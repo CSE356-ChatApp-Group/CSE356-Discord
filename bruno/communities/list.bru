@@ -1,0 +1,14 @@
+meta {
+  name: List Communities
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/communities
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

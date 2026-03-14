@@ -1,0 +1,26 @@
+meta {
+  name: Search Messages
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/search?q=hello&channelId={{channelId}}&limit=20
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+docs {
+  Optional filters:
+    q           required, min 2 chars
+    channelId   scope to a channel
+    conversationId  scope to a DM
+    authorId    filter by sender
+    after       ISO timestamp lower bound  e.g. 2024-01-01T00:00:00Z
+    before      ISO timestamp upper bound
+    limit       default 20, max 100
+    offset      for pagination
+}

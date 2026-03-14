@@ -1,0 +1,15 @@
+meta {
+  name: Mark As Read
+  type: http
+  seq: 5
+}
+
+put {
+  url: {{baseUrl}}/messages/{{messageId}}/read
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

@@ -1,0 +1,31 @@
+meta {
+  name: Create Channel
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/channels
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "communityId": "{{communityId}}",
+    "name": "engineering",
+    "description": "Engineering discussions",
+    "isPrivate": false
+  }
+}
+
+script:post-response {
+  if (res.status === 201) {
+    bru.setEnvVar("channelId", res.body.channel.id);
+    console.log("✅ Channel created:", res.body.channel.id);
+  }
+}

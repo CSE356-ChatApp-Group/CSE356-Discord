@@ -1,0 +1,14 @@
+meta {
+  name: List Channels
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/channels?communityId={{communityId}}
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

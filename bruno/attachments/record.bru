@@ -1,0 +1,27 @@
+meta {
+  name: Record Attachment Metadata
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/attachments
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "messageId": "{{messageId}}",
+    "storageKey": "{{storageKey}}",
+    "filename": "screenshot.png",
+    "contentType": "image/png",
+    "sizeBytes": 204800,
+    "width": 1280,
+    "height": 800
+  }
+}

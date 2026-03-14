@@ -1,0 +1,39 @@
+meta {
+  name: Get Upload URL (presign)
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/attachments/presign
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "filename": "screenshot.png",
+    "contentType": "image/png",
+    "sizeBytes": 204800,
+    "messageId": "{{messageId}}"
+  }
+}
+
+script:post-response {
+  if (res.status === 200) {
+    bru.setEnvVar("uploadUrl", res.body.uploadUrl);
+    bru.setEnvVar("storageKey", res.body.storageKey);
+    console.log("✅ Pre-signed URL ready. Now PUT your file to uploadUrl.");
+  }
+}
+
+docs {
+  Workflow:
+    1. Call this to get a pre-signed S3 PUT URL
+    2. PUT your file binary directly to uploadUrl (from your client, not through the API)
+    3. Call POST /attachments to record the metadata
+}

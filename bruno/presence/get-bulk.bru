@@ -1,0 +1,14 @@
+meta {
+  name: Get Presence (bulk)
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/presence?userIds={{userId}}
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

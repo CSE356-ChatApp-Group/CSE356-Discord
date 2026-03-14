@@ -1,0 +1,21 @@
+meta {
+  name: Edit Message
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{baseUrl}}/messages/{{messageId}}
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "content": "Hello, world! (edited) ✏️"
+  }
+}

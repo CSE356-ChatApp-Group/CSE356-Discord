@@ -1,0 +1,31 @@
+meta {
+  name: Create Community
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/communities
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "slug": "dev-team",
+    "name": "Dev Team",
+    "description": "Internal dev community",
+    "isPublic": true
+  }
+}
+
+script:post-response {
+  if (res.status === 201) {
+    bru.setEnvVar("communityId", res.body.community.id);
+    console.log("✅ Community created:", res.body.community.id);
+  }
+}

@@ -1,0 +1,169 @@
+.row {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding: 6px 16px;
+  transition: background .1s;
+}
+
+.row:hover { background: var(--bg-2); }
+
+.grouped { padding-top: 2px; padding-bottom: 2px; }
+
+.avatarCol {
+  width: 36px;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.content { flex: 1; min-width: 0; }
+
+.meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.author {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.time {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.edited {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.text {
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.deleted {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.image {
+  max-width: 320px;
+  max-height: 240px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  object-fit: cover;
+}
+
+/* Inline edit */
+.editForm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.editInput {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 14px;
+  background: var(--bg-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  resize: none;
+  line-height: 1.5;
+}
+
+.editInput:focus { outline: none; }
+
+.editActions {
+  display: flex;
+  gap: 6px;
+}
+
+.cancelBtn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-4);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition: background .1s;
+}
+
+.cancelBtn:hover { background: var(--bg-3); }
+
+.saveBtn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--text-inverse);
+  font-weight: 600;
+  transition: background .1s;
+}
+
+.saveBtn:hover { background: var(--accent-dim); }
+
+/* Hover actions toolbar */
+.actions {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 2px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px;
+  animation: fadeIn .1s ease;
+}
+
+.actionBtn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .1s, color .1s;
+}
+
+.actionBtn:hover { background: var(--bg-4); color: var(--text-primary); }
+.danger:hover { color: var(--red) !important; }
+
+/* Grouped timestamp */
+.groupedTime {
+  position: absolute;
+  left: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .1s;
+}
+
+.row:hover .groupedTime { opacity: 1; }

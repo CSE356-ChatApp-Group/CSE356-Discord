@@ -1,0 +1,197 @@
+/**
+ * Messages router
+ *
+ * GET    /api/v1/messages?channelId=&before=&limit=   – paginated history
+ * POST   /api/v1/messages                             – create
+ * PATCH  /api/v1/messages/:id                         – edit
+ * DELETE /api/v1/messages/:id                         – soft-delete
+ * PUT    /api/v1/messages/:id/read                    – mark as read
+ */
+
+'use strict';
+
+const express = require('express');
+const { body, query: qv, param, validationResult } = require('express-validator');
+
+const { pool }         = require('../db/pool');
+const { authenticate } = require('../middleware/authenticate');
+const fanout           = require('../websocket/fanout');
+const searchClient     = require('../search/client');
+
+const router = express.Router();
+router.use(authenticate);
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+function validate(req, res) {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) { res.status(400).json({ errors: errors.array() }); return false; }
+  return true;
+}
+
+/** Build the Redis pub/sub channel key for a message target */
+function targetKey(channelId, conversationId) {
+  if (channelId)      return `channel:${channelId}`;
+  if (conversationId) return `conversation:${conversationId}`;
+  throw new Error('No target');
+}
+
+// ── GET /messages ──────────────────────────────────────────────────────────────
+router.get('/',
+  qv('channelId').optional().isUUID(),
+  qv('conversationId').optional().isUUID(),
+  qv('before').optional().isUUID(),          // cursor-based pagination
+  qv('limit').optional().isInt({ min: 1, max: 100 }).toInt(),
+  async (req, res, next) => {
+    if (!validate(req, res)) return;
+    try {
+      const { channelId, conversationId, before, limit = 50 } = req.query;
+
+      if (!channelId && !conversationId) {
+        return res.status(400).json({ error: 'channelId or conversationId required' });
+      }
+
+      // TODO: verify caller has access to the channel/conversation
+      const params = [limit];
+      let where = channelId
+        ? `m.channel_id = $${params.push(channelId)}`
+        : `m.conversation_id = $${params.push(conversationId)}`;
+
+      if (before) {
+        where += ` AND m.created_at < (SELECT created_at FROM messages WHERE id = $${params.push(before)})`;
+      }
+
+      const sql = `
+        SELECT m.*,
+               row_to_json(u.*) AS author,
+               COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
+        FROM   messages m
+        JOIN   users u ON u.id = m.author_id
+        LEFT JOIN attachments a ON a.message_id = m.id
+        WHERE  ${where} AND m.deleted_at IS NULL
+        GROUP  BY m.id, u.id
+        ORDER  BY m.created_at DESC
+        LIMIT  $1
+      `;
+
+      const { rows } = await pool.query(sql, params);
+      res.json({ messages: rows.reverse() }); // return in chronological order
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /messages ─────────────────────────────────────────────────────────────
+router.post('/',
+  body('content').optional().isString().isLength({ max: 4000 }),
+  body('channelId').optional().isUUID(),
+  body('conversationId').optional().isUUID(),
+  body('threadId').optional().isUUID(),
+  async (req, res, next) => {
+    if (!validate(req, res)) return;
+    try {
+      const { content, channelId, conversationId, threadId } = req.body;
+
+      if (!channelId && !conversationId) {
+        return res.status(400).json({ error: 'channelId or conversationId required' });
+      }
+      if (!content) {
+        return res.status(400).json({ error: 'content required (attach files in a separate request)' });
+      }
+
+      const { rows } = await pool.query(
+        `INSERT INTO messages (channel_id, conversation_id, author_id, content, thread_id)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [channelId || null, conversationId || null, req.user.id, content, threadId || null]
+      );
+      const message = rows[0];
+
+      // Index in search (fire and forget)
+      searchClient.indexMessage(message).catch(() => {});
+
+      // Real-time fanout via Redis Pub/Sub
+      await fanout.publish(targetKey(channelId, conversationId), {
+        event: 'message:created',
+        data:  message,
+      });
+
+      res.status(201).json({ message });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /messages/:id ────────────────────────────────────────────────────────
+router.patch('/:id',
+  param('id').isUUID(),
+  body('content').isString().isLength({ min: 1, max: 4000 }),
+  async (req, res, next) => {
+    if (!validate(req, res)) return;
+    try {
+      const { rows } = await pool.query(
+        `UPDATE messages
+         SET content=$1, edited_at=NOW(), updated_at=NOW()
+         WHERE id=$2 AND author_id=$3 AND deleted_at IS NULL
+         RETURNING *`,
+        [req.body.content, req.params.id, req.user.id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
+
+      const message = rows[0];
+      searchClient.indexMessage(message).catch(() => {});
+      const key = targetKey(message.channel_id, message.conversation_id);
+      await fanout.publish(key, { event: 'message:updated', data: message });
+
+      res.json({ message });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── DELETE /messages/:id ───────────────────────────────────────────────────────
+router.delete('/:id',
+  param('id').isUUID(),
+  async (req, res, next) => {
+    if (!validate(req, res)) return;
+    try {
+      const { rows } = await pool.query(
+        `UPDATE messages SET deleted_at=NOW(), updated_at=NOW()
+         WHERE id=$1 AND author_id=$2 AND deleted_at IS NULL RETURNING *`,
+        [req.params.id, req.user.id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
+
+      const message = rows[0];
+      searchClient.deleteMessage(message.id).catch(() => {});
+      const key = targetKey(message.channel_id, message.conversation_id);
+      await fanout.publish(key, { event: 'message:deleted', data: { id: message.id } });
+
+      res.json({ success: true });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PUT /messages/:id/read ─────────────────────────────────────────────────────
+router.put('/:id/read',
+  param('id').isUUID(),
+  async (req, res, next) => {
+    if (!validate(req, res)) return;
+    try {
+      const { rows } = await pool.query(
+        'SELECT channel_id, conversation_id FROM messages WHERE id=$1 AND deleted_at IS NULL',
+        [req.params.id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Message not found' });
+
+      const { channel_id, conversation_id } = rows[0];
+      await pool.query(
+        `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
+         VALUES ($1,$2,$3,$4,NOW())
+         ON CONFLICT (user_id, COALESCE(channel_id, conversation_id))
+         DO UPDATE SET last_read_message_id=$4, last_read_at=NOW()`,
+        [req.user.id, channel_id, conversation_id, req.params.id]
+      );
+
+      res.json({ success: true });
+    } catch (err) { next(err); }
+  }
+);
+
+module.exports = router;

@@ -1,0 +1,14 @@
+meta {
+  name: List Members (with presence)
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/communities/{{communityId}}/members
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

@@ -1,0 +1,14 @@
+meta {
+  name: Get Community
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/communities/{{communityId}}
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

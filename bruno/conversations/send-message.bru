@@ -1,0 +1,29 @@
+meta {
+  name: Send DM Message
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/messages
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "conversationId": "{{conversationId}}",
+    "content": "Hey, just testing DMs 👋"
+  }
+}
+
+script:post-response {
+  if (res.status === 201) {
+    bru.setEnvVar("messageId", res.body.message.id);
+    console.log("✅ DM sent:", res.body.message.id);
+  }
+}
