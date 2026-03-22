@@ -100,7 +100,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: node src/db/migrate.js
+    command: npm run migrate
     volumes:
       - ./migrations:/migrations:ro
     environment:

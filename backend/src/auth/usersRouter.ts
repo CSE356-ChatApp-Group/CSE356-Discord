@@ -37,7 +37,7 @@ router.patch('/me',
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
-      const updates = {};
+      const updates: Record<string, unknown> = {};
       if (req.body.displayName) updates.display_name = req.body.displayName;
       if (req.body.bio !== undefined) updates.bio = req.body.bio;
       if (req.body.password) updates.password_hash = await bcrypt.hash(req.body.password, 12);

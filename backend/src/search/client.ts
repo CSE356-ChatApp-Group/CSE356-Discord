@@ -66,7 +66,7 @@ async function deleteMessage(id) {
  * @param {number}   opts.limit
  * @param {number}   opts.offset
  */
-async function search(q, opts = {}) {
+async function search(q, opts: Record<string, any> = {}) {
   const filters = [];
 
   if (opts.channelId)      filters.push(`channelId = "${opts.channelId}"`);
