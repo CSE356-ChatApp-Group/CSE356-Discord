@@ -15,8 +15,8 @@ const { body, query: qv, param, validationResult } = require('express-validator'
 
 const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
-const fanout           = require('../websocket/fanout');
-const searchClient     = require('../search/client');
+const sideEffects      = require('./sideEffects');
+const overload         = require('../utils/overload');
 
 const router = express.Router();
 router.use(authenticate);
@@ -45,7 +45,9 @@ router.get('/',
   async (req, res, next) => {
     if (!validate(req, res)) return;
     try {
-      const { channelId, conversationId, before, limit = 50 } = req.query;
+      const { channelId, conversationId, before } = req.query;
+      const requestedLimit = Number(req.query.limit || 50);
+      const limit = overload.historyLimit(requestedLimit);
 
       if (!channelId && !conversationId) {
         return res.status(400).json({ error: 'channelId or conversationId required' });
@@ -105,14 +107,8 @@ router.post('/',
       );
       const message = rows[0];
 
-      // Index in search (fire and forget)
-      searchClient.indexMessage(message).catch(() => {});
-
-      // Real-time fanout via Redis Pub/Sub
-      await fanout.publish(targetKey(channelId, conversationId), {
-        event: 'message:created',
-        data:  message,
-      });
+      sideEffects.indexMessage(message);
+      sideEffects.publishMessageEvent(targetKey(channelId, conversationId), 'message:created', message);
 
       res.status(201).json({ message });
     } catch (err) { next(err); }
@@ -125,6 +121,9 @@ router.patch('/:id',
   body('content').isString().isLength({ min: 1, max: 4000 }),
   async (req, res, next) => {
     if (!validate(req, res)) return;
+    if (overload.shouldRestrictNonEssentialWrites()) {
+      return res.status(503).json({ error: 'Edits temporarily unavailable under high load' });
+    }
     try {
       const { rows } = await pool.query(
         `UPDATE messages
@@ -136,9 +135,9 @@ router.patch('/:id',
       if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
 
       const message = rows[0];
-      searchClient.indexMessage(message).catch(() => {});
+      sideEffects.indexMessage(message);
       const key = targetKey(message.channel_id, message.conversation_id);
-      await fanout.publish(key, { event: 'message:updated', data: message });
+      sideEffects.publishMessageEvent(key, 'message:updated', message);
 
       res.json({ message });
     } catch (err) { next(err); }
@@ -150,6 +149,9 @@ router.delete('/:id',
   param('id').isUUID(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
+    if (overload.shouldRestrictNonEssentialWrites()) {
+      return res.status(503).json({ error: 'Deletes temporarily unavailable under high load' });
+    }
     try {
       const { rows } = await pool.query(
         `UPDATE messages SET deleted_at=NOW(), updated_at=NOW()
@@ -159,9 +161,9 @@ router.delete('/:id',
       if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
 
       const message = rows[0];
-      searchClient.deleteMessage(message.id).catch(() => {});
+      sideEffects.deleteMessage(message.id);
       const key = targetKey(message.channel_id, message.conversation_id);
-      await fanout.publish(key, { event: 'message:deleted', data: { id: message.id } });
+      sideEffects.publishMessageEvent(key, 'message:deleted', { id: message.id });
 
       res.json({ success: true });
     } catch (err) { next(err); }
@@ -173,6 +175,9 @@ router.put('/:id/read',
   param('id').isUUID(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
+    if (overload.shouldRestrictNonEssentialWrites()) {
+      return res.status(503).json({ error: 'Read receipts temporarily delayed under high load' });
+    }
     try {
       const { rows } = await pool.query(
         'SELECT channel_id, conversation_id FROM messages WHERE id=$1 AND deleted_at IS NULL',

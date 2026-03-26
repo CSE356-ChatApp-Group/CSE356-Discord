@@ -15,6 +15,7 @@
 const redis  = require('../db/redis');
 const fanout = require('../websocket/fanout');
 const { pool } = require('../db/pool');
+const overload = require('../utils/overload');
 
 const TTL_SECONDS = 90;
 
@@ -27,19 +28,24 @@ async function setPresence(userId, status) {
     await redis.set(key, status, 'EX', TTL_SECONDS);
   }
 
-  // Broadcast to anyone subscribed to this user's presence
-  await fanout.publish(`user:${userId}`, {
-    event: 'presence:updated',
-    data:  { userId, status },
-  });
+  // Under load, preserve explicit away/offline transitions and suppress noisy churn.
+  const shouldFanout = !overload.shouldThrottlePresenceFanout() || status === 'away' || status === 'offline';
+  if (shouldFanout) {
+    await fanout.publish(`user:${userId}`, {
+      event: 'presence:updated',
+      data:  { userId, status },
+    });
+  }
 
-  // Mirror to Postgres (non-blocking)
-  pool.query(
-    `INSERT INTO presence_snapshots (user_id, status, updated_at)
-     VALUES ($1,$2,NOW())
-     ON CONFLICT (user_id) DO UPDATE SET status=$2, updated_at=NOW()`,
-    [userId, status]
-  ).catch(() => {});
+  if (!overload.shouldSkipPresenceMirror()) {
+    // Mirror to Postgres (non-blocking)
+    pool.query(
+      `INSERT INTO presence_snapshots (user_id, status, updated_at)
+       VALUES ($1,$2,NOW())
+       ON CONFLICT (user_id) DO UPDATE SET status=$2, updated_at=NOW()`,
+      [userId, status]
+    ).catch(() => {});
+  }
 }
 
 async function getPresence(userId) {

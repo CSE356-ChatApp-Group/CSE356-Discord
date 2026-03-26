@@ -8,6 +8,7 @@
 'use strict';
 
 const request = require('supertest');
+const { randomUUID } = require('crypto');
 const app     = require('../src/app');
 const { pool }= require('../src/db/pool');
 const { closeRedisConnections } = require('../src/db/redis');
@@ -93,5 +94,110 @@ describe('GET /api/v1/users/me', () => {
   it('returns 401 without token', async () => {
     const res = await request(app).get('/api/v1/users/me');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('Overload behavior', () => {
+  let token;
+  let userId;
+  let channelId;
+
+  beforeAll(async () => {
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email: 'test@example.com', password: 'Password1!' });
+
+    token = loginRes.body.accessToken;
+
+    const { rows: userRows } = await pool.query(
+      'SELECT id FROM users WHERE email = $1',
+      ['test@example.com']
+    );
+    userId = userRows[0].id;
+
+    const slug = `loadtest-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const { rows: communityRows } = await pool.query(
+      `INSERT INTO communities (slug, name, owner_id)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [slug, 'Load Test Community', userId]
+    );
+    const communityId = communityRows[0].id;
+
+    await pool.query(
+      `INSERT INTO community_members (community_id, user_id, role)
+       VALUES ($1, $2, 'owner')`,
+      [communityId, userId]
+    );
+
+    const { rows: channelRows } = await pool.query(
+      `INSERT INTO channels (community_id, name, created_by)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [communityId, `general-${Math.floor(Math.random() * 10000)}`, userId]
+    );
+    channelId = channelRows[0].id;
+  });
+
+  afterEach(() => {
+    delete process.env.FORCE_OVERLOAD_STAGE;
+  });
+
+  it('keeps core message create path available under critical stage', async () => {
+    process.env.FORCE_OVERLOAD_STAGE = '3';
+
+    const res = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ channelId, content: 'core path should still work' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.message).toBeDefined();
+    expect(res.body.message.content).toBe('core path should still work');
+  });
+
+  it('rejects message edit under critical stage', async () => {
+    process.env.FORCE_OVERLOAD_STAGE = '3';
+
+    const res = await request(app)
+      .patch(`/api/v1/messages/${randomUUID()}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ content: 'updated' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/temporarily unavailable/i);
+  });
+
+  it('rejects message delete under critical stage', async () => {
+    process.env.FORCE_OVERLOAD_STAGE = '3';
+
+    const res = await request(app)
+      .delete(`/api/v1/messages/${randomUUID()}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/temporarily unavailable/i);
+  });
+
+  it('rejects read-state write under critical stage', async () => {
+    process.env.FORCE_OVERLOAD_STAGE = '3';
+
+    const res = await request(app)
+      .put(`/api/v1/messages/${randomUUID()}/read`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/temporarily delayed/i);
+  });
+
+  it('rejects search at critical stage before query execution', async () => {
+    process.env.FORCE_OVERLOAD_STAGE = '3';
+
+    const res = await request(app)
+      .get('/api/v1/search')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatch(/temporarily unavailable/i);
   });
 });
