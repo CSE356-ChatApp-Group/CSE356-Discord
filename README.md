@@ -56,6 +56,42 @@ docker compose up -d
 curl http://localhost/health   # → {"status":"ok"}
 ```
 
+## Testing
+
+Run all tests from the monorepo root:
+
+```bash
+npm test
+```
+
+This runs backend Jest tests and frontend Vitest tests in sequence.
+
+Run backend tests only (auto-provisions disposable Postgres + Redis if needed):
+
+```bash
+cd backend
+npm test
+```
+
+If `DATABASE_URL` is not provided, the backend test runner starts disposable
+Postgres and Redis containers, runs migrations, executes Jest, and cleans up.
+In CI or other pre-provisioned environments, it uses existing environment values.
+
+Run frontend tests only:
+
+```bash
+cd frontend
+npm test
+```
+
+## Build
+
+Build both packages from the monorepo root:
+
+```bash
+npm run build
+```
+
 ### Services after startup
 
 | Service       | URL                     | Notes                  |

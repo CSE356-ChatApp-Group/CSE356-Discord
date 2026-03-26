@@ -34,5 +34,13 @@ const redis = createClient('main');
 // Dedicated subscriber – used by ws/fanout; cannot issue normal commands
 const redisSub = createClient('subscriber');
 
+async function closeRedisConnections() {
+  await Promise.allSettled([
+    redis.quit(),
+    redisSub.quit(),
+  ]);
+}
+
 module.exports = redis;
 module.exports.redisSub = redisSub;
+module.exports.closeRedisConnections = closeRedisConnections;

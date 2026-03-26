@@ -19,6 +19,7 @@ const client = new MeiliSearch({
 });
 
 const INDEX = 'messages';
+const searchInitDisabled = process.env.DISABLE_SEARCH_INIT === 'true' || process.env.NODE_ENV === 'test';
 
 async function ensureIndex() {
   try {
@@ -35,7 +36,9 @@ async function ensureIndex() {
   }
 }
 
-ensureIndex().catch(err => logger.warn({ err }, 'Meilisearch init warning'));
+if (!searchInitDisabled) {
+  ensureIndex().catch(err => logger.warn({ err }, 'Meilisearch init warning'));
+}
 
 async function indexMessage(msg) {
   await client.index(INDEX).addDocuments([{

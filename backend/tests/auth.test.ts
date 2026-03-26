@@ -10,6 +10,7 @@
 const request = require('supertest');
 const app     = require('../src/app');
 const { pool }= require('../src/db/pool');
+const { closeRedisConnections } = require('../src/db/redis');
 
 beforeAll(async () => {
   // Ensure test user doesn't exist
@@ -17,6 +18,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await closeRedisConnections();
   await pool.end();
 });
 

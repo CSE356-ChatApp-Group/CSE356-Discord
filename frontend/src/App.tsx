@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
+import { setToken } from './lib/api';
 import LoginPage    from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import ChatPage     from './pages/ChatPage';
@@ -44,7 +45,12 @@ export default function App() {
   useEffect(() => { init(); }, []);
 
   return (
-    <BrowserRouter>
+    <BrowserRouter
+      future={{
+        v7_startTransition: true,
+        v7_relativeSplatPath: true,
+      }}
+    >
       <Routes>
         <Route path="/login" element={
           <RedirectIfAuthenticated><LoginPage /></RedirectIfAuthenticated>
@@ -66,10 +72,8 @@ function OAuthCallback() {
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get('token');
     if (token) {
-      import('./lib/api').then(({ setToken }) => {
-        setToken(token);
-        init().then(() => { window.location.href = '/'; });
-      });
+      setToken(token);
+      init().then(() => { window.location.href = '/'; });
     }
   }, []);
   return <AppLoader />;
