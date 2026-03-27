@@ -84,6 +84,10 @@ ssh "$PROD_USER@$PROD_HOST" "
   # Install backend dependencies
   cd \$RELEASE_PATH/backend
   npm ci --omit=dev --legacy-peer-deps || npm ci --omit=dev
+
+  # Run DB migrations before any new API instance starts.
+  cd \$RELEASE_PATH
+  npm --prefix backend run migrate
   
   # Frontend is pre-built, but verify
   if [ ! -d \$RELEASE_PATH/frontend/dist ]; then

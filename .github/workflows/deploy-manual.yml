@@ -26,7 +26,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  wait-for-release:
+    runs-on: ubuntu-latest
+    outputs:
+      target_sha: ${{ steps.resolve.outputs.target_sha }}
+    steps:
+      - name: Resolve target SHA
+        id: resolve
+        shell: bash
+        run: |
+          TARGET_SHA="${{ inputs.sha }}"
+          if [[ -z "$TARGET_SHA" ]]; then
+            TARGET_SHA="${{ github.sha }}"
+          fi
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for release artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.resolve.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          TAG="release-$TARGET_SHA"
+          MAX_ATTEMPTS=40
+          SLEEP_SECONDS=15
+
+          echo "Waiting for release artifact: $TAG"
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "Release artifact is ready."
+              exit 0
+            fi
+            echo "Attempt $attempt/$MAX_ATTEMPTS: release not ready yet; sleeping ${SLEEP_SECONDS}s"
+            sleep "$SLEEP_SECONDS"
+          done
+
+          echo "ERROR: release artifact $TAG not available after waiting."
+          exit 1
+
   deploy-staging:
+    needs: wait-for-release
     if: inputs.environment == 'staging'
     runs-on: ubuntu-latest
     environment: staging
@@ -68,10 +108,7 @@ jobs:
           STAGING_HOST: ${{ vars.STAGING_HOST }}
           STAGING_USER: ${{ vars.STAGING_USER }}
         run: |
-          TARGET_SHA="${{ inputs.sha }}"
-          if [[ -z "$TARGET_SHA" ]]; then
-            TARGET_SHA="${{ github.sha }}"
-          fi
+          TARGET_SHA="${{ needs.wait-for-release.outputs.target_sha }}"
 
           HOST="${STAGING_HOST:-136.114.103.71}"
           USER="${STAGING_USER:-ssperrottet}"
@@ -80,6 +117,7 @@ jobs:
             ./deploy/deploy-staging.sh "$TARGET_SHA"
 
   deploy-prod:
+    needs: wait-for-release
     if: inputs.environment == 'prod'
     runs-on: ubuntu-latest
     environment: production
@@ -121,10 +159,7 @@ jobs:
           PROD_HOST: ${{ vars.PROD_HOST }}
           PROD_USER: ${{ vars.PROD_USER }}
         run: |
-          TARGET_SHA="${{ inputs.sha }}"
-          if [[ -z "$TARGET_SHA" ]]; then
-            TARGET_SHA="${{ github.sha }}"
-          fi
+          TARGET_SHA="${{ needs.wait-for-release.outputs.target_sha }}"
 
           HOST="${PROD_HOST:-136.114.103.71}"
           USER="${PROD_USER:-ssperrottet}"
