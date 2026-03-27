@@ -65,7 +65,9 @@ Each release is immutable and tagged by commit SHA. The **same artifact** is dep
 
 ## GitHub Button Deploys
 
-You can deploy from GitHub Actions using **Manual Deploy** (`workflow_dispatch`) in `.github/workflows/deploy-manual.yml`.
+Staging deploys automatically from GitHub Actions after **CI Build & Package** succeeds on pushes to `main` via `.github/workflows/deploy-staging-auto.yml`.
+
+You can still deploy manually from GitHub Actions using **Manual Deploy** (`workflow_dispatch`) in `.github/workflows/deploy-manual.yml`.
 
 ### Required GitHub configuration
 
