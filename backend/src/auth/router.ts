@@ -22,7 +22,7 @@ const { pool }         = require('../db/pool');
 const { signAccess, signRefresh, verifyRefresh, denyToken } = require('../utils/jwt');
 const { authenticate } = require('../middleware/authenticate');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('./bypass');
-const { verifyOAuthPending, signOAuthLinkIntent } = require('./oauthTokens');
+const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLinkIntent } = require('./oauthTokens');
 
 const router = express.Router();
 const REFRESH_COOKIE = 'refreshToken';
@@ -81,6 +81,93 @@ function oauthCallback(provider) {
       return res.redirect(buildFrontendUrl('/oauth-callback', { token: accessToken, provider }));
     })(req, res, next);
   };
+}
+
+const COURSE_DISCOVERY_URL = process.env.COURSE_OIDC_DISCOVERY_URL
+  || 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/.well-known/openid-configuration';
+const COURSE_CLIENT_ID = process.env.COURSE_OIDC_CLIENT_ID || 'web-service';
+const COURSE_CLIENT_SECRET = process.env.COURSE_OIDC_CLIENT_SECRET || 'web-service-secret';
+let courseDiscoveryCache;
+
+async function getCourseDiscovery() {
+  if (courseDiscoveryCache) return courseDiscoveryCache;
+  const res = await fetch(COURSE_DISCOVERY_URL);
+  if (!res.ok) {
+    throw new Error(`Failed OIDC discovery (${res.status})`);
+  }
+  courseDiscoveryCache = await res.json();
+  return courseDiscoveryCache;
+}
+
+function getCourseCallbackUrl(req) {
+  if (process.env.COURSE_OIDC_CALLBACK_URL) return process.env.COURSE_OIDC_CALLBACK_URL;
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  return `${proto}://${req.get('host')}/api/v1/auth/course/callback`;
+}
+
+async function resolveOAuthAccount(provider, providerId, email, displayName, linkToken) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const existing = await client.query(
+      'SELECT u.* FROM users u JOIN oauth_accounts oa ON oa.user_id = u.id WHERE oa.provider=$1 AND oa.provider_id=$2',
+      [provider, providerId]
+    );
+    if (existing.rows.length) {
+      await client.query('COMMIT');
+      return { user: existing.rows[0] };
+    }
+
+    if (linkToken) {
+      let payload;
+      try {
+        payload = verifyOAuthLinkIntent(linkToken);
+      } catch {
+        await client.query('ROLLBACK');
+        return { error: 'Invalid link intent token' };
+      }
+
+      const target = await client.query('SELECT * FROM users WHERE id = $1 AND is_active = TRUE', [payload.userId]);
+      if (!target.rows.length) {
+        await client.query('ROLLBACK');
+        return { error: 'Link target account not found' };
+      }
+
+      await client.query(
+        'INSERT INTO oauth_accounts (user_id, provider, provider_id, email) VALUES ($1,$2,$3,$4)',
+        [target.rows[0].id, provider, providerId, email || null]
+      );
+
+      await client.query('COMMIT');
+      return { user: target.rows[0] };
+    }
+
+    const pendingToken = signOAuthPending({
+      provider,
+      providerId,
+      email: email || null,
+      displayName: displayName || null,
+    });
+
+    await client.query('COMMIT');
+    return { pendingToken };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === '23505') {
+      const linked = await client.query(
+        'SELECT u.* FROM users u JOIN oauth_accounts oa ON oa.user_id = u.id WHERE oa.provider=$1 AND oa.provider_id=$2',
+        [provider, providerId]
+      );
+      if (linked.rows.length) {
+        return { user: linked.rows[0] };
+      }
+      return { error: 'OAuth account already linked' };
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ── Register ───────────────────────────────────────────────────────────────────
@@ -341,8 +428,99 @@ router.get('/github', startOAuth('github'));
 router.get('/github/callback', oauthCallback('github'));
 
 // ── Course OIDC OAuth ──────────────────────────────────────────────────────────
-router.get('/course', startOAuth('course'));
+router.get('/course', async (req, res, next) => {
+  try {
+    const discovery = await getCourseDiscovery();
+    const callbackUrl = getCourseCallbackUrl(req);
+    const linkToken = typeof req.query?.linkToken === 'string' ? req.query.linkToken : null;
+    const state = signOAuthLinkIntent({
+      purpose: 'course-login',
+      linkToken,
+      ts: Date.now(),
+    });
 
-router.get('/course/callback', oauthCallback('course'));
+    const params = new URLSearchParams({
+      client_id: COURSE_CLIENT_ID,
+      response_type: 'code',
+      scope: 'openid profile email',
+      redirect_uri: callbackUrl,
+      state,
+    });
+
+    res.redirect(`${discovery.authorization_endpoint}?${params.toString()}`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/course/callback', async (req, res, next) => {
+  try {
+    const discovery = await getCourseDiscovery();
+    const callbackUrl = getCourseCallbackUrl(req);
+    const code = req.query?.code;
+    const state = req.query?.state;
+
+    if (!code || typeof code !== 'string') {
+      return res.redirect(buildFrontendUrl('/login', { error: 'Missing OIDC authorization code' }));
+    }
+
+    let statePayload;
+    try {
+      statePayload = verifyOAuthLinkIntent(typeof state === 'string' ? state : '');
+    } catch {
+      return res.redirect(buildFrontendUrl('/login', { error: 'Invalid OIDC state' }));
+    }
+
+    const tokenRes = await fetch(discovery.token_endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: callbackUrl,
+        client_id: COURSE_CLIENT_ID,
+        client_secret: COURSE_CLIENT_SECRET,
+      }),
+    });
+
+    if (!tokenRes.ok) {
+      return res.redirect(buildFrontendUrl('/login', { error: 'OIDC token exchange failed' }));
+    }
+    const tokenBody = await tokenRes.json();
+    const accessToken = tokenBody.access_token;
+    if (!accessToken) {
+      return res.redirect(buildFrontendUrl('/login', { error: 'OIDC access token missing' }));
+    }
+
+    const userInfoRes = await fetch(discovery.userinfo_endpoint, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!userInfoRes.ok) {
+      return res.redirect(buildFrontendUrl('/login', { error: 'OIDC userinfo fetch failed' }));
+    }
+
+    const userinfo = await userInfoRes.json();
+    const providerId = userinfo.sub;
+    const email = userinfo.email || null;
+    const displayName = userinfo.name || userinfo.preferred_username || email || 'OIDC User';
+    if (!providerId) {
+      return res.redirect(buildFrontendUrl('/login', { error: 'OIDC subject missing' }));
+    }
+
+    const linkToken = statePayload?.linkToken || null;
+    const outcome = await resolveOAuthAccount('course', providerId, email, displayName, linkToken);
+    if (outcome.error) {
+      return res.redirect(buildFrontendUrl('/login', { error: outcome.error }));
+    }
+    if (outcome.pendingToken) {
+      return res.redirect(buildFrontendUrl('/oauth-callback', { pending: outcome.pendingToken, provider: 'course' }));
+    }
+
+    const tokens = issueTokens(res, outcome.user);
+    return res.redirect(buildFrontendUrl('/oauth-callback', { token: tokens.accessToken, provider: 'course' }));
+  } catch (err) {
+    next(err);
+  }
+});
 
 module.exports = router;

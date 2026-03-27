@@ -17,7 +17,6 @@ const passport         = require('passport');
 const LocalStrategy    = require('passport-local').Strategy;
 const GoogleStrategy   = require('passport-google-oauth20').Strategy;
 const GitHubStrategy   = require('passport-github2').Strategy;
-const { Issuer, Strategy: OpenIDStrategy } = require('openid-client');
 const bcrypt           = require('bcrypt');
 const { pool }         = require('../db/pool');
 const { signOAuthPending, verifyOAuthLinkIntent } = require('./oauthTokens');
@@ -159,42 +158,3 @@ if (process.env.GITHUB_CLIENT_ID) {
   }));
 }
 
-// ── Course OIDC (OpenID Connect Discovery) ───────────────────────────────────
-const COURSE_DISCOVERY_URL = process.env.COURSE_OIDC_DISCOVERY_URL
-  || 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/.well-known/openid-configuration';
-const COURSE_CLIENT_ID = process.env.COURSE_OIDC_CLIENT_ID || 'web-service';
-const COURSE_CLIENT_SECRET = process.env.COURSE_OIDC_CLIENT_SECRET || 'web-service-secret';
-
-if (COURSE_CLIENT_ID && COURSE_CLIENT_SECRET) {
-  Issuer.discover(COURSE_DISCOVERY_URL)
-    .then((issuer) => {
-      const callbackURL = process.env.COURSE_OIDC_CALLBACK_URL || '/api/v1/auth/course/callback';
-      const client = new issuer.Client({
-        client_id: COURSE_CLIENT_ID,
-        client_secret: COURSE_CLIENT_SECRET,
-        redirect_uris: [callbackURL],
-        response_types: ['code'],
-      });
-
-      passport.use('course', new OpenIDStrategy(
-        {
-          client,
-          passReqToCallback: true,
-          params: {
-            scope: 'openid profile email',
-          },
-        },
-        async (req, tokenSet, userinfo, done) => {
-          const sub = userinfo?.sub || tokenSet?.claims?.()?.sub;
-          const email = userinfo?.email || tokenSet?.claims?.()?.email || null;
-          const displayName = userinfo?.name || userinfo?.preferred_username || email || 'OIDC User';
-          if (!sub) return done(null, false, { message: 'OIDC subject missing' });
-          await processOAuthLogin('course', sub, email, displayName, req.query?.state, done);
-        }
-      ));
-    })
-    .catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('Failed to initialize course OIDC strategy:', err?.message || err);
-    });
-}
