@@ -128,7 +128,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   fi
   
   # Start candidate in background
-  nohup npm --prefix backend start > /var/log/chatapp-candidate.log 2>&1 &
+  nohup npm --prefix backend start > /tmp/chatapp-${RELEASE_SHA}-candidate.log 2>&1 &
   CANDIDATE_PID=\$!
   echo \$CANDIDATE_PID > /tmp/chatapp-candidate.pid
   
@@ -137,7 +137,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   
   if ! kill -0 \$CANDIDATE_PID 2>/dev/null; then
     echo 'ERROR: Candidate process exited immediately'
-    tail -30 /var/log/chatapp-candidate.log
+    tail -30 /tmp/chatapp-${RELEASE_SHA}-candidate.log
     exit 1
   fi
   
