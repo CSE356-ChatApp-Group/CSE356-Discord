@@ -1,8 +1,9 @@
 .layout {
   display: grid;
   grid-template-columns: 64px var(--sidebar-width) 1fr;
-  grid-template-rows: 100%;
-  height: 100%;
+  grid-template-rows: 1fr;
+  min-height: 100vh;
+  min-height: 100dvh;
   overflow: hidden;
 }
 

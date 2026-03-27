@@ -22,7 +22,7 @@ function RedirectIfAuthenticated({ children }) {
 
 function AppLoader() {
   return (
-    <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-0)' }} role="status" aria-live="polite" data-testid="app-loader">
+    <div style={{ minHeight: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-0)' }} role="status" aria-live="polite" data-testid="app-loader">
       <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
         <Spinner size={24} />
         <div style={{ marginTop: 12, fontFamily: 'var(--font-mono)', fontSize: 12 }}>connecting…</div>
@@ -60,7 +60,7 @@ export default function App() {
         } />
         <Route path="/oauth-callback" element={<div data-testid="route-oauth-callback"><OAuthCallback /></div>} />
         <Route path="/*" element={
-          <RequireAuth><div data-testid="route-chat"><ChatPage /></div></RequireAuth>
+          <RequireAuth><div data-testid="route-chat" style={{ minHeight: '100dvh' }}><ChatPage /></div></RequireAuth>
         } />
       </Routes>
     </BrowserRouter>
@@ -125,7 +125,7 @@ function OAuthCallback() {
   if (!pending) return <Navigate to="/login" replace />;
 
   return (
-    <div style={{ minHeight: '100%', display: 'grid', placeItems: 'center', background: 'var(--bg-0)', padding: 24 }} data-testid="oauth-callback-page">
+    <div style={{ minHeight: '100dvh', display: 'grid', placeItems: 'center', background: 'var(--bg-0)', padding: 24 }} data-testid="oauth-callback-page">
       <div style={{ width: 'min(540px, 96vw)', background: 'var(--bg-1)', border: '1px solid var(--border-light)', borderRadius: 12, padding: 20 }} data-testid="oauth-callback-card">
         <h2 style={{ marginTop: 0 }}>Complete OAuth sign in</h2>
         <p style={{ color: 'var(--text-muted)', marginTop: 0 }}>Choose whether to create a new account or connect this OAuth login to an existing account.</p>
@@ -140,7 +140,7 @@ function OAuthCallback() {
               borderRadius: 8,
               border: '1px solid var(--border-light)',
               background: mode === 'create' ? 'var(--accent)' : 'var(--bg-2)',
-              color: mode === 'create' ? 'var(--bg-0)' : 'var(--text)',
+              color: mode === 'create' ? 'var(--bg-0)' : 'var(--text-primary)',
               cursor: 'pointer'
             }}
           >
@@ -155,7 +155,7 @@ function OAuthCallback() {
               borderRadius: 8,
               border: '1px solid var(--border-light)',
               background: mode === 'connect' ? 'var(--accent)' : 'var(--bg-2)',
-              color: mode === 'connect' ? 'var(--bg-0)' : 'var(--text)',
+              color: mode === 'connect' ? 'var(--bg-0)' : 'var(--text-primary)',
               cursor: 'pointer'
             }}
           >
