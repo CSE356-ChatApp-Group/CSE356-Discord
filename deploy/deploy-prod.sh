@@ -7,7 +7,7 @@ set -euo pipefail
 
 RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy-prod.sh <sha>}
 PROD_HOST="${PROD_HOST:-130.245.136.44}"
-PROD_USER="${PROD_USER:-ssperrottet}"
+PROD_USER="${PROD_USER:-ubuntu}"
 GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
 RELEASE_DIR="/opt/chatapp/releases"
 CURRENT_LINK="/opt/chatapp/current"
@@ -21,10 +21,10 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 
 echo "=== PRODUCTION DEPLOYMENT ==="
 echo "Release: $RELEASE_SHA"
-echo "Target: $PROD_HOST"
+echo "Target: $PROD_USER@$PROD_HOST"
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
 
-CURRENT_UPSTREAM_PORT=$(ssh "$PROD_USER@$PROD_HOST" "grep -oE '127\\.0\\.0\\.1:[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
+CURRENT_UPSTREAM_PORT=$(ssh "$PROD_USER@$PROD_HOST" "grep -oE '(127\\.0\\.0\\.1|localhost):[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
 if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
   CURRENT_UPSTREAM_PORT="${OLD_PORT}"
 fi
@@ -196,7 +196,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   set -e
   
   # Update Nginx upstream
-  sudo sed -i \"s/127.0.0.1:$OLD_PORT/127.0.0.1:$NEW_PORT/\" /etc/nginx/sites-available/chatapp
+  sudo sed -i -E \"s/(127\\\\.0\\\\.0\\\\.1|localhost):$OLD_PORT/localhost:$NEW_PORT/g\" /etc/nginx/sites-available/chatapp
   sudo nginx -t >/dev/null
   sudo systemctl reload nginx
   
@@ -223,11 +223,14 @@ echo "✓ Monitoring window complete"
 
 # 11. Update current symlink
 echo "11. Updating current release symlink..."
-ssh "$PROD_USER@$PROD_HOST" "
+if ssh "$PROD_USER@$PROD_HOST" "
   ln -sfn $RELEASE_DIR/$RELEASE_SHA $CURRENT_LINK
   echo 'Symlink: $CURRENT_LINK -> $RELEASE_SHA'
-"
-echo "✓ Symlink updated"
+"; then
+  echo "✓ Symlink updated"
+else
+  echo "⚠ WARNING: Could not update symlink due to transient SSH failure."
+fi
 
 # 12. Final health check
 echo "12. Final verification..."
@@ -239,7 +242,7 @@ fi
 
 # 13. Cleanup older releases/backups to control disk usage on small VMs.
 echo "13. Pruning old releases/backups (keep releases=$KEEP_RELEASES backups=$KEEP_BACKUPS)..."
-ssh "$PROD_USER@$PROD_HOST" "
+if ssh "$PROD_USER@$PROD_HOST" "
   set -e
   if [ -d '$RELEASE_DIR' ]; then
     ls -1dt '$RELEASE_DIR'/* 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | xargs -r rm -rf
@@ -247,8 +250,11 @@ ssh "$PROD_USER@$PROD_HOST" "
   if [ -d /opt/chatapp/backups ]; then
     ls -1dt /opt/chatapp/backups/* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -f
   fi
-"
-echo "✓ Cleanup complete"
+"; then
+  echo "✓ Cleanup complete"
+else
+  echo "⚠ WARNING: Cleanup skipped due to transient SSH failure."
+fi
 
 echo ""
 echo "=== Deployment Complete ==="
@@ -258,7 +264,7 @@ echo ""
 echo "Previous version still running on port $OLD_PORT for rollback."
 echo ""
 echo "To rollback immediately:"
-echo "  ssh $PROD_USER@$PROD_HOST 'sudo sed -i \"s/127.0.0.1:$NEW_PORT/127.0.0.1:$OLD_PORT/\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
+echo "  ssh $PROD_USER@$PROD_HOST 'sudo sed -i -E \"s/(127\\.0\\.0\\.1|localhost):$NEW_PORT/localhost:$OLD_PORT/g\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
 echo ""
 echo "To stop the old version after confidence window (keep for ~10 min):"
 echo "  ssh $PROD_USER@$PROD_HOST 'pkill -f \"PORT=$OLD_PORT\" || true'"

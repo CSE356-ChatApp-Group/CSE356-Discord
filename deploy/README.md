@@ -4,7 +4,7 @@ This document describes the staged deployment pipeline for ChatApp:
 
 - **Dev**: Local + CI containers
 - **Staging**: Google Cloud Compute Engine VM
-- **Production**: temporary VM at `ssperrottet@130.245.136.44`
+- **Production**: temporary VM at `ubuntu@130.245.136.44`
 
 > Public endpoints currently map as:
 > - Staging: `http://136.114.103.71`
@@ -75,7 +75,7 @@ You can deploy from GitHub Actions using **Manual Deploy** (`workflow_dispatch`)
    - `STAGING_HOST` (default: `136.114.103.71`)
    - `STAGING_USER` (default: `ssperrottet`)
    - `PROD_HOST` (default: `130.245.136.44`)
-   - `PROD_USER` (default: `ssperrottet`)
+   - `PROD_USER` (default: `ubuntu`)
    - If you move production to a new VM/IP, update `PROD_HOST` in GitHub environment variables before running deploys.
 - GitHub Environment protection:
    - Set approvals on `production` environment to require manual reviewer approval.
@@ -170,11 +170,11 @@ ssh <staging-user>@136.114.103.71 "
 ## Production Deployment
 
 ### Prerequisites
-- Production VM reachable at `ssperrottet@130.245.136.44`
+- Production VM reachable at `ubuntu@130.245.136.44`
 - Production database (Postgres)
 - Production Redis cache
 - Nginx configured for blue-green or candidate-port deployment
-- SSH access as `ssperrottet` user (or configured user)
+- SSH access as `ubuntu` user (or configured user)
 
 ### Release Directory Structure
 
@@ -227,7 +227,7 @@ If issues are detected after cutover:
 
 ```bash
 # Revert Nginx traffic immediately (takes ~5 seconds)
-ssh ssperrottet@136.114.103.71 "
+ssh ubuntu@130.245.136.44 "
   sudo sed -i 's/localhost:4001/localhost:4000/' /etc/nginx/sites-available/chatapp
   sudo systemctl reload nginx
 "
