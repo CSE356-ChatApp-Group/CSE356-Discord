@@ -37,37 +37,37 @@ so no CORS issues and no env config needed.
 
 ```
 src/
-├── main.jsx                   React root mount
-├── App.jsx                    Router + auth guard + OAuth callback handler
+├── main.tsx                   React root mount
+├── App.tsx                    Router + auth guard + OAuth callback handler
 ├── styles.css                 Global CSS variables, resets, animations
 │
 ├── lib/
-│   ├── api.js                 fetch wrapper — auto attaches token, handles 401 refresh
-│   └── ws.js                  WebSocket manager — connect/subscribe/reconnect
+│   ├── api.ts                 fetch wrapper — auto attaches token, handles 401 refresh
+│   └── ws.ts                  WebSocket manager — connect/subscribe/reconnect
 │
 ├── stores/
-│   ├── authStore.js           login / register / logout / session restore
-│   └── chatStore.js           communities, channels, messages, presence, search
+│   ├── authStore.ts           login / register / logout / session restore
+│   └── chatStore.ts           communities, channels, messages, presence, search
 │
 ├── hooks/
-│   ├── usePresenceHeartbeat.js  pings /presence every 45s, sets away on tab hide
-│   └── useAutoResize.js         expands textarea as user types
+│   ├── usePresenceHeartbeat.ts  sends WS presence updates, sets away on tab hide
+│   └── useAutoResize.ts         expands textarea as user types
 │
 └── pages/
-    ├── LoginPage.jsx
-    ├── RegisterPage.jsx
+    ├── LoginPage.tsx
+    ├── RegisterPage.tsx
     ├── Auth.module.css          shared auth page styles
-    └── ChatPage.jsx             main layout — composes all sidebar + pane components
+    └── ChatPage.tsx             main layout — composes all sidebar + pane components
 
 components/
-├── CommunitySidebar.jsx   leftmost icon strip + create community modal
-├── ChannelSidebar.jsx     channel list + DM list + create channel modal
-├── MessagePane.jsx        header, scrollable message list, input form
-├── MessageItem.jsx        single message with grouping, edit, delete
-├── MemberList.jsx         right panel — members grouped by presence status
-├── SearchBar.jsx          collapsible search with Meilisearch highlight rendering
-├── WelcomePane.jsx        shown when no channel is selected
-└── Modal.jsx              reusable overlay modal (Escape to close)
+├── CommunitySidebar.tsx   leftmost icon strip + create community modal
+├── ChannelSidebar.tsx     channel list + DM list + create channel modal
+├── MessagePane.tsx        header, scrollable message list, input form
+├── MessageItem.tsx        single message with grouping, edit, delete
+├── MemberList.tsx         right panel — members grouped by presence status
+├── SearchBar.tsx          collapsible search with Meilisearch highlight rendering
+├── WelcomePane.tsx        shown when no channel is selected
+└── Modal.tsx              reusable overlay modal (Escape to close)
 ```
 
 ## Key behaviours
@@ -75,7 +75,7 @@ components/
 **Session restore** — on page load, `authStore.init()` tries the existing token then
 falls back to a silent cookie-based refresh. The user stays logged in across reloads.
 
-**Real-time messages** — `ws.js` opens a single WebSocket on login and auto-reconnects.
+**Real-time messages** — `ws.ts` opens a single WebSocket on login and auto-reconnects.
 `chatStore._handleWsEvent` handles `message:created`, `message:updated`,
 `message:deleted`, and `presence:updated` events dispatched from Redis Pub/Sub.
 
@@ -85,8 +85,10 @@ visually grouped (no repeated avatar/name), matching Discord/Slack conventions.
 **Infinite scroll** — scrolling to the top of the message list fetches the previous 50
 messages and restores scroll position using `scrollHeight` diff.
 
-**Presence** — `usePresenceHeartbeat` keeps the user online with a 45s interval (backend
-TTL is 90s). Tab hide triggers an away timer (2 min); tab show cancels it.
+**Presence** — `usePresenceHeartbeat` sends websocket presence events for the active
+connection. The backend aggregates all active connections for a user and applies a
+1-minute activity window to resolve `online` vs `idle`, while tab hide still
+transitions that connection to `away` after 2 minutes.
 
 ## Production build
 

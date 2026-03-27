@@ -26,7 +26,8 @@ router.get('/', async (req, res, next) => {
 router.put('/', async (req, res, next) => {
   try {
     const { status } = req.body;
-    const allowed = ['online', 'idle', 'away', 'offline'];
+    // `offline` is derived from connection aggregation and is not client-settable.
+    const allowed = ['online', 'idle', 'away'];
     if (!allowed.includes(status)) {
       return res.status(400).json({ error: `status must be one of ${allowed.join(', ')}` });
     }

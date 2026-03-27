@@ -2,7 +2,24 @@ import { create } from 'zustand';
 import { api, setToken, getToken } from '../lib/api';
 import { wsManager } from '../lib/ws';
 
-export const useAuthStore = create((set, get) => ({
+type AuthUser = {
+  id: string;
+  email?: string;
+  username?: string;
+  displayName?: string;
+};
+
+type AuthState = {
+  user: AuthUser | null;
+  authBypass: boolean;
+  loading: boolean;
+  init: () => Promise<void>;
+  login: (email: string, password: string) => Promise<AuthUser>;
+  register: (email: string, username: string, password: string, displayName: string) => Promise<AuthUser>;
+  logout: () => Promise<void>;
+};
+
+export const useAuthStore = create<AuthState>()((set, get) => ({
   user:    null,
   authBypass: false,
   loading: true,   // true while checking existing session on mount
@@ -43,7 +60,7 @@ export const useAuthStore = create((set, get) => ({
     }
   },
 
-  async login(email, password) {
+  async login(email: string, password: string) {
     const data = await api.post('/auth/login', { email, password });
     setToken(data.accessToken);
     set({ user: data.user, authBypass: false });
@@ -51,7 +68,7 @@ export const useAuthStore = create((set, get) => ({
     return data.user;
   },
 
-  async register(email, username, password, displayName) {
+  async register(email: string, username: string, password: string, displayName: string) {
     const data = await api.post('/auth/register', { email, username, password, displayName });
     setToken(data.accessToken);
     set({ user: data.user, authBypass: false });

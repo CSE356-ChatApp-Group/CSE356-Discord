@@ -109,37 +109,37 @@ npm run build
 chatapp/
 ├── backend/
 │   ├── src/
-│   │   ├── index.js              Entry point (HTTP + WS server)
-│   │   ├── app.js                Express app, middleware, route mounting
+│   │   ├── index.ts              Entry point (HTTP + WS server)
+│   │   ├── app.ts                Express app, middleware, route mounting
 │   │   ├── db/
-│   │   │   ├── pool.js           Postgres pool singleton
-│   │   │   ├── redis.js          Redis + subscriber clients
-│   │   │   └── migrate.js        SQL migration runner
+│   │   │   ├── pool.ts           Postgres pool singleton
+│   │   │   ├── redis.ts          Redis + subscriber clients
+│   │   │   └── migrate.ts        SQL migration runner
 │   │   ├── auth/
-│   │   │   ├── passport.js       Strategy registration (local, Google, GitHub)
-│   │   │   ├── router.js         /auth/* endpoints
-│   │   │   └── usersRouter.js    /users/* endpoints
-│   │   ├── communities/router.js  CRUD + member management
-│   │   ├── channels/router.js     Channel CRUD
+│   │   │   ├── passport.ts       Strategy registration (local, Google, GitHub)
+│   │   │   ├── router.ts         /auth/* endpoints
+│   │   │   └── usersRouter.ts    /users/* endpoints
+│   │   ├── communities/router.ts  CRUD + member management
+│   │   ├── channels/router.ts     Channel CRUD
 │   │   ├── messages/
-│   │   │   ├── router.js          Message CRUD + read states
-│   │   │   └── conversationsRouter.js  DM conversations
+│   │   │   ├── router.ts          Message CRUD + read states
+│   │   │   └── conversationsRouter.ts  DM conversations
 │   │   ├── presence/
-│   │   │   ├── service.js         Redis TTL + fanout logic
-│   │   │   └── router.js
+│   │   │   ├── service.ts         Redis TTL + fanout logic
+│   │   │   └── router.ts
 │   │   ├── search/
-│   │   │   ├── client.js          Meilisearch wrapper
-│   │   │   └── router.js
-│   │   ├── attachments/router.js  S3 pre-sign + metadata
+│   │   │   ├── client.ts          Meilisearch wrapper
+│   │   │   └── router.ts
+│   │   ├── attachments/router.ts  S3 pre-sign + metadata
 │   │   ├── websocket/
-│   │   │   ├── server.js          WS upgrade handler + subscription mgmt
-│   │   │   └── fanout.js          Redis publish helper
+│   │   │   ├── server.ts          WS upgrade handler + subscription mgmt
+│   │   │   └── fanout.ts          Redis publish helper
 │   │   ├── middleware/
-│   │   │   └── authenticate.js    JWT verify + requireRole factory
+│   │   │   └── authenticate.ts    JWT verify + requireRole factory
 │   │   └── utils/
-│   │       ├── jwt.js             sign/verify + deny-list
-│   │       └── logger.js          pino logger
-│   ├── tests/auth.test.js
+│   │       ├── jwt.ts             sign/verify + deny-list
+│   │       └── logger.ts          pino logger
+│   ├── tests/auth.test.ts
 │   ├── Dockerfile
 │   └── package.json
 ├── migrations/
@@ -188,6 +188,7 @@ Connect: `ws://host/ws?token=<accessToken>`
 { "type": "subscribe",   "channel": "channel:<uuid>" }
 { "type": "unsubscribe", "channel": "channel:<uuid>" }
 { "type": "presence",    "status": "idle" }
+{ "type": "activity" }
 { "type": "ping" }
 ```
 
@@ -250,10 +251,10 @@ Integrate WebRTC signaling (e.g. mediasoup) and add a signal-relay route.
 
 ### Horizontal DB scaling
 The UUID primary keys and `created_at` cursors are compatible with Citus (Postgres sharding)
-or read-replica routing. Replace `pool.js` with a read/write split pool when ready.
+or read-replica routing. Replace `pool.ts` with a read/write split pool when ready.
 
 ### Replacing Meilisearch with OpenSearch
-Implement the same interface in `search/client.js` using `@opensearch-project/opensearch`.
+Implement the same interface in `search/client.ts` using `@opensearch-project/opensearch`.
 No other files change.
 
 ### Adding reactions, threads, polls

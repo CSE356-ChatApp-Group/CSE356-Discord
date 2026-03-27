@@ -27,14 +27,150 @@
 
 'use strict';
 
+const { randomUUID } = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { verifyAccess }  = require('../utils/jwt');
+const redis             = require('../db/redis');
 const { redisSub }      = require('../db/redis');
 const logger            = require('../utils/logger');
 const presenceService   = require('../presence/service');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('../auth/bypass');
 
 const wss = new WebSocketServer({ noServer: true });
+const IDLE_TTL_SECONDS = 60;
+const CONNECTION_ALIVE_TTL_SECONDS = 120;
+const PRESENCE_SWEEPER_MS = 15_000;
+
+function connectionSetKey(userId) {
+  return `user:${userId}:connections`;
+}
+
+function connectionStatusHashKey(userId) {
+  return `user:${userId}:connection_status`;
+}
+
+function connectionActivityKey(userId, connectionId) {
+  return `user:${userId}:connection:${connectionId}:activity`;
+}
+
+function connectionAliveKey(userId, connectionId) {
+  return `user:${userId}:connection:${connectionId}:alive`;
+}
+
+function connectedUsersKey() {
+  return 'presence:connected_users';
+}
+
+async function markConnectionAlive(userId, connectionId) {
+  await redis.set(connectionAliveKey(userId, connectionId), '1', 'EX', CONNECTION_ALIVE_TTL_SECONDS);
+}
+
+async function markConnectionActive(userId, connectionId) {
+  await redis.set(connectionActivityKey(userId, connectionId), '1', 'EX', IDLE_TTL_SECONDS);
+}
+
+async function upsertConnectionState(userId, connectionId, status) {
+  await redis
+    .multi()
+    .sadd(connectionSetKey(userId), connectionId)
+    .sadd(connectedUsersKey(), userId)
+    .hset(connectionStatusHashKey(userId), connectionId, status)
+    .exec();
+}
+
+function resolveAggregateStatus(states) {
+  let hasAway = false;
+  let hasOnline = false;
+
+  for (const state of states) {
+    if (state === 'away') hasAway = true;
+    else if (state === 'online') hasOnline = true;
+  }
+
+  if (hasAway) return 'away';
+  if (hasOnline) return 'online';
+  return 'idle';
+}
+
+async function removeConnection(userId, connectionId) {
+  await redis
+    .multi()
+    .srem(connectionSetKey(userId), connectionId)
+    .hdel(connectionStatusHashKey(userId), connectionId)
+    .del(connectionActivityKey(userId, connectionId))
+    .del(connectionAliveKey(userId, connectionId))
+    .exec();
+}
+
+async function recomputeUserPresence(userId) {
+  const connIds = await redis.smembers(connectionSetKey(userId));
+  if (!connIds.length) {
+    await redis.srem(connectedUsersKey(), userId);
+    await presenceService.setPresence(userId, 'offline');
+    return;
+  }
+
+  const statusHash = connectionStatusHashKey(userId);
+  const pipeline = redis.pipeline();
+  for (const connId of connIds) {
+    pipeline.hget(statusHash, connId);
+    pipeline.exists(connectionActivityKey(userId, connId));
+    pipeline.exists(connectionAliveKey(userId, connId));
+  }
+  const results = await pipeline.exec();
+
+  const stateByConn = [];
+  const staleConnIds = [];
+  for (let i = 0; i < connIds.length; i += 1) {
+    const statusRes = results[i * 3];
+    const activityRes = results[i * 3 + 1];
+    const aliveRes = results[i * 3 + 2];
+    const connId = connIds[i];
+
+    const status = statusRes?.[1] || 'online';
+    const isActive = Number(activityRes?.[1] || 0) === 1;
+    const isAlive = Number(aliveRes?.[1] || 0) === 1;
+
+    if (!isAlive) {
+      staleConnIds.push(connId);
+      continue;
+    }
+
+    if (status === 'away') {
+      stateByConn.push('away');
+    } else if (status === 'idle') {
+      stateByConn.push('idle');
+    } else {
+      stateByConn.push(isActive ? 'online' : 'idle');
+    }
+  }
+
+  if (staleConnIds.length) {
+    const stalePipe = redis.pipeline();
+    for (const connId of staleConnIds) {
+      stalePipe.srem(connectionSetKey(userId), connId);
+      stalePipe.hdel(statusHash, connId);
+      stalePipe.del(connectionActivityKey(userId, connId));
+      stalePipe.del(connectionAliveKey(userId, connId));
+    }
+    await stalePipe.exec();
+  }
+
+  if (!stateByConn.length) {
+    await redis.srem(connectedUsersKey(), userId);
+    await presenceService.setPresence(userId, 'offline');
+    return;
+  }
+
+  await presenceService.setPresence(userId, resolveAggregateStatus(stateByConn));
+}
+
+async function reconcileAllConnectedUsers() {
+  const userIds = await redis.smembers(connectedUsersKey());
+  for (const userId of userIds) {
+    await recomputeUserPresence(userId);
+  }
+}
 
 /**
  * Map from Redis channel key → Set of WebSocket clients subscribed to it.
@@ -82,9 +218,17 @@ wss.on('connection', async (ws, req) => {
   logger.info({ userId: user.id }, 'WS connected');
   ws._subscriptions = new Set();
   ws._userId = user.id;
+  ws._connectionId = randomUUID();
 
-  // Mark user online
-  presenceService.setPresence(user.id, 'online').catch(() => {});
+  upsertConnectionState(user.id, ws._connectionId, 'online')
+    .then(async () => {
+      await Promise.all([
+        markConnectionAlive(user.id, ws._connectionId),
+        markConnectionActive(user.id, ws._connectionId),
+      ]);
+      await recomputeUserPresence(user.id);
+    })
+    .catch((err) => logger.warn({ err, userId: user.id }, 'WS presence setup failed'));
 
   // Automatically subscribe to personal notification channel
   subscribeClient(ws, `user:${user.id}`);
@@ -108,14 +252,23 @@ wss.on('connection', async (ws, req) => {
 
   // Heartbeat / pong
   ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
+  ws.on('pong', () => {
+    ws.isAlive = true;
+    markConnectionAlive(user.id, ws._connectionId).catch(() => {});
+  });
 });
 
 // ── Client message dispatch ────────────────────────────────────────────────────
 function handleClientMessage(ws, user, msg) {
+  markConnectionAlive(user.id, ws._connectionId).catch(() => {});
+
   switch (msg.type) {
     case 'subscribe':
       if (isAllowedChannel(user, msg.channel)) {
+        markConnectionActive(user.id, ws._connectionId).catch(() => {});
+        upsertConnectionState(user.id, ws._connectionId, 'online')
+          .then(() => recomputeUserPresence(user.id))
+          .catch(() => {});
         subscribeClient(ws, msg.channel);
         ws.send(JSON.stringify({ event: 'subscribed', data: { channel: msg.channel } }));
       } else {
@@ -128,14 +281,32 @@ function handleClientMessage(ws, user, msg) {
       break;
 
     case 'ping':
+      markConnectionActive(user.id, ws._connectionId).catch(() => {});
+      upsertConnectionState(user.id, ws._connectionId, 'online')
+        .then(() => recomputeUserPresence(user.id))
+        .catch(() => {});
       ws.send(JSON.stringify({ event: 'pong' }));
       break;
 
     case 'presence':
       // Client reporting its own presence status
       if (['online', 'idle', 'away'].includes(msg.status)) {
-        presenceService.setPresence(user.id, msg.status).catch(() => {});
+        upsertConnectionState(user.id, ws._connectionId, msg.status)
+          .then(async () => {
+            if (msg.status === 'online') {
+              await markConnectionActive(user.id, ws._connectionId);
+            }
+            await recomputeUserPresence(user.id);
+          })
+          .catch(() => {});
       }
+      break;
+
+    case 'activity':
+      markConnectionActive(user.id, ws._connectionId)
+        .then(() => upsertConnectionState(user.id, ws._connectionId, 'online'))
+        .then(() => recomputeUserPresence(user.id))
+        .catch(() => {});
       break;
 
     default:
@@ -173,7 +344,9 @@ function cleanup(ws, userId) {
   ws._subscriptions.forEach((ch) => {
     channelClients.get(ch)?.delete(ws);
   });
-  presenceService.setPresence(userId, 'offline').catch(() => {});
+  removeConnection(userId, ws._connectionId)
+    .then(() => recomputeUserPresence(userId))
+    .catch((err) => logger.warn({ err, userId }, 'WS cleanup presence update failed'));
   logger.info({ userId }, 'WS disconnected');
 }
 
@@ -185,6 +358,13 @@ setInterval(() => {
     ws.ping();
   });
 }, 60_000);
+
+// Periodically reconcile global user presence from client-reported connection state.
+setInterval(() => {
+  reconcileAllConnectedUsers().catch((err) => {
+    logger.warn({ err }, 'Presence sweeper failed');
+  });
+}, PRESENCE_SWEEPER_MS);
 
 // ── HTTP upgrade handler (attached to http.Server in index.js) ─────────────────
 function handleUpgrade(request, socket, head) {
