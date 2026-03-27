@@ -18,6 +18,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
 
+CURRENT_UPSTREAM_PORT=$(ssh "${STAGING_USER}@${STAGING_HOST}" "grep -oE '127\.0\.0\.1:[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
+if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
+  CURRENT_UPSTREAM_PORT="${LIVE_PORT}"
+fi
+
+if [[ "${CURRENT_UPSTREAM_PORT}" == "4000" ]]; then
+  LIVE_PORT=4000
+  CANDIDATE_PORT=4001
+elif [[ "${CURRENT_UPSTREAM_PORT}" == "4001" ]]; then
+  LIVE_PORT=4001
+  CANDIDATE_PORT=4000
+else
+  echo "ERROR: Unexpected upstream port '${CURRENT_UPSTREAM_PORT}' in nginx config."
+  exit 1
+fi
+
+echo "Current live port: ${LIVE_PORT}"
+echo "Candidate port: ${CANDIDATE_PORT}"
+
 if ! command -v gh >/dev/null 2>&1; then
   echo "ERROR: GitHub CLI (gh) is required for artifact download."
   exit 1
