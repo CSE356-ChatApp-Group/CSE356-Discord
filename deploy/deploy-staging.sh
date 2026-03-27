@@ -1,0 +1,110 @@
+#!/bin/bash
+# deploy/deploy-staging.sh
+# Deploy CI-built artifact to staging using candidate-port cutover.
+# Usage: ./deploy/deploy-staging.sh <release-sha>
+
+set -euo pipefail
+
+RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy/deploy-staging.sh <sha>}
+STAGING_HOST="${STAGING_HOST:-136.114.103.71}"
+STAGING_USER="${STAGING_USER:-$USER}"
+GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
+RELEASE_DIR="/opt/chatapp/releases"
+CURRENT_LINK="/opt/chatapp/current"
+CANDIDATE_PORT=4001
+LIVE_PORT=4000
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
+"${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "ERROR: GitHub CLI (gh) is required for artifact download."
+  exit 1
+fi
+
+ARTIFACT="chatapp-${RELEASE_SHA}.tar.gz"
+LOCAL_ARTIFACT="/tmp/${ARTIFACT}"
+
+echo "1) Downloading CI-built artifact for ${RELEASE_SHA}..."
+gh release download "release-${RELEASE_SHA}" -R "${GITHUB_REPO}" -p "${ARTIFACT}" -O "${LOCAL_ARTIFACT}"
+
+echo "2) Copying artifact and verification scripts to staging host..."
+scp "${LOCAL_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
+scp deploy/health-check.sh deploy/smoke-test.sh "${STAGING_USER}@${STAGING_HOST}:/tmp/"
+rm -f "${LOCAL_ARTIFACT}"
+
+echo "3) Unpacking artifact into immutable release directory..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
+  mkdir -p '${RELEASE_DIR}'
+  mkdir -p \"\${RELEASE_PATH}\"
+  tar xzf '/tmp/${ARTIFACT}' -C \"\${RELEASE_PATH}\"
+
+  # Install backend runtime deps only if node_modules are not bundled.
+  if [ ! -d \"\${RELEASE_PATH}/backend/node_modules\" ]; then
+    cd \"\${RELEASE_PATH}/backend\"
+    npm ci --omit=dev
+  fi
+
+  chmod +x /tmp/health-check.sh /tmp/smoke-test.sh
+"
+
+echo "4) Starting candidate app on port ${CANDIDATE_PORT}..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
+
+  if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
+    echo 'ERROR: Candidate port ${CANDIDATE_PORT} already in use.'
+    exit 1
+  fi
+
+  cd \"\${RELEASE_PATH}\"
+  set -a
+  source /opt/chatapp/shared/.env
+  set +a
+  export NODE_ENV=staging
+  export PORT=${CANDIDATE_PORT}
+  nohup npm --prefix backend start > /tmp/chatapp-${RELEASE_SHA}-candidate.log 2>&1 &
+  echo \$! > /tmp/chatapp-${RELEASE_SHA}-candidate.pid
+
+  sleep 4
+  kill -0 \$(cat /tmp/chatapp-${RELEASE_SHA}-candidate.pid)
+"
+
+echo "5) Running health and smoke checks on candidate..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  /tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}
+  /tmp/smoke-test.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}
+"
+
+echo "6) Switching Nginx upstream from ${LIVE_PORT} to ${CANDIDATE_PORT}..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  sudo sed -i 's/127.0.0.1:${LIVE_PORT}/127.0.0.1:${CANDIDATE_PORT}/g' /etc/nginx/sites-available/chatapp
+  sudo nginx -t
+  sudo systemctl reload nginx
+"
+
+echo "7) Updating current symlink to new release..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  ln -sfn '${RELEASE_DIR}/${RELEASE_SHA}' '${CURRENT_LINK}'
+"
+
+echo "8) Post-cutover verification..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "/tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}"
+
+echo ""
+echo "Staging deployment successful."
+echo "- Candidate used port: ${CANDIDATE_PORT}"
+echo "- Live traffic now points to: ${CANDIDATE_PORT}"
+echo "- Previous version was kept for rollback"
+echo "- Deployment used immutable release dir: ${RELEASE_DIR}/${RELEASE_SHA}"
+
+echo ""
+echo "Rollback (immediate):"
+echo "  ssh ${STAGING_USER}@${STAGING_HOST} 'sudo sed -i \"s/127.0.0.1:${CANDIDATE_PORT}/127.0.0.1:${LIVE_PORT}/g\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"

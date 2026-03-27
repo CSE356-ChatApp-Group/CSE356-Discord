@@ -1,0 +1,72 @@
+name: CI Build & Package
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build backend
+        run: cd backend && npm run build
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+
+      - name: Package release artifact
+        run: |
+          mkdir -p releases
+          tar --exclude=node_modules --exclude=.git --exclude=.env \
+            -czf releases/chatapp-${{ github.sha }}.tar.gz \
+            backend/dist/ \
+            backend/package*.json \
+            backend/tsconfig.json \
+            frontend/dist/ \
+            frontend/package*.json \
+            migrations/ \
+            package*.json \
+            .env.example
+          echo "Packaged: releases/chatapp-${{ github.sha }}.tar.gz"
+          ls -lh releases/chatapp-${{ github.sha }}.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-${{ github.sha }}
+          path: releases/chatapp-*.tar.gz
+          retention-days: 30
+
+      - name: Create release (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: releases/chatapp-${{ github.sha }}.tar.gz
+          tag_name: release-${{ github.sha }}
+          body: |
+            Deploy to staging or production using:
+            ```bash
+            ./deploy/deploy-staging.sh ${{ github.sha }}
+            ./deploy/deploy-prod.sh ${{ github.sha }}
+            ```
