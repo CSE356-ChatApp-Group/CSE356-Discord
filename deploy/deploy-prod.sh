@@ -14,11 +14,32 @@ CURRENT_LINK="/opt/chatapp/current"
 OLD_PORT=4000
 NEW_PORT=4001
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REMOTE_CANDIDATE_PID_FILE="/tmp/chatapp-${RELEASE_SHA}-candidate.pid"
 
 echo "=== PRODUCTION DEPLOYMENT ==="
 echo "Release: $RELEASE_SHA"
 echo "Target: $PROD_HOST"
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
+
+CURRENT_UPSTREAM_PORT=$(ssh "$PROD_USER@$PROD_HOST" "grep -oE '127\\.0\\.0\\.1:[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
+if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
+  CURRENT_UPSTREAM_PORT="${OLD_PORT}"
+fi
+
+if [[ "${CURRENT_UPSTREAM_PORT}" == "4000" ]]; then
+  OLD_PORT=4000
+  NEW_PORT=4001
+elif [[ "${CURRENT_UPSTREAM_PORT}" == "4001" ]]; then
+  OLD_PORT=4001
+  NEW_PORT=4000
+else
+  echo "ERROR: Unexpected upstream port '${CURRENT_UPSTREAM_PORT}' in nginx config."
+  exit 1
+fi
+
+echo "Current live port: $OLD_PORT"
+echo "Candidate port: $NEW_PORT"
+
 echo ""
 echo "⚠️  This will deploy to PRODUCTION. Verify staging is working first."
 echo ""
@@ -74,6 +95,7 @@ echo "✓ Downloaded locally"
 # 4. Copy to production server
 echo "4. Copying to production..."
 scp "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
+scp "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "$PROD_USER@$PROD_HOST:/tmp/"
 rm "$DOWNLOAD_PATH"
 echo "✓ Copied to production"
 
@@ -102,6 +124,8 @@ ssh "$PROD_USER@$PROD_HOST" "
     echo 'ERROR: Frontend dist not found in artifact'
     exit 1
   fi
+
+  chmod +x /tmp/health-check.sh /tmp/smoke-test.sh
   
   echo 'Release unpacked and verified'
 "
@@ -130,7 +154,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   # Start candidate in background
   nohup npm --prefix backend start > /tmp/chatapp-${RELEASE_SHA}-candidate.log 2>&1 &
   CANDIDATE_PID=\$!
-  echo \$CANDIDATE_PID > /tmp/chatapp-candidate.pid
+  echo \$CANDIDATE_PID > ${REMOTE_CANDIDATE_PID_FILE}
   
   # Wait for startup
   sleep 4
@@ -147,18 +171,18 @@ echo "✓ Candidate process started on port $NEW_PORT"
 
 # 7. Health checks
 echo "7. Running health checks on candidate..."
-bash "${SCRIPT_DIR}/health-check.sh" $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" || {
+ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
   echo "ERROR: Health check failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "kill \$(cat /tmp/chatapp-candidate.pid) || true; rm /tmp/chatapp-candidate.pid"
+  ssh "$PROD_USER@$PROD_HOST" "kill \$(cat ${REMOTE_CANDIDATE_PID_FILE}) || true; rm -f ${REMOTE_CANDIDATE_PID_FILE}"
   exit 1
 }
 echo "✓ Health checks passed"
 
 # 8. Smoke tests
 echo "8. Running smoke tests..."
-bash "${SCRIPT_DIR}/smoke-test.sh" $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" || {
+ssh "$PROD_USER@$PROD_HOST" "/tmp/smoke-test.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
   echo "ERROR: Smoke tests failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "kill \$(cat /tmp/chatapp-candidate.pid) || true; rm /tmp/chatapp-candidate.pid"
+  ssh "$PROD_USER@$PROD_HOST" "kill \$(cat ${REMOTE_CANDIDATE_PID_FILE}) || true; rm -f ${REMOTE_CANDIDATE_PID_FILE}"
   exit 1
 }
 echo "✓ Smoke tests passed"
@@ -181,7 +205,7 @@ echo "✓ Nginx switched to new version"
 echo "10. Monitoring for 60 seconds..."
 for i in {1..12}; do
   sleep 5
-  if bash "${SCRIPT_DIR}/health-check.sh" $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" 2>/dev/null; then
+  if ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
     echo "  ✓ Check $i/12 passed"
   else
     echo "  ⚠ Check $i/12: health check failed"
@@ -199,7 +223,7 @@ echo "✓ Symlink updated"
 
 # 12. Final health check
 echo "12. Final verification..."
-if bash "${SCRIPT_DIR}/health-check.sh" $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" 2>/dev/null; then
+if ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
   echo "✓ Production deployment SUCCESSFUL"
 else
   echo "⚠ WARNING: Final check failed. Manual inspection recommended."
