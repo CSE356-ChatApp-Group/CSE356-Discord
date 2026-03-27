@@ -15,6 +15,9 @@ OLD_PORT=4000
 NEW_PORT=4001
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REMOTE_CANDIDATE_PID_FILE="/tmp/chatapp-${RELEASE_SHA}-candidate.pid"
+MONITOR_SECONDS="${MONITOR_SECONDS:-30}"
+KEEP_RELEASES="${KEEP_RELEASES:-3}"
+KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 
 echo "=== PRODUCTION DEPLOYMENT ==="
 echo "Release: $RELEASE_SHA"
@@ -202,13 +205,18 @@ ssh "$PROD_USER@$PROD_HOST" "
 echo "✓ Nginx switched to new version"
 
 # 10. Monitor briefly
-echo "10. Monitoring for 60 seconds..."
-for i in {1..12}; do
+MONITOR_CHECKS=$((MONITOR_SECONDS / 5))
+if [ "$MONITOR_CHECKS" -lt 1 ]; then
+  MONITOR_CHECKS=1
+fi
+
+echo "10. Monitoring for ${MONITOR_SECONDS} seconds..."
+for i in $(seq 1 "$MONITOR_CHECKS"); do
   sleep 5
   if ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
-    echo "  ✓ Check $i/12 passed"
+    echo "  ✓ Check $i/$MONITOR_CHECKS passed"
   else
-    echo "  ⚠ Check $i/12: health check failed"
+    echo "  ⚠ Check $i/$MONITOR_CHECKS: health check failed"
   fi
 done
 echo "✓ Monitoring window complete"
@@ -229,6 +237,19 @@ else
   echo "⚠ WARNING: Final check failed. Manual inspection recommended."
 fi
 
+# 13. Cleanup older releases/backups to control disk usage on small VMs.
+echo "13. Pruning old releases/backups (keep releases=$KEEP_RELEASES backups=$KEEP_BACKUPS)..."
+ssh "$PROD_USER@$PROD_HOST" "
+  set -e
+  if [ -d '$RELEASE_DIR' ]; then
+    ls -1dt '$RELEASE_DIR'/* 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | xargs -r rm -rf
+  fi
+  if [ -d /opt/chatapp/backups ]; then
+    ls -1dt /opt/chatapp/backups/* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -f
+  fi
+"
+echo "✓ Cleanup complete"
+
 echo ""
 echo "=== Deployment Complete ==="
 echo "Release: $RELEASE_SHA"
@@ -237,7 +258,7 @@ echo ""
 echo "Previous version still running on port $OLD_PORT for rollback."
 echo ""
 echo "To rollback immediately:"
-echo "  ssh $PROD_USER@$PROD_HOST 'sudo sed -i \"s/localhost:$NEW_PORT/localhost:$OLD_PORT/\" /etc/nginx/sites-available/chatapp && sudo systemctl reload nginx'"
+echo "  ssh $PROD_USER@$PROD_HOST 'sudo sed -i \"s/127.0.0.1:$NEW_PORT/127.0.0.1:$OLD_PORT/\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
 echo ""
 echo "To stop the old version after confidence window (keep for ~10 min):"
 echo "  ssh $PROD_USER@$PROD_HOST 'pkill -f \"PORT=$OLD_PORT\" || true'"

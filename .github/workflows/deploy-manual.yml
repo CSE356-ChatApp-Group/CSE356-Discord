@@ -148,7 +148,8 @@ jobs:
         env:
           PROD_HOST: ${{ vars.PROD_HOST }}
         run: |
-          HOST="${PROD_HOST:-136.114.103.71}"
+          HOST="${PROD_HOST:-}"
+          test -n "$HOST" || { echo "Missing production host: set GitHub environment variable PROD_HOST"; exit 1; }
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
@@ -161,11 +162,25 @@ jobs:
         run: |
           TARGET_SHA="${{ needs.wait-for-release.outputs.target_sha }}"
 
-          HOST="${PROD_HOST:-136.114.103.71}"
-          USER="${PROD_USER:-ssperrottet}"
+          HOST="${PROD_HOST:-}"
+          USER="${PROD_USER:-}"
+          test -n "$HOST" || { echo "Missing production host: set GitHub environment variable PROD_HOST"; exit 1; }
+          test -n "$USER" || { echo "Missing production user: set GitHub environment variable PROD_USER"; exit 1; }
 
           echo "Resolved production target: ${USER}@${HOST}"
           echo "Deploying SHA: ${TARGET_SHA}"
 
           printf 'y\n' | PROD_HOST="$HOST" PROD_USER="$USER" GITHUB_REPO="${{ github.repository }}" \
             ./deploy/deploy-prod.sh "$TARGET_SHA"
+
+      - name: Verify public prod endpoints
+        shell: bash
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+        run: |
+          HOST="${PROD_HOST:-}"
+          test -n "$HOST" || { echo "Missing production host: set GitHub environment variable PROD_HOST"; exit 1; }
+
+          curl -fsS --max-time 10 "http://${HOST}/health" >/dev/null
+          curl -fsS --max-time 10 "http://${HOST}/" >/dev/null
+          echo "Public endpoint checks passed for ${HOST}"
