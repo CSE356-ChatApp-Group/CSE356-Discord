@@ -8,6 +8,8 @@
 
 const BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '');
 
+type ApiError = Error & { status?: number; errors?: unknown };
+
 let _accessToken = localStorage.getItem('accessToken') || null;
 let _refreshing   = null; // in-flight refresh promise
 
@@ -27,7 +29,7 @@ async function refreshToken() {
   return data.accessToken;
 }
 
-async function request(method, path, body, retry = true) {
+async function request(method: string, path: string, body?: unknown, retry = true) {
   const headers = { 'Content-Type': 'application/json' };
   if (_accessToken) headers['Authorization'] = `Bearer ${_accessToken}`;
 
@@ -53,7 +55,7 @@ async function request(method, path, body, retry = true) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
-    const e = new Error(err.error || err.message || 'Request failed');
+    const e = new Error(err.error || err.message || 'Request failed') as ApiError;
     e.status = res.status;
     e.errors = err.errors;
     throw e;
@@ -64,9 +66,9 @@ async function request(method, path, body, retry = true) {
 }
 
 export const api = {
-  get:    (path)         => request('GET',    path),
-  post:   (path, body)   => request('POST',   path, body),
-  patch:  (path, body)   => request('PATCH',  path, body),
-  put:    (path, body)   => request('PUT',    path, body),
-  delete: (path)         => request('DELETE', path),
+  get:    (path: string)               => request('GET',    path),
+  post:   (path: string, body?: unknown) => request('POST',   path, body),
+  patch:  (path: string, body?: unknown) => request('PATCH',  path, body),
+  put:    (path: string, body?: unknown) => request('PUT',    path, body),
+  delete: (path: string)               => request('DELETE', path),
 };

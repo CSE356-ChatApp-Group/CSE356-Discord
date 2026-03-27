@@ -8,7 +8,7 @@ import styles from './MessageItem.module.css';
 function isGrouped(msg, prev) {
   if (!prev) return false;
   if (msg.author_id !== prev.author_id) return false;
-  const diff = new Date(msg.created_at) - new Date(prev.created_at);
+  const diff = new Date(msg.created_at).getTime() - new Date(prev.created_at).getTime();
   return diff < 5 * 60 * 1000;
 }
 
@@ -39,8 +39,8 @@ export default function MessageItem({ message: msg, prevMessage, isOwn }) {
     setEditing(false);
   }
 
-  const author = msg.author || { display_name: 'Unknown', username: 'unknown' };
-  const name   = author.display_name || author.username;
+  const author = msg.author || { displayName: 'Unknown', username: 'unknown' };
+  const name   = author.displayName || author.display_name || author.username;
 
   return (
     <div

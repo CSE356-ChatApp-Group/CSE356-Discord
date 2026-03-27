@@ -51,7 +51,18 @@ app.use(rateLimit({
 }));
 
 // ── Health check (no auth required) ───────────────────────────────────────────
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/health', async (_req, res) => {
+  try {
+    // Check DB
+    await require('./db/pool').pool.query('SELECT 1');
+    // Check Redis
+    await require('./db/redis').ping();
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  } catch (err) {
+    logger.warn({ err }, 'Health check failed');
+    res.status(503).json({ status: 'unhealthy', error: err.message });
+  }
+});
 
 // ── API routes ─────────────────────────────────────────────────────────────────
 const api = express.Router();

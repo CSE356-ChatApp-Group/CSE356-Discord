@@ -21,6 +21,12 @@ function getWebSocketBaseUrl() {
 }
 
 class WsManager {
+  private _ws: WebSocket | null;
+  private _listeners: Map<string, Set<(event: any) => void>>;
+  private _globalListeners: Set<(event: any) => void>;
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null;
+  private _intentionalClose: boolean;
+
   constructor() {
     this._ws         = null;
     this._listeners  = new Map(); // channel → Set<fn>
@@ -29,7 +35,7 @@ class WsManager {
     this._intentionalClose = false;
   }
 
-  connect(options = {}) {
+  connect(options: { allowAnonymous?: boolean } = {}) {
     const { allowAnonymous = false } = options;
     const token = getToken();
     if (!token && !allowAnonymous) return;
@@ -82,14 +88,14 @@ class WsManager {
     this._ws = null;
   }
 
-  send(msg) {
+  send(msg: Record<string, any>) {
     if (this._ws?.readyState === WebSocket.OPEN) {
       this._ws.send(JSON.stringify(msg));
     }
   }
 
   /** Subscribe to events for a specific Redis channel key */
-  subscribe(channel, fn) {
+  subscribe(channel: string, fn: (event: any) => void) {
     if (!this._listeners.has(channel)) this._listeners.set(channel, new Set());
     this._listeners.get(channel).add(fn);
     // Tell server to subscribe this process if not already
@@ -98,7 +104,7 @@ class WsManager {
   }
 
   /** Subscribe to ALL events (useful for global notification handling) */
-  onAny(fn) {
+  onAny(fn: (event: any) => void) {
     this._globalListeners.add(fn);
     return () => this._globalListeners.delete(fn);
   }

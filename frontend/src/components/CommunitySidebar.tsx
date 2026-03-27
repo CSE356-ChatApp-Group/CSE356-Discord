@@ -37,7 +37,7 @@ export default function CommunitySidebar() {
       {/* User avatar at bottom */}
       <div className={styles.bottom}>
         <button className={styles.userBtn} title={`${user?.username} – click to log out`} onClick={logout}>
-          <Avatar name={user?.display_name || user?.username} size={36} />
+          <Avatar name={user?.displayName || user?.username} size={36} />
         </button>
       </div>
 

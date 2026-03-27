@@ -11,7 +11,7 @@ export default function WelcomePane() {
       <div className={styles.card}>
         <div className={styles.mark}>▸</div>
         <h1 className={styles.heading}>
-          Welcome back, <span className={styles.name}>{user?.display_name || user?.username}</span>
+          Welcome back, <span className={styles.name}>{user?.displayName || user?.username}</span>
         </h1>
         <p className={styles.sub}>
           {communities.length === 0

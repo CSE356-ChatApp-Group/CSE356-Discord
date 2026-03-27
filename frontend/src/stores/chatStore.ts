@@ -2,7 +2,42 @@ import { create } from 'zustand';
 import { api } from '../lib/api';
 import { wsManager } from '../lib/ws';
 
-function dedupeMessages(messages) {
+type Entity = Record<string, any>;
+type PresenceStatus = 'online' | 'idle' | 'away' | 'offline';
+
+type ChatState = {
+  communities: Entity[];
+  activeCommunity: Entity | null;
+  channels: Entity[];
+  activeChannel: Entity | null;
+  conversations: Entity[];
+  activeConv: Entity | null;
+  messages: Record<string, Entity[]>;
+  presence: Record<string, PresenceStatus>;
+  members: Entity[];
+  searchResults: Entity[] | null;
+  searchQuery: string;
+  fetchCommunities: () => Promise<Entity[]>;
+  createCommunity: (slug: string, name: string, description: string) => Promise<Entity>;
+  selectCommunity: (community: Entity) => Promise<void>;
+  fetchChannels: (communityId: string) => Promise<Entity[]>;
+  createChannel: (communityId: string, name: string, isPrivate?: boolean, description?: string) => Promise<Entity>;
+  selectChannel: (channel: Entity) => Promise<void>;
+  fetchConversations: () => Promise<void>;
+  openDm: (userId: string) => Promise<Entity>;
+  selectConversation: (conv: Entity) => Promise<void>;
+  fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string }) => Promise<Entity[]>;
+  sendMessage: (content: string) => Promise<void>;
+  editMessage: (id: string, content: string) => Promise<void>;
+  deleteMessage: (id: string) => Promise<void>;
+  fetchMembers: (communityId: string) => Promise<void>;
+  setPresence: (userId: string, status: PresenceStatus) => void;
+  search: (q: string) => Promise<void>;
+  clearSearch: () => void;
+  _handleWsEvent: (event: any) => void;
+};
+
+function dedupeMessages(messages: Entity[]) {
   const deduped = [];
   const seen = new Set();
 
@@ -25,7 +60,7 @@ function upsertMessage(messages, incoming) {
   return next;
 }
 
-export const useChatStore = create((set, get) => ({
+export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Data ──────────────────────────────────────────────────────────────────
   communities:     [],
   activeCommunity: null,
@@ -46,13 +81,13 @@ export const useChatStore = create((set, get) => ({
     return communities;
   },
 
-  async createCommunity(slug, name, description) {
+  async createCommunity(slug: string, name: string, description: string) {
     const { community } = await api.post('/communities', { slug, name, description });
     set(s => ({ communities: [...s.communities, community] }));
     return community;
   },
 
-  async selectCommunity(community) {
+  async selectCommunity(community: Entity) {
     set({ activeCommunity: community, activeChannel: null, activeConv: null });
     await get().fetchChannels(community.id);
     await get().fetchMembers(community.id);
@@ -61,19 +96,19 @@ export const useChatStore = create((set, get) => ({
   },
 
   // ── Channels ──────────────────────────────────────────────────────────────
-  async fetchChannels(communityId) {
+  async fetchChannels(communityId: string) {
     const { channels } = await api.get(`/channels?communityId=${communityId}`);
     set({ channels });
     return channels;
   },
 
-  async createChannel(communityId, name, isPrivate = false, description = '') {
+  async createChannel(communityId: string, name: string, isPrivate = false, description = '') {
     const { channel } = await api.post('/channels', { communityId, name, isPrivate, description });
     set(s => ({ channels: [...s.channels, channel] }));
     return channel;
   },
 
-  async selectChannel(channel) {
+  async selectChannel(channel: Entity) {
     set({ activeChannel: channel, activeConv: null });
     await get().fetchMessages({ channelId: channel.id });
     // Subscribe to real-time events for this channel
@@ -91,7 +126,7 @@ export const useChatStore = create((set, get) => ({
     set({ conversations });
   },
 
-  async openDm(userId) {
+  async openDm(userId: string) {
     const { conversation } = await api.post('/conversations', { participantIds: [userId] });
     set(s => ({
       conversations: s.conversations.find(c => c.id === conversation.id)
@@ -105,14 +140,14 @@ export const useChatStore = create((set, get) => ({
     return conversation;
   },
 
-  async selectConversation(conv) {
+  async selectConversation(conv: Entity) {
     set({ activeConv: conv, activeChannel: null });
     await get().fetchMessages({ conversationId: conv.id });
     wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
   },
 
   // ── Messages ──────────────────────────────────────────────────────────────
-  async fetchMessages({ channelId, conversationId, before } = {}) {
+  async fetchMessages({ channelId, conversationId, before }: { channelId?: string; conversationId?: string; before?: string } = {}) {
     const key = channelId || conversationId;
     const qs  = new URLSearchParams();
     if (channelId)      qs.set('channelId',      channelId);
@@ -132,39 +167,39 @@ export const useChatStore = create((set, get) => ({
     return messages;
   },
 
-  async sendMessage(content) {
+  async sendMessage(content: string) {
     const { activeChannel, activeConv } = get();
-    const body = { content };
+    const body: { content: string; channelId?: string; conversationId?: string } = { content };
     if (activeChannel)  body.channelId      = activeChannel.id;
     if (activeConv)     body.conversationId = activeConv.id;
     await api.post('/messages', body);
     // Optimistic update handled by WS event; if WS not connected, refetch
   },
 
-  async editMessage(id, content) {
+  async editMessage(id: string, content: string) {
     await api.patch(`/messages/${id}`, { content });
   },
 
-  async deleteMessage(id) {
+  async deleteMessage(id: string) {
     await api.delete(`/messages/${id}`);
   },
 
   // ── Members ───────────────────────────────────────────────────────────────
-  async fetchMembers(communityId) {
+  async fetchMembers(communityId: string) {
     const { members } = await api.get(`/communities/${communityId}/members`);
     // Seed presence map from member list
     const presence = {};
-    members.forEach(m => { presence[m.id] = m.status || 'offline'; });
+    members.forEach((m: Entity) => { presence[m.id] = m.status || 'offline'; });
     set({ members, presence: { ...get().presence, ...presence } });
   },
 
   // ── Presence ──────────────────────────────────────────────────────────────
-  setPresence(userId, status) {
+  setPresence(userId: string, status: PresenceStatus) {
     set(s => ({ presence: { ...s.presence, [userId]: status } }));
   },
 
   // ── Search ────────────────────────────────────────────────────────────────
-  async search(q) {
+  async search(q: string) {
     set({ searchQuery: q });
     if (!q || q.length < 2) { set({ searchResults: null }); return; }
     const { activeChannel, activeConv } = get();
@@ -178,7 +213,7 @@ export const useChatStore = create((set, get) => ({
   clearSearch() { set({ searchResults: null, searchQuery: '' }); },
 
   // ── WebSocket event handler ───────────────────────────────────────────────
-  _handleWsEvent(event) {
+  _handleWsEvent(event: any) {
     // Note: this is called as a standalone fn, not as a method, so use get()
     const store = useChatStore.getState();
     switch (event.event) {

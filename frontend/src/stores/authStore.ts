@@ -9,6 +9,14 @@ type AuthUser = {
   displayName?: string;
 };
 
+function normalizeAuthUser(user: any): AuthUser {
+  if (!user) return user;
+  return {
+    ...user,
+    displayName: user.displayName ?? user.display_name,
+  };
+}
+
 type AuthState = {
   user: AuthUser | null;
   authBypass: boolean;
@@ -29,7 +37,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     try {
       if (getToken()) {
         const data = await api.get('/users/me');
-        set({ user: data.user, authBypass: false, loading: false });
+        set({ user: normalizeAuthUser(data.user), authBypass: false, loading: false });
         wsManager.connect();
         return;
       }
@@ -41,7 +49,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       const data = await api.get('/auth/session');
       if (data?.authBypass && data.user) {
         setToken(data.accessToken || null);
-        set({ user: data.user, authBypass: true, loading: false });
+        set({ user: normalizeAuthUser(data.user), authBypass: true, loading: false });
         wsManager.connect({ allowAnonymous: true });
         return;
       }
@@ -53,7 +61,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       const { accessToken } = await api.post('/auth/refresh');
       setToken(accessToken);
       const data = await api.get('/users/me');
-      set({ user: data.user, authBypass: false, loading: false });
+      set({ user: normalizeAuthUser(data.user), authBypass: false, loading: false });
       wsManager.connect();
     } catch {
       set({ user: null, authBypass: false, loading: false });
@@ -63,17 +71,17 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   async login(email: string, password: string) {
     const data = await api.post('/auth/login', { email, password });
     setToken(data.accessToken);
-    set({ user: data.user, authBypass: false });
+    set({ user: normalizeAuthUser(data.user), authBypass: false });
     wsManager.connect();
-    return data.user;
+    return normalizeAuthUser(data.user);
   },
 
   async register(email: string, username: string, password: string, displayName: string) {
     const data = await api.post('/auth/register', { email, username, password, displayName });
     setToken(data.accessToken);
-    set({ user: data.user, authBypass: false });
+    set({ user: normalizeAuthUser(data.user), authBypass: false });
     wsManager.connect();
-    return data.user;
+    return normalizeAuthUser(data.user);
   },
 
   async logout() {

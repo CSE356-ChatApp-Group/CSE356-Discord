@@ -44,7 +44,7 @@ export default function MemberList() {
 }
 
 function MemberRow({ member, isYou }) {
-  const name = member.display_name || member.username;
+  const name = member.displayName || member.display_name || member.username;
   return (
     <div className={styles.row} title={`${name}${isYou ? ' (you)' : ''} · ${member.role}`}>
       <div className={styles.avatarWrap}>
