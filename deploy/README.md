@@ -6,6 +6,9 @@ This document describes the staged deployment pipeline for ChatApp:
 - **Staging**: Google Cloud Compute Engine VM
 - **Production**: temporary VM at `ssperrottet@136.114.103.71`
 
+> Current active public endpoint is `http://136.114.103.71`.
+> `http://130.245.136.44` is not the active production host for this project and is expected to refuse connections.
+
 ## Architecture Overview
 
 ```
@@ -72,6 +75,7 @@ You can deploy from GitHub Actions using **Manual Deploy** (`workflow_dispatch`)
    - `STAGING_USER` (default: `ssperrottet`)
    - `PROD_HOST` (default: `136.114.103.71`)
    - `PROD_USER` (default: `ssperrottet`)
+   - If you move production to a new VM/IP, update `PROD_HOST` in GitHub environment variables before running deploys.
 - GitHub Environment protection:
    - Set approvals on `production` environment to require manual reviewer approval.
 

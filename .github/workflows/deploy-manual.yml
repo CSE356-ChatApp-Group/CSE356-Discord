@@ -164,5 +164,8 @@ jobs:
           HOST="${PROD_HOST:-136.114.103.71}"
           USER="${PROD_USER:-ssperrottet}"
 
+          echo "Resolved production target: ${USER}@${HOST}"
+          echo "Deploying SHA: ${TARGET_SHA}"
+
           printf 'y\n' | PROD_HOST="$HOST" PROD_USER="$USER" GITHUB_REPO="${{ github.repository }}" \
             ./deploy/deploy-prod.sh "$TARGET_SHA"
