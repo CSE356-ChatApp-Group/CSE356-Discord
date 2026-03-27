@@ -37,6 +37,75 @@ fi
 echo "Current live port: ${LIVE_PORT}"
 echo "Candidate port: ${CANDIDATE_PORT}"
 
+echo "0) Ensuring Nginx serves frontend UI and proxies backend routes..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  LIVE_PORT='${LIVE_PORT}'
+  sudo tee /etc/nginx/sites-available/chatapp >/dev/null <<'EOF'
+upstream chatapp_upstream {
+  server 127.0.0.1:__LIVE_PORT__;
+  keepalive 32;
+}
+
+server {
+  listen 80 default_server;
+  listen [::]:80 default_server;
+  server_name _;
+
+  location /ws {
+    proxy_pass http://chatapp_upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection \"upgrade\";
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 86400;
+    proxy_send_timeout 86400;
+  }
+
+  location /api/ {
+    proxy_pass http://chatapp_upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 30s;
+    client_max_body_size 10m;
+  }
+
+  location /health {
+    proxy_pass http://chatapp_upstream/health;
+    access_log off;
+  }
+
+  location / {
+    root /opt/chatapp/current/frontend/dist;
+    try_files \$uri /index.html;
+  }
+
+  location = /index.html {
+    root /opt/chatapp/current/frontend/dist;
+    add_header Cache-Control \"no-store\";
+  }
+
+  location /assets/ {
+    root /opt/chatapp/current/frontend/dist;
+    try_files \$uri =404;
+    expires 1h;
+    add_header Cache-Control \"public, max-age=3600\";
+  }
+}
+EOF
+  sudo sed -i \"s/__LIVE_PORT__/\${LIVE_PORT}/g\" /etc/nginx/sites-available/chatapp
+  sudo ln -sfn /etc/nginx/sites-available/chatapp /etc/nginx/sites-enabled/chatapp
+  sudo rm -f /etc/nginx/sites-enabled/default
+  sudo nginx -t
+  sudo systemctl reload nginx
+"
+
 if ! command -v gh >/dev/null 2>&1; then
   echo "ERROR: GitHub CLI (gh) is required for artifact download."
   exit 1
@@ -76,8 +145,16 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
 
   if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
-    echo 'ERROR: Candidate port ${CANDIDATE_PORT} already in use.'
-    exit 1
+    echo 'Candidate port ${CANDIDATE_PORT} is already in use; attempting stale process cleanup...'
+    PIDS=\$(lsof -ti :${CANDIDATE_PORT} | sort -u)
+    for PID in \$PIDS; do
+      kill \"\$PID\" || true
+    done
+    sleep 2
+    if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
+      echo 'ERROR: Candidate port ${CANDIDATE_PORT} still in use after cleanup.'
+      exit 1
+    fi
   fi
 
   cd \"\${RELEASE_PATH}\"
@@ -116,6 +193,12 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 
 echo "8) Post-cutover verification..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "/tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}"
+
+echo "9) Verifying frontend root from Nginx..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  curl -fsS http://127.0.0.1/ >/dev/null
+"
 
 echo ""
 echo "Staging deployment successful."

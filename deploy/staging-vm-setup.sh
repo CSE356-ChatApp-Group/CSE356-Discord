@@ -27,7 +27,7 @@ echo "4) Creating base directories..."
 sudo mkdir -p /opt/chatapp/releases /opt/chatapp/shared
 sudo chown -R "$USER":"$USER" /opt/chatapp
 
-echo "5) Writing Nginx reverse proxy config (80 -> localhost:4000)..."
+echo "5) Writing Nginx config (frontend static + backend proxy)..."
 sudo tee /etc/nginx/sites-available/chatapp > /dev/null <<'NGINX'
 upstream chatapp_upstream {
   server 127.0.0.1:4000;
@@ -39,7 +39,7 @@ server {
   listen [::]:80 default_server;
   server_name _;
 
-  location / {
+  location /ws {
     proxy_pass http://chatapp_upstream;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
@@ -52,9 +52,37 @@ server {
     proxy_send_timeout 86400;
   }
 
+  location /api/ {
+    proxy_pass http://chatapp_upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 30s;
+    client_max_body_size 10m;
+  }
+
   location /health {
     proxy_pass http://chatapp_upstream/health;
     access_log off;
+  }
+
+  location / {
+    root /opt/chatapp/current/frontend/dist;
+    try_files $uri /index.html;
+  }
+
+  location = /index.html {
+    root /opt/chatapp/current/frontend/dist;
+    add_header Cache-Control "no-store";
+  }
+
+  location /assets/ {
+    root /opt/chatapp/current/frontend/dist;
+    try_files $uri =404;
+    expires 1h;
+    add_header Cache-Control "public, max-age=3600";
   }
 }
 NGINX
