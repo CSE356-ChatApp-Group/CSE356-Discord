@@ -201,3 +201,79 @@ describe('Overload behavior', () => {
     expect(res.body.error).toMatch(/temporarily unavailable/i);
   });
 });
+
+describe('Message hydration payloads', () => {
+  let token;
+  let userId;
+  let channelId;
+
+  beforeAll(async () => {
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email: 'test@example.com', password: 'Password1!' });
+
+    token = loginRes.body.accessToken;
+
+    const { rows: userRows } = await pool.query(
+      'SELECT id FROM users WHERE email = $1',
+      ['test@example.com']
+    );
+    userId = userRows[0].id;
+
+    const slug = `hydration-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const { rows: communityRows } = await pool.query(
+      `INSERT INTO communities (slug, name, owner_id)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [slug, 'Hydration Test Community', userId]
+    );
+    const communityId = communityRows[0].id;
+
+    await pool.query(
+      `INSERT INTO community_members (community_id, user_id, role)
+       VALUES ($1, $2, 'owner')`,
+      [communityId, userId]
+    );
+
+    const { rows: channelRows } = await pool.query(
+      `INSERT INTO channels (community_id, name, created_by)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [communityId, `hydration-${Math.floor(Math.random() * 10000)}`, userId]
+    );
+    channelId = channelRows[0].id;
+  });
+
+  it('returns hydrated author and attachments on message create', async () => {
+    const res = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ channelId, content: 'hydrated create payload' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.message).toBeDefined();
+    expect(res.body.message.author).toBeDefined();
+    expect(res.body.message.author.id).toBe(userId);
+    expect(Array.isArray(res.body.message.attachments)).toBe(true);
+  });
+
+  it('returns hydrated author and attachments on message update', async () => {
+    const createRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ channelId, content: 'before edit' });
+
+    const messageId = createRes.body.message.id;
+    const res = await request(app)
+      .patch(`/api/v1/messages/${messageId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ content: 'after edit' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message).toBeDefined();
+    expect(res.body.message.content).toBe('after edit');
+    expect(res.body.message.author).toBeDefined();
+    expect(res.body.message.author.id).toBe(userId);
+    expect(Array.isArray(res.body.message.attachments)).toBe(true);
+  });
+});
