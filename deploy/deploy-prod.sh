@@ -22,11 +22,17 @@ echo "Target: $PROD_HOST"
 echo ""
 echo "⚠️  This will deploy to PRODUCTION. Verify staging is working first."
 echo ""
-read -p "Continue? (y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-  echo "Aborted."
-  exit 1
+
+# In CI environments (GitHub Actions), skip interactive prompt
+if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+  read -p "Continue? (y/N) " -n 1 -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 1
+  fi
+else
+  echo "(CI environment detected, proceeding without confirmation)"
 fi
 
 # 1. Verify artifact exists
