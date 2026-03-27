@@ -6,7 +6,7 @@
 set -euo pipefail
 
 RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy-prod.sh <sha>}
-PROD_HOST="${PROD_HOST:-136.114.103.71}"
+PROD_HOST="${PROD_HOST:-130.245.136.44}"
 PROD_USER="${PROD_USER:-ssperrottet}"
 GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
 RELEASE_DIR="/opt/chatapp/releases"

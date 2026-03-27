@@ -13,7 +13,7 @@ DEV ──commit──> CI ────artifact───> STAGING ──manual�
 
 1. **Dev** (local): Developers test changes
 2. **Staging** (Google Cloud VM): Exact production environment, full validation
-3. **Production** (`ssperrottet@136.114.103.71`): Zero-downtime cutover with instant rollback
+3. **Production** (`ssperrottet@130.245.136.44`): Zero-downtime cutover with instant rollback
 
 ## Immutable Artifacts
 

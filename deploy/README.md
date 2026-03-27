@@ -4,10 +4,11 @@ This document describes the staged deployment pipeline for ChatApp:
 
 - **Dev**: Local + CI containers
 - **Staging**: Google Cloud Compute Engine VM
-- **Production**: temporary VM at `ssperrottet@136.114.103.71`
+- **Production**: temporary VM at `ssperrottet@130.245.136.44`
 
-> Current active public endpoint is `http://136.114.103.71`.
-> `http://130.245.136.44` is not the active production host for this project and is expected to refuse connections.
+> Public endpoints currently map as:
+> - Staging: `http://136.114.103.71`
+> - Production: `http://130.245.136.44`
 
 ## Architecture Overview
 
@@ -26,8 +27,8 @@ This document describes the staged deployment pipeline for ChatApp:
           │                                 │
           ▼                                 ▼
     ┌──────────────┐               ┌──────────────┐
-    │  Staging VM  │               │ Production   │
-   │ (Google      │   (Manual)    │ (136.114.103.71) │
+   │  Staging VM  │               │ Production   │
+   │ (Google      │   (Manual)    │ (130.245.136.44) │
     │  Cloud)      │ ──approval──► │              │
     │              │               │              │
     │ Verify       │               │ Validate +   │
@@ -73,7 +74,7 @@ You can deploy from GitHub Actions using **Manual Deploy** (`workflow_dispatch`)
 - Repository/environment variables (optional overrides):
    - `STAGING_HOST` (default: `136.114.103.71`)
    - `STAGING_USER` (default: `ssperrottet`)
-   - `PROD_HOST` (default: `136.114.103.71`)
+   - `PROD_HOST` (default: `130.245.136.44`)
    - `PROD_USER` (default: `ssperrottet`)
    - If you move production to a new VM/IP, update `PROD_HOST` in GitHub environment variables before running deploys.
 - GitHub Environment protection:
@@ -169,7 +170,7 @@ ssh <staging-user>@136.114.103.71 "
 ## Production Deployment
 
 ### Prerequisites
-- Production VM reachable at `ssperrottet@136.114.103.71`
+- Production VM reachable at `ssperrottet@130.245.136.44`
 - Production database (Postgres)
 - Production Redis cache
 - Nginx configured for blue-green or candidate-port deployment
