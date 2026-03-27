@@ -137,8 +137,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   fi
 
   # Ensure schema exists before API process boots.
-  cd "\${RELEASE_PATH}"
-  npm --prefix backend run migrate
+  node "\${RELEASE_PATH}/backend/dist/db/migrate.js"
 
   chmod +x /tmp/health-check.sh /tmp/smoke-test.sh
 "
