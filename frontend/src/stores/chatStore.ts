@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../lib/api';
 import { wsManager } from '../lib/ws';
+import { useAuthStore } from './authStore';
 
 type Entity = Record<string, any>;
 type PresenceStatus = 'online' | 'idle' | 'away' | 'offline';
@@ -58,6 +59,24 @@ function upsertMessage(messages, incoming) {
   const next = [...list];
   next[index] = { ...next[index], ...incoming };
   return next;
+}
+
+function hydrateAuthorFromSession(message: Entity) {
+  if (!message || message.author) return message;
+
+  const currentUser = useAuthStore.getState().user;
+  if (!currentUser || message.author_id !== currentUser.id) return message;
+
+  return {
+    ...message,
+    author: {
+      id: currentUser.id,
+      username: currentUser.username,
+      displayName: currentUser.displayName,
+      display_name: currentUser.displayName,
+      email: currentUser.email,
+    },
+  };
 }
 
 export const useChatStore = create<ChatState>()((set, get) => ({
@@ -218,7 +237,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const store = useChatStore.getState();
     switch (event.event) {
       case 'message:created': {
-        const msg = event.data;
+        const msg = hydrateAuthorFromSession(event.data);
         const key = msg.channel_id || msg.conversation_id;
         set(s => ({
           messages: {
@@ -229,7 +248,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         break;
       }
       case 'message:updated': {
-        const msg = event.data;
+        const msg = hydrateAuthorFromSession(event.data);
         const key = msg.channel_id || msg.conversation_id;
         set(s => ({
           messages: {
