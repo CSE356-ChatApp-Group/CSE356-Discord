@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -63,13 +66,15 @@ jobs:
 
       - name: Create release (main only)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: softprops/action-gh-release@v1
-        with:
-          files: releases/chatapp-${{ github.sha }}.tar.gz
-          tag_name: release-${{ github.sha }}
-          body: |
-            Deploy to staging or production using:
-            ```bash
-            ./deploy/deploy-staging.sh ${{ github.sha }}
-            ./deploy/deploy-prod.sh ${{ github.sha }}
-            ```
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="release-${{ github.sha }}"
+          FILE="releases/chatapp-${{ github.sha }}.tar.gz"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FILE" --clobber
+          else
+            gh release create "$TAG" "$FILE" \
+              --notes "Deploy to staging or production using:\n\n./deploy/deploy-staging.sh ${{ github.sha }}\n./deploy/deploy-prod.sh ${{ github.sha }}"
+          fi
