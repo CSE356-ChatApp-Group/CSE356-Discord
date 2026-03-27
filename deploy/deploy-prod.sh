@@ -169,11 +169,11 @@ ssh "$PROD_USER@$PROD_HOST" "
   set -e
   
   # Update Nginx upstream
-  sudo sed -i 's/localhost:$OLD_PORT/localhost:$NEW_PORT/' /etc/nginx/sites-available/chatapp
+  sudo sed -i \"s/127.0.0.1:$OLD_PORT/127.0.0.1:$NEW_PORT/\" /etc/nginx/sites-available/chatapp
   sudo nginx -t >/dev/null
   sudo systemctl reload nginx
   
-  echo 'Nginx upstream switched to port $NEW_PORT'
+  echo 'Nginx upstream switched from port $OLD_PORT to $NEW_PORT'
 "
 echo "✓ Nginx switched to new version"
 
