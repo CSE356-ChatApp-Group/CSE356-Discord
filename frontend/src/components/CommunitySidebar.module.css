@@ -154,3 +154,128 @@
 
 .form button:hover:not(:disabled) { background: var(--accent-dim); }
 .form button:disabled { opacity: .5; }
+
+.accountWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.accountIdentity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.accountName {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.accountEmail {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.accountSectionTitle {
+  margin: 0 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.accountConnected {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.accountMuted {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.accountActions {
+  display: grid;
+  gap: 8px;
+}
+
+.passwordForm {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.passwordForm input {
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text-primary);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.passwordBtn {
+  border: 1px solid var(--border-light);
+  background: var(--accent);
+  color: var(--text-inverse);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.passwordBtn:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.passwordMsg {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.linkBtn {
+  border: 1px solid var(--border-light);
+  background: var(--bg-3);
+  color: var(--text-primary);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+
+.linkBtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.linkBtn:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.logoutBtn {
+  border: 1px solid var(--border-light);
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.logoutBtn:hover {
+  color: var(--text-primary);
+  border-color: var(--red);
+}

@@ -417,6 +417,22 @@ router.post('/oauth/link-intent', authenticate,
   }
 );
 
+router.get('/oauth/linked', authenticate, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT provider FROM oauth_accounts WHERE user_id = $1 ORDER BY provider ASC',
+      [req.user.id]
+    );
+    const passwordRow = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    return res.json({
+      providers: rows.map(r => r.provider),
+      hasPassword: Boolean(passwordRow.rows[0]?.password_hash),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // ── Google OAuth ───────────────────────────────────────────────────────────────
 router.get('/google', startOAuth('google', { scope: ['profile', 'email'] }));
 
