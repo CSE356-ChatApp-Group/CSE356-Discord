@@ -48,7 +48,11 @@ async function request(method: string, path: string, body?: unknown, retry = tru
       return request(method, path, body, false);
     } catch {
       setToken(null);
-      window.location.href = '/login';
+      const currentPath = window.location.pathname;
+      const isAuthRoute = currentPath === '/login' || currentPath === '/register' || currentPath === '/oauth-callback';
+      if (!isAuthRoute) {
+        window.location.href = '/login';
+      }
       throw new Error('Session expired');
     }
   }
