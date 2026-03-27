@@ -120,10 +120,11 @@ ssh "$PROD_USER@$PROD_HOST" "
   export NODE_ENV=production
   export PORT=$NEW_PORT
   
-  # Check if port is already in use
+  # Kill any existing process on the candidate port
   if lsof -i :$NEW_PORT >/dev/null 2>&1; then
-    echo 'ERROR: Port $NEW_PORT already in use'
-    exit 1
+    echo 'Killing existing process on port $NEW_PORT'
+    lsof -ti :$NEW_PORT | xargs kill -9 2>/dev/null || true
+    sleep 1
   fi
   
   # Start candidate in background
