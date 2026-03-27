@@ -147,7 +147,7 @@ echo "✓ Candidate process started on port $NEW_PORT"
 
 # 7. Health checks
 echo "7. Running health checks on candidate..."
-bash ./health-check.sh $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" || {
+bash "${SCRIPT_DIR}/health-check.sh" $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" || {
   echo "ERROR: Health check failed. Stopping candidate."
   ssh "$PROD_USER@$PROD_HOST" "kill \$(cat /tmp/chatapp-candidate.pid) || true; rm /tmp/chatapp-candidate.pid"
   exit 1
@@ -156,7 +156,7 @@ echo "✓ Health checks passed"
 
 # 8. Smoke tests
 echo "8. Running smoke tests..."
-bash ./smoke-test.sh $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" || {
+bash "${SCRIPT_DIR}/smoke-test.sh" $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" || {
   echo "ERROR: Smoke tests failed. Stopping candidate."
   ssh "$PROD_USER@$PROD_HOST" "kill \$(cat /tmp/chatapp-candidate.pid) || true; rm /tmp/chatapp-candidate.pid"
   exit 1
@@ -181,7 +181,7 @@ echo "✓ Nginx switched to new version"
 echo "10. Monitoring for 60 seconds..."
 for i in {1..12}; do
   sleep 5
-  if bash ./health-check.sh $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" 2>/dev/null; then
+  if bash "${SCRIPT_DIR}/health-check.sh" $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" 2>/dev/null; then
     echo "  ✓ Check $i/12 passed"
   else
     echo "  ⚠ Check $i/12: health check failed"
@@ -199,7 +199,7 @@ echo "✓ Symlink updated"
 
 # 12. Final health check
 echo "12. Final verification..."
-if bash ./health-check.sh $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" 2>/dev/null; then
+if bash "${SCRIPT_DIR}/health-check.sh" $NEW_PORT "http://${PROD_HOST}:${NEW_PORT}" 2>/dev/null; then
   echo "✓ Production deployment SUCCESSFUL"
 else
   echo "⚠ WARNING: Final check failed. Manual inspection recommended."
