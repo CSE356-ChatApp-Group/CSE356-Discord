@@ -86,6 +86,9 @@ ssh "$PROD_USER@$PROD_HOST" "
   npm ci --omit=dev --legacy-peer-deps || npm ci --omit=dev
 
   # Run DB migrations before any new API instance starts.
+  set -a
+  source /opt/chatapp/shared/.env
+  set +a
   node \$RELEASE_PATH/backend/dist/db/migrate.js
   
   # Frontend is pre-built, but verify

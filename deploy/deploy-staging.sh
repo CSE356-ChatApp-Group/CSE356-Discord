@@ -137,6 +137,9 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   fi
 
   # Ensure schema exists before API process boots.
+  set -a
+  source /opt/chatapp/shared/.env
+  set +a
   node "\${RELEASE_PATH}/backend/dist/db/migrate.js"
 
   chmod +x /tmp/health-check.sh /tmp/smoke-test.sh
