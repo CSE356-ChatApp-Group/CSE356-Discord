@@ -36,6 +36,21 @@ function targetKey(channelId, conversationId) {
   throw new Error('No target');
 }
 
+async function loadHydratedMessageById(messageId) {
+  const { rows } = await pool.query(
+    `SELECT m.*,
+            row_to_json(u.*) AS author,
+            COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
+     FROM messages m
+     JOIN users u ON u.id = m.author_id
+     LEFT JOIN attachments a ON a.message_id = m.id
+     WHERE m.id = $1
+     GROUP BY m.id, u.id`,
+    [messageId]
+  );
+  return rows[0] || null;
+}
+
 // ── GET /messages ──────────────────────────────────────────────────────────────
 router.get('/',
   qv('channelId').optional().isUUID(),
@@ -105,12 +120,13 @@ router.post('/',
          VALUES ($1,$2,$3,$4,$5) RETURNING *`,
         [channelId || null, conversationId || null, req.user.id, content, threadId || null]
       );
-      const message = rows[0];
+      const baseMessage = rows[0];
+      const message = await loadHydratedMessageById(baseMessage.id);
 
-      sideEffects.indexMessage(message);
-      sideEffects.publishMessageEvent(targetKey(channelId, conversationId), 'message:created', message);
+      sideEffects.indexMessage(baseMessage);
+      sideEffects.publishMessageEvent(targetKey(channelId, conversationId), 'message:created', message || baseMessage);
 
-      res.status(201).json({ message });
+      res.status(201).json({ message: message || baseMessage });
     } catch (err) { next(err); }
   }
 );
@@ -134,12 +150,13 @@ router.patch('/:id',
       );
       if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
 
-      const message = rows[0];
-      sideEffects.indexMessage(message);
-      const key = targetKey(message.channel_id, message.conversation_id);
-      sideEffects.publishMessageEvent(key, 'message:updated', message);
+      const baseMessage = rows[0];
+      const message = await loadHydratedMessageById(baseMessage.id);
+      sideEffects.indexMessage(baseMessage);
+      const key = targetKey(baseMessage.channel_id, baseMessage.conversation_id);
+      sideEffects.publishMessageEvent(key, 'message:updated', message || baseMessage);
 
-      res.json({ message });
+      res.json({ message: message || baseMessage });
     } catch (err) { next(err); }
   }
 );

@@ -40,11 +40,13 @@ export default function MessageItem({ message: msg, prevMessage, isOwn }) {
   }
 
   const author = msg.author || { displayName: 'Unknown', username: 'unknown' };
-  const name   = author.displayName || author.display_name || author.username;
+  const name   = author.displayName || author.display_name || author.username || author.email || 'Unknown';
 
   return (
     <div
       className={`${styles.row} ${grouped ? styles.grouped : ''} fade-in`}
+      data-testid={`message-item-${msg.id}`}
+      data-message-id={msg.id}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
@@ -104,10 +106,10 @@ export default function MessageItem({ message: msg, prevMessage, isOwn }) {
       {/* Action toolbar (visible on hover) */}
       {hovering && !msg.deleted_at && isOwn && !editing && (
         <div className={styles.actions}>
-          <button className={styles.actionBtn} title="Edit" onClick={() => { setDraft(msg.content); setEditing(true); }}>
+          <button className={styles.actionBtn} title="Edit" aria-label="Edit message" onClick={() => { setDraft(msg.content); setEditing(true); }}>
             <EditIcon />
           </button>
-          <button className={`${styles.actionBtn} ${styles.danger}`} title="Delete"
+          <button className={`${styles.actionBtn} ${styles.danger}`} title="Delete" aria-label="Delete message"
             onClick={() => { if (confirm('Delete this message?')) deleteMessage(msg.id); }}>
             <TrashIcon />
           </button>

@@ -21,10 +21,10 @@ export default function ChatPage() {
   const hasActive = activeChannel || activeConv;
 
   return (
-    <div className={styles.layout}>
+    <div className={styles.layout} data-testid="page-chat">
       <CommunitySidebar />
       <ChannelSidebar />
-      <main className={styles.main}>
+      <main className={styles.main} role="main" aria-label="Chat workspace" data-testid="chat-main">
         {hasActive ? <MessagePane /> : <WelcomePane />}
       </main>
       {activeChannel && <MemberList />}

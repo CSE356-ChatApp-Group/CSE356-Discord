@@ -90,6 +90,48 @@ connection. The backend aggregates all active connections for a user and applies
 1-minute activity window to resolve `online` vs `idle`, while tab hide still
 transitions that connection to `away` after 2 minutes.
 
+## LLM Test Navigation Contract
+
+The UI now exposes stable selectors and landmarks so automated LLM test agents can
+drive full feature scenarios reliably without brittle CSS/text matching.
+
+Primary page anchors:
+
+- `data-testid="route-login"`
+- `data-testid="route-register"`
+- `data-testid="route-chat"`
+- `data-testid="route-oauth-callback"`
+
+Auth flows:
+
+- Login: `login-form`, `login-email`, `login-password`, `login-submit`
+- OAuth sign-in: `oauth-google`, `oauth-github`, `oauth-course`
+- Register: `register-form`, `register-email`, `register-username`, `register-password`, `register-submit`
+- OAuth account choice: `oauth-mode-create`, `oauth-mode-connect`, `oauth-complete-form`, `oauth-complete-submit`
+
+Chat navigation:
+
+- Community navigation: `community-sidebar`, `community-list`, `community-item-<id>`, `community-create-open`
+- Channel/DM navigation: `channel-sidebar`, `tab-channels`, `tab-dms`, `channel-item-<id>`, `dm-item-<id>`
+- Main chat region: `chat-main`, `message-pane`, `message-pane-title`, `message-list`
+
+Messaging actions:
+
+- Composer: `message-compose-form`, `message-compose-input`, `message-send`
+- Message rows: `message-item-<id>`
+- Search: `message-search-toggle`, `search-input`, `search-results`, `search-hit-<id>`
+
+Account/settings:
+
+- Open account modal: `account-open`
+- Link providers: `account-link-google`, `account-link-github`, `account-link-course`
+- Local password setup/update: `account-password-form`, `account-password-save`
+- Logout: `account-logout`
+
+Presence/member checks:
+
+- Members panel: `member-list`, `member-row-<id>` with `data-member-status`
+
 ## Production build
 
 ```bash

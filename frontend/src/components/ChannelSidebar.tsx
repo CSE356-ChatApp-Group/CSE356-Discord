@@ -16,7 +16,7 @@ export default function ChannelSidebar() {
 
   if (!activeCommunity && conversations.length === 0) {
     return (
-      <aside className={styles.sidebar}>
+      <aside className={styles.sidebar} aria-label="Channels and DMs" data-testid="channel-sidebar-empty">
         <div className={styles.empty}>
           <p>Select or create<br/>a community</p>
         </div>
@@ -25,30 +25,30 @@ export default function ChannelSidebar() {
   }
 
   return (
-    <aside className={styles.sidebar}>
+    <aside className={styles.sidebar} aria-label="Channels and DMs" data-testid="channel-sidebar">
       {activeCommunity && (
-        <div className={styles.header}>
+        <div className={styles.header} data-testid="channel-sidebar-header">
           <span className={styles.communityName}>{activeCommunity.name}</span>
         </div>
       )}
 
       {/* Section tabs */}
       <div className={styles.tabs}>
-        <button className={`${styles.tab} ${section === 'channels' ? styles.tabActive : ''}`} onClick={() => setSection('channels')}>
+        <button className={`${styles.tab} ${section === 'channels' ? styles.tabActive : ''}`} onClick={() => setSection('channels')} data-testid="tab-channels" aria-label="Show channels">
           Channels
         </button>
-        <button className={`${styles.tab} ${section === 'dms' ? styles.tabActive : ''}`} onClick={() => setSection('dms')}>
+        <button className={`${styles.tab} ${section === 'dms' ? styles.tabActive : ''}`} onClick={() => setSection('dms')} data-testid="tab-dms" aria-label="Show direct messages">
           DMs
         </button>
       </div>
 
-      <div className={styles.scroll}>
+      <div className={styles.scroll} data-testid="channel-sidebar-scroll">
         {section === 'channels' && (
           <>
             <div className={styles.sectionHeader}>
               <span>Channels</span>
               {activeCommunity && (
-                <button className={styles.sectionAdd} title="New channel" onClick={() => setShowCreate(true)}>+</button>
+                <button className={styles.sectionAdd} title="New channel" onClick={() => setShowCreate(true)} aria-label="Create channel" data-testid="channel-create-open">+</button>
               )}
             </div>
             {channels.length === 0 && (
@@ -99,7 +99,7 @@ export default function ChannelSidebar() {
 
 function ChannelRow({ channel, active, onClick }) {
   return (
-    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick}>
+    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`channel-item-${channel.id}`} data-channel-id={channel.id} aria-label={`Open channel ${channel.name}`}>
       <span className={styles.hash}>{channel.is_private ? '🔒' : '#'}</span>
       <span className={styles.rowName}>{channel.name}</span>
     </button>
@@ -110,7 +110,7 @@ function DmRow({ conv, currentUserId, active, onClick }) {
   const others = (conv.participants || []).filter(p => p.id !== currentUserId);
   const name   = conv.name || others.map(p => p.displayName || p.username).join(', ') || 'Unknown';
   return (
-    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick}>
+    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} aria-label={`Open direct conversation ${name}`}>
       <span className={styles.dmIcon}>@</span>
       <span className={styles.rowName}>{name}</span>
     </button>
@@ -133,15 +133,15 @@ function CreateChannelModal({ onClose, onCreate }) {
   return (
     <Modal title="New Channel" onClose={onClose}>
       {err && <p className={styles.err}>{err}</p>}
-      <form onSubmit={submit} className={styles.form}>
+      <form onSubmit={submit} className={styles.form} data-testid="channel-create-form">
         <label>Channel name
-          <input value={name} onChange={e => setName(e.target.value.toLowerCase().replace(/\s+/g, '-'))} required placeholder="e.g. general" />
+          <input value={name} onChange={e => setName(e.target.value.toLowerCase().replace(/\s+/g, '-'))} required placeholder="e.g. general" data-testid="channel-create-name" />
         </label>
         <label className={styles.checkLabel}>
-          <input type="checkbox" checked={isPrivate} onChange={e => setPrivate(e.target.checked)} />
+          <input type="checkbox" checked={isPrivate} onChange={e => setPrivate(e.target.checked)} data-testid="channel-create-private" />
           Private channel
         </label>
-        <button type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create channel'}</button>
+        <button type="submit" disabled={busy} data-testid="channel-create-submit">{busy ? 'Creating…' : 'Create channel'}</button>
       </form>
     </Modal>
   );

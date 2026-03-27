@@ -17,9 +17,9 @@ export default function MemberList() {
   }
 
   return (
-    <aside className={`${styles.list} memberList`}>
-      <div className={styles.header}>Members <span className={styles.count}>{members.length}</span></div>
-      <div className={styles.scroll}>
+    <aside className={`${styles.list} memberList`} aria-label="Community members" data-testid="member-list">
+      <div className={styles.header} data-testid="member-list-header">Members <span className={styles.count}>{members.length}</span></div>
+      <div className={styles.scroll} data-testid="member-list-scroll">
         {['online', 'idle', 'away', 'offline'].map(status => {
           const grp = groups[status];
           if (!grp.length) return null;
@@ -46,7 +46,7 @@ export default function MemberList() {
 function MemberRow({ member, isYou }) {
   const name = member.displayName || member.display_name || member.username;
   return (
-    <div className={styles.row} title={`${name}${isYou ? ' (you)' : ''} · ${member.role}`}>
+    <div className={styles.row} title={`${name}${isYou ? ' (you)' : ''} · ${member.role}`} data-testid={`member-row-${member.id}`} data-member-id={member.id} data-member-status={member.status}>
       <div className={styles.avatarWrap}>
         <Avatar name={name} size={30} />
         <span className={`${styles.dot} ${styles[member.status]}`} />

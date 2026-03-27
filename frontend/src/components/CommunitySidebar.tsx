@@ -78,9 +78,9 @@ export default function CommunitySidebar() {
   }
 
   return (
-    <nav className={styles.sidebar}>
+    <nav className={styles.sidebar} aria-label="Communities" data-testid="community-sidebar">
       {/* Community icons */}
-      <div className={styles.list}>
+      <div className={styles.list} data-testid="community-list">
         {communities.map(c => (
           <CommunityIcon
             key={c.id}
@@ -93,6 +93,8 @@ export default function CommunitySidebar() {
         <button
           className={styles.addBtn}
           title="Create community"
+          aria-label="Create community"
+          data-testid="community-create-open"
           onClick={() => setShowCreate(true)}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -103,7 +105,7 @@ export default function CommunitySidebar() {
 
       {/* User avatar at bottom */}
       <div className={styles.bottom}>
-        <button className={styles.userBtn} title={`${user?.username} – account settings`} onClick={openAccountModal}>
+        <button className={styles.userBtn} title={`${user?.username} – account settings`} onClick={openAccountModal} aria-label="Open account settings" data-testid="account-open">
           <Avatar name={user?.displayName || user?.username} size={36} />
         </button>
       </div>
@@ -122,7 +124,7 @@ export default function CommunitySidebar() {
       {showAccount && (
         <Modal title="Account" onClose={() => setShowAccount(false)}>
           <div className={styles.accountWrap}>
-            <div className={styles.accountIdentity}>
+            <div className={styles.accountIdentity} data-testid="account-identity">
               <Avatar name={user?.displayName || user?.username} size={44} />
               <div>
                 <p className={styles.accountName}>{user?.displayName || user?.username}</p>
@@ -144,7 +146,7 @@ export default function CommunitySidebar() {
             <div>
               <p className={styles.accountSectionTitle}>Local password</p>
               <p className={styles.accountMuted}>{hasPassword ? 'Configured' : 'Not configured'}</p>
-              <form className={styles.passwordForm} onSubmit={submitPassword}>
+              <form className={styles.passwordForm} onSubmit={submitPassword} data-testid="account-password-form">
                 <input
                   type="password"
                   value={passwordForm.newPassword}
@@ -153,6 +155,7 @@ export default function CommunitySidebar() {
                   autoComplete="new-password"
                   minLength={8}
                   required
+                  data-testid="account-password-new"
                 />
                 <input
                   type="password"
@@ -162,8 +165,9 @@ export default function CommunitySidebar() {
                   autoComplete="new-password"
                   minLength={8}
                   required
+                  data-testid="account-password-confirm"
                 />
-                <button type="submit" className={styles.passwordBtn} disabled={passwordBusy}>
+                <button type="submit" className={styles.passwordBtn} disabled={passwordBusy} data-testid="account-password-save">
                   {passwordBusy ? 'Saving…' : hasPassword ? 'Update password' : 'Set password'}
                 </button>
               </form>
@@ -176,6 +180,7 @@ export default function CommunitySidebar() {
                 type="button"
                 disabled={linkBusyProvider !== null}
                 onClick={() => startLinkFlow('google')}
+                data-testid="account-link-google"
               >
                 {linkBusyProvider === 'google' ? 'Opening Google…' : 'Link Google'}
               </button>
@@ -184,6 +189,7 @@ export default function CommunitySidebar() {
                 type="button"
                 disabled={linkBusyProvider !== null}
                 onClick={() => startLinkFlow('github')}
+                data-testid="account-link-github"
               >
                 {linkBusyProvider === 'github' ? 'Opening GitHub…' : 'Link GitHub'}
               </button>
@@ -192,12 +198,13 @@ export default function CommunitySidebar() {
                 type="button"
                 disabled={linkBusyProvider !== null}
                 onClick={() => startLinkFlow('course')}
+                data-testid="account-link-course"
               >
                 {linkBusyProvider === 'course' ? 'Opening Course OAuth…' : 'Link Course OAuth'}
               </button>
             </div>
 
-            {accountError && <p className={styles.err}>{accountError}</p>}
+            {accountError && <p className={styles.err} role="alert" data-testid="account-error">{accountError}</p>}
 
             <button
               type="button"
@@ -206,6 +213,7 @@ export default function CommunitySidebar() {
                 await logout();
                 setShowAccount(false);
               }}
+              data-testid="account-logout"
             >
               Log out
             </button>
@@ -223,6 +231,9 @@ function CommunityIcon({ community, active, onClick }) {
       className={`${styles.icon} ${active ? styles.active : ''}`}
       title={community.name}
       onClick={onClick}
+      aria-label={`Open community ${community.name}`}
+      data-testid={`community-item-${community.id}`}
+      data-community-id={community.id}
     >
       {community.icon_url
         ? <img src={community.icon_url} alt={community.name} className={styles.iconImg} />
@@ -264,9 +275,9 @@ function CreateCommunityModal({ onClose, onCreate }) {
   return (
     <Modal title="New Community" onClose={onClose}>
       {err && <p className={styles.err}>{err}</p>}
-      <form onSubmit={submit} className={styles.form}>
+      <form onSubmit={submit} className={styles.form} data-testid="community-create-form">
         <label>Name
-          <input value={name} onChange={e => { setName(e.target.value); setSlug(normalizeSlug(e.target.value)); }} required />
+          <input value={name} onChange={e => { setName(e.target.value); setSlug(normalizeSlug(e.target.value)); }} required data-testid="community-create-name" />
         </label>
         <label>Slug (URL-safe)
           <input
@@ -277,12 +288,13 @@ function CreateCommunityModal({ onClose, onCreate }) {
             autoCorrect="off"
             spellCheck={false}
             required
+            data-testid="community-create-slug"
           />
         </label>
         <label>Description
-          <input value={desc} onChange={e => setDesc(e.target.value)} />
+          <input value={desc} onChange={e => setDesc(e.target.value)} data-testid="community-create-description" />
         </label>
-        <button type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create'}</button>
+        <button type="submit" disabled={busy} data-testid="community-create-submit">{busy ? 'Creating…' : 'Create'}</button>
       </form>
     </Modal>
   );

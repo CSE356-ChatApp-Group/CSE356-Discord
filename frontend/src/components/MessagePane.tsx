@@ -85,11 +85,11 @@ export default function MessagePane() {
     : 'Message';
 
   return (
-    <div className={styles.pane}>
+    <div className={styles.pane} data-testid="message-pane">
       {/* Header */}
-      <header className={styles.header}>
+      <header className={styles.header} data-testid="message-pane-header">
         <div className={styles.headerLeft}>
-          <span className={styles.headerTitle}>{title}</span>
+          <span className={styles.headerTitle} data-testid="message-pane-title">{title}</span>
           {activeChannel?.description && (
             <span className={styles.headerDesc}>{activeChannel.description}</span>
           )}
@@ -98,6 +98,8 @@ export default function MessagePane() {
           className={`${styles.headerBtn} ${showSearch ? styles.headerBtnActive : ''}`}
           title="Search messages"
           onClick={() => setSearch(s => !s)}
+          aria-label="Toggle message search"
+          data-testid="message-search-toggle"
         >
           <SearchIcon />
         </button>
@@ -107,7 +109,7 @@ export default function MessagePane() {
       {showSearch && <SearchBar onClose={() => setSearch(false)} />}
 
       {/* Messages */}
-      <div className={styles.messages} ref={scrollRef} onScroll={handleScroll}>
+      <div className={styles.messages} ref={scrollRef} onScroll={handleScroll} role="log" aria-live="polite" aria-label="Message history" data-testid="message-list">
         {loadingMore && <div className={styles.loadingMore}>Loading…</div>}
         {msgList.length === 0 && (
           <div className={styles.empty}>
@@ -128,10 +130,12 @@ export default function MessagePane() {
       </div>
 
       {/* Input */}
-      <form className={styles.inputRow} onSubmit={handleSend}>
+      <form className={styles.inputRow} onSubmit={handleSend} data-testid="message-compose-form">
         <textarea
           ref={inputRef}
           className={styles.input}
+          id="message-compose-input"
+          name="content"
           value={content}
           onChange={e => setContent(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -139,12 +143,15 @@ export default function MessagePane() {
           rows={1}
           maxLength={4000}
           disabled={sending}
+          data-testid="message-compose-input"
         />
         <button
           type="submit"
           className={styles.sendBtn}
           disabled={!content.trim() || sending}
           title="Send (Enter)"
+          aria-label="Send message"
+          data-testid="message-send"
         >
           <SendIcon />
         </button>

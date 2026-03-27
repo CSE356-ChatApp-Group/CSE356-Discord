@@ -22,7 +22,7 @@ function RedirectIfAuthenticated({ children }) {
 
 function AppLoader() {
   return (
-    <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-0)' }}>
+    <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-0)' }} role="status" aria-live="polite" data-testid="app-loader">
       <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
         <Spinner size={24} />
         <div style={{ marginTop: 12, fontFamily: 'var(--font-mono)', fontSize: 12 }}>connecting…</div>
@@ -53,14 +53,14 @@ export default function App() {
     >
       <Routes>
         <Route path="/login" element={
-          <RedirectIfAuthenticated><LoginPage /></RedirectIfAuthenticated>
+          <RedirectIfAuthenticated><div data-testid="route-login"><LoginPage /></div></RedirectIfAuthenticated>
         } />
         <Route path="/register" element={
-          <RedirectIfAuthenticated><RegisterPage /></RedirectIfAuthenticated>
+          <RedirectIfAuthenticated><div data-testid="route-register"><RegisterPage /></div></RedirectIfAuthenticated>
         } />
-        <Route path="/oauth-callback" element={<OAuthCallback />} />
+        <Route path="/oauth-callback" element={<div data-testid="route-oauth-callback"><OAuthCallback /></div>} />
         <Route path="/*" element={
-          <RequireAuth><ChatPage /></RequireAuth>
+          <RequireAuth><div data-testid="route-chat"><ChatPage /></div></RequireAuth>
         } />
       </Routes>
     </BrowserRouter>
@@ -125,8 +125,8 @@ function OAuthCallback() {
   if (!pending) return <Navigate to="/login" replace />;
 
   return (
-    <div style={{ minHeight: '100%', display: 'grid', placeItems: 'center', background: 'var(--bg-0)', padding: 24 }}>
-      <div style={{ width: 'min(540px, 96vw)', background: 'var(--bg-1)', border: '1px solid var(--border-light)', borderRadius: 12, padding: 20 }}>
+    <div style={{ minHeight: '100%', display: 'grid', placeItems: 'center', background: 'var(--bg-0)', padding: 24 }} data-testid="oauth-callback-page">
+      <div style={{ width: 'min(540px, 96vw)', background: 'var(--bg-1)', border: '1px solid var(--border-light)', borderRadius: 12, padding: 20 }} data-testid="oauth-callback-card">
         <h2 style={{ marginTop: 0 }}>Complete OAuth sign in</h2>
         <p style={{ color: 'var(--text-muted)', marginTop: 0 }}>Choose whether to create a new account or connect this OAuth login to an existing account.</p>
 
@@ -134,6 +134,7 @@ function OAuthCallback() {
           <button
             type="button"
             onClick={() => setMode('create')}
+            data-testid="oauth-mode-create"
             style={{
               padding: '8px 12px',
               borderRadius: 8,
@@ -148,6 +149,7 @@ function OAuthCallback() {
           <button
             type="button"
             onClick={() => setMode('connect')}
+            data-testid="oauth-mode-connect"
             style={{
               padding: '8px 12px',
               borderRadius: 8,
@@ -161,9 +163,9 @@ function OAuthCallback() {
           </button>
         </div>
 
-        {error && <div style={{ color: '#ff8c8c', marginBottom: 12 }}>{error}</div>}
+        {error && <div style={{ color: '#ff8c8c', marginBottom: 12 }} role="alert" data-testid="oauth-error">{error}</div>}
 
-        <form onSubmit={completeOAuthChoice} style={{ display: 'grid', gap: 10 }}>
+        <form onSubmit={completeOAuthChoice} style={{ display: 'grid', gap: 10 }} data-testid="oauth-complete-form">
           {mode === 'create' && (
             <>
               <label>
@@ -174,6 +176,7 @@ function OAuthCallback() {
                   placeholder="devuser"
                   maxLength={32}
                   style={{ width: '100%', marginTop: 4 }}
+                  data-testid="oauth-create-username"
                 />
               </label>
               <label>
@@ -184,6 +187,7 @@ function OAuthCallback() {
                   placeholder="Dev User"
                   maxLength={64}
                   style={{ width: '100%', marginTop: 4 }}
+                  data-testid="oauth-create-display-name"
                 />
               </label>
               <label>
@@ -195,6 +199,7 @@ function OAuthCallback() {
                   placeholder="At least 8 characters"
                   minLength={8}
                   style={{ width: '100%', marginTop: 4 }}
+                  data-testid="oauth-create-password"
                 />
               </label>
             </>
@@ -210,6 +215,7 @@ function OAuthCallback() {
                   value={connectForm.email}
                   onChange={e => setConnectForm(f => ({ ...f, email: e.target.value }))}
                   style={{ width: '100%', marginTop: 4 }}
+                  data-testid="oauth-connect-email"
                 />
               </label>
               <label>
@@ -221,12 +227,13 @@ function OAuthCallback() {
                   value={connectForm.password}
                   onChange={e => setConnectForm(f => ({ ...f, password: e.target.value }))}
                   style={{ width: '100%', marginTop: 4 }}
+                  data-testid="oauth-connect-password"
                 />
               </label>
             </>
           )}
 
-          <button type="submit" disabled={busy} style={{ padding: '10px 12px', borderRadius: 8, cursor: 'pointer' }}>
+          <button type="submit" disabled={busy} style={{ padding: '10px 12px', borderRadius: 8, cursor: 'pointer' }} data-testid="oauth-complete-submit">
             {busy ? 'Finishing…' : mode === 'create' ? 'Create & continue' : 'Connect & continue'}
           </button>
         </form>

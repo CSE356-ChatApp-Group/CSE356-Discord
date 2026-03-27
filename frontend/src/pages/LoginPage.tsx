@@ -26,8 +26,8 @@ export default function LoginPage() {
   }
 
   return (
-    <div className={styles.bg}>
-      <div className={styles.card}>
+    <div className={styles.bg} data-testid="page-login">
+      <main className={styles.card} role="main" aria-label="Login" data-testid="login-card">
         <div className={styles.logo}>
           <span className={styles.logoMark}>▸</span>
           <span className={styles.logoText}>ChatApp</span>
@@ -35,12 +35,14 @@ export default function LoginPage() {
 
         <h1 className={styles.title}>Sign in</h1>
 
-        {error && <div className={styles.error}>{error}</div>}
+        {error && <div className={styles.error} role="alert" data-testid="login-error">{error}</div>}
 
-        <form onSubmit={handleSubmit} className={styles.form}>
+        <form onSubmit={handleSubmit} className={styles.form} data-testid="login-form">
           <label className={styles.label}>
             Email
             <input
+              id="login-email"
+              name="email"
               type="email"
               value={email}
               onChange={e => setEmail(e.target.value)}
@@ -48,22 +50,26 @@ export default function LoginPage() {
               placeholder="you@example.com"
               required
               autoFocus
+              data-testid="login-email"
             />
           </label>
 
           <label className={styles.label}>
             Password
             <input
+              id="login-password"
+              name="password"
               type="password"
               value={password}
               onChange={e => setPassword(e.target.value)}
               className={styles.input}
               placeholder="••••••••"
               required
+              data-testid="login-password"
             />
           </label>
 
-          <button type="submit" className={styles.btn} disabled={loading}>
+          <button type="submit" className={styles.btn} disabled={loading} data-testid="login-submit">
             {loading ? 'Signing in…' : 'Sign in →'}
           </button>
         </form>
@@ -71,13 +77,13 @@ export default function LoginPage() {
         <div className={styles.divider}><span>or</span></div>
 
         <div className={styles.oauthRow}>
-          <a href="/api/v1/auth/google" className={styles.oauthBtn}>
+          <a href="/api/v1/auth/google" className={styles.oauthBtn} data-testid="oauth-google" aria-label="Sign in with Google">
             <GoogleIcon /> Google
           </a>
-          <a href="/api/v1/auth/github" className={styles.oauthBtn}>
+          <a href="/api/v1/auth/github" className={styles.oauthBtn} data-testid="oauth-github" aria-label="Sign in with GitHub">
             <GitHubIcon /> GitHub
           </a>
-          <a href="/api/v1/auth/course" className={styles.oauthBtn}>
+          <a href="/api/v1/auth/course" className={styles.oauthBtn} data-testid="oauth-course" aria-label="Sign in with Course OAuth">
             <ShieldIcon /> Course OAuth
           </a>
         </div>
@@ -85,7 +91,7 @@ export default function LoginPage() {
         <p className={styles.footer}>
           No account? <Link to="/register">Register</Link>
         </p>
-      </div>
+      </main>
     </div>
   );
 }
