@@ -1,0 +1,130 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+      sha:
+        description: "Commit SHA to deploy (defaults to current ref SHA)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    if: inputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure GitHub CLI exists
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+
+      - name: Setup SSH key
+        shell: bash
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_SSH_KEY" || { echo "Missing DEPLOY_SSH_KEY secret"; exit 1; }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Add host to known_hosts
+        shell: bash
+        env:
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
+        run: |
+          HOST="${STAGING_HOST:-136.114.103.71}"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy to staging
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
+          STAGING_USER: ${{ vars.STAGING_USER }}
+        run: |
+          TARGET_SHA="${{ inputs.sha }}"
+          if [[ -z "$TARGET_SHA" ]]; then
+            TARGET_SHA="${{ github.sha }}"
+          fi
+
+          HOST="${STAGING_HOST:-136.114.103.71}"
+          USER="${STAGING_USER:-ssperrottet}"
+
+          STAGING_HOST="$HOST" STAGING_USER="$USER" GITHUB_REPO="${{ github.repository }}" \
+            ./deploy/deploy-staging.sh "$TARGET_SHA"
+
+  deploy-prod:
+    if: inputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure GitHub CLI exists
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+
+      - name: Setup SSH key
+        shell: bash
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_SSH_KEY" || { echo "Missing DEPLOY_SSH_KEY secret"; exit 1; }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Add host to known_hosts
+        shell: bash
+        env:
+          PROD_HOST: ${{ vars.PROD_HOST }}
+        run: |
+          HOST="${PROD_HOST:-136.114.103.71}"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy to production
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROD_HOST: ${{ vars.PROD_HOST }}
+          PROD_USER: ${{ vars.PROD_USER }}
+        run: |
+          TARGET_SHA="${{ inputs.sha }}"
+          if [[ -z "$TARGET_SHA" ]]; then
+            TARGET_SHA="${{ github.sha }}"
+          fi
+
+          HOST="${PROD_HOST:-136.114.103.71}"
+          USER="${PROD_USER:-ssperrottet}"
+
+          printf 'y\n' | PROD_HOST="$HOST" PROD_USER="$USER" GITHUB_REPO="${{ github.repository }}" \
+            ./deploy/deploy-prod.sh "$TARGET_SHA"

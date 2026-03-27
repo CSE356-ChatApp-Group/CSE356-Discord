@@ -26,7 +26,9 @@ for cmd in gh ssh scp curl; do
   fi
 done
 
-if ! gh auth status >/dev/null 2>&1; then
+if [[ -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]]; then
+  echo "Using GitHub token from environment for gh commands."
+elif ! gh auth status >/dev/null 2>&1; then
   echo "ERROR: GitHub CLI is not authenticated. Run: gh auth login"
   exit 1
 fi

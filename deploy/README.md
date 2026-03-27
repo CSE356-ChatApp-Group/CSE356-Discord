@@ -59,6 +59,31 @@ Every push to `main` runs full CI.
 ### Artifact
 Each release is immutable and tagged by commit SHA. The **same artifact** is deployed to both staging and production.
 
+## GitHub Button Deploys
+
+You can deploy from GitHub Actions using **Manual Deploy** (`workflow_dispatch`) in `.github/workflows/deploy-manual.yml`.
+
+### Required GitHub configuration
+
+- Repository secret: `DEPLOY_SSH_KEY`
+   - Private key for SSH access to deploy hosts.
+- Repository/environment variables (optional overrides):
+   - `STAGING_HOST` (default: `136.114.103.71`)
+   - `STAGING_USER` (default: `ssperrottet`)
+   - `PROD_HOST` (default: `136.114.103.71`)
+   - `PROD_USER` (default: `ssperrottet`)
+- GitHub Environment protection:
+   - Set approvals on `production` environment to require manual reviewer approval.
+
+### How to run
+
+1. Open GitHub Actions → **Manual Deploy**.
+2. Click **Run workflow**.
+3. Choose `environment`: `staging` or `prod`.
+4. Optionally provide `sha` (if empty, workflow uses selected ref SHA).
+
+The workflow uses the same deploy scripts as local console deploys, so behavior is consistent.
+
 ## Staging Deployment
 
 ### Prerequisites
