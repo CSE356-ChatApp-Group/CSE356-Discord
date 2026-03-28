@@ -55,8 +55,6 @@ router.get('/', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.use(authenticate);
-
 // ── Serve avatar image (public — browsers cannot send Authorization via <img>) ──
 router.get('/:id/avatar', async (req, res, next) => {
   try {
@@ -72,6 +70,8 @@ router.get('/:id/avatar', async (req, res, next) => {
     res.send(rows[0].avatar_data);
   } catch (err) { next(err); }
 });
+
+router.use(authenticate);
 
 router.get('/me', async (req, res, next) => {
   try {

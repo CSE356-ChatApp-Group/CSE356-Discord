@@ -80,17 +80,31 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   async login(email: string, password: string) {
     const data = await api.post('/auth/login', { email, password });
     setToken(data.accessToken);
-    set({ user: normalizeAuthUser(data.user), authBypass: false });
+    let user = normalizeAuthUser(data.user);
+    try {
+      const profile = await api.get('/users/me');
+      if (profile?.user) user = normalizeAuthUser(profile.user);
+    } catch {
+      // Fall back to auth payload if profile hydrate fails.
+    }
+    set({ user, authBypass: false });
     wsManager.connect();
-    return normalizeAuthUser(data.user);
+    return user;
   },
 
   async register(email: string, username: string, password: string, displayName: string) {
     const data = await api.post('/auth/register', { email, username, password, displayName });
     setToken(data.accessToken);
-    set({ user: normalizeAuthUser(data.user), authBypass: false });
+    let user = normalizeAuthUser(data.user);
+    try {
+      const profile = await api.get('/users/me');
+      if (profile?.user) user = normalizeAuthUser(profile.user);
+    } catch {
+      // Fall back to auth payload if profile hydrate fails.
+    }
+    set({ user, authBypass: false });
     wsManager.connect();
-    return normalizeAuthUser(data.user);
+    return user;
   },
 
   async logout() {

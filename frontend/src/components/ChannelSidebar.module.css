@@ -138,9 +138,33 @@
 .rowActive .dmIcon { color: var(--accent); }
 
 .rowName {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.readBadge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.readBadgeRead {
+  color: var(--text-muted);
+  background: var(--bg-3);
+  border-color: var(--border);
+}
+
+.readBadgeUnread {
+  color: #9a2b2b;
+  background: rgba(255, 120, 120, 0.18);
+  border-color: rgba(255, 120, 120, 0.45);
 }
 
 .hint {

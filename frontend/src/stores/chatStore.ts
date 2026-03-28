@@ -12,6 +12,7 @@ type ChatState = {
   channels: Entity[];
   activeChannel: Entity | null;
   conversations: Entity[];
+  conversationReadAt: Record<string, string>;
   activeConv: Entity | null;
   messages: Record<string, Entity[]>;
   presence: Record<string, PresenceStatus>;
@@ -87,6 +88,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   channels:        [],
   activeChannel:   null,
   conversations:   [],
+  conversationReadAt: {},
   activeConv:      null,
   messages:        {},   // { [channelId|convId]: Message[] }
   presence:        {},   // { [userId]: 'online'|'idle'|'away'|'offline' }
@@ -143,7 +145,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Conversations (DMs) ───────────────────────────────────────────────────
   async fetchConversations() {
     const { conversations } = await api.get('/conversations');
-    set({ conversations });
+    const now = new Date().toISOString();
+    set(s => {
+      const conversationReadAt = { ...s.conversationReadAt };
+      conversations.forEach((conv: Entity) => {
+        if (!conversationReadAt[conv.id]) {
+          conversationReadAt[conv.id] = conv.updated_at || conv.updatedAt || now;
+        }
+      });
+      return { conversations, conversationReadAt };
+    });
   },
 
   openHome() {
@@ -152,10 +163,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   async openDm(userId: string) {
     const { conversation } = await api.post('/conversations', { participantIds: [userId] });
+    const now = new Date().toISOString();
     set(s => ({
       conversations: s.conversations.find(c => c.id === conversation.id)
         ? s.conversations
         : [conversation, ...s.conversations],
+      conversationReadAt: {
+        ...s.conversationReadAt,
+        [conversation.id]: s.conversationReadAt[conversation.id] || conversation.updated_at || conversation.updatedAt || now,
+      },
       activeConv: conversation,
       activeChannel: null,
     }));
@@ -164,6 +180,20 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const msgs = get().messages[conversation.id];
     if (msgs?.length) {
       api.put(`/messages/${msgs[msgs.length - 1].id}/read`).catch(() => {});
+      const latest = msgs[msgs.length - 1];
+      set(s => ({
+        conversationReadAt: {
+          ...s.conversationReadAt,
+          [conversation.id]: latest?.created_at || latest?.createdAt || new Date().toISOString(),
+        },
+      }));
+    } else {
+      set(s => ({
+        conversationReadAt: {
+          ...s.conversationReadAt,
+          [conversation.id]: new Date().toISOString(),
+        },
+      }));
     }
     return conversation;
   },
@@ -175,6 +205,20 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const msgs = get().messages[conv.id];
     if (msgs?.length) {
       api.put(`/messages/${msgs[msgs.length - 1].id}/read`).catch(() => {});
+      const latest = msgs[msgs.length - 1];
+      set(s => ({
+        conversationReadAt: {
+          ...s.conversationReadAt,
+          [conv.id]: latest?.created_at || latest?.createdAt || new Date().toISOString(),
+        },
+      }));
+    } else {
+      set(s => ({
+        conversationReadAt: {
+          ...s.conversationReadAt,
+          [conv.id]: new Date().toISOString(),
+        },
+      }));
     }
   },
 
@@ -208,6 +252,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // Mark the just-sent message as read immediately
     if (message?.id) {
       api.put(`/messages/${message.id}/read`).catch(() => {});
+      if (activeConv?.id) {
+        set(s => ({
+          conversationReadAt: {
+            ...s.conversationReadAt,
+            [activeConv.id]: message.created_at || message.createdAt || new Date().toISOString(),
+          },
+        }));
+      }
     }
   },
 
@@ -260,7 +312,29 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             ...s.messages,
             [key]: upsertMessage(s.messages[key], msg),
           },
+          conversations: msg.conversation_id
+            ? (() => {
+                const next = [...s.conversations];
+                const idx = next.findIndex(c => c.id === msg.conversation_id);
+                if (idx === -1) return next;
+                const updatedAt = msg.created_at || msg.createdAt || new Date().toISOString();
+                const updated = { ...next[idx], updated_at: updatedAt, updatedAt };
+                next.splice(idx, 1);
+                next.unshift(updated);
+                return next;
+              })()
+            : s.conversations,
+          conversationReadAt:
+            msg.conversation_id && s.activeConv?.id === msg.conversation_id
+              ? {
+                  ...s.conversationReadAt,
+                  [msg.conversation_id]: msg.created_at || msg.createdAt || new Date().toISOString(),
+                }
+              : s.conversationReadAt,
         }));
+        if (msg.conversation_id && store.activeConv?.id === msg.conversation_id && msg.id) {
+          api.put(`/messages/${msg.id}/read`).catch(() => {});
+        }
         break;
       }
       case 'message:updated': {

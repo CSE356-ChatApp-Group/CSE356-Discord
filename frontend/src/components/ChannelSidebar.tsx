@@ -8,7 +8,7 @@ import styles from './ChannelSidebar.module.css';
 export default function ChannelSidebar() {
   const {
     activeCommunity, channels, activeChannel,
-    conversations, activeConv,
+    conversations, conversationReadAt, activeConv,
     selectChannel, selectConversation, createChannel, openDm,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
@@ -113,6 +113,7 @@ export default function ChannelSidebar() {
                 key={conv.id}
                 conv={conv}
                 currentUserId={user?.id}
+                unread={isConversationUnread(conv, conversationReadAt[conv.id], activeConv?.id === conv.id)}
                 active={activeConv?.id === conv.id}
                 onClick={() => selectConversation(conv)}
               />
@@ -161,13 +162,29 @@ function ChannelRow({ channel, active, onClick }) {
   );
 }
 
-function DmRow({ conv, currentUserId, active, onClick }) {
+function isConversationUnread(conv, readAt, active) {
+  if (active) return false;
+  const updatedAt = conv?.updatedAt || conv?.updated_at;
+  if (!updatedAt) return false;
+  if (!readAt) return true;
+  return new Date(updatedAt).getTime() > new Date(readAt).getTime();
+}
+
+function DmRow({ conv, currentUserId, unread, active, onClick }) {
   const others = (conv.participants || []).filter(p => p.id !== currentUserId);
   const name   = conv.name || others.map(p => p.displayName || p.username).join(', ') || 'Unknown';
   return (
     <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} aria-label={`Open direct conversation ${name}`}>
       <span className={styles.dmIcon}>@</span>
       <span className={styles.rowName}>{name}</span>
+      <span
+        className={`${styles.readBadge} ${unread ? styles.readBadgeUnread : styles.readBadgeRead}`}
+        data-testid={`dm-read-state-${conv.id}`}
+        data-read-state={unread ? 'UNREAD' : 'READ'}
+        aria-label={unread ? 'Unread conversation' : 'Read conversation'}
+      >
+        {unread ? 'UNREAD' : 'READ'}
+      </span>
     </button>
   );
 }
