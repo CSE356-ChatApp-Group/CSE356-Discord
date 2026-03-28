@@ -6,7 +6,7 @@ import Modal from './Modal';
 import styles from './CommunitySidebar.module.css';
 
 export default function CommunitySidebar() {
-  const { communities, activeCommunity, selectCommunity, createCommunity } = useChatStore();
+  const { communities, activeCommunity, selectCommunity, createCommunity, openHome } = useChatStore();
   const logout = useAuthStore(s => s.logout);
   const user   = useAuthStore(s => s.user);
   const [showCreate, setShowCreate] = useState(false);
@@ -79,6 +79,21 @@ export default function CommunitySidebar() {
 
   return (
     <nav className={styles.sidebar} aria-label="Communities" data-testid="community-sidebar">
+      <div className={styles.topRail}>
+        <button
+          className={`${styles.icon} ${!activeCommunity ? styles.active : ''}`}
+          title="Direct Messages"
+          aria-label="Open direct messages home"
+          data-testid="home-dms-open"
+          onClick={openHome}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+        </button>
+        <div className={styles.separator} />
+      </div>
+
       {/* Community icons */}
       <div className={styles.list} data-testid="community-list">
         {communities.map(c => (
@@ -239,7 +254,6 @@ function CommunityIcon({ community, active, onClick }) {
         ? <img src={community.icon_url} alt={community.name} className={styles.iconImg} />
         : <span className={styles.iconText}>{initials}</span>
       }
-      {active && <span className={styles.activePip} />}
     </button>
   );
 }

@@ -12,13 +12,13 @@ export default function ChannelSidebar() {
   } = useChatStore();
   const user = useAuthStore(s => s.user);
   const [showCreate, setShowCreate] = useState(false);
-  const [section, setSection] = useState('channels'); // 'channels' | 'dms'
+  const [showInvite, setShowInvite] = useState(false);
 
   if (!activeCommunity && conversations.length === 0) {
     return (
       <aside className={styles.sidebar} aria-label="Channels and DMs" data-testid="channel-sidebar-empty">
         <div className={styles.empty}>
-          <p>Select or create<br/>a community</p>
+          <p>No direct messages yet</p>
         </div>
       </aside>
     );
@@ -29,21 +29,27 @@ export default function ChannelSidebar() {
       {activeCommunity && (
         <div className={styles.header} data-testid="channel-sidebar-header">
           <span className={styles.communityName}>{activeCommunity.name}</span>
+          <div className={styles.headerActions}>
+            <button
+              className={styles.inviteBtn}
+              title="Invite people"
+              aria-label="Invite people to server"
+              data-testid="community-invite-open"
+              onClick={() => setShowInvite(true)}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                <circle cx="8.5" cy="7" r="4"/>
+                <line x1="20" y1="8" x2="20" y2="14"/>
+                <line x1="23" y1="11" x2="17" y2="11"/>
+              </svg>
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Section tabs */}
-      <div className={styles.tabs}>
-        <button className={`${styles.tab} ${section === 'channels' ? styles.tabActive : ''}`} onClick={() => setSection('channels')} data-testid="tab-channels" aria-label="Show channels">
-          Channels
-        </button>
-        <button className={`${styles.tab} ${section === 'dms' ? styles.tabActive : ''}`} onClick={() => setSection('dms')} data-testid="tab-dms" aria-label="Show direct messages">
-          DMs
-        </button>
-      </div>
-
       <div className={styles.scroll} data-testid="channel-sidebar-scroll">
-        {section === 'channels' && (
+        {activeCommunity ? (
           <>
             <div className={styles.sectionHeader}>
               <span>Channels</span>
@@ -63,11 +69,11 @@ export default function ChannelSidebar() {
               />
             ))}
           </>
-        )}
-
-        {section === 'dms' && (
+        ) : (
           <>
-            <div className={styles.sectionHeader}><span>Direct Messages</span></div>
+            <div className={styles.sectionHeader}>
+              <span>Messages</span>
+            </div>
             {conversations.length === 0 && (
               <p className={styles.hint}>No DMs yet</p>
             )}
@@ -93,6 +99,13 @@ export default function ChannelSidebar() {
           }}
         />
       )}
+
+      {showInvite && activeCommunity && (
+        <InviteCommunityModal
+          community={activeCommunity}
+          onClose={() => setShowInvite(false)}
+        />
+      )}
     </aside>
   );
 }
@@ -114,6 +127,36 @@ function DmRow({ conv, currentUserId, active, onClick }) {
       <span className={styles.dmIcon}>@</span>
       <span className={styles.rowName}>{name}</span>
     </button>
+  );
+}
+
+function InviteCommunityModal({ community, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const inviteCode = community?.invite_code || community?.inviteCode || '';
+  const inviteUrl = inviteCode ? `${window.location.origin}/invite/${inviteCode}` : '';
+
+  async function handleCopy() {
+    if (!inviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <Modal title="Invite people" onClose={onClose}>
+      <div className={styles.form} data-testid="community-invite-modal">
+        <label>Invite link
+          <input value={inviteUrl || 'Invite link unavailable'} readOnly data-testid="community-invite-link" />
+        </label>
+        <button type="button" onClick={handleCopy} disabled={!inviteUrl} data-testid="community-invite-copy">
+          {copied ? 'Copied' : 'Copy invite link'}
+        </button>
+      </div>
+    </Modal>
   );
 }
 

@@ -20,6 +20,22 @@
   padding: 0 10px;
 }
 
+.topRail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  padding: 0 10px;
+  margin-bottom: 4px;
+}
+
+.separator {
+  width: 28px;
+  height: 1px;
+  background: var(--border);
+  margin: 8px 0 4px;
+}
+
 .icon {
   position: relative;
   width: 44px;
@@ -60,17 +76,6 @@
   height: 100%;
   object-fit: cover;
   border-radius: inherit;
-}
-
-.activePip {
-  position: absolute;
-  left: -6px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 4px;
-  height: 20px;
-  background: var(--accent);
-  border-radius: 0 2px 2px 0;
 }
 
 .addBtn {

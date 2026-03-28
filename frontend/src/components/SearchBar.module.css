@@ -1,30 +1,56 @@
-.bar {
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-1);
+}
+
+.top {
   border-bottom: 1px solid var(--border);
-  background: var(--bg-2);
-  flex-shrink: 0;
+  padding: 10px;
+  background: color-mix(in srgb, var(--bg-1) 82%, var(--bg-0));
 }
 
 .inputRow {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
+  padding: 6px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  background: var(--bg-2);
 }
 
 .icon { color: var(--text-muted); flex-shrink: 0; }
 
+.searchSubmit {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+}
+
 .input {
   flex: 1;
-  background: var(--bg-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 6px 10px;
-  font-size: 13px;
+  background: transparent;
+  border: none;
+  padding: 4px 2px;
+  font-size: 14px;
   color: var(--text-primary);
 }
 
-.input:focus { border-color: var(--accent); outline: none; }
+.input:focus { outline: none; }
 .input::placeholder { color: var(--text-muted); }
+
+.summary {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
 
 .clear {
   color: var(--text-muted);
@@ -46,9 +72,9 @@
 .closeBtn:hover { background: var(--accent-subtle); }
 
 .results {
-  max-height: 280px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  border-top: 1px solid var(--border);
 }
 
 .none {
@@ -59,12 +85,12 @@
 }
 
 .hit {
-  padding: 10px 16px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--border);
   transition: background .1s;
   cursor: pointer;
 }
-.hit:hover { background: var(--bg-3); }
+.hit:hover { background: color-mix(in srgb, var(--bg-2) 76%, var(--accent-subtle)); }
 .hit:last-child { border-bottom: none; }
 
 .hitMeta {
@@ -86,18 +112,25 @@
 }
 
 .hitContent {
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.45;
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* Meilisearch highlight */
 .hitContent em {
-  background: var(--accent-glow);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--text-primary);
   font-style: normal;
-  border-radius: 2px;
-  padding: 0 2px;
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+.hitContent mark {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--text-primary);
+  border-radius: 3px;
+  padding: 0 3px;
 }

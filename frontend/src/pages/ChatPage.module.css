@@ -7,10 +7,6 @@
   overflow: hidden;
 }
 
-.layoutWithMembers {
-  grid-template-columns: 72px var(--sidebar-width) minmax(0, 1fr) var(--member-list-width);
-}
-
 .main {
   display: flex;
   flex-direction: column;
@@ -20,19 +16,13 @@
 }
 
 @media (max-width: 1200px) {
-  .layout,
-  .layoutWithMembers {
+  .layout {
     grid-template-columns: 64px var(--sidebar-width) minmax(0, 1fr);
-  }
-
-  .layoutWithMembers > :last-child {
-    display: none;
   }
 }
 
 @media (max-width: 900px) {
-  .layout,
-  .layoutWithMembers {
+  .layout {
     grid-template-columns: 64px minmax(200px, 36vw) minmax(0, 1fr);
   }
 }

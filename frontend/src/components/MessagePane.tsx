@@ -4,6 +4,7 @@ import { useAuthStore  } from '../stores/authStore';
 import { useAutoResize } from '../hooks/useAutoResize';
 import MessageItem  from './MessageItem';
 import SearchBar    from './SearchBar';
+import MemberList   from './MemberList';
 import styles from './MessagePane.module.css';
 
 export default function MessagePane() {
@@ -18,6 +19,8 @@ export default function MessagePane() {
   const [sending, setSending]     = useState(false);
   const [loadingMore, setLoadMore] = useState(false);
   const [showSearch, setSearch]   = useState(false);
+  const [showMembers, setShowMembers] = useState(Boolean(activeChannel));
+  const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
 
   const bottomRef   = useRef(null);
   const inputRef    = useRef(null);
@@ -33,7 +36,25 @@ export default function MessagePane() {
   useEffect(() => {
     inputRef.current?.focus();
     setSearch(false);
+    setShowMembers(Boolean(activeChannel));
   }, [key]);
+
+  useEffect(() => {
+    function onShortcut(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearch(true);
+        setShowMembers(false);
+      }
+      if (e.key === 'Escape') {
+        setSearch(false);
+        setShowMembers(false);
+      }
+    }
+
+    window.addEventListener('keydown', onShortcut);
+    return () => window.removeEventListener('keydown', onShortcut);
+  }, []);
 
   async function handleSend(e) {
     e.preventDefault();
@@ -80,6 +101,13 @@ export default function MessagePane() {
     ? `# ${activeChannel.name}`
     : activeConv?.name || 'Direct Message';
 
+  const searchScope = activeChannel
+    ? `#${activeChannel.name}`
+    : activeConv?.name
+      ? `@${activeConv.name}`
+      : 'messages';
+  const searchLabel = `Search ${searchScope}`;
+
   const placeholder = activeChannel
     ? `Message #${activeChannel.name}`
     : 'Message';
@@ -94,68 +122,108 @@ export default function MessagePane() {
             <span className={styles.headerDesc}>{activeChannel.description}</span>
           )}
         </div>
-        <button
-          className={`${styles.headerBtn} ${showSearch ? styles.headerBtnActive : ''}`}
-          title="Search messages"
-          onClick={() => setSearch(s => !s)}
+        <div className={styles.headerActions}>
+          {activeChannel && (
+            <button
+              className={`${styles.iconTrigger} ${showMembers ? styles.iconTriggerActive : ''}`}
+              title="Toggle member list"
+              onClick={() => {
+                setShowMembers(v => {
+                  const next = !v;
+                  if (next) setSearch(false);
+                  return next;
+                });
+              }}
+              aria-label="Toggle member list"
+              data-testid="message-members-toggle"
+            >
+              <MembersIcon />
+            </button>
+          )}
+          <button
+          className={`${styles.searchTrigger} ${showSearch ? styles.searchTriggerActive : ''}`}
+          title={searchLabel}
+          onClick={() => {
+            setSearch(v => {
+              const next = !v;
+              if (next) setShowMembers(false);
+              return next;
+            });
+          }}
           aria-label="Toggle message search"
           data-testid="message-search-toggle"
         >
           <SearchIcon />
+          <span className={styles.searchTriggerText}>{searchLabel}</span>
+          <span className={styles.searchTriggerHint}>{shortcutLabel}</span>
         </button>
+        </div>
       </header>
 
-      {/* Search bar (collapsible) */}
-      {showSearch && <SearchBar onClose={() => setSearch(false)} />}
-
-      {/* Messages */}
-      <div className={styles.messages} ref={scrollRef} onScroll={handleScroll} role="log" aria-live="polite" aria-label="Message history" data-testid="message-list">
-        {loadingMore && <div className={styles.loadingMore}>Loading…</div>}
-        {msgList.length === 0 && (
-          <div className={styles.empty}>
-            <span className={styles.emptyIcon}>{activeChannel ? '#' : '@'}</span>
-            <p>Start of <strong>{title}</strong></p>
-            <p className={styles.emptyHint}>Be the first to say something.</p>
+      <div className={styles.body}>
+        <div className={styles.mainColumn}>
+          {/* Messages */}
+          <div className={styles.messages} ref={scrollRef} onScroll={handleScroll} role="log" aria-live="polite" aria-label="Message history" data-testid="message-list">
+            {loadingMore && <div className={styles.loadingMore}>Loading…</div>}
+            {msgList.length === 0 && (
+              <div className={styles.empty}>
+                <span className={styles.emptyIcon}>{activeChannel ? '#' : '@'}</span>
+                <p>Start of <strong>{title}</strong></p>
+                <p className={styles.emptyHint}>Be the first to say something.</p>
+              </div>
+            )}
+            {msgList.map((msg, i) => (
+              <MessageItem
+                key={msg.id}
+                message={msg}
+                prevMessage={msgList[i - 1]}
+                isOwn={msg.author_id === user?.id}
+              />
+            ))}
+            <div ref={bottomRef} />
           </div>
-        )}
-        {msgList.map((msg, i) => (
-          <MessageItem
-            key={msg.id}
-            message={msg}
-            prevMessage={msgList[i - 1]}
-            isOwn={msg.author_id === user?.id}
-          />
-        ))}
-        <div ref={bottomRef} />
-      </div>
 
-      {/* Input */}
-      <form className={styles.inputRow} onSubmit={handleSend} data-testid="message-compose-form">
-        <textarea
-          ref={inputRef}
-          className={styles.input}
-          id="message-compose-input"
-          name="content"
-          value={content}
-          onChange={e => setContent(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          rows={1}
-          maxLength={4000}
-          disabled={sending}
-          data-testid="message-compose-input"
-        />
-        <button
-          type="submit"
-          className={styles.sendBtn}
-          disabled={!content.trim() || sending}
-          title="Send (Enter)"
-          aria-label="Send message"
-          data-testid="message-send"
-        >
-          <SendIcon />
-        </button>
-      </form>
+          {/* Input */}
+          <form className={styles.inputRow} onSubmit={handleSend} data-testid="message-compose-form">
+            <textarea
+              ref={inputRef}
+              className={styles.input}
+              id="message-compose-input"
+              name="content"
+              value={content}
+              onChange={e => setContent(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              rows={1}
+              maxLength={4000}
+              disabled={sending}
+              data-testid="message-compose-input"
+            />
+            <button
+              type="submit"
+              className={styles.sendBtn}
+              disabled={!content.trim() || sending}
+              title="Send (Enter)"
+              aria-label="Send message"
+              data-testid="message-send"
+            >
+              <SendIcon />
+            </button>
+          </form>
+        </div>
+
+        {/* Right sidebar (members/search) */}
+        {showMembers && activeChannel && (
+          <aside className={styles.searchSidebar} data-testid="message-members-sidebar">
+            <MemberList />
+          </aside>
+        )}
+        {showSearch && (
+          <aside className={styles.searchSidebar} data-testid="message-search-sidebar">
+            <SearchBar onClose={() => setSearch(false)} placeholder={`${searchLabel}...`} />
+          </aside>
+        )}
+      </div>
     </div>
   );
 }
@@ -164,6 +232,17 @@ function SearchIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
       <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+  );
+}
+
+function MembersIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+      <circle cx="9" cy="7" r="4"/>
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+      <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
     </svg>
   );
 }

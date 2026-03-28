@@ -5,6 +5,28 @@
   overflow: hidden;
 }
 
+.body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+}
+
+.mainColumn {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.searchSidebar {
+  width: min(420px, 44vw);
+  min-width: 320px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-1);
+  display: flex;
+  flex-direction: column;
+}
+
 .header {
   height: var(--header-height);
   border-bottom: 1px solid var(--border);
@@ -21,6 +43,37 @@
   align-items: baseline;
   gap: 10px;
   min-width: 0;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.iconTrigger {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.iconTrigger:hover {
+  background: var(--bg-3);
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.iconTriggerActive {
+  background: var(--accent-subtle) !important;
+  color: var(--accent) !important;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
 .headerTitle {
@@ -40,20 +93,45 @@
   white-space: nowrap;
 }
 
-.headerBtn {
-  width: 30px;
-  height: 30px;
+.searchTrigger {
+  min-width: 170px;
+  height: 32px;
   border-radius: var(--radius);
   color: var(--text-muted);
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 10px;
   transition: background .15s, color .15s;
   flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
 }
 
-.headerBtn:hover { background: var(--bg-3); color: var(--text-primary); }
-.headerBtnActive { background: var(--accent-subtle) !important; color: var(--accent) !important; }
+.searchTrigger:hover {
+  background: var(--bg-3);
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.searchTriggerActive {
+  background: var(--accent-subtle) !important;
+  color: var(--accent) !important;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.searchTriggerText {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.searchTriggerHint {
+  margin-left: auto;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
 
 .messages {
   flex: 1;
@@ -61,6 +139,7 @@
   padding: 16px 0 8px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .loadingMore {
@@ -138,3 +217,25 @@
 .sendBtn:hover:not(:disabled) { background: var(--accent-dim); }
 .sendBtn:active:not(:disabled) { transform: scale(0.94); }
 .sendBtn:disabled { background: var(--bg-4); color: var(--text-muted); cursor: not-allowed; }
+
+@media (max-width: 980px) {
+  .searchSidebar {
+    width: min(360px, 52vw);
+    min-width: 280px;
+  }
+}
+
+@media (max-width: 760px) {
+  .body {
+    position: relative;
+  }
+
+  .searchSidebar {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    min-width: 0;
+    z-index: 4;
+    background: var(--bg-1);
+  }
+}

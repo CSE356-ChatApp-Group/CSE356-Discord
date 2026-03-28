@@ -25,6 +25,7 @@ type ChatState = {
   createChannel: (communityId: string, name: string, isPrivate?: boolean, description?: string) => Promise<Entity>;
   selectChannel: (channel: Entity) => Promise<void>;
   fetchConversations: () => Promise<void>;
+  openHome: () => void;
   openDm: (userId: string) => Promise<Entity>;
   selectConversation: (conv: Entity) => Promise<void>;
   fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string }) => Promise<Entity[]>;
@@ -143,6 +144,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   async fetchConversations() {
     const { conversations } = await api.get('/conversations');
     set({ conversations });
+  },
+
+  openHome() {
+    set({ activeCommunity: null, activeChannel: null });
   },
 
   async openDm(userId: string) {
