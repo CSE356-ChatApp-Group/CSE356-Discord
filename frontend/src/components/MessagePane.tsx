@@ -129,6 +129,7 @@ export default function MessagePane() {
     try {
       await sendMessage(content.trim());
       setContent('');
+      inputRef.current?.focus()
     } catch (err) {
       console.error(err);
     } finally {
