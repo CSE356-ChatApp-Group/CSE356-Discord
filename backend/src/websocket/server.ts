@@ -25,17 +25,19 @@
  *                  └─────────────┘       └─────────────┘
  */
 
-'use strict';
+"use strict";
 
-const { randomUUID } = require('crypto');
-const { WebSocketServer, WebSocket } = require('ws');
-const { verifyAccess }  = require('../utils/jwt');
-const redis             = require('../db/redis');
-const { redisSub }      = require('../db/redis');
-const { pool }          = require('../db/pool');
-const logger            = require('../utils/logger');
-const presenceService   = require('../presence/service');
-const { isAuthBypassEnabled, getBypassAuthContext } = require('../auth/bypass');
+const { randomUUID } = require("crypto");
+const { WebSocketServer, WebSocket } = require("ws");
+const { verifyAccess } = require("../utils/jwt");
+const redis = require("../db/redis");
+const { redisSub } = require("../db/redis");
+const { pool } = require("../db/pool");
+const logger = require("../utils/logger");
+const presenceService = require("../presence/service");
+const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
+const { fanoutRecipientsHistogram } = require("../utils/metrics");
+const { tracer, context, trace } = require("../utils/tracer");
 
 const wss = new WebSocketServer({ noServer: true });
 const IDLE_TTL_SECONDS = 60;
@@ -44,7 +46,9 @@ const PRESENCE_SWEEPER_MS = 15_000;
 let shuttingDown = false;
 
 function isRedisOperational(client) {
-  return ['wait', 'connecting', 'connect', 'ready', 'reconnecting'].includes(client.status);
+  return ["wait", "connecting", "connect", "ready", "reconnecting"].includes(
+    client.status,
+  );
 }
 
 function connectionSetKey(userId) {
@@ -64,15 +68,25 @@ function connectionAliveKey(userId, connectionId) {
 }
 
 function connectedUsersKey() {
-  return 'presence:connected_users';
+  return "presence:connected_users";
 }
 
 async function markConnectionAlive(userId, connectionId) {
-  await redis.set(connectionAliveKey(userId, connectionId), '1', 'EX', CONNECTION_ALIVE_TTL_SECONDS);
+  await redis.set(
+    connectionAliveKey(userId, connectionId),
+    "1",
+    "EX",
+    CONNECTION_ALIVE_TTL_SECONDS,
+  );
 }
 
 async function markConnectionActive(userId, connectionId) {
-  await redis.set(connectionActivityKey(userId, connectionId), '1', 'EX', IDLE_TTL_SECONDS);
+  await redis.set(
+    connectionActivityKey(userId, connectionId),
+    "1",
+    "EX",
+    IDLE_TTL_SECONDS,
+  );
 }
 
 async function upsertConnectionState(userId, connectionId, status) {
@@ -89,13 +103,13 @@ function resolveAggregateStatus(states) {
   let hasOnline = false;
 
   for (const state of states) {
-    if (state === 'away') hasAway = true;
-    else if (state === 'online') hasOnline = true;
+    if (state === "away") hasAway = true;
+    else if (state === "online") hasOnline = true;
   }
 
-  if (hasAway) return 'away';
-  if (hasOnline) return 'online';
-  return 'idle';
+  if (hasAway) return "away";
+  if (hasOnline) return "online";
+  return "idle";
 }
 
 async function removeConnection(userId, connectionId) {
@@ -112,7 +126,7 @@ async function recomputeUserPresence(userId) {
   const connIds = await redis.smembers(connectionSetKey(userId));
   if (!connIds.length) {
     await redis.srem(connectedUsersKey(), userId);
-    await presenceService.setPresence(userId, 'offline');
+    await presenceService.setPresence(userId, "offline");
     return;
   }
 
@@ -127,13 +141,14 @@ async function recomputeUserPresence(userId) {
 
   const stateByConn = [];
   const staleConnIds = [];
+  let idleSpan = null;
   for (let i = 0; i < connIds.length; i += 1) {
     const statusRes = results[i * 3];
     const activityRes = results[i * 3 + 1];
     const aliveRes = results[i * 3 + 2];
     const connId = connIds[i];
 
-    const status = statusRes?.[1] || 'online';
+    const status = statusRes?.[1] || "online";
     const isActive = Number(activityRes?.[1] || 0) === 1;
     const isAlive = Number(aliveRes?.[1] || 0) === 1;
 
@@ -142,12 +157,25 @@ async function recomputeUserPresence(userId) {
       continue;
     }
 
-    if (status === 'away') {
-      stateByConn.push('away');
-    } else if (status === 'idle') {
-      stateByConn.push('idle');
+    if (status === "away") {
+      stateByConn.push("away");
+    } else if (status === "idle") {
+      stateByConn.push("idle");
     } else {
-      stateByConn.push(isActive ? 'online' : 'idle');
+      if (!isActive) {
+        logger.info({
+          event: "presence.activity_expired",
+          userId,
+          connectionId: connId,
+        });
+        // Start a root span that will parent the fanout spans below
+        if (!idleSpan) {
+          idleSpan = tracer.startSpan("presence.idle_transition", {
+            attributes: { userId, connectionId: connId },
+          });
+        }
+      }
+      stateByConn.push(isActive ? "online" : "idle");
     }
   }
 
@@ -164,16 +192,29 @@ async function recomputeUserPresence(userId) {
 
   if (!stateByConn.length) {
     await redis.srem(connectedUsersKey(), userId);
-    await presenceService.setPresence(userId, 'offline');
+    await presenceService.setPresence(userId, "offline");
+    idleSpan?.end();
     return;
   }
 
   const aggregateStatus = resolveAggregateStatus(stateByConn);
-  if (aggregateStatus === 'away') {
-    await presenceService.setPresence(userId, 'away', undefined);
+  if (aggregateStatus === "away") {
+    await presenceService.setPresence(userId, "away", undefined);
     return;
+  } else {
+    if (idleSpan) {
+      idleSpan.setAttribute("resolved_status", aggregateStatus);
+      // Run setPresence inside the span's context so fanout spans are children
+      const ctx = trace.setSpan(context.active(), idleSpan);
+      await context.with(ctx, () =>
+        presenceService.setPresence(userId, aggregateStatus, null),
+      );
+      idleSpan.end();
+    } else {
+      // online
+      await presenceService.setPresence(userId, aggregateStatus, null);
+    }
   }
-  await presenceService.setPresence(userId, aggregateStatus, null);
 }
 
 async function reconcileAllConnectedUsers() {
@@ -200,12 +241,36 @@ const redisSubscribeInFlight = new Map();
 // ── Redis subscriber listener ──────────────────────────────────────────────────
 function deliverPubsubMessage(channel, message) {
   const clients = channelClients.get(channel);
-  if (!clients || clients.size === 0) return;
+  const recipientCount = clients ? clients.size : 0;
+
+  // Record recipient distribution by channel type (user / channel / conversation)
+  const channelType = channel.split(":")[0] || "unknown";
+  fanoutRecipientsHistogram.observe(
+    { channel_type: channelType },
+    recipientCount,
+  );
+
+  // Per-event structured log for presence fanouts so Loki can drill down by userId
+  if (channelType === "user" && recipientCount > 0) {
+    try {
+      const payload = JSON.parse(message);
+      logger.info({
+        event: "presence.fanout.delivered",
+        channel,
+        recipientCount,
+        payload,
+      });
+    } catch {
+      // non-JSON message – skip detailed log
+    }
+  }
+
+  if (!clients || recipientCount === 0) return;
 
   let outbound = message;
   try {
     const parsed = JSON.parse(message);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       outbound = JSON.stringify({ ...parsed, channel });
     }
   } catch {
@@ -219,7 +284,7 @@ function deliverPubsubMessage(channel, message) {
   });
 }
 
-redisSub.on('message', (channel, message) => {
+redisSub.on("message", (channel, message) => {
   deliverPubsubMessage(channel, message);
 });
 
@@ -229,13 +294,13 @@ async function listAutoSubscriptionChannels(userId) {
       `SELECT conversation_id::text AS id
        FROM conversation_participants
        WHERE user_id = $1 AND left_at IS NULL`,
-      [userId]
+      [userId],
     ),
     pool.query(
       `SELECT community_id::text AS id
        FROM community_members
        WHERE user_id = $1`,
-      [userId]
+      [userId],
     ),
     pool.query(
       `SELECT c.id::text AS id
@@ -247,7 +312,7 @@ async function listAutoSubscriptionChannels(userId) {
          ON chm.channel_id = c.id
         AND chm.user_id = $1
        WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
-      [userId]
+      [userId],
     ),
   ]);
 
@@ -260,7 +325,9 @@ async function listAutoSubscriptionChannels(userId) {
 
 async function bootstrapUserSubscriptions(ws, userId) {
   const channels = await listAutoSubscriptionChannels(userId);
-  await Promise.allSettled(channels.map((channel) => subscribeClient(ws, channel)));
+  await Promise.allSettled(
+    channels.map((channel) => subscribeClient(ws, channel)),
+  );
 }
 
 function hasLocalSubscribers(redisChannel) {
@@ -276,7 +343,7 @@ async function ensureRedisChannelSubscribed(redisChannel) {
   }
 
   if (!isRedisOperational(redisSub)) {
-    throw new Error('Redis subscriber is not available');
+    throw new Error("Redis subscriber is not available");
   }
 
   const op = Promise.resolve(redisSub.subscribe(redisChannel))
@@ -292,24 +359,24 @@ async function ensureRedisChannelSubscribed(redisChannel) {
 }
 
 // ── Connection handling ────────────────────────────────────────────────────────
-wss.on('connection', async (ws, req) => {
+wss.on("connection", async (ws, req) => {
   // Authenticate
   let user;
   try {
-    const url = new URL(req.url, 'ws://localhost');
-    const token = url.searchParams.get('token');
+    const url = new URL(req.url, "ws://localhost");
+    const token = url.searchParams.get("token");
     if (!token) {
-      if (!isAuthBypassEnabled()) throw new Error('No token');
+      if (!isAuthBypassEnabled()) throw new Error("No token");
       ({ user } = await getBypassAuthContext());
     } else {
       user = verifyAccess(token);
     }
   } catch {
-    ws.close(4001, 'Unauthorized');
+    ws.close(4001, "Unauthorized");
     return;
   }
 
-  logger.info({ userId: user.id }, 'WS connected');
+  logger.info({ userId: user.id }, "WS connected");
   ws._subscriptions = new Set();
   ws._userId = user.id;
   ws._connectionId = randomUUID();
@@ -320,45 +387,48 @@ wss.on('connection', async (ws, req) => {
       ws._bootstrapReady = true;
     })
     .catch((err) => {
-      logger.warn({ err, userId: user.id }, 'WS user-channel subscribe failed');
-      ws.close(1011, 'Subscription failed');
+      logger.warn({ err, userId: user.id }, "WS user-channel subscribe failed");
+      ws.close(1011, "Subscription failed");
     });
 
-  ws.on('message', (raw) => {
+  ws.on("message", (raw) => {
     try {
       const msg = JSON.parse(raw);
       handleClientMessage(ws, user, msg).catch((err) => {
-        logger.warn({ err, userId: user.id }, 'WS message dispatch failed');
+        logger.warn({ err, userId: user.id }, "WS message dispatch failed");
       });
     } catch {
-      ws.send(JSON.stringify({ event: 'error', data: 'Invalid JSON' }));
+      ws.send(JSON.stringify({ event: "error", data: "Invalid JSON" }));
     }
   });
 
-  ws.on('close', () => {
+  ws.on("close", () => {
     cleanup(ws, user.id);
   });
 
-  ws.on('error', (err) => {
-    logger.warn({ err, userId: user.id }, 'WS error');
+  ws.on("error", (err) => {
+    logger.warn({ err, userId: user.id }, "WS error");
   });
 
   // Heartbeat / pong
   ws.isAlive = true;
-  ws.on('pong', () => {
+  ws.on("pong", () => {
     ws.isAlive = true;
     markConnectionAlive(user.id, ws._connectionId).catch(() => {});
   });
 
-  upsertConnectionState(user.id, ws._connectionId, 'idle')
+  upsertConnectionState(user.id, ws._connectionId, "idle")
     .then(async () => {
       await markConnectionAlive(user.id, ws._connectionId);
       await recomputeUserPresence(user.id);
     })
-    .catch((err) => logger.warn({ err, userId: user.id }, 'WS presence setup failed'));
+    .catch((err) =>
+      logger.warn({ err, userId: user.id }, "WS presence setup failed"),
+    );
 
-  bootstrapUserSubscriptions(ws, user.id)
-    .catch((err) => logger.warn({ err, userId: user.id }, 'WS auto-subscribe bootstrap failed'));
+  bootstrapUserSubscriptions(ws, user.id).catch((err) =>
+    logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed"),
+  );
 });
 
 // ── Client message dispatch ────────────────────────────────────────────────────
@@ -373,33 +443,40 @@ async function handleClientMessage(ws, user, msg) {
   markConnectionAlive(user.id, ws._connectionId).catch(() => {});
 
   switch (msg.type) {
-    case 'subscribe':
+    case "subscribe":
       if (await isAllowedChannel(user, msg.channel)) {
         try {
           await subscribeClient(ws, msg.channel);
-          ws.send(JSON.stringify({ event: 'subscribed', data: { channel: msg.channel } }));
+          ws.send(
+            JSON.stringify({
+              event: "subscribed",
+              data: { channel: msg.channel },
+            }),
+          );
         } catch {
-          ws.send(JSON.stringify({ event: 'error', data: 'Subscribe failed' }));
+          ws.send(JSON.stringify({ event: "error", data: "Subscribe failed" }));
         }
       } else {
-        ws.send(JSON.stringify({ event: 'error', data: 'Channel not allowed' }));
+        ws.send(
+          JSON.stringify({ event: "error", data: "Channel not allowed" }),
+        );
       }
       break;
 
-    case 'unsubscribe':
+    case "unsubscribe":
       await unsubscribeClient(ws, msg.channel);
       break;
 
-    case 'ping':
-      ws.send(JSON.stringify({ event: 'pong' }));
+    case "ping":
+      ws.send(JSON.stringify({ event: "pong" }));
       break;
 
-    case 'presence':
+    case "presence":
       // Client reporting its own presence status
-      if (['online', 'idle', 'away'].includes(msg.status)) {
+      if (["online", "idle", "away"].includes(msg.status)) {
         upsertConnectionState(user.id, ws._connectionId, msg.status)
           .then(async () => {
-            if (msg.status === 'away') {
+            if (msg.status === "away") {
               await presenceService.setAwayMessage(user.id, msg.awayMessage);
             }
             await recomputeUserPresence(user.id);
@@ -408,22 +485,26 @@ async function handleClientMessage(ws, user, msg) {
       }
       break;
 
-    case 'activity':
+    case "activity":
       markConnectionActive(user.id, ws._connectionId)
-        .then(() => upsertConnectionState(user.id, ws._connectionId, 'online'))
+        .then(() => upsertConnectionState(user.id, ws._connectionId, "online"))
         .then(() => recomputeUserPresence(user.id))
         .catch(() => {});
       break;
 
     default:
-      ws.send(JSON.stringify({ event: 'error', data: `Unknown type: ${msg.type}` }));
+      ws.send(
+        JSON.stringify({ event: "error", data: `Unknown type: ${msg.type}` }),
+      );
   }
 }
 
 // ── Channel allow-list ─────────────────────────────────────────────────────────
 function parseChannelKey(channel) {
-  if (typeof channel !== 'string') return null;
-  const match = channel.match(/^(channel|conversation|community|user):([\w-]+)$/);
+  if (typeof channel !== "string") return null;
+  const match = channel.match(
+    /^(channel|conversation|community|user):([\w-]+)$/,
+  );
   if (!match) return null;
   return { type: match[1], id: match[2] };
 }
@@ -432,26 +513,26 @@ async function isAllowedChannel(user, channel) {
   const parsed = parseChannelKey(channel);
   if (!parsed) return false;
 
-  if (parsed.type === 'user') {
+  if (parsed.type === "user") {
     return parsed.id === user.id;
   }
 
-  if (parsed.type === 'community') {
+  if (parsed.type === "community") {
     const { rows } = await pool.query(
       `SELECT 1
        FROM community_members
        WHERE community_id = $1 AND user_id = $2`,
-      [parsed.id, user.id]
+      [parsed.id, user.id],
     );
     return rows.length > 0;
   }
 
-  if (parsed.type === 'conversation') {
+  if (parsed.type === "conversation") {
     const { rows } = await pool.query(
       `SELECT 1
        FROM conversation_participants
        WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
-      [parsed.id, user.id]
+      [parsed.id, user.id],
     );
     return rows.length > 0;
   }
@@ -472,7 +553,7 @@ async function isAllowedChannel(user, channel) {
              AND chm.user_id = $1
          )
        )`,
-    [user.id, parsed.id]
+    [user.id, parsed.id],
   );
   return rows.length > 0;
 }
@@ -501,15 +582,17 @@ async function unsubscribeClient(ws, redisChannel) {
 
 function cleanup(ws, userId) {
   const subscriptions = [...ws._subscriptions];
-  Promise.allSettled(subscriptions.map((ch) => unsubscribeClient(ws, ch))).catch(() => {});
+  Promise.allSettled(
+    subscriptions.map((ch) => unsubscribeClient(ws, ch)),
+  ).catch(() => {});
 
   if (shuttingDown) {
-    logger.info({ userId }, 'WS disconnected');
+    logger.info({ userId }, "WS disconnected");
     return;
   }
 
   if (!isRedisOperational(redis)) {
-    logger.info({ userId }, 'WS disconnected');
+    logger.info({ userId }, "WS disconnected");
     return;
   }
 
@@ -517,18 +600,21 @@ function cleanup(ws, userId) {
     .then(() => recomputeUserPresence(userId))
     .catch((err) => {
       if (/Connection is closed/i.test(String(err?.message || err))) {
-        logger.info({ userId }, 'WS disconnected');
+        logger.info({ userId }, "WS disconnected");
         return;
       }
-      logger.warn({ err, userId }, 'WS cleanup presence update failed');
+      logger.warn({ err, userId }, "WS cleanup presence update failed");
     });
-  logger.info({ userId }, 'WS disconnected');
+  logger.info({ userId }, "WS disconnected");
 }
 
 // ── Heartbeat loop (60 s) ──────────────────────────────────────────────────────
 const heartbeatInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (!ws.isAlive) { ws.terminate(); return; }
+    if (!ws.isAlive) {
+      ws.terminate();
+      return;
+    }
     ws.isAlive = false;
     ws.ping();
   });
@@ -537,14 +623,14 @@ const heartbeatInterval = setInterval(() => {
 // Periodically reconcile global user presence from client-reported connection state.
 const presenceSweepInterval = setInterval(() => {
   reconcileAllConnectedUsers().catch((err) => {
-    logger.warn({ err }, 'Presence sweeper failed');
+    logger.warn({ err }, "Presence sweeper failed");
   });
 }, PRESENCE_SWEEPER_MS);
 
 // ── HTTP upgrade handler (attached to http.Server in index.js) ─────────────────
 function handleUpgrade(request, socket, head) {
   wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit('connection', ws, request);
+    wss.emit("connection", ws, request);
   });
 }
 

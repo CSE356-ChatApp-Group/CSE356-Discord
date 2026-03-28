@@ -50,6 +50,13 @@ app.use(rateLimit({
   legacyHeaders: false,
 }));
 
+// ── Prometheus metrics (no auth required) ─────────────────────────────────────
+const { register } = require('./utils/metrics');
+app.get('/metrics', async (_req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+
 // ── Health check (no auth required) ───────────────────────────────────────────
 app.get('/health', async (_req, res) => {
   try {

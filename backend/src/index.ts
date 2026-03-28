@@ -8,6 +8,8 @@
 'use strict';
 
 require('dotenv').config();
+// OTel must be the first non-env require so it can patch async context
+require('./utils/tracer');
 
 const http     = require('http');
 const app      = require('./app');

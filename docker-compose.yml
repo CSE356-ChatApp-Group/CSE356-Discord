@@ -24,6 +24,8 @@ volumes:
   minio_data:
   prometheus_data:
   grafana_data:
+  loki_data:
+  tempo_data:
 
 services:
   # ── Node 1 · Database ─────────────────────────────────────────────────────────
@@ -205,4 +207,30 @@ services:
       - ./infrastructure/monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
     ports:
       - "3001:3000"
+    networks: [chatapp]
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/config.yml"]
+    volumes:
+      - ./infrastructure/monitoring/tempo-config.yml:/etc/tempo/config.yml:ro
+      - tempo_data:/var/tempo
+    networks: [chatapp]
+
+  loki:
+    image: grafana/loki:3.1.0
+    restart: unless-stopped
+    volumes:
+      - ./infrastructure/monitoring/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    networks: [chatapp]
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    restart: unless-stopped
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./infrastructure/monitoring/promtail-config.yml:/etc/promtail/config.yml:ro
     networks: [chatapp]
