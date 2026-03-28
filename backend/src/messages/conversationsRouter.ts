@@ -9,7 +9,7 @@
 'use strict';
 
 const express = require('express');
-const { body, validationResult } = require('express-validator');
+const { body, param, validationResult } = require('express-validator');
 const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 
@@ -208,5 +208,80 @@ router.get('/:id', async (req, res, next) => {
     res.json({ conversation: rows[0] });
   } catch (err) { next(err); }
 });
+router.post('/:id/participants',
+   param('id').isUUID(),
+   body('participantIds').isArray({ min: 1 }).custom(arr => arr.every(x => typeof x === 'string')),
+   async (req, res, next) => {
+     const errors = validationResult(req);
+     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+ 
+     const client = await pool.connect();
+     try {
+       await client.query('BEGIN');
+ 
+       const { rows: [isParticipant] } = await client.query(
+         `SELECT 1 FROM conversation_participants 
+          WHERE conversation_id=$1 AND user_id=$2 AND left_at IS NULL`,
+         [req.params.id, req.user.id]
+       );
+       if (!isParticipant) {
+         await client.query('ROLLBACK');
+         return res.status(403).json({ error: 'Not a participant in this conversation' });
+       }
+ 
+       const newParticipants = await resolveParticipantIds(client, req.body.participantIds);
+       if (!newParticipants || newParticipants.length === 0) {
+         await client.query('ROLLBACK');
+         return res.status(400).json({ error: 'One or more participants not found' });
+       }
+ 
+       for (const uid of newParticipants) {
+         if (uid === req.user.id) continue;
+         await client.query(
+           `INSERT INTO conversation_participants (conversation_id, user_id, left_at)
+            VALUES ($1,$2,NULL)
+            ON CONFLICT (conversation_id, user_id) DO UPDATE SET left_at = NULL`,
+           [req.params.id, uid]
+         );
+       }
+ 
+       const conversation = await loadConversationWithParticipants(client, req.params.id);
+       await client.query('COMMIT');
+       res.json({ conversation });
+     } catch (err) {
+       await client.query('ROLLBACK');
+       next(err);
+     } finally { client.release(); }
+   }
+ );
+ 
+ router.post('/:id/leave',
+   param('id').isUUID(),
+   async (req, res, next) => {
+     const errors = validationResult(req);
+     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+ 
+     try {
+       await pool.query(
+         `UPDATE conversation_participants 
+          SET left_at = NOW() 
+          WHERE conversation_id = $1 AND user_id = $2`,
+         [req.params.id, req.user.id]
+       );
+ 
+       const { rows } = await pool.query(
+         `SELECT COUNT(*)::int as remaining FROM conversation_participants 
+          WHERE conversation_id = $1 AND left_at IS NULL`,
+         [req.params.id]
+       );
+ 
+       if (parseInt(rows[0].remaining, 10) === 0) {
+         await pool.query('DELETE FROM conversations WHERE id = $1', [req.params.id]);
+       }
+ 
+       res.json({ success: true });
+     } catch (err) { next(err); }
+   }
+ );
 
 module.exports = router;
