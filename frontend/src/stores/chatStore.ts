@@ -108,6 +108,15 @@ function countUnreadChannels(channels: Entity[], currentUserId?: string, activeC
 }
 
 let lastCommunityUnreadRefreshAt = 0;
+let unreadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleUnreadRefresh(run: () => void) {
+  if (unreadRefreshTimer) return;
+  unreadRefreshTimer = setTimeout(() => {
+    unreadRefreshTimer = null;
+    run();
+  }, 400);
+}
 
 export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Data ──────────────────────────────────────────────────────────────────
@@ -236,6 +245,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         };
       });
       api.put(`/messages/${lastId}/read`).catch(() => {});
+      scheduleUnreadRefresh(() => {
+        const s = useChatStore.getState();
+        s.fetchCommunities().catch(() => {});
+        const communityId = channel.community_id || channel.communityId || s.activeCommunity?.id;
+        if (communityId) {
+          s.fetchChannels(communityId).catch(() => {});
+        }
+      });
     }
   },
 
@@ -609,6 +626,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           });
           api.put(`/messages/${msg.id}/read`).catch(() => {});
         }
+        if (msg.channel_id) {
+          scheduleUnreadRefresh(() => {
+            const s = useChatStore.getState();
+            s.fetchCommunities().catch(() => {});
+            if (s.activeCommunity?.id) {
+              s.fetchChannels(s.activeCommunity.id).catch(() => {});
+            }
+          });
+        }
         if (msg.conversation_id && store.activeConv?.id === msg.conversation_id && msg.id) {
           set(s => ({
             conversations: s.conversations.map((conv) =>
@@ -718,6 +744,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   : s.activeCommunity,
             };
           });
+          scheduleUnreadRefresh(() => {
+            const s = useChatStore.getState();
+            s.fetchCommunities().catch(() => {});
+            if (s.activeCommunity?.id) {
+              s.fetchChannels(s.activeCommunity.id).catch(() => {});
+            }
+          });
         }
         if (!conversationId) break;
         set(s => ({
@@ -803,6 +836,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         if (now - lastCommunityUnreadRefreshAt > 2000) {
           lastCommunityUnreadRefreshAt = now;
           store.fetchCommunities().catch(() => {});
+          if (store.activeCommunity?.id === communityId) {
+            store.fetchChannels(communityId).catch(() => {});
+          }
         }
         break;
       }
