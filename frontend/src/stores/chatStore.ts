@@ -144,6 +144,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   async fetchConversations() {
     const { conversations } = await api.get('/conversations');
     set({ conversations });
+    conversations.forEach((conv: Entity) => {
+      if (conv?.id) {
+        wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
+      }
+    });
   },
 
   openHome() {
@@ -163,7 +168,27 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
     const msgs = get().messages[conversation.id];
     if (msgs?.length) {
-      api.put(`/messages/${msgs[msgs.length - 1].id}/read`).catch(() => {});
+      const lastId = msgs[msgs.length - 1].id;
+      set(s => ({
+        conversations: s.conversations.map((conv) =>
+          conv.id === conversation.id
+            ? {
+                ...conv,
+                my_last_read_message_id: lastId,
+                myLastReadMessageId: lastId,
+              }
+            : conv
+        ),
+        activeConv:
+          s.activeConv?.id === conversation.id
+            ? {
+                ...s.activeConv,
+                my_last_read_message_id: lastId,
+                myLastReadMessageId: lastId,
+              }
+            : s.activeConv,
+      }));
+      api.put(`/messages/${lastId}/read`).catch(() => {});
     }
     return conversation;
   },
@@ -174,7 +199,27 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
     const msgs = get().messages[conv.id];
     if (msgs?.length) {
-      api.put(`/messages/${msgs[msgs.length - 1].id}/read`).catch(() => {});
+      const lastId = msgs[msgs.length - 1].id;
+      set(s => ({
+        conversations: s.conversations.map((c) =>
+          c.id === conv.id
+            ? {
+                ...c,
+                my_last_read_message_id: lastId,
+                myLastReadMessageId: lastId,
+              }
+            : c
+        ),
+        activeConv:
+          s.activeConv?.id === conv.id
+            ? {
+                ...s.activeConv,
+                my_last_read_message_id: lastId,
+                myLastReadMessageId: lastId,
+              }
+            : s.activeConv,
+      }));
+      api.put(`/messages/${lastId}/read`).catch(() => {});
     }
   },
 
@@ -266,14 +311,57 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 const idx = next.findIndex(c => c.id === msg.conversation_id);
                 if (idx === -1) return next;
                 const updatedAt = msg.created_at || msg.createdAt || new Date().toISOString();
-                const updated = { ...next[idx], updated_at: updatedAt, updatedAt };
+                const updated = {
+                  ...next[idx],
+                  updated_at: updatedAt,
+                  updatedAt,
+                  last_message_id: msg.id,
+                  lastMessageId: msg.id,
+                  last_message_author_id: msg.author_id,
+                  lastMessageAuthorId: msg.author_id,
+                  last_message_at: updatedAt,
+                  lastMessageAt: updatedAt,
+                };
                 next.splice(idx, 1);
                 next.unshift(updated);
                 return next;
               })()
             : s.conversations,
+          activeConv:
+            msg.conversation_id && s.activeConv?.id === msg.conversation_id
+              ? {
+                  ...s.activeConv,
+                  updated_at: msg.created_at || msg.createdAt || s.activeConv.updated_at,
+                  updatedAt: msg.created_at || msg.createdAt || s.activeConv.updatedAt,
+                  last_message_id: msg.id,
+                  lastMessageId: msg.id,
+                  last_message_author_id: msg.author_id,
+                  lastMessageAuthorId: msg.author_id,
+                  last_message_at: msg.created_at || msg.createdAt || s.activeConv.last_message_at,
+                  lastMessageAt: msg.created_at || msg.createdAt || s.activeConv.lastMessageAt,
+                }
+              : s.activeConv,
         }));
         if (msg.conversation_id && store.activeConv?.id === msg.conversation_id && msg.id) {
+          set(s => ({
+            conversations: s.conversations.map((conv) =>
+              conv.id === msg.conversation_id
+                ? {
+                    ...conv,
+                    my_last_read_message_id: msg.id,
+                    myLastReadMessageId: msg.id,
+                  }
+                : conv
+            ),
+            activeConv:
+              s.activeConv?.id === msg.conversation_id
+                ? {
+                    ...s.activeConv,
+                    my_last_read_message_id: msg.id,
+                    myLastReadMessageId: msg.id,
+                  }
+                : s.activeConv,
+          }));
           api.put(`/messages/${msg.id}/read`).catch(() => {});
         }
         break;

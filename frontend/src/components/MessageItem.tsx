@@ -94,10 +94,10 @@ export default function MessageItem({ message: msg, prevMessage, isOwn, showRead
               <div
                 className={styles.readReceipt}
                 data-testid={`message-read-receipt-${msg.id}`}
-                data-read-receipt="SEEN"
-                aria-label="Seen by recipient"
+                data-read-receipt="READ"
+                aria-label="Read by recipient"
               >
-                Seen
+                Read
               </div>
             )}
             {/* Attachments */}

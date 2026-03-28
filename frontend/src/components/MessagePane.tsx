@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { useAutoResize } from '../hooks/useAutoResize';
@@ -136,22 +136,28 @@ export default function MessagePane() {
   const participants = activeConv?.participants || [];
   const isOneToOneDm = Boolean(activeConv && participants.length === 2);
   const otherLastReadMessageId = activeConv?.other_last_read_message_id || activeConv?.otherLastReadMessageId;
-  let latestOwnMessageId: string | null = null;
-  for (let i = msgList.length - 1; i >= 0; i -= 1) {
-    const m = msgList[i];
-    if (!m?.deleted_at && m?.author_id === user?.id) {
-      latestOwnMessageId = m.id;
-      break;
+  const { latestOwnMessageId, latestOwnSeen } = useMemo(() => {
+    let latestOwnId: string | null = null;
+    let latestOwnIdx = -1;
+    for (let i = msgList.length - 1; i >= 0; i -= 1) {
+      const m = msgList[i];
+      if (!m?.deleted_at && m?.author_id === user?.id) {
+        latestOwnId = m.id;
+        latestOwnIdx = i;
+        break;
+      }
     }
-  }
-  let latestOwnSeen = false;
-  if (isOneToOneDm && latestOwnMessageId) {
-    const ownIdx = msgList.findIndex(m => m.id === latestOwnMessageId);
-    if (ownIdx >= 0 && otherLastReadMessageId) {
-      const seenIdx = msgList.findIndex(m => m.id === otherLastReadMessageId);
-      if (seenIdx >= ownIdx) latestOwnSeen = true;
+
+    if (!isOneToOneDm || !latestOwnId || !otherLastReadMessageId) {
+      return { latestOwnMessageId: latestOwnId, latestOwnSeen: false };
     }
-  }
+
+    const readIdx = msgList.findIndex(m => m.id === otherLastReadMessageId);
+    return {
+      latestOwnMessageId: latestOwnId,
+      latestOwnSeen: readIdx >= latestOwnIdx && latestOwnIdx >= 0,
+    };
+  }, [msgList, user?.id, isOneToOneDm, otherLastReadMessageId]);
 
   const searchScope = activeChannel
     ? `#${activeChannel.name}`
