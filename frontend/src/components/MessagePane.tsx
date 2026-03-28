@@ -29,6 +29,8 @@ export default function MessagePane() {
   const scrollRef   = useRef(null);
   const initialScrollKeyRef = useRef<string | null>(null);
   const prevMsgCountRef = useRef(0);
+  const exhaustedBeforeRef = useRef<string | null>(null);
+  const historyRetryAfterRef = useRef(0);
   useAutoResize(inputRef);
 
   // Default each conversation to newest messages, and only auto-follow when already near bottom.
@@ -37,6 +39,8 @@ export default function MessagePane() {
     if (!key) {
       initialScrollKeyRef.current = null;
       prevMsgCountRef.current = 0;
+      exhaustedBeforeRef.current = null;
+      historyRetryAfterRef.current = 0;
       return;
     }
     if (!el || msgList.length === 0) return;
@@ -144,19 +148,36 @@ export default function MessagePane() {
     const el = scrollRef.current;
     if (!el || loadingMore || msgList.length === 0) return;
     if (el.scrollTop < 80) {
+      const beforeId = msgList[0]?.id;
+      if (!beforeId) return;
+      if (exhaustedBeforeRef.current === beforeId) return;
+      if (Date.now() < historyRetryAfterRef.current) return;
+
       setLoadMore(true);
       const prevH = el.scrollHeight;
       try {
-        await fetchMessages({
+        const older = await fetchMessages({
           channelId:      activeChannel?.id,
           conversationId: activeConv?.id,
-          before:         msgList[0]?.id,
+          before:         beforeId,
         });
+
+        if (!older?.length) {
+          exhaustedBeforeRef.current = beforeId;
+          return;
+        }
+
+        exhaustedBeforeRef.current = null;
         // Restore scroll position after prepend
         requestAnimationFrame(() => {
           el.scrollTop = el.scrollHeight - prevH;
         });
       } catch (err) {
+        const status = Number(err?.status || 0);
+        if (status === 503) {
+          // Temporary backend overload/unavailability: back off to avoid request storms.
+          historyRetryAfterRef.current = Date.now() + 5000;
+        }
         console.warn('[messages] failed to load older history', err);
       } finally {
         setLoadMore(false);
