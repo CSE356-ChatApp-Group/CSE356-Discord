@@ -105,7 +105,7 @@ function getCourseCallbackUrl(req) {
   return `${proto}://${req.get('host')}/api/v1/auth/course/callback`;
 }
 
-async function resolveOAuthAccount(provider, providerId, email, displayName, linkToken) {
+async function resolveOAuthAccount(provider, providerId, email, displayName, linkToken, preferredUsername?) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -143,11 +143,53 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
       return { user: target.rows[0] };
     }
 
+    // For trusted providers (course OIDC), auto-create the account immediately
+    // when we have enough info (email + preferredUsername) to avoid the pending flow.
+    if (provider === 'course' && email && preferredUsername) {
+      // Sanitize KC username: allow letters, digits, hyphens, underscores, max 32 chars
+      const sanitized = preferredUsername.replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 32) || null;
+
+      // Check if username already used (conflict resolution: append short suffix)
+      let username = sanitized;
+      if (username) {
+        const taken = await client.query('SELECT 1 FROM users WHERE username=$1', [username]);
+        if (taken.rows.length) {
+          username = `${sanitized.slice(0, 28)}_${Date.now().toString().slice(-4)}`;
+        }
+      }
+
+      if (username) {
+        const existingEmail = await client.query('SELECT u.* FROM users WHERE email=$1', [email]);
+        if (existingEmail.rows.length) {
+          // Email already registered — link this provider to existing account
+          const user = existingEmail.rows[0];
+          await client.query(
+            'INSERT INTO oauth_accounts (user_id, provider, provider_id, email) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING',
+            [user.id, provider, providerId, email]
+          );
+          await client.query('COMMIT');
+          return { user };
+        }
+
+        const { rows: [newUser] } = await client.query(
+          `INSERT INTO users (email, username, display_name) VALUES ($1,$2,$3) RETURNING *`,
+          [email, username, displayName || username]
+        );
+        await client.query(
+          'INSERT INTO oauth_accounts (user_id, provider, provider_id, email) VALUES ($1,$2,$3,$4)',
+          [newUser.id, provider, providerId, email]
+        );
+        await client.query('COMMIT');
+        return { user: newUser };
+      }
+    }
+
     const pendingToken = signOAuthPending({
       provider,
       providerId,
       email: email || null,
       displayName: displayName || null,
+      preferredUsername: preferredUsername || null,
     });
 
     await client.query('COMMIT');
@@ -284,7 +326,12 @@ router.post('/oauth/complete-create',
       .replace(/[^a-zA-Z0-9]/g, '')
       .slice(0, 24)
       || `${pending.provider}user`;
-    const username = req.body.username || `${generatedUsernameBase}${Date.now().toString().slice(-4)}`.slice(0, 32);
+
+    // Prefer the preserved KC username (may contain hyphens), fall back to alphanumeric derived name
+    const rawPreferred = pending.preferredUsername || req.body.username || null;
+    const username = rawPreferred
+      ? rawPreferred.replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 32) || `${generatedUsernameBase}${Date.now().toString().slice(-4)}`.slice(0, 32)
+      : `${generatedUsernameBase}${Date.now().toString().slice(-4)}`.slice(0, 32);
     const displayName = req.body.displayName || pending.displayName || username;
 
     const client = await pool.connect();
@@ -518,13 +565,14 @@ router.get('/course/callback', async (req, res, next) => {
     const userinfo = await userInfoRes.json();
     const providerId = userinfo.sub;
     const email = userinfo.email || null;
-    const displayName = userinfo.name || userinfo.preferred_username || email || 'OIDC User';
+    const kcUsername = userinfo.preferred_username || null;
+    const displayName = userinfo.name || kcUsername || email || 'OIDC User';
     if (!providerId) {
       return res.redirect(buildFrontendUrl('/login', { error: 'OIDC subject missing' }));
     }
 
     const linkToken = statePayload?.linkToken || null;
-    const outcome = await resolveOAuthAccount('course', providerId, email, displayName, linkToken);
+    const outcome = await resolveOAuthAccount('course', providerId, email, displayName, linkToken, kcUsername);
     if (outcome.error) {
       return res.redirect(buildFrontendUrl('/login', { error: outcome.error }));
     }
