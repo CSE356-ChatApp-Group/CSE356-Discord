@@ -1,7 +1,7 @@
 /**
  * api.js – thin fetch wrapper
  *
- * • Attaches Authorization header from localStorage token
+ * • Attaches Authorization header from in-memory access token (per-tab session)
  * • Auto-refreshes on 401 (once) using the httpOnly cookie
  * • Throws { status, message, errors } on non-2xx
  */
@@ -10,13 +10,16 @@ const BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '');
 
 type ApiError = Error & { status?: number; errors?: unknown };
 
-let _accessToken = localStorage.getItem('accessToken') || null;
+// Access token is stored in memory only (not localStorage).
+// Each browser tab has an independent session. On page load, authStore.init()
+// restores the session via the httpOnly refresh cookie.
+let _accessToken: string | null = null;
+// Remove any stale token left from the previous localStorage-based approach.
+localStorage.removeItem('accessToken');
 let _refreshing   = null; // in-flight refresh promise
 
-export function setToken(t) {
+export function setToken(t: string | null) {
   _accessToken = t;
-  if (t) localStorage.setItem('accessToken', t);
-  else   localStorage.removeItem('accessToken');
 }
 
 export function getToken() { return _accessToken; }

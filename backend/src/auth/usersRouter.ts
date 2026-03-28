@@ -57,6 +57,22 @@ router.get('/', authenticate, async (req, res, next) => {
 
 router.use(authenticate);
 
+// ── Serve avatar image (public — browsers cannot send Authorization via <img>) ──
+router.get('/:id/avatar', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT avatar_data, avatar_content_type FROM users WHERE id=$1`,
+      [req.params.id]
+    );
+    if (!rows.length || !rows[0].avatar_data) {
+      return res.status(404).json({ error: 'No avatar' });
+    }
+    res.setHeader('Content-Type', rows[0].avatar_content_type || 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(rows[0].avatar_data);
+  } catch (err) { next(err); }
+});
+
 router.get('/me', async (req, res, next) => {
   try {
     const { rows } = await pool.query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
@@ -120,21 +136,6 @@ router.put('/me/avatar', upload.single('avatar'), async (req, res, next) => {
 });
 
 // ── Serve avatar image ─────────────────────────────────────────────────────────
-router.get('/:id/avatar', async (req, res, next) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT avatar_data, avatar_content_type FROM users WHERE id=$1`,
-      [req.params.id]
-    );
-    if (!rows.length || !rows[0].avatar_data) {
-      return res.status(404).json({ error: 'No avatar' });
-    }
-    res.setHeader('Content-Type', rows[0].avatar_content_type || 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.send(rows[0].avatar_data);
-  } catch (err) { next(err); }
-});
-
 router.get('/:id', async (req, res, next) => {
   try {
     // Include email so clients can map SSO usernames
