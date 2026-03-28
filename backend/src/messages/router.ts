@@ -68,7 +68,28 @@ router.get('/',
         return res.status(400).json({ error: 'channelId or conversationId required' });
       }
 
-      // TODO: verify caller has access to the channel/conversation
+      if (channelId) {
+        const { rows: [channel] } = await pool.query(
+          `SELECT c.id FROM channels c
+            WHERE c.id = $1
+              AND (c.is_private = FALSE 
+                  OR EXISTS (
+                    SELECT 1 FROM channel_members cm
+                    WHERE cm.channel_id = c.id AND cm.user_id = $2
+                  ))`,
+          [channelId, req.user.id]
+        );
+        if (!channel) return res.status(403).json({ error: 'Access denied' });
+      }
+      
+      if (conversationId) {
+        const { rows: [conv] } = await pool.query(
+          `SELECT 1 FROM conversation_participants 
+            WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+          [conversationId, req.user.id]
+        );
+        if (!conv) return res.status(403).json({ error: 'Not a participant' });
+      }
       const params = [limit];
       let where = channelId
         ? `m.channel_id = $${params.push(channelId)}`
