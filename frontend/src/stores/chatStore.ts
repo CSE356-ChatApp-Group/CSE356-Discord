@@ -107,15 +107,48 @@ function countUnreadChannels(channels: Entity[], currentUserId?: string, activeC
   return channels.reduce((count, channel) => count + (isChannelUnreadForUser(channel, currentUserId, activeChannelId) ? 1 : 0), 0);
 }
 
-let lastCommunityUnreadRefreshAt = 0;
 let unreadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let lastUnreadRefreshAt = 0;
+let communitiesInFlight: Promise<Entity[]> | null = null;
+const channelsInFlightByCommunity = new Map<string, Promise<Entity[]>>();
+const readMarkInFlight = new Set<string>();
+const readMarkRecent = new Map<string, number>();
+
+const READ_MARK_RECENT_MS = 2000;
+const UNREAD_REFRESH_MIN_MS = 1200;
 
 function scheduleUnreadRefresh(run: () => void) {
   if (unreadRefreshTimer) return;
+  const now = Date.now();
+  const wait = Math.max(400, UNREAD_REFRESH_MIN_MS - (now - lastUnreadRefreshAt));
   unreadRefreshTimer = setTimeout(() => {
     unreadRefreshTimer = null;
+    lastUnreadRefreshAt = Date.now();
     run();
-  }, 400);
+  }, wait);
+}
+
+function markMessageRead(messageId?: string | null) {
+  if (!messageId) return;
+  const now = Date.now();
+  const lastSentAt = readMarkRecent.get(messageId) || 0;
+  if (readMarkInFlight.has(messageId) || now - lastSentAt < READ_MARK_RECENT_MS) {
+    return;
+  }
+
+  readMarkRecent.set(messageId, now);
+  readMarkInFlight.add(messageId);
+  api.put(`/messages/${messageId}/read`)
+    .catch(() => {})
+    .finally(() => {
+      readMarkInFlight.delete(messageId);
+      if (readMarkRecent.size > 500) {
+        const cutoff = Date.now() - READ_MARK_RECENT_MS;
+        for (const [id, ts] of readMarkRecent) {
+          if (ts < cutoff) readMarkRecent.delete(id);
+        }
+      }
+    });
 }
 
 export const useChatStore = create<ChatState>()((set, get) => ({
@@ -135,19 +168,45 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   // ── Communities ───────────────────────────────────────────────────────────
   async fetchCommunities() {
-    const { communities } = await api.get('/communities');
-    set(s => ({
-      communities,
-      activeCommunity: s.activeCommunity
-        ? communities.find((c: Entity) => c.id === s.activeCommunity?.id) || s.activeCommunity
-        : s.activeCommunity,
-    }));
-    communities.forEach((community: Entity) => {
-      if (community?.id && community?.my_role) {
-        wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
-      }
-    });
-    return communities;
+    if (communitiesInFlight) return communitiesInFlight;
+
+    communitiesInFlight = (async () => {
+      const { communities } = await api.get('/communities');
+      set(s => ({
+        communities: communities.map((community: Entity) => {
+          const previous = s.communities.find((c: Entity) => c.id === community.id);
+          const hadActivity = Boolean(previous?.has_new_activity ?? previous?.hasNewActivity);
+          return hadActivity
+            ? {
+                ...community,
+                has_new_activity: true,
+                hasNewActivity: true,
+              }
+            : community;
+        }),
+        activeCommunity: s.activeCommunity
+          ? (communities.find((c: Entity) => c.id === s.activeCommunity?.id)
+              ? {
+                  ...(communities.find((c: Entity) => c.id === s.activeCommunity?.id) as Entity),
+                  has_new_activity: Boolean(s.activeCommunity?.has_new_activity ?? s.activeCommunity?.hasNewActivity),
+                  hasNewActivity: Boolean(s.activeCommunity?.has_new_activity ?? s.activeCommunity?.hasNewActivity),
+                }
+              : s.activeCommunity)
+          : s.activeCommunity,
+      }));
+      communities.forEach((community: Entity) => {
+        if (community?.id && community?.my_role) {
+          wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
+        }
+      });
+      return communities;
+    })();
+
+    try {
+      return await communitiesInFlight;
+    } finally {
+      communitiesInFlight = null;
+    }
   },
 
   async createCommunity(slug: string, name: string, description: string) {
@@ -157,7 +216,24 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async selectCommunity(community: Entity) {
-    set({ activeCommunity: community, activeChannel: null, activeConv: null });
+    set(s => ({
+      activeCommunity: {
+        ...community,
+        has_new_activity: false,
+        hasNewActivity: false,
+      },
+      activeChannel: null,
+      activeConv: null,
+      communities: s.communities.map((c) =>
+        c.id === community.id
+          ? {
+              ...c,
+              has_new_activity: false,
+              hasNewActivity: false,
+            }
+          : c
+      ),
+    }));
     await get().fetchChannels(community.id);
     await get().fetchMembers(community.id);
     // Subscribe to community-level events
@@ -166,19 +242,48 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   // ── Channels ──────────────────────────────────────────────────────────────
   async fetchChannels(communityId: string) {
-    const { channels } = await api.get(`/channels?communityId=${communityId}`);
-    set(s => ({
-      channels,
-      activeChannel: s.activeChannel
-        ? channels.find((ch: Entity) => ch.id === s.activeChannel?.id) || s.activeChannel
-        : s.activeChannel,
-    }));
-    channels.forEach((channel: Entity) => {
-      if (channel?.id) {
-        wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
-      }
-    });
-    return channels;
+    if (channelsInFlightByCommunity.has(communityId)) {
+      return channelsInFlightByCommunity.get(communityId)!;
+    }
+
+    const inFlight = (async () => {
+      const { channels } = await api.get(`/channels?communityId=${communityId}`);
+      set(s => ({
+        channels: channels.map((channel: Entity) => {
+          const previous = s.channels.find((ch: Entity) => ch.id === channel.id);
+          const hadActivity = Boolean(previous?.has_new_activity ?? previous?.hasNewActivity);
+          return hadActivity
+            ? {
+                ...channel,
+                has_new_activity: true,
+                hasNewActivity: true,
+              }
+            : channel;
+        }),
+        activeChannel: s.activeChannel
+          ? (channels.find((ch: Entity) => ch.id === s.activeChannel?.id)
+              ? {
+                  ...(channels.find((ch: Entity) => ch.id === s.activeChannel?.id) as Entity),
+                  has_new_activity: false,
+                  hasNewActivity: false,
+                }
+              : s.activeChannel)
+          : s.activeChannel,
+      }));
+      channels.forEach((channel: Entity) => {
+        if (channel?.id) {
+          wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
+        }
+      });
+      return channels;
+    })();
+
+    channelsInFlightByCommunity.set(communityId, inFlight);
+    try {
+      return await inFlight;
+    } finally {
+      channelsInFlightByCommunity.delete(communityId);
+    }
   },
 
   async createChannel(communityId: string, name: string, isPrivate = false, description = '') {
@@ -188,7 +293,23 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async selectChannel(channel: Entity) {
-    set({ activeChannel: channel, activeConv: null });
+    set(s => ({
+      activeChannel: {
+        ...channel,
+        has_new_activity: false,
+        hasNewActivity: false,
+      },
+      activeConv: null,
+      channels: s.channels.map((ch) =>
+        ch.id === channel.id
+          ? {
+              ...ch,
+              has_new_activity: false,
+              hasNewActivity: false,
+            }
+          : ch
+      ),
+    }));
     await get().fetchMessages({ channelId: channel.id });
     // Subscribe to real-time events for this channel
     wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
@@ -244,7 +365,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               : s.activeCommunity,
         };
       });
-      api.put(`/messages/${lastId}/read`).catch(() => {});
+      markMessageRead(lastId);
       scheduleUnreadRefresh(() => {
         const s = useChatStore.getState();
         s.fetchCommunities().catch(() => {});
@@ -314,7 +435,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }
             : s.activeConv,
       }));
-      api.put(`/messages/${lastId}/read`).catch(() => {});
+      markMessageRead(lastId);
     }
     return conversation;
   },
@@ -348,7 +469,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }
             : s.activeConv,
       }));
-      api.put(`/messages/${lastId}/read`).catch(() => {});
+      markMessageRead(lastId);
     }
   },
 
@@ -381,7 +502,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const { message } = await api.post('/messages', body);
     // Mark the just-sent message as read immediately
     if (message?.id) {
-      api.put(`/messages/${message.id}/read`).catch(() => {});
+      markMessageRead(message.id);
     }
   },
 
@@ -462,6 +583,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                       lastMessageAuthorId: msg.author_id,
                       last_message_at: msg.created_at || msg.createdAt || channel.last_message_at,
                       lastMessageAt: msg.created_at || msg.createdAt || channel.lastMessageAt,
+                      has_new_activity: s.activeChannel?.id !== msg.channel_id,
+                      hasNewActivity: s.activeChannel?.id !== msg.channel_id,
                     }
                   : channel
               )
@@ -527,12 +650,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                         lastMessageId: msg.id,
                         last_message_author_id: msg.author_id,
                         lastMessageAuthorId: msg.author_id,
+                        has_new_activity: s.activeChannel?.id !== msg.channel_id,
+                        hasNewActivity: s.activeChannel?.id !== msg.channel_id,
                       }
                     : channel
                 )
               : s.channels);
             const target = channelAfterUpdate.find((channel) => channel.id === msg.channel_id);
-            const communityId = target?.community_id || target?.communityId || s.activeCommunity?.id;
+            const communityId = target?.community_id || target?.communityId;
             if (!communityId) return s.communities;
             const unreadCount = countUnreadChannels(channelAfterUpdate, me?.id, s.activeChannel?.id);
             return s.communities.map((community) =>
@@ -543,6 +668,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                     unreadChannelCount: unreadCount,
                     has_unread_channels: unreadCount > 0,
                     hasUnreadChannels: unreadCount > 0,
+                    has_new_activity: s.activeCommunity?.id !== communityId,
+                    hasNewActivity: s.activeCommunity?.id !== communityId,
                   }
                 : community
             );
@@ -558,12 +685,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                         lastMessageId: msg.id,
                         last_message_author_id: msg.author_id,
                         lastMessageAuthorId: msg.author_id,
+                        has_new_activity: s.activeChannel?.id !== msg.channel_id,
+                        hasNewActivity: s.activeChannel?.id !== msg.channel_id,
                       }
                     : channel
                 )
               : s.channels);
             const target = channelAfterUpdate.find((channel) => channel.id === msg.channel_id);
-            const communityId = target?.community_id || target?.communityId || s.activeCommunity?.id;
+            const communityId = target?.community_id || target?.communityId;
             if (!communityId || s.activeCommunity.id !== communityId) return s.activeCommunity;
             const unreadCount = countUnreadChannels(channelAfterUpdate, me?.id, s.activeChannel?.id);
             return {
@@ -572,6 +701,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               unreadChannelCount: unreadCount,
               has_unread_channels: unreadCount > 0,
               hasUnreadChannels: unreadCount > 0,
+              has_new_activity: false,
+              hasNewActivity: false,
             };
           })(),
         }));
@@ -597,6 +728,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                       ...s.activeChannel,
                       my_last_read_message_id: msg.id,
                       myLastReadMessageId: msg.id,
+                      has_new_activity: false,
+                      hasNewActivity: false,
                     }
                   : s.activeChannel,
               communities: communityId
@@ -624,16 +757,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   : s.activeCommunity,
             };
           });
-          api.put(`/messages/${msg.id}/read`).catch(() => {});
-        }
-        if (msg.channel_id) {
-          scheduleUnreadRefresh(() => {
-            const s = useChatStore.getState();
-            s.fetchCommunities().catch(() => {});
-            if (s.activeCommunity?.id) {
-              s.fetchChannels(s.activeCommunity.id).catch(() => {});
-            }
-          });
+          markMessageRead(msg.id);
         }
         if (msg.conversation_id && store.activeConv?.id === msg.conversation_id && msg.id) {
           set(s => ({
@@ -655,7 +779,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   }
                 : s.activeConv,
           }));
-          api.put(`/messages/${msg.id}/read`).catch(() => {});
+          markMessageRead(msg.id);
         }
         break;
       }
@@ -744,13 +868,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   : s.activeCommunity,
             };
           });
-          scheduleUnreadRefresh(() => {
-            const s = useChatStore.getState();
-            s.fetchCommunities().catch(() => {});
-            if (s.activeCommunity?.id) {
-              s.fetchChannels(s.activeCommunity.id).catch(() => {});
-            }
-          });
         }
         if (!conversationId) break;
         set(s => ({
@@ -802,12 +919,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         break;
       }
       case 'community:channel_message': {
-        const { communityId, channelId, authorId } = event.data || {};
+        const { communityId, channelId } = event.data || {};
         if (!communityId || !channelId) break;
-        const me = useAuthStore.getState().user;
-        if (authorId && me?.id === authorId) break;
 
         set(s => ({
+          channels: s.channels.map((channel) =>
+            channel.id === channelId
+              ? {
+                  ...channel,
+                  has_new_activity: s.activeChannel?.id !== channelId,
+                  hasNewActivity: s.activeChannel?.id !== channelId,
+                }
+              : channel
+          ),
           communities: s.communities.map((community) =>
             community.id === communityId
               ? {
@@ -816,6 +940,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   hasUnreadChannels: true,
                   unread_channel_count: Math.max(Number(community.unread_channel_count ?? community.unreadChannelCount ?? 0), 1),
                   unreadChannelCount: Math.max(Number(community.unread_channel_count ?? community.unreadChannelCount ?? 0), 1),
+                  has_new_activity: s.activeCommunity?.id !== communityId,
+                  hasNewActivity: s.activeCommunity?.id !== communityId,
                 }
               : community
           ),
@@ -827,19 +953,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   hasUnreadChannels: true,
                   unread_channel_count: Math.max(Number(s.activeCommunity.unread_channel_count ?? s.activeCommunity.unreadChannelCount ?? 0), 1),
                   unreadChannelCount: Math.max(Number(s.activeCommunity.unread_channel_count ?? s.activeCommunity.unreadChannelCount ?? 0), 1),
+                  has_new_activity: false,
+                  hasNewActivity: false,
                 }
               : s.activeCommunity,
         }));
 
-        // Keep counts authoritative with throttled refresh (avoids drift across many events).
-        const now = Date.now();
-        if (now - lastCommunityUnreadRefreshAt > 2000) {
-          lastCommunityUnreadRefreshAt = now;
-          store.fetchCommunities().catch(() => {});
-          if (store.activeCommunity?.id === communityId) {
-            store.fetchChannels(communityId).catch(() => {});
-          }
-        }
         break;
       }
     }

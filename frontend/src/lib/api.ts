@@ -17,14 +17,23 @@ let _accessToken: string | null = null;
 // Remove any stale token left from the previous localStorage-based approach.
 localStorage.removeItem('accessToken');
 let _refreshing   = null; // in-flight refresh promise
+let _authInvalid = false;
+const _inFlightGets = new Map<string, Promise<any>>();
+const _recentGets = new Map<string, { at: number; value: any }>();
+const GET_CACHE_TTL_MS = 1500;
 
 export function setToken(t: string | null) {
   _accessToken = t;
+  _authInvalid = !t;
 }
 
 export function getToken() { return _accessToken; }
 
 async function requestFormData(path: string, formData: FormData) {
+  if (_authInvalid && !path.startsWith('/auth/')) {
+    throw new Error('Session expired');
+  }
+
   const headers: Record<string, string> = {};
   if (_accessToken) headers['Authorization'] = `Bearer ${_accessToken}`;
 
@@ -65,6 +74,19 @@ async function request(method: string, path: string, body?: unknown, retry = tru
     path === '/auth/refresh' ||
     path === '/auth/session';
 
+  if (_authInvalid && !skipRefreshForPath) {
+    throw new Error('Session expired');
+  }
+
+  // If another request is already refreshing auth, wait before firing more traffic.
+  if (_refreshing && !skipRefreshForPath) {
+    try {
+      await _refreshing;
+    } catch {
+      throw new Error('Session expired');
+    }
+  }
+
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers,
@@ -80,6 +102,8 @@ async function request(method: string, path: string, body?: unknown, retry = tru
       return request(method, path, body, false);
     } catch {
       setToken(null);
+      _authInvalid = true;
+      _inFlightGets.clear();
       const currentPath = window.location.pathname;
       const isAuthRoute = currentPath === '/login' || currentPath === '/register' || currentPath === '/oauth-callback';
       if (!isAuthRoute) {
@@ -102,7 +126,32 @@ async function request(method: string, path: string, body?: unknown, retry = tru
 }
 
 export const api = {
-  get:    (path: string)               => request('GET',    path),
+  get:    (path: string)               => {
+    const cached = _recentGets.get(path);
+    if (cached && Date.now() - cached.at < GET_CACHE_TTL_MS) {
+      return Promise.resolve(cached.value);
+    }
+
+    const existing = _inFlightGets.get(path);
+    if (existing) return existing;
+
+    const pending = request('GET', path)
+      .then((value) => {
+        _recentGets.set(path, { at: Date.now(), value });
+        if (_recentGets.size > 300) {
+          const cutoff = Date.now() - GET_CACHE_TTL_MS;
+          for (const [key, entry] of _recentGets) {
+            if (entry.at < cutoff) _recentGets.delete(key);
+          }
+        }
+        return value;
+      })
+      .finally(() => {
+        _inFlightGets.delete(path);
+      });
+    _inFlightGets.set(path, pending);
+    return pending;
+  },
   post:   (path: string, body?: unknown) => request('POST',   path, body),
   postForm: (path: string, formData: FormData) => requestFormData(path, formData),
   patch:  (path: string, body?: unknown) => request('PATCH',  path, body),

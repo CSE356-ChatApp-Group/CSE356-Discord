@@ -195,9 +195,19 @@ redisSub.on('message', (channel, message) => {
   const clients = channelClients.get(channel);
   if (!clients || clients.size === 0) return;
 
+  let outbound = message;
+  try {
+    const parsed = JSON.parse(message);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      outbound = JSON.stringify({ ...parsed, channel });
+    }
+  } catch {
+    // Keep original payload if it is not valid JSON.
+  }
+
   clients.forEach((ws) => {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(message); // already serialized JSON
+      ws.send(outbound);
     }
   });
 });

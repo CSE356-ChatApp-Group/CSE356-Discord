@@ -173,6 +173,8 @@ function ChannelRow({ channel, active, unread, onClick }) {
 
 function isChannelUnread(channel, active, currentUserId) {
   if (active) return false;
+  const hasActivity = Boolean(channel?.has_new_activity ?? channel?.hasNewActivity);
+  if (hasActivity) return true;
   const lastMessageAuthorId = channel?.last_message_author_id || channel?.lastMessageAuthorId;
   const lastMessageId = channel?.last_message_id || channel?.lastMessageId;
   const myLastReadMessageId = channel?.my_last_read_message_id || channel?.myLastReadMessageId;

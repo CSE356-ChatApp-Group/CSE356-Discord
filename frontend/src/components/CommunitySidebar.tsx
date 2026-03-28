@@ -6,10 +6,20 @@ import Modal from './Modal';
 import styles from './CommunitySidebar.module.css';
 
 export default function CommunitySidebar() {
-  const { communities, activeCommunity, selectCommunity, createCommunity, fetchCommunities, openHome } = useChatStore();
+  const {
+    communities,
+    activeCommunity,
+    conversations,
+    activeConv,
+    selectCommunity,
+    createCommunity,
+    fetchCommunities,
+    openHome,
+  } = useChatStore();
   const logout = useAuthStore(s => s.logout);
   const user   = useAuthStore(s => s.user);
   const setUser = useAuthStore(s => s.setUser);
+  const hasUnreadDms = conversations.some((conv) => isConversationUnread(conv, activeConv?.id === conv.id, user?.id));
   const [showCreate, setShowCreate] = useState(false);
   const [showJoin, setShowJoin] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
@@ -159,6 +169,13 @@ export default function CommunitySidebar() {
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
           </svg>
+          {hasUnreadDms && (
+            <span
+              className={styles.communityUnreadDot}
+              data-testid="home-dms-unread-indicator"
+              aria-label="Direct messages have unread messages"
+            />
+          )}
         </button>
         <div className={styles.separator} />
       </div>
@@ -382,8 +399,20 @@ export default function CommunitySidebar() {
 
 function communityHasUnreadChannels(community) {
   if (!community) return false;
+  const hasActivity = Boolean(community.has_new_activity ?? community.hasNewActivity);
+  if (hasActivity) return true;
   const unreadCount = Number(community.unread_channel_count ?? community.unreadChannelCount ?? 0);
   return Boolean(community.has_unread_channels ?? community.hasUnreadChannels ?? unreadCount > 0);
+}
+
+function isConversationUnread(conv, active, currentUserId) {
+  if (active) return false;
+  const lastMessageAuthorId = conv?.last_message_author_id || conv?.lastMessageAuthorId;
+  const lastMessageId = conv?.last_message_id || conv?.lastMessageId;
+  const myLastReadMessageId = conv?.my_last_read_message_id || conv?.myLastReadMessageId;
+  if (!lastMessageId) return false;
+  if (lastMessageAuthorId === currentUserId) return false;
+  return myLastReadMessageId !== lastMessageId;
 }
 
 function CommunityIcon({ community, unread, active, onClick }) {

@@ -64,10 +64,11 @@ class WsManager {
         const event = JSON.parse(data);
         // Notify global listeners
         this._globalListeners.forEach(fn => fn(event));
-        // Notify channel-specific listeners
-        // Messages fan out to the Redis channel key embedded in the event
-        // We broadcast to all local listeners since the server already filtered
-        this._listeners.forEach(fns => fns.forEach(fn => fn(event)));
+        // Notify channel-specific listeners for the event's channel only.
+        const eventChannel = event?.channel;
+        if (eventChannel && this._listeners.has(eventChannel)) {
+          this._listeners.get(eventChannel)?.forEach(fn => fn(event));
+        }
       } catch { /* ignore */ }
     };
 
