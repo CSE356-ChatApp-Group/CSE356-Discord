@@ -19,7 +19,7 @@ export default function MessagePane() {
   const [sending, setSending]     = useState(false);
   const [loadingMore, setLoadMore] = useState(false);
   const [showSearch, setSearch]   = useState(false);
-  const [showMembers, setShowMembers] = useState(Boolean(activeChannel));
+  const [showMembers, setShowMembers] = useState(false);
   const [localQ, setLocalQ]       = useState('');
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -72,7 +72,7 @@ export default function MessagePane() {
   useEffect(() => {
     inputRef.current?.focus();
     setSearch(false);
-    setShowMembers(Boolean(activeChannel));
+    setShowMembers(false);
     clearSearch();
     setLocalQ('');
   }, [key]);
