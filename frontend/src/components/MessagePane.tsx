@@ -152,6 +152,11 @@ export default function MessagePane() {
       return { latestOwnMessageId: latestOwnId, latestOwnSeen: false };
     }
 
+    // Fast path: recipient read pointer exactly equals latest outgoing message.
+    if (otherLastReadMessageId === latestOwnId) {
+      return { latestOwnMessageId: latestOwnId, latestOwnSeen: true };
+    }
+
     const readIdx = msgList.findIndex(m => m.id === otherLastReadMessageId);
     return {
       latestOwnMessageId: latestOwnId,
