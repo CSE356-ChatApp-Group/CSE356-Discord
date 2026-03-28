@@ -154,9 +154,19 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     echo 'Candidate port ${CANDIDATE_PORT} is already in use; attempting stale process cleanup...'
     PIDS=\$(lsof -ti :${CANDIDATE_PORT} | sort -u)
     for PID in \$PIDS; do
-      kill \"\$PID\" || true
+      kill \"\$PID\" 2>/dev/null || true
     done
-    sleep 2
+    sleep 1
+    
+    PIDS=\$(lsof -ti :${CANDIDATE_PORT} 2>/dev/null | sort -u)
+    if [ -n \"\$PIDS\" ]; then
+      echo 'Force killing remaining processes on port ${CANDIDATE_PORT}...'
+      for PID in \$PIDS; do
+        sudo kill -9 \"\$PID\" 2>/dev/null || true
+      done
+    fi
+    
+    sleep 1
     if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
       echo 'ERROR: Candidate port ${CANDIDATE_PORT} still in use after cleanup.'
       exit 1
