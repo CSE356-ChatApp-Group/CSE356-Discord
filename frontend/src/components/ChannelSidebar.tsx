@@ -8,7 +8,7 @@ import styles from './ChannelSidebar.module.css';
 export default function ChannelSidebar() {
   const {
     activeCommunity, channels, activeChannel,
-    conversations, conversationReadAt, activeConv,
+    conversations, activeConv,
     selectChannel, selectConversation, createChannel, openDm,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
@@ -113,7 +113,7 @@ export default function ChannelSidebar() {
                 key={conv.id}
                 conv={conv}
                 currentUserId={user?.id}
-                unread={isConversationUnread(conv, conversationReadAt[conv.id], activeConv?.id === conv.id, user?.id)}
+                unread={isConversationUnread(conv, activeConv?.id === conv.id, user?.id)}
                 active={activeConv?.id === conv.id}
                 onClick={() => selectConversation(conv)}
               />
@@ -162,18 +162,14 @@ function ChannelRow({ channel, active, onClick }) {
   );
 }
 
-function isConversationUnread(conv, readAt, active, currentUserId) {
+function isConversationUnread(conv, active, currentUserId) {
   if (active) return false;
   const lastMessageAuthorId = conv?.last_message_author_id || conv?.lastMessageAuthorId;
   const lastMessageId = conv?.last_message_id || conv?.lastMessageId;
   const myLastReadMessageId = conv?.my_last_read_message_id || conv?.myLastReadMessageId;
-  if (lastMessageId && lastMessageAuthorId && lastMessageAuthorId !== currentUserId) {
-    return myLastReadMessageId !== lastMessageId;
-  }
-  const updatedAt = conv?.updatedAt || conv?.updated_at;
-  if (!updatedAt) return false;
-  if (!readAt) return true;
-  return new Date(updatedAt).getTime() > new Date(readAt).getTime();
+  if (!lastMessageId) return false;
+  if (lastMessageAuthorId === currentUserId) return false;
+  return myLastReadMessageId !== lastMessageId;
 }
 
 function DmRow({ conv, currentUserId, unread, active, onClick }) {

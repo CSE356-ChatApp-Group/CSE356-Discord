@@ -133,8 +133,9 @@ export default function MessagePane() {
     ? `# ${activeChannel.name}`
     : activeConv?.name || 'Direct Message';
 
+  const participants = activeConv?.participants || [];
+  const isOneToOneDm = Boolean(activeConv && participants.length === 2);
   const otherLastReadMessageId = activeConv?.other_last_read_message_id || activeConv?.otherLastReadMessageId;
-  const otherLastReadAt = activeConv?.other_last_read_at || activeConv?.otherLastReadAt;
   let latestOwnMessageId: string | null = null;
   for (let i = msgList.length - 1; i >= 0; i -= 1) {
     const m = msgList[i];
@@ -144,14 +145,11 @@ export default function MessagePane() {
     }
   }
   let latestOwnSeen = false;
-  if (latestOwnMessageId) {
+  if (isOneToOneDm && latestOwnMessageId) {
     const ownIdx = msgList.findIndex(m => m.id === latestOwnMessageId);
     if (ownIdx >= 0 && otherLastReadMessageId) {
       const seenIdx = msgList.findIndex(m => m.id === otherLastReadMessageId);
       if (seenIdx >= ownIdx) latestOwnSeen = true;
-    }
-    if (!latestOwnSeen && otherLastReadAt && ownIdx >= 0) {
-      latestOwnSeen = new Date(otherLastReadAt).getTime() >= new Date(msgList[ownIdx].created_at).getTime();
     }
   }
 
