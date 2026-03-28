@@ -18,20 +18,27 @@ router.get('/', async (req, res, next) => {
   try {
     const ids = (req.query.userIds || '').split(',').filter(Boolean);
     if (!ids.length) return res.status(400).json({ error: 'userIds query param required' });
-    const map = await presence.getBulkPresence(ids);
-    res.json({ presence: map });
+    const details = await presence.getBulkPresenceDetails(ids) as Record<string, { status: string; awayMessage: string | null }>;
+    const map = Object.fromEntries(Object.entries(details).map(([id, d]) => [id, d.status]));
+    const awayMessages = Object.fromEntries(Object.entries(details)
+      .filter(([, d]) => d?.awayMessage)
+      .map(([id, d]) => [id, d.awayMessage]));
+    res.json({ presence: map, awayMessages });
   } catch (err) { next(err); }
 });
 
 router.put('/', async (req, res, next) => {
   try {
-    const { status } = req.body;
+    const { status, awayMessage } = req.body || {};
     // `offline` is derived from connection aggregation and is not client-settable.
     const allowed = ['online', 'idle', 'away'];
     if (!allowed.includes(status)) {
       return res.status(400).json({ error: `status must be one of ${allowed.join(', ')}` });
     }
-    await presence.setPresence(req.user.id, status);
+    if (awayMessage !== undefined && typeof awayMessage !== 'string' && awayMessage !== null) {
+      return res.status(400).json({ error: 'awayMessage must be a string or null' });
+    }
+    await presence.setPresence(req.user.id, status, status === 'away' ? awayMessage : null);
     res.json({ success: true });
   } catch (err) { next(err); }
 });

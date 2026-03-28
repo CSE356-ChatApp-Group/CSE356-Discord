@@ -21,6 +21,10 @@ export default function CommunitySidebar() {
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ newPassword: '', confirmPassword: '' });
   const [passwordMsg, setPasswordMsg] = useState('');
+  const [presenceStatus, setPresenceStatus] = useState<'online' | 'away'>('online');
+  const [awayMessage, setAwayMessage] = useState('');
+  const [presenceBusy, setPresenceBusy] = useState(false);
+  const [presenceMsg, setPresenceMsg] = useState('');
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarMsg, setAvatarMsg] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
@@ -33,12 +37,39 @@ export default function CommunitySidebar() {
       const data = await api.get('/auth/oauth/linked');
       setLinkedProviders(Array.isArray(data?.providers) ? data.providers : []);
       setHasPassword(Boolean(data?.hasPassword));
+      const me = await api.get('/users/me');
+      const status = me?.user?.status === 'away' ? 'away' : 'online';
+      setPresenceStatus(status);
+      setAwayMessage(me?.user?.away_message || me?.user?.awayMessage || '');
+      setPresenceMsg('');
     } catch (e) {
       setAccountError(e?.message || 'Could not load linked providers');
       setLinkedProviders([]);
       setHasPassword(false);
+      setPresenceStatus('online');
+      setAwayMessage('');
     } finally {
       setLoadingLinks(false);
+    }
+  }
+
+  async function submitPresence(e) {
+    e.preventDefault();
+    setPresenceBusy(true);
+    setPresenceMsg('');
+    setAccountError('');
+    try {
+      const body = presenceStatus === 'away'
+        ? { status: 'away', awayMessage: awayMessage.trim() || null }
+        : { status: 'online', awayMessage: null };
+      await api.put('/presence', body);
+      setPresenceMsg(presenceStatus === 'away' ? 'Away status updated.' : 'Presence set to online.');
+      const profile = await api.get('/users/me');
+      if (profile?.user) setUser(profile.user);
+    } catch (e) {
+      setAccountError(e?.message || 'Could not update presence');
+    } finally {
+      setPresenceBusy(false);
     }
   }
 
@@ -229,6 +260,32 @@ export default function CommunitySidebar() {
                 {avatarBusy ? 'Uploading…' : 'Upload avatar'}
               </button>
               {avatarMsg && <p className={styles.passwordMsg}>{avatarMsg}</p>}
+            </div>
+
+            <div>
+              <p className={styles.accountSectionTitle}>Presence</p>
+              <form className={styles.passwordForm} onSubmit={submitPresence} data-testid="account-presence-form">
+                <select
+                  value={presenceStatus}
+                  onChange={e => setPresenceStatus(e.target.value === 'away' ? 'away' : 'online')}
+                  data-testid="account-presence-status"
+                >
+                  <option value="online">Online / Auto idle</option>
+                  <option value="away">Away</option>
+                </select>
+                {presenceStatus === 'away' && (
+                  <input
+                    value={awayMessage}
+                    onChange={e => setAwayMessage(e.target.value.slice(0, 280))}
+                    placeholder="Away message (optional)"
+                    data-testid="account-away-message"
+                  />
+                )}
+                <button type="submit" className={styles.passwordBtn} disabled={presenceBusy} data-testid="account-presence-save">
+                  {presenceBusy ? 'Saving…' : 'Save presence'}
+                </button>
+              </form>
+              {presenceMsg && <p className={styles.passwordMsg}>{presenceMsg}</p>}
             </div>
 
             <div>

@@ -112,3 +112,12 @@
   text-transform: uppercase;
   letter-spacing: .04em;
 }
+
+.awayMessage {
+  max-width: 190px;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

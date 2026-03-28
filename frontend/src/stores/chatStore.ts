@@ -15,6 +15,7 @@ type ChatState = {
   activeConv: Entity | null;
   messages: Record<string, Entity[]>;
   presence: Record<string, PresenceStatus>;
+  awayMessages: Record<string, string | null>;
   members: Entity[];
   searchResults: Entity[] | null;
   searchQuery: string;
@@ -33,7 +34,7 @@ type ChatState = {
   editMessage: (id: string, content: string) => Promise<void>;
   deleteMessage: (id: string) => Promise<void>;
   fetchMembers: (communityId: string) => Promise<void>;
-  setPresence: (userId: string, status: PresenceStatus) => void;
+  setPresence: (userId: string, status: PresenceStatus, awayMessage?: string | null) => void;
   search: (q: string) => Promise<void>;
   clearSearch: () => void;
   _handleWsEvent: (event: any) => void;
@@ -116,6 +117,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   activeConv:      null,
   messages:        {},   // { [channelId|convId]: Message[] }
   presence:        {},   // { [userId]: 'online'|'idle'|'away'|'offline' }
+  awayMessages:    {},   // { [userId]: away message }
   members:         [],   // members of activeCommunity
   searchResults:   null,
   searchQuery:     '',
@@ -372,13 +374,27 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const { members } = await api.get(`/communities/${communityId}/members`);
     // Seed presence map from member list
     const presence = {};
+    const awayMessages = {};
     members.forEach((m: Entity) => { presence[m.id] = m.status || 'offline'; });
-    set({ members, presence: { ...get().presence, ...presence } });
+    members.forEach((m: Entity) => {
+      awayMessages[m.id] = m.away_message || m.awayMessage || null;
+    });
+    set({
+      members,
+      presence: { ...get().presence, ...presence },
+      awayMessages: { ...get().awayMessages, ...awayMessages },
+    });
   },
 
   // ── Presence ──────────────────────────────────────────────────────────────
-  setPresence(userId: string, status: PresenceStatus) {
-    set(s => ({ presence: { ...s.presence, [userId]: status } }));
+  setPresence(userId: string, status: PresenceStatus, awayMessage: string | null = null) {
+    set(s => ({
+      presence: { ...s.presence, [userId]: status },
+      awayMessages: {
+        ...s.awayMessages,
+        [userId]: status === 'away' ? (awayMessage || null) : null,
+      },
+    }));
   },
 
   // ── Search ────────────────────────────────────────────────────────────────
@@ -634,8 +650,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         break;
       }
       case 'presence:updated': {
-        const { userId, status } = event.data;
-        store.setPresence(userId, status);
+        const { userId, status, awayMessage } = event.data;
+        store.setPresence(userId, status, awayMessage ?? null);
         break;
       }
       case 'read:updated': {

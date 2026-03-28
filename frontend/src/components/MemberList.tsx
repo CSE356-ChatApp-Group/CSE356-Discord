@@ -6,14 +6,14 @@ import styles from './MemberList.module.css';
 const STATUS_LABEL = { online: 'Online', idle: 'Idle', away: 'Away', offline: 'Offline' };
 
 export default function MemberList() {
-  const { members, presence } = useChatStore();
+  const { members, presence, awayMessages } = useChatStore();
   const currentUser = useAuthStore(s => s.user);
 
   // Group by status
   const groups = { online: [], idle: [], away: [], offline: [] };
   for (const m of members) {
     const s = presence[m.id] || 'offline';
-    groups[s].push({ ...m, status: s });
+    groups[s].push({ ...m, status: s, awayMessage: awayMessages[m.id] || m.away_message || null });
   }
 
   return (
@@ -56,6 +56,9 @@ function MemberRow({ member, isYou }) {
           {name}
           {isYou && <span className={styles.you}>you</span>}
         </span>
+        {member.status === 'away' && member.awayMessage && (
+          <span className={styles.awayMessage} title={member.awayMessage}>{member.awayMessage}</span>
+        )}
         {member.role !== 'member' && (
           <span className={styles.role}>{member.role}</span>
         )}

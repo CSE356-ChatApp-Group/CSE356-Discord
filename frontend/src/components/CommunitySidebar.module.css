@@ -240,6 +240,15 @@
   font-size: 13px;
 }
 
+.passwordForm select {
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-primary);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
 .passwordBtn {
   border: 1px solid var(--border-light);
   background: var(--accent);

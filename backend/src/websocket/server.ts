@@ -162,7 +162,12 @@ async function recomputeUserPresence(userId) {
     return;
   }
 
-  await presenceService.setPresence(userId, resolveAggregateStatus(stateByConn));
+  const aggregateStatus = resolveAggregateStatus(stateByConn);
+  if (aggregateStatus === 'away') {
+    await presenceService.setPresence(userId, 'away', undefined);
+    return;
+  }
+  await presenceService.setPresence(userId, aggregateStatus, null);
 }
 
 async function reconcileAllConnectedUsers() {
@@ -222,10 +227,7 @@ wss.on('connection', async (ws, req) => {
 
   upsertConnectionState(user.id, ws._connectionId, 'online')
     .then(async () => {
-      await Promise.all([
-        markConnectionAlive(user.id, ws._connectionId),
-        markConnectionActive(user.id, ws._connectionId),
-      ]);
+      await markConnectionAlive(user.id, ws._connectionId);
       await recomputeUserPresence(user.id);
     })
     .catch((err) => logger.warn({ err, userId: user.id }, 'WS presence setup failed'));
@@ -265,10 +267,6 @@ function handleClientMessage(ws, user, msg) {
   switch (msg.type) {
     case 'subscribe':
       if (isAllowedChannel(user, msg.channel)) {
-        markConnectionActive(user.id, ws._connectionId).catch(() => {});
-        upsertConnectionState(user.id, ws._connectionId, 'online')
-          .then(() => recomputeUserPresence(user.id))
-          .catch(() => {});
         subscribeClient(ws, msg.channel);
         ws.send(JSON.stringify({ event: 'subscribed', data: { channel: msg.channel } }));
       } else {
@@ -281,10 +279,6 @@ function handleClientMessage(ws, user, msg) {
       break;
 
     case 'ping':
-      markConnectionActive(user.id, ws._connectionId).catch(() => {});
-      upsertConnectionState(user.id, ws._connectionId, 'online')
-        .then(() => recomputeUserPresence(user.id))
-        .catch(() => {});
       ws.send(JSON.stringify({ event: 'pong' }));
       break;
 
@@ -293,8 +287,8 @@ function handleClientMessage(ws, user, msg) {
       if (['online', 'idle', 'away'].includes(msg.status)) {
         upsertConnectionState(user.id, ws._connectionId, msg.status)
           .then(async () => {
-            if (msg.status === 'online') {
-              await markConnectionActive(user.id, ws._connectionId);
+            if (msg.status === 'away') {
+              await presenceService.setAwayMessage(user.id, msg.awayMessage);
             }
             await recomputeUserPresence(user.id);
           })

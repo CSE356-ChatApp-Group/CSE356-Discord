@@ -77,8 +77,8 @@ router.get('/me', async (req, res, next) => {
   try {
     const { rows } = await pool.query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const status = await presenceService.getPresence(req.user.id);
-    res.json({ user: { ...rows[0], status } });
+    const { status, awayMessage } = await presenceService.getPresenceDetails(req.user.id);
+    res.json({ user: { ...rows[0], status, away_message: awayMessage } });
   } catch (err) { next(err); }
 });
 
@@ -144,8 +144,8 @@ router.get('/:id', async (req, res, next) => {
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const status = await presenceService.getPresence(req.params.id);
-    res.json({ user: { ...rows[0], status } });
+    const { status, awayMessage } = await presenceService.getPresenceDetails(req.params.id);
+    res.json({ user: { ...rows[0], status, away_message: awayMessage } });
   } catch (err) { next(err); }
 });
 

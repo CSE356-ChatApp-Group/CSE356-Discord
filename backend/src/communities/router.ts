@@ -195,8 +195,12 @@ router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
        ORDER BY cm.role DESC, u.username`,
       [req.params.id]
     );
-    const presenceMap = await presenceService.getBulkPresence(rows.map(r => r.id));
-    const members = rows.map(r => ({ ...r, status: presenceMap[r.id] }));
+    const presenceMap = await presenceService.getBulkPresenceDetails(rows.map(r => r.id));
+    const members = rows.map(r => ({
+      ...r,
+      status: presenceMap[r.id]?.status || 'offline',
+      away_message: presenceMap[r.id]?.awayMessage || null,
+    }));
     res.json({ members });
   } catch (err) { next(err); }
 });
