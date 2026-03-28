@@ -125,6 +125,22 @@ router.post('/',
 
       sideEffects.indexMessage(baseMessage);
       sideEffects.publishMessageEvent(targetKey(channelId, conversationId), 'message:created', message || baseMessage);
+      if (channelId) {
+        const { rows: channelRows } = await pool.query(
+          'SELECT community_id FROM channels WHERE id = $1',
+          [channelId]
+        );
+        const communityId = channelRows[0]?.community_id;
+        if (communityId) {
+          sideEffects.publishMessageEvent(`community:${communityId}`, 'community:channel_message', {
+            communityId,
+            channelId,
+            messageId: baseMessage.id,
+            authorId: baseMessage.author_id,
+            createdAt: baseMessage.created_at,
+          });
+        }
+      }
 
       res.status(201).json({ message: message || baseMessage });
     } catch (err) { next(err); }

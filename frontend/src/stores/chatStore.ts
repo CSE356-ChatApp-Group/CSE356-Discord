@@ -107,6 +107,8 @@ function countUnreadChannels(channels: Entity[], currentUserId?: string, activeC
   return channels.reduce((count, channel) => count + (isChannelUnreadForUser(channel, currentUserId, activeChannelId) ? 1 : 0), 0);
 }
 
+let lastCommunityUnreadRefreshAt = 0;
+
 export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Data ──────────────────────────────────────────────────────────────────
   communities:     [],
@@ -131,6 +133,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         ? communities.find((c: Entity) => c.id === s.activeCommunity?.id) || s.activeCommunity
         : s.activeCommunity,
     }));
+    communities.forEach((community: Entity) => {
+      if (community?.id && community?.my_role) {
+        wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
+      }
+    });
     return communities;
   },
 
@@ -758,6 +765,44 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const { communityId } = event.data;
         if (store.activeCommunity?.id === communityId) {
           store.fetchMembers(communityId);
+        }
+        break;
+      }
+      case 'community:channel_message': {
+        const { communityId, channelId, authorId } = event.data || {};
+        if (!communityId || !channelId) break;
+        const me = useAuthStore.getState().user;
+        if (authorId && me?.id === authorId) break;
+
+        set(s => ({
+          communities: s.communities.map((community) =>
+            community.id === communityId
+              ? {
+                  ...community,
+                  has_unread_channels: true,
+                  hasUnreadChannels: true,
+                  unread_channel_count: Math.max(Number(community.unread_channel_count ?? community.unreadChannelCount ?? 0), 1),
+                  unreadChannelCount: Math.max(Number(community.unread_channel_count ?? community.unreadChannelCount ?? 0), 1),
+                }
+              : community
+          ),
+          activeCommunity:
+            s.activeCommunity?.id === communityId
+              ? {
+                  ...s.activeCommunity,
+                  has_unread_channels: true,
+                  hasUnreadChannels: true,
+                  unread_channel_count: Math.max(Number(s.activeCommunity.unread_channel_count ?? s.activeCommunity.unreadChannelCount ?? 0), 1),
+                  unreadChannelCount: Math.max(Number(s.activeCommunity.unread_channel_count ?? s.activeCommunity.unreadChannelCount ?? 0), 1),
+                }
+              : s.activeCommunity,
+        }));
+
+        // Keep counts authoritative with throttled refresh (avoids drift across many events).
+        const now = Date.now();
+        if (now - lastCommunityUnreadRefreshAt > 2000) {
+          lastCommunityUnreadRefreshAt = now;
+          store.fetchCommunities().catch(() => {});
         }
         break;
       }
