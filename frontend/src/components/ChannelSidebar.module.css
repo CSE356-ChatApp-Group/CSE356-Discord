@@ -212,3 +212,63 @@
 
 .form button:hover:not(:disabled) { background: var(--accent-dim); }
 .form button:disabled { opacity: .5; }
+
+/* ── New DM modal ─────────────────────────────────────────────────────────── */
+.newDmModal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 280px;
+}
+
+.newDmSearch {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.newDmSearch:focus {
+  border-color: var(--accent);
+}
+
+.newDmResults {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.newDmResultBtn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  text-align: left;
+  transition: background .1s;
+  color: var(--text-primary);
+}
+
+.newDmResultBtn:hover:not(:disabled) { background: var(--bg-3); }
+.newDmResultBtn:disabled { opacity: .5; }
+
+.newDmResultName {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.newDmResultUsername {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: auto;
+}

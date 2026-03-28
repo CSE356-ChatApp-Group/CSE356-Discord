@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
+import { api } from '../lib/api';
 import Modal from './Modal';
 import styles from './ChannelSidebar.module.css';
 
@@ -8,18 +9,41 @@ export default function ChannelSidebar() {
   const {
     activeCommunity, channels, activeChannel,
     conversations, activeConv,
-    selectChannel, selectConversation, createChannel,
+    selectChannel, selectConversation, createChannel, openDm,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
   const [showCreate, setShowCreate] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
+  const [showNewDm, setShowNewDm] = useState(false);
 
   if (!activeCommunity && conversations.length === 0) {
     return (
       <aside className={styles.sidebar} aria-label="Channels and DMs" data-testid="channel-sidebar-empty">
-        <div className={styles.empty}>
-          <p>No direct messages yet</p>
+        <div className={styles.scroll}>
+          <div className={styles.sectionHeader}>
+            <span>Messages</span>
+            <button
+              className={styles.sectionAdd}
+              title="New direct message"
+              aria-label="Start new direct message"
+              data-testid="dm-create-open"
+              onClick={() => setShowNewDm(true)}
+            >+</button>
+          </div>
+          <div className={styles.empty}>
+            <p>No direct messages yet</p>
+          </div>
         </div>
+        {showNewDm && (
+          <NewDmModal
+            currentUserId={user?.id}
+            onClose={() => setShowNewDm(false)}
+            onOpen={async (userId) => {
+              setShowNewDm(false);
+              await openDm(userId);
+            }}
+          />
+        )}
       </aside>
     );
   }
@@ -73,6 +97,13 @@ export default function ChannelSidebar() {
           <>
             <div className={styles.sectionHeader}>
               <span>Messages</span>
+              <button
+                className={styles.sectionAdd}
+                title="New direct message"
+                aria-label="Start new direct message"
+                data-testid="dm-create-open"
+                onClick={() => setShowNewDm(true)}
+              >+</button>
             </div>
             {conversations.length === 0 && (
               <p className={styles.hint}>No DMs yet</p>
@@ -104,6 +135,17 @@ export default function ChannelSidebar() {
         <InviteCommunityModal
           community={activeCommunity}
           onClose={() => setShowInvite(false)}
+        />
+      )}
+
+      {showNewDm && (
+        <NewDmModal
+          currentUserId={user?.id}
+          onClose={() => setShowNewDm(false)}
+          onOpen={async (userId) => {
+            setShowNewDm(false);
+            await openDm(userId);
+          }}
         />
       )}
     </aside>
@@ -186,6 +228,80 @@ function CreateChannelModal({ onClose, onCreate }) {
         </label>
         <button type="submit" disabled={busy} data-testid="channel-create-submit">{busy ? 'Creating…' : 'Create channel'}</button>
       </form>
+    </Modal>
+  );
+}
+
+function NewDmModal({ currentUserId, onClose, onOpen }) {
+  const [query, setQuery]     = useState('');
+  const [results, setResults] = useState<any[]>([]);
+  const [busy, setBusy]       = useState(false);
+  const [err, setErr]         = useState('');
+  const inputRef              = useRef<HTMLInputElement>(null);
+  const debounceRef           = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const search = useCallback((q: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!q.trim()) { setResults([]); return; }
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const data = await api.get(`/users?q=${encodeURIComponent(q.trim())}`);
+        const users: any[] = data.users ?? data ?? [];
+        setResults(users.filter((u: any) => u.id !== currentUserId));
+      } catch {
+        setResults([]);
+      }
+    }, 250);
+  }, [currentUserId]);
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setQuery(e.target.value);
+    search(e.target.value);
+  }
+
+  async function handleSelect(userId: string) {
+    setBusy(true); setErr('');
+    try { await onOpen(userId); }
+    catch (e: any) { setErr(e?.message ?? 'Failed to open DM'); setBusy(false); }
+  }
+
+  return (
+    <Modal title="New message" onClose={onClose}>
+      <div className={styles.newDmModal} data-testid="dm-create-modal">
+        <input
+          ref={inputRef}
+          className={styles.newDmSearch}
+          type="text"
+          placeholder="Find a user by name or username…"
+          value={query}
+          onChange={handleChange}
+          data-testid="dm-search-input"
+        />
+        {err && <p className={styles.err}>{err}</p>}
+        {results.length > 0 && (
+          <ul className={styles.newDmResults} data-testid="dm-search-results">
+            {results.map(u => (
+              <li key={u.id}>
+                <button
+                  className={styles.newDmResultBtn}
+                  onClick={() => handleSelect(u.id)}
+                  disabled={busy}
+                  data-testid={`dm-user-result-${u.id}`}
+                  data-user-id={u.id}
+                >
+                  <span className={styles.newDmResultName}>{u.displayName || u.display_name || u.username}</span>
+                  {(u.username) && <span className={styles.newDmResultUsername}>@{u.username}</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {query.trim() && results.length === 0 && (
+          <p className={styles.hint}>No users found</p>
+        )}
+      </div>
     </Modal>
   );
 }
