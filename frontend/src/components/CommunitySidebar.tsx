@@ -134,7 +134,7 @@ export default function CommunitySidebar() {
 
       {/* Community icons */}
       <div className={styles.list} data-testid="community-list">
-        {communities.map(c => (
+        {communities.filter(c => c.my_role).map(c => (
           <CommunityIcon
             key={c.id}
             community={c}
