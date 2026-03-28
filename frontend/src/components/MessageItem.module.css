@@ -25,6 +25,24 @@
   margin-bottom: 2px;
 }
 
+.metaReadReceipt {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: .01em;
+}
+
+.groupedReadReceipt {
+  position: absolute;
+  right: 16px;
+  top: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: .01em;
+}
+
 .author {
   font-size: 14px;
   font-weight: 600;
@@ -55,16 +73,6 @@
   font-size: 13px;
   color: var(--text-muted);
   font-style: italic;
-}
-
-.readReceipt {
-  margin-top: 3px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-muted);
-  letter-spacing: .01em;
-  text-align: right;
-  width: 100%;
 }
 
 .attachments {

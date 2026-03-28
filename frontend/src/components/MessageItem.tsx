@@ -22,6 +22,7 @@ function formatTimestamp(iso) {
 export default function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false }) {
   const { editMessage, deleteMessage } = useChatStore();
   const grouped = isGrouped(msg, prevMessage);
+  const shouldShowReadReceipt = showReadReceipt && !msg.deleted_at;
 
   const [editing,  setEditing]  = useState(false);
   const [draft,    setDraft]    = useState(msg.content || '');
@@ -62,6 +63,16 @@ export default function MessageItem({ message: msg, prevMessage, isOwn, showRead
             <span className={styles.author}>{name}</span>
             <span className={styles.time}>{formatTimestamp(msg.created_at)}</span>
             {msg.edited_at && <span className={styles.edited}>(edited)</span>}
+            {shouldShowReadReceipt && (
+              <span
+                className={styles.metaReadReceipt}
+                data-testid={`message-read-receipt-${msg.id}`}
+                data-read-receipt="READ"
+                aria-label="Read by recipient"
+              >
+                Read
+              </span>
+            )}
           </div>
         )}
 
@@ -90,16 +101,6 @@ export default function MessageItem({ message: msg, prevMessage, isOwn, showRead
             ) : (
               <p className={styles.text}>{msg.content}</p>
             )}
-            {showReadReceipt && !msg.deleted_at && (
-              <div
-                className={styles.readReceipt}
-                data-testid={`message-read-receipt-${msg.id}`}
-                data-read-receipt="READ"
-                aria-label="Read by recipient"
-              >
-                Read
-              </div>
-            )}
             {/* Attachments */}
             {msg.attachments?.length > 0 && (
               <div className={styles.attachments}>
@@ -110,6 +111,17 @@ export default function MessageItem({ message: msg, prevMessage, isOwn, showRead
               </div>
             )}
           </>
+        )}
+
+        {grouped && !editing && shouldShowReadReceipt && (
+          <span
+            className={styles.groupedReadReceipt}
+            data-testid={`message-read-receipt-${msg.id}`}
+            data-read-receipt="READ"
+            aria-label="Read by recipient"
+          >
+            Read
+          </span>
         )}
       </div>
 

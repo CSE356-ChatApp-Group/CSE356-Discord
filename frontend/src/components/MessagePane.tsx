@@ -221,6 +221,14 @@ export default function MessagePane() {
     };
   }, [msgList, user?.id, isDm, otherLastReadMessageId]);
 
+  const latestVisibleMessage = useMemo(() => {
+    for (let i = msgList.length - 1; i >= 0; i -= 1) {
+      const m = msgList[i];
+      if (!m?.deleted_at) return m;
+    }
+    return null;
+  }, [msgList]);
+
   const searchScope = activeChannel
     ? `#${activeChannel.name}`
     : activeConv?.name
@@ -335,7 +343,14 @@ export default function MessagePane() {
                 message={msg}
                 prevMessage={msgList[i - 1]}
                 isOwn={msg.author_id === user?.id}
-                showReadReceipt={Boolean(activeConv && msg.id === latestOwnMessageId && latestOwnSeen)}
+                showReadReceipt={Boolean(
+                  activeConv
+                    && latestOwnSeen
+                    && latestVisibleMessage
+                    && latestVisibleMessage.author_id === user?.id
+                    && msg.id === latestVisibleMessage.id
+                    && msg.id === latestOwnMessageId
+                )}
               />
             ))}
             <div ref={bottomRef} />
