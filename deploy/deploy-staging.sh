@@ -165,10 +165,18 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
         sudo kill -9 \"\$PID\" 2>/dev/null || true
       done
     fi
-    
     sleep 1
+    
+    if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
+      echo 'Using fuser to force-release port ${CANDIDATE_PORT}...'
+      sudo fuser -k ${CANDIDATE_PORT}/tcp 2>/dev/null || true
+      sleep 2
+    fi
+    
     if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
       echo 'ERROR: Candidate port ${CANDIDATE_PORT} still in use after cleanup.'
+      echo 'Processes holding the port:'
+      lsof -i :${CANDIDATE_PORT} || true
       exit 1
     fi
   fi
