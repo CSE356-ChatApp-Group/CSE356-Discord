@@ -22,6 +22,20 @@ const _inFlightGets = new Map<string, Promise<any>>();
 const _recentGets = new Map<string, { at: number; value: any }>();
 const GET_CACHE_TTL_MS = 1500;
 
+function notifySessionExpired() {
+  setToken(null);
+  _authInvalid = true;
+  _inFlightGets.clear();
+  _recentGets.clear();
+  window.dispatchEvent(new CustomEvent('chatapp:session-expired'));
+
+  const currentPath = window.location.pathname;
+  const isAuthRoute = currentPath === '/login' || currentPath === '/register' || currentPath === '/oauth-callback';
+  if (!isAuthRoute) {
+    window.location.href = '/login';
+  }
+}
+
 export function setToken(t: string | null) {
   _accessToken = t;
   _authInvalid = !t;
@@ -31,6 +45,7 @@ export function getToken() { return _accessToken; }
 
 async function requestFormData(path: string, formData: FormData) {
   if (_authInvalid && !path.startsWith('/auth/')) {
+    notifySessionExpired();
     throw new Error('Session expired');
   }
 
@@ -75,6 +90,7 @@ async function request(method: string, path: string, body?: unknown, retry = tru
     path === '/auth/session';
 
   if (_authInvalid && !skipRefreshForPath) {
+    notifySessionExpired();
     throw new Error('Session expired');
   }
 
@@ -83,6 +99,7 @@ async function request(method: string, path: string, body?: unknown, retry = tru
     try {
       await _refreshing;
     } catch {
+      notifySessionExpired();
       throw new Error('Session expired');
     }
   }
@@ -101,14 +118,7 @@ async function request(method: string, path: string, body?: unknown, retry = tru
       await _refreshing;
       return request(method, path, body, false);
     } catch {
-      setToken(null);
-      _authInvalid = true;
-      _inFlightGets.clear();
-      const currentPath = window.location.pathname;
-      const isAuthRoute = currentPath === '/login' || currentPath === '/register' || currentPath === '/oauth-callback';
-      if (!isAuthRoute) {
-        window.location.href = '/login';
-      }
+      notifySessionExpired();
       throw new Error('Session expired');
     }
   }

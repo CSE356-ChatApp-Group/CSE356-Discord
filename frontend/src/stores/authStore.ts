@@ -26,11 +26,18 @@ type AuthState = {
   authBypass: boolean;
   loading: boolean;
   setUser: (user: AuthUser | null) => void;
+  expireSession: () => void;
   init: () => Promise<void>;
   login: (email: string, password: string) => Promise<AuthUser>;
   register: (email: string, username: string, password: string, displayName: string) => Promise<AuthUser>;
   logout: () => Promise<void>;
 };
+
+let initInFlight: Promise<void> | null = null;
+
+function isAuthRoute(pathname: string) {
+  return pathname === '/login' || pathname === '/register' || pathname === '/oauth-callback';
+}
 
 export const useAuthStore = create<AuthState>()((set, get) => ({
   user:    null,
@@ -41,8 +48,20 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     set({ user: normalizeAuthUser(user) });
   },
 
+  expireSession() {
+    setToken(null);
+    wsManager.disconnect();
+    set({ user: null, authBypass: false, loading: false });
+  },
+
   /** Called on app mount – tries to restore session from refresh cookie */
   async init() {
+    if (!get().loading) return;
+    if (initInFlight) return initInFlight;
+
+    initInFlight = (async () => {
+    const currentPath = window.location.pathname;
+
     try {
       if (getToken()) {
         const data = await api.get('/users/me');
@@ -54,16 +73,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       setToken(null);
     }
 
-    try {
-      const data = await api.get('/auth/session');
-      if (data?.authBypass && data.user) {
-        setToken(data.accessToken || null);
-        set({ user: normalizeAuthUser(data.user), authBypass: true, loading: false });
-        wsManager.connect({ allowAnonymous: true });
-        return;
+    if (!isAuthRoute(currentPath)) {
+      try {
+        const data = await api.get('/auth/session');
+        if (data?.authBypass && data.user) {
+          setToken(data.accessToken || null);
+          set({ user: normalizeAuthUser(data.user), authBypass: true, loading: false });
+          wsManager.connect({ allowAnonymous: true });
+          return;
+        }
+      } catch {
+        // Fall through to normal refresh-based session restore.
       }
-    } catch {
-      // Fall through to normal refresh-based session restore.
     }
 
     try {
@@ -74,6 +95,13 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       wsManager.connect();
     } catch {
       set({ user: null, authBypass: false, loading: false });
+    }
+    })();
+
+    try {
+      await initInFlight;
+    } finally {
+      initInFlight = null;
     }
   },
 
@@ -109,8 +137,6 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
   async logout() {
     try { await api.post('/auth/logout'); } catch { /* ignore */ }
-    setToken(null);
-    wsManager.disconnect();
-    set({ user: null, authBypass: false });
+    get().expireSession();
   },
 }));

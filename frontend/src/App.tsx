@@ -42,7 +42,20 @@ function Spinner({ size = 16 }) {
 
 export default function App() {
   const init = useAuthStore(s => s.init);
+  const expireSession = useAuthStore(s => s.expireSession);
+
   useEffect(() => { init(); }, []);
+
+  useEffect(() => {
+    const handleSessionExpired = () => {
+      expireSession();
+    };
+
+    window.addEventListener('chatapp:session-expired', handleSessionExpired);
+    return () => {
+      window.removeEventListener('chatapp:session-expired', handleSessionExpired);
+    };
+  }, [expireSession]);
 
   return (
     <BrowserRouter

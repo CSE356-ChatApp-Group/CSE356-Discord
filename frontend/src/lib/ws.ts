@@ -72,7 +72,13 @@ class WsManager {
       } catch { /* ignore */ }
     };
 
-    this._ws.onclose = () => {
+    this._ws.onclose = (event) => {
+      if (event.code === 4001) {
+        this.disconnect();
+        window.dispatchEvent(new CustomEvent('chatapp:session-expired'));
+        return;
+      }
+
       if (!this._intentionalClose) {
         console.debug('[WS] disconnected – reconnecting in 3s');
         this._reconnectTimer = setTimeout(() => this.connect(), 3000);

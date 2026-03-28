@@ -49,6 +49,7 @@ export default function LoginPage() {
               className={styles.input}
               placeholder="you@example.com"
               required
+              autoComplete="email"
               autoFocus
               data-testid="login-email"
             />
@@ -65,6 +66,7 @@ export default function LoginPage() {
               className={styles.input}
               placeholder="••••••••"
               required
+              autoComplete="current-password"
               data-testid="login-password"
             />
           </label>
