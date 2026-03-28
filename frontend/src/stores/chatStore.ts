@@ -161,6 +161,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }));
     await get().fetchMessages({ conversationId: conversation.id });
     wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
+    const msgs = get().messages[conversation.id];
+    if (msgs?.length) {
+      api.put(`/messages/${msgs[msgs.length - 1].id}/read`).catch(() => {});
+    }
     return conversation;
   },
 
@@ -168,6 +172,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     set({ activeConv: conv, activeChannel: null });
     await get().fetchMessages({ conversationId: conv.id });
     wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
+    const msgs = get().messages[conv.id];
+    if (msgs?.length) {
+      api.put(`/messages/${msgs[msgs.length - 1].id}/read`).catch(() => {});
+    }
   },
 
   // ── Messages ──────────────────────────────────────────────────────────────
@@ -196,8 +204,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const body: { content: string; channelId?: string; conversationId?: string } = { content };
     if (activeChannel)  body.channelId      = activeChannel.id;
     if (activeConv)     body.conversationId = activeConv.id;
-    await api.post('/messages', body);
-    // Optimistic update handled by WS event; if WS not connected, refetch
+    const { message } = await api.post('/messages', body);
+    // Mark the just-sent message as read immediately
+    if (message?.id) {
+      api.put(`/messages/${message.id}/read`).catch(() => {});
+    }
   },
 
   async editMessage(id: string, content: string) {
