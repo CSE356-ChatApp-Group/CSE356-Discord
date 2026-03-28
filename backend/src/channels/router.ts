@@ -13,6 +13,7 @@ const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
+const sideEffects      = require('../messages/sideEffects');
 
 const router = express.Router();
 router.use(authenticate);
@@ -87,7 +88,9 @@ router.post('/',
          VALUES ($1,$2,$3,$4,$5) RETURNING *`,
         [communityId, name.toLowerCase().replace(/\s+/g, '-'), isPrivate, description || null, req.user.id]
       );
-      res.status(201).json({ channel: rows[0] });
+      const channel = rows[0];
+      sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:created', channel);
+      res.status(201).json({ channel });
     } catch (err) {
       if (err.code === '23505') return res.status(409).json({ error: 'Channel name already exists' });
       next(err);

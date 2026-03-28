@@ -918,6 +918,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         }
         break;
       }
+      case 'channel:created': {
+        const channel = event.data;
+        if (!channel?.community_id && !channel?.communityId) break;
+        const communityId = channel.community_id || channel.communityId;
+        if (store.activeCommunity?.id === communityId) {
+          store.fetchChannels(communityId);
+        }
+        break;
+      }
       case 'community:channel_message': {
         const { communityId, channelId } = event.data || {};
         if (!communityId || !channelId) break;
