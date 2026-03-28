@@ -172,6 +172,6 @@ if (process.env.OIDC_CLIENT_ID) {
     // OIDC profile structure is standardized
     const email = profile.emails?.[0]?.value || profile._json?.email;
     const displayName = profile.displayName || profile._json?.name || profile.username;
-    await handleOAuth('oidc', profile.id, email, displayName, done);
+    await processOAuthLogin('oidc', profile.id, email, displayName, undefined, done);
   }));
 }
