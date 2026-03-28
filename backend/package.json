@@ -2,17 +2,20 @@
   "name": "chatapp-backend",
   "version": "1.0.0",
   "description": "ChatApp MVP – REST + WebSocket API",
-  "main": "src/index.js",
+  "main": "dist/index.js",
   "scripts": {
-    "dev": "nodemon src/index.js",
-    "start": "node src/index.js",
-    "migrate": "node src/db/migrate.js",
-    "test": "jest --forceExit"
+    "dev": "nodemon --watch src --ext ts --exec tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "migrate": "tsx src/db/migrate.ts",
+    "test": "node scripts/test-runner.cjs",
+    "test:raw": "jest"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
-    "bcrypt": "^5.1.1",
+    "bcrypt": "^6.0.0",
     "compression": "^1.7.4",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
@@ -39,9 +42,14 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^22.10.10",
     "jest": "^29.7.0",
     "nodemon": "^3.1.4",
-    "supertest": "^7.0.0"
+    "supertest": "^7.0.0",
+    "ts-jest": "^29.2.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
   },
   "engines": {
     "node": ">=20"

@@ -8,17 +8,44 @@
 }
 
 .header {
-  padding: 0 14px;
+  padding: 0 12px 0 16px;
   height: var(--header-height);
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inviteBtn {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color .15s, background .15s, border-color .15s;
+}
+
+.inviteBtn:hover {
+  color: var(--text-primary);
+  background: var(--bg-3);
+  border-color: var(--border-light);
+}
+
 .communityName {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 15px;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -33,7 +60,7 @@
 
 .tab {
   flex: 1;
-  padding: 8px;
+  padding: 10px 8px;
   font-size: 12px;
   font-weight: 500;
   color: var(--text-muted);
@@ -47,7 +74,7 @@
 .scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 6px;
+  padding: 10px 8px;
 }
 
 .sectionHeader {
@@ -85,8 +112,8 @@
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
+  gap: 8px;
+  padding: 7px 10px;
   border-radius: var(--radius);
   font-size: 14px;
   color: var(--text-secondary);
@@ -111,9 +138,20 @@
 .rowActive .dmIcon { color: var(--accent); }
 
 .rowName {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.unreadDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: #ff6b6b;
+  box-shadow: 0 0 0 2px rgba(255, 107, 107, 0.2);
 }
 
 .hint {
@@ -185,3 +223,63 @@
 
 .form button:hover:not(:disabled) { background: var(--accent-dim); }
 .form button:disabled { opacity: .5; }
+
+/* ── New DM modal ─────────────────────────────────────────────────────────── */
+.newDmModal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 280px;
+}
+
+.newDmSearch {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.newDmSearch:focus {
+  border-color: var(--accent);
+}
+
+.newDmResults {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.newDmResultBtn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  text-align: left;
+  transition: background .1s;
+  color: var(--text-primary);
+}
+
+.newDmResultBtn:hover:not(:disabled) { background: var(--bg-3); }
+.newDmResultBtn:disabled { opacity: .5; }
+
+.newDmResultName {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.newDmResultUsername {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: auto;
+}

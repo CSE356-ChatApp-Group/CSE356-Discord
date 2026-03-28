@@ -1,20 +1,78 @@
 .layout {
   display: grid;
-  grid-template-columns: 64px var(--sidebar-width) 1fr;
-  grid-template-rows: 100%;
-  height: 100%;
+  grid-template-columns: 72px var(--channel-sidebar-width, var(--sidebar-width)) minmax(0, 1fr);
+  grid-template-rows: 1fr;
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
-/* When member list is present (channel selected), add a 4th column */
-.layout:has(aside.memberList) {
-  grid-template-columns: 64px var(--sidebar-width) 1fr var(--member-list-width);
+.layoutResizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.channelColumn {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  background: var(--bg-1);
+}
+
+.channelColumn > *:first-child {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  transform: translateX(50%);
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+}
+
+.resizeHandle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background .15s ease;
+}
+
+.resizeHandle:hover::before,
+.resizeHandle:focus-visible::before,
+.resizeHandleActive::before {
+  background: var(--accent);
 }
 
 .main {
   display: flex;
   flex-direction: column;
+  height: 100%;
   overflow: hidden;
   background: var(--bg-0);
   min-width: 0;
+}
+
+@media (max-width: 1200px) {
+  .layout {
+    grid-template-columns: 64px var(--channel-sidebar-width, var(--sidebar-width)) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 64px var(--channel-sidebar-width, var(--sidebar-width)) minmax(0, 1fr);
+  }
 }

@@ -1,0 +1,430 @@
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useChatStore } from '../stores/chatStore';
+import { useAuthStore  } from '../stores/authStore';
+import { useAutoResize } from '../hooks/useAutoResize';
+import MessageItem  from './MessageItem';
+import SearchBar    from './SearchBar';
+import MemberList   from './MemberList';
+import styles from './MessagePane.module.css';
+
+export default function MessagePane() {
+  const { activeChannel, activeConv, messages, sendMessage, fetchMessages, search, searchResults, clearSearch } = useChatStore();
+  const user = useAuthStore(s => s.user);
+
+  const target   = activeChannel || activeConv;
+  const key      = target?.id;
+  const msgList  = (messages[key] || []);
+
+  const [content, setContent]     = useState('');
+  const [sending, setSending]     = useState(false);
+  const [loadingMore, setLoadMore] = useState(false);
+  const [showSearch, setSearch]   = useState(false);
+  const [showMembers, setShowMembers] = useState(false);
+  const [localQ, setLocalQ]       = useState('');
+  const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const bottomRef   = useRef(null);
+  const inputRef    = useRef(null);
+  const scrollRef   = useRef(null);
+  const initialScrollKeyRef = useRef<string | null>(null);
+  const prevMsgCountRef = useRef(0);
+  const exhaustedBeforeRef = useRef<string | null>(null);
+  const historyRetryAfterRef = useRef(0);
+  useAutoResize(inputRef);
+
+  // Default each conversation to newest messages, and only auto-follow when already near bottom.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!key) {
+      initialScrollKeyRef.current = null;
+      prevMsgCountRef.current = 0;
+      exhaustedBeforeRef.current = null;
+      historyRetryAfterRef.current = 0;
+      return;
+    }
+    if (!el || msgList.length === 0) return;
+
+    if (initialScrollKeyRef.current !== key) {
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+      initialScrollKeyRef.current = key;
+      prevMsgCountRef.current = msgList.length;
+      return;
+    }
+
+    const countIncreased = msgList.length > prevMsgCountRef.current;
+    if (countIncreased) {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const nearBottom = distanceFromBottom < 120;
+      if (nearBottom) {
+        requestAnimationFrame(() => {
+          el.scrollTop = el.scrollHeight;
+        });
+      }
+    }
+
+    prevMsgCountRef.current = msgList.length;
+  }, [key, msgList.length]);
+
+  // Focus input when channel changes
+  useEffect(() => {
+    inputRef.current?.focus();
+    setSearch(false);
+    setShowMembers(false);
+    clearSearch();
+    setLocalQ('');
+  }, [key]);
+
+  // Focus search input and clean up when search panel toggles
+  useEffect(() => {
+    if (showSearch) {
+      requestAnimationFrame(() => searchInputRef.current?.focus());
+    } else {
+      clearSearch();
+      setLocalQ('');
+    }
+  }, [showSearch]);
+
+  useEffect(() => {
+    function onShortcut(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearch(true);
+        setShowMembers(false);
+      }
+      if (e.key === 'Escape') {
+        setSearch(false);
+        setShowMembers(false);
+      }
+    }
+
+    window.addEventListener('keydown', onShortcut);
+    return () => window.removeEventListener('keydown', onShortcut);
+  }, []);
+
+  async function handleSearchSubmit(e?: React.FormEvent) {
+    e?.preventDefault();
+    const query = localQ.trim();
+    if (!query) return;
+    await search(query);
+  }
+
+  function handleSearchChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setLocalQ(e.target.value);
+    if (searchResults !== null) clearSearch();
+  }
+
+  function closeSearch() {
+    setSearch(false);
+    clearSearch();
+    setLocalQ('');
+  }
+
+  async function handleSend(e) {
+    e.preventDefault();
+    if (!content.trim() || sending) return;
+    setSending(true);
+    try {
+      await sendMessage(content.trim());
+      setContent('');
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend(e);
+    }
+  }
+
+  // Infinite scroll – load older messages when scrolled to top
+  const handleScroll = useCallback(async () => {
+    const el = scrollRef.current;
+    if (!el || loadingMore || msgList.length === 0) return;
+    if (el.scrollTop < 80) {
+      const beforeId = msgList[0]?.id;
+      if (!beforeId) return;
+      if (exhaustedBeforeRef.current === beforeId) return;
+      if (Date.now() < historyRetryAfterRef.current) return;
+
+      setLoadMore(true);
+      const prevH = el.scrollHeight;
+      try {
+        const older = await fetchMessages({
+          channelId:      activeChannel?.id,
+          conversationId: activeConv?.id,
+          before:         beforeId,
+        });
+
+        if (!older?.length) {
+          exhaustedBeforeRef.current = beforeId;
+          return;
+        }
+
+        exhaustedBeforeRef.current = null;
+        // Restore scroll position after prepend
+        requestAnimationFrame(() => {
+          el.scrollTop = el.scrollHeight - prevH;
+        });
+      } catch (err) {
+        const status = Number(err?.status || 0);
+        if (status === 503) {
+          // Temporary backend overload/unavailability: back off to avoid request storms.
+          historyRetryAfterRef.current = Date.now() + 5000;
+        }
+        console.warn('[messages] failed to load older history', err);
+      } finally {
+        setLoadMore(false);
+      }
+    }
+  }, [loadingMore, msgList, activeChannel, activeConv]);
+
+  const title = activeChannel
+    ? `# ${activeChannel.name}`
+    : activeConv?.name || 'Direct Message';
+
+  // Any activeConv is a DM – we don't need participants.length to gate read receipts.
+  const isDm = Boolean(activeConv);
+  const otherLastReadMessageId = activeConv?.other_last_read_message_id || activeConv?.otherLastReadMessageId;
+  const { latestOwnMessageId, latestOwnSeen } = useMemo(() => {
+    let latestOwnId: string | null = null;
+    let latestOwnIdx = -1;
+    for (let i = msgList.length - 1; i >= 0; i -= 1) {
+      const m = msgList[i];
+      if (!m?.deleted_at && m?.author_id === user?.id) {
+        latestOwnId = m.id;
+        latestOwnIdx = i;
+        break;
+      }
+    }
+
+    if (!isDm || !latestOwnId || !otherLastReadMessageId) {
+      return { latestOwnMessageId: latestOwnId, latestOwnSeen: false };
+    }
+
+    // Fast path: recipient read pointer exactly equals latest outgoing message.
+    if (otherLastReadMessageId === latestOwnId) {
+      return { latestOwnMessageId: latestOwnId, latestOwnSeen: true };
+    }
+
+    const readIdx = msgList.findIndex(m => m.id === otherLastReadMessageId);
+    const seen = readIdx >= latestOwnIdx && latestOwnIdx >= 0;
+    return {
+      latestOwnMessageId: latestOwnId,
+      latestOwnSeen: seen,
+    };
+  }, [msgList, user?.id, isDm, otherLastReadMessageId]);
+
+  const latestVisibleMessage = useMemo(() => {
+    for (let i = msgList.length - 1; i >= 0; i -= 1) {
+      const m = msgList[i];
+      if (!m?.deleted_at) return m;
+    }
+    return null;
+  }, [msgList]);
+
+  const searchScope = activeChannel
+    ? `#${activeChannel.name}`
+    : activeConv?.name
+      ? `@${activeConv.name}`
+      : 'messages';
+  const searchLabel = `Search ${searchScope}`;
+
+  const placeholder = activeChannel
+    ? `Message #${activeChannel.name}`
+    : 'Message';
+
+  return (
+    <div className={styles.pane} data-testid="message-pane">
+      {/* Header */}
+      <header className={styles.header} data-testid="message-pane-header">
+        <div className={styles.headerLeft}>
+          <span className={styles.headerTitle} data-testid="message-pane-title">{title}</span>
+          {activeChannel?.description && (
+            <span className={styles.headerDesc}>{activeChannel.description}</span>
+          )}
+        </div>
+        <div className={styles.headerActions}>
+          {activeChannel && (
+            <button
+              className={`${styles.iconTrigger} ${showMembers ? styles.iconTriggerActive : ''}`}
+              title="Toggle member list"
+              onClick={() => {
+                setShowMembers(v => {
+                  const next = !v;
+                  if (next) setSearch(false);
+                  return next;
+                });
+              }}
+              aria-label="Toggle member list"
+              data-testid="message-members-toggle"
+            >
+              <MembersIcon />
+            </button>
+          )}
+          {showSearch ? (
+            <div className={styles.searchBox} data-testid="search-box">
+              <form className={styles.searchForm} onSubmit={handleSearchSubmit}>
+                <span className={styles.searchFormIcon}><SearchIcon /></span>
+                <input
+                  ref={searchInputRef}
+                  className={styles.searchFormInput}
+                  value={localQ}
+                  onChange={handleSearchChange}
+                  placeholder={searchLabel}
+                  autoComplete="off"
+                  spellCheck={false}
+                  data-testid="search-input"
+                />
+                <button
+                  type="button"
+                  className={styles.searchClear}
+                  onClick={closeSearch}
+                  aria-label="Close search"
+                >✕</button>
+              </form>
+              {searchResults === null && (
+                <div className={styles.searchPopout} data-testid="search-popout">
+                  {localQ.trim() ? (
+                    <button
+                      className={styles.searchPopoutOption}
+                      type="button"
+                      onClick={handleSearchSubmit}
+                    >
+                      <SearchIcon />
+                      <span>Search for <strong>{localQ.trim()}</strong></span>
+                    </button>
+                  ) : (
+                    <div className={styles.searchPopoutHint}>
+                      <SearchIcon />
+                      <span>Start typing to search {activeChannel ? `#${activeChannel.name}` : 'messages'}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              className={styles.searchTrigger}
+              title={searchLabel}
+              onClick={() => { setSearch(true); setShowMembers(false); }}
+              aria-label="Toggle message search"
+              data-testid="message-search-toggle"
+            >
+              <SearchIcon />
+              <span className={styles.searchTriggerText}>{searchLabel}</span>
+              <span className={styles.searchTriggerHint}>{shortcutLabel}</span>
+            </button>
+          )}
+        </div>
+      </header>
+
+      <div className={styles.body}>
+        <div className={styles.mainColumn}>
+          {/* Messages */}
+          <div className={styles.messages} ref={scrollRef} onScroll={handleScroll} role="log" aria-live="polite" aria-label="Message history" data-testid="message-list">
+            {loadingMore && <div className={styles.loadingMore}>Loading…</div>}
+            {msgList.length === 0 && (
+              <div className={styles.empty}>
+                <span className={styles.emptyIcon}>{activeChannel ? '#' : '@'}</span>
+                <p>Start of <strong>{title}</strong></p>
+                <p className={styles.emptyHint}>Be the first to say something.</p>
+              </div>
+            )}
+            {msgList.map((msg, i) => (
+              <MessageItem
+                key={msg.id}
+                message={msg}
+                prevMessage={msgList[i - 1]}
+                isOwn={msg.author_id === user?.id}
+                showReadReceipt={Boolean(
+                  activeConv
+                    && latestOwnSeen
+                    && latestVisibleMessage
+                    && latestVisibleMessage.author_id === user?.id
+                    && msg.id === latestVisibleMessage.id
+                    && msg.id === latestOwnMessageId
+                )}
+              />
+            ))}
+            <div ref={bottomRef} />
+          </div>
+
+          {/* Input */}
+          <form className={styles.inputRow} onSubmit={handleSend} data-testid="message-compose-form">
+            <textarea
+              ref={inputRef}
+              className={styles.input}
+              id="message-compose-input"
+              name="content"
+              value={content}
+              onChange={e => setContent(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              rows={1}
+              maxLength={4000}
+              disabled={sending}
+              data-testid="message-compose-input"
+            />
+            <button
+              type="submit"
+              className={styles.sendBtn}
+              disabled={!content.trim() || sending}
+              title="Send (Enter)"
+              aria-label="Send message"
+              data-testid="message-send"
+            >
+              <SendIcon />
+            </button>
+          </form>
+        </div>
+
+        {/* Right sidebar (members/search) */}
+        {showMembers && activeChannel && (
+          <aside className={styles.searchSidebar} data-testid="message-members-sidebar">
+            <MemberList />
+          </aside>
+        )}
+        {showSearch && searchResults !== null && (
+          <aside className={styles.searchSidebar} data-testid="message-search-sidebar">
+            <SearchBar onClose={closeSearch} />
+          </aside>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+  );
+}
+
+function MembersIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+      <circle cx="9" cy="7" r="4"/>
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+      <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="22" y1="2" x2="11" y2="13"/>
+      <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+    </svg>
+  );
+}

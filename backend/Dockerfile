@@ -22,6 +22,9 @@ RUN addgroup -S chatapp && adduser -S chatapp -G chatapp
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Compile TypeScript before pruning dev dependencies
+RUN npm run build
+
 # Remove dev tooling from final image
 RUN npm prune --omit=dev
 # Tini for proper signal handling in containers
@@ -32,7 +35,7 @@ USER chatapp
 EXPOSE 3000
 ENTRYPOINT ["/sbin/tini", "--"]
 
-CMD ["node", "src/index.js"]
+CMD ["node", "dist/index.js"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:3000/health || exit 1

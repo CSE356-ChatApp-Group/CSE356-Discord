@@ -1,0 +1,80 @@
+name: CI Build & Package
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build backend
+        run: cd backend && npm run build
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+
+      - name: Package release artifact
+        run: |
+          mkdir -p releases
+          tar --exclude=node_modules --exclude=.git --exclude=.env \
+            -czf releases/chatapp-${{ github.sha }}.tar.gz \
+            backend/dist/ \
+            backend/package*.json \
+            backend/tsconfig.json \
+            frontend/dist/ \
+            frontend/package*.json \
+            migrations/ \
+            package*.json \
+            .env.example
+          echo "Packaged: releases/chatapp-${{ github.sha }}.tar.gz"
+          ls -lh releases/chatapp-${{ github.sha }}.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: releases/chatapp-*.tar.gz
+          retention-days: 30
+
+      - name: Create release (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="release-${{ github.sha }}"
+          FILE="releases/chatapp-${{ github.sha }}.tar.gz"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FILE" --clobber
+          else
+            gh release create "$TAG" "$FILE" \
+              --notes "Deploy to staging or production using:\n\n./deploy/deploy-staging.sh ${{ github.sha }}\n./deploy/deploy-prod.sh ${{ github.sha }}"
+          fi
