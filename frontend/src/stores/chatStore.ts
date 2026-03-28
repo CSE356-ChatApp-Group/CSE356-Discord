@@ -188,7 +188,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }
             : s.activeConv,
       }));
-      api.put(`/messages/${lastId}/read`).catch(() => {});
+      console.debug('[markRead openDm]', lastId);
+      api.put(`/messages/${lastId}/read`)
+        .then(() => console.debug('[markRead openDm] ✓', lastId))
+        .catch(err => console.warn('[markRead openDm] ✗', err));
     }
     return conversation;
   },
@@ -219,7 +222,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }
             : s.activeConv,
       }));
-      api.put(`/messages/${lastId}/read`).catch(() => {});
+      console.debug('[markRead selectConv]', lastId);
+      api.put(`/messages/${lastId}/read`)
+        .then(() => console.debug('[markRead selectConv] ✓', lastId))
+        .catch(err => console.warn('[markRead selectConv] ✗', err));
     }
   },
 
@@ -362,7 +368,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   }
                 : s.activeConv,
           }));
-          api.put(`/messages/${msg.id}/read`).catch(() => {});
+          console.debug('[markRead message:created auto]', msg.id);
+          api.put(`/messages/${msg.id}/read`)
+            .then(() => console.debug('[markRead message:created auto] ✓', msg.id))
+            .catch(err => console.warn('[markRead message:created auto] ✗', err));
         }
         break;
       }
@@ -396,6 +405,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }
       case 'read:updated': {
         const { conversationId, userId, lastReadMessageId, lastReadAt } = event.data || {};
+        console.debug('[WS read:updated]', { conversationId, userId, lastReadMessageId });
         if (!conversationId || !userId) break;
         const me = useAuthStore.getState().user;
         set(s => ({

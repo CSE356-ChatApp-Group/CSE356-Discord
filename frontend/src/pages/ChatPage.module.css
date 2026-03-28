@@ -2,14 +2,15 @@
   display: grid;
   grid-template-columns: 72px var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: 1fr;
-  min-height: 100vh;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
 .main {
   display: flex;
   flex-direction: column;
+  height: 100%;
   overflow: hidden;
   background: var(--bg-0);
   min-width: 0;

@@ -27,12 +27,42 @@ export default function MessagePane() {
   const bottomRef   = useRef(null);
   const inputRef    = useRef(null);
   const scrollRef   = useRef(null);
+  const initialScrollKeyRef = useRef<string | null>(null);
+  const prevMsgCountRef = useRef(0);
   useAutoResize(inputRef);
 
-  // Scroll to bottom when new messages arrive
+  // Default each conversation to newest messages, and only auto-follow when already near bottom.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [msgList.length, key]);
+    const el = scrollRef.current;
+    if (!key) {
+      initialScrollKeyRef.current = null;
+      prevMsgCountRef.current = 0;
+      return;
+    }
+    if (!el || msgList.length === 0) return;
+
+    if (initialScrollKeyRef.current !== key) {
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+      initialScrollKeyRef.current = key;
+      prevMsgCountRef.current = msgList.length;
+      return;
+    }
+
+    const countIncreased = msgList.length > prevMsgCountRef.current;
+    if (countIncreased) {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const nearBottom = distanceFromBottom < 120;
+      if (nearBottom) {
+        requestAnimationFrame(() => {
+          el.scrollTop = el.scrollHeight;
+        });
+      }
+    }
+
+    prevMsgCountRef.current = msgList.length;
+  }, [key, msgList.length]);
 
   // Focus input when channel changes
   useEffect(() => {
@@ -116,16 +146,21 @@ export default function MessagePane() {
     if (el.scrollTop < 80) {
       setLoadMore(true);
       const prevH = el.scrollHeight;
-      await fetchMessages({
-        channelId:      activeChannel?.id,
-        conversationId: activeConv?.id,
-        before:         msgList[0]?.id,
-      });
-      // Restore scroll position after prepend
-      requestAnimationFrame(() => {
-        el.scrollTop = el.scrollHeight - prevH;
-      });
-      setLoadMore(false);
+      try {
+        await fetchMessages({
+          channelId:      activeChannel?.id,
+          conversationId: activeConv?.id,
+          before:         msgList[0]?.id,
+        });
+        // Restore scroll position after prepend
+        requestAnimationFrame(() => {
+          el.scrollTop = el.scrollHeight - prevH;
+        });
+      } catch (err) {
+        console.warn('[messages] failed to load older history', err);
+      } finally {
+        setLoadMore(false);
+      }
     }
   }, [loadingMore, msgList, activeChannel, activeConv]);
 
@@ -133,8 +168,24 @@ export default function MessagePane() {
     ? `# ${activeChannel.name}`
     : activeConv?.name || 'Direct Message';
 
-  const participants = activeConv?.participants || [];
-  const isOneToOneDm = Boolean(activeConv && participants.length === 2);
+  // Log activeConv read fields whenever the active conversation changes
+  useEffect(() => {
+    if (activeConv) {
+      console.debug('[ActiveConv read fields]', {
+        id: activeConv.id,
+        my_last_read_message_id: activeConv.my_last_read_message_id,
+        other_last_read_message_id: activeConv.other_last_read_message_id,
+        last_message_id: activeConv.last_message_id,
+        participants: activeConv.participants,
+        // camelCase variants too
+        myLastReadMessageId: activeConv.myLastReadMessageId,
+        otherLastReadMessageId: activeConv.otherLastReadMessageId,
+      });
+    }
+  }, [activeConv?.id, activeConv?.other_last_read_message_id, activeConv?.otherLastReadMessageId]);
+
+  // Any activeConv is a DM – we don't need participants.length to gate read receipts.
+  const isDm = Boolean(activeConv);
   const otherLastReadMessageId = activeConv?.other_last_read_message_id || activeConv?.otherLastReadMessageId;
   const { latestOwnMessageId, latestOwnSeen } = useMemo(() => {
     let latestOwnId: string | null = null;
@@ -148,21 +199,25 @@ export default function MessagePane() {
       }
     }
 
-    if (!isOneToOneDm || !latestOwnId || !otherLastReadMessageId) {
+    if (!isDm || !latestOwnId || !otherLastReadMessageId) {
+      console.debug('[ReadReceipt] skipped', { isDm, latestOwnId, otherLastReadMessageId });
       return { latestOwnMessageId: latestOwnId, latestOwnSeen: false };
     }
 
     // Fast path: recipient read pointer exactly equals latest outgoing message.
     if (otherLastReadMessageId === latestOwnId) {
+      console.debug('[ReadReceipt] fast-path seen', { otherLastReadMessageId, latestOwnId });
       return { latestOwnMessageId: latestOwnId, latestOwnSeen: true };
     }
 
     const readIdx = msgList.findIndex(m => m.id === otherLastReadMessageId);
+    const seen = readIdx >= latestOwnIdx && latestOwnIdx >= 0;
+    console.debug('[ReadReceipt] index check', { otherLastReadMessageId, latestOwnId, readIdx, latestOwnIdx, seen });
     return {
       latestOwnMessageId: latestOwnId,
-      latestOwnSeen: readIdx >= latestOwnIdx && latestOwnIdx >= 0,
+      latestOwnSeen: seen,
     };
-  }, [msgList, user?.id, isOneToOneDm, otherLastReadMessageId]);
+  }, [msgList, user?.id, isDm, otherLastReadMessageId]);
 
   const searchScope = activeChannel
     ? `#${activeChannel.name}`
