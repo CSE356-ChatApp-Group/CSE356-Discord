@@ -52,7 +52,7 @@ export default function MessageItem({ message: msg, prevMessage, isOwn }) {
     >
       {/* Avatar column */}
       <div className={styles.avatarCol}>
-        {!grouped && <Avatar name={name} size={36} />}
+        {!grouped && <Avatar user={author} name={name} size={36} />}
       </div>
 
       {/* Content column */}

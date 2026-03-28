@@ -210,6 +210,10 @@
   gap: 8px;
 }
 
+.hiddenFileInput {
+  display: none;
+}
+
 .passwordForm {
   display: grid;
   gap: 8px;

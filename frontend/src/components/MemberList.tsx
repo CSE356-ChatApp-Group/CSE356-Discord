@@ -48,7 +48,7 @@ function MemberRow({ member, isYou }) {
   return (
     <div className={styles.row} title={`${name}${isYou ? ' (you)' : ''} · ${member.role}`} data-testid={`member-row-${member.id}`} data-member-id={member.id} data-member-status={member.status}>
       <div className={styles.avatarWrap}>
-        <Avatar name={name} size={30} />
+        <Avatar user={member} name={name} size={30} />
         <span className={`${styles.dot} ${styles[member.status]}`} />
       </div>
       <div className={styles.info}>

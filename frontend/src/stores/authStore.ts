@@ -7,6 +7,8 @@ type AuthUser = {
   email?: string;
   username?: string;
   displayName?: string;
+  avatarUrl?: string;
+  updatedAt?: string;
 };
 
 function normalizeAuthUser(user: any): AuthUser {
@@ -14,6 +16,8 @@ function normalizeAuthUser(user: any): AuthUser {
   return {
     ...user,
     displayName: user.displayName ?? user.display_name,
+    avatarUrl: user.avatarUrl ?? user.avatar_url,
+    updatedAt: user.updatedAt ?? user.updated_at,
   };
 }
 
@@ -21,6 +25,7 @@ type AuthState = {
   user: AuthUser | null;
   authBypass: boolean;
   loading: boolean;
+  setUser: (user: AuthUser | null) => void;
   init: () => Promise<void>;
   login: (email: string, password: string) => Promise<AuthUser>;
   register: (email: string, username: string, password: string, displayName: string) => Promise<AuthUser>;
@@ -31,6 +36,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   user:    null,
   authBypass: false,
   loading: true,   // true while checking existing session on mount
+
+  setUser(user: AuthUser | null) {
+    set({ user: normalizeAuthUser(user) });
+  },
 
   /** Called on app mount – tries to restore session from refresh cookie */
   async init() {

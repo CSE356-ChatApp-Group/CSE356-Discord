@@ -21,6 +21,29 @@ export function setToken(t) {
 
 export function getToken() { return _accessToken; }
 
+async function requestFormData(path: string, formData: FormData) {
+  const headers: Record<string, string> = {};
+  if (_accessToken) headers['Authorization'] = `Bearer ${_accessToken}`;
+
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: res.statusText }));
+    const e = new Error(err.error || err.message || 'Request failed') as ApiError;
+    e.status = res.status;
+    e.errors = err.errors;
+    throw e;
+  }
+
+  if (res.status === 204) return null;
+  return res.json();
+}
+
 async function refreshToken() {
   const res = await fetch(`${BASE}/auth/refresh`, { method: 'POST', credentials: 'include' });
   if (!res.ok) throw new Error('Session expired');
@@ -33,6 +56,12 @@ async function request(method: string, path: string, body?: unknown, retry = tru
   const headers = { 'Content-Type': 'application/json' };
   if (_accessToken) headers['Authorization'] = `Bearer ${_accessToken}`;
 
+  const skipRefreshForPath =
+    path === '/auth/login' ||
+    path === '/auth/register' ||
+    path === '/auth/refresh' ||
+    path === '/auth/session';
+
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers,
@@ -40,7 +69,7 @@ async function request(method: string, path: string, body?: unknown, retry = tru
     body: body ? JSON.stringify(body) : undefined,
   });
 
-  if (res.status === 401 && retry) {
+  if (res.status === 401 && retry && !skipRefreshForPath) {
     // Deduplicate concurrent refresh attempts
     if (!_refreshing) _refreshing = refreshToken().finally(() => { _refreshing = null; });
     try {
@@ -72,6 +101,7 @@ async function request(method: string, path: string, body?: unknown, retry = tru
 export const api = {
   get:    (path: string)               => request('GET',    path),
   post:   (path: string, body?: unknown) => request('POST',   path, body),
+  postForm: (path: string, formData: FormData) => requestFormData(path, formData),
   patch:  (path: string, body?: unknown) => request('PATCH',  path, body),
   put:    (path: string, body?: unknown) => request('PUT',    path, body),
   delete: (path: string)               => request('DELETE', path),

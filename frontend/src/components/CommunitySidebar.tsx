@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { api } from '../lib/api';
@@ -9,6 +9,7 @@ export default function CommunitySidebar() {
   const { communities, activeCommunity, selectCommunity, createCommunity, openHome } = useChatStore();
   const logout = useAuthStore(s => s.logout);
   const user   = useAuthStore(s => s.user);
+  const setUser = useAuthStore(s => s.setUser);
   const [showCreate, setShowCreate] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
   const [linkedProviders, setLinkedProviders] = useState<string[]>([]);
@@ -19,6 +20,9 @@ export default function CommunitySidebar() {
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ newPassword: '', confirmPassword: '' });
   const [passwordMsg, setPasswordMsg] = useState('');
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarMsg, setAvatarMsg] = useState('');
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   async function openAccountModal() {
     setShowAccount(true);
@@ -77,6 +81,39 @@ export default function CommunitySidebar() {
     }
   }
 
+  async function handleAvatarPicked(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setAccountError('');
+    setAvatarMsg('');
+
+    if (!file.type.startsWith('image/')) {
+      setAccountError('Please choose an image file.');
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setAccountError('Image must be 5MB or smaller.');
+      e.target.value = '';
+      return;
+    }
+
+    setAvatarBusy(true);
+    try {
+      const formData = new FormData();
+      formData.append('avatar', file);
+      const data = await api.postForm('/users/me/avatar', formData);
+      if (data?.user) setUser(data.user);
+      setAvatarMsg('Avatar updated.');
+    } catch (err) {
+      setAccountError(err?.message || 'Could not upload avatar');
+    } finally {
+      setAvatarBusy(false);
+      e.target.value = '';
+    }
+  }
+
   return (
     <nav className={styles.sidebar} aria-label="Communities" data-testid="community-sidebar">
       <div className={styles.topRail}>
@@ -121,7 +158,7 @@ export default function CommunitySidebar() {
       {/* User avatar at bottom */}
       <div className={styles.bottom}>
         <button className={styles.userBtn} title={`${user?.username} – account settings`} onClick={openAccountModal} aria-label="Open account settings" data-testid="account-open">
-          <Avatar name={user?.displayName || user?.username} size={36} />
+          <Avatar user={user} name={user?.displayName || user?.username} size={36} />
         </button>
       </div>
 
@@ -140,11 +177,33 @@ export default function CommunitySidebar() {
         <Modal title="Account" onClose={() => setShowAccount(false)}>
           <div className={styles.accountWrap}>
             <div className={styles.accountIdentity} data-testid="account-identity">
-              <Avatar name={user?.displayName || user?.username} size={44} />
+              <Avatar user={user} name={user?.displayName || user?.username} size={44} />
               <div>
                 <p className={styles.accountName}>{user?.displayName || user?.username}</p>
                 <p className={styles.accountEmail}>{user?.email || 'No email available'}</p>
               </div>
+            </div>
+
+            <div>
+              <p className={styles.accountSectionTitle}>Avatar</p>
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                className={styles.hiddenFileInput}
+                onChange={handleAvatarPicked}
+                data-testid="account-avatar-file"
+              />
+              <button
+                type="button"
+                className={styles.linkBtn}
+                disabled={avatarBusy}
+                onClick={() => avatarInputRef.current?.click()}
+                data-testid="account-avatar-upload"
+              >
+                {avatarBusy ? 'Uploading…' : 'Upload avatar'}
+              </button>
+              {avatarMsg && <p className={styles.passwordMsg}>{avatarMsg}</p>}
             </div>
 
             <div>
@@ -314,8 +373,24 @@ function CreateCommunityModal({ onClose, onCreate }) {
   );
 }
 
-export function Avatar({ name = '?', size = 32 }) {
+function buildAvatarSrc(user?: any) {
+  const base = user?.avatarUrl || user?.avatar_url;
+  if (!base) return '';
+  const version = user?.updatedAt || user?.updated_at || '';
+  if (!version) return base;
+  const separator = base.includes('?') ? '&' : '?';
+  return `${base}${separator}v=${encodeURIComponent(version)}`;
+}
+
+export function Avatar({ name = '?', size = 32, user }: { name?: string; size?: number; user?: any }) {
   const initials = name.slice(0, 2).toUpperCase();
+  const src = buildAvatarSrc(user);
+  const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    setImgError(false);
+  }, [src]);
+
   // Deterministic hue from name
   let hash = 0;
   for (const c of name) hash = c.charCodeAt(0) + ((hash << 5) - hash);
@@ -327,10 +402,18 @@ export function Avatar({ name = '?', size = 32 }) {
       background: `hsl(${hue}, 45%, 30%)`,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontSize: size * 0.35, fontWeight: 600, color: `hsl(${hue}, 70%, 80%)`,
+      overflow: 'hidden',
       flexShrink: 0,
       border: '1px solid rgba(255,255,255,0.07)',
     }}>
-      {initials}
+      {src && !imgError ? (
+        <img
+          src={src}
+          alt={name}
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          onError={() => setImgError(true)}
+        />
+      ) : initials}
     </div>
   );
 }
