@@ -16,6 +16,66 @@ const { authenticate } = require('../middleware/authenticate');
 const router = express.Router();
 router.use(authenticate);
 
+async function loadConversationWithParticipants(client, conversationId) {
+  const { rows } = await client.query(
+    `SELECT c.*,
+            json_agg(
+              json_build_object(
+                'id', u.id,
+                'username', u.username,
+                'displayName', u.display_name,
+                'avatarUrl', u.avatar_url,
+                'email', u.email
+              )
+              ORDER BY u.username
+            ) AS participants
+     FROM conversations c
+     JOIN conversation_participants cp ON cp.conversation_id = c.id
+     JOIN users u ON u.id = cp.user_id
+     WHERE c.id = $1
+     GROUP BY c.id`,
+    [conversationId]
+  );
+  return rows[0] || null;
+}
+
+async function resolveParticipantIds(client, rawParticipants) {
+  const raw = Array.isArray(rawParticipants) ? rawParticipants : [];
+  const uniqueValues = [...new Set(raw.map(v => (v || '').toString().trim()).filter(Boolean))];
+  if (!uniqueValues.length) return [];
+
+  const { rows } = await client.query(
+    `SELECT id::text, username, email
+     FROM users
+     WHERE id::text = ANY($1::text[])
+        OR username = ANY($1::text[])
+        OR email = ANY($1::text[])
+        OR lower(username) = ANY($2::text[])
+        OR lower(email) = ANY($2::text[])`,
+    [uniqueValues, uniqueValues.map(v => v.toLowerCase())]
+  );
+
+  const byAny = new Map();
+  rows.forEach((row) => {
+    byAny.set(row.id, row.id);
+    byAny.set(row.username, row.id);
+    byAny.set(row.email, row.id);
+    byAny.set(row.username.toLowerCase(), row.id);
+    byAny.set(row.email.toLowerCase(), row.id);
+  });
+
+  const resolved = [];
+  for (const value of uniqueValues) {
+    const resolvedId = byAny.get(value) || byAny.get(value.toLowerCase());
+    if (!resolvedId) {
+      return null;
+    }
+    resolved.push(resolvedId);
+  }
+
+  return [...new Set(resolved)];
+}
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
@@ -38,7 +98,8 @@ router.get('/', async (req, res, next) => {
 
 // ── Create or get existing 1:1 ─────────────────────────────────────────────────
 router.post('/',
-  body('participantIds').isArray({ min: 1, max: 9 }),
+  body('participantIds').optional().isArray({ min: 1, max: 9 }),
+  body('participants').optional().isArray({ min: 1, max: 9 }),
   body('name').optional().isLength({ max: 100 }),
   async (req, res, next) => {
     const errors = validationResult(req);
@@ -48,7 +109,19 @@ router.post('/',
     try {
       await client.query('BEGIN');
 
-      const allIds = [...new Set([req.user.id, ...req.body.participantIds])];
+      const providedParticipants = req.body.participantIds || req.body.participants || [];
+      const resolvedParticipants = await resolveParticipantIds(client, providedParticipants);
+      if (!resolvedParticipants) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'One or more participants were not found' });
+      }
+
+      const allIds = [...new Set([req.user.id, ...resolvedParticipants])];
+      if (allIds.length < 2) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'At least one other participant is required' });
+      }
+
       const isGroup = allIds.length > 2;
 
       // For 1:1, check if conversation already exists
@@ -59,12 +132,15 @@ router.post('/',
            JOIN conversation_participants cp1 ON cp1.conversation_id = c.id AND cp1.user_id = $1
            JOIN conversation_participants cp2 ON cp2.conversation_id = c.id AND cp2.user_id = $2
            WHERE c.name IS NULL
+             AND cp1.left_at IS NULL
+             AND cp2.left_at IS NULL
            LIMIT 1`,
           [req.user.id, otherId]
         );
         if (rows.length) {
+          const existing = await loadConversationWithParticipants(client, rows[0].id);
           await client.query('COMMIT');
-          return res.json({ conversation: rows[0], created: false });
+          return res.json({ conversation: existing || rows[0], created: false });
         }
       }
 
@@ -80,8 +156,9 @@ router.post('/',
         );
       }
 
+      const conversation = await loadConversationWithParticipants(client, conv.id);
       await client.query('COMMIT');
-      res.status(201).json({ conversation: conv, created: true });
+      res.status(201).json({ conversation: conversation || conv, created: true });
     } catch (err) {
       await client.query('ROLLBACK');
       next(err);
