@@ -129,7 +129,7 @@ export default function MessagePane() {
     try {
       await sendMessage(content.trim());
       setContent('');
-      inputRef.current?.focus()
+      setTimeout(() => inputRef.current?.focus(), 0);
     } catch (err) {
       console.error(err);
     } finally {

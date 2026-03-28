@@ -243,7 +243,7 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
 // ── Register ───────────────────────────────────────────────────────────────────
 router.post('/register',
   body('email').isEmail().normalizeEmail(),
-  body('username').isAlphanumeric().isLength({ min: 3, max: 32 }),
+  body('username').matches(/^[a-z0-9-]{3,32}$/i).withMessage('Username must be 3-32 chars, alphanumeric or hyphens'),
   body('password').isLength({ min: 8 }),
   body('displayName').optional().isLength({ max: 64 }),
   async (req, res, next) => {
@@ -331,7 +331,7 @@ router.get('/session', async (_req, res, next) => {
 
 router.post('/oauth/complete-create',
   body('pendingToken').isString().isLength({ min: 20 }),
-  body('username').optional().isAlphanumeric().isLength({ min: 3, max: 32 }),
+  body('username').optional().matches(/^[a-z0-9-]{3,32}$/i).withMessage('Username must be 3-32 chars, alphanumeric or hyphens'),
   body('displayName').optional().isLength({ min: 1, max: 64 }),
   body('password').optional().isLength({ min: 8 }),
   async (req, res, next) => {
