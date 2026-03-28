@@ -330,6 +330,24 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               otherLastReadAt: lastReadAt,
             };
           }),
+          activeConv:
+            s.activeConv?.id === conversationId
+              ? (me?.id === userId
+                  ? {
+                      ...s.activeConv,
+                      my_last_read_message_id: lastReadMessageId,
+                      myLastReadMessageId: lastReadMessageId,
+                      my_last_read_at: lastReadAt,
+                      myLastReadAt: lastReadAt,
+                    }
+                  : {
+                      ...s.activeConv,
+                      other_last_read_message_id: lastReadMessageId,
+                      otherLastReadMessageId: lastReadMessageId,
+                      other_last_read_at: lastReadAt,
+                      otherLastReadAt: lastReadAt,
+                    })
+              : s.activeConv,
         }));
         break;
       }
