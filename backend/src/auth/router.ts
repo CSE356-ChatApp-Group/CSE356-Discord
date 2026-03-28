@@ -26,18 +26,46 @@ const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLi
 
 const router = express.Router();
 const REFRESH_COOKIE = 'refreshToken';
-const COOKIE_OPTS = {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict',
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days (milliseconds)
-};
+
+function parseBooleanEnv(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return null;
+}
+
+function shouldUseSecureCookies() {
+  const explicit = parseBooleanEnv(process.env.COOKIE_SECURE);
+  if (explicit !== null) return explicit;
+
+  const frontendUrl = process.env.FRONTEND_URL || process.env.CORS_ORIGIN || '';
+  if (frontendUrl) {
+    return frontendUrl.startsWith('https://');
+  }
+
+  return process.env.NODE_ENV === 'production';
+}
+
+function getRefreshCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: shouldUseSecureCookies(),
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days (milliseconds)
+  };
+}
+
+function getRefreshCookieClearOptions() {
+  const { maxAge, ...clearOptions } = getRefreshCookieOptions();
+  return clearOptions;
+}
 
 function issueTokens(res, user) {
   const payload = { id: user.id, username: user.username, email: user.email };
   const accessToken  = signAccess(payload);
   const refreshToken = signRefresh(payload);
-  res.cookie(REFRESH_COOKIE, refreshToken, COOKIE_OPTS);
+  res.cookie(REFRESH_COOKIE, refreshToken, getRefreshCookieOptions());
   return { accessToken, user: payload };
 }
 
@@ -266,14 +294,14 @@ router.post('/refresh', (req, res) => {
 router.post('/logout', authenticate, async (req, res, next) => {
   try {
     if (isAuthBypassEnabled() && !req.token) {
-      res.clearCookie(REFRESH_COOKIE);
+      res.clearCookie(REFRESH_COOKIE, getRefreshCookieClearOptions());
       return res.json({ message: 'Logged out (auth bypass)' });
     }
 
     // Decode the access token for its exp to set deny-list TTL
     const payload = req.user;
     await denyToken(req.token, payload.exp);
-    res.clearCookie(REFRESH_COOKIE);
+    res.clearCookie(REFRESH_COOKIE, getRefreshCookieClearOptions());
     res.json({ message: 'Logged out' });
   } catch (err) {
     next(err);
@@ -283,7 +311,7 @@ router.post('/logout', authenticate, async (req, res, next) => {
 router.get('/session', async (_req, res, next) => {
   try {
     if (!isAuthBypassEnabled()) {
-      return res.status(404).json({ error: 'Not found' });
+      return res.json({ authBypass: false, accessToken: null, user: null });
     }
 
     const { user } = await getBypassAuthContext();
