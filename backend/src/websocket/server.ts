@@ -235,7 +235,7 @@ wss.on('connection', async (ws, req) => {
   ws._userId = user.id;
   ws._connectionId = randomUUID();
 
-  upsertConnectionState(user.id, ws._connectionId, 'online')
+  upsertConnectionState(user.id, ws._connectionId, 'idle')
     .then(async () => {
       await markConnectionAlive(user.id, ws._connectionId);
       await recomputeUserPresence(user.id);
