@@ -8,7 +8,7 @@ import MemberList   from './MemberList';
 import styles from './MessagePane.module.css';
 
 export default function MessagePane() {
-  const { activeChannel, activeConv, messages, sendMessage, fetchMessages } = useChatStore();
+  const { activeChannel, activeConv, messages, sendMessage, fetchMessages, search, searchResults, clearSearch } = useChatStore();
   const user = useAuthStore(s => s.user);
 
   const target   = activeChannel || activeConv;
@@ -20,7 +20,9 @@ export default function MessagePane() {
   const [loadingMore, setLoadMore] = useState(false);
   const [showSearch, setSearch]   = useState(false);
   const [showMembers, setShowMembers] = useState(Boolean(activeChannel));
+  const [localQ, setLocalQ]       = useState('');
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   const bottomRef   = useRef(null);
   const inputRef    = useRef(null);
@@ -37,7 +39,19 @@ export default function MessagePane() {
     inputRef.current?.focus();
     setSearch(false);
     setShowMembers(Boolean(activeChannel));
+    clearSearch();
+    setLocalQ('');
   }, [key]);
+
+  // Focus search input and clean up when search panel toggles
+  useEffect(() => {
+    if (showSearch) {
+      requestAnimationFrame(() => searchInputRef.current?.focus());
+    } else {
+      clearSearch();
+      setLocalQ('');
+    }
+  }, [showSearch]);
 
   useEffect(() => {
     function onShortcut(e) {
@@ -55,6 +69,24 @@ export default function MessagePane() {
     window.addEventListener('keydown', onShortcut);
     return () => window.removeEventListener('keydown', onShortcut);
   }, []);
+
+  async function handleSearchSubmit(e?: React.FormEvent) {
+    e?.preventDefault();
+    const query = localQ.trim();
+    if (!query) return;
+    await search(query);
+  }
+
+  function handleSearchChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setLocalQ(e.target.value);
+    if (searchResults !== null) clearSearch();
+  }
+
+  function closeSearch() {
+    setSearch(false);
+    clearSearch();
+    setLocalQ('');
+  }
 
   async function handleSend(e) {
     e.preventDefault();
@@ -140,23 +172,60 @@ export default function MessagePane() {
               <MembersIcon />
             </button>
           )}
-          <button
-          className={`${styles.searchTrigger} ${showSearch ? styles.searchTriggerActive : ''}`}
-          title={searchLabel}
-          onClick={() => {
-            setSearch(v => {
-              const next = !v;
-              if (next) setShowMembers(false);
-              return next;
-            });
-          }}
-          aria-label="Toggle message search"
-          data-testid="message-search-toggle"
-        >
-          <SearchIcon />
-          <span className={styles.searchTriggerText}>{searchLabel}</span>
-          <span className={styles.searchTriggerHint}>{shortcutLabel}</span>
-        </button>
+          {showSearch ? (
+            <div className={styles.searchBox} data-testid="search-box">
+              <form className={styles.searchForm} onSubmit={handleSearchSubmit}>
+                <span className={styles.searchFormIcon}><SearchIcon /></span>
+                <input
+                  ref={searchInputRef}
+                  className={styles.searchFormInput}
+                  value={localQ}
+                  onChange={handleSearchChange}
+                  placeholder={searchLabel}
+                  autoComplete="off"
+                  spellCheck={false}
+                  data-testid="search-input"
+                />
+                <button
+                  type="button"
+                  className={styles.searchClear}
+                  onClick={closeSearch}
+                  aria-label="Close search"
+                >✕</button>
+              </form>
+              {searchResults === null && (
+                <div className={styles.searchPopout} data-testid="search-popout">
+                  {localQ.trim() ? (
+                    <button
+                      className={styles.searchPopoutOption}
+                      type="button"
+                      onClick={handleSearchSubmit}
+                    >
+                      <SearchIcon />
+                      <span>Search for <strong>{localQ.trim()}</strong></span>
+                    </button>
+                  ) : (
+                    <div className={styles.searchPopoutHint}>
+                      <SearchIcon />
+                      <span>Start typing to search {activeChannel ? `#${activeChannel.name}` : 'messages'}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              className={styles.searchTrigger}
+              title={searchLabel}
+              onClick={() => { setSearch(true); setShowMembers(false); }}
+              aria-label="Toggle message search"
+              data-testid="message-search-toggle"
+            >
+              <SearchIcon />
+              <span className={styles.searchTriggerText}>{searchLabel}</span>
+              <span className={styles.searchTriggerHint}>{shortcutLabel}</span>
+            </button>
+          )}
         </div>
       </header>
 
@@ -218,9 +287,9 @@ export default function MessagePane() {
             <MemberList />
           </aside>
         )}
-        {showSearch && (
+        {showSearch && searchResults !== null && (
           <aside className={styles.searchSidebar} data-testid="message-search-sidebar">
-            <SearchBar onClose={() => setSearch(false)} placeholder={`${searchLabel}...`} />
+            <SearchBar onClose={closeSearch} />
           </aside>
         )}
       </div>

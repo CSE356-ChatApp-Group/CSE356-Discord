@@ -239,3 +239,101 @@
     background: var(--bg-1);
   }
 }
+
+/* ── Inline search (in header) ───────────────────────────── */
+.searchBox {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: 420px;
+  flex: 1;
+}
+
+.searchForm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-light);
+  background: var(--bg-3);
+  transition: border-color .15s;
+}
+
+.searchForm:focus-within {
+  border-color: var(--accent);
+}
+
+.searchFormIcon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.searchFormInput {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: var(--text-primary);
+  min-width: 0;
+}
+.searchFormInput::placeholder { color: var(--text-muted); }
+
+.searchClear {
+  color: var(--text-muted);
+  font-size: 11px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background .1s, color .1s;
+}
+.searchClear:hover { background: var(--bg-5, var(--bg-4)); color: var(--text-primary); }
+
+/* Pop-out dropdown below the search input */
+.searchPopout {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  z-index: 100;
+  overflow: hidden;
+}
+
+.searchPopoutOption {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  font-size: 14px;
+  color: var(--text-primary);
+  text-align: left;
+  transition: background .1s;
+}
+.searchPopoutOption:hover { background: var(--bg-2); }
+.searchPopoutOption svg { color: var(--text-muted); flex-shrink: 0; }
+.searchPopoutOption strong { font-weight: 600; }
+
+.searchPopoutHint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.searchPopoutHint svg { flex-shrink: 0; }
