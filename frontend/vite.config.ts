@@ -11,6 +11,9 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       port: 5173,
+      watch: {
+        usePolling: true,
+      },
       proxy: {
         // Proxy API and WS calls to the backend so no CORS issues in dev
         '/api': { target: httpTarget, changeOrigin: true },

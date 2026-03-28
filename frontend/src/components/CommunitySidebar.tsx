@@ -6,11 +6,12 @@ import Modal from './Modal';
 import styles from './CommunitySidebar.module.css';
 
 export default function CommunitySidebar() {
-  const { communities, activeCommunity, selectCommunity, createCommunity, openHome } = useChatStore();
+  const { communities, activeCommunity, selectCommunity, createCommunity, fetchCommunities, openHome } = useChatStore();
   const logout = useAuthStore(s => s.logout);
   const user   = useAuthStore(s => s.user);
   const setUser = useAuthStore(s => s.setUser);
   const [showCreate, setShowCreate] = useState(false);
+  const [showJoin, setShowJoin] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
   const [linkedProviders, setLinkedProviders] = useState<string[]>([]);
   const [hasPassword, setHasPassword] = useState(false);
@@ -153,6 +154,18 @@ export default function CommunitySidebar() {
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
         </button>
+
+        <button
+          className={styles.addBtn}
+          title="Browse & join communities"
+          aria-label="Browse and join communities"
+          data-testid="community-join-open"
+          onClick={() => setShowJoin(true)}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </button>
       </div>
 
       {/* User avatar at bottom */}
@@ -169,6 +182,17 @@ export default function CommunitySidebar() {
             const c = await createCommunity(slug, name, desc);
             selectCommunity(c);
             setShowCreate(false);
+          }}
+        />
+      )}
+
+      {showJoin && (
+        <JoinCommunityModal
+          onClose={() => setShowJoin(false)}
+          onJoined={async (community) => {
+            await fetchCommunities();
+            selectCommunity(community);
+            setShowJoin(false);
           }}
         />
       )}
@@ -369,6 +393,86 @@ function CreateCommunityModal({ onClose, onCreate }) {
         </label>
         <button type="submit" disabled={busy} data-testid="community-create-submit">{busy ? 'Creating…' : 'Create'}</button>
       </form>
+    </Modal>
+  );
+}
+
+function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoined: (community: any) => Promise<void> }) {
+  const [allCommunities, setAllCommunities] = useState<any[]>([]);
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    api.get('/communities')
+      .then(data => {
+        const browseable = (data?.communities ?? []).filter((c: any) => !c.my_role);
+        setAllCommunities(browseable);
+      })
+      .catch(e => setErr(e?.message || 'Could not load communities'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const filtered = query.trim()
+    ? allCommunities.filter(c =>
+        c.name.toLowerCase().includes(query.toLowerCase()) ||
+        c.slug.toLowerCase().includes(query.toLowerCase())
+      )
+    : allCommunities;
+
+  async function join(community: any) {
+    setErr('');
+    setBusyId(community.id);
+    try {
+      await api.post(`/communities/${community.id}/join`, {});
+      await onJoined(community);
+    } catch (e: any) {
+      setErr(e?.message || 'Could not join community');
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Modal title="Browse Communities" onClose={onClose}>
+      <div className={styles.joinWrap}>
+        <input
+          className={styles.joinSearch}
+          placeholder="Search communities…"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          autoFocus
+          data-testid="community-join-search"
+        />
+        {err && <p className={styles.err} role="alert">{err}</p>}
+        {loading ? (
+          <p className={styles.accountMuted}>Loading…</p>
+        ) : filtered.length === 0 ? (
+          <p className={styles.joinEmpty}>
+            {allCommunities.length === 0 ? 'No public communities available.' : 'No communities match your search.'}
+          </p>
+        ) : (
+          <ul className={styles.joinList} data-testid="community-join-list">
+            {filtered.map(c => (
+              <li key={c.id} className={styles.joinItem} data-testid={`community-join-item-${c.id}`}>
+                <div className={styles.joinItemInfo}>
+                  <span className={styles.joinItemName}>{c.name}</span>
+                  {c.description && <span className={styles.joinItemDesc}>{c.description}</span>}
+                  <span className={styles.joinItemMeta}>{c.member_count ?? 0} members</span>
+                </div>
+                <button
+                  className={styles.joinBtn}
+                  disabled={busyId !== null}
+                  onClick={() => join(c)}
+                  data-testid={`community-join-btn-${c.id}`}
+                >
+                  {busyId === c.id ? 'Joining…' : 'Join'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </Modal>
   );
 }
