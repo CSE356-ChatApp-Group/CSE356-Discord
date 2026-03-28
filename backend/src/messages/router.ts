@@ -203,13 +203,22 @@ router.put('/:id/read',
       if (!rows.length) return res.status(404).json({ error: 'Message not found' });
 
       const { channel_id, conversation_id } = rows[0];
-      await pool.query(
+      const { rows: upsertRows } = await pool.query(
         `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
          VALUES ($1,$2,$3,$4,NOW())
          ON CONFLICT (user_id, COALESCE(channel_id, conversation_id))
-         DO UPDATE SET last_read_message_id=$4, last_read_at=NOW()`,
+         DO UPDATE SET last_read_message_id=$4, last_read_at=NOW()
+         RETURNING last_read_at`,
         [req.user.id, channel_id, conversation_id, req.params.id]
       );
+
+      sideEffects.publishMessageEvent(targetKey(channel_id, conversation_id), 'read:updated', {
+        userId: req.user.id,
+        channelId: channel_id,
+        conversationId: conversation_id,
+        lastReadMessageId: req.params.id,
+        lastReadAt: upsertRows[0]?.last_read_at || new Date().toISOString(),
+      });
 
       res.json({ success: true });
     } catch (err) { next(err); }

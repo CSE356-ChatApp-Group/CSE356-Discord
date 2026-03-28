@@ -365,6 +365,40 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         store.setPresence(userId, status);
         break;
       }
+      case 'read:updated': {
+        const { conversationId, userId, lastReadMessageId, lastReadAt } = event.data || {};
+        if (!conversationId || !userId) break;
+        const me = useAuthStore.getState().user;
+        set(s => ({
+          conversations: s.conversations.map((conv) => {
+            if (conv.id !== conversationId) return conv;
+            if (me?.id === userId) {
+              return {
+                ...conv,
+                my_last_read_message_id: lastReadMessageId,
+                myLastReadMessageId: lastReadMessageId,
+                my_last_read_at: lastReadAt,
+                myLastReadAt: lastReadAt,
+              };
+            }
+            return {
+              ...conv,
+              other_last_read_message_id: lastReadMessageId,
+              otherLastReadMessageId: lastReadMessageId,
+              other_last_read_at: lastReadAt,
+              otherLastReadAt: lastReadAt,
+            };
+          }),
+          conversationReadAt:
+            me?.id === userId
+              ? {
+                  ...s.conversationReadAt,
+                  [conversationId]: lastReadAt || s.conversationReadAt[conversationId],
+                }
+              : s.conversationReadAt,
+        }));
+        break;
+      }
       case 'community:member_joined': {
         const { communityId } = event.data;
         if (store.activeCommunity?.id === communityId) {

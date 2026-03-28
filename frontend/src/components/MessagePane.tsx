@@ -133,6 +133,28 @@ export default function MessagePane() {
     ? `# ${activeChannel.name}`
     : activeConv?.name || 'Direct Message';
 
+  const otherLastReadMessageId = activeConv?.other_last_read_message_id || activeConv?.otherLastReadMessageId;
+  const otherLastReadAt = activeConv?.other_last_read_at || activeConv?.otherLastReadAt;
+  let latestOwnMessageId: string | null = null;
+  for (let i = msgList.length - 1; i >= 0; i -= 1) {
+    const m = msgList[i];
+    if (!m?.deleted_at && m?.author_id === user?.id) {
+      latestOwnMessageId = m.id;
+      break;
+    }
+  }
+  let latestOwnSeen = false;
+  if (latestOwnMessageId) {
+    const ownIdx = msgList.findIndex(m => m.id === latestOwnMessageId);
+    if (ownIdx >= 0 && otherLastReadMessageId) {
+      const seenIdx = msgList.findIndex(m => m.id === otherLastReadMessageId);
+      if (seenIdx >= ownIdx) latestOwnSeen = true;
+    }
+    if (!latestOwnSeen && otherLastReadAt && ownIdx >= 0) {
+      latestOwnSeen = new Date(otherLastReadAt).getTime() >= new Date(msgList[ownIdx].created_at).getTime();
+    }
+  }
+
   const searchScope = activeChannel
     ? `#${activeChannel.name}`
     : activeConv?.name
@@ -247,6 +269,7 @@ export default function MessagePane() {
                 message={msg}
                 prevMessage={msgList[i - 1]}
                 isOwn={msg.author_id === user?.id}
+                showReadReceipt={Boolean(activeConv && msg.id === latestOwnMessageId && latestOwnSeen)}
               />
             ))}
             <div ref={bottomRef} />

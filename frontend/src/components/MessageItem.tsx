@@ -19,7 +19,7 @@ function formatTimestamp(iso) {
   return format(d, 'MMM d, HH:mm');
 }
 
-export default function MessageItem({ message: msg, prevMessage, isOwn }) {
+export default function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false }) {
   const { editMessage, deleteMessage } = useChatStore();
   const grouped = isGrouped(msg, prevMessage);
 
@@ -89,6 +89,16 @@ export default function MessageItem({ message: msg, prevMessage, isOwn }) {
               <span className={styles.deleted}>This message was deleted.</span>
             ) : (
               <p className={styles.text}>{msg.content}</p>
+            )}
+            {showReadReceipt && !msg.deleted_at && (
+              <div
+                className={styles.readReceipt}
+                data-testid={`message-read-receipt-${msg.id}`}
+                data-read-receipt="SEEN"
+                aria-label="Seen by recipient"
+              >
+                Seen
+              </div>
             )}
             {/* Attachments */}
             {msg.attachments?.length > 0 && (

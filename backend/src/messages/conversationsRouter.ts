@@ -81,15 +81,39 @@ router.get('/', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT c.*,
+              lm.id AS last_message_id,
+              lm.author_id AS last_message_author_id,
+              lm.created_at AS last_message_at,
+              my_rs.last_read_message_id AS my_last_read_message_id,
+              my_rs.last_read_at AS my_last_read_at,
+              (array_agg(other_rs.last_read_message_id ORDER BY other_rs.last_read_at DESC NULLS LAST)
+                FILTER (WHERE other_rs.user_id IS NOT NULL))[1] AS other_last_read_message_id,
+              MAX(other_rs.last_read_at) AS other_last_read_at,
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name,'avatarUrl',u.avatar_url))
                 AS participants
        FROM   conversations c
        JOIN   conversation_participants cp ON cp.conversation_id = c.id
+                                           AND cp.user_id = $1
+                                           AND cp.left_at IS NULL
        JOIN   conversation_participants cp2 ON cp2.conversation_id = c.id
+                                            AND cp2.left_at IS NULL
        JOIN   users u ON u.id = cp2.user_id
-       WHERE  cp.user_id = $1 AND cp.left_at IS NULL
-       GROUP  BY c.id
-       ORDER  BY c.updated_at DESC`,
+       LEFT JOIN LATERAL (
+         SELECT m.id, m.author_id, m.created_at
+         FROM messages m
+         WHERE m.conversation_id = c.id AND m.deleted_at IS NULL
+         ORDER BY m.created_at DESC
+         LIMIT 1
+       ) lm ON TRUE
+       LEFT JOIN read_states my_rs
+              ON my_rs.conversation_id = c.id
+             AND my_rs.user_id = $1
+       LEFT JOIN read_states other_rs
+              ON other_rs.conversation_id = c.id
+             AND other_rs.user_id = cp2.user_id
+             AND cp2.user_id <> $1
+       GROUP  BY c.id, lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at
+       ORDER  BY COALESCE(lm.created_at, c.updated_at) DESC`,
       [req.user.id]
     );
     res.json({ conversations: rows });

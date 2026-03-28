@@ -113,7 +113,7 @@ export default function ChannelSidebar() {
                 key={conv.id}
                 conv={conv}
                 currentUserId={user?.id}
-                unread={isConversationUnread(conv, conversationReadAt[conv.id], activeConv?.id === conv.id)}
+                unread={isConversationUnread(conv, conversationReadAt[conv.id], activeConv?.id === conv.id, user?.id)}
                 active={activeConv?.id === conv.id}
                 onClick={() => selectConversation(conv)}
               />
@@ -162,8 +162,14 @@ function ChannelRow({ channel, active, onClick }) {
   );
 }
 
-function isConversationUnread(conv, readAt, active) {
+function isConversationUnread(conv, readAt, active, currentUserId) {
   if (active) return false;
+  const lastMessageAuthorId = conv?.last_message_author_id || conv?.lastMessageAuthorId;
+  const lastMessageId = conv?.last_message_id || conv?.lastMessageId;
+  const myLastReadMessageId = conv?.my_last_read_message_id || conv?.myLastReadMessageId;
+  if (lastMessageId && lastMessageAuthorId && lastMessageAuthorId !== currentUserId) {
+    return myLastReadMessageId !== lastMessageId;
+  }
   const updatedAt = conv?.updatedAt || conv?.updated_at;
   if (!updatedAt) return false;
   if (!readAt) return true;
@@ -174,17 +180,17 @@ function DmRow({ conv, currentUserId, unread, active, onClick }) {
   const others = (conv.participants || []).filter(p => p.id !== currentUserId);
   const name   = conv.name || others.map(p => p.displayName || p.username).join(', ') || 'Unknown';
   return (
-    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} aria-label={`Open direct conversation ${name}`}>
+    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open direct conversation ${name}`}>
       <span className={styles.dmIcon}>@</span>
       <span className={styles.rowName}>{name}</span>
-      <span
-        className={`${styles.readBadge} ${unread ? styles.readBadgeUnread : styles.readBadgeRead}`}
-        data-testid={`dm-read-state-${conv.id}`}
-        data-read-state={unread ? 'UNREAD' : 'READ'}
-        aria-label={unread ? 'Unread conversation' : 'Read conversation'}
-      >
-        {unread ? 'UNREAD' : 'READ'}
-      </span>
+      {unread && (
+        <span
+          className={styles.unreadDot}
+          data-testid={`dm-unread-indicator-${conv.id}`}
+          data-read-state="UNREAD"
+          aria-label="Unread conversation"
+        />
+      )}
     </button>
   );
 }
