@@ -6,9 +6,7 @@
  *   local    – username/password with bcrypt
  *   google   – OAuth 2.0 via Google
  *   github   – OAuth 2.0 via GitHub
- *
- * OIDC (generic) can be added by following the same pattern as Google
- * using openid-client wrapped in passport-openidconnect.
+ *   oidc     – OpenID Connect (class instructor platform)
  */
 
 'use strict';
@@ -17,6 +15,7 @@ const passport         = require('passport');
 const LocalStrategy    = require('passport-local').Strategy;
 const GoogleStrategy   = require('passport-google-oauth20').Strategy;
 const GitHubStrategy   = require('passport-github2').Strategy;
+const OpenIDConnectStrategy = require('passport-openidconnect').Strategy;
 const bcrypt           = require('bcrypt');
 const { pool }         = require('../db/pool');
 
@@ -109,5 +108,24 @@ if (process.env.GITHUB_CLIENT_ID) {
   }, async (accessToken, refreshToken, profile, done) => {
     const email = profile.emails?.[0]?.value;
     await handleOAuth('github', profile.id, email, profile.displayName, done);
+  }));
+}
+
+// ── OIDC (Class Instructor Platform) ────────────────────────────────────────────
+if (process.env.OIDC_CLIENT_ID) {
+  passport.use(new OpenIDConnectStrategy({
+    issuer: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth',
+    authorizationURL: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/protocol/openid-connect/auth',
+    tokenURL: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/protocol/openid-connect/token',
+    userInfoURL: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/protocol/openid-connect/userinfo',
+    clientID: process.env.OIDC_CLIENT_ID,
+    clientSecret: process.env.OIDC_CLIENT_SECRET,
+    callbackURL: process.env.OIDC_CALLBACK_URL || '/api/v1/auth/oidc/callback',
+    scope: ['openid', 'profile', 'email'],
+  }, async (issuer, profile, done) => {
+    // OIDC profile structure is standardized
+    const email = profile.emails?.[0]?.value || profile._json?.email;
+    const displayName = profile.displayName || profile._json?.name || profile.username;
+    await handleOAuth('oidc', profile.id, email, displayName, done);
   }));
 }

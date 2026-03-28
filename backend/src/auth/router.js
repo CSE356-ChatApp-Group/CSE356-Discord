@@ -129,7 +129,7 @@ router.get('/session', async (_req, res, next) => {
   }
 });
 
-// ── Google OAuth ───────────────────────────────────────────────────────────────
+// ── Google OAuth Callback Handler ───────────────────────────────────────────────────────────────
 router.get('/google', passport.authenticate('google', { session: false, scope: ['profile', 'email'] }));
 
 router.get('/google/callback',
@@ -141,11 +141,22 @@ router.get('/google/callback',
   }
 );
 
-// ── GitHub OAuth ───────────────────────────────────────────────────────────────
+// ── GitHub OAuth Callback Handler ───────────────────────────────────────────────────────────────
 router.get('/github', passport.authenticate('github', { session: false }));
 
 router.get('/github/callback',
   passport.authenticate('github', { session: false, failureRedirect: '/login?error=oauth' }),
+  (req, res) => {
+    const { accessToken } = issueTokens(res, req.user);
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/oauth-callback?token=${accessToken}`);
+  }
+);
+
+// ── OIDC (Class Instructor Platform) Callback Handler ────────────────────────────────────────────
+router.get('/oidc', passport.authenticate('openidconnect', { session: false }));
+
+router.get('/oidc/callback',
+  passport.authenticate('openidconnect', { session: false, failureRedirect: '/login?error=oauth' }),
   (req, res) => {
     const { accessToken } = issueTokens(res, req.user);
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/oauth-callback?token=${accessToken}`);
