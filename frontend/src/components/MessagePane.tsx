@@ -168,22 +168,6 @@ export default function MessagePane() {
     ? `# ${activeChannel.name}`
     : activeConv?.name || 'Direct Message';
 
-  // Log activeConv read fields whenever the active conversation changes
-  useEffect(() => {
-    if (activeConv) {
-      console.debug('[ActiveConv read fields]', {
-        id: activeConv.id,
-        my_last_read_message_id: activeConv.my_last_read_message_id,
-        other_last_read_message_id: activeConv.other_last_read_message_id,
-        last_message_id: activeConv.last_message_id,
-        participants: activeConv.participants,
-        // camelCase variants too
-        myLastReadMessageId: activeConv.myLastReadMessageId,
-        otherLastReadMessageId: activeConv.otherLastReadMessageId,
-      });
-    }
-  }, [activeConv?.id, activeConv?.other_last_read_message_id, activeConv?.otherLastReadMessageId]);
-
   // Any activeConv is a DM – we don't need participants.length to gate read receipts.
   const isDm = Boolean(activeConv);
   const otherLastReadMessageId = activeConv?.other_last_read_message_id || activeConv?.otherLastReadMessageId;
@@ -200,19 +184,16 @@ export default function MessagePane() {
     }
 
     if (!isDm || !latestOwnId || !otherLastReadMessageId) {
-      console.debug('[ReadReceipt] skipped', { isDm, latestOwnId, otherLastReadMessageId });
       return { latestOwnMessageId: latestOwnId, latestOwnSeen: false };
     }
 
     // Fast path: recipient read pointer exactly equals latest outgoing message.
     if (otherLastReadMessageId === latestOwnId) {
-      console.debug('[ReadReceipt] fast-path seen', { otherLastReadMessageId, latestOwnId });
       return { latestOwnMessageId: latestOwnId, latestOwnSeen: true };
     }
 
     const readIdx = msgList.findIndex(m => m.id === otherLastReadMessageId);
     const seen = readIdx >= latestOwnIdx && latestOwnIdx >= 0;
-    console.debug('[ReadReceipt] index check', { otherLastReadMessageId, latestOwnId, readIdx, latestOwnIdx, seen });
     return {
       latestOwnMessageId: latestOwnId,
       latestOwnSeen: seen,

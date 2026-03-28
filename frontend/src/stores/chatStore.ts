@@ -157,13 +157,23 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   async openDm(userId: string) {
     const { conversation } = await api.post('/conversations', { participantIds: [userId] });
-    set(s => ({
-      conversations: s.conversations.find(c => c.id === conversation.id)
-        ? s.conversations
-        : [conversation, ...s.conversations],
-      activeConv: conversation,
-      activeChannel: null,
-    }));
+    set(s => {
+      const existing = s.conversations.find(c => c.id === conversation.id);
+      const activeConv = existing
+        ? {
+            ...conversation,
+            ...existing,
+            participants: conversation.participants || existing.participants,
+          }
+        : conversation;
+      return {
+        conversations: existing
+          ? s.conversations.map(c => (c.id === conversation.id ? activeConv : c))
+          : [activeConv, ...s.conversations],
+        activeConv,
+        activeChannel: null,
+      };
+    });
     await get().fetchMessages({ conversationId: conversation.id });
     wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
     const msgs = get().messages[conversation.id];
@@ -188,16 +198,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }
             : s.activeConv,
       }));
-      console.debug('[markRead openDm]', lastId);
-      api.put(`/messages/${lastId}/read`)
-        .then(() => console.debug('[markRead openDm] ✓', lastId))
-        .catch(err => console.warn('[markRead openDm] ✗', err));
+      api.put(`/messages/${lastId}/read`).catch(() => {});
     }
     return conversation;
   },
 
   async selectConversation(conv: Entity) {
-    set({ activeConv: conv, activeChannel: null });
+    set(s => ({
+      activeConv: s.conversations.find((c) => c.id === conv.id) || conv,
+      activeChannel: null,
+    }));
     await get().fetchMessages({ conversationId: conv.id });
     wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
     const msgs = get().messages[conv.id];
@@ -222,10 +232,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }
             : s.activeConv,
       }));
-      console.debug('[markRead selectConv]', lastId);
-      api.put(`/messages/${lastId}/read`)
-        .then(() => console.debug('[markRead selectConv] ✓', lastId))
-        .catch(err => console.warn('[markRead selectConv] ✗', err));
+      api.put(`/messages/${lastId}/read`).catch(() => {});
     }
   },
 
@@ -368,10 +375,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   }
                 : s.activeConv,
           }));
-          console.debug('[markRead message:created auto]', msg.id);
-          api.put(`/messages/${msg.id}/read`)
-            .then(() => console.debug('[markRead message:created auto] ✓', msg.id))
-            .catch(err => console.warn('[markRead message:created auto] ✗', err));
+          api.put(`/messages/${msg.id}/read`).catch(() => {});
         }
         break;
       }
@@ -405,7 +409,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }
       case 'read:updated': {
         const { conversationId, userId, lastReadMessageId, lastReadAt } = event.data || {};
-        console.debug('[WS read:updated]', { conversationId, userId, lastReadMessageId });
         if (!conversationId || !userId) break;
         const me = useAuthStore.getState().user;
         set(s => ({
