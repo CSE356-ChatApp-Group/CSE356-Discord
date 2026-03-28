@@ -29,10 +29,25 @@ router.get('/',
   async (req, res, next) => {
     if (!v(req, res)) return;
     try {
-      // Return public channels + private channels where user is a member
+      // Return accessible channels with last-message/read-pointer metadata.
       const { rows } = await pool.query(
-        `SELECT ch.*
+        `SELECT ch.*,
+                lm.id AS last_message_id,
+                lm.author_id AS last_message_author_id,
+                lm.created_at AS last_message_at,
+                rs.last_read_message_id AS my_last_read_message_id,
+                rs.last_read_at AS my_last_read_at
          FROM   channels ch
+         LEFT JOIN LATERAL (
+           SELECT m.id, m.author_id, m.created_at
+           FROM messages m
+           WHERE m.channel_id = ch.id AND m.deleted_at IS NULL
+           ORDER BY m.created_at DESC
+           LIMIT 1
+         ) lm ON TRUE
+         LEFT JOIN read_states rs
+                ON rs.channel_id = ch.id
+               AND rs.user_id = $2
          WHERE  ch.community_id = $1
            AND  (ch.is_private = FALSE
                  OR EXISTS (

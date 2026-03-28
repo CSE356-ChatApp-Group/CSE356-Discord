@@ -138,6 +138,7 @@ export default function CommunitySidebar() {
           <CommunityIcon
             key={c.id}
             community={c}
+            unread={communityHasUnreadChannels(c)}
             active={activeCommunity?.id === c.id}
             onClick={() => selectCommunity(c)}
           />
@@ -322,7 +323,13 @@ export default function CommunitySidebar() {
   );
 }
 
-function CommunityIcon({ community, active, onClick }) {
+function communityHasUnreadChannels(community) {
+  if (!community) return false;
+  const unreadCount = Number(community.unread_channel_count ?? community.unreadChannelCount ?? 0);
+  return Boolean(community.has_unread_channels ?? community.hasUnreadChannels ?? unreadCount > 0);
+}
+
+function CommunityIcon({ community, unread, active, onClick }) {
   const initials = community.name.slice(0, 2).toUpperCase();
   return (
     <button
@@ -337,6 +344,13 @@ function CommunityIcon({ community, active, onClick }) {
         ? <img src={community.icon_url} alt={community.name} className={styles.iconImg} />
         : <span className={styles.iconText}>{initials}</span>
       }
+      {unread && (
+        <span
+          className={styles.communityUnreadDot}
+          data-testid={`community-unread-indicator-${community.id}`}
+          aria-label="Community has unread channels"
+        />
+      )}
     </button>
   );
 }

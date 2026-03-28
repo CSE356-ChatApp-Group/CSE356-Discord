@@ -46,9 +46,34 @@ router.get('/', async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT c.*,
               cm.role AS my_role,
-              (SELECT COUNT(*) FROM community_members WHERE community_id = c.id) AS member_count
+              (SELECT COUNT(*) FROM community_members WHERE community_id = c.id) AS member_count,
+              COALESCE(unread.unread_channel_count, 0) AS unread_channel_count,
+              (COALESCE(unread.unread_channel_count, 0) > 0) AS has_unread_channels
        FROM   communities c
        LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = $1
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS unread_channel_count
+         FROM channels ch
+         LEFT JOIN LATERAL (
+           SELECT m.id, m.author_id
+           FROM messages m
+           WHERE m.channel_id = ch.id AND m.deleted_at IS NULL
+           ORDER BY m.created_at DESC
+           LIMIT 1
+         ) lm ON TRUE
+         LEFT JOIN read_states rs
+                ON rs.channel_id = ch.id
+               AND rs.user_id = $1
+         WHERE ch.community_id = c.id
+           AND (ch.is_private = FALSE
+                OR EXISTS (
+                  SELECT 1 FROM channel_members chm
+                  WHERE chm.channel_id = ch.id AND chm.user_id = $1
+                ))
+           AND lm.id IS NOT NULL
+           AND lm.author_id <> $1
+           AND rs.last_read_message_id IS DISTINCT FROM lm.id
+       ) unread ON TRUE
        WHERE  c.is_public = TRUE OR cm.user_id IS NOT NULL
        ORDER  BY c.name`,
       [req.user.id]

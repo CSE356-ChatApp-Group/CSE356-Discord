@@ -89,6 +89,7 @@ export default function ChannelSidebar() {
                 key={ch.id}
                 channel={ch}
                 active={activeChannel?.id === ch.id}
+                unread={isChannelUnread(ch, activeChannel?.id === ch.id, user?.id)}
                 onClick={() => selectChannel(ch)}
               />
             ))}
@@ -153,13 +154,31 @@ export default function ChannelSidebar() {
   );
 }
 
-function ChannelRow({ channel, active, onClick }) {
+function ChannelRow({ channel, active, unread, onClick }) {
   return (
-    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`channel-item-${channel.id}`} data-channel-id={channel.id} aria-label={`Open channel ${channel.name}`}>
+    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`channel-item-${channel.id}`} data-channel-id={channel.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open channel ${channel.name}`}>
       <span className={styles.hash}>{channel.is_private ? '🔒' : '#'}</span>
       <span className={styles.rowName}>{channel.name}</span>
+      {unread && (
+        <span
+          className={styles.unreadDot}
+          data-testid={`channel-unread-indicator-${channel.id}`}
+          data-read-state="UNREAD"
+          aria-label="Unread channel"
+        />
+      )}
     </button>
   );
+}
+
+function isChannelUnread(channel, active, currentUserId) {
+  if (active) return false;
+  const lastMessageAuthorId = channel?.last_message_author_id || channel?.lastMessageAuthorId;
+  const lastMessageId = channel?.last_message_id || channel?.lastMessageId;
+  const myLastReadMessageId = channel?.my_last_read_message_id || channel?.myLastReadMessageId;
+  if (!lastMessageId) return false;
+  if (lastMessageAuthorId === currentUserId) return false;
+  return myLastReadMessageId !== lastMessageId;
 }
 
 function isConversationUnread(conv, active, currentUserId) {

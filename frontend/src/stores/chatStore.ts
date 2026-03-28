@@ -80,6 +80,32 @@ function hydrateAuthorFromSession(message: Entity) {
   };
 }
 
+function channelLastMessageId(channel: Entity) {
+  return channel?.last_message_id || channel?.lastMessageId || null;
+}
+
+function channelLastMessageAuthorId(channel: Entity) {
+  return channel?.last_message_author_id || channel?.lastMessageAuthorId || null;
+}
+
+function channelMyLastReadMessageId(channel: Entity) {
+  return channel?.my_last_read_message_id || channel?.myLastReadMessageId || null;
+}
+
+function isChannelUnreadForUser(channel: Entity, currentUserId?: string, activeChannelId?: string | null) {
+  if (!channel || !currentUserId) return false;
+  if (activeChannelId && channel.id === activeChannelId) return false;
+  const lastMessageId = channelLastMessageId(channel);
+  if (!lastMessageId) return false;
+  if (channelLastMessageAuthorId(channel) === currentUserId) return false;
+  return channelMyLastReadMessageId(channel) !== lastMessageId;
+}
+
+function countUnreadChannels(channels: Entity[], currentUserId?: string, activeChannelId?: string | null) {
+  if (!currentUserId || !Array.isArray(channels)) return 0;
+  return channels.reduce((count, channel) => count + (isChannelUnreadForUser(channel, currentUserId, activeChannelId) ? 1 : 0), 0);
+}
+
 export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Data ──────────────────────────────────────────────────────────────────
   communities:     [],
@@ -97,7 +123,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Communities ───────────────────────────────────────────────────────────
   async fetchCommunities() {
     const { communities } = await api.get('/communities');
-    set({ communities });
+    set(s => ({
+      communities,
+      activeCommunity: s.activeCommunity
+        ? communities.find((c: Entity) => c.id === s.activeCommunity?.id) || s.activeCommunity
+        : s.activeCommunity,
+    }));
     return communities;
   },
 
@@ -118,7 +149,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Channels ──────────────────────────────────────────────────────────────
   async fetchChannels(communityId: string) {
     const { channels } = await api.get(`/channels?communityId=${communityId}`);
-    set({ channels });
+    set(s => ({
+      channels,
+      activeChannel: s.activeChannel
+        ? channels.find((ch: Entity) => ch.id === s.activeChannel?.id) || s.activeChannel
+        : s.activeChannel,
+    }));
+    channels.forEach((channel: Entity) => {
+      if (channel?.id) {
+        wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
+      }
+    });
     return channels;
   },
 
@@ -136,7 +177,56 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // Mark latest message as read
     const msgs = get().messages[channel.id];
     if (msgs?.length) {
-      api.put(`/messages/${msgs[msgs.length - 1].id}/read`).catch(() => {});
+      const me = useAuthStore.getState().user;
+      const lastId = msgs[msgs.length - 1].id;
+      set(s => {
+        const nextChannels = s.channels.map((ch) =>
+          ch.id === channel.id
+            ? {
+                ...ch,
+                my_last_read_message_id: lastId,
+                myLastReadMessageId: lastId,
+              }
+            : ch
+        );
+        const communityId = channel.community_id || channel.communityId || s.activeCommunity?.id;
+        const unreadCount = countUnreadChannels(nextChannels, me?.id, channel.id);
+        return {
+          channels: nextChannels,
+          activeChannel:
+            s.activeChannel?.id === channel.id
+              ? {
+                  ...s.activeChannel,
+                  my_last_read_message_id: lastId,
+                  myLastReadMessageId: lastId,
+                }
+              : s.activeChannel,
+          communities: communityId
+            ? s.communities.map((community) =>
+                community.id === communityId
+                  ? {
+                      ...community,
+                      unread_channel_count: unreadCount,
+                      unreadChannelCount: unreadCount,
+                      has_unread_channels: unreadCount > 0,
+                      hasUnreadChannels: unreadCount > 0,
+                    }
+                  : community
+              )
+            : s.communities,
+          activeCommunity:
+            communityId && s.activeCommunity?.id === communityId
+              ? {
+                  ...s.activeCommunity,
+                  unread_channel_count: unreadCount,
+                  unreadChannelCount: unreadCount,
+                  has_unread_channels: unreadCount > 0,
+                  hasUnreadChannels: unreadCount > 0,
+                }
+              : s.activeCommunity,
+        };
+      });
+      api.put(`/messages/${lastId}/read`).catch(() => {});
     }
   },
 
@@ -312,12 +402,44 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     switch (event.event) {
       case 'message:created': {
         const msg = hydrateAuthorFromSession(event.data);
+        const me = useAuthStore.getState().user;
         const key = msg.channel_id || msg.conversation_id;
         set(s => ({
           messages: {
             ...s.messages,
             [key]: upsertMessage(s.messages[key], msg),
           },
+          channels: msg.channel_id
+            ? s.channels.map((channel) =>
+                channel.id === msg.channel_id
+                  ? {
+                      ...channel,
+                      updated_at: msg.created_at || msg.createdAt || channel.updated_at,
+                      updatedAt: msg.created_at || msg.createdAt || channel.updatedAt,
+                      last_message_id: msg.id,
+                      lastMessageId: msg.id,
+                      last_message_author_id: msg.author_id,
+                      lastMessageAuthorId: msg.author_id,
+                      last_message_at: msg.created_at || msg.createdAt || channel.last_message_at,
+                      lastMessageAt: msg.created_at || msg.createdAt || channel.lastMessageAt,
+                    }
+                  : channel
+              )
+            : s.channels,
+          activeChannel:
+            msg.channel_id && s.activeChannel?.id === msg.channel_id
+              ? {
+                  ...s.activeChannel,
+                  updated_at: msg.created_at || msg.createdAt || s.activeChannel.updated_at,
+                  updatedAt: msg.created_at || msg.createdAt || s.activeChannel.updatedAt,
+                  last_message_id: msg.id,
+                  lastMessageId: msg.id,
+                  last_message_author_id: msg.author_id,
+                  lastMessageAuthorId: msg.author_id,
+                  last_message_at: msg.created_at || msg.createdAt || s.activeChannel.last_message_at,
+                  lastMessageAt: msg.created_at || msg.createdAt || s.activeChannel.lastMessageAt,
+                }
+              : s.activeChannel,
           conversations: msg.conversation_id
             ? (() => {
                 const next = [...s.conversations];
@@ -354,7 +476,116 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   lastMessageAt: msg.created_at || msg.createdAt || s.activeConv.lastMessageAt,
                 }
               : s.activeConv,
+          communities: (() => {
+            if (!msg.channel_id) return s.communities;
+            const channelAfterUpdate = (msg.channel_id
+              ? s.channels.map((channel) =>
+                  channel.id === msg.channel_id
+                    ? {
+                        ...channel,
+                        last_message_id: msg.id,
+                        lastMessageId: msg.id,
+                        last_message_author_id: msg.author_id,
+                        lastMessageAuthorId: msg.author_id,
+                      }
+                    : channel
+                )
+              : s.channels);
+            const target = channelAfterUpdate.find((channel) => channel.id === msg.channel_id);
+            const communityId = target?.community_id || target?.communityId || s.activeCommunity?.id;
+            if (!communityId) return s.communities;
+            const unreadCount = countUnreadChannels(channelAfterUpdate, me?.id, s.activeChannel?.id);
+            return s.communities.map((community) =>
+              community.id === communityId
+                ? {
+                    ...community,
+                    unread_channel_count: unreadCount,
+                    unreadChannelCount: unreadCount,
+                    has_unread_channels: unreadCount > 0,
+                    hasUnreadChannels: unreadCount > 0,
+                  }
+                : community
+            );
+          })(),
+          activeCommunity: (() => {
+            if (!msg.channel_id || !s.activeCommunity) return s.activeCommunity;
+            const channelAfterUpdate = (msg.channel_id
+              ? s.channels.map((channel) =>
+                  channel.id === msg.channel_id
+                    ? {
+                        ...channel,
+                        last_message_id: msg.id,
+                        lastMessageId: msg.id,
+                        last_message_author_id: msg.author_id,
+                        lastMessageAuthorId: msg.author_id,
+                      }
+                    : channel
+                )
+              : s.channels);
+            const target = channelAfterUpdate.find((channel) => channel.id === msg.channel_id);
+            const communityId = target?.community_id || target?.communityId || s.activeCommunity?.id;
+            if (!communityId || s.activeCommunity.id !== communityId) return s.activeCommunity;
+            const unreadCount = countUnreadChannels(channelAfterUpdate, me?.id, s.activeChannel?.id);
+            return {
+              ...s.activeCommunity,
+              unread_channel_count: unreadCount,
+              unreadChannelCount: unreadCount,
+              has_unread_channels: unreadCount > 0,
+              hasUnreadChannels: unreadCount > 0,
+            };
+          })(),
         }));
+        if (msg.channel_id && store.activeChannel?.id === msg.channel_id && msg.id) {
+          set(s => {
+            const nextChannels = s.channels.map((channel) =>
+              channel.id === msg.channel_id
+                ? {
+                    ...channel,
+                    my_last_read_message_id: msg.id,
+                    myLastReadMessageId: msg.id,
+                  }
+                : channel
+            );
+            const target = nextChannels.find((channel) => channel.id === msg.channel_id);
+            const communityId = target?.community_id || target?.communityId || s.activeCommunity?.id;
+            const unreadCount = countUnreadChannels(nextChannels, me?.id, s.activeChannel?.id);
+            return {
+              channels: nextChannels,
+              activeChannel:
+                s.activeChannel?.id === msg.channel_id
+                  ? {
+                      ...s.activeChannel,
+                      my_last_read_message_id: msg.id,
+                      myLastReadMessageId: msg.id,
+                    }
+                  : s.activeChannel,
+              communities: communityId
+                ? s.communities.map((community) =>
+                    community.id === communityId
+                      ? {
+                          ...community,
+                          unread_channel_count: unreadCount,
+                          unreadChannelCount: unreadCount,
+                          has_unread_channels: unreadCount > 0,
+                          hasUnreadChannels: unreadCount > 0,
+                        }
+                      : community
+                  )
+                : s.communities,
+              activeCommunity:
+                communityId && s.activeCommunity?.id === communityId
+                  ? {
+                      ...s.activeCommunity,
+                      unread_channel_count: unreadCount,
+                      unreadChannelCount: unreadCount,
+                      has_unread_channels: unreadCount > 0,
+                      hasUnreadChannels: unreadCount > 0,
+                    }
+                  : s.activeCommunity,
+            };
+          });
+          api.put(`/messages/${msg.id}/read`).catch(() => {});
+        }
         if (msg.conversation_id && store.activeConv?.id === msg.conversation_id && msg.id) {
           set(s => ({
             conversations: s.conversations.map((conv) =>
@@ -408,9 +639,64 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         break;
       }
       case 'read:updated': {
-        const { conversationId, userId, lastReadMessageId, lastReadAt } = event.data || {};
-        if (!conversationId || !userId) break;
+        const { channelId, conversationId, userId, lastReadMessageId, lastReadAt } = event.data || {};
+        if (!userId || (!conversationId && !channelId)) break;
         const me = useAuthStore.getState().user;
+        if (channelId && me?.id === userId) {
+          set(s => {
+            const nextChannels = s.channels.map((channel) =>
+              channel.id === channelId
+                ? {
+                    ...channel,
+                    my_last_read_message_id: lastReadMessageId,
+                    myLastReadMessageId: lastReadMessageId,
+                    my_last_read_at: lastReadAt,
+                    myLastReadAt: lastReadAt,
+                  }
+                : channel
+            );
+            const target = nextChannels.find((channel) => channel.id === channelId);
+            const communityId = target?.community_id || target?.communityId || s.activeCommunity?.id;
+            const unreadCount = countUnreadChannels(nextChannels, me?.id, s.activeChannel?.id);
+            return {
+              channels: nextChannels,
+              activeChannel:
+                s.activeChannel?.id === channelId
+                  ? {
+                      ...s.activeChannel,
+                      my_last_read_message_id: lastReadMessageId,
+                      myLastReadMessageId: lastReadMessageId,
+                      my_last_read_at: lastReadAt,
+                      myLastReadAt: lastReadAt,
+                    }
+                  : s.activeChannel,
+              communities: communityId
+                ? s.communities.map((community) =>
+                    community.id === communityId
+                      ? {
+                          ...community,
+                          unread_channel_count: unreadCount,
+                          unreadChannelCount: unreadCount,
+                          has_unread_channels: unreadCount > 0,
+                          hasUnreadChannels: unreadCount > 0,
+                        }
+                      : community
+                  )
+                : s.communities,
+              activeCommunity:
+                communityId && s.activeCommunity?.id === communityId
+                  ? {
+                      ...s.activeCommunity,
+                      unread_channel_count: unreadCount,
+                      unreadChannelCount: unreadCount,
+                      has_unread_channels: unreadCount > 0,
+                      hasUnreadChannels: unreadCount > 0,
+                    }
+                  : s.activeCommunity,
+            };
+          });
+        }
+        if (!conversationId) break;
         set(s => ({
           conversations: s.conversations.map((conv) => {
             if (conv.id !== conversationId) return conv;
