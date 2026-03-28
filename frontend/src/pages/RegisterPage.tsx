@@ -49,7 +49,7 @@ export default function RegisterPage() {
             Username
             <input id="register-username" name="username" type="text" value={form.username} onChange={set('username')}
               className={styles.input} placeholder="devuser" required
-              pattern="[a-zA-Z0-9_]+" title="Letters, numbers, underscores only" minLength={3} maxLength={32} />
+              pattern="[a-zA-Z0-9_-]+" title="Letters, numbers, underscores only" minLength={3} maxLength={32} />
           </label>
 
           <label className={styles.label}>
