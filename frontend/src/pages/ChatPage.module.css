@@ -1,15 +1,14 @@
 .layout {
   display: grid;
-  grid-template-columns: 64px var(--sidebar-width) 1fr;
+  grid-template-columns: 72px var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: 1fr;
   min-height: 100vh;
   min-height: 100dvh;
   overflow: hidden;
 }
 
-/* When member list is present (channel selected), add a 4th column */
-.layout:has(aside.memberList) {
-  grid-template-columns: 64px var(--sidebar-width) 1fr var(--member-list-width);
+.layoutWithMembers {
+  grid-template-columns: 72px var(--sidebar-width) minmax(0, 1fr) var(--member-list-width);
 }
 
 .main {
@@ -18,4 +17,22 @@
   overflow: hidden;
   background: var(--bg-0);
   min-width: 0;
+}
+
+@media (max-width: 1200px) {
+  .layout,
+  .layoutWithMembers {
+    grid-template-columns: 64px var(--sidebar-width) minmax(0, 1fr);
+  }
+
+  .layoutWithMembers > :last-child {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .layout,
+  .layoutWithMembers {
+    grid-template-columns: 64px minmax(200px, 36vw) minmax(0, 1fr);
+  }
 }

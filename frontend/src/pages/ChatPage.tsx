@@ -19,15 +19,16 @@ export default function ChatPage() {
   }, []);
 
   const hasActive = activeChannel || activeConv;
+  const showMemberList = Boolean(activeChannel);
 
   return (
-    <div className={styles.layout} data-testid="page-chat">
+    <div className={`${styles.layout} ${showMemberList ? styles.layoutWithMembers : ''}`} data-testid="page-chat">
       <CommunitySidebar />
       <ChannelSidebar />
       <main className={styles.main} role="main" aria-label="Chat workspace" data-testid="chat-main">
         {hasActive ? <MessagePane /> : <WelcomePane />}
       </main>
-      {activeChannel && <MemberList />}
+      {showMemberList && <MemberList />}
     </div>
   );
 }

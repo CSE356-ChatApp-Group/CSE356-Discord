@@ -8,7 +8,7 @@
 }
 
 .header {
-  padding: 0 14px;
+  padding: 0 16px;
   height: var(--header-height);
   display: flex;
   align-items: center;
@@ -18,7 +18,7 @@
 
 .communityName {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 15px;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -33,7 +33,7 @@
 
 .tab {
   flex: 1;
-  padding: 8px;
+  padding: 10px 8px;
   font-size: 12px;
   font-weight: 500;
   color: var(--text-muted);
@@ -47,7 +47,7 @@
 .scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 6px;
+  padding: 10px 8px;
 }
 
 .sectionHeader {
@@ -85,8 +85,8 @@
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
+  gap: 8px;
+  padding: 7px 10px;
   border-radius: var(--radius);
   font-size: 14px;
   color: var(--text-secondary);
