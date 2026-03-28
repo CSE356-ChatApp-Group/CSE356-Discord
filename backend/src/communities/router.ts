@@ -95,7 +95,14 @@ router.post('/',
       await client.query('BEGIN');
       const { slug, name, description, isPublic = true } = req.body;
       const inviteCode = uuidv4().slice(0, 8);
-
+      const { rowCount } = await client.query(
+        'SELECT 1 FROM communities WHERE owner_id = $1',
+        [req.user.id]
+      );
+      if (rowCount >= 100) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Maximum 100 communities reached' });
+      }
       const { rows } = await client.query(
         `INSERT INTO communities (slug, name, description, is_public, owner_id, invite_code)
          VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
