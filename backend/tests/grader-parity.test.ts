@@ -101,7 +101,7 @@ describe('Grader parity: profile & presence', () => {
     expect(searchRes.body.users.some((u: any) => u.id === userA.user.id)).toBe(true);
     expect(searchRes.body.users.some((u: any) => u.id === userB.user.id)).toBe(true);
 
-    const observerSocket = trackSocket(await connectWebSocket(port, userB.accessToken));
+    const observerSocket = trackSocket(await connectWebSocket(port, userA.accessToken));
     try {
       observerSocket.send(JSON.stringify({ type: 'subscribe', channel: `user:${userA.user.id}` }));
       await waitForWsEvent(
@@ -111,7 +111,10 @@ describe('Grader parity: profile & presence', () => {
 
       const presenceEventPromise = waitForWsEvent(
         observerSocket,
-        (event) => event.event === 'presence:updated' && event.data?.userId === userA.user.id,
+        (event) =>
+          event.event === 'presence:updated'
+          && event.data?.userId === userA.user.id
+          && event.data?.status === 'away',
       );
 
       const setPresenceRes = await request(app)

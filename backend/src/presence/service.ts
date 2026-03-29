@@ -27,6 +27,14 @@ function awayMessageKey(userId) {
   return `presence:${userId}:away_message`;
 }
 
+function connectionSetKey(userId) {
+  return `user:${userId}:connections`;
+}
+
+function connectionStatusHashKey(userId) {
+  return `user:${userId}:connection_status`;
+}
+
 function normalizeAwayMessage(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -47,6 +55,17 @@ async function setAwayMessage(userId, message) {
 async function getAwayMessage(userId) {
   const msg = await redis.get(awayMessageKey(userId));
   return msg || null;
+}
+
+async function syncConnectionStatuses(userId, status) {
+  const connectionIds = await redis.smembers(connectionSetKey(userId));
+  if (!connectionIds.length) return;
+
+  const pipeline = redis.pipeline();
+  for (const connectionId of connectionIds) {
+    pipeline.hset(connectionStatusHashKey(userId), connectionId, status);
+  }
+  await pipeline.exec();
 }
 
 async function setPresence(userId, status, awayMessage) {
@@ -125,4 +144,13 @@ async function getBulkPresenceDetails(userIds) {
   return details;
 }
 
-module.exports = { setPresence, setAwayMessage, getAwayMessage, getPresence, getPresenceDetails, getBulkPresence, getBulkPresenceDetails };
+module.exports = {
+  setPresence,
+  setAwayMessage,
+  getAwayMessage,
+  syncConnectionStatuses,
+  getPresence,
+  getPresenceDetails,
+  getBulkPresence,
+  getBulkPresenceDetails,
+};

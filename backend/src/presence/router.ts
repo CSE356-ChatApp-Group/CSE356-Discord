@@ -38,6 +38,7 @@ router.put('/', async (req, res, next) => {
     if (awayMessage !== undefined && typeof awayMessage !== 'string' && awayMessage !== null) {
       return res.status(400).json({ error: 'awayMessage must be a string or null' });
     }
+    await presence.syncConnectionStatuses(req.user.id, status);
     await presence.setPresence(req.user.id, status, status === 'away' ? awayMessage : null);
     res.json({ success: true });
   } catch (err) { next(err); }
