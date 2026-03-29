@@ -283,3 +283,76 @@
   color: var(--text-muted);
   margin-left: auto;
 }
+
+.newDmSelectedMark {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.selectedUsers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.selectedUserChip {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.selectedUserChip:hover {
+  border-color: var(--accent);
+}
+
+.newDmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.newDmCancelBtn,
+.newDmCreateBtn {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.newDmCancelBtn {
+  background: var(--bg-3);
+  color: var(--text-secondary);
+}
+
+.newDmCancelBtn:hover:not(:disabled) {
+  background: var(--bg-4);
+  color: var(--text-primary);
+}
+
+.newDmCreateBtn {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--text-inverse);
+}
+
+.newDmCreateBtn:hover:not(:disabled) {
+  background: var(--accent-dim);
+}
+
+.newDmCancelBtn:disabled,
+.newDmCreateBtn:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}

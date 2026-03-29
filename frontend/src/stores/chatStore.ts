@@ -27,7 +27,7 @@ type ChatState = {
   selectChannel: (channel: Entity) => Promise<void>;
   fetchConversations: () => Promise<void>;
   openHome: () => void;
-  openDm: (userId: string) => Promise<Entity>;
+  openDm: (participants: string | string[]) => Promise<Entity>;
   selectConversation: (conv: Entity) => Promise<void>;
   inviteToConversation: (conversationId: string, participants: string[]) => Promise<Entity | null>;
   leaveConversation: (conversationId: string) => Promise<void>;
@@ -394,8 +394,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     set({ activeCommunity: null, activeChannel: null });
   },
 
-  async openDm(userId: string) {
-    const { conversation } = await api.post('/conversations', { participantIds: [userId] });
+  async openDm(participants: string | string[]) {
+    const list = Array.isArray(participants) ? participants : [participants];
+    const cleaned = [...new Set((list || []).map((value) => value?.trim?.() || '').filter(Boolean))];
+    if (!cleaned.length) {
+      throw new Error('Select at least one participant');
+    }
+
+    const { conversation } = await api.post('/conversations', { participantIds: cleaned });
     set(s => {
       const existing = s.conversations.find(c => c.id === conversation.id);
       const activeConv = existing

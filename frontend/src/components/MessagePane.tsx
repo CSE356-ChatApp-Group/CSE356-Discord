@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { useAutoResize } from '../hooks/useAutoResize';
+import { api } from '../lib/api';
 import MessageItem  from './MessageItem';
 import SearchBar    from './SearchBar';
 import MemberList   from './MemberList';
@@ -35,12 +36,16 @@ export default function MessagePane() {
   const [localQ, setLocalQ]       = useState('');
   const [showDmInviteModal, setShowDmInviteModal] = useState(false);
   const [showDmLeaveModal, setShowDmLeaveModal] = useState(false);
-  const [inviteInput, setInviteInput] = useState('');
+  const [inviteQuery, setInviteQuery] = useState('');
+  const [inviteResults, setInviteResults] = useState<any[]>([]);
+  const [selectedInvitees, setSelectedInvitees] = useState<any[]>([]);
   const [dmInviteBusy, setDmInviteBusy] = useState(false);
   const [dmLeaveBusy, setDmLeaveBusy] = useState(false);
   const [dmActionErr, setDmActionErr] = useState('');
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const inviteInputRef = useRef<HTMLInputElement>(null);
+  const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const bottomRef   = useRef(null);
   const inputRef    = useRef(null);
@@ -96,8 +101,24 @@ export default function MessagePane() {
     setShowDmInviteModal(false);
     setShowDmLeaveModal(false);
     setDmActionErr('');
-    setInviteInput('');
+    setInviteQuery('');
+    setInviteResults([]);
+    setSelectedInvitees([]);
   }, [key]);
+
+  useEffect(() => {
+    if (showDmInviteModal) {
+      requestAnimationFrame(() => inviteInputRef.current?.focus());
+    }
+  }, [showDmInviteModal]);
+
+  useEffect(() => () => {
+    if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current);
+  }, []);
+
+  const existingDmMemberIds = useMemo(() => {
+    return new Set((activeConv?.participants || []).map((participant) => participant.id));
+  }, [activeConv]);
 
   // Focus search input and clean up when search panel toggles
   useEffect(() => {
@@ -169,17 +190,50 @@ export default function MessagePane() {
   function handleInviteToDm() {
     if (!activeConv?.id) return;
     setDmActionErr('');
+    setInviteQuery('');
+    setInviteResults([]);
+    setSelectedInvitees([]);
     setShowDmInviteModal(true);
+  }
+
+  function searchInviteUsers(value: string) {
+    if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current);
+    const query = value.trim();
+    if (!query) {
+      setInviteResults([]);
+      return;
+    }
+
+    inviteDebounceRef.current = setTimeout(async () => {
+      try {
+        const data = await api.get(`/users?q=${encodeURIComponent(query)}`);
+        const users: any[] = data.users ?? data ?? [];
+        setInviteResults(users.filter((entry) => !existingDmMemberIds.has(entry.id)));
+      } catch {
+        setInviteResults([]);
+      }
+    }, 220);
+  }
+
+  function toggleInvitee(user) {
+    if (!user?.id) return;
+    setSelectedInvitees((prev) => {
+      const exists = prev.some((entry) => entry.id === user.id);
+      if (exists) return prev.filter((entry) => entry.id !== user.id);
+      return [...prev, user];
+    });
+  }
+
+  function handleInviteInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setInviteQuery(e.target.value);
+    searchInviteUsers(e.target.value);
   }
 
   async function submitInviteToDm(e: React.FormEvent) {
     e.preventDefault();
     if (!activeConv?.id || dmInviteBusy) return;
 
-    const participants = inviteInput
-      .split(',')
-      .map((value) => value.trim())
-      .filter(Boolean);
+    const participants = selectedInvitees.map((entry) => entry.id).filter(Boolean);
 
     if (!participants.length) {
       setDmActionErr('Enter at least one username, email, or user id.');
@@ -191,7 +245,9 @@ export default function MessagePane() {
     try {
       await inviteToConversation(activeConv.id, participants);
       setShowDmInviteModal(false);
-      setInviteInput('');
+      setInviteQuery('');
+      setInviteResults([]);
+      setSelectedInvitees([]);
     } catch (err: any) {
       const msg = err?.message || 'Failed to invite participant(s)';
       setDmActionErr(msg);
@@ -500,17 +556,53 @@ export default function MessagePane() {
         <Modal title="Invite to conversation" onClose={() => { if (!dmInviteBusy) setShowDmInviteModal(false); }}>
           <form className={styles.modalForm} onSubmit={submitInviteToDm} data-testid="dm-invite-modal">
             <label className={styles.modalLabel}>
-              Username, email, or user id
+              Add people
               <input
                 className={styles.modalInput}
-                value={inviteInput}
-                onChange={(e) => setInviteInput(e.target.value)}
-                placeholder="alice, bob@example.com"
-                autoFocus
+                ref={inviteInputRef}
+                value={inviteQuery}
+                onChange={handleInviteInputChange}
+                placeholder="Find by name or username…"
                 data-testid="dm-invite-input"
               />
             </label>
-            <p className={styles.modalHint}>Use commas to invite multiple users.</p>
+            {selectedInvitees.length > 0 && (
+              <div className={styles.selectedUsers} data-testid="dm-invite-selected-users">
+                {selectedInvitees.map((user) => (
+                  <button
+                    key={user.id}
+                    type="button"
+                    className={styles.selectedUserChip}
+                    onClick={() => toggleInvitee(user)}
+                  >
+                    <span>{user.displayName || user.display_name || user.username}</span>
+                    <span aria-hidden="true">×</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {inviteResults.length > 0 && (
+              <ul className={styles.inviteResults} data-testid="dm-invite-results">
+                {inviteResults.map((user) => (
+                  <li key={user.id}>
+                    <button
+                      type="button"
+                      className={styles.inviteResultBtn}
+                      onClick={() => toggleInvitee(user)}
+                      disabled={dmInviteBusy}
+                      data-testid={`dm-invite-user-${user.id}`}
+                    >
+                      <span className={styles.inviteResultName}>{user.displayName || user.display_name || user.username}</span>
+                      {user.username && <span className={styles.inviteResultUsername}>@{user.username}</span>}
+                      {selectedInvitees.some((entry) => entry.id === user.id) && <span className={styles.inviteSelectedMark}>Selected</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {inviteQuery.trim() && inviteResults.length === 0 && (
+              <p className={styles.modalHint}>No eligible users found.</p>
+            )}
             {dmActionErr && <p className={styles.dmActionErr}>{dmActionErr}</p>}
             <div className={styles.modalActions}>
               <button
@@ -524,10 +616,10 @@ export default function MessagePane() {
               <button
                 type="submit"
                 className={styles.modalPrimaryBtn}
-                disabled={dmInviteBusy}
+                disabled={dmInviteBusy || selectedInvitees.length === 0}
                 data-testid="dm-invite-submit"
               >
-                {dmInviteBusy ? 'Inviting…' : 'Invite'}
+                {dmInviteBusy ? 'Inviting…' : selectedInvitees.length > 1 ? 'Invite people' : 'Invite person'}
               </button>
             </div>
           </form>
