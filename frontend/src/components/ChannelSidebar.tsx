@@ -17,6 +17,26 @@ export default function ChannelSidebar() {
   const [showInvite, setShowInvite] = useState(false);
   const [showNewDm, setShowNewDm] = useState(false);
 
+  function renderPendingInvites() {
+    if (pendingDmInvites.length === 0) return null;
+    return (
+      <div className={styles.pendingInvites} data-testid="dm-pending-invites">
+        <div className={styles.sectionHeader}>
+          <span>Pending invites</span>
+        </div>
+        {pendingDmInvites.map((invite) => (
+          <PendingInviteRow
+            key={invite.id}
+            invite={invite}
+            currentUserId={user?.id}
+            onAccept={() => { void acceptDmInvite(invite.id); }}
+            onDecline={() => { void declineDmInvite(invite.id); }}
+          />
+        ))}
+      </div>
+    );
+  }
+
   if (!activeCommunity && conversations.length === 0) {
     return (
       <aside className={styles.sidebar} aria-label="Channels and DMs" data-testid="channel-sidebar-empty">
@@ -31,6 +51,7 @@ export default function ChannelSidebar() {
               onClick={() => setShowNewDm(true)}
             >+</button>
           </div>
+          {renderPendingInvites()}
           <div className={styles.empty}>
             <p>No direct messages yet</p>
           </div>
@@ -107,22 +128,7 @@ export default function ChannelSidebar() {
                 onClick={() => setShowNewDm(true)}
               >+</button>
             </div>
-            {pendingDmInvites.length > 0 && (
-              <div className={styles.pendingInvites} data-testid="dm-pending-invites">
-                <div className={styles.sectionHeader}>
-                  <span>Pending invites</span>
-                </div>
-                {pendingDmInvites.map((invite) => (
-                  <PendingInviteRow
-                    key={invite.id}
-                    invite={invite}
-                    currentUserId={user?.id}
-                    onAccept={() => { void acceptDmInvite(invite.id); }}
-                    onDecline={() => { void declineDmInvite(invite.id); }}
-                  />
-                ))}
-              </div>
-            )}
+            {renderPendingInvites()}
             {conversations.length === 0 && (
               <p className={styles.hint}>No DMs yet</p>
             )}

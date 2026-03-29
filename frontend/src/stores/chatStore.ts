@@ -1145,6 +1145,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversation = event.data?.conversation;
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
+        const me = useAuthStore.getState().user;
+        const addedParticipantIds = Array.isArray(event.data?.participantIds)
+          ? event.data.participantIds.map((id: any) => String(id))
+          : [];
+        const iWasJustAdded = Boolean(me?.id && addedParticipantIds.includes(String(me.id)));
 
         wsManager.subscribe(`conversation:${conversationId}`, store._handleWsEvent);
 
@@ -1155,6 +1160,25 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
         set((s) => {
           const existing = s.conversations.find((conv) => conv.id === conversationId);
+          const existingInvite = s.pendingDmInvites.find((invite) => invite.id === conversationId);
+
+          if (iWasJustAdded && !existing) {
+            const pendingInvite = existingInvite
+              ? {
+                  ...existingInvite,
+                  ...conversation,
+                  participants: conversation.participants || existingInvite.participants,
+                }
+              : conversation;
+
+            return {
+              pendingDmInvites: [
+                pendingInvite,
+                ...s.pendingDmInvites.filter((invite) => invite.id !== conversationId),
+              ],
+            };
+          }
+
           const updated = existing
             ? {
                 ...existing,

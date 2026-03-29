@@ -123,6 +123,15 @@ describe('chatStore websocket author hydration', () => {
   });
 
   it('promotes participant_added conversation to active DM list and clears pending invite', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'sam',
+        displayName: 'Sam',
+        email: 'sam@example.com',
+      },
+    });
+
     useChatStore.setState({
       conversations: [],
       pendingDmInvites: [{ id: 'conv-2', participants: [{ id: 'user-1' }, { id: 'user-3' }] }],
@@ -132,6 +141,7 @@ describe('chatStore websocket author hydration', () => {
       event: 'conversation:participant_added',
       data: {
         conversationId: 'conv-2',
+        participantIds: ['user-4'],
         conversation: {
           id: 'conv-2',
           participants: [{ id: 'user-1', username: 'sam' }, { id: 'user-3', username: 'lee' }],
@@ -142,5 +152,34 @@ describe('chatStore websocket author hydration', () => {
     const state = useChatStore.getState();
     expect(state.conversations.some((conv) => conv.id === 'conv-2')).toBe(true);
     expect(state.pendingDmInvites.some((invite) => invite.id === 'conv-2')).toBe(false);
+  });
+
+  it('keeps participant_added as pending invite when current user was newly added', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-3',
+        username: 'lee',
+        displayName: 'Lee',
+        email: 'lee@example.com',
+      },
+    });
+
+    useChatStore.setState({ conversations: [], pendingDmInvites: [] } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'conversation:participant_added',
+      data: {
+        conversationId: 'conv-3',
+        participantIds: ['user-3'],
+        conversation: {
+          id: 'conv-3',
+          participants: [{ id: 'user-1', username: 'sam' }, { id: 'user-3', username: 'lee' }],
+        },
+      },
+    });
+
+    const state = useChatStore.getState();
+    expect(state.pendingDmInvites.some((invite) => invite.id === 'conv-3')).toBe(true);
+    expect(state.conversations.some((conv) => conv.id === 'conv-3')).toBe(false);
   });
 });

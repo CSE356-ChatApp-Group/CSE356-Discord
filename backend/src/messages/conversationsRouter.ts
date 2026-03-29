@@ -334,11 +334,13 @@ async function addParticipantsHandler(req, res, next) {
       invitedBy: req.user.id,
     };
 
-    await publishConversationEvents(
-      [`conversation:${req.params.id}`, ...activeParticipantIds.map((participantId) => `user:${participantId}`)],
-      'conversation:participant_added',
-      sharedEventData
-    );
+    if (participantIdsToAdd.length) {
+      await publishConversationEvents(
+        [`conversation:${req.params.id}`, ...currentParticipantIds.map((participantId) => `user:${participantId}`)],
+        'conversation:participant_added',
+        sharedEventData
+      );
+    }
 
     if (participantIdsToAdd.length) {
       await publishConversationEvents(
