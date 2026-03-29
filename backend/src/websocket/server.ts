@@ -43,6 +43,10 @@ const CONNECTION_ALIVE_TTL_SECONDS = 120;
 const PRESENCE_SWEEPER_MS = 15_000;
 let shuttingDown = false;
 
+function isRedisOperational(client) {
+  return ['wait', 'connecting', 'connect', 'ready', 'reconnecting'].includes(client.status);
+}
+
 function connectionSetKey(userId) {
   return `user:${userId}:connections`;
 }
@@ -380,7 +384,10 @@ function subscribeClient(ws, redisChannel) {
 
   if (!redisSubscribed.has(redisChannel)) {
     redisSubscribed.add(redisChannel);
-    redisSub.subscribe(redisChannel);
+    Promise.resolve(redisSub.subscribe(redisChannel)).catch((err) => {
+      redisSubscribed.delete(redisChannel);
+      logger.warn({ err, redisChannel }, 'WS redis subscribe failed');
+    });
   }
 }
 
@@ -399,9 +406,20 @@ function cleanup(ws, userId) {
     return;
   }
 
+  if (!isRedisOperational(redis)) {
+    logger.info({ userId }, 'WS disconnected');
+    return;
+  }
+
   removeConnection(userId, ws._connectionId)
     .then(() => recomputeUserPresence(userId))
-    .catch((err) => logger.warn({ err, userId }, 'WS cleanup presence update failed'));
+    .catch((err) => {
+      if (/Connection is closed/i.test(String(err?.message || err))) {
+        logger.info({ userId }, 'WS disconnected');
+        return;
+      }
+      logger.warn({ err, userId }, 'WS cleanup presence update failed');
+    });
   logger.info({ userId }, 'WS disconnected');
 }
 
