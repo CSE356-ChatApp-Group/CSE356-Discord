@@ -62,33 +62,27 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_TARGET" "echo ok" >/dev/null
   exit 1
 fi
 
-echo "Checking remote runtime prerequisites..."
-ssh "$SSH_TARGET" "
-  set -euo pipefail
-  command -v node >/dev/null
-  command -v npm >/dev/null
-  command -v nginx >/dev/null
-  [ -d /opt/chatapp/releases ]
-  [ -d /opt/chatapp/shared ]
-  [ -f /opt/chatapp/shared/.env ]
-  [ -f /etc/nginx/sites-available/chatapp ]
-"
-
-echo "Checking remote /health route path compatibility in nginx config..."
-ssh "$SSH_TARGET" "grep -q '/health' /etc/nginx/sites-available/chatapp"
-
-echo "Checking nginx config validity..."
-if ! ssh "$SSH_TARGET" "sudo nginx -t >/dev/null 2>&1"; then
-  echo "ERROR: nginx -t failed on remote host. Fix nginx config before deploy."
-  exit 1
-fi
+# Run all remaining remote checks in a single SSH session to avoid
+# triggering fail2ban with rapid successive connections.
+echo "Checking remote runtime prerequisites, nginx config, and health route..."
+REMOTE_SCRIPT='set -euo pipefail
+command -v node >/dev/null
+command -v npm >/dev/null
+command -v nginx >/dev/null
+[ -d /opt/chatapp/releases ]
+[ -d /opt/chatapp/shared ]
+[ -f /opt/chatapp/shared/.env ]
+[ -f /etc/nginx/sites-available/chatapp ]
+grep -q "/health" /etc/nginx/sites-available/chatapp
+sudo nginx -t >/dev/null 2>&1'
 
 if [[ "$ENVIRONMENT" == "prod" ]]; then
-  echo "Checking pg_dump availability for production backup..."
-  if ! ssh "$SSH_TARGET" "command -v pg_dump >/dev/null 2>&1"; then
-    echo "ERROR: pg_dump not available on production host."
-    exit 1
-  fi
+  REMOTE_SCRIPT+=$'\ncommand -v pg_dump >/dev/null 2>&1'
+fi
+
+if ! echo "$REMOTE_SCRIPT" | ssh "$SSH_TARGET" bash -s; then
+  echo "ERROR: Remote prerequisite checks failed."
+  exit 1
 fi
 
 echo "Preflight passed for ${ENVIRONMENT}."

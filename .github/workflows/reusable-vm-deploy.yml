@@ -125,6 +125,16 @@ jobs:
           chmod 700 ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+          # Multiplex all SSH connections over one TCP session to avoid
+          # triggering fail2ban with rapid successive connections.
+          touch ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          cat >> ~/.ssh/config << 'EOF'
+Host *
+  ControlMaster auto
+  ControlPath ~/.ssh/ctl-%h-%p-%r
+  ControlPersist 5m
+EOF
 
       - name: Add host to known_hosts
         shell: bash
