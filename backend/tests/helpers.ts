@@ -35,11 +35,36 @@ export async function createAuthenticatedUser(prefix: string) {
   const email = `${prefix}-${suffix}@example.com`;
   const username = `${prefix}${suffix}`.slice(0, 32);
   const res = await registerUser({ email, username });
+  if (res.status !== 201) {
+    throw new Error(
+      [
+        `createAuthenticatedUser failed for prefix=${prefix}`,
+        `status=${res.status}`,
+        `email=${email}`,
+        `username=${username}`,
+        `body=${JSON.stringify(res.body)}`,
+      ].join(' | '),
+    );
+  }
+
+  const accessToken = res.body?.accessToken as string | undefined;
+  const user = res.body?.user as { id: string; email: string; username: string } | undefined;
+
+  if (!accessToken || !user?.id) {
+    throw new Error(
+      [
+        `createAuthenticatedUser returned incomplete auth payload for prefix=${prefix}`,
+        `status=${res.status}`,
+        `body=${JSON.stringify(res.body)}`,
+      ].join(' | '),
+    );
+  }
+
   return {
     email,
     username,
-    accessToken: res.body.accessToken as string,
-    user: res.body.user as { id: string; email: string; username: string },
+    accessToken,
+    user,
   };
 }
 

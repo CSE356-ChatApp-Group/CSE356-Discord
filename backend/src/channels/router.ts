@@ -71,27 +71,48 @@ router.post('/',
   body('description').optional().isLength({ max: 500 }),
   async (req, res, next) => {
     if (!v(req, res)) return;
+    const client = await pool.connect();
     try {
       const { communityId, name, isPrivate = false, description } = req.body;
 
       // Verify caller is admin+ in the community
-      const { rows: [m] } = await pool.query(
+      const { rows: [m] } = await client.query(
         `SELECT role FROM community_members WHERE community_id=$1 AND user_id=$2`,
         [communityId, req.user.id]
       );
       if (!m || !['owner','admin','moderator'].includes(m.role)) {
+        client.release();
         return res.status(403).json({ error: 'Insufficient permissions' });
       }
 
-      const { rows } = await pool.query(
+      await client.query('BEGIN');
+      const { rows } = await client.query(
         `INSERT INTO channels (community_id, name, is_private, description, created_by)
          VALUES ($1,$2,$3,$4,$5) RETURNING *`,
         [communityId, name.toLowerCase().replace(/\s+/g, '-'), isPrivate, description || null, req.user.id]
       );
       const channel = rows[0];
+
+      if (isPrivate) {
+        await client.query(
+          `INSERT INTO channel_members (channel_id, user_id)
+           VALUES ($1,$2)
+           ON CONFLICT (channel_id, user_id) DO NOTHING`,
+          [channel.id, req.user.id]
+        );
+      }
+
+      await client.query('COMMIT');
+      client.release();
       sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:created', channel);
       res.status(201).json({ channel });
     } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Ignore rollback failures and surface original error.
+      }
+      client.release();
       if (err.code === '23505') return res.status(409).json({ error: 'Channel name already exists' });
       next(err);
     }

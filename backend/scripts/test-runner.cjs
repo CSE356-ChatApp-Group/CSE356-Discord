@@ -8,6 +8,7 @@ const PG_CONTAINER = 'chatapp-test-postgres';
 const REDIS_CONTAINER = 'chatapp-test-redis';
 const PG_PORT = process.env.TEST_PG_PORT || '55432';
 const REDIS_PORT = process.env.TEST_REDIS_PORT || '56379';
+const jestArgs = process.argv.slice(2);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -97,7 +98,8 @@ function runLocalTests() {
   let code = run('npm', ['run', 'migrate'], { env });
   if (code !== 0) return code;
 
-  code = run('npm', ['run', 'test:raw'], { env });
+  const testArgs = jestArgs.length ? ['run', 'test:raw', '--', ...jestArgs] : ['run', 'test:raw'];
+  code = run('npm', testArgs, { env });
   return code;
 }
 
@@ -106,7 +108,8 @@ function runCiStyleTests() {
     ...process.env,
     DISABLE_SEARCH_INIT: process.env.DISABLE_SEARCH_INIT || 'true',
   };
-  return run('npm', ['run', 'test:raw'], { env });
+  const testArgs = jestArgs.length ? ['run', 'test:raw', '--', ...jestArgs] : ['run', 'test:raw'];
+  return run('npm', testArgs, { env });
 }
 
 const shouldProvision = !process.env.DATABASE_URL;
