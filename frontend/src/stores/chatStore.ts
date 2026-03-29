@@ -112,6 +112,13 @@ function countUnreadChannels(channels: Entity[], currentUserId?: string, activeC
   return channels.reduce((count, channel) => count + (isChannelUnreadForUser(channel, currentUserId, activeChannelId) ? 1 : 0), 0);
 }
 
+function isVisibleConversation(conv: Entity, currentUserId?: string) {
+  if (!conv) return false;
+  if (!currentUserId) return true;
+  const participants = Array.isArray(conv.participants) ? conv.participants : [];
+  return participants.some((participant: Entity) => participant?.id && participant.id !== currentUserId);
+}
+
 let unreadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let lastUnreadRefreshAt = 0;
 let communitiesInFlight: Promise<Entity[]> | null = null;
@@ -396,8 +403,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   async fetchConversations() {
     ensureUserWsSubscription(get()._handleWsEvent);
     const { conversations } = await api.get('/conversations');
-    set({ conversations });
-    conversations.forEach((conv: Entity) => {
+    const me = useAuthStore.getState().user;
+    const visibleConversations = (conversations || []).filter((conv: Entity) => isVisibleConversation(conv, me?.id));
+    set({ conversations: visibleConversations });
+    visibleConversations.forEach((conv: Entity) => {
       if (conv?.id) {
         wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
       }
@@ -499,15 +508,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const invite = get().pendingDmInvites.find((entry) => entry.id === conversationId);
     if (!invite) return;
 
+    const { conversation } = await api.post(`/conversations/${conversationId}/accept`, {});
+    if (!conversation?.id) return;
+
     set((s) => {
       const existing = s.conversations.find((conv) => conv.id === conversationId);
       const updated = existing
         ? {
             ...existing,
-            ...invite,
-            participants: invite.participants || existing.participants,
+            ...conversation,
+            participants: conversation.participants || existing.participants,
           }
-        : invite;
+        : {
+            ...invite,
+            ...conversation,
+            participants: conversation.participants || invite.participants,
+          };
 
       return {
         conversations: existing

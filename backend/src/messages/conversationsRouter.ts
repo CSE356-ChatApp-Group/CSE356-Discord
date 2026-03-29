@@ -169,6 +169,7 @@ router.get('/', async (req, res, next) => {
              AND other_rs.user_id = cp2.user_id
              AND cp2.user_id <> $1
        GROUP  BY c.id, lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at
+      HAVING COUNT(cp2.user_id) > 1
        ORDER  BY COALESCE(lm.created_at, c.updated_at) DESC`,
       [req.user.id]
     );
@@ -333,43 +334,17 @@ async function addParticipantsHandler(req, res, next) {
 
     for (const participantId of participantIdsToAdd) {
       await client.query(
-        `INSERT INTO conversation_participants (conversation_id, user_id)
-         VALUES ($1, $2)
+        `INSERT INTO conversation_participants (conversation_id, user_id, joined_at, left_at)
+         VALUES ($1, $2, NOW(), NOW())
          ON CONFLICT (conversation_id, user_id)
-         DO UPDATE SET left_at = NULL, joined_at = NOW()`,
+         DO UPDATE SET left_at = NOW()`,
         [req.params.id, participantId]
       );
     }
 
     const conversation = await loadConversationWithParticipants(client, req.params.id);
-    const activeParticipantIds = await getActiveParticipantIds(client, req.params.id);
-
-    // Emit system messages for group DMs (3+ total participants after adding)
-    const systemMessagesToBroadcast = [];
-    if (participantIdsToAdd.length && conversation?.participants?.length >= 3) {
-      for (const participantId of participantIdsToAdd) {
-        const displayName = await getUserDisplayName(client, participantId);
-        const sysMsg = await createSystemMessage(client, req.params.id, `${displayName} joined the group.`);
-        if (sysMsg) {
-          systemMessagesToBroadcast.push({
-            ...sysMsg,
-            author: null,
-            attachments: [],
-          });
-        }
-      }
-    }
 
     await client.query('COMMIT');
-
-    // Broadcast system messages to all participants
-    for (const message of systemMessagesToBroadcast) {
-      const targets = [
-        `conversation:${req.params.id}`,
-        ...activeParticipantIds.map((uid) => `user:${uid}`),
-      ];
-      await publishConversationEvents(targets, 'message:created', message);
-    }
 
     const sharedEventData = {
       conversation,
@@ -406,6 +381,94 @@ async function addParticipantsHandler(req, res, next) {
 router.post('/:id/participants', ...addParticipantsValidators, addParticipantsHandler);
 router.post('/:id/invite', ...addParticipantsValidators, addParticipantsHandler);
 
+router.post('/:id/accept', param('id').isUUID(), async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const conversationExists = await client.query(
+      'SELECT id FROM conversations WHERE id = $1',
+      [req.params.id]
+    );
+    if (!conversationExists.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const participation = await client.query(
+      `SELECT left_at
+       FROM conversation_participants
+       WHERE conversation_id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id]
+    );
+
+    if (!participation.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Not invited' });
+    }
+
+    const wasPending = participation.rows[0].left_at !== null;
+
+    if (wasPending) {
+      await client.query(
+        `UPDATE conversation_participants
+         SET left_at = NULL, joined_at = NOW()
+         WHERE conversation_id = $1 AND user_id = $2`,
+        [req.params.id, req.user.id]
+      );
+    }
+
+    const conversation = await loadConversationWithParticipants(client, req.params.id);
+    const activeParticipantIds = wasPending
+      ? await getActiveParticipantIds(client, req.params.id)
+      : [];
+
+    let joinedGroupMessage = null;
+    if (wasPending && conversation?.participants?.length >= 3) {
+      const joinedUserName = await getUserDisplayName(client, req.user.id);
+      joinedGroupMessage = await createSystemMessage(client, req.params.id, `${joinedUserName} joined the group.`);
+    }
+
+    await client.query('COMMIT');
+
+    if (wasPending && joinedGroupMessage) {
+      const targets = [
+        `conversation:${req.params.id}`,
+        ...activeParticipantIds.map((uid) => `user:${uid}`),
+      ];
+
+      await publishConversationEvents(targets, 'message:created', {
+        ...joinedGroupMessage,
+        author: null,
+        attachments: [],
+      });
+    }
+
+    if (wasPending) {
+      await publishConversationEvents(
+        [`conversation:${req.params.id}`, ...activeParticipantIds.map((participantId) => `user:${participantId}`)],
+        'conversation:participant_added',
+        {
+          conversation,
+          conversationId: req.params.id,
+          participantIds: [req.user.id],
+          invitedBy: req.user.id,
+        }
+      );
+    }
+
+    res.json({ conversation, accepted: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
 router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -436,19 +499,8 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     );
 
     const activeParticipantIds = await getActiveParticipantIds(client, req.params.id);
-    let shouldDelete = activeParticipantIds.length === 0;
-
-    if (!shouldDelete && activeParticipantIds.length === 1) {
-      // For 1:1 DMs (never more than 2 participants total), delete when one person leaves.
-      // Group DMs retain history as long as at least one participant remains (per spec).
-      const { rows: countRows } = await client.query(
-        `SELECT COUNT(*)::int AS total FROM conversation_participants WHERE conversation_id = $1`,
-        [req.params.id]
-      );
-      if (countRows[0].total <= 2) {
-        shouldDelete = true;
-      }
-    }
+    // If no participants remain, or only one remains, retire the DM to avoid stale self-only entries.
+    let shouldDelete = activeParticipantIds.length <= 1;
 
     // Emit system message for leaving group DMs (2+ participants remain, or would have been 3+ before deletion)
     let leftGroupMessage = null;
