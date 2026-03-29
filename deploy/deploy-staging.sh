@@ -158,23 +158,22 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
 
+  get_port_pids() {
+    lsof -ti :${CANDIDATE_PORT} 2>/dev/null | sort -u || true
+  }
+
   # Clean up any stale candidate PID files from prior failed runs.
   rm -f /tmp/chatapp-*-candidate.pid 2>/dev/null || true
 
   if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
     echo 'Candidate port ${CANDIDATE_PORT} is already in use; attempting stale process cleanup...'
-    PIDS=\$(lsof -ti :${CANDIDATE_PORT} | sort -u)
+    PIDS=\$(get_port_pids)
     for PID in \$PIDS; do
       kill \"\$PID\" 2>/dev/null || true
     done
     sleep 1
 
-    # Also kill known stale app patterns that may not release immediately.
-    pkill -f 'PORT=${CANDIDATE_PORT}.*npm --prefix backend start' 2>/dev/null || true
-    pkill -f 'backend/dist/index.js' 2>/dev/null || true
-    sleep 1
-    
-    PIDS=\$(lsof -ti :${CANDIDATE_PORT} 2>/dev/null | sort -u)
+    PIDS=\$(get_port_pids)
     if [ -n \"\$PIDS\" ]; then
       echo 'Force killing remaining processes on port ${CANDIDATE_PORT}...'
       for PID in \$PIDS; do
@@ -185,7 +184,9 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     
     if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
       echo 'Using fuser to force-release port ${CANDIDATE_PORT}...'
-      sudo fuser -k ${CANDIDATE_PORT}/tcp 2>/dev/null || true
+      if command -v fuser >/dev/null 2>&1; then
+        sudo fuser -k ${CANDIDATE_PORT}/tcp 2>/dev/null || true
+      fi
       sleep 2
     fi
     
