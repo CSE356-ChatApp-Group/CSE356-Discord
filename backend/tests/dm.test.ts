@@ -1,0 +1,418 @@
+/**
+ * DM / conversation lifecycle integration tests.
+ *
+ * Covers: invite flow, accept idempotency, leave, guard rails, 1:1 vs group
+ * deletion, history retention, and system message persistence.
+ */
+
+import http from 'http';
+import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+
+import {
+  createAuthenticatedUser,
+  connectWebSocket,
+  closeWebSocket,
+  waitForWsEvent,
+} from './helpers';
+
+let server: any;
+let port: number;
+
+beforeAll(async () => {
+  server = http.createServer(app);
+  server.on('upgrade', wsServer.handleUpgrade);
+  await new Promise<void>((resolve) => {
+    server.listen(0, () => resolve());
+  });
+  port = (server.address() as any).port;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(resolve));
+  await wsServer.shutdown();
+  await closeRedisConnections();
+  await pool.end();
+});
+
+// ── Invite flow ───────────────────────────────────────────────────────────────
+
+describe('DM invite flow', () => {
+  it('keeps invited participants pending until acceptance, then allows them to leave', async () => {
+    const userA = await createAuthenticatedUser('dmowner');
+    const userB = await createAuthenticatedUser('dminitial');
+    const userC = await createAuthenticatedUser('dminvite');
+
+    const inviteeSocket = await connectWebSocket(port, userC.accessToken);
+
+    try {
+      const createRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${userA.accessToken}`)
+        .send({ participantIds: [userB.user.id] });
+
+      expect(createRes.status).toBe(201);
+      const conversationId = createRes.body.conversation.id;
+
+      const inviteEventPromise = waitForWsEvent(
+        inviteeSocket,
+        (event) => event.event === 'conversation:invited',
+      );
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/invite`)
+        .set('Authorization', `Bearer ${userA.accessToken}`)
+        .send({ participantIds: [userC.user.id] });
+
+      expect(inviteRes.status).toBe(200);
+      expect(inviteRes.body.addedParticipantIds).toContain(userC.user.id);
+
+      const inviteEvent = await inviteEventPromise;
+      expect(inviteEvent.data.conversationId).toBe(conversationId);
+      expect(inviteEvent.data.participantIds).toContain(userC.user.id);
+      expect(inviteEvent.data.invitedBy).toBe(userA.user.id);
+
+      // Pending invitees should not appear as active participants yet.
+      const pendingListRes = await request(app)
+        .get('/api/v1/conversations')
+        .set('Authorization', `Bearer ${userC.accessToken}`);
+
+      expect(pendingListRes.status).toBe(200);
+      expect(
+        pendingListRes.body.conversations.find((c: any) => c.id === conversationId),
+      ).toBeUndefined();
+
+      // No joined system message until the invitee accepts.
+      const beforeAcceptMessages = await request(app)
+        .get('/api/v1/messages')
+        .set('Authorization', `Bearer ${userA.accessToken}`)
+        .query({ conversationId });
+
+      expect(beforeAcceptMessages.status).toBe(200);
+      expect(
+        beforeAcceptMessages.body.messages.some(
+          (m: any) => m.type === 'system' && /joined the group\./i.test(m.content || ''),
+        ),
+      ).toBe(false);
+
+      const acceptRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/accept`)
+        .set('Authorization', `Bearer ${userC.accessToken}`)
+        .send({});
+
+      expect(acceptRes.status).toBe(200);
+
+      const afterAcceptMessages = await request(app)
+        .get('/api/v1/messages')
+        .set('Authorization', `Bearer ${userA.accessToken}`)
+        .query({ conversationId });
+
+      expect(afterAcceptMessages.status).toBe(200);
+      expect(
+        afterAcceptMessages.body.messages.some(
+          (m: any) => m.type === 'system' && /joined the group\./i.test(m.content || ''),
+        ),
+      ).toBe(true);
+
+      const leaveRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/leave`)
+        .set('Authorization', `Bearer ${userC.accessToken}`)
+        .send({});
+
+      expect(leaveRes.status).toBe(200);
+
+      const listRes = await request(app)
+        .get('/api/v1/conversations')
+        .set('Authorization', `Bearer ${userC.accessToken}`);
+
+      expect(listRes.status).toBe(200);
+      expect(
+        listRes.body.conversations.find((c: any) => c.id === conversationId),
+      ).toBeUndefined();
+    } finally {
+      await closeWebSocket(inviteeSocket);
+    }
+  });
+
+  it('rejects accepting a conversation when user is not invited', async () => {
+    const owner = await createAuthenticatedUser('dmacceptowner');
+    const member = await createAuthenticatedUser('dmacceptmember');
+    const stranger = await createAuthenticatedUser('dmacceptstranger');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [member.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const acceptRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/accept`)
+      .set('Authorization', `Bearer ${stranger.accessToken}`)
+      .send({});
+
+    expect(acceptRes.status).toBe(403);
+    expect(acceptRes.body.error).toMatch(/not invited/i);
+  });
+
+  it('accept endpoint is idempotent and emits joined system message only once', async () => {
+    const owner = await createAuthenticatedUser('dmacceptonceowner');
+    const existing = await createAuthenticatedUser('dmacceptonceexisting');
+    const invitee = await createAuthenticatedUser('dmacceptonceinvitee');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [existing.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const inviteRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/invite`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [invitee.user.id] });
+
+    expect(inviteRes.status).toBe(200);
+
+    const firstAccept = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/accept`)
+      .set('Authorization', `Bearer ${invitee.accessToken}`)
+      .send({});
+
+    expect(firstAccept.status).toBe(200);
+
+    const secondAccept = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/accept`)
+      .set('Authorization', `Bearer ${invitee.accessToken}`)
+      .send({});
+
+    expect(secondAccept.status).toBe(200);
+
+    const messagesRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .query({ conversationId });
+
+    expect(messagesRes.status).toBe(200);
+    const joinedMessages = messagesRes.body.messages.filter(
+      (m: any) =>
+        m.type === 'system' &&
+        /joined the group\./i.test(m.content || '') &&
+        /invitee/i.test(m.content || ''),
+    );
+    expect(joinedMessages).toHaveLength(1);
+  });
+
+  it('emits joined system message when first invitee accepts in a group-intent conversation', async () => {
+    const owner = await createAuthenticatedUser('dmgroupintentowner');
+    const inviteeA = await createAuthenticatedUser('dmgroupintenta');
+    const inviteeB = await createAuthenticatedUser('dmgroupintentb');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [inviteeA.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const inviteSecondRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/invite`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [inviteeB.user.id] });
+
+    expect(inviteSecondRes.status).toBe(200);
+
+    const acceptRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/accept`)
+      .set('Authorization', `Bearer ${inviteeB.accessToken}`)
+      .send({});
+
+    expect(acceptRes.status).toBe(200);
+
+    const messagesRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .query({ conversationId });
+
+    expect(messagesRes.status).toBe(200);
+    const joinedMessages = messagesRes.body.messages.filter(
+      (m: any) => m.type === 'system' && /joined the group\./i.test(m.content || ''),
+    );
+    expect(joinedMessages).toHaveLength(1);
+  });
+});
+
+// ── Leave / guard rails ───────────────────────────────────────────────────────
+
+describe('DM leave and access guards', () => {
+  it('blocks DM edits, deletes, and read receipts after a participant leaves', async () => {
+    const owner = await createAuthenticatedUser('dmguardowner');
+    const participant = await createAuthenticatedUser('dmguardparticipant');
+    const third = await createAuthenticatedUser('dmguardthird');
+
+    const createConversationRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [participant.user.id, third.user.id] });
+
+    expect(createConversationRes.status).toBe(201);
+    const conversationId = createConversationRes.body.conversation.id;
+
+    const participantMessageRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .send({ conversationId, content: 'message before leaving' });
+
+    expect(participantMessageRes.status).toBe(201);
+    const participantMessageId = participantMessageRes.body.message.id;
+
+    const ownerMessageRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ conversationId, content: 'owner message after join' });
+
+    expect(ownerMessageRes.status).toBe(201);
+    const ownerMessageId = ownerMessageRes.body.message.id;
+
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .send({});
+
+    expect(leaveRes.status).toBe(200);
+
+    const editRes = await request(app)
+      .patch(`/api/v1/messages/${participantMessageId}`)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .send({ content: 'edited after leaving' });
+
+    expect(editRes.status).toBe(403);
+    expect(editRes.body.error).toMatch(/access denied/i);
+
+    const deleteRes = await request(app)
+      .delete(`/api/v1/messages/${participantMessageId}`)
+      .set('Authorization', `Bearer ${participant.accessToken}`);
+
+    expect(deleteRes.status).toBe(403);
+    expect(deleteRes.body.error).toMatch(/access denied/i);
+
+    const readRes = await request(app)
+      .put(`/api/v1/messages/${ownerMessageId}/read`)
+      .set('Authorization', `Bearer ${participant.accessToken}`);
+
+    expect(readRes.status).toBe(403);
+    expect(readRes.body.error).toMatch(/access denied/i);
+  });
+
+  it('deletes 1:1 DM for both parties when one participant leaves', async () => {
+    const userA = await createAuthenticatedUser('dm1to1a');
+    const userB = await createAuthenticatedUser('dm1to1b');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ participantIds: [userB.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({});
+
+    expect(leaveRes.status).toBe(200);
+
+    const listResB = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userB.accessToken}`);
+
+    expect(listResB.status).toBe(200);
+    expect(listResB.body.conversations.find((c: any) => c.id === conversationId)).toBeUndefined();
+
+    const listResA = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userA.accessToken}`);
+
+    expect(listResA.status).toBe(200);
+    expect(listResA.body.conversations.find((c: any) => c.id === conversationId)).toBeUndefined();
+  });
+
+  it('retains group DM history for remaining participants when one leaves', async () => {
+    const userA = await createAuthenticatedUser('dmgroup3a');
+    const userB = await createAuthenticatedUser('dmgroup3b');
+    const userC = await createAuthenticatedUser('dmgroup3c');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ participantIds: [userB.user.id, userC.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ conversationId, content: 'farewell message' });
+
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({});
+
+    expect(leaveRes.status).toBe(200);
+
+    const listResB = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userB.accessToken}`);
+
+    expect(listResB.status).toBe(200);
+    expect(listResB.body.conversations.find((c: any) => c.id === conversationId)).toBeDefined();
+
+    const listResC = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userC.accessToken}`);
+
+    expect(listResC.status).toBe(200);
+    expect(listResC.body.conversations.find((c: any) => c.id === conversationId)).toBeDefined();
+  });
+
+  it('persists leave system message in group DM history for remaining participants', async () => {
+    const userA = await createAuthenticatedUser('dmsysleavea');
+    const userB = await createAuthenticatedUser('dmsysleaveb');
+    const userC = await createAuthenticatedUser('dmsysleavec');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ participantIds: [userB.user.id, userC.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${userB.accessToken}`)
+      .send({});
+
+    expect(leaveRes.status).toBe(200);
+
+    const messagesRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .query({ conversationId });
+
+    expect(messagesRes.status).toBe(200);
+
+    const leaveMessage = messagesRes.body.messages.find(
+      (m: any) => m.type === 'system' && /left the group\./i.test(m.content || ''),
+    );
+
+    expect(leaveMessage).toBeDefined();
+    expect(leaveMessage.author_id).toBeNull();
+    expect(leaveMessage.author).toBeNull();
+  });
+});

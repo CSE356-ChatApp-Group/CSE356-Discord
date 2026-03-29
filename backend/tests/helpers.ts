@@ -1,0 +1,174 @@
+/**
+ * Shared test helpers.
+ *
+ * Pure utility functions with no Jest dependencies – safe to import from any
+ * test file without pulling in global test lifecycle hooks.
+ */
+
+import { WebSocket } from 'ws';
+import { request, app } from './runtime';
+
+// ── User helpers ──────────────────────────────────────────────────────────────
+
+export function uniqueSuffix(): string {
+  return `${Date.now()}${Math.floor(Math.random() * 10000)}`;
+}
+
+export async function registerUser({
+  email,
+  username,
+  password = 'Password1!',
+  displayName,
+}: {
+  email: string;
+  username: string;
+  password?: string;
+  displayName?: string;
+}) {
+  return request(app)
+    .post('/api/v1/auth/register')
+    .send({ email, username, password, displayName: displayName || username });
+}
+
+export async function createAuthenticatedUser(prefix: string) {
+  const suffix = uniqueSuffix();
+  const email = `${prefix}-${suffix}@example.com`;
+  const username = `${prefix}${suffix}`.slice(0, 32);
+  const res = await registerUser({ email, username });
+  return {
+    email,
+    username,
+    accessToken: res.body.accessToken as string,
+    user: res.body.user as { id: string; email: string; username: string },
+  };
+}
+
+// ── WebSocket helpers ─────────────────────────────────────────────────────────
+
+export function connectWebSocket(port: number, token: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`);
+    const timer = setTimeout(() => {
+      ws.terminate();
+      reject(new Error('Timed out connecting websocket'));
+    }, 3000);
+
+    ws.once('open', () => {
+      clearTimeout(timer);
+      resolve(ws);
+    });
+    ws.once('error', (err: Error) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Connect a WebSocket and immediately send `frame` in the `open` handler.
+ * Used to exercise the subscribe-on-open race condition fix.
+ */
+export function connectWebSocketWithOpenFrame(
+  port: number,
+  token: string,
+  frame: Record<string, unknown>,
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`);
+    const timer = setTimeout(() => {
+      ws.terminate();
+      reject(new Error('Timed out connecting websocket'));
+    }, 3000);
+
+    ws.once('open', () => {
+      try {
+        ws.send(JSON.stringify(frame));
+      } catch (err) {
+        clearTimeout(timer);
+        reject(err);
+        return;
+      }
+      clearTimeout(timer);
+      resolve(ws);
+    });
+    ws.once('error', (err: Error) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+export function closeWebSocket(ws: any): Promise<void> {
+  return new Promise((resolve) => {
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      resolve();
+      return;
+    }
+    ws.once('close', resolve);
+    ws.close();
+  });
+}
+
+/**
+ * Resolve with the first WebSocket message that satisfies `predicate`.
+ * Rejects if no matching message arrives within `timeoutMs`.
+ */
+export function waitForWsEvent(
+  ws: any,
+  predicate: (event: any) => boolean,
+  timeoutMs = 4000,
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off('message', onMessage);
+      reject(new Error('Timed out waiting for websocket event'));
+    }, timeoutMs);
+
+    const onMessage = (raw: any) => {
+      let event: any;
+      try {
+        event = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      if (!predicate(event)) return;
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      resolve(event);
+    };
+
+    ws.on('message', onMessage);
+  });
+}
+
+/**
+ * Resolve after `timeoutMs` if NO message matching `predicate` arrives.
+ * Rejects immediately if a matching message is received.
+ */
+export function waitForNoWsEvent(
+  ws: any,
+  predicate: (event: any) => boolean,
+  timeoutMs = 750,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off('message', onMessage);
+      resolve();
+    }, timeoutMs);
+
+    const onMessage = (raw: any) => {
+      let event: any;
+      try {
+        event = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      if (!predicate(event)) return;
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      reject(new Error(`Unexpected websocket event: ${JSON.stringify(event)}`));
+    };
+
+    ws.on('message', onMessage);
+  });
+}
