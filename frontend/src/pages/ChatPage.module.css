@@ -65,50 +65,6 @@
   min-width: 0;
 }
 
-.invitePrompt {
-  display: grid;
-  gap: 12px;
-}
-
-.invitePromptText {
-  margin: 0;
-  color: var(--text-0);
-  font-size: 15px;
-  line-height: 1.45;
-}
-
-.invitePromptHint {
-  margin: 0;
-  color: var(--text-2);
-  font-size: 13px;
-}
-
-.invitePromptActions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.inviteDeclineBtn,
-.inviteAcceptBtn {
-  border: 1px solid transparent;
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.inviteDeclineBtn {
-  background: transparent;
-  color: var(--text-1);
-  border-color: var(--border-1);
-}
-
-.inviteAcceptBtn {
-  background: var(--accent);
-  color: #fff;
-}
-
 @media (max-width: 1200px) {
   .layout {
     grid-template-columns: 64px var(--channel-sidebar-width, var(--sidebar-width)) minmax(0, 1fr);

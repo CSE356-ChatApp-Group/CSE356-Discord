@@ -8,8 +8,9 @@ import styles from './ChannelSidebar.module.css';
 export default function ChannelSidebar() {
   const {
     activeCommunity, channels, activeChannel,
-    conversations, activeConv,
+    conversations, pendingDmInvites, activeConv,
     selectChannel, selectConversation, createChannel, openDm,
+    acceptDmInvite, declineDmInvite,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
   const [showCreate, setShowCreate] = useState(false);
@@ -106,6 +107,22 @@ export default function ChannelSidebar() {
                 onClick={() => setShowNewDm(true)}
               >+</button>
             </div>
+            {pendingDmInvites.length > 0 && (
+              <div className={styles.pendingInvites} data-testid="dm-pending-invites">
+                <div className={styles.sectionHeader}>
+                  <span>Pending invites</span>
+                </div>
+                {pendingDmInvites.map((invite) => (
+                  <PendingInviteRow
+                    key={invite.id}
+                    invite={invite}
+                    currentUserId={user?.id}
+                    onAccept={() => { void acceptDmInvite(invite.id); }}
+                    onDecline={() => { void declineDmInvite(invite.id); }}
+                  />
+                ))}
+              </div>
+            )}
             {conversations.length === 0 && (
               <p className={styles.hint}>No DMs yet</p>
             )}
@@ -209,6 +226,35 @@ function DmRow({ conv, currentUserId, unread, active, onClick }) {
         />
       )}
     </button>
+  );
+}
+
+function PendingInviteRow({ invite, currentUserId, onAccept, onDecline }) {
+  const others = (invite.participants || []).filter((p) => p.id !== currentUserId);
+  const name = invite.name || others.map((p) => p.displayName || p.display_name || p.username).join(', ') || 'Unknown';
+
+  return (
+    <div className={styles.pendingInviteRow} data-testid={`dm-pending-invite-${invite.id}`}>
+      <span className={styles.pendingInviteName} title={name}>{name}</span>
+      <div className={styles.pendingInviteActions}>
+        <button
+          type="button"
+          className={styles.pendingInviteDecline}
+          onClick={onDecline}
+          data-testid={`dm-pending-decline-${invite.id}`}
+        >
+          Decline
+        </button>
+        <button
+          type="button"
+          className={styles.pendingInviteAccept}
+          onClick={onAccept}
+          data-testid={`dm-pending-accept-${invite.id}`}
+        >
+          Accept
+        </button>
+      </div>
+    </div>
   );
 }
 

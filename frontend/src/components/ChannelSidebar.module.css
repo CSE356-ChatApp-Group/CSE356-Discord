@@ -161,6 +161,66 @@
   font-style: italic;
 }
 
+.pendingInvites {
+  margin-bottom: 8px;
+}
+
+.pendingInviteRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  margin-bottom: 4px;
+}
+
+.pendingInviteName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.pendingInviteActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pendingInviteDecline,
+.pendingInviteAccept {
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  transition: background .12s, border-color .12s, color .12s;
+}
+
+.pendingInviteDecline {
+  color: var(--text-secondary);
+  border-color: var(--border);
+  background: transparent;
+}
+
+.pendingInviteDecline:hover {
+  color: var(--text-primary);
+  background: var(--bg-3);
+}
+
+.pendingInviteAccept {
+  color: var(--text-inverse);
+  background: var(--accent);
+}
+
+.pendingInviteAccept:hover {
+  background: var(--accent-dim);
+}
+
 .empty {
   flex: 1;
   display: flex;
