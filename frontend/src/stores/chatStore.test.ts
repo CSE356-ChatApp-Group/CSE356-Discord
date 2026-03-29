@@ -182,4 +182,79 @@ describe('chatStore websocket author hydration', () => {
     expect(state.pendingDmInvites.some((invite) => invite.id === 'conv-3')).toBe(true);
     expect(state.conversations.some((conv) => conv.id === 'conv-3')).toBe(false);
   });
+
+  it('removes 1:1 DM from sidebar when the other participant leaves', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-me',
+        username: 'me',
+        displayName: 'Me',
+        email: 'me@example.com',
+      },
+    });
+
+    useChatStore.setState({
+      conversations: [
+        {
+          id: 'conv-1on1',
+          participants: [
+            { id: 'user-me', username: 'me' },
+            { id: 'user-other', username: 'other' },
+          ],
+        },
+      ],
+      activeConv: null,
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'conversation:participant_left',
+      data: {
+        conversationId: 'conv-1on1',
+        leftUserId: 'user-other',
+      },
+    });
+
+    const state = useChatStore.getState();
+    expect(state.conversations.some((c) => c.id === 'conv-1on1')).toBe(false);
+  });
+
+  it('keeps group DM in sidebar when one of three participants leaves', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-me',
+        username: 'me',
+        displayName: 'Me',
+        email: 'me@example.com',
+      },
+    });
+
+    useChatStore.setState({
+      conversations: [
+        {
+          id: 'conv-group',
+          participants: [
+            { id: 'user-me', username: 'me' },
+            { id: 'user-b', username: 'b' },
+            { id: 'user-c', username: 'c' },
+          ],
+        },
+      ],
+      activeConv: null,
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'conversation:participant_left',
+      data: {
+        conversationId: 'conv-group',
+        leftUserId: 'user-c',
+      },
+    });
+
+    const state = useChatStore.getState();
+    // Conversation survives — user-b still remains alongside me
+    expect(state.conversations.some((c) => c.id === 'conv-group')).toBe(true);
+    const conv = state.conversations.find((c) => c.id === 'conv-group');
+    expect(conv?.participants?.some((p) => p.id === 'user-c')).toBe(false);
+    expect(conv?.participants?.some((p) => p.id === 'user-b')).toBe(true);
+  });
 });

@@ -1221,23 +1221,37 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           break;
         }
 
-        set((s) => ({
-          conversations: s.conversations.map((conv) =>
-            conv.id === conversationId
-              ? {
-                  ...conv,
-                  participants: (conv.participants || []).filter((participant) => participant.id !== leftUserId),
-                }
-              : conv
-          ),
-          activeConv:
-            s.activeConv?.id === conversationId
-              ? {
-                  ...s.activeConv,
-                  participants: (s.activeConv.participants || []).filter((participant) => participant.id !== leftUserId),
-                }
-              : s.activeConv,
-        }));
+        set((s) => {
+          const updatedParticipants = (
+            s.conversations.find((conv) => conv.id === conversationId)?.participants || []
+          ).filter((participant) => participant.id !== leftUserId);
+
+          // If no other participants remain (only me), treat it as if I left too —
+          // this happens when the other person in a 1:1 DM leaves.
+          const otherParticipants = updatedParticipants.filter((p) => p.id !== me?.id);
+          if (otherParticipants.length === 0) {
+            return {
+              conversations: s.conversations.filter((conv) => conv.id !== conversationId),
+              activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
+              activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
+            };
+          }
+
+          return {
+            conversations: s.conversations.map((conv) =>
+              conv.id === conversationId
+                ? { ...conv, participants: updatedParticipants }
+                : conv
+            ),
+            activeConv:
+              s.activeConv?.id === conversationId
+                ? {
+                    ...s.activeConv,
+                    participants: updatedParticipants,
+                  }
+                : s.activeConv,
+          };
+        });
         break;
       }
     }

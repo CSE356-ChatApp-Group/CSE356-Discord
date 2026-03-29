@@ -544,11 +544,14 @@ describe('DM management and realtime delivery', () => {
   it('blocks DM edits, deletes, and read receipts after a participant leaves', async () => {
     const owner = await createAuthenticatedUser('dmguardowner');
     const participant = await createAuthenticatedUser('dmguardparticipant');
+    const third = await createAuthenticatedUser('dmguardthird');
 
+    // Use a group DM (3 people) so the conversation is NOT deleted when participant leaves.
+    // This lets us verify that the leaving participant is properly blocked.
     const createConversationRes = await request(app)
       .post('/api/v1/conversations')
       .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [participant.user.id] });
+      .send({ participantIds: [participant.user.id, third.user.id] });
 
     expect(createConversationRes.status).toBe(201);
     const conversationId = createConversationRes.body.conversation.id;
@@ -597,5 +600,84 @@ describe('DM management and realtime delivery', () => {
 
     expect(readRes.status).toBe(403);
     expect(readRes.body.error).toMatch(/access denied/i);
+  });
+
+  it('deletes 1:1 DM for both parties when one participant leaves', async () => {
+    const userA = await createAuthenticatedUser('dm1to1a');
+    const userB = await createAuthenticatedUser('dm1to1b');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ participantIds: [userB.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    // userA leaves the 1:1 DM
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({});
+
+    expect(leaveRes.status).toBe(200);
+
+    // The conversation should also be gone for userB
+    const listResB = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userB.accessToken}`);
+
+    expect(listResB.status).toBe(200);
+    expect(listResB.body.conversations.find((c) => c.id === conversationId)).toBeUndefined();
+
+    // userA also should not see it
+    const listResA = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userA.accessToken}`);
+
+    expect(listResA.status).toBe(200);
+    expect(listResA.body.conversations.find((c) => c.id === conversationId)).toBeUndefined();
+  });
+
+  it('retains group DM history for remaining participants when one leaves', async () => {
+    const userA = await createAuthenticatedUser('dmgroup3a');
+    const userB = await createAuthenticatedUser('dmgroup3b');
+    const userC = await createAuthenticatedUser('dmgroup3c');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ participantIds: [userB.user.id, userC.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    // userA sends a message then leaves
+    await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ conversationId, content: 'farewell message' });
+
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({});
+
+    expect(leaveRes.status).toBe(200);
+
+    // userB and userC should still see the conversation
+    const listResB = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userB.accessToken}`);
+
+    expect(listResB.status).toBe(200);
+    expect(listResB.body.conversations.find((c) => c.id === conversationId)).toBeDefined();
+
+    const listResC = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userC.accessToken}`);
+
+    expect(listResC.status).toBe(200);
+    expect(listResC.body.conversations.find((c) => c.id === conversationId)).toBeDefined();
   });
 });

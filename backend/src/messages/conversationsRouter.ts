@@ -392,7 +392,21 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     );
 
     const activeParticipantIds = await getActiveParticipantIds(client, req.params.id);
-    if (activeParticipantIds.length === 0) {
+    let shouldDelete = activeParticipantIds.length === 0;
+
+    if (!shouldDelete && activeParticipantIds.length === 1) {
+      // For 1:1 DMs (never more than 2 participants total), delete when one person leaves.
+      // Group DMs retain history as long as at least one participant remains (per spec).
+      const { rows: countRows } = await client.query(
+        `SELECT COUNT(*)::int AS total FROM conversation_participants WHERE conversation_id = $1`,
+        [req.params.id]
+      );
+      if (countRows[0].total <= 2) {
+        shouldDelete = true;
+      }
+    }
+
+    if (shouldDelete) {
       await client.query('DELETE FROM conversations WHERE id = $1', [req.params.id]);
     }
     await client.query('COMMIT');
