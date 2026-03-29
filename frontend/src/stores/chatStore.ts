@@ -310,7 +310,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           : s.activeChannel,
       }));
       channels.forEach((channel: Entity) => {
-        if (channel?.id) {
+        const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
+        if (channel?.id && canAccess) {
           wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
         }
       });
@@ -345,6 +346,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async selectChannel(channel: Entity) {
+    const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
+    if (!canAccess) return;
+
     set(s => ({
       activeChannel: {
         ...channel,

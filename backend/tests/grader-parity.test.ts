@@ -196,6 +196,29 @@ describe('Grader parity: communities and channels', () => {
     const ids = channelsRes.body.channels.map((ch: any) => ch.id);
     expect(ids).toContain(publicChannelRes.body.channel.id);
     expect(ids).toContain(privateChannelRes.body.channel.id);
+
+    const privateMessageRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId: privateChannelRes.body.channel.id, content: `private-${uniqueSuffix()}` });
+    expect(privateMessageRes.status).toBe(201);
+
+    const memberChannelsRes = await request(app)
+      .get('/api/v1/channels')
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .query({ communityId });
+
+    expect(memberChannelsRes.status).toBe(200);
+    const memberPrivate = memberChannelsRes.body.channels.find((ch: any) => ch.id === privateChannelRes.body.channel.id);
+    expect(memberPrivate).toBeDefined();
+    expect(memberPrivate.can_access).toBe(false);
+    expect(memberPrivate.last_message_id).toBeNull();
+
+    const memberPrivateHistoryRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .query({ channelId: privateChannelRes.body.channel.id });
+    expect(memberPrivateHistoryRes.status).toBe(403);
   });
 });
 

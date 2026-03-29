@@ -184,6 +184,66 @@ describe('Channel bootstrap subscriptions', () => {
       await closeWebSocket(memberSocket);
     }
   });
+
+  it('rejects manual websocket subscribe to private channel when user is not invited', async () => {
+    const owner = await createAuthenticatedUser('wsprivowner');
+    const communityMember = await createAuthenticatedUser('wsprivmember');
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        slug: `ws-private-${uniqueSuffix()}`,
+        name: 'ws-private',
+        description: 'ws private access test',
+      });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${communityMember.accessToken}`)
+      .send({});
+    expect(joinRes.status).toBe(200);
+
+    const privateChannelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        communityId,
+        name: `ws-priv-${uniqueSuffix()}`,
+        isPrivate: true,
+        description: 'private channel',
+      });
+    expect(privateChannelRes.status).toBe(201);
+    const privateChannelId = privateChannelRes.body.channel.id;
+
+    const memberSocket = await connectWebSocket(port, communityMember.accessToken);
+    try {
+      memberSocket.send(JSON.stringify({ type: 'subscribe', channel: `channel:${privateChannelId}` }));
+
+      const denied = await waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'error' && /Channel not allowed/i.test(String(event.data || '')),
+      );
+      expect(denied.event).toBe('error');
+
+      const noMessagePromise = waitForNoWsEvent(
+        memberSocket,
+        (event) => event.event === 'message:created' && event.data?.channel_id === privateChannelId,
+      );
+
+      const sendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId: privateChannelId, content: `private-${uniqueSuffix()}` });
+      expect(sendRes.status).toBe(201);
+
+      await noMessagePromise;
+    } finally {
+      await closeWebSocket(memberSocket);
+    }
+  });
 });
 
 // ── Subscribe-on-open race ────────────────────────────────────────────────────

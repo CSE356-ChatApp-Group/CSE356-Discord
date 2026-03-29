@@ -358,7 +358,7 @@ async function handleClientMessage(ws, user, msg) {
 
   switch (msg.type) {
     case 'subscribe':
-      if (isAllowedChannel(user, msg.channel)) {
+      if (await isAllowedChannel(user, msg.channel)) {
         try {
           await subscribeClient(ws, msg.channel);
           ws.send(JSON.stringify({ event: 'subscribed', data: { channel: msg.channel } }));
@@ -405,10 +405,60 @@ async function handleClientMessage(ws, user, msg) {
 }
 
 // ── Channel allow-list ─────────────────────────────────────────────────────────
-// In production, verify the user is a member of the channel/conversation/community.
-// Here we allow any well-formed channel key for MVP simplicity.
-function isAllowedChannel(_user, channel) {
-  return /^(channel|conversation|community|user):[\w-]+$/.test(channel);
+function parseChannelKey(channel) {
+  if (typeof channel !== 'string') return null;
+  const match = channel.match(/^(channel|conversation|community|user):([\w-]+)$/);
+  if (!match) return null;
+  return { type: match[1], id: match[2] };
+}
+
+async function isAllowedChannel(user, channel) {
+  const parsed = parseChannelKey(channel);
+  if (!parsed) return false;
+
+  if (parsed.type === 'user') {
+    return parsed.id === user.id;
+  }
+
+  if (parsed.type === 'community') {
+    const { rows } = await pool.query(
+      `SELECT 1
+       FROM community_members
+       WHERE community_id = $1 AND user_id = $2`,
+      [parsed.id, user.id]
+    );
+    return rows.length > 0;
+  }
+
+  if (parsed.type === 'conversation') {
+    const { rows } = await pool.query(
+      `SELECT 1
+       FROM conversation_participants
+       WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+      [parsed.id, user.id]
+    );
+    return rows.length > 0;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT 1
+     FROM channels c
+     JOIN community_members cm
+       ON cm.community_id = c.community_id
+      AND cm.user_id = $1
+     WHERE c.id = $2
+       AND (
+         c.is_private = FALSE
+         OR EXISTS (
+           SELECT 1
+           FROM channel_members chm
+           WHERE chm.channel_id = c.id
+             AND chm.user_id = $1
+         )
+       )`,
+    [user.id, parsed.id]
+  );
+  return rows.length > 0;
 }
 
 // ── Subscribe helpers ──────────────────────────────────────────────────────────

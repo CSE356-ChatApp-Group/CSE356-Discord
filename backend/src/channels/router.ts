@@ -30,32 +30,49 @@ router.get('/',
   async (req, res, next) => {
     if (!v(req, res)) return;
     try {
-      // Return accessible channels with last-message/read-pointer metadata.
+      const { rows: membership } = await pool.query(
+        `SELECT 1
+         FROM community_members
+         WHERE community_id = $1 AND user_id = $2`,
+        [req.query.communityId, req.user.id]
+      );
+      if (!membership.length) {
+        return res.status(403).json({ error: 'Not a community member' });
+      }
+
+      // Return all visible channel names. Private-channel metadata/content pointers
+      // are redacted for users who are not invited to that private channel.
       const { rows } = await pool.query(
-        `SELECT ch.*,
-                lm.id AS last_message_id,
-                lm.author_id AS last_message_author_id,
-                lm.created_at AS last_message_at,
-                rs.last_read_message_id AS my_last_read_message_id,
-                rs.last_read_at AS my_last_read_at
-         FROM   channels ch
+        `WITH visible_channels AS (
+           SELECT ch.*,
+                  (ch.is_private = FALSE
+                   OR EXISTS (
+                     SELECT 1 FROM channel_members cm
+                     WHERE cm.channel_id = ch.id AND cm.user_id = $2
+                   )) AS can_access
+           FROM channels ch
+           WHERE ch.community_id = $1
+         )
+         SELECT vc.*,
+                vc.can_access,
+                CASE WHEN vc.can_access THEN lm.id ELSE NULL END AS last_message_id,
+                CASE WHEN vc.can_access THEN lm.author_id ELSE NULL END AS last_message_author_id,
+                CASE WHEN vc.can_access THEN lm.created_at ELSE NULL END AS last_message_at,
+                CASE WHEN vc.can_access THEN rs.last_read_message_id ELSE NULL END AS my_last_read_message_id,
+                CASE WHEN vc.can_access THEN rs.last_read_at ELSE NULL END AS my_last_read_at
+         FROM   visible_channels vc
          LEFT JOIN LATERAL (
            SELECT m.id, m.author_id, m.created_at
            FROM messages m
-           WHERE m.channel_id = ch.id AND m.deleted_at IS NULL
+           WHERE m.channel_id = vc.id AND m.deleted_at IS NULL
            ORDER BY m.created_at DESC
            LIMIT 1
-         ) lm ON TRUE
+         ) lm ON vc.can_access
          LEFT JOIN read_states rs
-                ON rs.channel_id = ch.id
+                ON vc.can_access
+               AND rs.channel_id = vc.id
                AND rs.user_id = $2
-         WHERE  ch.community_id = $1
-           AND  (ch.is_private = FALSE
-                 OR EXISTS (
-                   SELECT 1 FROM channel_members cm
-                   WHERE cm.channel_id = ch.id AND cm.user_id = $2
-                 ))
-         ORDER  BY ch.position, ch.name`,
+         ORDER  BY vc.position, vc.name`,
         [req.query.communityId, req.user.id]
       );
       res.json({ channels: rows });

@@ -129,20 +129,27 @@ export default function ChannelSidebar() {
             {channels.length === 0 && (
               <p className={styles.hint}>No channels yet</p>
             )}
-            {channels.map(ch => (
+            {channels.map((ch) => {
+              const canAccess = ch.can_access ?? ch.canAccess ?? !ch.is_private;
+              return (
               <ChannelRow
                 key={ch.id}
                 channel={ch}
                 active={activeChannel?.id === ch.id}
+                canAccess={canAccess}
                 unread={isChannelUnread(ch, activeChannel?.id === ch.id, user?.id)}
                 canDelete={canManage}
                 onDelete={async () => {
                   if (!confirm(`Delete #${ch.name}?`)) return;
                   await deleteChannel(ch.id);
                 }}
-                onClick={() => selectChannel(ch)}
+                onClick={() => {
+                  if (!canAccess) return;
+                  void selectChannel(ch);
+                }}
               />
-            ))}
+              );
+            })}
           </>
         ) : (
           <>
@@ -205,9 +212,17 @@ export default function ChannelSidebar() {
   );
 }
 
-function ChannelRow({ channel, active, unread, canDelete, onDelete, onClick }) {
+function ChannelRow({ channel, active, unread, canAccess, canDelete, onDelete, onClick }) {
   return (
-    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`channel-item-${channel.id}`} data-channel-id={channel.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open channel ${channel.name}`}>
+    <button
+      className={`${styles.row} ${active ? styles.rowActive : ''} ${canAccess ? '' : styles.rowDisabled}`}
+      onClick={onClick}
+      data-testid={`channel-item-${channel.id}`}
+      data-channel-id={channel.id}
+      data-read-state={unread ? 'UNREAD' : 'READ'}
+      aria-label={canAccess ? `Open channel ${channel.name}` : `Private channel ${channel.name} requires invite`}
+      title={canAccess ? `Open channel ${channel.name}` : 'Invite required to read channel contents'}
+    >
       <span className={styles.hash}>{channel.is_private ? '🔒' : '#'}</span>
       <span className={styles.rowName}>{channel.name}</span>
       {canDelete && (
@@ -258,6 +273,8 @@ function canLeaveCommunity(community) {
 
 function isChannelUnread(channel, active, currentUserId) {
   if (active) return false;
+  const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
+  if (!canAccess) return false;
   const hasActivity = Boolean(channel?.has_new_activity ?? channel?.hasNewActivity);
   if (hasActivity) return true;
   const lastMessageAuthorId = channel?.last_message_author_id || channel?.lastMessageAuthorId;
