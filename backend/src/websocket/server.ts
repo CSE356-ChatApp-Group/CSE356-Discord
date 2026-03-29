@@ -32,6 +32,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const { verifyAccess }  = require('../utils/jwt');
 const redis             = require('../db/redis');
 const { redisSub }      = require('../db/redis');
+const { pool }          = require('../db/pool');
 const logger            = require('../utils/logger');
 const presenceService   = require('../presence/service');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('../auth/bypass');
@@ -213,6 +214,46 @@ redisSub.on('message', (channel, message) => {
   });
 });
 
+async function listAutoSubscriptionChannels(userId) {
+  const [conversationRes, communityRes, channelRes] = await Promise.all([
+    pool.query(
+      `SELECT conversation_id::text AS id
+       FROM conversation_participants
+       WHERE user_id = $1 AND left_at IS NULL`,
+      [userId]
+    ),
+    pool.query(
+      `SELECT community_id::text AS id
+       FROM community_members
+       WHERE user_id = $1`,
+      [userId]
+    ),
+    pool.query(
+      `SELECT c.id::text AS id
+       FROM channels c
+       JOIN community_members cm
+         ON cm.community_id = c.community_id
+        AND cm.user_id = $1
+       LEFT JOIN channel_members chm
+         ON chm.channel_id = c.id
+        AND chm.user_id = $1
+       WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
+      [userId]
+    ),
+  ]);
+
+  return [
+    ...conversationRes.rows.map((row) => `conversation:${row.id}`),
+    ...communityRes.rows.map((row) => `community:${row.id}`),
+    ...channelRes.rows.map((row) => `channel:${row.id}`),
+  ];
+}
+
+async function bootstrapUserSubscriptions(ws, userId) {
+  const channels = await listAutoSubscriptionChannels(userId);
+  channels.forEach((channel) => subscribeClient(ws, channel));
+}
+
 // ── Connection handling ────────────────────────────────────────────────────────
 wss.on('connection', async (ws, req) => {
   // Authenticate
@@ -245,6 +286,9 @@ wss.on('connection', async (ws, req) => {
 
   // Automatically subscribe to personal notification channel
   subscribeClient(ws, `user:${user.id}`);
+
+  bootstrapUserSubscriptions(ws, user.id)
+    .catch((err) => logger.warn({ err, userId: user.id }, 'WS auto-subscribe bootstrap failed'));
 
   ws.on('message', (raw) => {
     try {

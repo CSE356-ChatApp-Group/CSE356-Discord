@@ -649,6 +649,57 @@ describe('DM management and realtime delivery', () => {
     }
   });
 
+  it('delivers channel messages without manual websocket subscribe', async () => {
+    const owner = await createAuthenticatedUser('wsautosubowner');
+    const member = await createAuthenticatedUser('wsautosubmember');
+
+    const slug = `ws-auto-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'ws auto subscribe test' });
+
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .send({});
+
+    expect(joinRes.status).toBe(200);
+
+    const channelName = `auto-sub-${uniqueSuffix()}`;
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: channelName, isPrivate: false, description: 'auto-sub channel' });
+
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const memberSocket = await connectWebSocket(port, member.accessToken);
+
+    try {
+      // Do not send a subscribe frame here; this validates server-side bootstrap subscriptions.
+      const createdEventPromise = waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'message:created' && event.data?.channel_id === channelId
+      );
+
+      const sendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'channel ws auto-sub check' });
+
+      expect(sendRes.status).toBe(201);
+      const event = await createdEventPromise;
+      expect(event.data.content).toBe('channel ws auto-sub check');
+    } finally {
+      await closeWebSocket(memberSocket);
+    }
+  });
+
   it('blocks DM edits, deletes, and read receipts after a participant leaves', async () => {
     const owner = await createAuthenticatedUser('dmguardowner');
     const participant = await createAuthenticatedUser('dmguardparticipant');
