@@ -219,6 +219,27 @@ describe('Grader parity: communities and channels', () => {
       .set('Authorization', `Bearer ${member.accessToken}`)
       .query({ channelId: privateChannelRes.body.channel.id });
     expect(memberPrivateHistoryRes.status).toBe(403);
+
+    const invitePrivateMemberRes = await request(app)
+      .post(`/api/v1/channels/${privateChannelRes.body.channel.id}/members`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ userIds: [member.user.id] });
+    expect(invitePrivateMemberRes.status).toBe(200);
+    expect(invitePrivateMemberRes.body.addedUserIds).toContain(member.user.id);
+
+    const invitedMemberChannelsRes = await request(app)
+      .get('/api/v1/channels')
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .query({ communityId });
+    expect(invitedMemberChannelsRes.status).toBe(200);
+    const invitedPrivate = invitedMemberChannelsRes.body.channels.find((ch: any) => ch.id === privateChannelRes.body.channel.id);
+    expect(invitedPrivate.can_access).toBe(true);
+
+    const invitedPrivateHistoryRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .query({ channelId: privateChannelRes.body.channel.id });
+    expect(invitedPrivateHistoryRes.status).toBe(200);
   });
 
   it('allows owners to delete communities and rejects non-owner deletion attempts', async () => {

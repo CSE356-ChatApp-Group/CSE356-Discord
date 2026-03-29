@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { apiDelete } = vi.hoisted(() => ({
+const { apiDelete, apiGet, apiPost } = vi.hoisted(() => ({
   apiDelete: vi.fn(),
+  apiGet: vi.fn(),
+  apiPost: vi.fn(),
 }));
 
 vi.mock('../lib/api', () => ({
   api: {
-    get: vi.fn(),
-    post: vi.fn(),
+    get: apiGet,
+    post: apiPost,
     postForm: vi.fn(),
     patch: vi.fn(),
     put: vi.fn(),
@@ -69,6 +71,22 @@ describe('chatStore quick actions', () => {
     expect(state.messages['ch-1']).toBeUndefined();
     expect(state.messages['ch-2']).toBeUndefined();
     expect(state.messages['other-thread']).toBeDefined();
+  });
+
+  it('inviteToChannel posts invited users and refreshes active community channels', async () => {
+    apiPost.mockResolvedValue({ members: [{ id: 'user-2', username: 'alex' }] });
+    apiGet.mockResolvedValue({ channels: [] });
+
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'secret' }],
+    } as any);
+
+    const members = await useChatStore.getState().inviteToChannel('ch-1', ['user-2']);
+
+    expect(apiPost).toHaveBeenCalledWith('/channels/ch-1/members', { userIds: ['user-2'] });
+    expect(apiGet).toHaveBeenCalledWith('/channels?communityId=comm-1');
+    expect(members).toEqual([{ id: 'user-2', username: 'alex' }]);
   });
 
   it('leaveCommunity removes the active community and clears related selection state', async () => {
@@ -145,6 +163,21 @@ describe('chatStore quick actions', () => {
     expect(state.activeChannel).toBeNull();
     expect(state.channels).toEqual([]);
     expect(state.messages['ch-1']).toBeUndefined();
+  });
+
+  it('refreshes channels when a private-channel membership update arrives for the active community', () => {
+    const fetchChannels = vi.fn().mockResolvedValue([]);
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      fetchChannels,
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'channel:membership_updated',
+      data: { communityId: 'comm-1', channelId: 'ch-1' },
+    });
+
+    expect(fetchChannels).toHaveBeenCalledWith('comm-1');
   });
 
   it('deleteChannel removes channel, active selection, and cached message thread', async () => {

@@ -11,6 +11,7 @@ import styles from './MessagePane.module.css';
 
 export default function MessagePane() {
   const {
+    activeCommunity,
     activeChannel,
     activeConv,
     messages,
@@ -19,8 +20,11 @@ export default function MessagePane() {
     search,
     searchResults,
     clearSearch,
+    fetchChannelMembers,
+    inviteToChannel,
     inviteToConversation,
     leaveConversation,
+    members,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
 
@@ -36,12 +40,19 @@ export default function MessagePane() {
   const [localQ, setLocalQ]       = useState('');
   const [showDmInviteModal, setShowDmInviteModal] = useState(false);
   const [showDmLeaveModal, setShowDmLeaveModal] = useState(false);
+  const [showChannelInviteModal, setShowChannelInviteModal] = useState(false);
   const [inviteQuery, setInviteQuery] = useState('');
   const [inviteResults, setInviteResults] = useState<any[]>([]);
   const [selectedInvitees, setSelectedInvitees] = useState<any[]>([]);
+  const [channelInviteQuery, setChannelInviteQuery] = useState('');
+  const [selectedChannelInvitees, setSelectedChannelInvitees] = useState<any[]>([]);
+  const [privateChannelMembers, setPrivateChannelMembers] = useState<any[]>([]);
   const [dmInviteBusy, setDmInviteBusy] = useState(false);
   const [dmLeaveBusy, setDmLeaveBusy] = useState(false);
+  const [channelInviteBusy, setChannelInviteBusy] = useState(false);
+  const [channelInviteLoading, setChannelInviteLoading] = useState(false);
   const [dmActionErr, setDmActionErr] = useState('');
+  const [channelInviteErr, setChannelInviteErr] = useState('');
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inviteInputRef = useRef<HTMLInputElement>(null);
@@ -100,10 +111,15 @@ export default function MessagePane() {
     setLocalQ('');
     setShowDmInviteModal(false);
     setShowDmLeaveModal(false);
+    setShowChannelInviteModal(false);
     setDmActionErr('');
     setInviteQuery('');
     setInviteResults([]);
     setSelectedInvitees([]);
+    setChannelInviteQuery('');
+    setSelectedChannelInvitees([]);
+    setPrivateChannelMembers([]);
+    setChannelInviteErr('');
   }, [key]);
 
   useEffect(() => {
@@ -119,6 +135,28 @@ export default function MessagePane() {
   const existingDmMemberIds = useMemo(() => {
     return new Set((activeConv?.participants || []).map((participant) => participant.id));
   }, [activeConv]);
+
+  const existingPrivateChannelMemberIds = useMemo(() => {
+    return new Set((privateChannelMembers || []).map((member) => member.id));
+  }, [privateChannelMembers]);
+
+  const privateChannelInviteResults = useMemo(() => {
+    if (!activeChannel?.is_private) return [];
+    const query = channelInviteQuery.trim().toLowerCase();
+    return (members || [])
+      .filter((member) => !existingPrivateChannelMemberIds.has(member.id))
+      .filter((member) => {
+        if (!query) return true;
+        const name = (member.displayName || member.display_name || member.username || '').toLowerCase();
+        const username = (member.username || '').toLowerCase();
+        return name.includes(query) || username.includes(query);
+      })
+      .slice(0, 20);
+  }, [activeChannel, channelInviteQuery, existingPrivateChannelMemberIds, members]);
+
+  const canManagePrivateChannel = Boolean(
+    activeChannel?.is_private && ['owner', 'admin', 'moderator'].includes(activeCommunity?.my_role || activeCommunity?.myRole)
+  );
 
   // Focus search input and clean up when search panel toggles
   useEffect(() => {
@@ -196,6 +234,24 @@ export default function MessagePane() {
     setShowDmInviteModal(true);
   }
 
+  async function handleInviteToPrivateChannel() {
+    if (!activeChannel?.id || !activeChannel?.is_private || !canManagePrivateChannel) return;
+    setShowChannelInviteModal(true);
+    setChannelInviteErr('');
+    setChannelInviteLoading(true);
+    setChannelInviteQuery('');
+    setSelectedChannelInvitees([]);
+    try {
+      const channelMembers = await fetchChannelMembers(activeChannel.id);
+      setPrivateChannelMembers(channelMembers);
+    } catch (err: any) {
+      setChannelInviteErr(err?.message || 'Failed to load channel access list');
+      setPrivateChannelMembers([]);
+    } finally {
+      setChannelInviteLoading(false);
+    }
+  }
+
   function searchInviteUsers(value: string) {
     if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current);
     const query = value.trim();
@@ -221,6 +277,15 @@ export default function MessagePane() {
       const exists = prev.some((entry) => entry.id === user.id);
       if (exists) return prev.filter((entry) => entry.id !== user.id);
       return [...prev, user];
+    });
+  }
+
+  function toggleChannelInvitee(member) {
+    if (!member?.id) return;
+    setSelectedChannelInvitees((prev) => {
+      const exists = prev.some((entry) => entry.id === member.id);
+      if (exists) return prev.filter((entry) => entry.id !== member.id);
+      return [...prev, member];
     });
   }
 
@@ -260,6 +325,30 @@ export default function MessagePane() {
       setDmActionErr(msg);
     } finally {
       setDmInviteBusy(false);
+    }
+  }
+
+  async function submitInviteToChannel(e: React.FormEvent) {
+    e.preventDefault();
+    if (!activeChannel?.id || channelInviteBusy || !canManagePrivateChannel) return;
+
+    const userIds = selectedChannelInvitees.map((entry) => entry.id).filter(Boolean);
+    if (!userIds.length) {
+      setChannelInviteErr('Select at least one community member to add.');
+      return;
+    }
+
+    setChannelInviteBusy(true);
+    setChannelInviteErr('');
+    try {
+      const updatedMembers = await inviteToChannel(activeChannel.id, userIds);
+      setPrivateChannelMembers(updatedMembers);
+      setSelectedChannelInvitees([]);
+      setChannelInviteQuery('');
+    } catch (err: any) {
+      setChannelInviteErr(err?.message || 'Failed to add member(s) to private channel');
+    } finally {
+      setChannelInviteBusy(false);
     }
   }
 
@@ -411,6 +500,16 @@ export default function MessagePane() {
                 Leave
               </button>
             </>
+          )}
+          {activeChannel?.is_private && canManagePrivateChannel && (
+            <button
+              type="button"
+              className={styles.dmActionBtn}
+              onClick={handleInviteToPrivateChannel}
+              data-testid="channel-invite-button"
+            >
+              Add Members
+            </button>
           )}
           {activeChannel && (
             <button
@@ -627,6 +726,106 @@ export default function MessagePane() {
                 data-testid="dm-invite-submit"
               >
                 {dmInviteBusy ? 'Inviting…' : selectedInvitees.length > 1 ? 'Invite people' : 'Invite person'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showChannelInviteModal && activeChannel && (
+        <Modal title="Add members to private channel" onClose={() => { if (!channelInviteBusy) setShowChannelInviteModal(false); }}>
+          <form className={styles.modalForm} onSubmit={submitInviteToChannel} data-testid="channel-invite-modal">
+            <label className={styles.modalLabel}>
+              Invite community members
+              <input
+                className={styles.modalInput}
+                value={channelInviteQuery}
+                onChange={(e) => setChannelInviteQuery(e.target.value)}
+                placeholder="Filter by name or username…"
+                data-testid="channel-invite-input"
+              />
+            </label>
+
+            <p className={styles.modalHint}>
+              People added here can read and send messages in #{activeChannel.name}.
+            </p>
+
+            {privateChannelMembers.length > 0 && (
+              <div className={styles.channelAccessSection} data-testid="channel-access-members">
+                <div className={styles.channelAccessLabel}>Has access</div>
+                <div className={styles.selectedUsers}>
+                  {privateChannelMembers.map((member) => (
+                    <span key={member.id} className={styles.accessMemberChip}>
+                      {member.displayName || member.display_name || member.username}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {selectedChannelInvitees.length > 0 && (
+              <div className={styles.selectedUsers} data-testid="channel-invite-selected-users">
+                {selectedChannelInvitees.map((member) => (
+                  <button
+                    key={member.id}
+                    type="button"
+                    className={styles.selectedUserChip}
+                    onClick={() => toggleChannelInvitee(member)}
+                  >
+                    <span>{member.displayName || member.display_name || member.username}</span>
+                    <span aria-hidden="true">×</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {channelInviteLoading ? (
+              <p className={styles.modalHint}>Loading channel access…</p>
+            ) : privateChannelInviteResults.length > 0 ? (
+              <ul className={styles.inviteResults} data-testid="channel-invite-results">
+                {privateChannelInviteResults.map((member) => {
+                  const selected = selectedChannelInvitees.some((entry) => entry.id === member.id);
+                  return (
+                    <li key={member.id}>
+                      <button
+                        type="button"
+                        className={styles.inviteResultBtn}
+                        onClick={() => toggleChannelInvitee(member)}
+                        data-testid={`channel-invite-result-${member.id}`}
+                      >
+                        <span className={styles.inviteResultName}>{member.displayName || member.display_name || member.username}</span>
+                        <span className={styles.inviteResultUsername}>@{member.username}</span>
+                        {selected && <span className={styles.inviteSelectedMark}>Selected</span>}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className={styles.modalHint}>
+                {(members || []).length ? 'No additional community members match this filter.' : 'No community members available to invite.'}
+              </p>
+            )}
+
+            {channelInviteErr && <p className={styles.dmActionErr}>{channelInviteErr}</p>}
+
+            <div className={styles.modalActions}>
+              <button
+                type="button"
+                className={styles.modalCancelBtn}
+                onClick={() => setShowChannelInviteModal(false)}
+                disabled={channelInviteBusy}
+                data-testid="channel-invite-cancel"
+              >
+                Close
+              </button>
+              <button
+                type="submit"
+                className={styles.modalPrimaryBtn}
+                disabled={channelInviteBusy || selectedChannelInvitees.length === 0}
+                data-testid="channel-invite-submit"
+              >
+                {channelInviteBusy ? 'Adding…' : 'Add Members'}
               </button>
             </div>
           </form>

@@ -26,7 +26,9 @@ type ChatState = {
   leaveCommunity: (communityId: string) => Promise<void>;
   selectCommunity: (community: Entity) => Promise<void>;
   fetchChannels: (communityId: string) => Promise<Entity[]>;
+  fetchChannelMembers: (channelId: string) => Promise<Entity[]>;
   createChannel: (communityId: string, name: string, isPrivate?: boolean, description?: string) => Promise<Entity>;
+  inviteToChannel: (channelId: string, userIds: string[]) => Promise<Entity[]>;
   deleteChannel: (channelId: string) => Promise<void>;
   selectChannel: (channel: Entity) => Promise<void>;
   fetchConversations: () => Promise<void>;
@@ -348,10 +350,24 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 
+  async fetchChannelMembers(channelId: string) {
+    const { members } = await api.get(`/channels/${channelId}/members`);
+    return members || [];
+  },
+
   async createChannel(communityId: string, name: string, isPrivate = false, description = '') {
     const { channel } = await api.post('/channels', { communityId, name, isPrivate, description });
     set(s => ({ channels: [...s.channels, channel] }));
     return channel;
+  },
+
+  async inviteToChannel(channelId: string, userIds: string[]) {
+    const { members } = await api.post(`/channels/${channelId}/members`, { userIds });
+    const communityId = get().activeCommunity?.id;
+    if (communityId) {
+      await get().fetchChannels(communityId);
+    }
+    return members || [];
   },
 
   async deleteChannel(channelId: string) {
@@ -1121,6 +1137,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const communityId = channel.community_id || channel.communityId;
         if (store.activeCommunity?.id === communityId) {
           store.fetchChannels(communityId);
+        }
+        break;
+      }
+      case 'channel:membership_updated': {
+        const { communityId } = event.data || {};
+        if (communityId && store.activeCommunity?.id === communityId) {
+          store.fetchChannels(communityId).catch(() => {});
         }
         break;
       }
