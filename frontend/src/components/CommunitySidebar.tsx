@@ -462,6 +462,16 @@ function CreateCommunityModal({ onClose, onCreate }) {
   const [err, setErr]     = useState('');
   const [busy, setBusy]   = useState(false);
 
+  function getCreateCommunityErrorMessage(error: any) {
+    const details = Array.isArray(error?.errors) ? error.errors : [];
+    const first = details[0];
+    const path = first?.path || first?.param;
+    if (path === 'slug') return 'Slug must be 2-32 characters using letters, numbers, and hyphens.';
+    if (path === 'name') return 'Community name is required and must be 100 characters or fewer.';
+    if (path === 'description') return 'Description must be 500 characters or fewer.';
+    return error?.message || 'Could not create community.';
+  }
+
   function normalizeSlug(value) {
     return value
       .toLowerCase()
@@ -472,38 +482,67 @@ function CreateCommunityModal({ onClose, onCreate }) {
 
   async function submit(e) {
     e.preventDefault();
+    const trimmedName = name.trim();
+    const trimmedDesc = desc.trim();
     const normalizedSlug = normalizeSlug(slug || name);
+    if (!trimmedName) {
+      setErr('Community name is required.');
+      return;
+    }
+    if (trimmedName.length > 100) {
+      setErr('Community name must be 100 characters or fewer.');
+      return;
+    }
     if (!normalizedSlug) {
       setErr('Slug must contain letters or numbers.');
       return;
     }
+    if (normalizedSlug.length < 2) {
+      setErr('Community name/slug must be at least 2 characters.');
+      return;
+    }
+    if (normalizedSlug.length > 32) {
+      setErr('Slug must be 32 characters or fewer.');
+      return;
+    }
+    if (trimmedDesc.length > 500) {
+      setErr('Description must be 500 characters or fewer.');
+      return;
+    }
 
     setBusy(true); setErr('');
-    try { await onCreate(normalizedSlug, name.trim(), desc.trim()); }
-    catch (e) { setErr(e.message); setBusy(false); }
+    try { await onCreate(normalizedSlug, trimmedName, trimmedDesc); }
+    catch (e: any) { setErr(getCreateCommunityErrorMessage(e)); setBusy(false); }
   }
 
   return (
     <Modal title="New Community" onClose={onClose}>
-      {err && <p className={styles.err}>{err}</p>}
+      {err && <p className={styles.err} role="alert">{err}</p>}
       <form onSubmit={submit} className={styles.form} data-testid="community-create-form">
         <label>Name
-          <input value={name} onChange={e => { setName(e.target.value); setSlug(normalizeSlug(e.target.value)); }} required data-testid="community-create-name" />
+          <input
+            value={name}
+            onChange={e => { setName(e.target.value); setSlug(normalizeSlug(e.target.value).slice(0, 32)); }}
+            maxLength={100}
+            required
+            data-testid="community-create-name"
+          />
         </label>
         <label>Slug (URL-safe)
           <input
             value={slug}
-            onChange={e => setSlug(normalizeSlug(e.target.value))}
+            onChange={e => setSlug(normalizeSlug(e.target.value).slice(0, 32))}
             inputMode="text"
             autoCapitalize="off"
             autoCorrect="off"
             spellCheck={false}
+            maxLength={32}
             required
             data-testid="community-create-slug"
           />
         </label>
         <label>Description
-          <input value={desc} onChange={e => setDesc(e.target.value)} data-testid="community-create-description" />
+          <input value={desc} onChange={e => setDesc(e.target.value)} maxLength={500} data-testid="community-create-description" />
         </label>
         <button type="submit" disabled={busy} data-testid="community-create-submit">{busy ? 'Creating…' : 'Create'}</button>
       </form>
