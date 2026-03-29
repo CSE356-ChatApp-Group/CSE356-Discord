@@ -218,6 +218,7 @@ function isConversationUnread(conv, active, currentUserId) {
 
 function DmRow({ conv, currentUserId, unread, active, onClick }) {
   const others = (conv.participants || []).filter(p => p.id !== currentUserId);
+  if (others.length === 0) return null;
   const name   = conv.name || others.map(p => p.displayName || p.username).join(', ') || 'Unknown';
   return (
     <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open direct conversation ${name}`}>
@@ -237,6 +238,7 @@ function DmRow({ conv, currentUserId, unread, active, onClick }) {
 
 function PendingInviteRow({ invite, currentUserId, onAccept, onDecline }) {
   const others = (invite.participants || []).filter((p) => p.id !== currentUserId);
+  if (others.length === 0) return null;
   const name = invite.name || others.map((p) => p.displayName || p.display_name || p.username).join(', ') || 'Unknown';
 
   return (

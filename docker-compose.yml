@@ -59,12 +59,17 @@ services:
 
   # ── Node 2 · API (primary) ────────────────────────────────────────────────────
   api:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    volumes:
+      - ./backend:/app
+      - ./migrations:/migrations
+      - /app/node_modules
     restart: unless-stopped
     environment:
-      NODE_ENV: production
+      NODE_ENV: development
+      CHOKIDAR_USEPOLLING: "true"
       AUTH_BYPASS: ${AUTH_BYPASS:-false}
       PORT: 3000
       DATABASE_URL: postgres://chatapp:${POSTGRES_PASSWORD:-chatapp_dev}@postgres:5432/chatapp

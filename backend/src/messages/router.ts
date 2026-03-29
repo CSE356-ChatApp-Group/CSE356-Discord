@@ -94,10 +94,10 @@ async function publishConversationEvent(conversationId, event, data) {
 async function loadHydratedMessageById(messageId) {
   const { rows } = await pool.query(
     `SELECT m.*,
-            row_to_json(u.*) AS author,
+            CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
             COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
      FROM messages m
-     JOIN users u ON u.id = m.author_id
+     LEFT JOIN users u ON u.id = m.author_id
      LEFT JOIN attachments a ON a.message_id = m.id
      WHERE m.id = $1
      GROUP BY m.id, u.id`,
@@ -166,10 +166,10 @@ router.get('/',
 
       const sql = `
         SELECT m.*,
-               row_to_json(u.*) AS author,
+           CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
                COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
         FROM   messages m
-        JOIN   users u ON u.id = m.author_id
+         LEFT JOIN users u ON u.id = m.author_id
         LEFT JOIN attachments a ON a.message_id = m.id
         WHERE  ${where} AND m.deleted_at IS NULL
         GROUP  BY m.id, u.id

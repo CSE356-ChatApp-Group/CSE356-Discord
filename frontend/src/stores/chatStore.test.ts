@@ -61,6 +61,29 @@ describe('chatStore websocket author hydration', () => {
     expect(stored.author).toBeUndefined();
   });
 
+  it('stores conversation system messages without author in the correct thread', () => {
+    const now = new Date().toISOString();
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'message:created',
+      data: {
+        id: 'sys-1',
+        conversation_id: 'conv-1',
+        author_id: null,
+        content: 'Alex left the group.',
+        type: 'system',
+        created_at: now,
+      },
+    });
+
+    const stored = useChatStore.getState().messages['conv-1'][0];
+    expect(stored).toBeDefined();
+    expect(stored.id).toBe('sys-1');
+    expect(stored.type).toBe('system');
+    expect(stored.author_id).toBeNull();
+    expect(stored.author).toBeUndefined();
+  });
+
   it('hydrates author for current-user message:updated events missing author', () => {
     useAuthStore.setState({
       user: {
