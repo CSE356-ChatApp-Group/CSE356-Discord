@@ -9,6 +9,7 @@ RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy-prod.sh <sha>}
 PROD_HOST="${PROD_HOST:-130.245.136.44}"
 PROD_USER="${PROD_USER:-ubuntu}"
 GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
+LOCAL_ARTIFACT_PATH="${LOCAL_ARTIFACT_PATH:-}"
 RELEASE_DIR="/opt/chatapp/releases"
 CURRENT_LINK="/opt/chatapp/current"
 OLD_PORT=4000
@@ -60,12 +61,21 @@ else
 fi
 
 # 1. Verify artifact exists
-echo "1. Verifying artifact exists..."
-if ! gh release view "release-${RELEASE_SHA}" -R "$GITHUB_REPO" >/dev/null 2>&1; then
-  echo "ERROR: Release not found. Check SHA and GitHub access."
-  exit 1
+if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
+  echo "1. Using local CI artifact..."
+  if [[ ! -f "$LOCAL_ARTIFACT_PATH" ]]; then
+    echo "ERROR: Local artifact not found at $LOCAL_ARTIFACT_PATH"
+    exit 1
+  fi
+  echo "✓ Local artifact found"
+else
+  echo "1. Verifying artifact exists..."
+  if ! gh release view "release-${RELEASE_SHA}" -R "$GITHUB_REPO" >/dev/null 2>&1; then
+    echo "ERROR: Release not found. Check SHA and GitHub access."
+    exit 1
+  fi
+  echo "✓ Release found"
 fi
-echo "✓ Release found"
 
 # 2. Backup database before risky deploy
 echo "2. Backing up database..."
@@ -85,15 +95,20 @@ ssh "$PROD_USER@$PROD_HOST" "
 }
 echo "✓ Backup prepared"
 
-# 3. Download artifact to prod
-echo "3. Downloading artifact..."
 DOWNLOAD_PATH="/tmp/chatapp-${RELEASE_SHA}.tar.gz"
-gh release download "release-${RELEASE_SHA}" -R "$GITHUB_REPO" \
-  -p "chatapp-${RELEASE_SHA}.tar.gz" -O "$DOWNLOAD_PATH" || {
-  echo "ERROR: Failed to download artifact."
-  exit 1
-}
-echo "✓ Downloaded locally"
+# 3. Download artifact to prod
+if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
+  echo "3. Using local artifact..."
+  cp "$LOCAL_ARTIFACT_PATH" "$DOWNLOAD_PATH"
+else
+  echo "3. Downloading artifact..."
+  gh release download "release-${RELEASE_SHA}" -R "$GITHUB_REPO" \
+    -p "chatapp-${RELEASE_SHA}.tar.gz" -O "$DOWNLOAD_PATH" || {
+    echo "ERROR: Failed to download artifact."
+    exit 1
+  }
+fi
+echo "✓ Artifact ready locally"
 
 # 4. Copy to production server
 echo "4. Copying to production..."

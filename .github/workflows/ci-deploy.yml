@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -17,9 +17,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
+  deploy-scripts:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate deploy scripts
+        run: |
+          bash -n deploy/preflight-check.sh
+          bash -n deploy/deploy-staging.sh
+          bash -n deploy/deploy-prod.sh
+
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v5
@@ -33,23 +46,79 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate deploy scripts
-        run: |
-          bash -n deploy/preflight-check.sh
-          bash -n deploy/deploy-staging.sh
-          bash -n deploy/deploy-prod.sh
+      - name: Backend typecheck
+        run: npm run typecheck --workspace=backend
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Unit tests
-        run: npm test
+      - name: Backend tests
+        run: npm run test --workspace=backend
 
       - name: Build backend
-        run: cd backend && npm run build
+        run: npm run build --workspace=backend
+
+      - name: Upload backend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dist-${{ github.sha }}
+          path: backend/dist
+          retention-days: 7
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Frontend typecheck
+        run: npm run typecheck --workspace=frontend
+
+      - name: Frontend tests
+        run: npm run test --workspace=frontend
 
       - name: Build frontend
-        run: cd frontend && npm run build
+        run: npm run build --workspace=frontend
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: frontend/dist
+          retention-days: 7
+
+  package-release:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs:
+      - deploy-scripts
+      - backend
+      - frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download backend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-dist-${{ github.sha }}
+          path: backend/dist
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: frontend/dist
 
       - name: Package release artifact
         run: |
@@ -67,15 +136,14 @@ jobs:
           echo "Packaged: releases/chatapp-${{ github.sha }}.tar.gz"
           ls -lh releases/chatapp-${{ github.sha }}.tar.gz
 
-      - name: Upload artifact
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ github.sha }}
           path: releases/chatapp-*.tar.gz
           retention-days: 30
 
-      - name: Create release (main only)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -88,3 +156,17 @@ jobs:
             gh release create "$TAG" "$FILE" \
               --notes "Deploy to staging or production using:\n\n./deploy/deploy-staging.sh ${{ github.sha }}\n./deploy/deploy-prod.sh ${{ github.sha }}"
           fi
+
+  deploy-staging:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs:
+      - package-release
+    uses: ./.github/workflows/reusable-vm-deploy.yml
+    secrets: inherit
+    with:
+      environment: staging
+      target_sha: ${{ github.sha }}
+      host: ${{ vars.STAGING_HOST || '136.114.103.71' }}
+      user: ${{ vars.STAGING_USER || 'ssperrottet' }}
+      script_path: deploy/deploy-staging.sh
+      artifact_name: release-${{ github.sha }}

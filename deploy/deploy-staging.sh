@@ -9,6 +9,7 @@ RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy/deploy-staging.sh <sha>}
 STAGING_HOST="${STAGING_HOST:-136.114.103.71}"
 STAGING_USER="${STAGING_USER:-$USER}"
 GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
+LOCAL_ARTIFACT_PATH="${LOCAL_ARTIFACT_PATH:-}"
 RELEASE_DIR="/opt/chatapp/releases"
 CURRENT_LINK="/opt/chatapp/current"
 CANDIDATE_PORT=4001
@@ -106,21 +107,28 @@ EOF
   sudo systemctl reload nginx
 "
 
-if ! command -v gh >/dev/null 2>&1; then
+if [[ -z "$LOCAL_ARTIFACT_PATH" ]] && ! command -v gh >/dev/null 2>&1; then
   echo "ERROR: GitHub CLI (gh) is required for artifact download."
   exit 1
 fi
 
 ARTIFACT="chatapp-${RELEASE_SHA}.tar.gz"
-LOCAL_ARTIFACT="/tmp/${ARTIFACT}"
+DOWNLOADED_ARTIFACT="/tmp/${ARTIFACT}"
+SOURCE_ARTIFACT="${LOCAL_ARTIFACT_PATH:-$DOWNLOADED_ARTIFACT}"
 
-echo "1) Downloading CI-built artifact for ${RELEASE_SHA}..."
-gh release download "release-${RELEASE_SHA}" -R "${GITHUB_REPO}" -p "${ARTIFACT}" -O "${LOCAL_ARTIFACT}"
+if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
+  echo "1) Using local CI artifact for ${RELEASE_SHA}..."
+else
+  echo "1) Downloading CI-built artifact for ${RELEASE_SHA}..."
+  gh release download "release-${RELEASE_SHA}" -R "${GITHUB_REPO}" -p "${ARTIFACT}" -O "${DOWNLOADED_ARTIFACT}"
+fi
 
 echo "2) Copying artifact and verification scripts to staging host..."
-scp "${LOCAL_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
+scp "${SOURCE_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
 scp deploy/health-check.sh deploy/smoke-test.sh "${STAGING_USER}@${STAGING_HOST}:/tmp/"
-rm -f "${LOCAL_ARTIFACT}"
+if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
+  rm -f "${DOWNLOADED_ARTIFACT}"
+fi
 
 echo "3) Unpacking artifact into immutable release directory..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "

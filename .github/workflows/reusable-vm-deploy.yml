@@ -23,6 +23,11 @@ on:
         description: Deploy script to execute
         required: true
         type: string
+      artifact_name:
+        description: Current-run artifact name to deploy instead of polling GitHub Releases
+        required: false
+        default: ''
+        type: string
       verify_public_host:
         description: Verify public HTTP endpoints after deploy
         required: false
@@ -39,6 +44,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -53,6 +59,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Ensure GitHub CLI exists
+        if: ${{ inputs.artifact_name == '' }}
         shell: bash
         run: |
           if ! command -v gh >/dev/null 2>&1; then
@@ -61,6 +68,7 @@ jobs:
           fi
 
       - name: Wait for release artifact
+        if: ${{ inputs.artifact_name == '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,6 +91,23 @@ jobs:
 
           echo "ERROR: release artifact $TAG not available after waiting."
           exit 1
+
+      - name: Download current-run artifact
+        if: ${{ inputs.artifact_name != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: .artifacts
+
+      - name: Resolve local artifact path
+        id: artifact
+        if: ${{ inputs.artifact_name != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE=$(find .artifacts -type f -name '*.tar.gz' | head -n 1)
+          test -n "$FILE" || { echo "Artifact tarball not found after download"; exit 1; }
+          echo "local_path=$FILE" >> "$GITHUB_OUTPUT"
 
       - name: Validate deploy inputs
         shell: bash
@@ -114,13 +139,14 @@ jobs:
           TARGET_SHA: ${{ inputs.target_sha }}
           DEPLOY_HOST: ${{ inputs.host }}
           DEPLOY_USER: ${{ inputs.user }}
+          LOCAL_ARTIFACT_PATH: ${{ steps.artifact.outputs.local_path }}
         run: |
           set -euo pipefail
           if [[ "${{ inputs.auto_confirm }}" == "true" ]]; then
-            printf 'y\n' | STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
+            printf 'y\n' | LOCAL_ARTIFACT_PATH="$LOCAL_ARTIFACT_PATH" STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
               "./${{ inputs.script_path }}" "$TARGET_SHA"
           else
-            STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
+            LOCAL_ARTIFACT_PATH="$LOCAL_ARTIFACT_PATH" STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
               "./${{ inputs.script_path }}" "$TARGET_SHA"
           fi
 

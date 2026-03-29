@@ -10,6 +10,7 @@ RELEASE_SHA=${2:?release sha required}
 SSH_USER=${3:?ssh user required}
 SSH_HOST=${4:?ssh host required}
 GITHUB_REPO=${5:?github repo required}
+LOCAL_ARTIFACT_PATH=${LOCAL_ARTIFACT_PATH:-}
 
 if [[ "$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "prod" ]]; then
   echo "ERROR: environment must be 'staging' or 'prod'"
@@ -19,24 +20,37 @@ fi
 echo "=== Preflight: ${ENVIRONMENT} ==="
 echo "Target: ${SSH_USER}@${SSH_HOST}"
 
-for cmd in gh ssh scp curl; do
+REQUIRED_COMMANDS=(ssh scp curl)
+if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
+  REQUIRED_COMMANDS=(gh "${REQUIRED_COMMANDS[@]}")
+fi
+
+for cmd in "${REQUIRED_COMMANDS[@]}"; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "ERROR: Missing required command: $cmd"
     exit 1
   fi
 done
 
-if [[ -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]]; then
-  echo "Using GitHub token from environment for gh commands."
-elif ! gh auth status >/dev/null 2>&1; then
-  echo "ERROR: GitHub CLI is not authenticated. Run: gh auth login"
-  exit 1
-fi
+if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
+  echo "Using local artifact: ${LOCAL_ARTIFACT_PATH}"
+  if [[ ! -f "$LOCAL_ARTIFACT_PATH" ]]; then
+    echo "ERROR: Local artifact not found at ${LOCAL_ARTIFACT_PATH}"
+    exit 1
+  fi
+else
+  if [[ -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]]; then
+    echo "Using GitHub token from environment for gh commands."
+  elif ! gh auth status >/dev/null 2>&1; then
+    echo "ERROR: GitHub CLI is not authenticated. Run: gh auth login"
+    exit 1
+  fi
 
-echo "Checking release artifact exists..."
-if ! gh release view "release-${RELEASE_SHA}" -R "$GITHUB_REPO" >/dev/null 2>&1; then
-  echo "ERROR: Release release-${RELEASE_SHA} not found in ${GITHUB_REPO}"
-  exit 1
+  echo "Checking release artifact exists..."
+  if ! gh release view "release-${RELEASE_SHA}" -R "$GITHUB_REPO" >/dev/null 2>&1; then
+    echo "ERROR: Release release-${RELEASE_SHA} not found in ${GITHUB_REPO}"
+    exit 1
+  fi
 fi
 
 SSH_TARGET="${SSH_USER}@${SSH_HOST}"
