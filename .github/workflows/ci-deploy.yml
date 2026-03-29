@@ -57,7 +57,7 @@ jobs:
         run: npm run build --workspace=backend
 
       - name: Upload backend dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backend-dist-${{ github.sha }}
           path: backend/dist
@@ -89,7 +89,7 @@ jobs:
         run: npm run build --workspace=frontend
 
       - name: Upload frontend dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-dist-${{ github.sha }}
           path: frontend/dist
@@ -110,13 +110,13 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download backend dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: backend-dist-${{ github.sha }}
           path: backend/dist
 
       - name: Download frontend dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist-${{ github.sha }}
           path: frontend/dist
@@ -138,7 +138,7 @@ jobs:
           ls -lh releases/chatapp-${{ github.sha }}.tar.gz
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ github.sha }}
           path: releases/chatapp-*.tar.gz
