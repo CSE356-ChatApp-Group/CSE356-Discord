@@ -9,13 +9,22 @@ export default function ChannelSidebar() {
   const {
     activeCommunity, channels, activeChannel,
     conversations, pendingDmInvites, activeConv,
-    selectChannel, selectConversation, createChannel, openDm,
+    selectChannel, selectConversation, createChannel, deleteChannel, leaveCommunity, openDm,
     acceptDmInvite, declineDmInvite,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
   const [showCreate, setShowCreate] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [showNewDm, setShowNewDm] = useState(false);
+
+  const canManage = canManageChannels(activeCommunity);
+  const canLeave = canLeaveCommunity(activeCommunity);
+
+  async function handleLeaveCommunity() {
+    if (!activeCommunity?.id || !canLeave) return;
+    if (!confirm(`Leave ${activeCommunity.name}?`)) return;
+    await leaveCommunity(activeCommunity.id);
+  }
 
   function renderPendingInvites() {
     if (pendingDmInvites.length === 0) return null;
@@ -90,6 +99,20 @@ export default function ChannelSidebar() {
                 <line x1="23" y1="11" x2="17" y2="11"/>
               </svg>
             </button>
+            <button
+              className={styles.inviteBtn}
+              title={canLeave ? 'Leave community' : 'Owners cannot leave community'}
+              aria-label="Leave community"
+              data-testid="community-leave-btn"
+              onClick={handleLeaveCommunity}
+              disabled={!canLeave}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                <polyline points="16 17 21 12 16 7"/>
+                <line x1="21" y1="12" x2="9" y2="12"/>
+              </svg>
+            </button>
           </div>
         </div>
       )}
@@ -99,7 +122,7 @@ export default function ChannelSidebar() {
           <>
             <div className={styles.sectionHeader}>
               <span>Channels</span>
-              {activeCommunity && (
+              {activeCommunity && canManage && (
                 <button className={styles.sectionAdd} title="New channel" onClick={() => setShowCreate(true)} aria-label="Create channel" data-testid="channel-create-open">+</button>
               )}
             </div>
@@ -112,6 +135,11 @@ export default function ChannelSidebar() {
                 channel={ch}
                 active={activeChannel?.id === ch.id}
                 unread={isChannelUnread(ch, activeChannel?.id === ch.id, user?.id)}
+                canDelete={canManage}
+                onDelete={async () => {
+                  if (!confirm(`Delete #${ch.name}?`)) return;
+                  await deleteChannel(ch.id);
+                }}
                 onClick={() => selectChannel(ch)}
               />
             ))}
@@ -177,11 +205,34 @@ export default function ChannelSidebar() {
   );
 }
 
-function ChannelRow({ channel, active, unread, onClick }) {
+function ChannelRow({ channel, active, unread, canDelete, onDelete, onClick }) {
   return (
     <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`channel-item-${channel.id}`} data-channel-id={channel.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open channel ${channel.name}`}>
       <span className={styles.hash}>{channel.is_private ? '🔒' : '#'}</span>
       <span className={styles.rowName}>{channel.name}</span>
+      {canDelete && (
+        <span
+          className={styles.rowAction}
+          role="button"
+          tabIndex={0}
+          title={`Delete #${channel.name}`}
+          aria-label={`Delete channel ${channel.name}`}
+          data-testid={`channel-delete-${channel.id}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            void onDelete?.();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              void onDelete?.();
+            }
+          }}
+        >
+          ×
+        </span>
+      )}
       {unread && (
         <span
           className={styles.unreadDot}
@@ -192,6 +243,17 @@ function ChannelRow({ channel, active, unread, onClick }) {
       )}
     </button>
   );
+}
+
+function canManageChannels(community) {
+  const role = community?.my_role || community?.myRole;
+  return role === 'owner' || role === 'admin' || role === 'moderator';
+}
+
+function canLeaveCommunity(community) {
+  if (!community) return false;
+  const role = community?.my_role || community?.myRole;
+  return role && role !== 'owner';
 }
 
 function isChannelUnread(channel, active, currentUserId) {

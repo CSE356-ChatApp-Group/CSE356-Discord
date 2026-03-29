@@ -22,9 +22,11 @@ type ChatState = {
   searchQuery: string;
   fetchCommunities: () => Promise<Entity[]>;
   createCommunity: (slug: string, name: string, description: string) => Promise<Entity>;
+  leaveCommunity: (communityId: string) => Promise<void>;
   selectCommunity: (community: Entity) => Promise<void>;
   fetchChannels: (communityId: string) => Promise<Entity[]>;
   createChannel: (communityId: string, name: string, isPrivate?: boolean, description?: string) => Promise<Entity>;
+  deleteChannel: (channelId: string) => Promise<void>;
   selectChannel: (channel: Entity) => Promise<void>;
   fetchConversations: () => Promise<void>;
   openHome: () => void;
@@ -237,6 +239,21 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     return community;
   },
 
+  async leaveCommunity(communityId: string) {
+    await api.delete(`/communities/${communityId}/leave`);
+    set(s => {
+      const isActive = s.activeCommunity?.id === communityId;
+      const nextCommunities = s.communities.filter((community) => community.id !== communityId);
+      return {
+        communities: nextCommunities,
+        activeCommunity: isActive ? null : s.activeCommunity,
+        channels: isActive ? [] : s.channels,
+        activeChannel: isActive ? null : s.activeChannel,
+        members: isActive ? [] : s.members,
+      };
+    });
+  },
+
   async selectCommunity(community: Entity) {
     set(s => ({
       activeCommunity: {
@@ -312,6 +329,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const { channel } = await api.post('/channels', { communityId, name, isPrivate, description });
     set(s => ({ channels: [...s.channels, channel] }));
     return channel;
+  },
+
+  async deleteChannel(channelId: string) {
+    await api.delete(`/channels/${channelId}`);
+    set(s => {
+      const { [channelId]: _removed, ...nextMessages } = s.messages;
+      const isActive = s.activeChannel?.id === channelId;
+      return {
+        channels: s.channels.filter((channel) => channel.id !== channelId),
+        activeChannel: isActive ? null : s.activeChannel,
+        messages: nextMessages,
+      };
+    });
   },
 
   async selectChannel(channel: Entity) {

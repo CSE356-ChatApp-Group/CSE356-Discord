@@ -43,6 +43,11 @@
   border-color: var(--border-light);
 }
 
+.inviteBtn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
 .communityName {
   font-weight: 600;
   font-size: 15px;
@@ -143,6 +148,26 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rowAction {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.rowAction:hover,
+.rowAction:focus-visible {
+  color: #ff9a9a;
+  background: rgba(255, 90, 90, 0.14);
+  outline: none;
 }
 
 .unreadDot {

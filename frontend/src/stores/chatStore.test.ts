@@ -1,10 +1,114 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const { apiDelete } = vi.hoisted(() => ({
+  apiDelete: vi.fn(),
+}));
+
+vi.mock('../lib/api', () => ({
+  api: {
+    get: vi.fn(),
+    post: vi.fn(),
+    postForm: vi.fn(),
+    patch: vi.fn(),
+    put: vi.fn(),
+    delete: apiDelete,
+  },
+}));
+
 import { useAuthStore } from './authStore';
 import { useChatStore } from './chatStore';
 
 afterEach(() => {
+  vi.clearAllMocks();
   useAuthStore.setState({ user: null });
-  useChatStore.setState({ messages: {} });
+  useChatStore.setState({
+    communities: [],
+    activeCommunity: null,
+    channels: [],
+    activeChannel: null,
+    conversations: [],
+    activeConv: null,
+    members: [],
+    pendingDmInvites: [],
+    messages: {},
+  } as any);
+});
+
+describe('chatStore quick actions', () => {
+  it('leaveCommunity removes the active community and clears related selection state', async () => {
+    apiDelete.mockResolvedValue({ success: true });
+
+    useChatStore.setState({
+      communities: [
+        { id: 'comm-1', name: 'One' },
+        { id: 'comm-2', name: 'Two' },
+      ],
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [{ id: 'ch-1', community_id: 'comm-1' }],
+      activeChannel: { id: 'ch-1', community_id: 'comm-1' },
+      members: [{ id: 'user-1' }],
+    } as any);
+
+    await useChatStore.getState().leaveCommunity('comm-1');
+
+    const state = useChatStore.getState();
+    expect(apiDelete).toHaveBeenCalledWith('/communities/comm-1/leave');
+    expect(state.communities.map((community) => community.id)).toEqual(['comm-2']);
+    expect(state.activeCommunity).toBeNull();
+    expect(state.activeChannel).toBeNull();
+    expect(state.channels).toEqual([]);
+    expect(state.members).toEqual([]);
+  });
+
+  it('leaveCommunity keeps current selection when leaving a non-active community', async () => {
+    apiDelete.mockResolvedValue({ success: true });
+
+    useChatStore.setState({
+      communities: [
+        { id: 'comm-1', name: 'One' },
+        { id: 'comm-2', name: 'Two' },
+      ],
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [{ id: 'ch-1', community_id: 'comm-1' }],
+      activeChannel: { id: 'ch-1', community_id: 'comm-1' },
+      members: [{ id: 'user-1' }],
+    } as any);
+
+    await useChatStore.getState().leaveCommunity('comm-2');
+
+    const state = useChatStore.getState();
+    expect(apiDelete).toHaveBeenCalledWith('/communities/comm-2/leave');
+    expect(state.communities.map((community) => community.id)).toEqual(['comm-1']);
+    expect(state.activeCommunity?.id).toBe('comm-1');
+    expect(state.activeChannel?.id).toBe('ch-1');
+    expect(state.channels.map((channel) => channel.id)).toEqual(['ch-1']);
+    expect(state.members.map((member) => member.id)).toEqual(['user-1']);
+  });
+
+  it('deleteChannel removes channel, active selection, and cached message thread', async () => {
+    apiDelete.mockResolvedValue({ success: true });
+
+    useChatStore.setState({
+      channels: [
+        { id: 'ch-1', name: 'general' },
+        { id: 'ch-2', name: 'random' },
+      ],
+      activeChannel: { id: 'ch-1', name: 'general' },
+      messages: {
+        'ch-1': [{ id: 'm-1', content: 'hello' }],
+        'ch-2': [{ id: 'm-2', content: 'hi' }],
+      },
+    } as any);
+
+    await useChatStore.getState().deleteChannel('ch-1');
+
+    const state = useChatStore.getState();
+    expect(apiDelete).toHaveBeenCalledWith('/channels/ch-1');
+    expect(state.channels.map((channel) => channel.id)).toEqual(['ch-2']);
+    expect(state.activeChannel).toBeNull();
+    expect(state.messages['ch-1']).toBeUndefined();
+    expect(state.messages['ch-2']).toBeDefined();
+  });
 });
 
 describe('chatStore websocket author hydration', () => {
