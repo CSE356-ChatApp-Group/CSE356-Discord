@@ -23,6 +23,7 @@ export default function MessageItem({ message: msg, prevMessage, isOwn, showRead
   const { editMessage, deleteMessage } = useChatStore();
   const grouped = isGrouped(msg, prevMessage);
   const shouldShowReadReceipt = showReadReceipt && !msg.deleted_at;
+  const isSystemMessage = msg.type === 'system';
 
   const [editing,  setEditing]  = useState(false);
   const [draft,    setDraft]    = useState(msg.content || '');
@@ -42,6 +43,21 @@ export default function MessageItem({ message: msg, prevMessage, isOwn, showRead
 
   const author = msg.author || { displayName: 'Unknown', username: 'unknown' };
   const name   = author.displayName || author.display_name || author.username || author.email || 'Unknown';
+
+  // System messages are rendered differently
+  if (isSystemMessage) {
+    return (
+      <div
+        className={`${styles.row} ${styles.systemMessage}`}
+        data-testid={`message-item-${msg.id}`}
+        data-message-id={msg.id}
+      >
+        <div className={styles.systemContent}>
+          <p className={styles.systemText}>{msg.content}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

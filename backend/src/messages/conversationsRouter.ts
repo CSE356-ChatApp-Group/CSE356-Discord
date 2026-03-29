@@ -114,6 +114,24 @@ async function resolveParticipantIds(client, rawParticipants) {
   return [...new Set(resolved)];
 }
 
+async function getUserDisplayName(client, userId) {
+  const { rows } = await client.query(
+    `SELECT display_name FROM users WHERE id = $1`,
+    [userId]
+  );
+  return rows[0]?.display_name || 'User';
+}
+
+async function createSystemMessage(client, conversationId, content) {
+  const { rows } = await client.query(
+    `INSERT INTO messages (conversation_id, author_id, content, type)
+     VALUES ($1, NULL, $2, 'system')
+     RETURNING id, created_at, content, type`,
+    [conversationId, content]
+  );
+  return rows[0] || null;
+}
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
@@ -325,6 +343,15 @@ async function addParticipantsHandler(req, res, next) {
 
     const conversation = await loadConversationWithParticipants(client, req.params.id);
     const activeParticipantIds = await getActiveParticipantIds(client, req.params.id);
+
+    // Emit system messages for group DMs (3+ total participants after adding)
+    if (participantIdsToAdd.length && conversation?.participants?.length >= 3) {
+      for (const participantId of participantIdsToAdd) {
+        const displayName = await getUserDisplayName(client, participantId);
+        await createSystemMessage(client, req.params.id, `${displayName} joined the group.`);
+      }
+    }
+
     await client.query('COMMIT');
 
     const sharedEventData = {
@@ -404,6 +431,12 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       if (countRows[0].total <= 2) {
         shouldDelete = true;
       }
+    }
+
+    // Emit system message for leaving group DMs (2+ participants remain, or would have been 3+ before deletion)
+    if (!shouldDelete && activeParticipantIds.length >= 2) {
+      const leftUserName = await getUserDisplayName(client, req.user.id);
+      await createSystemMessage(client, req.params.id, `${leftUserName} left the group.`);
     }
 
     if (shouldDelete) {

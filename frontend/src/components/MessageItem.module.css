@@ -185,3 +185,27 @@
 }
 
 .row:hover .groupedTime { opacity: 1; }
+
+/* System messages */
+.systemMessage {
+  justify-content: center;
+  padding: 12px 16px;
+  background: transparent;
+}
+
+.systemMessage:hover { background: transparent; }
+
+.systemContent {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.systemText {
+  font-size: 13px;
+  font-style: italic;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.4;
+}
+
