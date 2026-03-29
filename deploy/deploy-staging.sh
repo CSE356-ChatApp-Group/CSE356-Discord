@@ -150,12 +150,20 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
 
+  # Clean up any stale candidate PID files from prior failed runs.
+  rm -f /tmp/chatapp-*-candidate.pid 2>/dev/null || true
+
   if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
     echo 'Candidate port ${CANDIDATE_PORT} is already in use; attempting stale process cleanup...'
     PIDS=\$(lsof -ti :${CANDIDATE_PORT} | sort -u)
     for PID in \$PIDS; do
       kill \"\$PID\" 2>/dev/null || true
     done
+    sleep 1
+
+    # Also kill known stale app patterns that may not release immediately.
+    pkill -f "PORT=${CANDIDATE_PORT}.*npm --prefix backend start" 2>/dev/null || true
+    pkill -f "backend/dist/index.js" 2>/dev/null || true
     sleep 1
     
     PIDS=\$(lsof -ti :${CANDIDATE_PORT} 2>/dev/null | sort -u)
@@ -177,6 +185,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
       echo 'ERROR: Candidate port ${CANDIDATE_PORT} still in use after cleanup.'
       echo 'Processes holding the port:'
       lsof -i :${CANDIDATE_PORT} || true
+      ss -lptn "( sport = :${CANDIDATE_PORT} )" 2>/dev/null || true
       exit 1
     fi
   fi
