@@ -345,14 +345,31 @@ async function addParticipantsHandler(req, res, next) {
     const activeParticipantIds = await getActiveParticipantIds(client, req.params.id);
 
     // Emit system messages for group DMs (3+ total participants after adding)
+    const systemMessagesToBroadcast = [];
     if (participantIdsToAdd.length && conversation?.participants?.length >= 3) {
       for (const participantId of participantIdsToAdd) {
         const displayName = await getUserDisplayName(client, participantId);
-        await createSystemMessage(client, req.params.id, `${displayName} joined the group.`);
+        const sysMsg = await createSystemMessage(client, req.params.id, `${displayName} joined the group.`);
+        if (sysMsg) {
+          systemMessagesToBroadcast.push({
+            ...sysMsg,
+            author: null,
+            attachments: [],
+          });
+        }
       }
     }
 
     await client.query('COMMIT');
+
+    // Broadcast system messages to all participants
+    for (const message of systemMessagesToBroadcast) {
+      const targets = [
+        `conversation:${req.params.id}`,
+        ...activeParticipantIds.map((uid) => `user:${uid}`),
+      ];
+      await publishConversationEvents(targets, 'message:created', message);
+    }
 
     const sharedEventData = {
       conversation,
@@ -434,15 +451,30 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     }
 
     // Emit system message for leaving group DMs (2+ participants remain, or would have been 3+ before deletion)
+    let leftGroupMessage = null;
     if (!shouldDelete && activeParticipantIds.length >= 2) {
       const leftUserName = await getUserDisplayName(client, req.user.id);
-      await createSystemMessage(client, req.params.id, `${leftUserName} left the group.`);
+      leftGroupMessage = await createSystemMessage(client, req.params.id, `${leftUserName} left the group.`);
     }
 
     if (shouldDelete) {
       await client.query('DELETE FROM conversations WHERE id = $1', [req.params.id]);
     }
     await client.query('COMMIT');
+
+    // Broadcast system message if group DM and not deleted
+    if (leftGroupMessage) {
+      const targets = [
+        `conversation:${req.params.id}`,
+        ...activeParticipantIds.map((uid) => `user:${uid}`),
+        `user:${req.user.id}`,
+      ];
+      await publishConversationEvents(targets, 'message:created', {
+        ...leftGroupMessage,
+        author: null,
+        attachments: [],
+      });
+    }
 
     await publishConversationEvents(
       [`conversation:${req.params.id}`, `user:${req.user.id}`, ...activeParticipantIds.map((participantId) => `user:${participantId}`)],
