@@ -77,6 +77,36 @@
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
+.dmActionBtn {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.dmActionBtn:hover {
+  background: var(--bg-3);
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.dmLeaveBtn {
+  color: #e1605f;
+  border-color: color-mix(in srgb, #e1605f 35%, var(--border));
+}
+
+.dmLeaveBtn:hover {
+  background: color-mix(in srgb, #e1605f 14%, var(--bg-2));
+  color: #f08988;
+  border-color: color-mix(in srgb, #e1605f 50%, var(--border));
+}
+
 .headerTitle {
   font-weight: 600;
   font-size: 15px;

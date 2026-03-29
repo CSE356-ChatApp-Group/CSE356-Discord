@@ -29,6 +29,8 @@ type ChatState = {
   openHome: () => void;
   openDm: (userId: string) => Promise<Entity>;
   selectConversation: (conv: Entity) => Promise<void>;
+  inviteToConversation: (conversationId: string, participants: string[]) => Promise<Entity | null>;
+  leaveConversation: (conversationId: string) => Promise<void>;
   fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string }) => Promise<Entity[]>;
   sendMessage: (content: string) => Promise<void>;
   editMessage: (id: string, content: string) => Promise<void>;
@@ -471,6 +473,49 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }));
       markMessageRead(lastId);
     }
+  },
+
+  async inviteToConversation(conversationId: string, participants: string[]) {
+    const cleaned = (participants || []).map((value) => value.trim()).filter(Boolean);
+    if (!conversationId || !cleaned.length) return null;
+
+    const { conversation } = await api.post(`/conversations/${conversationId}/invite`, {
+      participantIds: cleaned,
+    });
+
+    if (conversation?.id) {
+      wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
+      set(s => ({
+        conversations: s.conversations.map((conv) =>
+          conv.id === conversation.id
+            ? {
+                ...conv,
+                ...conversation,
+                participants: conversation.participants || conv.participants,
+              }
+            : conv
+        ),
+        activeConv:
+          s.activeConv?.id === conversation.id
+            ? {
+                ...s.activeConv,
+                ...conversation,
+                participants: conversation.participants || s.activeConv.participants,
+              }
+            : s.activeConv,
+      }));
+    }
+
+    return conversation || null;
+  },
+
+  async leaveConversation(conversationId: string) {
+    await api.post(`/conversations/${conversationId}/leave`, {});
+    set(s => ({
+      conversations: s.conversations.filter((conv) => conv.id !== conversationId),
+      activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
+      activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
+    }));
   },
 
   // ── Messages ──────────────────────────────────────────────────────────────
@@ -968,6 +1013,81 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               : s.activeCommunity,
         }));
 
+        break;
+      }
+      case 'conversation:invited':
+      case 'conversation:participant_added': {
+        const conversation = event.data?.conversation;
+        const conversationId = event.data?.conversationId || conversation?.id;
+        if (!conversationId) break;
+
+        wsManager.subscribe(`conversation:${conversationId}`, store._handleWsEvent);
+
+        if (!conversation) {
+          store.fetchConversations().catch(() => {});
+          break;
+        }
+
+        set((s) => {
+          const existing = s.conversations.find((conv) => conv.id === conversationId);
+          const updated = existing
+            ? {
+                ...existing,
+                ...conversation,
+                participants: conversation.participants || existing.participants,
+              }
+            : conversation;
+
+          const conversations = existing
+            ? s.conversations.map((conv) => (conv.id === conversationId ? updated : conv))
+            : [updated, ...s.conversations];
+
+          return {
+            conversations,
+            activeConv:
+              s.activeConv?.id === conversationId
+                ? {
+                    ...s.activeConv,
+                    ...updated,
+                    participants: updated.participants || s.activeConv.participants,
+                  }
+                : s.activeConv,
+          };
+        });
+        break;
+      }
+      case 'conversation:participant_left': {
+        const conversationId = event.data?.conversationId;
+        const leftUserId = event.data?.leftUserId || event.data?.userId;
+        const me = useAuthStore.getState().user;
+        if (!conversationId || !leftUserId) break;
+
+        if (me?.id === leftUserId) {
+          set((s) => ({
+            conversations: s.conversations.filter((conv) => conv.id !== conversationId),
+            activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
+            activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
+          }));
+          break;
+        }
+
+        set((s) => ({
+          conversations: s.conversations.map((conv) =>
+            conv.id === conversationId
+              ? {
+                  ...conv,
+                  participants: (conv.participants || []).filter((participant) => participant.id !== leftUserId),
+                }
+              : conv
+          ),
+          activeConv:
+            s.activeConv?.id === conversationId
+              ? {
+                  ...s.activeConv,
+                  participants: (s.activeConv.participants || []).filter((participant) => participant.id !== leftUserId),
+                }
+              : s.activeConv,
+        }));
         break;
       }
     }

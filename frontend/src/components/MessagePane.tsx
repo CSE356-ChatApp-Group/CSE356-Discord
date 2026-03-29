@@ -8,7 +8,18 @@ import MemberList   from './MemberList';
 import styles from './MessagePane.module.css';
 
 export default function MessagePane() {
-  const { activeChannel, activeConv, messages, sendMessage, fetchMessages, search, searchResults, clearSearch } = useChatStore();
+  const {
+    activeChannel,
+    activeConv,
+    messages,
+    sendMessage,
+    fetchMessages,
+    search,
+    searchResults,
+    clearSearch,
+    inviteToConversation,
+    leaveConversation,
+  } = useChatStore();
   const user = useAuthStore(s => s.user);
 
   const target   = activeChannel || activeConv;
@@ -144,6 +155,39 @@ export default function MessagePane() {
     }
   }
 
+  async function handleInviteToDm() {
+    if (!activeConv?.id) return;
+    const raw = window.prompt('Invite to DM: enter username, email, or user id (comma-separated for multiple users)');
+    if (!raw) return;
+
+    const participants = raw
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    if (!participants.length) return;
+
+    try {
+      await inviteToConversation(activeConv.id, participants);
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to invite participant(s)';
+      window.alert(msg);
+    }
+  }
+
+  async function handleLeaveDm() {
+    if (!activeConv?.id) return;
+    const confirmed = window.confirm('Leave this DM conversation?');
+    if (!confirmed) return;
+
+    try {
+      await leaveConversation(activeConv.id);
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to leave conversation';
+      window.alert(msg);
+    }
+  }
+
   // Infinite scroll – load older messages when scrolled to top
   const handleScroll = useCallback(async () => {
     const el = scrollRef.current;
@@ -252,6 +296,26 @@ export default function MessagePane() {
           )}
         </div>
         <div className={styles.headerActions}>
+          {activeConv && (
+            <>
+              <button
+                type="button"
+                className={styles.dmActionBtn}
+                onClick={handleInviteToDm}
+                data-testid="dm-invite-button"
+              >
+                Invite
+              </button>
+              <button
+                type="button"
+                className={`${styles.dmActionBtn} ${styles.dmLeaveBtn}`}
+                onClick={handleLeaveDm}
+                data-testid="dm-leave-button"
+              >
+                Leave
+              </button>
+            </>
+          )}
           {activeChannel && (
             <button
               className={`${styles.iconTrigger} ${showMembers ? styles.iconTriggerActive : ''}`}
