@@ -126,7 +126,7 @@ async function createSystemMessage(client, conversationId, content) {
   const { rows } = await client.query(
     `INSERT INTO messages (conversation_id, author_id, content, type)
      VALUES ($1, NULL, $2, 'system')
-     RETURNING id, created_at, content, type`,
+         RETURNING id, conversation_id, author_id, content, type, created_at, updated_at, deleted_at, edited_at, channel_id, thread_id`,
     [conversationId, content]
   );
   return rows[0] || null;
