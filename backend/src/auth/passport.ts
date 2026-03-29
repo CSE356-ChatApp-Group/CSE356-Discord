@@ -15,7 +15,6 @@ const passport         = require('passport');
 const LocalStrategy    = require('passport-local').Strategy;
 const GoogleStrategy   = require('passport-google-oauth20').Strategy;
 const GitHubStrategy   = require('passport-github2').Strategy;
-const OpenIDConnectStrategy = require('passport-openidconnect').Strategy;
 const bcrypt           = require('bcrypt');
 const { pool }         = require('../db/pool');
 const { signOAuthPending, verifyOAuthLinkIntent } = require('./oauthTokens');
@@ -159,6 +158,7 @@ if (process.env.GITHUB_CLIENT_ID) {
 
 // ── OIDC (Class Instructor Platform) ────────────────────────────────────────────
 if (process.env.OIDC_CLIENT_ID) {
+  const OpenIDConnectStrategy = require('passport-openidconnect').Strategy;
   passport.use(new OpenIDConnectStrategy({
     issuer: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth',
     authorizationURL: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/protocol/openid-connect/auth',

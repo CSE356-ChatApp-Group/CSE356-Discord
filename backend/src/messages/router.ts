@@ -36,6 +36,61 @@ function targetKey(channelId, conversationId) {
   throw new Error('No target');
 }
 
+async function ensureActiveConversationParticipant(conversationId, userId) {
+  const { rows } = await pool.query(
+    `SELECT 1
+     FROM conversation_participants
+     WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+    [conversationId, userId]
+  );
+  return rows.length > 0;
+}
+
+async function ensureChannelAccess(channelId, userId) {
+  const { rows } = await pool.query(
+    `SELECT 1
+     FROM channels c
+     WHERE c.id = $1
+       AND (
+         c.is_private = FALSE
+         OR EXISTS (
+           SELECT 1
+           FROM channel_members cm
+           WHERE cm.channel_id = c.id AND cm.user_id = $2
+         )
+       )`,
+    [channelId, userId]
+  );
+  return rows.length > 0;
+}
+
+async function ensureMessageAccess({ channelId, conversationId }, userId) {
+  if (conversationId) return ensureActiveConversationParticipant(conversationId, userId);
+  if (channelId) return ensureChannelAccess(channelId, userId);
+  return false;
+}
+
+async function getConversationFanoutTargets(conversationId) {
+  const { rows } = await pool.query(
+    `SELECT user_id::text AS user_id
+     FROM conversation_participants
+     WHERE conversation_id = $1 AND left_at IS NULL`,
+    [conversationId]
+  );
+
+  return [
+    `conversation:${conversationId}`,
+    ...rows.map((row) => `user:${row.user_id}`),
+  ];
+}
+
+async function publishConversationEvent(conversationId, event, data) {
+  const targets = await getConversationFanoutTargets(conversationId);
+  [...new Set(targets)].forEach((target) => {
+    sideEffects.publishMessageEvent(target, event, data);
+  });
+}
+
 async function loadHydratedMessageById(messageId) {
   const { rows } = await pool.query(
     `SELECT m.*,
@@ -46,6 +101,16 @@ async function loadHydratedMessageById(messageId) {
      LEFT JOIN attachments a ON a.message_id = m.id
      WHERE m.id = $1
      GROUP BY m.id, u.id`,
+    [messageId]
+  );
+  return rows[0] || null;
+}
+
+async function loadMessageTarget(messageId) {
+  const { rows } = await pool.query(
+    `SELECT id, author_id, channel_id, conversation_id
+     FROM messages
+     WHERE id = $1 AND deleted_at IS NULL`,
     [messageId]
   );
   return rows[0] || null;
@@ -135,6 +200,12 @@ router.post('/',
       if (!content) {
         return res.status(400).json({ error: 'content required (attach files in a separate request)' });
       }
+      if (conversationId) {
+        const isParticipant = await ensureActiveConversationParticipant(conversationId, req.user.id);
+        if (!isParticipant) {
+          return res.status(403).json({ error: 'Not a participant' });
+        }
+      }
 
       const { rows } = await pool.query(
         `INSERT INTO messages (channel_id, conversation_id, author_id, content, thread_id)
@@ -145,7 +216,11 @@ router.post('/',
       const message = await loadHydratedMessageById(baseMessage.id);
 
       sideEffects.indexMessage(baseMessage);
-      sideEffects.publishMessageEvent(targetKey(channelId, conversationId), 'message:created', message || baseMessage);
+      if (conversationId) {
+        await publishConversationEvent(conversationId, 'message:created', message || baseMessage);
+      } else {
+        sideEffects.publishMessageEvent(targetKey(channelId, conversationId), 'message:created', message || baseMessage);
+      }
       if (channelId) {
         const { rows: channelRows } = await pool.query(
           'SELECT community_id FROM channels WHERE id = $1',
@@ -178,6 +253,19 @@ router.patch('/:id',
       return res.status(503).json({ error: 'Edits temporarily unavailable under high load' });
     }
     try {
+      const target = await loadMessageTarget(req.params.id);
+      if (!target || target.author_id !== req.user.id) {
+        return res.status(404).json({ error: 'Message not found or not yours' });
+      }
+
+      const hasAccess = await ensureMessageAccess({
+        channelId: target.channel_id,
+        conversationId: target.conversation_id,
+      }, req.user.id);
+      if (!hasAccess) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
       const { rows } = await pool.query(
         `UPDATE messages
          SET content=$1, edited_at=NOW(), updated_at=NOW()
@@ -190,8 +278,12 @@ router.patch('/:id',
       const baseMessage = rows[0];
       const message = await loadHydratedMessageById(baseMessage.id);
       sideEffects.indexMessage(baseMessage);
-      const key = targetKey(baseMessage.channel_id, baseMessage.conversation_id);
-      sideEffects.publishMessageEvent(key, 'message:updated', message || baseMessage);
+      if (baseMessage.conversation_id) {
+        await publishConversationEvent(baseMessage.conversation_id, 'message:updated', message || baseMessage);
+      } else {
+        const key = targetKey(baseMessage.channel_id, baseMessage.conversation_id);
+        sideEffects.publishMessageEvent(key, 'message:updated', message || baseMessage);
+      }
 
       res.json({ message: message || baseMessage });
     } catch (err) { next(err); }
@@ -207,6 +299,19 @@ router.delete('/:id',
       return res.status(503).json({ error: 'Deletes temporarily unavailable under high load' });
     }
     try {
+      const target = await loadMessageTarget(req.params.id);
+      if (!target || target.author_id !== req.user.id) {
+        return res.status(404).json({ error: 'Message not found or not yours' });
+      }
+
+      const hasAccess = await ensureMessageAccess({
+        channelId: target.channel_id,
+        conversationId: target.conversation_id,
+      }, req.user.id);
+      if (!hasAccess) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
       const { rows } = await pool.query(
         `UPDATE messages SET deleted_at=NOW(), updated_at=NOW()
          WHERE id=$1 AND author_id=$2 AND deleted_at IS NULL RETURNING *`,
@@ -216,8 +321,12 @@ router.delete('/:id',
 
       const message = rows[0];
       sideEffects.deleteMessage(message.id);
-      const key = targetKey(message.channel_id, message.conversation_id);
-      sideEffects.publishMessageEvent(key, 'message:deleted', { id: message.id });
+      if (message.conversation_id) {
+        await publishConversationEvent(message.conversation_id, 'message:deleted', { id: message.id });
+      } else {
+        const key = targetKey(message.channel_id, message.conversation_id);
+        sideEffects.publishMessageEvent(key, 'message:deleted', { id: message.id });
+      }
 
       res.json({ success: true });
     } catch (err) { next(err); }
@@ -233,13 +342,18 @@ router.put('/:id/read',
       return res.status(503).json({ error: 'Read receipts temporarily delayed under high load' });
     }
     try {
-      const { rows } = await pool.query(
-        'SELECT channel_id, conversation_id FROM messages WHERE id=$1 AND deleted_at IS NULL',
-        [req.params.id]
-      );
-      if (!rows.length) return res.status(404).json({ error: 'Message not found' });
+      const target = await loadMessageTarget(req.params.id);
+      if (!target) return res.status(404).json({ error: 'Message not found' });
 
-      const { channel_id, conversation_id } = rows[0];
+      const hasAccess = await ensureMessageAccess({
+        channelId: target.channel_id,
+        conversationId: target.conversation_id,
+      }, req.user.id);
+      if (!hasAccess) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      const { channel_id, conversation_id } = target;
       const { rows: upsertRows } = await pool.query(
         `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
          VALUES ($1,$2,$3,$4,NOW())
@@ -249,13 +363,19 @@ router.put('/:id/read',
         [req.user.id, channel_id, conversation_id, req.params.id]
       );
 
-      sideEffects.publishMessageEvent(targetKey(channel_id, conversation_id), 'read:updated', {
+      const payload = {
         userId: req.user.id,
         channelId: channel_id,
         conversationId: conversation_id,
         lastReadMessageId: req.params.id,
         lastReadAt: upsertRows[0]?.last_read_at || new Date().toISOString(),
-      });
+      };
+
+      if (conversation_id) {
+        await publishConversationEvent(conversation_id, 'read:updated', payload);
+      } else {
+        sideEffects.publishMessageEvent(targetKey(channel_id, conversation_id), 'read:updated', payload);
+      }
 
       res.json({ success: true });
     } catch (err) { next(err); }

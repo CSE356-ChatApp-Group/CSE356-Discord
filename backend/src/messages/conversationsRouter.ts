@@ -12,9 +12,47 @@ const express = require('express');
 const { body, param, validationResult } = require('express-validator');
 const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
+const fanout           = require('../websocket/fanout');
 
 const router = express.Router();
 router.use(authenticate);
+
+function publishConversationEvents(targets, event, data) {
+  const uniqueTargets = [...new Set(targets.filter(Boolean))];
+  return Promise.allSettled(uniqueTargets.map((target) => fanout.publish(target, { event, data })));
+}
+
+function getParticipantInputs(body: Record<string, any> = {}) {
+  const list = body.participantIds || body.participants;
+  if (Array.isArray(list)) return list;
+
+  return [body.participantId, body.userId].filter(Boolean);
+}
+
+async function getActiveParticipantIds(client, conversationId) {
+  const { rows } = await client.query(
+    `SELECT user_id::text AS user_id
+     FROM conversation_participants
+     WHERE conversation_id = $1 AND left_at IS NULL`,
+    [conversationId]
+  );
+  return rows.map((row) => row.user_id);
+}
+
+async function requireActiveConversationParticipant(client, conversationId, userId) {
+  const { rows } = await client.query(
+    `SELECT c.id
+     FROM conversations c
+     JOIN conversation_participants cp
+       ON cp.conversation_id = c.id
+      AND cp.user_id = $2
+      AND cp.left_at IS NULL
+     WHERE c.id = $1`,
+    [conversationId, userId]
+  );
+
+  return rows.length > 0;
+}
 
 async function loadConversationWithParticipants(client, conversationId) {
   const { rows } = await client.query(
@@ -181,7 +219,22 @@ router.post('/',
       }
 
       const conversation = await loadConversationWithParticipants(client, conv.id);
+      const invitedUserIds = allIds.filter(id => id !== req.user.id);
       await client.query('COMMIT');
+
+      if (conversation) {
+        await publishConversationEvents(
+          invitedUserIds.map((userId) => `user:${userId}`),
+          'conversation:invited',
+          {
+            conversation,
+            conversationId: conversation.id,
+            invitedBy: req.user.id,
+            participantIds: invitedUserIds,
+          }
+        );
+      }
+
       res.status(201).json({ conversation: conversation || conv, created: true });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -198,11 +251,15 @@ router.get('/:id', async (req, res, next) => {
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name))
                 AS participants
        FROM conversations c
+       JOIN conversation_participants me ON me.conversation_id = c.id
+                                        AND me.user_id = $2
+                                        AND me.left_at IS NULL
        JOIN conversation_participants cp ON cp.conversation_id = c.id
+                                        AND cp.left_at IS NULL
        JOIN users u ON u.id = cp.user_id
        WHERE c.id = $1
        GROUP BY c.id`,
-      [req.params.id]
+      [req.params.id, req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ conversation: rows[0] });
@@ -283,5 +340,151 @@ router.post('/:id/participants',
      } catch (err) { next(err); }
    }
  );
+
+const addParticipantsValidators = [
+  param('id').isUUID(),
+  body('participantIds').optional().isArray({ min: 1, max: 9 }),
+  body('participants').optional().isArray({ min: 1, max: 9 }),
+  body('participantId').optional().isString().isLength({ min: 1, max: 255 }),
+  body('userId').optional().isString().isLength({ min: 1, max: 255 }),
+];
+
+async function addParticipantsHandler(req, res, next) {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const providedParticipants = getParticipantInputs(req.body);
+  if (!providedParticipants.length) {
+    return res.status(400).json({ error: 'participantIds, participants, participantId, or userId is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const conversationExists = await client.query(
+      'SELECT id FROM conversations WHERE id = $1',
+      [req.params.id]
+    );
+    if (!conversationExists.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const isParticipant = await requireActiveConversationParticipant(client, req.params.id, req.user.id);
+    if (!isParticipant) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Not a participant' });
+    }
+
+    const resolvedParticipants = await resolveParticipantIds(client, providedParticipants);
+    if (!resolvedParticipants) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'One or more participants were not found' });
+    }
+
+    const currentParticipantIds = await getActiveParticipantIds(client, req.params.id);
+    const currentParticipantSet = new Set(currentParticipantIds);
+    const participantIdsToAdd = resolvedParticipants.filter(
+      (participantId) => participantId !== req.user.id && !currentParticipantSet.has(participantId)
+    );
+
+    for (const participantId of participantIdsToAdd) {
+      await client.query(
+        `INSERT INTO conversation_participants (conversation_id, user_id)
+         VALUES ($1, $2)
+         ON CONFLICT (conversation_id, user_id)
+         DO UPDATE SET left_at = NULL, joined_at = NOW()`,
+        [req.params.id, participantId]
+      );
+    }
+
+    const conversation = await loadConversationWithParticipants(client, req.params.id);
+    const activeParticipantIds = await getActiveParticipantIds(client, req.params.id);
+    await client.query('COMMIT');
+
+    const sharedEventData = {
+      conversation,
+      conversationId: req.params.id,
+      participantIds: participantIdsToAdd,
+      invitedBy: req.user.id,
+    };
+
+    await publishConversationEvents(
+      [`conversation:${req.params.id}`, ...activeParticipantIds.map((participantId) => `user:${participantId}`)],
+      'conversation:participant_added',
+      sharedEventData
+    );
+
+    if (participantIdsToAdd.length) {
+      await publishConversationEvents(
+        participantIdsToAdd.map((participantId) => `user:${participantId}`),
+        'conversation:invited',
+        sharedEventData
+      );
+    }
+
+    res.json({ conversation, addedParticipantIds: participantIdsToAdd });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+}
+
+router.post('/:id/participants', ...addParticipantsValidators, addParticipantsHandler);
+router.post('/:id/invite', ...addParticipantsValidators, addParticipantsHandler);
+
+router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const membership = await client.query(
+      `SELECT 1
+       FROM conversation_participants
+       WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+      [req.params.id, req.user.id]
+    );
+    if (!membership.rows.length) {
+      const existingConversation = await client.query('SELECT 1 FROM conversations WHERE id = $1', [req.params.id]);
+      await client.query('ROLLBACK');
+      return res.status(existingConversation.rows.length ? 403 : 404).json({
+        error: existingConversation.rows.length ? 'Not a participant' : 'Conversation not found',
+      });
+    }
+
+    await client.query(
+      `UPDATE conversation_participants
+       SET left_at = NOW()
+       WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+      [req.params.id, req.user.id]
+    );
+
+    const activeParticipantIds = await getActiveParticipantIds(client, req.params.id);
+    await client.query('COMMIT');
+
+    await publishConversationEvents(
+      [`conversation:${req.params.id}`, `user:${req.user.id}`, ...activeParticipantIds.map((participantId) => `user:${participantId}`)],
+      'conversation:participant_left',
+      {
+        conversationId: req.params.id,
+        userId: req.user.id,
+        leftUserId: req.user.id,
+      }
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+});
 
 module.exports = router;

@@ -40,6 +40,7 @@ const wss = new WebSocketServer({ noServer: true });
 const IDLE_TTL_SECONDS = 60;
 const CONNECTION_ALIVE_TTL_SECONDS = 120;
 const PRESENCE_SWEEPER_MS = 15_000;
+let shuttingDown = false;
 
 function connectionSetKey(userId) {
   return `user:${userId}:connections`;
@@ -348,6 +349,12 @@ function cleanup(ws, userId) {
   ws._subscriptions.forEach((ch) => {
     channelClients.get(ch)?.delete(ws);
   });
+
+  if (shuttingDown) {
+    logger.info({ userId }, 'WS disconnected');
+    return;
+  }
+
   removeConnection(userId, ws._connectionId)
     .then(() => recomputeUserPresence(userId))
     .catch((err) => logger.warn({ err, userId }, 'WS cleanup presence update failed'));
@@ -355,7 +362,7 @@ function cleanup(ws, userId) {
 }
 
 // ── Heartbeat loop (60 s) ──────────────────────────────────────────────────────
-setInterval(() => {
+const heartbeatInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) { ws.terminate(); return; }
     ws.isAlive = false;
@@ -364,7 +371,7 @@ setInterval(() => {
 }, 60_000);
 
 // Periodically reconcile global user presence from client-reported connection state.
-setInterval(() => {
+const presenceSweepInterval = setInterval(() => {
   reconcileAllConnectedUsers().catch((err) => {
     logger.warn({ err }, 'Presence sweeper failed');
   });
@@ -377,4 +384,22 @@ function handleUpgrade(request, socket, head) {
   });
 }
 
-module.exports = { handleUpgrade, wss };
+function shutdown() {
+  shuttingDown = true;
+  clearInterval(heartbeatInterval);
+  clearInterval(presenceSweepInterval);
+
+  return new Promise<void>((resolve) => {
+    wss.clients.forEach((ws) => {
+      try {
+        ws.terminate();
+      } catch {
+        // Ignore termination errors during shutdown.
+      }
+    });
+
+    wss.close(() => resolve());
+  });
+}
+
+module.exports = { handleUpgrade, wss, shutdown };

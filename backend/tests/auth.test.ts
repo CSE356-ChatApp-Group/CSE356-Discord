@@ -7,11 +7,108 @@
 
 'use strict';
 
+const http = require('http');
 const request = require('supertest');
 const { randomUUID } = require('crypto');
+const { WebSocket } = require('ws');
 const app     = require('../src/app');
+const wsServer = require('../src/websocket/server');
 const { pool }= require('../src/db/pool');
 const { closeRedisConnections } = require('../src/db/redis');
+
+function uniqueSuffix() {
+  return `${Date.now()}${Math.floor(Math.random() * 10000)}`;
+}
+
+async function registerUser({ email, username, password = 'Password1!', displayName }: { email: string; username: string; password?: string; displayName?: string }) {
+  const res = await request(app)
+    .post('/api/v1/auth/register')
+    .send({ email, username, password, displayName: displayName || username });
+
+  return res;
+}
+
+async function createAuthenticatedUser(prefix) {
+  const suffix = uniqueSuffix();
+  const email = `${prefix}-${suffix}@example.com`;
+  const username = `${prefix}${suffix}`.slice(0, 32);
+  const res = await registerUser({ email, username });
+  return {
+    email,
+    username,
+    accessToken: res.body.accessToken,
+    user: res.body.user,
+  };
+}
+
+function startWebSocketTestServer() {
+  const server = http.createServer(app);
+  server.on('upgrade', wsServer.handleUpgrade);
+
+  return new Promise<{ server: any; port: number }>((resolve) => {
+    server.listen(0, () => {
+      const address = server.address() as any;
+      const port = Number(address?.port);
+      resolve({ server, port });
+    });
+  });
+}
+
+function connectWebSocket(port, token) {
+  return new Promise<any>((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`);
+    const timer = setTimeout(() => {
+      ws.terminate();
+      reject(new Error('Timed out connecting websocket'));
+    }, 3000);
+
+    ws.once('open', () => {
+      clearTimeout(timer);
+      resolve(ws);
+    });
+    ws.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function closeWebSocket(ws) {
+  return new Promise<void>((resolve) => {
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      resolve();
+      return;
+    }
+    ws.once('close', resolve);
+    ws.close();
+  });
+}
+
+function waitForWsEvent(ws, predicate, timeoutMs = 4000) {
+  return new Promise<any>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off('message', onMessage);
+      reject(new Error('Timed out waiting for websocket event'));
+    }, timeoutMs);
+
+    const onMessage = (raw) => {
+      let event;
+      try {
+        event = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      if (!predicate(event)) return;
+
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      resolve(event);
+    };
+
+    ws.on('message', onMessage);
+  });
+}
 
 beforeAll(async () => {
   // Ensure test user doesn't exist
@@ -19,6 +116,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await wsServer.shutdown();
   await closeRedisConnections();
   await pool.end();
 });
@@ -48,6 +146,25 @@ describe('POST /api/v1/auth/register', () => {
       .send({ email: 'other@example.com', username: 'other', password: '123' });
 
     expect(res.status).toBe(400);
+  });
+
+  it('accepts hyphenated usernames and returns conflict on duplicate registration', async () => {
+    const suffix = uniqueSuffix();
+    const email = `hyphen-${suffix}@example.com`;
+    const username = `abiding-aardwark-${suffix}`.slice(0, 32);
+
+    const first = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ email, username, password: 'Password1!' });
+
+    expect(first.status).toBe(201);
+    expect(first.body.user.username).toBe(username);
+
+    const duplicate = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ email, username, password: 'Password1!' });
+
+    expect(duplicate.status).toBe(409);
   });
 });
 
@@ -275,5 +392,210 @@ describe('Message hydration payloads', () => {
     expect(res.body.message.author).toBeDefined();
     expect(res.body.message.author.id).toBe(userId);
     expect(Array.isArray(res.body.message.attachments)).toBe(true);
+  });
+});
+
+describe('DM management and realtime delivery', () => {
+  let server;
+  let port;
+
+  beforeAll(async () => {
+    const started = await startWebSocketTestServer();
+    server = started.server;
+    port = started.port;
+  });
+
+  afterAll(async () => {
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  it('invites participants to an existing conversation and allows them to leave', async () => {
+    const userA = await createAuthenticatedUser('dmowner');
+    const userB = await createAuthenticatedUser('dminitial');
+    const userC = await createAuthenticatedUser('dminvite');
+
+    const inviteeSocket = await connectWebSocket(port, userC.accessToken);
+
+    try {
+      const createRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${userA.accessToken}`)
+        .send({ participantIds: [userB.user.id] });
+
+      expect(createRes.status).toBe(201);
+      const conversationId = createRes.body.conversation.id;
+
+      const inviteEventPromise = waitForWsEvent(inviteeSocket, (event) => event.event === 'conversation:invited');
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/invite`)
+        .set('Authorization', `Bearer ${userA.accessToken}`)
+        .send({ participantIds: [userC.user.id] });
+
+      expect(inviteRes.status).toBe(200);
+      expect(inviteRes.body.addedParticipantIds).toContain(userC.user.id);
+
+      const inviteEvent = await inviteEventPromise;
+      expect(inviteEvent.data.conversationId).toBe(conversationId);
+      expect(inviteEvent.data.participantIds).toContain(userC.user.id);
+
+      const leaveRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/leave`)
+        .set('Authorization', `Bearer ${userC.accessToken}`)
+        .send({});
+
+      expect(leaveRes.status).toBe(200);
+
+      const listRes = await request(app)
+        .get('/api/v1/conversations')
+        .set('Authorization', `Bearer ${userC.accessToken}`);
+
+      expect(listRes.status).toBe(200);
+      expect(listRes.body.conversations.find((conversation) => conversation.id === conversationId)).toBeUndefined();
+    } finally {
+      await closeWebSocket(inviteeSocket);
+    }
+  });
+
+  it('delivers DM message and read events on user websocket channels', async () => {
+    const sender = await createAuthenticatedUser('dmsender');
+    const recipient = await createAuthenticatedUser('dmrecipient');
+
+    const senderSocket = await connectWebSocket(port, sender.accessToken);
+    const recipientSocket = await connectWebSocket(port, recipient.accessToken);
+
+    try {
+      const createConversationRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ participantIds: [recipient.user.id] });
+
+      expect(createConversationRes.status).toBe(201);
+      const conversationId = createConversationRes.body.conversation.id;
+
+      const createdEventPromise = waitForWsEvent(
+        recipientSocket,
+        (event) => event.event === 'message:created' && event.data?.conversation_id === conversationId
+      );
+
+      const createMessageRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ conversationId, content: 'hello realtime' });
+
+      expect(createMessageRes.status).toBe(201);
+      const messageId = createMessageRes.body.message.id;
+      const createdEvent = await createdEventPromise;
+      expect(createdEvent.data.id).toBe(messageId);
+
+      const updatedEventPromise = waitForWsEvent(
+        recipientSocket,
+        (event) => event.event === 'message:updated' && event.data?.id === messageId
+      );
+
+      const updateRes = await request(app)
+        .patch(`/api/v1/messages/${messageId}`)
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ content: 'hello edited realtime' });
+
+      expect(updateRes.status).toBe(200);
+      const updatedEvent = await updatedEventPromise;
+      expect(updatedEvent.data.content).toBe('hello edited realtime');
+
+      const deletedEventPromise = waitForWsEvent(
+        recipientSocket,
+        (event) => event.event === 'message:deleted' && event.data?.id === messageId
+      );
+
+      const deleteRes = await request(app)
+        .delete(`/api/v1/messages/${messageId}`)
+        .set('Authorization', `Bearer ${sender.accessToken}`);
+
+      expect(deleteRes.status).toBe(200);
+      await deletedEventPromise;
+
+      const secondMessageRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ conversationId, content: 'mark read target' });
+
+      expect(secondMessageRes.status).toBe(201);
+      const secondMessageId = secondMessageRes.body.message.id;
+
+      const readEventPromise = waitForWsEvent(
+        senderSocket,
+        (event) => event.event === 'read:updated' && event.data?.lastReadMessageId === secondMessageId
+      );
+
+      const readRes = await request(app)
+        .put(`/api/v1/messages/${secondMessageId}/read`)
+        .set('Authorization', `Bearer ${recipient.accessToken}`);
+
+      expect(readRes.status).toBe(200);
+      const readEvent = await readEventPromise;
+      expect(readEvent.data.userId).toBe(recipient.user.id);
+      expect(readEvent.data.conversationId).toBe(conversationId);
+    } finally {
+      await closeWebSocket(senderSocket);
+      await closeWebSocket(recipientSocket);
+    }
+  });
+
+  it('blocks DM edits, deletes, and read receipts after a participant leaves', async () => {
+    const owner = await createAuthenticatedUser('dmguardowner');
+    const participant = await createAuthenticatedUser('dmguardparticipant');
+
+    const createConversationRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [participant.user.id] });
+
+    expect(createConversationRes.status).toBe(201);
+    const conversationId = createConversationRes.body.conversation.id;
+
+    const participantMessageRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .send({ conversationId, content: 'message before leaving' });
+
+    expect(participantMessageRes.status).toBe(201);
+    const participantMessageId = participantMessageRes.body.message.id;
+
+    const ownerMessageRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ conversationId, content: 'owner message after join' });
+
+    expect(ownerMessageRes.status).toBe(201);
+    const ownerMessageId = ownerMessageRes.body.message.id;
+
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .send({});
+
+    expect(leaveRes.status).toBe(200);
+
+    const editRes = await request(app)
+      .patch(`/api/v1/messages/${participantMessageId}`)
+      .set('Authorization', `Bearer ${participant.accessToken}`)
+      .send({ content: 'edited after leaving' });
+
+    expect(editRes.status).toBe(403);
+    expect(editRes.body.error).toMatch(/access denied/i);
+
+    const deleteRes = await request(app)
+      .delete(`/api/v1/messages/${participantMessageId}`)
+      .set('Authorization', `Bearer ${participant.accessToken}`);
+
+    expect(deleteRes.status).toBe(403);
+    expect(deleteRes.body.error).toMatch(/access denied/i);
+
+    const readRes = await request(app)
+      .put(`/api/v1/messages/${ownerMessageId}/read`)
+      .set('Authorization', `Bearer ${participant.accessToken}`);
+
+    expect(readRes.status).toBe(403);
+    expect(readRes.body.error).toMatch(/access denied/i);
   });
 });

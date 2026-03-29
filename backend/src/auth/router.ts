@@ -26,6 +26,14 @@ const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLi
 
 const router = express.Router();
 const REFRESH_COOKIE = 'refreshToken';
+const USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{2,31}$/;
+
+function validateUsername(value) {
+  if (typeof value !== 'string' || !USERNAME_PATTERN.test(value)) {
+    throw new Error('username must be 3-32 chars using letters, numbers, hyphens, or underscores');
+  }
+  return true;
+}
 
 function parseBooleanEnv(value) {
   if (typeof value !== 'string') return null;
@@ -243,7 +251,7 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
 // ── Register ───────────────────────────────────────────────────────────────────
 router.post('/register',
   body('email').isEmail().normalizeEmail(),
-  body('username').matches(/^[a-z0-9-]{3,32}$/i).withMessage('Username must be 3-32 chars, alphanumeric or hyphens'),
+  body('username').custom(validateUsername),
   body('password').isLength({ min: 8 }),
   body('displayName').optional().isLength({ max: 64 }),
   async (req, res, next) => {
@@ -331,7 +339,7 @@ router.get('/session', async (_req, res, next) => {
 
 router.post('/oauth/complete-create',
   body('pendingToken').isString().isLength({ min: 20 }),
-  body('username').optional().matches(/^[a-z0-9-]{3,32}$/i).withMessage('Username must be 3-32 chars, alphanumeric or hyphens'),
+  body('username').optional().custom(validateUsername),
   body('displayName').optional().isLength({ min: 1, max: 64 }),
   body('password').optional().isLength({ min: 8 }),
   async (req, res, next) => {
