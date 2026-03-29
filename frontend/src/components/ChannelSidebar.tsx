@@ -16,14 +16,28 @@ export default function ChannelSidebar() {
   const [showCreate, setShowCreate] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [showNewDm, setShowNewDm] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [channelToDelete, setChannelToDelete] = useState<any | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const canManage = canManageChannels(activeCommunity);
   const canLeave = canLeaveCommunity(activeCommunity);
 
-  async function handleLeaveCommunity() {
+  function handleLeaveCommunity() {
     if (!activeCommunity?.id || !canLeave) return;
-    if (!confirm(`Leave ${activeCommunity.name}?`)) return;
-    await leaveCommunity(activeCommunity.id);
+    setShowLeaveConfirm(true);
+  }
+
+  async function confirmLeaveCommunity() {
+    if (!activeCommunity?.id || leaveBusy) return;
+    setLeaveBusy(true);
+    try {
+      await leaveCommunity(activeCommunity.id);
+      setShowLeaveConfirm(false);
+    } finally {
+      setLeaveBusy(false);
+    }
   }
 
   function renderPendingInvites() {
@@ -139,10 +153,7 @@ export default function ChannelSidebar() {
                 canAccess={canAccess}
                 unread={isChannelUnread(ch, activeChannel?.id === ch.id, user?.id)}
                 canDelete={canManage}
-                onDelete={async () => {
-                  if (!confirm(`Delete #${ch.name}?`)) return;
-                  await deleteChannel(ch.id);
-                }}
+                onDelete={() => setChannelToDelete(ch)}
                 onClick={() => {
                   if (!canAccess) return;
                   void selectChannel(ch);
@@ -207,6 +218,75 @@ export default function ChannelSidebar() {
             await openDm(participantIds);
           }}
         />
+      )}
+
+      {showLeaveConfirm && activeCommunity && (
+        <Modal title="Leave community?" onClose={() => setShowLeaveConfirm(false)}>
+          <div className={styles.leaveConfirmWrap} data-testid="community-leave-modal">
+            <p className={styles.hint}>
+              You will leave {activeCommunity.name}. You can rejoin later if the community is public.
+            </p>
+            <div className={styles.leaveConfirmActions}>
+              <button
+                type="button"
+                className={styles.leaveCancelBtn}
+                onClick={() => setShowLeaveConfirm(false)}
+                disabled={leaveBusy}
+                data-testid="community-leave-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={styles.leaveDangerBtn}
+                onClick={() => { void confirmLeaveCommunity(); }}
+                disabled={leaveBusy}
+                data-testid="community-leave-confirm"
+              >
+                {leaveBusy ? 'Leaving…' : 'Leave community'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {channelToDelete && (
+        <Modal title="Delete channel?" onClose={() => setChannelToDelete(null)}>
+          <div className={styles.leaveConfirmWrap} data-testid="channel-delete-modal">
+            <p className={styles.hint}>
+              Delete #{channelToDelete.name}? This action cannot be undone.
+            </p>
+            <div className={styles.leaveConfirmActions}>
+              <button
+                type="button"
+                className={styles.leaveCancelBtn}
+                onClick={() => setChannelToDelete(null)}
+                disabled={deleteBusy}
+                data-testid="channel-delete-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={styles.leaveDangerBtn}
+                onClick={async () => {
+                  if (!channelToDelete?.id || deleteBusy) return;
+                  setDeleteBusy(true);
+                  try {
+                    await deleteChannel(channelToDelete.id);
+                    setChannelToDelete(null);
+                  } finally {
+                    setDeleteBusy(false);
+                  }
+                }}
+                disabled={deleteBusy}
+                data-testid="channel-delete-confirm"
+              >
+                {deleteBusy ? 'Deleting…' : 'Delete channel'}
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </aside>
   );

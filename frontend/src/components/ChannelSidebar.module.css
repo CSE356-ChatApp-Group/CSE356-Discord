@@ -255,6 +255,52 @@
   background: var(--accent-dim);
 }
 
+.leaveConfirmWrap {
+  display: grid;
+  gap: 12px;
+}
+
+.leaveConfirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.leaveCancelBtn,
+.leaveDangerBtn {
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.leaveCancelBtn {
+  border: 1px solid var(--border-light);
+  background: var(--bg-2);
+  color: var(--text-secondary);
+}
+
+.leaveCancelBtn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.leaveDangerBtn {
+  border: 1px solid transparent;
+  background: #d9534f;
+  color: var(--text-inverse);
+}
+
+.leaveDangerBtn:hover:not(:disabled) {
+  background: #c94440;
+}
+
+.leaveCancelBtn:disabled,
+.leaveDangerBtn:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
 .empty {
   flex: 1;
   display: flex;

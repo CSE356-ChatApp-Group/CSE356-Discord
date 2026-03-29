@@ -235,8 +235,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   async createCommunity(slug: string, name: string, description: string) {
     const { community } = await api.post('/communities', { slug, name, description });
-    set(s => ({ communities: [...s.communities, community] }));
-    return community;
+    const created = {
+      ...community,
+      my_role: community?.my_role || 'owner',
+      myRole: community?.myRole || 'owner',
+    };
+    set(s => ({ communities: [...s.communities, created] }));
+    return created;
   },
 
   async leaveCommunity(communityId: string) {
