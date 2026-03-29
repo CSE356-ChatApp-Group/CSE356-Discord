@@ -73,6 +73,33 @@ function connectWebSocket(port, token) {
   });
 }
 
+function connectWebSocketWithOpenFrame(port, token, frame) {
+  return new Promise<any>((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`);
+    const timer = setTimeout(() => {
+      ws.terminate();
+      reject(new Error('Timed out connecting websocket'));
+    }, 3000);
+
+    ws.once('open', () => {
+      try {
+        ws.send(JSON.stringify(frame));
+      } catch (err) {
+        clearTimeout(timer);
+        reject(err);
+        return;
+      }
+
+      clearTimeout(timer);
+      resolve(ws);
+    });
+    ws.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
 function closeWebSocket(ws) {
   return new Promise<void>((resolve) => {
     if (!ws || ws.readyState === WebSocket.CLOSED) {
@@ -104,6 +131,32 @@ function waitForWsEvent(ws, predicate, timeoutMs = 4000) {
       clearTimeout(timer);
       ws.off('message', onMessage);
       resolve(event);
+    };
+
+    ws.on('message', onMessage);
+  });
+}
+
+function waitForNoWsEvent(ws, predicate, timeoutMs = 750) {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off('message', onMessage);
+      resolve();
+    }, timeoutMs);
+
+    const onMessage = (raw) => {
+      let event;
+      try {
+        event = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      if (!predicate(event)) return;
+
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      reject(new Error(`Unexpected websocket event: ${JSON.stringify(event)}`));
     };
 
     ws.on('message', onMessage);
@@ -743,6 +796,212 @@ describe('DM management and realtime delivery', () => {
     }
   });
 
+  it('accepts a subscribe frame sent immediately on websocket open', async () => {
+    const owner = await createAuthenticatedUser('wsopenowner');
+    const leaver = await createAuthenticatedUser('wsopenleaver');
+    const third = await createAuthenticatedUser('wsopenthird');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [leaver.user.id, third.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const ownerSocket = await connectWebSocketWithOpenFrame(port, owner.accessToken, {
+      type: 'subscribe',
+      channel: `conversation:${conversationId}`,
+    });
+
+    try {
+      await waitForWsEvent(
+        ownerSocket,
+        (event) => event.event === 'subscribed' && event.data?.channel === `conversation:${conversationId}`
+      );
+
+      const leaveSystemMessagePromise = waitForWsEvent(
+        ownerSocket,
+        (event) => (
+          event.event === 'message:created'
+          && event.data?.conversation_id === conversationId
+          && event.data?.type === 'system'
+          && /left the group\./i.test(event.data?.content || '')
+        )
+      );
+
+      const leaveRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/leave`)
+        .set('Authorization', `Bearer ${leaver.accessToken}`)
+        .send({});
+
+      expect(leaveRes.status).toBe(200);
+
+      const leaveMessageEvent = await leaveSystemMessagePromise;
+      expect(leaveMessageEvent.data.author_id).toBeNull();
+    } finally {
+      await closeWebSocket(ownerSocket);
+    }
+  });
+
+  it('delivers user-channel realtime events to multiple sockets for the same user', async () => {
+    const owner = await createAuthenticatedUser('wsmultiowner');
+    const existing = await createAuthenticatedUser('wsmultiexisting');
+    const invitee = await createAuthenticatedUser('wsmultiinvitee');
+
+    const socketA = await connectWebSocket(port, invitee.accessToken);
+    const socketB = await connectWebSocket(port, invitee.accessToken);
+
+    try {
+      const createRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [existing.user.id] });
+
+      expect(createRes.status).toBe(201);
+      const conversationId = createRes.body.conversation.id;
+
+      const inviteEventPromiseA = waitForWsEvent(
+        socketA,
+        (event) => event.event === 'conversation:invited' && event.data?.conversationId === conversationId
+      );
+      const inviteEventPromiseB = waitForWsEvent(
+        socketB,
+        (event) => event.event === 'conversation:invited' && event.data?.conversationId === conversationId
+      );
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/invite`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [invitee.user.id] });
+
+      expect(inviteRes.status).toBe(200);
+
+      const [eventA, eventB] = await Promise.all([inviteEventPromiseA, inviteEventPromiseB]);
+      expect(eventA.data.invitedBy).toBe(owner.user.id);
+      expect(eventB.data.invitedBy).toBe(owner.user.id);
+    } finally {
+      await closeWebSocket(socketA);
+      await closeWebSocket(socketB);
+    }
+  });
+
+  it('stops delivery to an unsubscribed channel socket without affecting other sockets', async () => {
+    const owner = await createAuthenticatedUser('wsunsubowner');
+    const member = await createAuthenticatedUser('wsunsubmember');
+
+    const slug = `ws-unsub-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'unsubscribe isolation test' });
+
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .send({});
+
+    expect(joinRes.status).toBe(200);
+
+    const channelName = `ws-unsub-${uniqueSuffix()}`;
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: channelName, isPrivate: false, description: 'unsubscribe isolation channel' });
+
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const socketA = await connectWebSocket(port, member.accessToken);
+    const socketB = await connectWebSocket(port, member.accessToken);
+
+    try {
+      const bootstrapEventPromiseA = waitForWsEvent(
+        socketA,
+        (event) => event.event === 'message:created' && event.data?.channel_id === channelId && event.data?.content === 'bootstrap delivery check'
+      );
+      const bootstrapEventPromiseB = waitForWsEvent(
+        socketB,
+        (event) => event.event === 'message:created' && event.data?.channel_id === channelId && event.data?.content === 'bootstrap delivery check'
+      );
+
+      const bootstrapSendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'bootstrap delivery check' });
+
+      expect(bootstrapSendRes.status).toBe(201);
+      await Promise.all([bootstrapEventPromiseA, bootstrapEventPromiseB]);
+
+      socketA.send(JSON.stringify({ type: 'unsubscribe', channel: `channel:${channelId}` }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const recipientEventPromise = waitForWsEvent(
+        socketB,
+        (event) => event.event === 'message:created' && event.data?.channel_id === channelId && event.data?.content === 'unsubscribe isolation check'
+      );
+      const noEventPromise = waitForNoWsEvent(
+        socketA,
+        (event) => event.event === 'message:created' && event.data?.channel_id === channelId && event.data?.content === 'unsubscribe isolation check'
+      );
+
+      const sendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'unsubscribe isolation check' });
+
+      expect(sendRes.status).toBe(201);
+
+      const recipientEvent = await recipientEventPromise;
+      expect(recipientEvent.data.content).toBe('unsubscribe isolation check');
+      await noEventPromise;
+    } finally {
+      await closeWebSocket(socketA);
+      await closeWebSocket(socketB);
+    }
+  });
+
+  it('delivers user-channel events after the user reconnects', async () => {
+    const owner = await createAuthenticatedUser('wsreconnectowner');
+    const existing = await createAuthenticatedUser('wsreconnectexisting');
+    const invitee = await createAuthenticatedUser('wsreconnectinvitee');
+
+    const firstSocket = await connectWebSocket(port, invitee.accessToken);
+    await closeWebSocket(firstSocket);
+
+    const secondSocket = await connectWebSocket(port, invitee.accessToken);
+
+    try {
+      const createRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [existing.user.id] });
+
+      expect(createRes.status).toBe(201);
+      const conversationId = createRes.body.conversation.id;
+
+      const inviteEventPromise = waitForWsEvent(
+        secondSocket,
+        (event) => event.event === 'conversation:invited' && event.data?.conversationId === conversationId
+      );
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/invite`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [invitee.user.id] });
+
+      expect(inviteRes.status).toBe(200);
+
+      const inviteEvent = await inviteEventPromise;
+      expect(inviteEvent.data.invitedBy).toBe(owner.user.id);
+    } finally {
+      await closeWebSocket(secondSocket);
+    }
+  });
+
   it('blocks DM edits, deletes, and read receipts after a participant leaves', async () => {
     const owner = await createAuthenticatedUser('dmguardowner');
     const participant = await createAuthenticatedUser('dmguardparticipant');
@@ -932,7 +1191,6 @@ describe('DM management and realtime delivery', () => {
     expect(createRes.status).toBe(201);
     const conversationId = createRes.body.conversation.id;
 
-    const { server, port } = await startWebSocketTestServer();
     const ownerSocket = await connectWebSocket(port, owner.accessToken);
 
     try {
@@ -963,7 +1221,6 @@ describe('DM management and realtime delivery', () => {
       expect(leaveMessageEvent.data.author_id).toBeNull();
     } finally {
       await closeWebSocket(ownerSocket);
-      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });
