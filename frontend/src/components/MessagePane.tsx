@@ -233,10 +233,17 @@ export default function MessagePane() {
     e.preventDefault();
     if (!activeConv?.id || dmInviteBusy) return;
 
-    const participants = selectedInvitees.map((entry) => entry.id).filter(Boolean);
+    const selected = selectedInvitees.map((entry) => entry.id).filter(Boolean);
+    const typed = inviteQuery
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const participants = selected.length
+      ? selected
+      : [...new Set(typed)].filter((value) => !existingDmMemberIds.has(value));
 
     if (!participants.length) {
-      setDmActionErr('Enter at least one username, email, or user id.');
+      setDmActionErr('Select someone from search, or type a username/email/id and press Invite.');
       return;
     }
 
@@ -601,7 +608,7 @@ export default function MessagePane() {
               </ul>
             )}
             {inviteQuery.trim() && inviteResults.length === 0 && (
-              <p className={styles.modalHint}>No eligible users found.</p>
+              <p className={styles.modalHint}>No matches yet. You can still type exact username/email/id and press Invite.</p>
             )}
             {dmActionErr && <p className={styles.dmActionErr}>{dmActionErr}</p>}
             <div className={styles.modalActions}>
@@ -616,7 +623,7 @@ export default function MessagePane() {
               <button
                 type="submit"
                 className={styles.modalPrimaryBtn}
-                disabled={dmInviteBusy || selectedInvitees.length === 0}
+                disabled={dmInviteBusy || (selectedInvitees.length === 0 && !inviteQuery.trim())}
                 data-testid="dm-invite-submit"
               >
                 {dmInviteBusy ? 'Inviting…' : selectedInvitees.length > 1 ? 'Invite people' : 'Invite person'}

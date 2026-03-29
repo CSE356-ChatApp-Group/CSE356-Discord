@@ -68,7 +68,7 @@ async function loadConversationWithParticipants(client, conversationId) {
               ORDER BY u.username
             ) AS participants
      FROM conversations c
-     JOIN conversation_participants cp ON cp.conversation_id = c.id
+     JOIN conversation_participants cp ON cp.conversation_id = c.id AND cp.left_at IS NULL
      JOIN users u ON u.id = cp.user_id
      WHERE c.id = $1
      GROUP BY c.id`,

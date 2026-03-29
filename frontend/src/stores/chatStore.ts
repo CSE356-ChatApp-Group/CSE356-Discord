@@ -516,7 +516,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async leaveConversation(conversationId: string) {
-    await api.post(`/conversations/${conversationId}/leave`, {});
+    try {
+      await api.post(`/conversations/${conversationId}/leave`, {});
+    } catch (err: any) {
+      const status = Number(err?.status || 0);
+      // Treat already-left/not-found as idempotent success for UI smoothness.
+      if (status !== 403 && status !== 404) {
+        throw err;
+      }
+    }
+
     set(s => ({
       conversations: s.conversations.filter((conv) => conv.id !== conversationId),
       activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
