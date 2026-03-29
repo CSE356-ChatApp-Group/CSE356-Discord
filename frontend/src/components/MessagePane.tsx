@@ -5,6 +5,7 @@ import { useAutoResize } from '../hooks/useAutoResize';
 import MessageItem  from './MessageItem';
 import SearchBar    from './SearchBar';
 import MemberList   from './MemberList';
+import Modal        from './Modal';
 import styles from './MessagePane.module.css';
 
 export default function MessagePane() {
@@ -32,6 +33,12 @@ export default function MessagePane() {
   const [showSearch, setSearch]   = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   const [localQ, setLocalQ]       = useState('');
+  const [showDmInviteModal, setShowDmInviteModal] = useState(false);
+  const [showDmLeaveModal, setShowDmLeaveModal] = useState(false);
+  const [inviteInput, setInviteInput] = useState('');
+  const [dmInviteBusy, setDmInviteBusy] = useState(false);
+  const [dmLeaveBusy, setDmLeaveBusy] = useState(false);
+  const [dmActionErr, setDmActionErr] = useState('');
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -86,6 +93,10 @@ export default function MessagePane() {
     setShowMembers(false);
     clearSearch();
     setLocalQ('');
+    setShowDmInviteModal(false);
+    setShowDmLeaveModal(false);
+    setDmActionErr('');
+    setInviteInput('');
   }, [key]);
 
   // Focus search input and clean up when search panel toggles
@@ -155,36 +166,58 @@ export default function MessagePane() {
     }
   }
 
-  async function handleInviteToDm() {
+  function handleInviteToDm() {
     if (!activeConv?.id) return;
-    const raw = window.prompt('Invite to DM: enter username, email, or user id (comma-separated for multiple users)');
-    if (!raw) return;
+    setDmActionErr('');
+    setShowDmInviteModal(true);
+  }
 
-    const participants = raw
+  async function submitInviteToDm(e: React.FormEvent) {
+    e.preventDefault();
+    if (!activeConv?.id || dmInviteBusy) return;
+
+    const participants = inviteInput
       .split(',')
       .map((value) => value.trim())
       .filter(Boolean);
 
-    if (!participants.length) return;
+    if (!participants.length) {
+      setDmActionErr('Enter at least one username, email, or user id.');
+      return;
+    }
 
+    setDmInviteBusy(true);
+    setDmActionErr('');
     try {
       await inviteToConversation(activeConv.id, participants);
+      setShowDmInviteModal(false);
+      setInviteInput('');
     } catch (err: any) {
       const msg = err?.message || 'Failed to invite participant(s)';
-      window.alert(msg);
+      setDmActionErr(msg);
+    } finally {
+      setDmInviteBusy(false);
     }
   }
 
-  async function handleLeaveDm() {
+  function handleLeaveDm() {
     if (!activeConv?.id) return;
-    const confirmed = window.confirm('Leave this DM conversation?');
-    if (!confirmed) return;
+    setDmActionErr('');
+    setShowDmLeaveModal(true);
+  }
 
+  async function confirmLeaveDm() {
+    if (!activeConv?.id || dmLeaveBusy) return;
+    setDmLeaveBusy(true);
+    setDmActionErr('');
     try {
       await leaveConversation(activeConv.id);
+      setShowDmLeaveModal(false);
     } catch (err: any) {
       const msg = err?.message || 'Failed to leave conversation';
-      window.alert(msg);
+      setDmActionErr(msg);
+    } finally {
+      setDmLeaveBusy(false);
     }
   }
 
@@ -462,6 +495,72 @@ export default function MessagePane() {
           </aside>
         )}
       </div>
+
+      {showDmInviteModal && activeConv && (
+        <Modal title="Invite to conversation" onClose={() => { if (!dmInviteBusy) setShowDmInviteModal(false); }}>
+          <form className={styles.modalForm} onSubmit={submitInviteToDm} data-testid="dm-invite-modal">
+            <label className={styles.modalLabel}>
+              Username, email, or user id
+              <input
+                className={styles.modalInput}
+                value={inviteInput}
+                onChange={(e) => setInviteInput(e.target.value)}
+                placeholder="alice, bob@example.com"
+                autoFocus
+                data-testid="dm-invite-input"
+              />
+            </label>
+            <p className={styles.modalHint}>Use commas to invite multiple users.</p>
+            {dmActionErr && <p className={styles.dmActionErr}>{dmActionErr}</p>}
+            <div className={styles.modalActions}>
+              <button
+                type="button"
+                className={styles.modalCancelBtn}
+                onClick={() => setShowDmInviteModal(false)}
+                disabled={dmInviteBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className={styles.modalPrimaryBtn}
+                disabled={dmInviteBusy}
+                data-testid="dm-invite-submit"
+              >
+                {dmInviteBusy ? 'Inviting…' : 'Invite'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showDmLeaveModal && activeConv && (
+        <Modal title="Leave conversation" onClose={() => { if (!dmLeaveBusy) setShowDmLeaveModal(false); }}>
+          <div className={styles.modalForm} data-testid="dm-leave-modal">
+            <p className={styles.modalHint}>You will stop receiving messages from this DM.</p>
+            {dmActionErr && <p className={styles.dmActionErr}>{dmActionErr}</p>}
+            <div className={styles.modalActions}>
+              <button
+                type="button"
+                className={styles.modalCancelBtn}
+                onClick={() => setShowDmLeaveModal(false)}
+                disabled={dmLeaveBusy}
+              >
+                Stay
+              </button>
+              <button
+                type="button"
+                className={styles.modalDangerBtn}
+                onClick={confirmLeaveDm}
+                disabled={dmLeaveBusy}
+                data-testid="dm-leave-confirm"
+              >
+                {dmLeaveBusy ? 'Leaving…' : 'Leave'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

@@ -107,6 +107,105 @@
   border-color: color-mix(in srgb, #e1605f 50%, var(--border));
 }
 
+.modalForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modalLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-secondary);
+}
+
+.modalInput {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+}
+
+.modalInput:focus {
+  border-color: var(--accent);
+}
+
+.modalHint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.dmActionErr {
+  margin: 0;
+  color: var(--red);
+  font-size: 13px;
+}
+
+.modalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.modalCancelBtn,
+.modalPrimaryBtn,
+.modalDangerBtn {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.modalCancelBtn {
+  background: var(--bg-3);
+  color: var(--text-secondary);
+}
+
+.modalCancelBtn:hover:not(:disabled) {
+  background: var(--bg-4);
+  color: var(--text-primary);
+}
+
+.modalPrimaryBtn {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--text-inverse);
+}
+
+.modalPrimaryBtn:hover:not(:disabled) {
+  background: var(--accent-dim);
+}
+
+.modalDangerBtn {
+  background: color-mix(in srgb, #e1605f 18%, var(--bg-2));
+  border-color: color-mix(in srgb, #e1605f 45%, var(--border));
+  color: #f08988;
+}
+
+.modalDangerBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, #e1605f 28%, var(--bg-2));
+}
+
+.modalCancelBtn:disabled,
+.modalPrimaryBtn:disabled,
+.modalDangerBtn:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
 .headerTitle {
   font-weight: 600;
   font-size: 15px;
