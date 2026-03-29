@@ -436,8 +436,11 @@ describe('DM management and realtime delivery', () => {
       expect(inviteRes.body.addedParticipantIds).toContain(userC.user.id);
 
       const inviteEvent = await inviteEventPromise;
+      // The invitee never explicitly subscribes to conversation/user channels in this test.
+      // Receiving this event validates server-side auto subscription/notification wiring.
       expect(inviteEvent.data.conversationId).toBe(conversationId);
       expect(inviteEvent.data.participantIds).toContain(userC.user.id);
+      expect(inviteEvent.data.invitedBy).toBe(userA.user.id);
 
       // Pending invitees should not be active participants yet.
       const pendingListRes = await request(app)

@@ -195,6 +195,7 @@ const channelClients = new Map(); // key → Set<WebSocket>
  * times for the same channel is a no-op.
  */
 const redisSubscribed = new Set();
+const redisSubscribeInFlight = new Map();
 
 // ── Redis subscriber listener ──────────────────────────────────────────────────
 redisSub.on('message', (channel, message) => {
@@ -255,7 +256,35 @@ async function listAutoSubscriptionChannels(userId) {
 
 async function bootstrapUserSubscriptions(ws, userId) {
   const channels = await listAutoSubscriptionChannels(userId);
-  channels.forEach((channel) => subscribeClient(ws, channel));
+  await Promise.allSettled(channels.map((channel) => subscribeClient(ws, channel)));
+}
+
+function hasLocalSubscribers(redisChannel) {
+  return (channelClients.get(redisChannel)?.size || 0) > 0;
+}
+
+async function ensureRedisChannelSubscribed(redisChannel) {
+  if (redisSubscribed.has(redisChannel)) return;
+
+  if (redisSubscribeInFlight.has(redisChannel)) {
+    await redisSubscribeInFlight.get(redisChannel);
+    return;
+  }
+
+  if (!isRedisOperational(redisSub)) {
+    throw new Error('Redis subscriber is not available');
+  }
+
+  const op = Promise.resolve(redisSub.subscribe(redisChannel))
+    .then(() => {
+      redisSubscribed.add(redisChannel);
+    })
+    .finally(() => {
+      redisSubscribeInFlight.delete(redisChannel);
+    });
+
+  redisSubscribeInFlight.set(redisChannel, op);
+  await op;
 }
 
 // ── Connection handling ────────────────────────────────────────────────────────
@@ -281,23 +310,12 @@ wss.on('connection', async (ws, req) => {
   ws._userId = user.id;
   ws._connectionId = randomUUID();
 
-  upsertConnectionState(user.id, ws._connectionId, 'idle')
-    .then(async () => {
-      await markConnectionAlive(user.id, ws._connectionId);
-      await recomputeUserPresence(user.id);
-    })
-    .catch((err) => logger.warn({ err, userId: user.id }, 'WS presence setup failed'));
-
-  // Automatically subscribe to personal notification channel
-  subscribeClient(ws, `user:${user.id}`);
-
-  bootstrapUserSubscriptions(ws, user.id)
-    .catch((err) => logger.warn({ err, userId: user.id }, 'WS auto-subscribe bootstrap failed'));
-
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw);
-      handleClientMessage(ws, user, msg);
+      handleClientMessage(ws, user, msg).catch((err) => {
+        logger.warn({ err, userId: user.id }, 'WS message dispatch failed');
+      });
     } catch {
       ws.send(JSON.stringify({ event: 'error', data: 'Invalid JSON' }));
     }
@@ -317,24 +335,43 @@ wss.on('connection', async (ws, req) => {
     ws.isAlive = true;
     markConnectionAlive(user.id, ws._connectionId).catch(() => {});
   });
+
+  upsertConnectionState(user.id, ws._connectionId, 'idle')
+    .then(async () => {
+      await markConnectionAlive(user.id, ws._connectionId);
+      await recomputeUserPresence(user.id);
+    })
+    .catch((err) => logger.warn({ err, userId: user.id }, 'WS presence setup failed'));
+
+  // Automatically subscribe to personal notification channel without blocking
+  // client message handling, otherwise early subscribe frames can be dropped.
+  subscribeClient(ws, `user:${user.id}`)
+    .catch((err) => logger.warn({ err, userId: user.id }, 'WS user-channel subscribe failed'));
+
+  bootstrapUserSubscriptions(ws, user.id)
+    .catch((err) => logger.warn({ err, userId: user.id }, 'WS auto-subscribe bootstrap failed'));
 });
 
 // ── Client message dispatch ────────────────────────────────────────────────────
-function handleClientMessage(ws, user, msg) {
+async function handleClientMessage(ws, user, msg) {
   markConnectionAlive(user.id, ws._connectionId).catch(() => {});
 
   switch (msg.type) {
     case 'subscribe':
       if (isAllowedChannel(user, msg.channel)) {
-        subscribeClient(ws, msg.channel);
-        ws.send(JSON.stringify({ event: 'subscribed', data: { channel: msg.channel } }));
+        try {
+          await subscribeClient(ws, msg.channel);
+          ws.send(JSON.stringify({ event: 'subscribed', data: { channel: msg.channel } }));
+        } catch {
+          ws.send(JSON.stringify({ event: 'error', data: 'Subscribe failed' }));
+        }
       } else {
         ws.send(JSON.stringify({ event: 'error', data: 'Channel not allowed' }));
       }
       break;
 
     case 'unsubscribe':
-      unsubscribeClient(ws, msg.channel);
+      await unsubscribeClient(ws, msg.channel);
       break;
 
     case 'ping':
@@ -375,31 +412,30 @@ function isAllowedChannel(_user, channel) {
 }
 
 // ── Subscribe helpers ──────────────────────────────────────────────────────────
-function subscribeClient(ws, redisChannel) {
+async function subscribeClient(ws, redisChannel) {
+  if (ws._subscriptions.has(redisChannel)) return;
+
+  await ensureRedisChannelSubscribed(redisChannel);
+
   if (!channelClients.has(redisChannel)) {
     channelClients.set(redisChannel, new Set());
   }
   channelClients.get(redisChannel).add(ws);
   ws._subscriptions.add(redisChannel);
+}
 
-  if (!redisSubscribed.has(redisChannel)) {
-    redisSubscribed.add(redisChannel);
-    Promise.resolve(redisSub.subscribe(redisChannel)).catch((err) => {
-      redisSubscribed.delete(redisChannel);
-      logger.warn({ err, redisChannel }, 'WS redis subscribe failed');
-    });
+async function unsubscribeClient(ws, redisChannel) {
+  channelClients.get(redisChannel)?.delete(ws);
+  ws._subscriptions.delete(redisChannel);
+
+  if ((channelClients.get(redisChannel)?.size || 0) === 0) {
+    channelClients.delete(redisChannel);
   }
 }
 
-function unsubscribeClient(ws, redisChannel) {
-  channelClients.get(redisChannel)?.delete(ws);
-  ws._subscriptions.delete(redisChannel);
-}
-
 function cleanup(ws, userId) {
-  ws._subscriptions.forEach((ch) => {
-    channelClients.get(ch)?.delete(ws);
-  });
+  const subscriptions = [...ws._subscriptions];
+  Promise.allSettled(subscriptions.map((ch) => unsubscribeClient(ws, ch))).catch(() => {});
 
   if (shuttingDown) {
     logger.info({ userId }, 'WS disconnected');
