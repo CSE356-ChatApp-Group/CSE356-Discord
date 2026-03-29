@@ -162,8 +162,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     sleep 1
 
     # Also kill known stale app patterns that may not release immediately.
-    pkill -f "PORT=${CANDIDATE_PORT}.*npm --prefix backend start" 2>/dev/null || true
-    pkill -f "backend/dist/index.js" 2>/dev/null || true
+    pkill -f 'PORT=${CANDIDATE_PORT}.*npm --prefix backend start' 2>/dev/null || true
+    pkill -f 'backend/dist/index.js' 2>/dev/null || true
     sleep 1
     
     PIDS=\$(lsof -ti :${CANDIDATE_PORT} 2>/dev/null | sort -u)
@@ -185,7 +185,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
       echo 'ERROR: Candidate port ${CANDIDATE_PORT} still in use after cleanup.'
       echo 'Processes holding the port:'
       lsof -i :${CANDIDATE_PORT} || true
-      ss -lptn "( sport = :${CANDIDATE_PORT} )" 2>/dev/null || true
+      ss -lptn 2>/dev/null | grep -E ":${CANDIDATE_PORT}[[:space:]]" || true
       exit 1
     fi
   fi
