@@ -26,161 +26,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  wait-for-release:
-    runs-on: ubuntu-latest
-    outputs:
-      target_sha: ${{ steps.resolve.outputs.target_sha }}
-    steps:
-      - name: Resolve target SHA
-        id: resolve
-        shell: bash
-        run: |
-          TARGET_SHA="${{ inputs.sha }}"
-          if [[ -z "$TARGET_SHA" ]]; then
-            TARGET_SHA="${{ github.sha }}"
-          fi
-          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for release artifact
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ steps.resolve.outputs.target_sha }}
-        run: |
-          set -euo pipefail
-          TAG="release-$TARGET_SHA"
-          MAX_ATTEMPTS=40
-          SLEEP_SECONDS=15
-
-          echo "Waiting for release artifact: $TAG"
-          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-            if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
-              echo "Release artifact is ready."
-              exit 0
-            fi
-            echo "Attempt $attempt/$MAX_ATTEMPTS: release not ready yet; sleeping ${SLEEP_SECONDS}s"
-            sleep "$SLEEP_SECONDS"
-          done
-
-          echo "ERROR: release artifact $TAG not available after waiting."
-          exit 1
-
   deploy-staging:
-    needs: wait-for-release
     if: inputs.environment == 'staging'
-    runs-on: ubuntu-latest
-    environment: staging
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Ensure GitHub CLI exists
-        run: |
-          if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y gh
-          fi
-
-      - name: Setup SSH key
-        shell: bash
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: |
-          test -n "$DEPLOY_SSH_KEY" || { echo "Missing DEPLOY_SSH_KEY secret"; exit 1; }
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
-      - name: Add host to known_hosts
-        shell: bash
-        env:
-          STAGING_HOST: ${{ vars.STAGING_HOST }}
-        run: |
-          HOST="${STAGING_HOST:-136.114.103.71}"
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Deploy to staging
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STAGING_HOST: ${{ vars.STAGING_HOST }}
-          STAGING_USER: ${{ vars.STAGING_USER }}
-        run: |
-          TARGET_SHA="${{ needs.wait-for-release.outputs.target_sha }}"
-
-          HOST="${STAGING_HOST:-136.114.103.71}"
-          USER="${STAGING_USER:-ssperrottet}"
-
-          STAGING_HOST="$HOST" STAGING_USER="$USER" GITHUB_REPO="${{ github.repository }}" \
-            ./deploy/deploy-staging.sh "$TARGET_SHA"
+    uses: ./.github/workflows/reusable-vm-deploy.yml
+    secrets: inherit
+    with:
+      environment: staging
+      target_sha: ${{ inputs.sha || github.sha }}
+      host: ${{ vars.STAGING_HOST || '136.114.103.71' }}
+      user: ${{ vars.STAGING_USER || 'ssperrottet' }}
+      script_path: deploy/deploy-staging.sh
 
   deploy-prod:
-    needs: wait-for-release
     if: inputs.environment == 'prod'
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Ensure GitHub CLI exists
-        run: |
-          if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y gh
-          fi
-
-      - name: Setup SSH key
-        shell: bash
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: |
-          test -n "$DEPLOY_SSH_KEY" || { echo "Missing DEPLOY_SSH_KEY secret"; exit 1; }
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
-      - name: Add host to known_hosts
-        shell: bash
-        env:
-          PROD_HOST: ${{ vars.PROD_HOST }}
-        run: |
-          HOST="${PROD_HOST:-}"
-          test -n "$HOST" || { echo "Missing production host: set GitHub environment variable PROD_HOST"; exit 1; }
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Deploy to production
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PROD_HOST: ${{ vars.PROD_HOST }}
-          PROD_USER: ${{ vars.PROD_USER }}
-        run: |
-          TARGET_SHA="${{ needs.wait-for-release.outputs.target_sha }}"
-
-          HOST="${PROD_HOST:-}"
-          USER="${PROD_USER:-}"
-          test -n "$HOST" || { echo "Missing production host: set GitHub environment variable PROD_HOST"; exit 1; }
-          test -n "$USER" || { echo "Missing production user: set GitHub environment variable PROD_USER"; exit 1; }
-
-          echo "Resolved production target: ${USER}@${HOST}"
-          echo "Deploying SHA: ${TARGET_SHA}"
-
-          printf 'y\n' | PROD_HOST="$HOST" PROD_USER="$USER" GITHUB_REPO="${{ github.repository }}" \
-            ./deploy/deploy-prod.sh "$TARGET_SHA"
-
-      - name: Verify public prod endpoints
-        shell: bash
-        env:
-          PROD_HOST: ${{ vars.PROD_HOST }}
-        run: |
-          HOST="${PROD_HOST:-}"
-          test -n "$HOST" || { echo "Missing production host: set GitHub environment variable PROD_HOST"; exit 1; }
-
-          curl -fsS --max-time 10 "http://${HOST}/health" >/dev/null
-          curl -fsS --max-time 10 "http://${HOST}/" >/dev/null
-          echo "Public endpoint checks passed for ${HOST}"
+    uses: ./.github/workflows/reusable-vm-deploy.yml
+    secrets: inherit
+    with:
+      environment: production
+      target_sha: ${{ inputs.sha || github.sha }}
+      host: ${{ vars.PROD_HOST }}
+      user: ${{ vars.PROD_USER }}
+      script_path: deploy/deploy-prod.sh
+      verify_public_host: true
+      auto_confirm: true
