@@ -2,13 +2,26 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { useAutoResize } from '../hooks/useAutoResize';
+import { api } from '../lib/api';
 import MessageItem  from './MessageItem';
 import SearchBar    from './SearchBar';
 import MemberList   from './MemberList';
+import Modal        from './Modal';
 import styles from './MessagePane.module.css';
 
 export default function MessagePane() {
-  const { activeChannel, activeConv, messages, sendMessage, fetchMessages, search, searchResults, clearSearch } = useChatStore();
+  const {
+    activeChannel,
+    activeConv,
+    messages,
+    sendMessage,
+    fetchMessages,
+    search,
+    searchResults,
+    clearSearch,
+    inviteToConversation,
+    leaveConversation,
+  } = useChatStore();
   const user = useAuthStore(s => s.user);
 
   const target   = activeChannel || activeConv;
@@ -21,8 +34,18 @@ export default function MessagePane() {
   const [showSearch, setSearch]   = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   const [localQ, setLocalQ]       = useState('');
+  const [showDmInviteModal, setShowDmInviteModal] = useState(false);
+  const [showDmLeaveModal, setShowDmLeaveModal] = useState(false);
+  const [inviteQuery, setInviteQuery] = useState('');
+  const [inviteResults, setInviteResults] = useState<any[]>([]);
+  const [selectedInvitees, setSelectedInvitees] = useState<any[]>([]);
+  const [dmInviteBusy, setDmInviteBusy] = useState(false);
+  const [dmLeaveBusy, setDmLeaveBusy] = useState(false);
+  const [dmActionErr, setDmActionErr] = useState('');
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const inviteInputRef = useRef<HTMLInputElement>(null);
+  const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const bottomRef   = useRef(null);
   const inputRef    = useRef(null);
@@ -75,7 +98,27 @@ export default function MessagePane() {
     setShowMembers(false);
     clearSearch();
     setLocalQ('');
+    setShowDmInviteModal(false);
+    setShowDmLeaveModal(false);
+    setDmActionErr('');
+    setInviteQuery('');
+    setInviteResults([]);
+    setSelectedInvitees([]);
   }, [key]);
+
+  useEffect(() => {
+    if (showDmInviteModal) {
+      requestAnimationFrame(() => inviteInputRef.current?.focus());
+    }
+  }, [showDmInviteModal]);
+
+  useEffect(() => () => {
+    if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current);
+  }, []);
+
+  const existingDmMemberIds = useMemo(() => {
+    return new Set((activeConv?.participants || []).map((participant) => participant.id));
+  }, [activeConv]);
 
   // Focus search input and clean up when search panel toggles
   useEffect(() => {
@@ -141,6 +184,103 @@ export default function MessagePane() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend(e);
+    }
+  }
+
+  function handleInviteToDm() {
+    if (!activeConv?.id) return;
+    setDmActionErr('');
+    setInviteQuery('');
+    setInviteResults([]);
+    setSelectedInvitees([]);
+    setShowDmInviteModal(true);
+  }
+
+  function searchInviteUsers(value: string) {
+    if (inviteDebounceRef.current) clearTimeout(inviteDebounceRef.current);
+    const query = value.trim();
+    if (!query) {
+      setInviteResults([]);
+      return;
+    }
+
+    inviteDebounceRef.current = setTimeout(async () => {
+      try {
+        const data = await api.get(`/users?q=${encodeURIComponent(query)}`);
+        const users: any[] = data.users ?? data ?? [];
+        setInviteResults(users.filter((entry) => !existingDmMemberIds.has(entry.id)));
+      } catch {
+        setInviteResults([]);
+      }
+    }, 220);
+  }
+
+  function toggleInvitee(user) {
+    if (!user?.id) return;
+    setSelectedInvitees((prev) => {
+      const exists = prev.some((entry) => entry.id === user.id);
+      if (exists) return prev.filter((entry) => entry.id !== user.id);
+      return [...prev, user];
+    });
+  }
+
+  function handleInviteInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setInviteQuery(e.target.value);
+    searchInviteUsers(e.target.value);
+  }
+
+  async function submitInviteToDm(e: React.FormEvent) {
+    e.preventDefault();
+    if (!activeConv?.id || dmInviteBusy) return;
+
+    const selected = selectedInvitees.map((entry) => entry.id).filter(Boolean);
+    const typed = inviteQuery
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const participants = selected.length
+      ? selected
+      : [...new Set(typed)].filter((value) => !existingDmMemberIds.has(value));
+
+    if (!participants.length) {
+      setDmActionErr('Select someone from search, or type a username/email/id and press Invite.');
+      return;
+    }
+
+    setDmInviteBusy(true);
+    setDmActionErr('');
+    try {
+      await inviteToConversation(activeConv.id, participants);
+      setShowDmInviteModal(false);
+      setInviteQuery('');
+      setInviteResults([]);
+      setSelectedInvitees([]);
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to invite participant(s)';
+      setDmActionErr(msg);
+    } finally {
+      setDmInviteBusy(false);
+    }
+  }
+
+  function handleLeaveDm() {
+    if (!activeConv?.id) return;
+    setDmActionErr('');
+    setShowDmLeaveModal(true);
+  }
+
+  async function confirmLeaveDm() {
+    if (!activeConv?.id || dmLeaveBusy) return;
+    setDmLeaveBusy(true);
+    setDmActionErr('');
+    try {
+      await leaveConversation(activeConv.id);
+      setShowDmLeaveModal(false);
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to leave conversation';
+      setDmActionErr(msg);
+    } finally {
+      setDmLeaveBusy(false);
     }
   }
 
@@ -252,6 +392,26 @@ export default function MessagePane() {
           )}
         </div>
         <div className={styles.headerActions}>
+          {activeConv && (
+            <>
+              <button
+                type="button"
+                className={styles.dmActionBtn}
+                onClick={handleInviteToDm}
+                data-testid="dm-invite-button"
+              >
+                Invite
+              </button>
+              <button
+                type="button"
+                className={`${styles.dmActionBtn} ${styles.dmLeaveBtn}`}
+                onClick={handleLeaveDm}
+                data-testid="dm-leave-button"
+              >
+                Leave
+              </button>
+            </>
+          )}
           {activeChannel && (
             <button
               className={`${styles.iconTrigger} ${showMembers ? styles.iconTriggerActive : ''}`}
@@ -398,6 +558,108 @@ export default function MessagePane() {
           </aside>
         )}
       </div>
+
+      {showDmInviteModal && activeConv && (
+        <Modal title="Invite to conversation" onClose={() => { if (!dmInviteBusy) setShowDmInviteModal(false); }}>
+          <form className={styles.modalForm} onSubmit={submitInviteToDm} data-testid="dm-invite-modal">
+            <label className={styles.modalLabel}>
+              Add people
+              <input
+                className={styles.modalInput}
+                ref={inviteInputRef}
+                value={inviteQuery}
+                onChange={handleInviteInputChange}
+                placeholder="Find by name or username…"
+                data-testid="dm-invite-input"
+              />
+            </label>
+            {selectedInvitees.length > 0 && (
+              <div className={styles.selectedUsers} data-testid="dm-invite-selected-users">
+                {selectedInvitees.map((user) => (
+                  <button
+                    key={user.id}
+                    type="button"
+                    className={styles.selectedUserChip}
+                    onClick={() => toggleInvitee(user)}
+                  >
+                    <span>{user.displayName || user.display_name || user.username}</span>
+                    <span aria-hidden="true">×</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {inviteResults.length > 0 && (
+              <ul className={styles.inviteResults} data-testid="dm-invite-results">
+                {inviteResults.map((user) => (
+                  <li key={user.id}>
+                    <button
+                      type="button"
+                      className={styles.inviteResultBtn}
+                      onClick={() => toggleInvitee(user)}
+                      disabled={dmInviteBusy}
+                      data-testid={`dm-invite-user-${user.id}`}
+                    >
+                      <span className={styles.inviteResultName}>{user.displayName || user.display_name || user.username}</span>
+                      {user.username && <span className={styles.inviteResultUsername}>@{user.username}</span>}
+                      {selectedInvitees.some((entry) => entry.id === user.id) && <span className={styles.inviteSelectedMark}>Selected</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {inviteQuery.trim() && inviteResults.length === 0 && (
+              <p className={styles.modalHint}>No matches yet. You can still type exact username/email/id and press Invite.</p>
+            )}
+            {dmActionErr && <p className={styles.dmActionErr}>{dmActionErr}</p>}
+            <div className={styles.modalActions}>
+              <button
+                type="button"
+                className={styles.modalCancelBtn}
+                onClick={() => setShowDmInviteModal(false)}
+                disabled={dmInviteBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className={styles.modalPrimaryBtn}
+                disabled={dmInviteBusy || (selectedInvitees.length === 0 && !inviteQuery.trim())}
+                data-testid="dm-invite-submit"
+              >
+                {dmInviteBusy ? 'Inviting…' : selectedInvitees.length > 1 ? 'Invite people' : 'Invite person'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showDmLeaveModal && activeConv && (
+        <Modal title="Leave conversation" onClose={() => { if (!dmLeaveBusy) setShowDmLeaveModal(false); }}>
+          <div className={styles.modalForm} data-testid="dm-leave-modal">
+            <p className={styles.modalHint}>You will stop receiving messages from this DM.</p>
+            {dmActionErr && <p className={styles.dmActionErr}>{dmActionErr}</p>}
+            <div className={styles.modalActions}>
+              <button
+                type="button"
+                className={styles.modalCancelBtn}
+                onClick={() => setShowDmLeaveModal(false)}
+                disabled={dmLeaveBusy}
+              >
+                Stay
+              </button>
+              <button
+                type="button"
+                className={styles.modalDangerBtn}
+                onClick={confirmLeaveDm}
+                disabled={dmLeaveBusy}
+                data-testid="dm-leave-confirm"
+              >
+                {dmLeaveBusy ? 'Leaving…' : 'Leave'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

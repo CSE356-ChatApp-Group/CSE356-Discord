@@ -101,4 +101,46 @@ describe('chatStore websocket author hydration', () => {
     expect(stored.author).toBeDefined();
     expect(stored.author.id).toBe('user-1');
   });
+
+  it('queues conversation:invited as a pending DM invite', () => {
+    useChatStore.setState({ conversations: [], pendingDmInvites: [] } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'conversation:invited',
+      data: {
+        conversationId: 'conv-1',
+        conversation: {
+          id: 'conv-1',
+          participants: [{ id: 'user-1', username: 'sam' }, { id: 'user-2', username: 'alex' }],
+        },
+      },
+    });
+
+    const state = useChatStore.getState();
+    expect(state.pendingDmInvites).toHaveLength(1);
+    expect(state.pendingDmInvites[0].id).toBe('conv-1');
+    expect(state.conversations).toHaveLength(0);
+  });
+
+  it('promotes participant_added conversation to active DM list and clears pending invite', () => {
+    useChatStore.setState({
+      conversations: [],
+      pendingDmInvites: [{ id: 'conv-2', participants: [{ id: 'user-1' }, { id: 'user-3' }] }],
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'conversation:participant_added',
+      data: {
+        conversationId: 'conv-2',
+        conversation: {
+          id: 'conv-2',
+          participants: [{ id: 'user-1', username: 'sam' }, { id: 'user-3', username: 'lee' }],
+        },
+      },
+    });
+
+    const state = useChatStore.getState();
+    expect(state.conversations.some((conv) => conv.id === 'conv-2')).toBe(true);
+    expect(state.pendingDmInvites.some((invite) => invite.id === 'conv-2')).toBe(false);
+  });
 });

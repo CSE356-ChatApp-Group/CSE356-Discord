@@ -12,6 +12,7 @@ type ChatState = {
   channels: Entity[];
   activeChannel: Entity | null;
   conversations: Entity[];
+  pendingDmInvites: Entity[];
   activeConv: Entity | null;
   messages: Record<string, Entity[]>;
   presence: Record<string, PresenceStatus>;
@@ -27,8 +28,12 @@ type ChatState = {
   selectChannel: (channel: Entity) => Promise<void>;
   fetchConversations: () => Promise<void>;
   openHome: () => void;
-  openDm: (userId: string) => Promise<Entity>;
+  openDm: (participants: string | string[]) => Promise<Entity>;
   selectConversation: (conv: Entity) => Promise<void>;
+  acceptDmInvite: (conversationId: string) => Promise<void>;
+  declineDmInvite: (conversationId: string) => Promise<void>;
+  inviteToConversation: (conversationId: string, participants: string[]) => Promise<Entity | null>;
+  leaveConversation: (conversationId: string) => Promise<void>;
   fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string }) => Promise<Entity[]>;
   sendMessage: (content: string) => Promise<void>;
   editMessage: (id: string, content: string) => Promise<void>;
@@ -116,6 +121,14 @@ const readMarkRecent = new Map<string, number>();
 
 const READ_MARK_RECENT_MS = 2000;
 const UNREAD_REFRESH_MIN_MS = 1200;
+let wsUserSubscriptionId: string | null = null;
+
+function ensureUserWsSubscription(handler: (event: any) => void) {
+  const userId = useAuthStore.getState().user?.id;
+  if (!userId || wsUserSubscriptionId === userId) return;
+  wsManager.subscribe(`user:${userId}`, handler);
+  wsUserSubscriptionId = userId;
+}
 
 function scheduleUnreadRefresh(run: () => void) {
   if (unreadRefreshTimer) return;
@@ -158,6 +171,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   channels:        [],
   activeChannel:   null,
   conversations:   [],
+  pendingDmInvites: [],
   activeConv:      null,
   messages:        {},   // { [channelId|convId]: Message[] }
   presence:        {},   // { [userId]: 'online'|'idle'|'away'|'offline' }
@@ -168,6 +182,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   // ── Communities ───────────────────────────────────────────────────────────
   async fetchCommunities() {
+    ensureUserWsSubscription(get()._handleWsEvent);
     if (communitiesInFlight) return communitiesInFlight;
 
     communitiesInFlight = (async () => {
@@ -379,6 +394,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   // ── Conversations (DMs) ───────────────────────────────────────────────────
   async fetchConversations() {
+    ensureUserWsSubscription(get()._handleWsEvent);
     const { conversations } = await api.get('/conversations');
     set({ conversations });
     conversations.forEach((conv: Entity) => {
@@ -392,8 +408,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     set({ activeCommunity: null, activeChannel: null });
   },
 
-  async openDm(userId: string) {
-    const { conversation } = await api.post('/conversations', { participantIds: [userId] });
+  async openDm(participants: string | string[]) {
+    const list = Array.isArray(participants) ? participants : [participants];
+    const cleaned = [...new Set((list || []).map((value) => value?.trim?.() || '').filter(Boolean))];
+    if (!cleaned.length) {
+      throw new Error('Select at least one participant');
+    }
+
+    const { conversation } = await api.post('/conversations', { participantIds: cleaned });
     set(s => {
       const existing = s.conversations.find(c => c.id === conversation.id);
       const activeConv = existing
@@ -471,6 +493,95 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }));
       markMessageRead(lastId);
     }
+  },
+
+  async acceptDmInvite(conversationId: string) {
+    const invite = get().pendingDmInvites.find((entry) => entry.id === conversationId);
+    if (!invite) return;
+
+    set((s) => {
+      const existing = s.conversations.find((conv) => conv.id === conversationId);
+      const updated = existing
+        ? {
+            ...existing,
+            ...invite,
+            participants: invite.participants || existing.participants,
+          }
+        : invite;
+
+      return {
+        conversations: existing
+          ? s.conversations.map((conv) => (conv.id === conversationId ? updated : conv))
+          : [updated, ...s.conversations],
+        pendingDmInvites: s.pendingDmInvites.filter((entry) => entry.id !== conversationId),
+      };
+    });
+
+    const acceptedConversation = get().conversations.find((conv) => conv.id === conversationId);
+    if (acceptedConversation) {
+      await get().selectConversation(acceptedConversation);
+    }
+  },
+
+  async declineDmInvite(conversationId: string) {
+    set((s) => ({
+      pendingDmInvites: s.pendingDmInvites.filter((entry) => entry.id !== conversationId),
+    }));
+
+    await get().leaveConversation(conversationId).catch(() => {});
+  },
+
+  async inviteToConversation(conversationId: string, participants: string[]) {
+    const cleaned = (participants || []).map((value) => value.trim()).filter(Boolean);
+    if (!conversationId || !cleaned.length) return null;
+
+    const { conversation } = await api.post(`/conversations/${conversationId}/invite`, {
+      participantIds: cleaned,
+    });
+
+    if (conversation?.id) {
+      wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
+      set(s => ({
+        conversations: s.conversations.map((conv) =>
+          conv.id === conversation.id
+            ? {
+                ...conv,
+                ...conversation,
+                participants: conversation.participants || conv.participants,
+              }
+            : conv
+        ),
+        activeConv:
+          s.activeConv?.id === conversation.id
+            ? {
+                ...s.activeConv,
+                ...conversation,
+                participants: conversation.participants || s.activeConv.participants,
+              }
+            : s.activeConv,
+      }));
+    }
+
+    return conversation || null;
+  },
+
+  async leaveConversation(conversationId: string) {
+    try {
+      await api.post(`/conversations/${conversationId}/leave`, {});
+    } catch (err: any) {
+      const status = Number(err?.status || 0);
+      // Treat already-left/not-found as idempotent success for UI smoothness.
+      if (status !== 403 && status !== 404) {
+        throw err;
+      }
+    }
+
+    set(s => ({
+      conversations: s.conversations.filter((conv) => conv.id !== conversationId),
+      pendingDmInvites: s.pendingDmInvites.filter((invite) => invite.id !== conversationId),
+      activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
+      activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
+    }));
   },
 
   // ── Messages ──────────────────────────────────────────────────────────────
@@ -968,6 +1079,141 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               : s.activeCommunity,
         }));
 
+        break;
+      }
+      case 'conversation:invited': {
+        const conversation = event.data?.conversation;
+        const conversationId = event.data?.conversationId || conversation?.id;
+        if (!conversationId) break;
+
+        wsManager.subscribe(`conversation:${conversationId}`, store._handleWsEvent);
+
+        if (!conversation) {
+          store.fetchConversations().catch(() => {});
+          break;
+        }
+
+        set((s) => {
+          const existing = s.conversations.find((conv) => conv.id === conversationId);
+          const existingInvite = s.pendingDmInvites.find((invite) => invite.id === conversationId);
+
+          if (!existing) {
+            const pendingInvite = existingInvite
+              ? {
+                  ...existingInvite,
+                  ...conversation,
+                  participants: conversation.participants || existingInvite.participants,
+                }
+              : conversation;
+
+            return {
+              pendingDmInvites: [
+                pendingInvite,
+                ...s.pendingDmInvites.filter((invite) => invite.id !== conversationId),
+              ],
+            };
+          }
+
+          const updated = existing
+            ? {
+                ...existing,
+                ...conversation,
+                participants: conversation.participants || existing.participants,
+              }
+            : conversation;
+
+          const conversations = existing
+            ? s.conversations.map((conv) => (conv.id === conversationId ? updated : conv))
+            : [updated, ...s.conversations];
+
+          return {
+            conversations,
+            pendingDmInvites: s.pendingDmInvites.filter((invite) => invite.id !== conversationId),
+            activeConv:
+              s.activeConv?.id === conversationId
+                ? {
+                    ...s.activeConv,
+                    ...updated,
+                    participants: updated.participants || s.activeConv.participants,
+                  }
+                : s.activeConv,
+          };
+        });
+        break;
+      }
+      case 'conversation:participant_added': {
+        const conversation = event.data?.conversation;
+        const conversationId = event.data?.conversationId || conversation?.id;
+        if (!conversationId) break;
+
+        wsManager.subscribe(`conversation:${conversationId}`, store._handleWsEvent);
+
+        if (!conversation) {
+          store.fetchConversations().catch(() => {});
+          break;
+        }
+
+        set((s) => {
+          const existing = s.conversations.find((conv) => conv.id === conversationId);
+          const updated = existing
+            ? {
+                ...existing,
+                ...conversation,
+                participants: conversation.participants || existing.participants,
+              }
+            : conversation;
+
+          const conversations = existing
+            ? s.conversations.map((conv) => (conv.id === conversationId ? updated : conv))
+            : [updated, ...s.conversations];
+
+          return {
+            conversations,
+            pendingDmInvites: s.pendingDmInvites.filter((invite) => invite.id !== conversationId),
+            activeConv:
+              s.activeConv?.id === conversationId
+                ? {
+                    ...s.activeConv,
+                    ...updated,
+                    participants: updated.participants || s.activeConv.participants,
+                  }
+                : s.activeConv,
+          };
+        });
+        break;
+      }
+      case 'conversation:participant_left': {
+        const conversationId = event.data?.conversationId;
+        const leftUserId = event.data?.leftUserId || event.data?.userId;
+        const me = useAuthStore.getState().user;
+        if (!conversationId || !leftUserId) break;
+
+        if (me?.id === leftUserId) {
+          set((s) => ({
+            conversations: s.conversations.filter((conv) => conv.id !== conversationId),
+            activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
+            activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
+          }));
+          break;
+        }
+
+        set((s) => ({
+          conversations: s.conversations.map((conv) =>
+            conv.id === conversationId
+              ? {
+                  ...conv,
+                  participants: (conv.participants || []).filter((participant) => participant.id !== leftUserId),
+                }
+              : conv
+          ),
+          activeConv:
+            s.activeConv?.id === conversationId
+              ? {
+                  ...s.activeConv,
+                  participants: (s.activeConv.participants || []).filter((participant) => participant.id !== leftUserId),
+                }
+              : s.activeConv,
+        }));
         break;
       }
     }

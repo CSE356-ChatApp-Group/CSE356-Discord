@@ -77,6 +77,207 @@
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
+.dmActionBtn {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.dmActionBtn:hover {
+  background: var(--bg-3);
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+
+.dmLeaveBtn {
+  color: #e1605f;
+  border-color: color-mix(in srgb, #e1605f 35%, var(--border));
+}
+
+.dmLeaveBtn:hover {
+  background: color-mix(in srgb, #e1605f 14%, var(--bg-2));
+  color: #f08988;
+  border-color: color-mix(in srgb, #e1605f 50%, var(--border));
+}
+
+.modalForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modalLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-secondary);
+}
+
+.modalInput {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+}
+
+.modalInput:focus {
+  border-color: var(--accent);
+}
+
+.modalHint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.selectedUsers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.selectedUserChip {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.selectedUserChip:hover {
+  border-color: var(--accent);
+}
+
+.inviteResults {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.inviteResultBtn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  text-align: left;
+  color: var(--text-primary);
+  transition: background .1s;
+}
+
+.inviteResultBtn:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+
+.inviteResultBtn:disabled {
+  opacity: .6;
+}
+
+.inviteResultName {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.inviteResultUsername {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.inviteSelectedMark {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.dmActionErr {
+  margin: 0;
+  color: var(--red);
+  font-size: 13px;
+}
+
+.modalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.modalCancelBtn,
+.modalPrimaryBtn,
+.modalDangerBtn {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.modalCancelBtn {
+  background: var(--bg-3);
+  color: var(--text-secondary);
+}
+
+.modalCancelBtn:hover:not(:disabled) {
+  background: var(--bg-4);
+  color: var(--text-primary);
+}
+
+.modalPrimaryBtn {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--text-inverse);
+}
+
+.modalPrimaryBtn:hover:not(:disabled) {
+  background: var(--accent-dim);
+}
+
+.modalDangerBtn {
+  background: color-mix(in srgb, #e1605f 18%, var(--bg-2));
+  border-color: color-mix(in srgb, #e1605f 45%, var(--border));
+  color: #f08988;
+}
+
+.modalDangerBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, #e1605f 28%, var(--bg-2));
+}
+
+.modalCancelBtn:disabled,
+.modalPrimaryBtn:disabled,
+.modalDangerBtn:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
 .headerTitle {
   font-weight: 600;
   font-size: 15px;

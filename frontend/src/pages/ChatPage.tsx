@@ -5,6 +5,7 @@ import { usePresenceHeartbeat } from '../hooks/usePresenceHeartbeat';
 import CommunitySidebar  from '../components/CommunitySidebar';
 import ChannelSidebar    from '../components/ChannelSidebar';
 import MessagePane       from '../components/MessagePane';
+import Modal             from '../components/Modal';
 import WelcomePane       from '../components/WelcomePane';
 import styles from './ChatPage.module.css';
 
@@ -30,7 +31,16 @@ function getInitialSidebarWidth() {
 }
 
 export default function ChatPage() {
-  const { fetchCommunities, fetchConversations, activeChannel, activeConv } = useChatStore();
+  const {
+    fetchCommunities,
+    fetchConversations,
+    activeChannel,
+    activeConv,
+    pendingDmInvites,
+    acceptDmInvite,
+    declineDmInvite,
+  } = useChatStore();
+  const user = useAuthStore((s) => s.user);
   const [sidebarWidth, setSidebarWidth] = useState(getInitialSidebarWidth);
   const [isResizing, setIsResizing] = useState(false);
   const layoutRef = useRef<HTMLDivElement | null>(null);
@@ -57,6 +67,11 @@ export default function ChatPage() {
   }, [sidebarWidth]);
 
   const hasActive = activeChannel || activeConv;
+  const pendingInvite = pendingDmInvites[0] || null;
+  const pendingInviteNames = (pendingInvite?.participants || [])
+    .filter((participant: any) => participant?.id !== user?.id)
+    .map((participant: any) => participant?.displayName || participant?.display_name || participant?.username)
+    .filter(Boolean);
 
   function startResize(event: React.PointerEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -124,6 +139,37 @@ export default function ChatPage() {
       <main className={styles.main} role="main" aria-label="Chat workspace" data-testid="chat-main">
         {hasActive ? <MessagePane /> : <WelcomePane />}
       </main>
+
+      {pendingInvite && (
+        <Modal title="New DM invitation" onClose={() => { void declineDmInvite(pendingInvite.id); }}>
+          <div className={styles.invitePrompt} data-testid="dm-invite-prompt-modal">
+            <p className={styles.invitePromptText}>
+              {pendingInviteNames.length
+                ? `You were invited to a DM with ${pendingInviteNames.join(', ')}.`
+                : 'Someone invited you to a DM conversation.'}
+            </p>
+            <p className={styles.invitePromptHint}>Do you want to accept this DM?</p>
+            <div className={styles.invitePromptActions}>
+              <button
+                type="button"
+                className={styles.inviteDeclineBtn}
+                onClick={() => { void declineDmInvite(pendingInvite.id); }}
+                data-testid="dm-invite-prompt-decline"
+              >
+                Decline
+              </button>
+              <button
+                type="button"
+                className={styles.inviteAcceptBtn}
+                onClick={() => { void acceptDmInvite(pendingInvite.id); }}
+                data-testid="dm-invite-prompt-accept"
+              >
+                Accept
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
