@@ -132,6 +132,22 @@ async function createSystemMessage(client, conversationId, content) {
   return rows[0] || null;
 }
 
+async function isGroupConversation(client, conversationId) {
+  const { rows } = await client.query(
+    `SELECT c.name,
+            COUNT(cp.user_id)::int AS participant_count
+     FROM conversations c
+     LEFT JOIN conversation_participants cp ON cp.conversation_id = c.id
+     WHERE c.id = $1
+     GROUP BY c.id`,
+    [conversationId]
+  );
+
+  const conversation = rows[0];
+  if (!conversation) return false;
+  return Boolean(conversation.name) || Number(conversation.participant_count || 0) >= 3;
+}
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
@@ -427,7 +443,11 @@ router.post('/:id/accept', param('id').isUUID(), async (req, res, next) => {
       : [];
 
     let joinedGroupMessage = null;
-    if (wasPending && conversation?.participants?.length >= 3) {
+    const groupConversation = wasPending
+      ? await isGroupConversation(client, req.params.id)
+      : false;
+
+    if (wasPending && groupConversation) {
       const joinedUserName = await getUserDisplayName(client, req.user.id);
       joinedGroupMessage = await createSystemMessage(client, req.params.id, `${joinedUserName} joined the group.`);
     }

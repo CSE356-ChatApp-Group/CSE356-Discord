@@ -565,6 +565,46 @@ describe('DM management and realtime delivery', () => {
     expect(joinedMessages).toHaveLength(1);
   });
 
+  it('emits joined system message when first invitee accepts in a group-intent conversation', async () => {
+    const owner = await createAuthenticatedUser('dmgroupintentowner');
+    const inviteeA = await createAuthenticatedUser('dmgroupintenta');
+    const inviteeB = await createAuthenticatedUser('dmgroupintentb');
+
+    // Start from 1:1, then invite a second pending member so the conversation is group-intent (3 total members).
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [inviteeA.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const inviteSecondRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/invite`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [inviteeB.user.id] });
+
+    expect(inviteSecondRes.status).toBe(200);
+
+    const acceptRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/accept`)
+      .set('Authorization', `Bearer ${inviteeB.accessToken}`)
+      .send({});
+
+    expect(acceptRes.status).toBe(200);
+
+    const messagesRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .query({ conversationId });
+
+    expect(messagesRes.status).toBe(200);
+    const joinedMessages = messagesRes.body.messages.filter(
+      (m) => m.type === 'system' && /joined the group\./i.test(m.content || '')
+    );
+    expect(joinedMessages).toHaveLength(1);
+  });
+
   it('delivers DM message and read events on user websocket channels', async () => {
     const sender = await createAuthenticatedUser('dmsender');
     const recipient = await createAuthenticatedUser('dmrecipient');
