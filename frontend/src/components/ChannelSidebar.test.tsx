@@ -6,11 +6,14 @@ import { useChatStore } from '../stores/chatStore';
 
 describe('ChannelSidebar destructive actions', () => {
   const deleteChannel = vi.fn();
+  const deleteCommunity = vi.fn();
   const leaveCommunity = vi.fn();
 
   beforeEach(() => {
     deleteChannel.mockReset();
     deleteChannel.mockResolvedValue(undefined);
+    deleteCommunity.mockReset();
+    deleteCommunity.mockResolvedValue(undefined);
     leaveCommunity.mockReset();
     leaveCommunity.mockResolvedValue(undefined);
 
@@ -36,6 +39,7 @@ describe('ChannelSidebar destructive actions', () => {
       selectConversation: vi.fn(),
       createChannel: vi.fn(),
       deleteChannel,
+      deleteCommunity,
       leaveCommunity,
       openDm: vi.fn(),
       acceptDmInvite: vi.fn(),
@@ -71,6 +75,31 @@ describe('ChannelSidebar destructive actions', () => {
 
     await waitFor(() => {
       expect(screen.queryByTestId('channel-delete-modal')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows an owner-only delete community modal and confirms deletion', async () => {
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'Workspace', my_role: 'owner' },
+    } as any);
+
+    render(<ChannelSidebar />);
+
+    expect(screen.queryByTestId('community-leave-btn')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('community-delete-btn'));
+
+    expect(screen.getByTestId('community-delete-modal')).toBeInTheDocument();
+    expect(screen.getByText('Delete Workspace? All channels and messages in this community will be permanently removed.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('community-delete-confirm'));
+
+    await waitFor(() => {
+      expect(deleteCommunity).toHaveBeenCalledWith('comm-1');
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('community-delete-modal')).not.toBeInTheDocument();
     });
   });
 });

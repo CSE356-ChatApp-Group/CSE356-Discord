@@ -22,6 +22,7 @@ type ChatState = {
   searchQuery: string;
   fetchCommunities: () => Promise<Entity[]>;
   createCommunity: (slug: string, name: string, description: string) => Promise<Entity>;
+  deleteCommunity: (communityId: string) => Promise<void>;
   leaveCommunity: (communityId: string) => Promise<void>;
   selectCommunity: (community: Entity) => Promise<void>;
   fetchChannels: (communityId: string) => Promise<Entity[]>;
@@ -119,6 +120,27 @@ function isVisibleConversation(conv: Entity, currentUserId?: string) {
   if (!currentUserId) return true;
   const participants = Array.isArray(conv.participants) ? conv.participants : [];
   return participants.some((participant: Entity) => participant?.id && participant.id !== currentUserId);
+}
+
+function removeCommunityState(state: ChatState, communityId: string) {
+  const removedChannelIds = state.channels
+    .filter((channel) => (channel.community_id || channel.communityId) === communityId)
+    .map((channel) => channel.id);
+  const removedSet = new Set(removedChannelIds);
+  const nextMessages = Object.fromEntries(
+    Object.entries(state.messages).filter(([key]) => !removedSet.has(key))
+  );
+  const isActiveCommunity = state.activeCommunity?.id === communityId;
+  const activeChannelRemoved = state.activeChannel?.id ? removedSet.has(state.activeChannel.id) : false;
+
+  return {
+    communities: state.communities.filter((community) => community.id !== communityId),
+    activeCommunity: isActiveCommunity ? null : state.activeCommunity,
+    channels: isActiveCommunity ? [] : state.channels,
+    activeChannel: isActiveCommunity || activeChannelRemoved ? null : state.activeChannel,
+    members: isActiveCommunity ? [] : state.members,
+    messages: nextMessages,
+  };
 }
 
 let unreadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -244,19 +266,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     return created;
   },
 
+  async deleteCommunity(communityId: string) {
+    await api.delete(`/communities/${communityId}`);
+    set((s) => removeCommunityState(s, communityId));
+  },
+
   async leaveCommunity(communityId: string) {
     await api.delete(`/communities/${communityId}/leave`);
-    set(s => {
-      const isActive = s.activeCommunity?.id === communityId;
-      const nextCommunities = s.communities.filter((community) => community.id !== communityId);
-      return {
-        communities: nextCommunities,
-        activeCommunity: isActive ? null : s.activeCommunity,
-        channels: isActive ? [] : s.channels,
-        activeChannel: isActive ? null : s.activeChannel,
-        members: isActive ? [] : s.members,
-      };
-    });
+    set((s) => removeCommunityState(s, communityId));
   },
 
   async selectCommunity(community: Entity) {
@@ -1090,6 +1107,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         if (store.activeCommunity?.id === communityId) {
           store.fetchMembers(communityId);
         }
+        break;
+      }
+      case 'community:deleted': {
+        const { communityId } = event.data || {};
+        if (!communityId) break;
+        set((s) => removeCommunityState(s, communityId));
         break;
       }
       case 'channel:created': {

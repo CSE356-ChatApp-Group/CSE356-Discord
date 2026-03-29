@@ -220,6 +220,48 @@ describe('Grader parity: communities and channels', () => {
       .query({ channelId: privateChannelRes.body.channel.id });
     expect(memberPrivateHistoryRes.status).toBe(403);
   });
+
+  it('allows owners to delete communities and rejects non-owner deletion attempts', async () => {
+    const owner = await createAuthenticatedUser('gradercommdeleteowner');
+    const member = await createAuthenticatedUser('gradercommdeletemember');
+
+    const slug = `delete-comm-${uniqueSuffix()}`;
+    const createCommunityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'delete community parity test' });
+
+    expect(createCommunityRes.status).toBe(201);
+    const communityId = createCommunityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .send({});
+    expect(joinRes.status).toBe(200);
+
+    const memberDeleteRes = await request(app)
+      .delete(`/api/v1/communities/${communityId}`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(memberDeleteRes.status).toBe(403);
+
+    const ownerDeleteRes = await request(app)
+      .delete(`/api/v1/communities/${communityId}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(ownerDeleteRes.status).toBe(200);
+
+    const ownerListRes = await request(app)
+      .get('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(ownerListRes.status).toBe(200);
+    expect(ownerListRes.body.communities.some((community: any) => community.id === communityId)).toBe(false);
+
+    const memberListRes = await request(app)
+      .get('/api/v1/communities')
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(memberListRes.status).toBe(200);
+    expect(memberListRes.body.communities.some((community: any) => community.id === communityId)).toBe(false);
+  });
 });
 
 describe('Grader parity: DM invite realtime', () => {

@@ -9,7 +9,7 @@ export default function ChannelSidebar() {
   const {
     activeCommunity, channels, activeChannel,
     conversations, pendingDmInvites, activeConv,
-    selectChannel, selectConversation, createChannel, deleteChannel, leaveCommunity, openDm,
+    selectChannel, selectConversation, createChannel, deleteChannel, deleteCommunity, leaveCommunity, openDm,
     acceptDmInvite, declineDmInvite,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
@@ -18,11 +18,14 @@ export default function ChannelSidebar() {
   const [showNewDm, setShowNewDm] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaveBusy, setLeaveBusy] = useState(false);
+  const [showDeleteCommunityConfirm, setShowDeleteCommunityConfirm] = useState(false);
+  const [deleteCommunityBusy, setDeleteCommunityBusy] = useState(false);
   const [channelToDelete, setChannelToDelete] = useState<any | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
 
   const canManage = canManageChannels(activeCommunity);
   const canLeave = canLeaveCommunity(activeCommunity);
+  const canDeleteCommunity = isCommunityOwner(activeCommunity);
 
   function handleLeaveCommunity() {
     if (!activeCommunity?.id || !canLeave) return;
@@ -37,6 +40,17 @@ export default function ChannelSidebar() {
       setShowLeaveConfirm(false);
     } finally {
       setLeaveBusy(false);
+    }
+  }
+
+  async function confirmDeleteCommunity() {
+    if (!activeCommunity?.id || deleteCommunityBusy || !canDeleteCommunity) return;
+    setDeleteCommunityBusy(true);
+    try {
+      await deleteCommunity(activeCommunity.id);
+      setShowDeleteCommunityConfirm(false);
+    } finally {
+      setDeleteCommunityBusy(false);
     }
   }
 
@@ -113,20 +127,38 @@ export default function ChannelSidebar() {
                 <line x1="23" y1="11" x2="17" y2="11"/>
               </svg>
             </button>
-            <button
-              className={styles.inviteBtn}
-              title={canLeave ? 'Leave community' : 'Owners cannot leave community'}
-              aria-label="Leave community"
-              data-testid="community-leave-btn"
-              onClick={handleLeaveCommunity}
-              disabled={!canLeave}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-                <polyline points="16 17 21 12 16 7"/>
-                <line x1="21" y1="12" x2="9" y2="12"/>
-              </svg>
-            </button>
+            {canDeleteCommunity ? (
+              <button
+                className={styles.inviteBtn}
+                title="Delete community"
+                aria-label="Delete community"
+                data-testid="community-delete-btn"
+                onClick={() => setShowDeleteCommunityConfirm(true)}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="3 6 5 6 21 6"/>
+                  <path d="M19 6l-1 14H6L5 6"/>
+                  <path d="M10 11v6"/>
+                  <path d="M14 11v6"/>
+                  <path d="M9 6V4h6v2"/>
+                </svg>
+              </button>
+            ) : (
+              <button
+                className={styles.inviteBtn}
+                title={canLeave ? 'Leave community' : 'Owners cannot leave community'}
+                aria-label="Leave community"
+                data-testid="community-leave-btn"
+                onClick={handleLeaveCommunity}
+                disabled={!canLeave}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                  <polyline points="16 17 21 12 16 7"/>
+                  <line x1="21" y1="12" x2="9" y2="12"/>
+                </svg>
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -250,6 +282,36 @@ export default function ChannelSidebar() {
         </Modal>
       )}
 
+      {showDeleteCommunityConfirm && activeCommunity && (
+        <Modal title="Delete community?" onClose={() => setShowDeleteCommunityConfirm(false)}>
+          <div className={styles.leaveConfirmWrap} data-testid="community-delete-modal">
+            <p className={styles.hint}>
+              Delete {activeCommunity.name}? All channels and messages in this community will be permanently removed.
+            </p>
+            <div className={styles.leaveConfirmActions}>
+              <button
+                type="button"
+                className={styles.leaveCancelBtn}
+                onClick={() => setShowDeleteCommunityConfirm(false)}
+                disabled={deleteCommunityBusy}
+                data-testid="community-delete-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={styles.leaveDangerBtn}
+                onClick={() => { void confirmDeleteCommunity(); }}
+                disabled={deleteCommunityBusy}
+                data-testid="community-delete-confirm"
+              >
+                {deleteCommunityBusy ? 'Deleting…' : 'Delete community'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       {channelToDelete && (
         <Modal title="Delete channel?" onClose={() => setChannelToDelete(null)}>
           <div className={styles.leaveConfirmWrap} data-testid="channel-delete-modal">
@@ -349,6 +411,12 @@ function canLeaveCommunity(community) {
   if (!community) return false;
   const role = community?.my_role || community?.myRole;
   return role && role !== 'owner';
+}
+
+function isCommunityOwner(community) {
+  if (!community) return false;
+  const role = community?.my_role || community?.myRole;
+  return role === 'owner';
 }
 
 function isChannelUnread(channel, active, currentUserId) {

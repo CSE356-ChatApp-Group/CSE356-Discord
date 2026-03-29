@@ -4,6 +4,7 @@
  * GET    /api/v1/communities                    – list public + joined
  * POST   /api/v1/communities                    – create
  * GET    /api/v1/communities/:id                – get details
+ * DELETE /api/v1/communities/:id                – delete (owner only)
  * PATCH  /api/v1/communities/:id                – update (admin+)
  * POST   /api/v1/communities/:id/join           – join by invite code or public
  * DELETE /api/v1/communities/:id/leave          – leave
@@ -17,7 +18,7 @@ const { body, param, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 
 const { pool }         = require('../db/pool');
-const { authenticate, requireRole } = require('../middleware/authenticate');
+const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
 
@@ -147,6 +148,30 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ community: rows[0] });
+  } catch (err) { next(err); }
+});
+
+// ── Delete ─────────────────────────────────────────────────────────────────────
+router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, next) => {
+  if (!validate(req, res)) return;
+  try {
+    const { rows: [community] } = await pool.query(
+      'SELECT id, owner_id FROM communities WHERE id=$1',
+      [req.params.id]
+    );
+    if (!community) return res.status(404).json({ error: 'Community not found' });
+    if (community.owner_id !== req.user.id || req.membership?.role !== 'owner') {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
+    await pool.query('DELETE FROM communities WHERE id=$1', [req.params.id]);
+
+    await fanout.publish(`community:${req.params.id}`, {
+      event: 'community:deleted',
+      data: { communityId: req.params.id },
+    });
+
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 

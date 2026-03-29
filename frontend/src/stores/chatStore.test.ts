@@ -35,6 +35,42 @@ afterEach(() => {
 });
 
 describe('chatStore quick actions', () => {
+  it('deleteCommunity removes the active community, related channels, and cached messages', async () => {
+    apiDelete.mockResolvedValue({ success: true });
+
+    useChatStore.setState({
+      communities: [
+        { id: 'comm-1', name: 'One' },
+        { id: 'comm-2', name: 'Two' },
+      ],
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [
+        { id: 'ch-1', community_id: 'comm-1', name: 'general' },
+        { id: 'ch-2', community_id: 'comm-1', name: 'random' },
+      ],
+      activeChannel: { id: 'ch-1', community_id: 'comm-1', name: 'general' },
+      members: [{ id: 'user-1' }],
+      messages: {
+        'ch-1': [{ id: 'm-1', content: 'hello' }],
+        'ch-2': [{ id: 'm-2', content: 'hi' }],
+        'other-thread': [{ id: 'm-3', content: 'keep' }],
+      },
+    } as any);
+
+    await useChatStore.getState().deleteCommunity('comm-1');
+
+    const state = useChatStore.getState();
+    expect(apiDelete).toHaveBeenCalledWith('/communities/comm-1');
+    expect(state.communities.map((community) => community.id)).toEqual(['comm-2']);
+    expect(state.activeCommunity).toBeNull();
+    expect(state.activeChannel).toBeNull();
+    expect(state.channels).toEqual([]);
+    expect(state.members).toEqual([]);
+    expect(state.messages['ch-1']).toBeUndefined();
+    expect(state.messages['ch-2']).toBeUndefined();
+    expect(state.messages['other-thread']).toBeDefined();
+  });
+
   it('leaveCommunity removes the active community and clears related selection state', async () => {
     apiDelete.mockResolvedValue({ success: true });
 
@@ -83,6 +119,32 @@ describe('chatStore quick actions', () => {
     expect(state.activeChannel?.id).toBe('ch-1');
     expect(state.channels.map((channel) => channel.id)).toEqual(['ch-1']);
     expect(state.members.map((member) => member.id)).toEqual(['user-1']);
+  });
+
+  it('removes a deleted community when a websocket delete event arrives', () => {
+    useChatStore.setState({
+      communities: [
+        { id: 'comm-1', name: 'One' },
+        { id: 'comm-2', name: 'Two' },
+      ],
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'general' }],
+      activeChannel: { id: 'ch-1', community_id: 'comm-1', name: 'general' },
+      messages: { 'ch-1': [{ id: 'm-1', content: 'hello' }] },
+      members: [{ id: 'user-1' }],
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'community:deleted',
+      data: { communityId: 'comm-1' },
+    });
+
+    const state = useChatStore.getState();
+    expect(state.communities.map((community) => community.id)).toEqual(['comm-2']);
+    expect(state.activeCommunity).toBeNull();
+    expect(state.activeChannel).toBeNull();
+    expect(state.channels).toEqual([]);
+    expect(state.messages['ch-1']).toBeUndefined();
   });
 
   it('deleteChannel removes channel, active selection, and cached message thread', async () => {
