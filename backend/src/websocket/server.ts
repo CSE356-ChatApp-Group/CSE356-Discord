@@ -198,7 +198,7 @@ const redisSubscribed = new Set();
 const redisSubscribeInFlight = new Map();
 
 // ── Redis subscriber listener ──────────────────────────────────────────────────
-redisSub.on('message', (channel, message) => {
+function deliverPubsubMessage(channel, message) {
   const clients = channelClients.get(channel);
   if (!clients || clients.size === 0) return;
 
@@ -217,6 +217,10 @@ redisSub.on('message', (channel, message) => {
       ws.send(outbound);
     }
   });
+}
+
+redisSub.on('message', (channel, message) => {
+  deliverPubsubMessage(channel, message);
 });
 
 async function listAutoSubscriptionChannels(userId) {
@@ -309,6 +313,16 @@ wss.on('connection', async (ws, req) => {
   ws._subscriptions = new Set();
   ws._userId = user.id;
   ws._connectionId = randomUUID();
+  ws._bootstrapReady = false;
+
+  ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
+    .then(() => {
+      ws._bootstrapReady = true;
+    })
+    .catch((err) => {
+      logger.warn({ err, userId: user.id }, 'WS user-channel subscribe failed');
+      ws.close(1011, 'Subscription failed');
+    });
 
   ws.on('message', (raw) => {
     try {
@@ -343,17 +357,19 @@ wss.on('connection', async (ws, req) => {
     })
     .catch((err) => logger.warn({ err, userId: user.id }, 'WS presence setup failed'));
 
-  // Automatically subscribe to personal notification channel without blocking
-  // client message handling, otherwise early subscribe frames can be dropped.
-  subscribeClient(ws, `user:${user.id}`)
-    .catch((err) => logger.warn({ err, userId: user.id }, 'WS user-channel subscribe failed'));
-
   bootstrapUserSubscriptions(ws, user.id)
     .catch((err) => logger.warn({ err, userId: user.id }, 'WS auto-subscribe bootstrap failed'));
 });
 
 // ── Client message dispatch ────────────────────────────────────────────────────
 async function handleClientMessage(ws, user, msg) {
+  if (ws._bootstrapPromise) {
+    await ws._bootstrapPromise;
+  }
+  if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) {
+    return;
+  }
+
   markConnectionAlive(user.id, ws._connectionId).catch(() => {});
 
   switch (msg.type) {
