@@ -129,12 +129,7 @@ jobs:
           # triggering fail2ban with rapid successive connections.
           touch ~/.ssh/config
           chmod 600 ~/.ssh/config
-          cat >> ~/.ssh/config << 'EOF'
-Host *
-  ControlMaster auto
-  ControlPath ~/.ssh/ctl-%h-%p-%r
-  ControlPersist 5m
-EOF
+          printf 'Host *\n  ControlMaster auto\n  ControlPath ~/.ssh/ctl-%%h-%%p-%%r\n  ControlPersist 5m\n' >> ~/.ssh/config
 
       - name: Add host to known_hosts
         shell: bash
