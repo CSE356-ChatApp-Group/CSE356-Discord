@@ -9,6 +9,8 @@ type AuthUser = {
   displayName?: string;
   avatarUrl?: string;
   updatedAt?: string;
+  status?: 'online' | 'idle' | 'away' | 'offline';
+  awayMessage?: string | null;
 };
 
 function normalizeAuthUser(user: any): AuthUser {
@@ -18,6 +20,8 @@ function normalizeAuthUser(user: any): AuthUser {
     displayName: user.displayName ?? user.display_name,
     avatarUrl: user.avatarUrl ?? user.avatar_url,
     updatedAt: user.updatedAt ?? user.updated_at,
+    status: user.status,
+    awayMessage: user.awayMessage ?? user.away_message ?? null,
   };
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { wsManager } from '../lib/ws';
 import { useAuthStore } from '../stores/authStore';
+import { readPresenceIntent } from '../lib/presenceIntent';
 
 const ACTIVITY_THROTTLE_MS = 15_000;
 
@@ -11,11 +12,21 @@ export function usePresenceHeartbeat() {
   useEffect(() => {
     if (!user) return;
 
-    // Start as online unless the user explicitly switches to away later.
-    wsManager.send({ type: 'presence', status: 'online' });
+    function sendPresenceFromIntent() {
+      const intent = readPresenceIntent();
+      wsManager.send({
+        type: 'presence',
+        status: intent.status,
+        awayMessage: intent.status === 'away' ? (intent.awayMessage || null) : null,
+      });
+    }
+
+    sendPresenceFromIntent();
+    const unsubscribeOpen = wsManager.onOpen(sendPresenceFromIntent);
 
     function reportActivity() {
       if (document.hidden) return;
+      if (readPresenceIntent().status === 'away') return;
       const now = Date.now();
       if (now - lastActivityAtRef.current < ACTIVITY_THROTTLE_MS) return;
       lastActivityAtRef.current = now;
@@ -33,6 +44,7 @@ export function usePresenceHeartbeat() {
     document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
+      unsubscribeOpen();
       activityEvents.forEach((eventName) => {
         window.removeEventListener(eventName, reportActivity);
       });

@@ -966,6 +966,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       case 'presence:updated': {
         const { userId, status, awayMessage } = event.data;
         store.setPresence(userId, status, awayMessage ?? null);
+        const auth = useAuthStore.getState();
+        if (auth.user?.id === userId) {
+          auth.setUser({
+            ...auth.user,
+            status,
+            awayMessage: status === 'away' ? (awayMessage ?? null) : null,
+          });
+        }
         break;
       }
       case 'read:updated': {

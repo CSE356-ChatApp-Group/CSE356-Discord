@@ -126,6 +126,38 @@
 
 .userBtn:hover { opacity: 0.8; }
 
+.userAvatarWrap {
+  position: relative;
+  width: fit-content;
+  height: fit-content;
+}
+
+.presenceBadge {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid var(--bg-0);
+}
+
+.presence-online {
+  background: #3ba55d;
+}
+
+.presence-idle {
+  background: #faa81a;
+}
+
+.presence-away {
+  background: #f04747;
+}
+
+.presence-offline {
+  background: var(--text-muted);
+}
+
 .err {
   color: var(--red);
   font-size: 13px;

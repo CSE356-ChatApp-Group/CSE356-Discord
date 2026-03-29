@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { api } from '../lib/api';
+import { wsManager } from '../lib/ws';
+import { readPresenceIntent, writePresenceIntent } from '../lib/presenceIntent';
 import Modal from './Modal';
 import styles from './CommunitySidebar.module.css';
 
@@ -51,6 +53,9 @@ export default function CommunitySidebar() {
       const status = me?.user?.status === 'away' ? 'away' : 'online';
       setPresenceStatus(status);
       setAwayMessage(me?.user?.away_message || me?.user?.awayMessage || '');
+      if (me?.user) {
+        setUser(me.user);
+      }
       setPresenceMsg('');
     } catch (e) {
       setAccountError(e?.message || 'Could not load linked providers');
@@ -73,6 +78,8 @@ export default function CommunitySidebar() {
         ? { status: 'away', awayMessage: awayMessage.trim() || null }
         : { status: 'online', awayMessage: null };
       await api.put('/presence', body);
+      writePresenceIntent(presenceStatus, awayMessage);
+      wsManager.send({ type: 'presence', ...body });
       setPresenceMsg(presenceStatus === 'away' ? 'Away status updated.' : 'Presence set to online.');
       const profile = await api.get('/users/me');
       if (profile?.user) setUser(profile.user);
@@ -220,7 +227,14 @@ export default function CommunitySidebar() {
       {/* User avatar at bottom */}
       <div className={styles.bottom}>
         <button className={styles.userBtn} title={`${user?.username} – account settings`} onClick={openAccountModal} aria-label="Open account settings" data-testid="account-open">
-          <Avatar user={user} name={user?.displayName || user?.username} size={36} />
+          <div className={styles.userAvatarWrap}>
+            <Avatar user={user} name={user?.displayName || user?.username} size={36} />
+            <span
+              className={`${styles.presenceBadge} ${styles[`presence-${resolvePresenceStatus(user?.status, readPresenceIntent().status)}`]}`}
+              aria-label={`Current presence: ${resolvePresenceStatus(user?.status, readPresenceIntent().status)}`}
+              data-testid="account-presence-badge"
+            />
+          </div>
         </button>
       </div>
 
@@ -584,6 +598,14 @@ function buildAvatarSrc(user?: any) {
   if (!version) return base;
   const separator = base.includes('?') ? '&' : '?';
   return `${base}${separator}v=${encodeURIComponent(version)}`;
+}
+
+function resolvePresenceStatus(status?: string, fallback?: 'online' | 'away') {
+  if (status === 'online' || status === 'idle' || status === 'away' || status === 'offline') {
+    return status;
+  }
+  if (fallback === 'away') return 'away';
+  return 'online';
 }
 
 export function Avatar({ name = '?', size = 32, user }: { name?: string; size?: number; user?: any }) {

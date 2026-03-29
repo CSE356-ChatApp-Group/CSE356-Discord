@@ -24,6 +24,7 @@ class WsManager {
   private _ws: WebSocket | null;
   private _listeners: Map<string, Set<(event: any) => void>>;
   private _globalListeners: Set<(event: any) => void>;
+  private _openListeners: Set<() => void>;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null;
   private _intentionalClose: boolean;
 
@@ -31,6 +32,7 @@ class WsManager {
     this._ws         = null;
     this._listeners  = new Map(); // channel → Set<fn>
     this._globalListeners = new Set();
+    this._openListeners = new Set();
     this._reconnectTimer  = null;
     this._intentionalClose = false;
   }
@@ -51,6 +53,7 @@ class WsManager {
 
     this._ws.onopen = () => {
       console.debug('[WS] connected');
+      this._openListeners.forEach((fn) => fn());
       // Re-subscribe to all watched channels after reconnect
       for (const ch of this._listeners.keys()) {
         if (this._listeners.get(ch).size > 0) {
@@ -114,6 +117,12 @@ class WsManager {
   onAny(fn: (event: any) => void) {
     this._globalListeners.add(fn);
     return () => this._globalListeners.delete(fn);
+  }
+
+  /** Subscribe to WebSocket open events (including reconnect). */
+  onOpen(fn: () => void) {
+    this._openListeners.add(fn);
+    return () => this._openListeners.delete(fn);
   }
 }
 
