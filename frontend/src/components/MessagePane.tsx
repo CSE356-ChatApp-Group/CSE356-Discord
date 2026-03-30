@@ -625,7 +625,7 @@ export default function MessagePane() {
         </div>
 
         {/* Right sidebar (members/search) */}
-        {activeChannel && (
+        {(activeChannel || activeConv) && (
           <aside className={styles.searchSidebar} data-testid="message-members-sidebar">
             <MemberList />
           </aside>

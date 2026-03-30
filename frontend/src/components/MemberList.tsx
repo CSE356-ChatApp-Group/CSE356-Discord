@@ -6,19 +6,23 @@ import styles from './MemberList.module.css';
 const STATUS_LABEL = { online: 'Online', idle: 'Idle', away: 'Away', offline: 'Offline' };
 
 export default function MemberList() {
-  const { members, presence, awayMessages } = useChatStore();
+  const { members, activeConv, presence, awayMessages } = useChatStore();
   const currentUser = useAuthStore(s => s.user);
+
+  const isDm = !!activeConv;
+  const list = isDm ? (activeConv.participants ?? []) : members;
+  const label = isDm ? 'Participants' : 'Members';
 
   // Group by status
   const groups = { online: [], idle: [], away: [], offline: [] };
-  for (const m of members) {
+  for (const m of list) {
     const s = presence[m.id] || 'offline';
     groups[s].push({ ...m, status: s, awayMessage: awayMessages[m.id] || m.away_message || null });
   }
 
   return (
     <aside className={`${styles.list} memberList`} aria-label="Community members" data-testid="member-list">
-      <div className={styles.header} data-testid="member-list-header">Members <span className={styles.count}>{members.length}</span></div>
+      <div className={styles.header} data-testid="member-list-header">{label} <span className={styles.count}>{list.length}</span></div>
       <div className={styles.scroll} data-testid="member-list-scroll">
         {['online', 'idle', 'away', 'offline'].map(status => {
           const grp = groups[status];
