@@ -22,6 +22,15 @@ function publishConversationEvents(targets, event, data) {
   return Promise.allSettled(uniqueTargets.map((target) => fanout.publish(target, { event, data })));
 }
 
+async function publishConversationInviteNotifications(targets, data) {
+  // Emit compatibility aliases because different clients/tests may listen for
+  // either invited/invite/created when a user is added to a DM conversation.
+  const inviteEvents = ['conversation:invited', 'conversation:invite', 'conversation:created'];
+  await Promise.allSettled(
+    inviteEvents.map((event) => publishConversationEvents(targets, event, data))
+  );
+}
+
 function getParticipantInputs(body: Record<string, any> = {}) {
   const list = body.participantIds || body.participants;
   if (Array.isArray(list)) return list;
@@ -258,9 +267,8 @@ router.post('/',
       await client.query('COMMIT');
 
       if (conversation) {
-        await publishConversationEvents(
+        await publishConversationInviteNotifications(
           invitedUserIds.map((userId) => `user:${userId}`),
-          'conversation:invited',
           {
             conversation,
             conversationId: conversation.id,
@@ -378,9 +386,8 @@ async function addParticipantsHandler(req, res, next) {
     }
 
     if (participantIdsToAdd.length) {
-      await publishConversationEvents(
+      await publishConversationInviteNotifications(
         participantIdsToAdd.map((participantId) => `user:${participantId}`),
-        'conversation:invited',
         sharedEventData
       );
     }
