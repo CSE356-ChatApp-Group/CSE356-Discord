@@ -36,7 +36,6 @@ export default function MessagePane() {
   const [sending, setSending]     = useState(false);
   const [loadingMore, setLoadMore] = useState(false);
   const [showSearch, setSearch]   = useState(false);
-  const [showMembers, setShowMembers] = useState(false);
   const [localQ, setLocalQ]       = useState('');
   const [showDmInviteModal, setShowDmInviteModal] = useState(false);
   const [showDmLeaveModal, setShowDmLeaveModal] = useState(false);
@@ -106,7 +105,6 @@ export default function MessagePane() {
   useEffect(() => {
     inputRef.current?.focus();
     setSearch(false);
-    setShowMembers(false);
     clearSearch();
     setLocalQ('');
     setShowDmInviteModal(false);
@@ -173,11 +171,9 @@ export default function MessagePane() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setSearch(true);
-        setShowMembers(false);
       }
       if (e.key === 'Escape') {
         setSearch(false);
-        setShowMembers(false);
       }
     }
 
@@ -511,23 +507,6 @@ export default function MessagePane() {
               Add Members
             </button>
           )}
-          {activeChannel && (
-            <button
-              className={`${styles.iconTrigger} ${showMembers ? styles.iconTriggerActive : ''}`}
-              title="Toggle member list"
-              onClick={() => {
-                setShowMembers(v => {
-                  const next = !v;
-                  if (next) setSearch(false);
-                  return next;
-                });
-              }}
-              aria-label="Toggle member list"
-              data-testid="message-members-toggle"
-            >
-              <MembersIcon />
-            </button>
-          )}
           {showSearch ? (
             <div className={styles.searchBox} data-testid="search-box">
               <form className={styles.searchForm} onSubmit={handleSearchSubmit}>
@@ -573,7 +552,7 @@ export default function MessagePane() {
             <button
               className={styles.searchTrigger}
               title={searchLabel}
-              onClick={() => { setSearch(true); setShowMembers(false); }}
+              onClick={() => { setSearch(true); }}
               aria-label="Toggle message search"
               data-testid="message-search-toggle"
             >
@@ -646,7 +625,7 @@ export default function MessagePane() {
         </div>
 
         {/* Right sidebar (members/search) */}
-        {showMembers && activeChannel && (
+        {activeChannel && (
           <aside className={styles.searchSidebar} data-testid="message-members-sidebar">
             <MemberList />
           </aside>
