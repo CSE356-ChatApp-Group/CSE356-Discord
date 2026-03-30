@@ -143,18 +143,11 @@ async function createSystemMessage(client, conversationId, content) {
 
 async function isGroupConversation(client, conversationId) {
   const { rows } = await client.query(
-    `SELECT c.name,
-            COUNT(cp.user_id)::int AS participant_count
-     FROM conversations c
-     LEFT JOIN conversation_participants cp ON cp.conversation_id = c.id
-     WHERE c.id = $1
-     GROUP BY c.id`,
+    `SELECT is_group FROM conversations WHERE id = $1`,
     [conversationId]
   );
-
-  const conversation = rows[0];
-  if (!conversation) return false;
-  return Boolean(conversation.name) || Number(conversation.participant_count || 0) >= 3;
+  if (!rows[0]) return false;
+  return Boolean(rows[0].is_group);
 }
 
 // ── List ───────────────────────────────────────────────────────────────────────
@@ -238,6 +231,7 @@ router.post('/',
            JOIN conversation_participants cp1 ON cp1.conversation_id = c.id AND cp1.user_id = $1
            JOIN conversation_participants cp2 ON cp2.conversation_id = c.id AND cp2.user_id = $2
            WHERE c.name IS NULL
+             AND c.is_group = FALSE
              AND cp1.left_at IS NULL
              AND cp2.left_at IS NULL
              AND (SELECT COUNT(*) FROM conversation_participants
@@ -253,8 +247,8 @@ router.post('/',
       }
 
       const { rows: [conv] } = await client.query(
-        `INSERT INTO conversations (name, created_by) VALUES ($1,$2) RETURNING *`,
-        [req.body.name || null, req.user.id]
+        `INSERT INTO conversations (name, created_by, is_group) VALUES ($1, $2, $3) RETURNING *`,
+        [req.body.name || null, req.user.id, isGroup]
       );
 
       for (const uid of allIds) {
@@ -357,6 +351,53 @@ async function addParticipantsHandler(req, res, next) {
     const participantIdsToAdd = resolvedParticipants.filter(
       (participantId) => participantId !== req.user.id && !currentParticipantSet.has(participantId)
     );
+
+    // Bug 3: inviting into a 1:1 DM creates a NEW group conversation instead of
+    // mutating the private conversation. The original 1:1 is left untouched.
+    const { rows: [convMeta] } = await client.query(
+      'SELECT is_group FROM conversations WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (!convMeta.is_group && participantIdsToAdd.length > 0) {
+      const allNewIds = [...new Set([...currentParticipantIds, ...participantIdsToAdd])];
+
+      const { rows: [newConv] } = await client.query(
+        `INSERT INTO conversations (name, created_by, is_group) VALUES (NULL, $1, TRUE) RETURNING *`,
+        [req.user.id]
+      );
+      for (const uid of allNewIds) {
+        await client.query(
+          `INSERT INTO conversation_participants (conversation_id, user_id) VALUES ($1, $2)`,
+          [newConv.id, uid]
+        );
+      }
+
+      const newConversation = await loadConversationWithParticipants(client, newConv.id);
+      await client.query('COMMIT');
+
+      const sharedEventData = {
+        conversation: newConversation,
+        conversationId: newConv.id,
+        participantIds: participantIdsToAdd,
+        invitedBy: req.user.id,
+      };
+      await publishConversationEvents(
+        allNewIds.map((uid) => `user:${uid}`),
+        'conversation:participant_added',
+        sharedEventData
+      );
+      await publishConversationInviteNotifications(
+        participantIdsToAdd.map((uid) => `user:${uid}`),
+        sharedEventData
+      );
+
+      return res.status(201).json({
+        conversation: newConversation || newConv,
+        addedParticipantIds: participantIdsToAdd,
+        createdNewConversation: true,
+      });
+    }
 
     for (const participantId of participantIdsToAdd) {
       await client.query(

@@ -640,31 +640,50 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const cleaned = (participants || []).map((value) => value.trim()).filter(Boolean);
     if (!conversationId || !cleaned.length) return null;
 
-    const { conversation } = await api.post(`/conversations/${conversationId}/invite`, {
-      participantIds: cleaned,
-    });
+    const { conversation, createdNewConversation } = await api.post(
+      `/conversations/${conversationId}/invite`,
+      { participantIds: cleaned }
+    );
 
     if (conversation?.id) {
       wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
-      set(s => ({
-        conversations: s.conversations.map((conv) =>
-          conv.id === conversation.id
-            ? {
-                ...conv,
-                ...conversation,
-                participants: conversation.participants || conv.participants,
-              }
-            : conv
-        ),
-        activeConv:
-          s.activeConv?.id === conversation.id
-            ? {
-                ...s.activeConv,
-                ...conversation,
-                participants: conversation.participants || s.activeConv.participants,
-              }
-            : s.activeConv,
-      }));
+      const existingEntry = get().conversations.find((c) => c.id === conversation.id);
+
+      if (!existingEntry) {
+        // A new group DM was spun up from a 1-on-1 — add it to the list and
+        // navigate the user directly into it.
+        set(s => ({
+          conversations: [conversation, ...s.conversations],
+          ...(createdNewConversation && {
+            activeConv: conversation,
+            activeChannel: null,
+          }),
+        }));
+        if (createdNewConversation) {
+          await get().fetchMessages({ conversationId: conversation.id });
+        }
+      } else {
+        // Existing group DM had a participant added — normal update path.
+        set(s => ({
+          conversations: s.conversations.map((conv) =>
+            conv.id === conversation.id
+              ? {
+                  ...conv,
+                  ...conversation,
+                  participants: conversation.participants || conv.participants,
+                }
+              : conv
+          ),
+          activeConv:
+            s.activeConv?.id === conversation.id
+              ? {
+                  ...s.activeConv,
+                  ...conversation,
+                  participants: conversation.participants || s.activeConv.participants,
+                }
+              : s.activeConv,
+        }));
+      }
     }
 
     return conversation || null;
