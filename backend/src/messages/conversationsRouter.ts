@@ -240,6 +240,8 @@ router.post('/',
            WHERE c.name IS NULL
              AND cp1.left_at IS NULL
              AND cp2.left_at IS NULL
+             AND (SELECT COUNT(*) FROM conversation_participants
+                  WHERE conversation_id = c.id AND left_at IS NULL) = 2
            LIMIT 1`,
           [req.user.id, otherId]
         );
