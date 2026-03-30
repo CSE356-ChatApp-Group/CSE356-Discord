@@ -537,14 +537,16 @@ export default function MessagePane() {
               >
                 Invite
               </button>
-              <button
-                type="button"
-                className={`${styles.dmActionBtn} ${styles.dmLeaveBtn}`}
-                onClick={handleLeaveDm}
-                data-testid="dm-leave-button"
-              >
-                Leave
-              </button>
+              {activeConv?.is_group && (
+                <button
+                  type="button"
+                  className={`${styles.dmActionBtn} ${styles.dmLeaveBtn}`}
+                  onClick={handleLeaveDm}
+                  data-testid="dm-leave-button"
+                >
+                  Leave
+                </button>
+              )}
             </>
           )}
           {activeChannel?.is_private && canManagePrivateChannel && (

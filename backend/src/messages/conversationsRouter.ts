@@ -608,6 +608,12 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       });
     }
 
+    const isGroup = await isGroupConversation(client, req.params.id);
+    if (!isGroup) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Cannot leave a 1-to-1 DM' });
+    }
+
     await client.query(
       `UPDATE conversation_participants
        SET left_at = NOW()
