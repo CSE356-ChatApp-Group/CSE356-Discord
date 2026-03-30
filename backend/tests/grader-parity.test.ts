@@ -301,22 +301,24 @@ describe('Grader parity: DM invite realtime', () => {
         .set('Authorization', `Bearer ${owner.accessToken}`)
         .send({ participantIds: [existing.user.id] });
 
-      const conversationId = expectConversationId(createDmRes);
+      const original1to1Id = expectConversationId(createDmRes);
 
       const inviteEventPromise = waitForWsEvent(
         inviteeSocket,
-        (event) => event.event === 'conversation:invited' && event.data?.conversationId === conversationId,
+        (event) => event.event === 'conversation:invited',
       );
 
       const inviteRes = await request(app)
-        .post(`/api/v1/conversations/${conversationId}/invite`)
+        .post(`/api/v1/conversations/${original1to1Id}/invite`)
         .set('Authorization', `Bearer ${owner.accessToken}`)
         .send({ participantIds: [invitee.user.id] });
 
-      expect(inviteRes.status).toBe(200);
+      expect(inviteRes.status).toBe(201);
+      const conversationId = inviteRes.body.conversation.id;
       expect(inviteRes.body.addedParticipantIds).toContain(invitee.user.id);
 
       const inviteEvent = await inviteEventPromise;
+      expect(inviteEvent.data.conversationId).toBe(conversationId);
       expect(inviteEvent.data.invitedBy).toBe(owner.user.id);
       expect(inviteEvent.data.participantIds).toContain(invitee.user.id);
     } finally {

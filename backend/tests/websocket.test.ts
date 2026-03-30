@@ -433,27 +433,28 @@ describe('Multi-socket fanout', () => {
         .send({ participantIds: [existing.user.id] });
 
       expect(createRes.status).toBe(201);
-      const conversationId = createRes.body.conversation.id;
+      const original1to1Id = createRes.body.conversation.id;
 
       const inviteEventPromiseA = waitForWsEvent(
         socketA,
-        (event) =>
-          event.event === 'conversation:invited' && event.data?.conversationId === conversationId,
+        (event) => event.event === 'conversation:invited',
       );
       const inviteEventPromiseB = waitForWsEvent(
         socketB,
-        (event) =>
-          event.event === 'conversation:invited' && event.data?.conversationId === conversationId,
+        (event) => event.event === 'conversation:invited',
       );
 
       const inviteRes = await request(app)
-        .post(`/api/v1/conversations/${conversationId}/invite`)
+        .post(`/api/v1/conversations/${original1to1Id}/invite`)
         .set('Authorization', `Bearer ${owner.accessToken}`)
         .send({ participantIds: [invitee.user.id] });
 
-      expect(inviteRes.status).toBe(200);
+      expect(inviteRes.status).toBe(201);
+      const conversationId = inviteRes.body.conversation.id;
 
       const [eventA, eventB] = await Promise.all([inviteEventPromiseA, inviteEventPromiseB]);
+      expect(eventA.data.conversationId).toBe(conversationId);
+      expect(eventB.data.conversationId).toBe(conversationId);
       expect(eventA.data.invitedBy).toBe(owner.user.id);
       expect(eventB.data.invitedBy).toBe(owner.user.id);
     } finally {
@@ -479,22 +480,23 @@ describe('Multi-socket fanout', () => {
         .send({ participantIds: [existing.user.id] });
 
       expect(createRes.status).toBe(201);
-      const conversationId = createRes.body.conversation.id;
+      const original1to1Id = createRes.body.conversation.id;
 
       const inviteEventPromise = waitForWsEvent(
         secondSocket,
-        (event) =>
-          event.event === 'conversation:invited' && event.data?.conversationId === conversationId,
+        (event) => event.event === 'conversation:invited',
       );
 
       const inviteRes = await request(app)
-        .post(`/api/v1/conversations/${conversationId}/invite`)
+        .post(`/api/v1/conversations/${original1to1Id}/invite`)
         .set('Authorization', `Bearer ${owner.accessToken}`)
         .send({ participantIds: [invitee.user.id] });
 
-      expect(inviteRes.status).toBe(200);
+      expect(inviteRes.status).toBe(201);
+      const conversationId = inviteRes.body.conversation.id;
 
       const inviteEvent = await inviteEventPromise;
+      expect(inviteEvent.data.conversationId).toBe(conversationId);
       expect(inviteEvent.data.invitedBy).toBe(owner.user.id);
     } finally {
       await closeWebSocket(secondSocket);
@@ -717,23 +719,23 @@ describe('WebSocket reliability', () => {
           .send({ participantIds: [existing.user.id] });
 
         expect(createRes.status).toBe(201);
-        const conversationId = createRes.body.conversation.id;
+        const original1to1Id = createRes.body.conversation.id;
 
         const inviteEventPromise = waitForWsEvent(
           inviteeSocket,
-          (event) =>
-            event.event === 'conversation:invited' &&
-            event.data?.conversationId === conversationId,
+          (event) => event.event === 'conversation:invited',
         );
 
         const inviteRes = await request(app)
-          .post(`/api/v1/conversations/${conversationId}/invite`)
+          .post(`/api/v1/conversations/${original1to1Id}/invite`)
           .set('Authorization', `Bearer ${owner.accessToken}`)
           .send({ participantIds: [invitee.user.id] });
 
-        expect(inviteRes.status).toBe(200);
+        expect(inviteRes.status).toBe(201);
+        const conversationId = inviteRes.body.conversation.id;
 
         const inviteEvent = await inviteEventPromise;
+        expect(inviteEvent.data.conversationId).toBe(conversationId);
         expect(inviteEvent.data.invitedBy).toBe(owner.user.id);
         expect(inviteEvent.data.participantIds).toContain(invitee.user.id);
       } finally {

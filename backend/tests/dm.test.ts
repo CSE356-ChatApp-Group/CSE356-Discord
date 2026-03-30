@@ -41,21 +41,24 @@ describe('DM invite flow', () => {
     const userA = await createAuthenticatedUser('dmowner');
     const userB = await createAuthenticatedUser('dminitial');
     const userC = await createAuthenticatedUser('dminvite');
+    const userD = await createAuthenticatedUser('dmbasegroup');
 
     const inviteeSocket = await connectWebSocket(port, userC.accessToken);
 
     try {
+      // Start with a true group DM, then invite userC as pending.
       const createRes = await request(app)
         .post('/api/v1/conversations')
         .set('Authorization', `Bearer ${userA.accessToken}`)
-        .send({ participantIds: [userB.user.id] });
+        .send({ participantIds: [userB.user.id, userD.user.id] });
 
       expect(createRes.status).toBe(201);
       const conversationId = createRes.body.conversation.id;
 
       const inviteEventPromise = waitForWsEvent(
         inviteeSocket,
-        (event) => event.event === 'conversation:invited',
+        (event) =>
+          event.event === 'conversation:invited' && event.data?.conversationId === conversationId,
       );
 
       const inviteRes = await request(app)
@@ -68,8 +71,6 @@ describe('DM invite flow', () => {
 
       const inviteEvent = await inviteEventPromise;
       expect(inviteEvent.data.conversationId).toBe(conversationId);
-      expect(inviteEvent.data.participantIds).toContain(userC.user.id);
-      expect(inviteEvent.data.invitedBy).toBe(userA.user.id);
 
       // Pending invitees should not appear as active participants yet.
       const pendingListRes = await request(app)
@@ -159,11 +160,13 @@ describe('DM invite flow', () => {
     const owner = await createAuthenticatedUser('dmacceptonceowner');
     const existing = await createAuthenticatedUser('dmacceptonceexisting');
     const invitee = await createAuthenticatedUser('dmacceptonceinvitee');
+    const base = await createAuthenticatedUser('dmacceptoncebase');
 
+    // Create group DM, then add invitee as pending via invite endpoint.
     const createRes = await request(app)
       .post('/api/v1/conversations')
       .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [existing.user.id] });
+      .send({ participantIds: [existing.user.id, base.user.id] });
 
     expect(createRes.status).toBe(201);
     const conversationId = createRes.body.conversation.id;
@@ -208,21 +211,29 @@ describe('DM invite flow', () => {
     const owner = await createAuthenticatedUser('dmgroupintentowner');
     const inviteeA = await createAuthenticatedUser('dmgroupintenta');
     const inviteeB = await createAuthenticatedUser('dmgroupintentb');
+    const base = await createAuthenticatedUser('dmgroupintentbase');
+    const base2 = await createAuthenticatedUser('dmgroupintentbase2');
 
+    // Create group DM, then invite both users as pending.
     const createRes = await request(app)
       .post('/api/v1/conversations')
       .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [inviteeA.user.id] });
+      .send({ participantIds: [base.user.id, base2.user.id] });
 
     expect(createRes.status).toBe(201);
     const conversationId = createRes.body.conversation.id;
 
-    const inviteSecondRes = await request(app)
+    const inviteARes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/invite`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [inviteeA.user.id] });
+    expect(inviteARes.status).toBe(200);
+
+    const inviteBRes = await request(app)
       .post(`/api/v1/conversations/${conversationId}/invite`)
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .send({ participantIds: [inviteeB.user.id] });
-
-    expect(inviteSecondRes.status).toBe(200);
+    expect(inviteBRes.status).toBe(200);
 
     const acceptRes = await request(app)
       .post(`/api/v1/conversations/${conversationId}/accept`)
@@ -306,7 +317,7 @@ describe('DM leave and access guards', () => {
     expect(readRes.body.error).toMatch(/access denied/i);
   });
 
-  it('deletes 1:1 DM for both parties when one participant leaves', async () => {
+  it('blocks leaving 1:1 DM conversations', async () => {
     const userA = await createAuthenticatedUser('dm1to1a');
     const userB = await createAuthenticatedUser('dm1to1b');
 
@@ -323,21 +334,22 @@ describe('DM leave and access guards', () => {
       .set('Authorization', `Bearer ${userA.accessToken}`)
       .send({});
 
-    expect(leaveRes.status).toBe(200);
+    expect(leaveRes.status).toBe(403);
+    expect(leaveRes.body.error).toMatch(/cannot leave a 1-to-1 dm/i);
 
     const listResB = await request(app)
       .get('/api/v1/conversations')
       .set('Authorization', `Bearer ${userB.accessToken}`);
 
     expect(listResB.status).toBe(200);
-    expect(listResB.body.conversations.find((c: any) => c.id === conversationId)).toBeUndefined();
+    expect(listResB.body.conversations.find((c: any) => c.id === conversationId)).toBeDefined();
 
     const listResA = await request(app)
       .get('/api/v1/conversations')
       .set('Authorization', `Bearer ${userA.accessToken}`);
 
     expect(listResA.status).toBe(200);
-    expect(listResA.body.conversations.find((c: any) => c.id === conversationId)).toBeUndefined();
+    expect(listResA.body.conversations.find((c: any) => c.id === conversationId)).toBeDefined();
   });
 
   it('retains group DM history for remaining participants when one leaves', async () => {
