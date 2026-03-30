@@ -304,6 +304,53 @@ router.get('/:id', async (req, res, next) => {
     res.json({ conversation: rows[0] });
   } catch (err) { next(err); }
 });
+// ── Rename group DM ────────────────────────────────────────────────────────────
+router.patch(
+  '/:id',
+  authenticate,
+  param('id').isUUID(),
+  body('name').optional({ nullable: true }).isLength({ max: 100 }),
+  async (req, res, next) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+      const { id } = req.params;
+      const userId = req.user.id;
+
+      const client = await pool.connect();
+      try {
+        const { rows } = await client.query(
+          `SELECT c.is_group
+             FROM conversations c
+             JOIN conversation_participants cp ON cp.conversation_id = c.id
+            WHERE c.id = $1 AND cp.user_id = $2 AND cp.left_at IS NULL`,
+          [id, userId]
+        );
+
+        if (rows.length === 0) return res.status(404).json({ error: 'Conversation not found' });
+        if (!rows[0].is_group) return res.status(403).json({ error: 'Cannot rename a 1-to-1 DM' });
+
+        const name = req.body.name != null ? req.body.name : null;
+        await client.query(
+          `UPDATE conversations SET name = $1, updated_at = NOW() WHERE id = $2`,
+          [name || null, id]
+        );
+
+        const conv = await loadConversationWithParticipants(client, id);
+        await publishConversationEvents(
+          [`conversation:${id}`],
+          'conversation:updated',
+          { conversation: conv, conversationId: id }
+        );
+        res.json({ conversation: conv });
+      } finally {
+        client.release();
+      }
+    } catch (err) { next(err); }
+  }
+);
+
 const addParticipantsValidators = [
   param('id').isUUID(),
   body('participantIds').optional().isArray({ min: 1, max: 9 }),

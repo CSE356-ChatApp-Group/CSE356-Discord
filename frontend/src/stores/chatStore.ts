@@ -39,6 +39,7 @@ type ChatState = {
   declineDmInvite: (conversationId: string) => Promise<void>;
   inviteToConversation: (conversationId: string, participants: string[]) => Promise<Entity | null>;
   leaveConversation: (conversationId: string) => Promise<void>;
+  renameGroupDm: (conversationId: string, name: string) => Promise<void>;
   fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string }) => Promise<Entity[]>;
   sendMessage: (content: string) => Promise<void>;
   editMessage: (id: string, content: string) => Promise<void>;
@@ -708,6 +709,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }));
   },
 
+  async renameGroupDm(conversationId: string, name: string) {
+    const { conversation } = await api.patch(`/conversations/${conversationId}`, { name: name.trim() || null });
+    set(s => ({
+      conversations: s.conversations.map(c => c.id === conversationId ? { ...c, name: conversation.name } : c),
+      activeConv: s.activeConv?.id === conversationId ? { ...s.activeConv, name: conversation.name } : s.activeConv,
+    }));
+  },
+
   // ── Messages ──────────────────────────────────────────────────────────────
   async fetchMessages({ channelId, conversationId, before }: { channelId?: string; conversationId?: string; before?: string } = {}) {
     const key = channelId || conversationId;
@@ -1354,6 +1363,21 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 : s.activeConv,
           };
         });
+        break;
+      }
+      case 'conversation:updated': {
+        const conversation = event.data?.conversation;
+        const conversationId = event.data?.conversationId || conversation?.id;
+        if (!conversationId || !conversation) break;
+        set((s) => ({
+          conversations: s.conversations.map((c) =>
+            c.id === conversationId ? { ...c, name: conversation.name } : c
+          ),
+          activeConv:
+            s.activeConv?.id === conversationId
+              ? { ...s.activeConv, name: conversation.name }
+              : s.activeConv,
+        }));
         break;
       }
       case 'conversation:participant_left': {

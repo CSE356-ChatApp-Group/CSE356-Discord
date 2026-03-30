@@ -24,6 +24,7 @@ export default function MessagePane() {
     inviteToChannel,
     inviteToConversation,
     leaveConversation,
+    renameGroupDm,
     members,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
@@ -48,6 +49,8 @@ export default function MessagePane() {
   const [privateChannelMembers, setPrivateChannelMembers] = useState<any[]>([]);
   const [dmInviteBusy, setDmInviteBusy] = useState(false);
   const [dmLeaveBusy, setDmLeaveBusy] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [draftName, setDraftName] = useState('');
   const [channelInviteBusy, setChannelInviteBusy] = useState(false);
   const [channelInviteLoading, setChannelInviteLoading] = useState(false);
   const [dmActionErr, setDmActionErr] = useState('');
@@ -100,6 +103,12 @@ export default function MessagePane() {
 
     prevMsgCountRef.current = msgList.length;
   }, [key, msgList.length]);
+
+  // Reset name editing when conversation changes
+  useEffect(() => {
+    setEditingName(false);
+    setDraftName('');
+  }, [activeConv?.id]);
 
   // Focus input when channel changes
   useEffect(() => {
@@ -413,7 +422,9 @@ export default function MessagePane() {
 
   const title = activeChannel
     ? `# ${activeChannel.name}`
-    : activeConv?.name || 'Direct Message';
+    : activeConv?.is_group
+      ? (activeConv.name || 'Unnamed Group')
+      : (activeConv?.name || 'Direct Message');
 
   // Any activeConv is a DM – we don't need participants.length to gate read receipts.
   const isDm = Boolean(activeConv);
@@ -471,7 +482,46 @@ export default function MessagePane() {
       {/* Header */}
       <header className={styles.header} data-testid="message-pane-header">
         <div className={styles.headerLeft}>
-          <span className={styles.headerTitle} data-testid="message-pane-title">{title}</span>
+          {activeConv?.is_group && editingName ? (
+            <input
+              className={styles.nameInput}
+              value={draftName}
+              autoFocus
+              onChange={e => setDraftName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  renameGroupDm(activeConv.id, draftName).catch(() => {});
+                  setEditingName(false);
+                } else if (e.key === 'Escape') {
+                  setEditingName(false);
+                }
+              }}
+              onBlur={() => {
+                renameGroupDm(activeConv.id, draftName).catch(() => {});
+                setEditingName(false);
+              }}
+              maxLength={100}
+              data-testid="group-dm-name-input"
+            />
+          ) : (
+            <>
+              <span className={styles.headerTitle} data-testid="message-pane-title">{title}</span>
+              {activeConv?.is_group && (
+                <button
+                  type="button"
+                  className={styles.editNameBtn}
+                  onClick={() => {
+                    setDraftName(activeConv.name || '');
+                    setEditingName(true);
+                  }}
+                  title="Rename group"
+                  data-testid="group-dm-rename-btn"
+                >
+                  ✏
+                </button>
+              )}
+            </>
+          )}
           {activeChannel?.description && (
             <span className={styles.headerDesc}>{activeChannel.description}</span>
           )}
