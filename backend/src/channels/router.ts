@@ -14,6 +14,8 @@ const { body, query: qv, param, validationResult } = require('express-validator'
 const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('../messages/sideEffects');
+const redis            = require('../db/redis');
+const logger           = require('../utils/logger');
 
 const router = express.Router();
 router.use(authenticate);
@@ -100,6 +102,72 @@ router.get('/',
          ORDER  BY vc.position, vc.name`,
         [req.query.communityId, req.user.id]
       );
+
+      // Attach Redis-backed unread_message_count to each accessible channel
+      const userId = req.user.id;
+      const accessibleRows = rows.filter(ch => ch.can_access);
+      if (accessibleRows.length > 0) {
+        try {
+          // Fetch both keys for all channels in one pipeline
+          const pipeline = redis.pipeline();
+          for (const ch of accessibleRows) {
+            pipeline.get(`channel:msg_count:${ch.id}`);
+            pipeline.get(`user:last_read_count:${ch.id}:${userId}`);
+          }
+          const results = await pipeline.exec();
+
+          // results is array of [err, value] pairs, two per channel
+          const missingChannels = [];
+          for (let i = 0; i < accessibleRows.length; i++) {
+            const ch = accessibleRows[i];
+            const [errCount, rawCount] = results[i * 2];
+            const [errRead, rawRead]   = results[i * 2 + 1];
+            if (errCount || errRead || rawCount === null || rawRead === null) {
+              missingChannels.push(ch);
+            } else {
+              ch.unread_message_count = Math.max(0, parseInt(rawCount, 10) - parseInt(rawRead, 10));
+            }
+          }
+
+          // For channels missing Redis data: initialize from DB then compute
+          if (missingChannels.length > 0) {
+            const initPipeline = redis.pipeline();
+            const initData = await Promise.all(missingChannels.map(async (ch) => {
+              const lastReadAt = ch.my_last_read_at || null;
+              const [countRes, readRes] = await Promise.all([
+                pool.query(
+                  `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
+                  [ch.id]
+                ),
+                pool.query(
+                  `SELECT COUNT(*)::int AS cnt FROM messages
+                   WHERE channel_id = $1 AND deleted_at IS NULL
+                     AND ($2::timestamptz IS NULL OR created_at <= $2::timestamptz)`,
+                  [ch.id, lastReadAt]
+                ),
+              ]);
+              return {
+                ch,
+                totalCount: countRes.rows[0]?.cnt ?? 0,
+                readCount:  readRes.rows[0]?.cnt ?? 0,
+              };
+            }));
+
+            for (const { ch, totalCount, readCount } of initData) {
+              initPipeline.set(`channel:msg_count:${ch.id}`, totalCount, 'NX');
+              initPipeline.set(`user:last_read_count:${ch.id}:${userId}`, readCount, 'NX');
+              ch.unread_message_count = Math.max(0, totalCount - readCount);
+            }
+            await initPipeline.exec();
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Failed to fetch unread counts from Redis; defaulting to 0');
+          for (const ch of accessibleRows) {
+            if (ch.unread_message_count === undefined) ch.unread_message_count = 0;
+          }
+        }
+      }
+
       res.json({ channels: rows });
     } catch (err) { next(err); }
   }

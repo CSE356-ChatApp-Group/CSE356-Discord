@@ -247,6 +247,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
         }
       });
+      // If a community was already active (e.g. after login without a page refresh),
+      // re-fetch its channels so unread counts are up-to-date from the server.
+      const activeCommunityId = get().activeCommunity?.id;
+      if (activeCommunityId) {
+        get().fetchChannels(activeCommunityId).catch(() => {});
+      }
       return communities;
     })();
 
@@ -315,13 +321,21 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         channels: channels.map((channel: Entity) => {
           const previous = s.channels.find((ch: Entity) => ch.id === channel.id);
           const hadActivity = Boolean(previous?.has_new_activity ?? previous?.hasNewActivity);
+          // Prefer the larger of: server-provided count vs in-memory incremented count
+          const serverCount = channel.unread_message_count ?? 0;
+          const prevCount = previous?.unread_message_count ?? 0;
+          const unreadCount = Math.max(serverCount, prevCount);
           return hadActivity
             ? {
                 ...channel,
                 has_new_activity: true,
                 hasNewActivity: true,
+                unread_message_count: unreadCount,
               }
-            : channel;
+            : {
+                ...channel,
+                unread_message_count: unreadCount,
+              };
         }),
         activeChannel: s.activeChannel
           ? (channels.find((ch: Entity) => ch.id === s.activeChannel?.id)
@@ -329,6 +343,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   ...(channels.find((ch: Entity) => ch.id === s.activeChannel?.id) as Entity),
                   has_new_activity: false,
                   hasNewActivity: false,
+                  unread_message_count: 0,
                 }
               : s.activeChannel)
           : s.activeChannel,
@@ -392,6 +407,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         ...channel,
         has_new_activity: false,
         hasNewActivity: false,
+        unread_message_count: 0,
       },
       activeConv: null,
       channels: s.channels.map((ch) =>
@@ -400,6 +416,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               ...ch,
               has_new_activity: false,
               hasNewActivity: false,
+              unread_message_count: 0,
             }
           : ch
       ),
@@ -770,23 +787,26 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             [key]: upsertMessage(s.messages[key], msg),
           },
           channels: msg.channel_id
-            ? s.channels.map((channel) =>
-                channel.id === msg.channel_id
-                  ? {
-                      ...channel,
-                      updated_at: msg.created_at || msg.createdAt || channel.updated_at,
-                      updatedAt: msg.created_at || msg.createdAt || channel.updatedAt,
-                      last_message_id: msg.id,
-                      lastMessageId: msg.id,
-                      last_message_author_id: msg.author_id,
-                      lastMessageAuthorId: msg.author_id,
-                      last_message_at: msg.created_at || msg.createdAt || channel.last_message_at,
-                      lastMessageAt: msg.created_at || msg.createdAt || channel.lastMessageAt,
-                      has_new_activity: s.activeChannel?.id !== msg.channel_id,
-                      hasNewActivity: s.activeChannel?.id !== msg.channel_id,
-                    }
-                  : channel
-              )
+            ? s.channels.map((channel) => {
+                if (channel.id !== msg.channel_id) return channel;
+                const isActive = s.activeChannel?.id === msg.channel_id;
+                return {
+                  ...channel,
+                  updated_at: msg.created_at || msg.createdAt || channel.updated_at,
+                  updatedAt: msg.created_at || msg.createdAt || channel.updatedAt,
+                  last_message_id: msg.id,
+                  lastMessageId: msg.id,
+                  last_message_author_id: msg.author_id,
+                  lastMessageAuthorId: msg.author_id,
+                  last_message_at: msg.created_at || msg.createdAt || channel.last_message_at,
+                  lastMessageAt: msg.created_at || msg.createdAt || channel.lastMessageAt,
+                  has_new_activity: !isActive,
+                  hasNewActivity: !isActive,
+                  unread_message_count: isActive
+                    ? 0
+                    : (channel.unread_message_count ?? 0) + 1,
+                };
+              })
             : s.channels,
           activeChannel:
             msg.channel_id && s.activeChannel?.id === msg.channel_id
@@ -1032,6 +1052,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                     myLastReadMessageId: lastReadMessageId,
                     my_last_read_at: lastReadAt,
                     myLastReadAt: lastReadAt,
+                    unread_message_count: 0,
                   }
                 : channel
             );
@@ -1048,6 +1069,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                       myLastReadMessageId: lastReadMessageId,
                       my_last_read_at: lastReadAt,
                       myLastReadAt: lastReadAt,
+                      unread_message_count: 0,
                     }
                   : s.activeChannel,
               communities: communityId

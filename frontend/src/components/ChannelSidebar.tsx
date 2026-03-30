@@ -183,7 +183,7 @@ export default function ChannelSidebar() {
                 channel={ch}
                 active={activeChannel?.id === ch.id}
                 canAccess={canAccess}
-                unread={isChannelUnread(ch, activeChannel?.id === ch.id, user?.id)}
+                unreadCount={getChannelUnreadCount(ch, activeChannel?.id === ch.id)}
                 canDelete={canManage}
                 onDelete={() => setChannelToDelete(ch)}
                 onClick={() => {
@@ -354,14 +354,14 @@ export default function ChannelSidebar() {
   );
 }
 
-function ChannelRow({ channel, active, unread, canAccess, canDelete, onDelete, onClick }) {
+function ChannelRow({ channel, active, unreadCount, canAccess, canDelete, onDelete, onClick }) {
   return (
     <button
       className={`${styles.row} ${active ? styles.rowActive : ''} ${canAccess ? '' : styles.rowDisabled}`}
       onClick={onClick}
       data-testid={`channel-item-${channel.id}`}
       data-channel-id={channel.id}
-      data-read-state={unread ? 'UNREAD' : 'READ'}
+      data-read-state={unreadCount > 0 ? 'UNREAD' : 'READ'}
       aria-label={canAccess ? `Open channel ${channel.name}` : `Private channel ${channel.name} requires invite`}
       title={canAccess ? `Open channel ${channel.name}` : 'Invite required to read channel contents'}
     >
@@ -390,13 +390,15 @@ function ChannelRow({ channel, active, unread, canAccess, canDelete, onDelete, o
           ×
         </span>
       )}
-      {unread && (
+      {unreadCount > 0 && (
         <span
-          className={styles.unreadDot}
+          className={styles.unreadBadge}
           data-testid={`channel-unread-indicator-${channel.id}`}
           data-read-state="UNREAD"
-          aria-label="Unread channel"
-        />
+          aria-label={`${unreadCount} unread messages`}
+        >
+          {unreadCount > 99 ? '99+' : unreadCount}
+        </span>
       )}
     </button>
   );
@@ -419,18 +421,14 @@ function isCommunityOwner(community) {
   return role === 'owner';
 }
 
-function isChannelUnread(channel, active, currentUserId) {
-  if (active) return false;
+function getChannelUnreadCount(channel, active): number {
+  if (active) return 0;
   const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
-  if (!canAccess) return false;
-  const hasActivity = Boolean(channel?.has_new_activity ?? channel?.hasNewActivity);
-  if (hasActivity) return true;
-  const lastMessageAuthorId = channel?.last_message_author_id || channel?.lastMessageAuthorId;
-  const lastMessageId = channel?.last_message_id || channel?.lastMessageId;
-  const myLastReadMessageId = channel?.my_last_read_message_id || channel?.myLastReadMessageId;
-  if (!lastMessageId) return false;
-  if (lastMessageAuthorId === currentUserId) return false;
-  return myLastReadMessageId !== lastMessageId;
+  if (!canAccess) return 0;
+  const count = channel?.unread_message_count ?? 0;
+  // Fall back to at-least-1 if has_new_activity is set but count hasn't propagated yet
+  if (count === 0 && Boolean(channel?.has_new_activity ?? channel?.hasNewActivity)) return 1;
+  return count;
 }
 
 function isConversationUnread(conv, active, currentUserId) {

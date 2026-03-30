@@ -188,6 +188,21 @@
   box-shadow: 0 0 0 2px rgba(255, 107, 107, 0.2);
 }
 
+.unreadBadge {
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: #ff6b6b;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  padding: 0 4px;
+  box-sizing: border-box;
+}
+
 .hint {
   padding: 6px 8px;
   font-size: 12px;

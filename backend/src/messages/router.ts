@@ -17,6 +17,8 @@ const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
 const overload         = require('../utils/overload');
+const redis            = require('../db/redis');
+const logger           = require('../utils/logger');
 
 const router = express.Router();
 router.use(authenticate);
@@ -219,7 +221,12 @@ router.post('/',
       if (conversationId) {
         await publishConversationEvent(conversationId, 'message:created', message || baseMessage);
       } else {
-        sideEffects.publishMessageEvent(targetKey(channelId, conversationId), 'message:created', message || baseMessage);
+        sideEffects.publishMessageEventWithUnread(
+          targetKey(channelId, conversationId),
+          'message:created',
+          message || baseMessage,
+          channelId
+        );
       }
       if (channelId) {
         const { rows: channelRows } = await pool.query(
@@ -375,6 +382,31 @@ router.put('/:id/read',
         await publishConversationEvent(conversation_id, 'read:updated', payload);
       } else {
         sideEffects.publishMessageEvent(targetKey(channel_id, conversation_id), 'read:updated', payload);
+      }
+
+      // Reset the user's unread watermark in Redis to the current channel message count
+      if (channel_id) {
+        try {
+          const countKey = `channel:msg_count:${channel_id}`;
+          const readKey  = `user:last_read_count:${channel_id}:${req.user.id}`;
+          const currentCount = await redis.get(countKey);
+          if (currentCount !== null) {
+            await redis.set(readKey, currentCount);
+          } else {
+            // Channel counter not yet in Redis; initialize both
+            const { rows: cntRows } = await pool.query(
+              `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
+              [channel_id]
+            );
+            const total = cntRows[0]?.cnt ?? 0;
+            const pipeline = redis.pipeline();
+            pipeline.set(countKey, total, 'NX');
+            pipeline.set(readKey, total);
+            await pipeline.exec();
+          }
+        } catch (err) {
+          logger.warn({ err, channel_id }, 'Failed to reset user:last_read_count in Redis');
+        }
       }
 
       res.json({ success: true });
