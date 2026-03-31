@@ -306,6 +306,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }));
     await get().fetchChannels(community.id);
     await get().fetchMembers(community.id);
+    // Auto-select the first accessible channel
+    const channels = get().channels;
+    const firstAccessible = channels.find(ch => {
+      const canAccess = ch?.can_access ?? ch?.canAccess ?? !ch?.is_private;
+      return canAccess;
+    });
+    if (firstAccessible) {
+      await get().selectChannel(firstAccessible);
+    }
     // Subscribe to community-level events
     wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
   },
