@@ -14,7 +14,6 @@ export default function ChannelSidebar() {
   } = useChatStore();
   const user = useAuthStore(s => s.user);
   const [showCreate, setShowCreate] = useState(false);
-  const [showInvite, setShowInvite] = useState(false);
   const [showNewDm, setShowNewDm] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [leaveBusy, setLeaveBusy] = useState(false);
@@ -113,20 +112,6 @@ export default function ChannelSidebar() {
         <div className={styles.header} data-testid="channel-sidebar-header">
           <span className={styles.communityName}>{activeCommunity.name}</span>
           <div className={styles.headerActions}>
-            <button
-              className={styles.inviteBtn}
-              title="Invite people"
-              aria-label="Invite people to server"
-              data-testid="community-invite-open"
-              onClick={() => setShowInvite(true)}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-                <circle cx="8.5" cy="7" r="4"/>
-                <line x1="20" y1="8" x2="20" y2="14"/>
-                <line x1="23" y1="11" x2="17" y2="11"/>
-              </svg>
-            </button>
             {canDeleteCommunity ? (
               <button
                 className={styles.inviteBtn}
@@ -231,13 +216,6 @@ export default function ChannelSidebar() {
             await createChannel(activeCommunity.id, name, isPrivate);
             setShowCreate(false);
           }}
-        />
-      )}
-
-      {showInvite && activeCommunity && (
-        <InviteCommunityModal
-          community={activeCommunity}
-          onClose={() => setShowInvite(false)}
         />
       )}
 
@@ -488,36 +466,6 @@ function PendingInviteRow({ invite, currentUserId, onAccept, onDecline }) {
         </button>
       </div>
     </div>
-  );
-}
-
-function InviteCommunityModal({ community, onClose }) {
-  const [copied, setCopied] = useState(false);
-  const inviteCode = community?.invite_code || community?.inviteCode || '';
-  const inviteUrl = inviteCode ? `${window.location.origin}/invite/${inviteCode}` : '';
-
-  async function handleCopy() {
-    if (!inviteUrl) return;
-    try {
-      await navigator.clipboard.writeText(inviteUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setCopied(false);
-    }
-  }
-
-  return (
-    <Modal title="Invite people" onClose={onClose}>
-      <div className={styles.form} data-testid="community-invite-modal">
-        <label>Invite link
-          <input value={inviteUrl || 'Invite link unavailable'} readOnly data-testid="community-invite-link" />
-        </label>
-        <button type="button" onClick={handleCopy} disabled={!inviteUrl} data-testid="community-invite-copy">
-          {copied ? 'Copied' : 'Copy invite link'}
-        </button>
-      </div>
-    </Modal>
   );
 }
 

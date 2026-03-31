@@ -6,7 +6,7 @@
  * GET    /api/v1/communities/:id                – get details
  * DELETE /api/v1/communities/:id                – delete (owner only)
  * PATCH  /api/v1/communities/:id                – update (admin+)
- * POST   /api/v1/communities/:id/join           – join by invite code or public
+ * POST   /api/v1/communities/:id/join           – join public community
  * DELETE /api/v1/communities/:id/leave          – leave
  * GET    /api/v1/communities/:id/members        – list members + presence
  */
@@ -15,7 +15,6 @@
 
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
-const { v4: uuidv4 } = require('uuid');
 
 const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
@@ -95,7 +94,6 @@ router.post('/',
     try {
       await client.query('BEGIN');
       const { slug, name, description, isPublic = true } = req.body;
-      const inviteCode = uuidv4().slice(0, 8);
       const { rowCount } = await client.query(
         'SELECT 1 FROM communities WHERE owner_id = $1',
         [req.user.id]
@@ -105,9 +103,9 @@ router.post('/',
         return res.status(403).json({ error: 'Maximum 100 communities reached' });
       }
       const { rows } = await client.query(
-        `INSERT INTO communities (slug, name, description, is_public, owner_id, invite_code)
-         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-        [slug, name, description || null, isPublic, req.user.id, inviteCode]
+        `INSERT INTO communities (slug, name, description, is_public, owner_id)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [slug, name, description || null, isPublic, req.user.id]
       );
       const community = rows[0];
 
@@ -185,9 +183,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
     if (!community) return res.status(404).json({ error: 'Community not found' });
 
     if (!community.is_public) {
-      if (!req.body.inviteCode || req.body.inviteCode !== community.invite_code) {
-        return res.status(403).json({ error: 'Invalid invite code' });
-      }
+      return res.status(403).json({ error: 'Community is private' });
     }
 
     await pool.query(

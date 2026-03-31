@@ -91,8 +91,8 @@ CREATE TABLE channels (
     community_id UUID NOT NULL REFERENCES communities (id) ON DELETE CASCADE,
     name         TEXT NOT NULL,
     description  TEXT,
-    type         channel_type NOT NULL DEFAULT 'text',
     is_private   BOOLEAN NOT NULL DEFAULT FALSE,
+    type         channel_type NOT NULL DEFAULT 'text',
     position     INTEGER NOT NULL DEFAULT 0,    -- display ordering
     created_by   UUID REFERENCES users (id),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
