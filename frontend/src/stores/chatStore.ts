@@ -292,8 +292,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         has_new_activity: false,
         hasNewActivity: false,
       },
-      activeChannel: null,
-      activeConv: null,
       communities: s.communities.map((c) =>
         c.id === community.id
           ? {
@@ -304,17 +302,20 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           : c
       ),
     }));
-    await get().fetchChannels(community.id);
-    await get().fetchMembers(community.id);
-    // Auto-select the first accessible channel
-    const channels = get().channels;
+    const channelsPromise = get().fetchChannels(community.id);
+    const membersPromise = get().fetchMembers(community.id);
+    const channels = await channelsPromise;
+    // Auto-select the first accessible channel as soon as channel data is ready.
     const firstAccessible = channels.find(ch => {
       const canAccess = ch?.can_access ?? ch?.canAccess ?? !ch?.is_private;
       return canAccess;
     });
     if (firstAccessible) {
       await get().selectChannel(firstAccessible);
+    } else {
+      set({ activeChannel: null, activeConv: null });
     }
+    await membersPromise;
     // Subscribe to community-level events
     wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
   },

@@ -139,6 +139,94 @@ describe('chatStore quick actions', () => {
     expect(state.members.map((member) => member.id)).toEqual(['user-1']);
   });
 
+  it('selectCommunity does not wait for members before selecting the first accessible channel', async () => {
+    let resolveMembers: ((value: { members: { id: string }[] }) => void) | undefined;
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/channels?communityId=comm-1') {
+        return Promise.resolve({
+          channels: [
+            { id: 'ch-1', community_id: 'comm-1', name: 'general', can_access: true },
+            { id: 'ch-2', community_id: 'comm-1', name: 'staff', can_access: false },
+          ],
+        });
+      }
+
+      if (path === '/communities/comm-1/members') {
+        return new Promise((resolve) => {
+          resolveMembers = resolve;
+        });
+      }
+
+      if (path === '/messages?channelId=ch-1&limit=50') {
+        return Promise.resolve({ messages: [] });
+      }
+
+      throw new Error(`Unexpected GET ${path}`);
+    });
+
+    const selectPromise = useChatStore.getState().selectCommunity({ id: 'comm-1', name: 'One' } as any);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (useChatStore.getState().activeChannel?.id === 'ch-1') break;
+      await Promise.resolve();
+    }
+
+    expect(useChatStore.getState().activeCommunity?.id).toBe('comm-1');
+    expect(useChatStore.getState().activeChannel?.id).toBe('ch-1');
+
+    resolveMembers?.({ members: [{ id: 'user-1' }] });
+    await selectPromise;
+
+    expect(useChatStore.getState().members).toEqual([{ id: 'user-1' }]);
+  });
+
+  it('selectCommunity keeps the current target visible until the replacement channel is ready', async () => {
+    let resolveMembers: ((value: { members: { id: string }[] }) => void) | undefined;
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/channels?communityId=comm-1') {
+        return Promise.resolve({
+          channels: [
+            { id: 'ch-1', community_id: 'comm-1', name: 'general', can_access: true },
+          ],
+        });
+      }
+
+      if (path === '/communities/comm-1/members') {
+        return new Promise((resolve) => {
+          resolveMembers = resolve;
+        });
+      }
+
+      if (path === '/messages?channelId=ch-1&limit=50') {
+        return Promise.resolve({ messages: [] });
+      }
+
+      throw new Error(`Unexpected GET ${path}`);
+    });
+
+    useChatStore.setState({
+      activeConv: { id: 'conv-1', name: 'Existing DM' },
+    } as any);
+
+    const selectPromise = useChatStore.getState().selectCommunity({ id: 'comm-1', name: 'One' } as any);
+
+    expect(useChatStore.getState().activeConv?.id).toBe('conv-1');
+    expect(useChatStore.getState().activeChannel).toBeNull();
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (useChatStore.getState().activeChannel?.id === 'ch-1') break;
+      await Promise.resolve();
+    }
+
+    expect(useChatStore.getState().activeChannel?.id).toBe('ch-1');
+    expect(useChatStore.getState().activeConv).toBeNull();
+
+    resolveMembers?.({ members: [{ id: 'user-1' }] });
+    await selectPromise;
+  });
+
   it('removes a deleted community when a websocket delete event arrives', () => {
     useChatStore.setState({
       communities: [
