@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
   const wsTarget = env.WS_PROXY_TARGET || 'ws://localhost';
 
   return {
+    publicDir: 'public',
     plugins: [react()],
     server: {
       port: 5173,
