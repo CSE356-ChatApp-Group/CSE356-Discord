@@ -331,7 +331,7 @@
 .err {
   color: var(--red);
   font-size: 13px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 
 .form {
@@ -351,6 +351,22 @@
   letter-spacing: .05em;
 }
 
+.form input {
+  padding: 8px 10px;
+  font-size: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text-primary);
+}
+
+.formToggle {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-3);
+  padding: 9px 10px;
+}
+
 .checkLabel {
   flex-direction: row !important;
   align-items: center;
@@ -362,9 +378,11 @@
   cursor: pointer;
 }
 
-.form input[type="text"] {
-  padding: 8px 10px;
-  font-size: 14px;
+.checkLabel input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  padding: 0;
 }
 
 .form button {
@@ -374,6 +392,7 @@
   font-weight: 600;
   border-radius: var(--radius);
   font-size: 14px;
+  transition: background .15s;
 }
 
 .form button:hover:not(:disabled) { background: var(--accent-dim); }

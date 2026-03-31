@@ -484,15 +484,17 @@ function CreateChannelModal({ onClose, onCreate }) {
 
   return (
     <Modal title="New Channel" onClose={onClose}>
-      {err && <p className={styles.err}>{err}</p>}
+      {err && <p className={styles.err} role="alert">{err}</p>}
       <form onSubmit={submit} className={styles.form} data-testid="channel-create-form">
-        <label>Channel name
+        <label>Name
           <input value={name} onChange={e => setName(e.target.value.toLowerCase().replace(/\s+/g, '-'))} required placeholder="e.g. general" data-testid="channel-create-name" />
         </label>
-        <label className={styles.checkLabel}>
-          <input type="checkbox" checked={isPrivate} onChange={e => setPrivate(e.target.checked)} data-testid="channel-create-private" />
-          Private channel
-        </label>
+        <div className={styles.formToggle}>
+          <label className={styles.checkLabel}>
+            <input type="checkbox" checked={isPrivate} onChange={e => setPrivate(e.target.checked)} data-testid="channel-create-private" />
+            Private channel
+          </label>
+        </div>
         <button type="submit" disabled={busy} data-testid="channel-create-submit">{busy ? 'Creating…' : 'Create channel'}</button>
       </form>
     </Modal>
