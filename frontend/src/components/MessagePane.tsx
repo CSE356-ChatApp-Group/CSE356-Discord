@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { useAutoResize } from '../hooks/useAutoResize';
@@ -8,6 +8,27 @@ import SearchBar    from './SearchBar';
 import MemberList   from './MemberList';
 import Modal        from './Modal';
 import styles from './MessagePane.module.css';
+
+const DEFAULT_MEMBER_LIST_WIDTH = 236;
+const MIN_MEMBER_LIST_WIDTH = 140;
+const MAX_MEMBER_LIST_WIDTH = 420;
+const MEMBER_LIST_WIDTH_STORAGE_KEY = 'chatapp.memberListWidth';
+
+function getMaxMemberListWidth() {
+  if (typeof window === 'undefined') return MAX_MEMBER_LIST_WIDTH;
+  return Math.max(MIN_MEMBER_LIST_WIDTH, Math.min(MAX_MEMBER_LIST_WIDTH, Math.floor(window.innerWidth * 0.45)));
+}
+
+function clampMemberListWidth(width: number) {
+  return Math.min(getMaxMemberListWidth(), Math.max(MIN_MEMBER_LIST_WIDTH, width));
+}
+
+function getInitialMemberListWidth() {
+  if (typeof window === 'undefined') return DEFAULT_MEMBER_LIST_WIDTH;
+  const stored = Number.parseInt(window.localStorage.getItem(MEMBER_LIST_WIDTH_STORAGE_KEY) || '', 10);
+  if (Number.isFinite(stored)) return clampMemberListWidth(stored);
+  return clampMemberListWidth(DEFAULT_MEMBER_LIST_WIDTH);
+}
 
 export default function MessagePane() {
   const {
@@ -55,6 +76,8 @@ export default function MessagePane() {
   const [channelInviteLoading, setChannelInviteLoading] = useState(false);
   const [dmActionErr, setDmActionErr] = useState('');
   const [channelInviteErr, setChannelInviteErr] = useState('');
+  const [memberListWidth, setMemberListWidth] = useState(getInitialMemberListWidth);
+  const [isMemberListResizing, setIsMemberListResizing] = useState(false);
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inviteInputRef = useRef<HTMLInputElement>(null);
@@ -63,6 +86,7 @@ export default function MessagePane() {
   const bottomRef   = useRef(null);
   const inputRef    = useRef(null);
   const scrollRef   = useRef(null);
+  const bodyRef     = useRef<HTMLDivElement | null>(null);
   const initialScrollKeyRef = useRef<string | null>(null);
   const prevMsgCountRef = useRef(0);
   const exhaustedBeforeRef = useRef<string | null>(null);
@@ -189,6 +213,53 @@ export default function MessagePane() {
     window.addEventListener('keydown', onShortcut);
     return () => window.removeEventListener('keydown', onShortcut);
   }, []);
+
+  // Persist member list width to localStorage
+  useEffect(() => {
+    window.localStorage.setItem(MEMBER_LIST_WIDTH_STORAGE_KEY, String(memberListWidth));
+  }, [memberListWidth]);
+
+  // Handle window resize to clamp member list width
+  useEffect(() => {
+    const handleResize = () => {
+      setMemberListWidth((current) => clampMemberListWidth(current));
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
+
+  function startMemberListResize(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    event.currentTarget.setPointerCapture(pointerId);
+    setIsMemberListResizing(true);
+
+    const updateWidth = (clientX: number) => {
+      const bodyRight = bodyRef.current?.getBoundingClientRect().right ?? 0;
+      const nextWidth = clampMemberListWidth(bodyRight - clientX);
+      setMemberListWidth(nextWidth);
+    };
+
+    updateWidth(event.clientX);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      updateWidth(moveEvent.clientX);
+    };
+
+    const finishResize = () => {
+      setIsMemberListResizing(false);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+  }
 
   async function handleSearchSubmit(e?: React.FormEvent) {
     e?.preventDefault();
@@ -616,7 +687,7 @@ export default function MessagePane() {
         </div>
       </header>
 
-      <div className={styles.body}>
+      <div className={`${styles.body} ${isMemberListResizing ? styles.bodyResizing : ''}`} ref={bodyRef} style={{ '--member-list-width': `${memberListWidth}px` } as CSSProperties}>
         <div className={styles.mainColumn}>
           {/* Messages */}
           <div className={styles.messages} ref={scrollRef} onScroll={handleScroll} role="log" aria-live="polite" aria-label="Message history" data-testid="message-list">
@@ -675,6 +746,29 @@ export default function MessagePane() {
             </button>
           </form>
         </div>
+
+        <div
+          className={`${styles.resizeHandle} ${isMemberListResizing ? styles.resizeHandleActive : ''}`}
+          role="separator"
+          aria-label="Resize member list"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_MEMBER_LIST_WIDTH}
+          aria-valuemax={getMaxMemberListWidth()}
+          aria-valuenow={memberListWidth}
+          tabIndex={0}
+          onPointerDown={startMemberListResize}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft') {
+              event.preventDefault();
+              setMemberListWidth((current) => clampMemberListWidth(current + 16));
+            }
+            if (event.key === 'ArrowRight') {
+              event.preventDefault();
+              setMemberListWidth((current) => clampMemberListWidth(current - 16));
+            }
+          }}
+          data-testid="member-list-resize-handle"
+        />
 
         {/* Right sidebar (members/search) */}
         {(activeChannel || activeConv) && (
