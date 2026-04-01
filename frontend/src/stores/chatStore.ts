@@ -1390,6 +1390,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversation = event.data?.conversation;
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
+        const existingBefore = store.conversations.find((conv) => conv.id === conversationId);
 
         wsManager.subscribe(`conversation:${conversationId}`, store._handleWsEvent);
 
@@ -1410,12 +1411,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   participants: conversation.participants || existingInvite.participants,
                 }
               : conversation;
-
-            broadcastDmInviteSync({
-              type: 'invite-added',
-              conversationId,
-              conversation: pendingInvite,
-            });
 
             return {
               pendingDmInvites: [
@@ -1451,11 +1446,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           };
         });
 
-        broadcastDmInviteSync({
-          type: 'invite-accepted',
-          conversationId,
-          conversation,
-        });
+        if (!existingBefore) {
+          broadcastDmInviteSync({
+            type: 'invite-added',
+            conversationId,
+            conversation,
+          });
+        } else {
+          broadcastDmInviteSync({
+            type: 'invite-accepted',
+            conversationId,
+            conversation,
+          });
+        }
         break;
       }
       case 'conversation:participant_added': {
@@ -1463,6 +1466,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
         const me = useAuthStore.getState().user;
+        const existingBefore = store.conversations.find((conv) => conv.id === conversationId);
         const addedParticipantIds = Array.isArray(event.data?.participantIds)
           ? event.data.participantIds.map((id: any) => String(id))
           : [];
@@ -1488,12 +1492,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 }
               : conversation;
 
-            broadcastDmInviteSync({
-              type: 'invite-added',
-              conversationId,
-              conversation: pendingInvite,
-            });
-
             return {
               pendingDmInvites: [
                 pendingInvite,
@@ -1528,11 +1526,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           };
         });
 
-        broadcastDmInviteSync({
-          type: 'invite-accepted',
-          conversationId,
-          conversation,
-        });
+        if (iWasJustAdded && !existingBefore) {
+          broadcastDmInviteSync({
+            type: 'invite-added',
+            conversationId,
+            conversation,
+          });
+        } else {
+          broadcastDmInviteSync({
+            type: 'invite-accepted',
+            conversationId,
+            conversation,
+          });
+        }
         break;
       }
       case 'conversation:updated': {
