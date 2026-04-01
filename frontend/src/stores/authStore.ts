@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, setToken, getToken } from '../lib/api';
 import { wsManager } from '../lib/ws';
+import { resetChatStore } from './chatStore';
 
 type AuthUser = {
   id: string;
@@ -55,6 +56,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   expireSession() {
     setToken(null);
     wsManager.disconnect();
+    resetChatStore();
     set({ user: null, authBypass: false, loading: false });
   },
 

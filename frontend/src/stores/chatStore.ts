@@ -48,6 +48,7 @@ type ChatState = {
   setPresence: (userId: string, status: PresenceStatus, awayMessage?: string | null) => void;
   search: (q: string) => Promise<void>;
   clearSearch: () => void;
+  reset: () => void;
   _handleWsEvent: (event: any) => void;
 };
 
@@ -198,6 +199,20 @@ function markMessageRead(messageId?: string | null) {
     });
 }
 
+export function resetChatStore() {
+  // Cancel any in-flight community fetch so the next user starts fresh.
+  communitiesInFlight = null;
+  channelsInFlightByCommunity.clear();
+  readMarkInFlight.clear();
+  readMarkRecent.clear();
+  if (unreadRefreshTimer) {
+    clearTimeout(unreadRefreshTimer);
+    unreadRefreshTimer = null;
+  }
+  wsUserSubscriptionId = null;
+  useChatStore.getState().reset();
+}
+
 export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Data ──────────────────────────────────────────────────────────────────
   communities:     [],
@@ -213,6 +228,24 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   members:         [],   // members of activeCommunity
   searchResults:   null,
   searchQuery:     '',
+
+  reset() {
+    set({
+      communities:     [],
+      activeCommunity: null,
+      channels:        [],
+      activeChannel:   null,
+      conversations:   [],
+      pendingDmInvites: [],
+      activeConv:      null,
+      messages:        {},
+      presence:        {},
+      awayMessages:    {},
+      members:         [],
+      searchResults:   null,
+      searchQuery:     '',
+    });
+  },
 
   // ── Communities ───────────────────────────────────────────────────────────
   async fetchCommunities() {
