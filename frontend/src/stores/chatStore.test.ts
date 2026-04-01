@@ -19,7 +19,7 @@ vi.mock('../lib/api', () => ({
 }));
 
 import { useAuthStore } from './authStore';
-import { useChatStore } from './chatStore';
+import { applyDmInviteSyncForTest, useChatStore } from './chatStore';
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -625,5 +625,39 @@ describe('resetChatStore / expireSession data isolation', () => {
     expect(s.activeConv).toBeNull();
     expect(s.messages).toEqual({});
     expect(s.members).toEqual([]);
+  });
+});
+
+describe('dm invite cross-tab sync', () => {
+  it('removes pending invite when another tab declines it', () => {
+    useChatStore.setState({
+      pendingDmInvites: [{ id: 'conv-10', participants: [{ id: 'user-1' }, { id: 'user-2' }] }],
+    } as any);
+
+    applyDmInviteSyncForTest({ type: 'invite-removed', conversationId: 'conv-10', ts: Date.now() });
+
+    expect(useChatStore.getState().pendingDmInvites).toEqual([]);
+  });
+
+  it('promotes pending invite to conversation when another tab accepts it', () => {
+    useChatStore.setState({
+      conversations: [],
+      pendingDmInvites: [{ id: 'conv-11', participants: [{ id: 'user-1' }, { id: 'user-2' }] }],
+    } as any);
+
+    applyDmInviteSyncForTest({
+      type: 'invite-accepted',
+      conversationId: 'conv-11',
+      conversation: {
+        id: 'conv-11',
+        name: 'Accepted DM',
+        participants: [{ id: 'user-1' }, { id: 'user-2' }],
+      },
+      ts: Date.now(),
+    });
+
+    const state = useChatStore.getState();
+    expect(state.pendingDmInvites).toEqual([]);
+    expect(state.conversations.some((conv) => conv.id === 'conv-11')).toBe(true);
   });
 });
