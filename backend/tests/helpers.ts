@@ -20,19 +20,19 @@ export async function registerUser({
   password = 'Password1!',
   displayName,
 }: {
-  email: string;
+  email?: string;
   username: string;
   password?: string;
   displayName?: string;
 }) {
   return request(app)
     .post('/api/v1/auth/register')
-    .send({ email, username, password, displayName: displayName || username });
+    .send({ ...(email ? { email } : {}), username, password, displayName: displayName || username });
 }
 
-export async function createAuthenticatedUser(prefix: string) {
+export async function createAuthenticatedUser(prefix: string, opts: { withEmail?: boolean } = {}) {
   const suffix = uniqueSuffix();
-  const email = `${prefix}-${suffix}@example.com`;
+  const email = opts.withEmail !== false ? `${prefix}-${suffix}@example.com` : undefined;
   const username = `${prefix}${suffix}`.slice(0, 32);
   const res = await registerUser({ email, username });
   if (res.status !== 201) {

@@ -33,7 +33,7 @@ type AuthState = {
   expireSession: () => void;
   init: () => Promise<void>;
   login: (email: string, password: string) => Promise<AuthUser>;
-  register: (email: string, username: string, password: string, displayName: string) => Promise<AuthUser>;
+  register: (email: string | null | undefined, username: string, password: string, displayName: string) => Promise<AuthUser>;
   logout: () => Promise<void>;
 };
 
@@ -124,8 +124,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     return user;
   },
 
-  async register(email: string, username: string, password: string, displayName: string) {
-    const data = await api.post('/auth/register', { email, username, password, displayName });
+  async register(email: string | null | undefined, username: string, password: string, displayName: string) {
+    const data = await api.post('/auth/register', { email: email || undefined, username, password, displayName });
     setToken(data.accessToken);
     let user = normalizeAuthUser(data.user);
     try {

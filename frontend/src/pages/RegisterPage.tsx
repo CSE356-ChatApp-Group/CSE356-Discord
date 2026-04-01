@@ -5,6 +5,7 @@ import styles from './Auth.module.css';
 
 export default function RegisterPage() {
   const [form, setForm] = useState({ email: '', username: '', password: '', displayName: '' });
+  // email is optional – the backend accepts null
   const [error, setError]   = useState('');
   const [loading, setLoading] = useState(false);
   const register = useAuthStore(s => s.register);
@@ -40,9 +41,9 @@ export default function RegisterPage() {
 
         <form onSubmit={handleSubmit} className={styles.form} data-testid="register-form">
           <label className={styles.label}>
-            Email
+            Email <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span>
             <input id="register-email" name="email" type="email" value={form.email} onChange={set('email')}
-              className={styles.input} placeholder="you@example.com" required autoFocus />
+              className={styles.input} placeholder="you@example.com" autoFocus />
           </label>
 
           <label className={styles.label}>

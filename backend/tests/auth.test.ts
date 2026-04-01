@@ -68,6 +68,29 @@ describe('POST /api/v1/auth/register', () => {
 
     expect(duplicate.status).toBe(409);
   });
+
+  it('registers successfully without an email address', async () => {
+    const suffix = uniqueSuffix();
+    const username = `noemail${suffix}`.slice(0, 32);
+
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ username, password: 'Password1!' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.accessToken).toBeDefined();
+    expect(res.body.user.email).toBeFalsy();
+    expect(res.body.user.username).toBe(username);
+  });
+
+  it('rejects an invalid email when one is supplied', async () => {
+    const suffix = uniqueSuffix();
+    const res = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ email: 'not-an-email', username: `badmail${suffix}`, password: 'Password1!' });
+
+    expect(res.status).toBe(400);
+  });
 });
 
 // ── Login ────────────────────────────────────────────────────────────────────────────
@@ -89,6 +112,31 @@ describe('POST /api/v1/auth/login', () => {
       .send({ email: 'test@example.com', password: 'wrongpassword' });
 
     expect(res.status).toBe(401);
+  });
+
+  it('logs in using username instead of email', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email: 'testuser', password: 'Password1!' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toBeDefined();
+  });
+
+  it('allows a no-email user to register and then log in by username', async () => {
+    const suffix = uniqueSuffix();
+    const username = `nologin${suffix}`.slice(0, 32);
+
+    const reg = await request(app)
+      .post('/api/v1/auth/register')
+      .send({ username, password: 'Password1!' });
+    expect(reg.status).toBe(201);
+
+    const login = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email: username, password: 'Password1!' });
+    expect(login.status).toBe(200);
+    expect(login.body.accessToken).toBeDefined();
   });
 });
 

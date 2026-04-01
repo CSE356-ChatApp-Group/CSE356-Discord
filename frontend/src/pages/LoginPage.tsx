@@ -39,17 +39,17 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} className={styles.form} data-testid="login-form">
           <label className={styles.label}>
-            Email
+            Email or username
             <input
               id="login-email"
               name="email"
-              type="email"
+              type="text"
               value={email}
               onChange={e => setEmail(e.target.value)}
               className={styles.input}
-              placeholder="you@example.com"
+              placeholder="you@example.com or username"
               required
-              autoComplete="email"
+              autoComplete="username"
               autoFocus
               data-testid="login-email"
             />
