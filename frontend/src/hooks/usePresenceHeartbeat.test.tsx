@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render } from '@testing-library/react';
+import { act, fireEvent, render } from '@testing-library/react';
 
 const { sendMock, onOpenMock, invokeOpen } = vi.hoisted(() => {
   const sendMock = vi.fn();
@@ -37,11 +37,15 @@ describe('usePresenceHeartbeat', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
-    useAuthStore.setState({ user: { id: 'user-1', username: 'sam', email: 'sam@example.com' } } as any);
+    act(() => {
+      useAuthStore.setState({ user: { id: 'user-1', username: 'sam', email: 'sam@example.com' } } as any);
+    });
   });
 
   afterEach(() => {
-    useAuthStore.setState({ user: null } as any);
+    act(() => {
+      useAuthStore.setState({ user: null } as any);
+    });
   });
 
   it('reapplies persisted away intent on mount and websocket reconnect, and suppresses activity while away', () => {
@@ -60,7 +64,9 @@ describe('usePresenceHeartbeat', () => {
     const activityCalls = sendMock.mock.calls.filter(([payload]) => payload?.type === 'activity');
     expect(activityCalls).toHaveLength(0);
 
-    invokeOpen();
+    act(() => {
+      invokeOpen();
+    });
 
     const awayPresenceCalls = sendMock.mock.calls.filter(([payload]) => payload?.type === 'presence' && payload?.status === 'away');
     expect(awayPresenceCalls).toHaveLength(2);

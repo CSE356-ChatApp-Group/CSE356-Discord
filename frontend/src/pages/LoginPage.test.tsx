@@ -1,19 +1,25 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import LoginPage from './LoginPage';
 import { useAuthStore } from '../stores/authStore';
 
 const originalLogin = useAuthStore.getState().login;
+const routerFuture = {
+  v7_startTransition: true,
+  v7_relativeSplatPath: true,
+} as const;
 
 afterEach(() => {
-  useAuthStore.setState({ login: originalLogin } as any);
+  act(() => {
+    useAuthStore.setState({ login: originalLogin } as any);
+  });
 });
 
 describe('LoginPage', () => {
   it('exposes stable machine-navigation selectors and oauth links', () => {
     render(
-      <MemoryRouter>
+      <MemoryRouter future={routerFuture}>
         <LoginPage />
       </MemoryRouter>
     );
@@ -32,17 +38,21 @@ describe('LoginPage', () => {
 
   it('submits credentials through auth store login action', async () => {
     const loginSpy = vi.fn().mockResolvedValue({ id: 'user-1' });
-    useAuthStore.setState({ login: loginSpy } as any);
+    act(() => {
+      useAuthStore.setState({ login: loginSpy } as any);
+    });
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={routerFuture}>
         <LoginPage />
       </MemoryRouter>
     );
 
-    fireEvent.change(screen.getByTestId('login-email'), { target: { value: 'sam@example.com' } });
-    fireEvent.change(screen.getByTestId('login-password'), { target: { value: 'Password1!' } });
-    fireEvent.submit(screen.getByTestId('login-form'));
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('login-email'), { target: { value: 'sam@example.com' } });
+      fireEvent.change(screen.getByTestId('login-password'), { target: { value: 'Password1!' } });
+      fireEvent.submit(screen.getByTestId('login-form'));
+    });
 
     await waitFor(() => {
       expect(loginSpy).toHaveBeenCalledWith('sam@example.com', 'Password1!');

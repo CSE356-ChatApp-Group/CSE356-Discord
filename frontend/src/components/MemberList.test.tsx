@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import MemberList from './MemberList';
 import { useAuthStore } from '../stores/authStore';
 import { useChatStore } from '../stores/chatStore';
@@ -22,37 +22,41 @@ vi.mock('../lib/api', () => ({
 describe('MemberList DM presence', () => {
   beforeEach(() => {
     apiGetMock.mockReset();
-    useAuthStore.setState({
-      user: {
-        id: 'user-1',
-        username: 'sam',
-        displayName: 'Sam',
-        email: 'sam@example.com',
-      },
-    } as any);
+    act(() => {
+      useAuthStore.setState({
+        user: {
+          id: 'user-1',
+          username: 'sam',
+          displayName: 'Sam',
+          email: 'sam@example.com',
+        },
+      } as any);
 
-    useChatStore.setState({
-      activeConv: {
-        id: 'conv-1',
-        participants: [
-          { id: 'user-1', username: 'sam', displayName: 'Sam' },
-          { id: 'user-2', username: 'alex', displayName: 'Alex' },
-        ],
-      },
-      members: [],
-      presence: {},
-      awayMessages: {},
-    } as any);
+      useChatStore.setState({
+        activeConv: {
+          id: 'conv-1',
+          participants: [
+            { id: 'user-1', username: 'sam', displayName: 'Sam' },
+            { id: 'user-2', username: 'alex', displayName: 'Alex' },
+          ],
+        },
+        members: [],
+        presence: {},
+        awayMessages: {},
+      } as any);
+    });
   });
 
   afterEach(() => {
-    useAuthStore.setState({ user: null } as any);
-    useChatStore.setState({
-      activeConv: null,
-      members: [],
-      presence: {},
-      awayMessages: {},
-    } as any);
+    act(() => {
+      useAuthStore.setState({ user: null } as any);
+      useChatStore.setState({
+        activeConv: null,
+        members: [],
+        presence: {},
+        awayMessages: {},
+      } as any);
+    });
   });
 
   it('fetches and renders latest participant statuses for DMs', async () => {
