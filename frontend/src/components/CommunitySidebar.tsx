@@ -41,16 +41,20 @@ export default function CommunitySidebar() {
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarMsg, setAvatarMsg] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const accountRequestIdRef = useRef(0);
 
   async function openAccountModal() {
+    const requestId = ++accountRequestIdRef.current;
     setShowAccount(true);
     setAccountError('');
     setLoadingLinks(true);
     try {
       const data = await api.get('/auth/oauth/linked');
+      if (accountRequestIdRef.current !== requestId) return;
       setLinkedProviders(Array.isArray(data?.providers) ? data.providers : []);
       setHasPassword(Boolean(data?.hasPassword));
       const me = await api.get('/users/me');
+      if (accountRequestIdRef.current !== requestId) return;
       const status = me?.user?.status === 'away' ? 'away' : 'online';
       setPresenceStatus(status);
       setAwayMessage(me?.user?.away_message || me?.user?.awayMessage || '');
@@ -59,13 +63,16 @@ export default function CommunitySidebar() {
       }
       setPresenceMsg('');
     } catch (e) {
+      if (accountRequestIdRef.current !== requestId) return;
       setAccountError(e?.message || 'Could not load linked providers');
       setLinkedProviders([]);
       setHasPassword(false);
       setPresenceStatus('online');
       setAwayMessage('');
     } finally {
-      setLoadingLinks(false);
+      if (accountRequestIdRef.current === requestId) {
+        setLoadingLinks(false);
+      }
     }
   }
 
@@ -262,7 +269,13 @@ export default function CommunitySidebar() {
       )}
 
       {showAccount && (
-        <Modal title="Account" onClose={() => setShowAccount(false)}>
+        <Modal
+          title="Account"
+          onClose={() => {
+            accountRequestIdRef.current += 1;
+            setShowAccount(false);
+          }}
+        >
           <div className={styles.accountWrap}>
             <div className={styles.accountIdentity} data-testid="account-identity">
               <Avatar user={user} name={user?.displayName || user?.username} size={44} />
@@ -398,8 +411,9 @@ export default function CommunitySidebar() {
               type="button"
               className={styles.logoutBtn}
               onClick={async () => {
-                await logout();
+                accountRequestIdRef.current += 1;
                 setShowAccount(false);
+                await logout();
               }}
               data-testid="account-logout"
             >

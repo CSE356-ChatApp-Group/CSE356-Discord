@@ -143,6 +143,15 @@ export async function loginViaUiWithRetry(page: Page, user: TestUser) {
 
   for (const [index, loginIdentifier] of identifiers.entries()) {
     await page.goto('/login');
+    await page.waitForLoadState('domcontentloaded');
+
+    await expect(
+      page.locator('[data-testid="route-login"], [data-testid="route-chat"]'),
+    ).toBeVisible({ timeout: 20_000 });
+
+    const alreadyLoggedIn = await page.getByTestId('route-chat').isVisible({ timeout: 1_000 }).catch(() => false);
+    if (alreadyLoggedIn) return;
+
     await expect(page.getByTestId('route-login')).toBeVisible({ timeout: 10_000 });
 
     await page.getByTestId('login-email').fill(loginIdentifier);

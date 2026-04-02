@@ -1,5 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+
+const { apiGet, apiPost } = vi.hoisted(() => ({
+  apiGet: vi.fn(),
+  apiPost: vi.fn(),
+}));
+
+vi.mock('../lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/api')>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      get: apiGet,
+      post: apiPost,
+    },
+  };
+});
+
 import CommunitySidebar from './CommunitySidebar';
 import { useAuthStore } from '../stores/authStore';
 import { useChatStore } from '../stores/chatStore';
@@ -7,6 +25,10 @@ import { useChatStore } from '../stores/chatStore';
 describe('CommunitySidebar presence badge', () => {
   beforeEach(() => {
     window.localStorage.clear();
+    apiGet.mockReset();
+    apiGet.mockResolvedValue({});
+    apiPost.mockReset();
+    apiPost.mockResolvedValue({});
     act(() => {
       useChatStore.setState({
         communities: [],
@@ -108,6 +130,59 @@ describe('CommunitySidebar presence badge', () => {
     render(<CommunitySidebar />);
 
     expect(screen.getByTestId('home-dms-unread-indicator')).toBeInTheDocument();
+  });
+
+  it('ignores late account-profile responses after logout', async () => {
+    let resolveProfile: ((value: any) => void) | undefined;
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/auth/oauth/linked') {
+        return Promise.resolve({ providers: [], hasPassword: true });
+      }
+      if (path === '/users/me') {
+        return new Promise((resolve) => {
+          resolveProfile = resolve;
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    act(() => {
+      useAuthStore.setState({
+        user: {
+          id: 'user-1',
+          username: 'sam',
+          displayName: 'Sam',
+          email: 'sam@example.com',
+        },
+        authBypass: false,
+        loading: false,
+      } as any);
+    });
+
+    render(<CommunitySidebar />);
+
+    fireEvent.click(screen.getByTestId('account-open'));
+    expect(await screen.findByTestId('account-logout')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('account-logout'));
+    });
+
+    await act(async () => {
+      resolveProfile?.({
+        user: {
+          id: 'user-1',
+          username: 'stale-user',
+          displayName: 'Stale User',
+          email: 'stale@example.com',
+        },
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().user).toBeNull();
+    });
   });
 
   it('hides DM unread indicator when user is already on DM tab', () => {

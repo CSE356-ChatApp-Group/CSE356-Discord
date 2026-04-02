@@ -50,6 +50,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   loading: true,   // true while checking existing session on mount
 
   setUser(user: AuthUser | null) {
+    if (user && !getToken() && !get().authBypass) {
+      // Ignore stale profile writes that arrive after logout/session expiry.
+      return;
+    }
     set({ user: normalizeAuthUser(user) });
   },
 

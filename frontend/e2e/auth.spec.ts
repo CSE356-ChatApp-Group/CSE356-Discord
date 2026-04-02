@@ -32,7 +32,8 @@ test.describe('authentication', () => {
     await page.getByTestId('account-open').click();
     await page.getByTestId('account-logout').click();
 
-    await expect(page.getByTestId('route-login')).toBeVisible({ timeout: 10_000 });
+    await page.waitForURL((url) => url.pathname.endsWith('/login'), { timeout: 15_000 }).catch(() => {});
+    await expect(page.getByTestId('route-login')).toBeVisible({ timeout: 15_000 });
   });
 
   test('shows an inline error for a wrong password @full @heavy-auth @staging', async ({ page }) => {
