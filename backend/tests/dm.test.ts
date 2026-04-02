@@ -1,7 +1,7 @@
 /**
  * DM / conversation lifecycle integration tests.
  *
- * Covers: invite flow, accept idempotency, leave, guard rails, 1:1 vs group
+ * Covers: invite flow, leave, guard rails, 1:1 vs group
  * deletion, history retention, and system message persistence.
  */
 
@@ -37,7 +37,7 @@ afterAll(async () => {
 // ── Invite flow ───────────────────────────────────────────────────────────────
 
 describe('DM invite flow', () => {
-  it('keeps invited participants pending until acceptance, then allows them to leave', async () => {
+  it('adds invited participants immediately and allows them to leave', async () => {
     const userA = await createAuthenticatedUser('dmowner');
     const userB = await createAuthenticatedUser('dminitial');
     const userC = await createAuthenticatedUser('dminvite');
@@ -46,7 +46,7 @@ describe('DM invite flow', () => {
     const inviteeSocket = await connectWebSocket(port, userC.accessToken);
 
     try {
-      // Start with a true group DM, then invite userC as pending.
+      // Start with a true group DM, then invite userC.
       const createRes = await request(app)
         .post('/api/v1/conversations')
         .set('Authorization', `Bearer ${userA.accessToken}`)
@@ -72,7 +72,7 @@ describe('DM invite flow', () => {
       const inviteEvent = await inviteEventPromise;
       expect(inviteEvent.data.conversationId).toBe(conversationId);
 
-      // Pending invitees should not appear as active participants yet.
+      // Invited users are immediately active participants.
       const pendingListRes = await request(app)
         .get('/api/v1/conversations')
         .set('Authorization', `Bearer ${userC.accessToken}`);
@@ -80,36 +80,17 @@ describe('DM invite flow', () => {
       expect(pendingListRes.status).toBe(200);
       expect(
         pendingListRes.body.conversations.find((c: any) => c.id === conversationId),
-      ).toBeUndefined();
+      ).toBeDefined();
 
-      // No joined system message until the invitee accepts.
-      const beforeAcceptMessages = await request(app)
+      // Group join system message is emitted at invite time.
+      const messagesAfterInvite = await request(app)
         .get('/api/v1/messages')
         .set('Authorization', `Bearer ${userA.accessToken}`)
         .query({ conversationId });
 
-      expect(beforeAcceptMessages.status).toBe(200);
+      expect(messagesAfterInvite.status).toBe(200);
       expect(
-        beforeAcceptMessages.body.messages.some(
-          (m: any) => m.type === 'system' && /joined the group\./i.test(m.content || ''),
-        ),
-      ).toBe(false);
-
-      const acceptRes = await request(app)
-        .post(`/api/v1/conversations/${conversationId}/accept`)
-        .set('Authorization', `Bearer ${userC.accessToken}`)
-        .send({});
-
-      expect(acceptRes.status).toBe(200);
-
-      const afterAcceptMessages = await request(app)
-        .get('/api/v1/messages')
-        .set('Authorization', `Bearer ${userA.accessToken}`)
-        .query({ conversationId });
-
-      expect(afterAcceptMessages.status).toBe(200);
-      expect(
-        afterAcceptMessages.body.messages.some(
+        messagesAfterInvite.body.messages.some(
           (m: any) => m.type === 'system' && /joined the group\./i.test(m.content || ''),
         ),
       ).toBe(true);
@@ -132,126 +113,6 @@ describe('DM invite flow', () => {
     } finally {
       await closeWebSocket(inviteeSocket);
     }
-  });
-
-  it('rejects accepting a conversation when user is not invited', async () => {
-    const owner = await createAuthenticatedUser('dmacceptowner');
-    const member = await createAuthenticatedUser('dmacceptmember');
-    const stranger = await createAuthenticatedUser('dmacceptstranger');
-
-    const createRes = await request(app)
-      .post('/api/v1/conversations')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [member.user.id] });
-
-    expect(createRes.status).toBe(201);
-    const conversationId = createRes.body.conversation.id;
-
-    const acceptRes = await request(app)
-      .post(`/api/v1/conversations/${conversationId}/accept`)
-      .set('Authorization', `Bearer ${stranger.accessToken}`)
-      .send({});
-
-    expect(acceptRes.status).toBe(403);
-    expect(acceptRes.body.error).toMatch(/not invited/i);
-  });
-
-  it('accept endpoint is idempotent and emits joined system message only once', async () => {
-    const owner = await createAuthenticatedUser('dmacceptonceowner');
-    const existing = await createAuthenticatedUser('dmacceptonceexisting');
-    const invitee = await createAuthenticatedUser('dmacceptonceinvitee');
-    const base = await createAuthenticatedUser('dmacceptoncebase');
-
-    // Create group DM, then add invitee as pending via invite endpoint.
-    const createRes = await request(app)
-      .post('/api/v1/conversations')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [existing.user.id, base.user.id] });
-
-    expect(createRes.status).toBe(201);
-    const conversationId = createRes.body.conversation.id;
-
-    const inviteRes = await request(app)
-      .post(`/api/v1/conversations/${conversationId}/invite`)
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [invitee.user.id] });
-
-    expect(inviteRes.status).toBe(200);
-
-    const firstAccept = await request(app)
-      .post(`/api/v1/conversations/${conversationId}/accept`)
-      .set('Authorization', `Bearer ${invitee.accessToken}`)
-      .send({});
-
-    expect(firstAccept.status).toBe(200);
-
-    const secondAccept = await request(app)
-      .post(`/api/v1/conversations/${conversationId}/accept`)
-      .set('Authorization', `Bearer ${invitee.accessToken}`)
-      .send({});
-
-    expect(secondAccept.status).toBe(200);
-
-    const messagesRes = await request(app)
-      .get('/api/v1/messages')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .query({ conversationId });
-
-    expect(messagesRes.status).toBe(200);
-    const joinedMessages = messagesRes.body.messages.filter(
-      (m: any) =>
-        m.type === 'system' &&
-        /joined the group\./i.test(m.content || '') &&
-        /invitee/i.test(m.content || ''),
-    );
-    expect(joinedMessages).toHaveLength(1);
-  });
-
-  it('emits joined system message when first invitee accepts in a group-intent conversation', async () => {
-    const owner = await createAuthenticatedUser('dmgroupintentowner');
-    const inviteeA = await createAuthenticatedUser('dmgroupintenta');
-    const inviteeB = await createAuthenticatedUser('dmgroupintentb');
-    const base = await createAuthenticatedUser('dmgroupintentbase');
-    const base2 = await createAuthenticatedUser('dmgroupintentbase2');
-
-    // Create group DM, then invite both users as pending.
-    const createRes = await request(app)
-      .post('/api/v1/conversations')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [base.user.id, base2.user.id] });
-
-    expect(createRes.status).toBe(201);
-    const conversationId = createRes.body.conversation.id;
-
-    const inviteARes = await request(app)
-      .post(`/api/v1/conversations/${conversationId}/invite`)
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [inviteeA.user.id] });
-    expect(inviteARes.status).toBe(200);
-
-    const inviteBRes = await request(app)
-      .post(`/api/v1/conversations/${conversationId}/invite`)
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ participantIds: [inviteeB.user.id] });
-    expect(inviteBRes.status).toBe(200);
-
-    const acceptRes = await request(app)
-      .post(`/api/v1/conversations/${conversationId}/accept`)
-      .set('Authorization', `Bearer ${inviteeB.accessToken}`)
-      .send({});
-
-    expect(acceptRes.status).toBe(200);
-
-    const messagesRes = await request(app)
-      .get('/api/v1/messages')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .query({ conversationId });
-
-    expect(messagesRes.status).toBe(200);
-    const joinedMessages = messagesRes.body.messages.filter(
-      (m: any) => m.type === 'system' && /joined the group\./i.test(m.content || ''),
-    );
-    expect(joinedMessages).toHaveLength(1);
   });
 });
 

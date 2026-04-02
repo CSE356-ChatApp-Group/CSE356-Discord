@@ -12,7 +12,6 @@ export default function CommunitySidebar() {
     communities,
     activeCommunity,
     conversations,
-    pendingDmInvites,
     activeConv,
     selectCommunity,
     createCommunity,
@@ -23,8 +22,7 @@ export default function CommunitySidebar() {
   const user   = useAuthStore(s => s.user);
   const setUser = useAuthStore(s => s.setUser);
   const hasUnreadConversations = conversations.some((conv) => isConversationUnread(conv, activeConv?.id === conv.id, user?.id));
-  const hasPendingDmInvites = pendingDmInvites.length > 0;
-  const hasUnreadDms = hasUnreadConversations || (hasPendingDmInvites && Boolean(activeCommunity));
+  const hasUnreadDms = hasUnreadConversations;
   const [showCreate, setShowCreate] = useState(false);
   const [showJoin, setShowJoin] = useState(false);
   const [showAccount, setShowAccount] = useState(false);

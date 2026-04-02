@@ -412,16 +412,42 @@ async function addParticipantsHandler(req, res, next) {
     for (const participantId of participantIdsToAdd) {
       await client.query(
         `INSERT INTO conversation_participants (conversation_id, user_id, joined_at, left_at)
-         VALUES ($1, $2, NOW(), NOW())
+         VALUES ($1, $2, NOW(), NULL)
          ON CONFLICT (conversation_id, user_id)
-         DO UPDATE SET left_at = NOW()`,
+         DO UPDATE SET left_at = NULL, joined_at = NOW()`,
         [req.params.id, participantId]
       );
     }
 
+    let joinedGroupMessages = [];
+    if (convMeta.is_group && participantIdsToAdd.length > 0) {
+      for (const participantId of participantIdsToAdd) {
+        const joinedUserName = await getUserDisplayName(client, participantId);
+        const joinedMessage = await createSystemMessage(client, req.params.id, `${joinedUserName} joined the group.`);
+        if (joinedMessage) joinedGroupMessages.push(joinedMessage);
+      }
+    }
+
     const conversation = await loadConversationWithParticipants(client, req.params.id);
+    const activeParticipantIds = participantIdsToAdd.length > 0
+      ? await getActiveParticipantIds(client, req.params.id)
+      : currentParticipantIds;
 
     await client.query('COMMIT');
+
+    if (joinedGroupMessages.length > 0) {
+      const targets = [
+        `conversation:${req.params.id}`,
+        ...activeParticipantIds.map((uid) => `user:${uid}`),
+      ];
+      for (const joinedGroupMessage of joinedGroupMessages) {
+        await publishConversationEvents(targets, 'message:created', {
+          ...joinedGroupMessage,
+          author: null,
+          attachments: [],
+        });
+      }
+    }
 
     const sharedEventData = {
       conversation,
@@ -456,98 +482,6 @@ async function addParticipantsHandler(req, res, next) {
 
 router.post('/:id/participants', ...addParticipantsValidators, addParticipantsHandler);
 router.post('/:id/invite', ...addParticipantsValidators, addParticipantsHandler);
-
-router.post('/:id/accept', param('id').isUUID(), async (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const conversationExists = await client.query(
-      'SELECT id FROM conversations WHERE id = $1',
-      [req.params.id]
-    );
-    if (!conversationExists.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Conversation not found' });
-    }
-
-    const participation = await client.query(
-      `SELECT left_at
-       FROM conversation_participants
-       WHERE conversation_id = $1 AND user_id = $2`,
-      [req.params.id, req.user.id]
-    );
-
-    if (!participation.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Not invited' });
-    }
-
-    const wasPending = participation.rows[0].left_at !== null;
-
-    if (wasPending) {
-      await client.query(
-        `UPDATE conversation_participants
-         SET left_at = NULL, joined_at = NOW()
-         WHERE conversation_id = $1 AND user_id = $2`,
-        [req.params.id, req.user.id]
-      );
-    }
-
-    const conversation = await loadConversationWithParticipants(client, req.params.id);
-    const activeParticipantIds = wasPending
-      ? await getActiveParticipantIds(client, req.params.id)
-      : [];
-
-    let joinedGroupMessage = null;
-    const groupConversation = wasPending
-      ? await isGroupConversation(client, req.params.id)
-      : false;
-
-    if (wasPending && groupConversation) {
-      const joinedUserName = await getUserDisplayName(client, req.user.id);
-      joinedGroupMessage = await createSystemMessage(client, req.params.id, `${joinedUserName} joined the group.`);
-    }
-
-    await client.query('COMMIT');
-
-    if (wasPending && joinedGroupMessage) {
-      const targets = [
-        `conversation:${req.params.id}`,
-        ...activeParticipantIds.map((uid) => `user:${uid}`),
-      ];
-
-      await publishConversationEvents(targets, 'message:created', {
-        ...joinedGroupMessage,
-        author: null,
-        attachments: [],
-      });
-    }
-
-    if (wasPending) {
-      await publishConversationEvents(
-        [`conversation:${req.params.id}`, ...activeParticipantIds.map((participantId) => `user:${participantId}`)],
-        'conversation:participant_added',
-        {
-          conversation,
-          conversationId: req.params.id,
-          participantIds: [req.user.id],
-          invitedBy: req.user.id,
-        }
-      );
-    }
-
-    res.json({ conversation, accepted: true });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    next(err);
-  } finally {
-    client.release();
-  }
-});
 
 router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
   const errors = validationResult(req);

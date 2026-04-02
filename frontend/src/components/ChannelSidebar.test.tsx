@@ -33,7 +33,6 @@ describe('ChannelSidebar destructive actions', () => {
       ],
       activeChannel: null,
       conversations: [],
-      pendingDmInvites: [],
       activeConv: null,
       selectChannel: vi.fn(),
       selectConversation: vi.fn(),
@@ -42,8 +41,6 @@ describe('ChannelSidebar destructive actions', () => {
       deleteCommunity,
       leaveCommunity,
       openDm: vi.fn(),
-      acceptDmInvite: vi.fn(),
-      declineDmInvite: vi.fn(),
     } as any);
   });
 
@@ -54,7 +51,6 @@ describe('ChannelSidebar destructive actions', () => {
       channels: [],
       activeChannel: null,
       conversations: [],
-      pendingDmInvites: [],
       activeConv: null,
     } as any);
   });

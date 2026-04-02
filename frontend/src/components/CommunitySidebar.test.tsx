@@ -12,7 +12,6 @@ describe('CommunitySidebar presence badge', () => {
         communities: [],
         activeCommunity: null,
         conversations: [],
-        pendingDmInvites: [],
         activeConv: null,
       } as any);
     });
@@ -81,7 +80,7 @@ describe('CommunitySidebar presence badge', () => {
     expect(await screen.findByText('Community name/slug must be at least 2 characters.')).toBeInTheDocument();
   });
 
-  it('shows DM unread indicator when there is a pending DM invite and user is not on DM tab', () => {
+  it('shows DM unread indicator when there is an unread DM and user is not on DM tab', () => {
     act(() => {
       useAuthStore.setState({
         user: {
@@ -94,8 +93,13 @@ describe('CommunitySidebar presence badge', () => {
 
       useChatStore.setState({
         activeCommunity: { id: 'community-1', name: 'General' },
-        pendingDmInvites: [{ id: 'conv-1', participants: [{ id: 'user-1' }, { id: 'user-2' }] }],
-        conversations: [],
+        conversations: [{
+          id: 'conv-1',
+          participants: [{ id: 'user-1' }, { id: 'user-2' }],
+          last_message_id: 'msg-2',
+          last_message_author_id: 'user-2',
+          my_last_read_message_id: 'msg-1',
+        }],
         activeConv: null,
         communities: [],
       } as any);
@@ -106,7 +110,7 @@ describe('CommunitySidebar presence badge', () => {
     expect(screen.getByTestId('home-dms-unread-indicator')).toBeInTheDocument();
   });
 
-  it('hides DM unread indicator for pending invites when user is already on DM tab', () => {
+  it('hides DM unread indicator when user is already on DM tab', () => {
     act(() => {
       useAuthStore.setState({
         user: {
@@ -119,9 +123,14 @@ describe('CommunitySidebar presence badge', () => {
 
       useChatStore.setState({
         activeCommunity: null,
-        pendingDmInvites: [{ id: 'conv-1', participants: [{ id: 'user-1' }, { id: 'user-2' }] }],
-        conversations: [],
-        activeConv: null,
+        conversations: [{
+          id: 'conv-1',
+          participants: [{ id: 'user-1' }, { id: 'user-2' }],
+          last_message_id: 'msg-2',
+          last_message_author_id: 'user-2',
+          my_last_read_message_id: 'msg-1',
+        }],
+        activeConv: { id: 'conv-1' },
         communities: [],
       } as any);
     });

@@ -19,7 +19,7 @@ vi.mock('../lib/api', () => ({
 }));
 
 import { useAuthStore } from './authStore';
-import { applyDmInviteSyncForTest, useChatStore } from './chatStore';
+import { useChatStore } from './chatStore';
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -32,7 +32,6 @@ afterEach(() => {
     conversations: [],
     activeConv: null,
     members: [],
-    pendingDmInvites: [],
     messages: {},
   } as any);
 });
@@ -413,8 +412,8 @@ describe('chatStore websocket author hydration', () => {
     expect(stored.author.id).toBe('user-1');
   });
 
-  it('queues conversation:invited as a pending DM invite', () => {
-    useChatStore.setState({ conversations: [], pendingDmInvites: [] } as any);
+  it('adds conversation:invited directly to the DM list', () => {
+    useChatStore.setState({ conversations: [] } as any);
 
     useChatStore.getState()._handleWsEvent({
       event: 'conversation:invited',
@@ -428,12 +427,11 @@ describe('chatStore websocket author hydration', () => {
     });
 
     const state = useChatStore.getState();
-    expect(state.pendingDmInvites).toHaveLength(1);
-    expect(state.pendingDmInvites[0].id).toBe('conv-1');
-    expect(state.conversations).toHaveLength(0);
+    expect(state.conversations).toHaveLength(1);
+    expect(state.conversations[0].id).toBe('conv-1');
   });
 
-  it('promotes participant_added conversation to active DM list and clears pending invite', () => {
+  it('keeps participant_added conversation in active DM list', () => {
     useAuthStore.setState({
       user: {
         id: 'user-1',
@@ -445,7 +443,6 @@ describe('chatStore websocket author hydration', () => {
 
     useChatStore.setState({
       conversations: [],
-      pendingDmInvites: [{ id: 'conv-2', participants: [{ id: 'user-1' }, { id: 'user-3' }] }],
     } as any);
 
     useChatStore.getState()._handleWsEvent({
@@ -462,10 +459,9 @@ describe('chatStore websocket author hydration', () => {
 
     const state = useChatStore.getState();
     expect(state.conversations.some((conv) => conv.id === 'conv-2')).toBe(true);
-    expect(state.pendingDmInvites.some((invite) => invite.id === 'conv-2')).toBe(false);
   });
 
-  it('keeps participant_added as pending invite when current user was newly added', () => {
+  it('adds participant_added to DM list when current user was newly added', () => {
     useAuthStore.setState({
       user: {
         id: 'user-3',
@@ -475,7 +471,7 @@ describe('chatStore websocket author hydration', () => {
       },
     });
 
-    useChatStore.setState({ conversations: [], pendingDmInvites: [] } as any);
+    useChatStore.setState({ conversations: [] } as any);
 
     useChatStore.getState()._handleWsEvent({
       event: 'conversation:participant_added',
@@ -490,8 +486,7 @@ describe('chatStore websocket author hydration', () => {
     });
 
     const state = useChatStore.getState();
-    expect(state.pendingDmInvites.some((invite) => invite.id === 'conv-3')).toBe(true);
-    expect(state.conversations.some((conv) => conv.id === 'conv-3')).toBe(false);
+    expect(state.conversations.some((conv) => conv.id === 'conv-3')).toBe(true);
   });
 
   it('keeps group DM visible when another participant leaves and only me remains', () => {
@@ -584,7 +579,6 @@ describe('resetChatStore / expireSession data isolation', () => {
       channels:        [{ id: 'ch-1' }],
       activeChannel:   { id: 'ch-1' },
       conversations:   [{ id: 'conv-1' }],
-      pendingDmInvites:[{ id: 'inv-1' }],
       activeConv:      { id: 'conv-1' },
       messages:        { 'ch-1': [{ id: 'm-1' }] },
       members:         [{ id: 'user-a' }],
@@ -602,7 +596,6 @@ describe('resetChatStore / expireSession data isolation', () => {
     expect(s.channels).toEqual([]);
     expect(s.activeChannel).toBeNull();
     expect(s.conversations).toEqual([]);
-    expect(s.pendingDmInvites).toEqual([]);
     expect(s.activeConv).toBeNull();
     expect(s.messages).toEqual({});
     expect(s.members).toEqual([]);
@@ -629,39 +622,5 @@ describe('resetChatStore / expireSession data isolation', () => {
     expect(s.activeConv).toBeNull();
     expect(s.messages).toEqual({});
     expect(s.members).toEqual([]);
-  });
-});
-
-describe('dm invite cross-tab sync', () => {
-  it('removes pending invite when another tab declines it', () => {
-    useChatStore.setState({
-      pendingDmInvites: [{ id: 'conv-10', participants: [{ id: 'user-1' }, { id: 'user-2' }] }],
-    } as any);
-
-    applyDmInviteSyncForTest({ type: 'invite-removed', conversationId: 'conv-10', ts: Date.now() });
-
-    expect(useChatStore.getState().pendingDmInvites).toEqual([]);
-  });
-
-  it('promotes pending invite to conversation when another tab accepts it', () => {
-    useChatStore.setState({
-      conversations: [],
-      pendingDmInvites: [{ id: 'conv-11', participants: [{ id: 'user-1' }, { id: 'user-2' }] }],
-    } as any);
-
-    applyDmInviteSyncForTest({
-      type: 'invite-accepted',
-      conversationId: 'conv-11',
-      conversation: {
-        id: 'conv-11',
-        name: 'Accepted DM',
-        participants: [{ id: 'user-1' }, { id: 'user-2' }],
-      },
-      ts: Date.now(),
-    });
-
-    const state = useChatStore.getState();
-    expect(state.pendingDmInvites).toEqual([]);
-    expect(state.conversations.some((conv) => conv.id === 'conv-11')).toBe(true);
   });
 });
