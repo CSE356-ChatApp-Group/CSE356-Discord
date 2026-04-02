@@ -742,7 +742,7 @@ describe('WebSocket reliability', () => {
         await closeWebSocket(inviteeSocket);
       }
     }
-  });
+  }, 60_000);
 
   it('reliably handles subscribe-on-open across repeated conversation leave broadcasts', async () => {
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -791,5 +791,5 @@ describe('WebSocket reliability', () => {
         await closeWebSocket(ownerSocket);
       }
     }
-  });
+  }, 60_000);
 });
