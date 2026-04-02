@@ -4,7 +4,7 @@
  * GET    /api/v1/messages?channelId=&before=&limit=   – paginated history
  * POST   /api/v1/messages                             – create
  * PATCH  /api/v1/messages/:id                         – edit
- * DELETE /api/v1/messages/:id                         – soft-delete
+ * DELETE /api/v1/messages/:id                         – hard-delete
  * PUT    /api/v1/messages/:id/read                    – mark as read
  */
 
@@ -395,8 +395,9 @@ router.delete('/:id',
       }
 
       const { rows } = await pool.query(
-        `UPDATE messages SET deleted_at=NOW(), updated_at=NOW()
-         WHERE id=$1 AND author_id=$2 AND deleted_at IS NULL RETURNING *`,
+        `DELETE FROM messages
+         WHERE id=$1 AND author_id=$2
+         RETURNING id, channel_id, conversation_id`,
         [req.params.id, req.user.id]
       );
       if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });

@@ -8,6 +8,18 @@
   "scripts": {
     "typecheck": "npm run typecheck --workspace=backend --workspace=frontend",
     "test": "npm run test --workspace=backend && npm run test --workspace=frontend",
-    "build": "npm run build --workspace=backend && npm run build --workspace=frontend"
+    "build": "npm run build --workspace=backend && npm run build --workspace=frontend",
+    "e2e:install": "npm run e2e:install --workspace=frontend",
+    "e2e": "npm run e2e --workspace=frontend",
+    "e2e:ci": "npm run e2e:ci --workspace=frontend",
+    "e2e:full": "npm run e2e:full --workspace=frontend",
+    "e2e:full:ci": "npm run e2e:full:ci --workspace=frontend",
+    "e2e:staging": "npm run e2e:staging --workspace=frontend",
+    "e2e:staging:ci": "npm run e2e:staging:ci --workspace=frontend",
+    "e2e:heavy": "npm run e2e:heavy --workspace=frontend",
+    "e2e:auth": "npm run e2e:auth --workspace=frontend",
+    "e2e:messaging": "npm run e2e:messaging --workspace=frontend",
+    "e2e:community": "npm run e2e:community --workspace=frontend",
+    "e2e:dm-invite": "npm run e2e:dm-invite --workspace=frontend"
   }
 }

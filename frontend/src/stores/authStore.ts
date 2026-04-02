@@ -67,6 +67,13 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     initInFlight = (async () => {
     const currentPath = window.location.pathname;
+    const oauthParams = new URLSearchParams(window.location.search);
+
+    // Avoid racing the OAuth callback bootstrap. That route sets the token from
+    // the URL first, then calls init() again to hydrate the user profile.
+    if (currentPath === '/oauth-callback' && !getToken() && (oauthParams.has('token') || oauthParams.has('pending'))) {
+      return;
+    }
 
     try {
       if (getToken()) {

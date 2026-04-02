@@ -160,3 +160,82 @@ describe('Message hydration payloads', () => {
     expect(Array.isArray(res.body.message.attachments)).toBe(true);
   });
 });
+
+describe('Hard delete contract', () => {
+  let token: string;
+  let channelId: string;
+
+  beforeAll(async () => {
+    const owner = await createAuthenticatedUser('harddeleteowner');
+    token = owner.accessToken;
+
+    const slug = `harddelete-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ slug, name: slug, description: 'hard delete contract community' });
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        communityId,
+        name: `hard-delete-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: false,
+        description: 'hard delete channel',
+      });
+    channelId = channelRes.body.channel.id;
+  });
+
+  it('removes deleted messages from storage and message history', async () => {
+    const createRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ channelId, content: `delete-target-${uniqueSuffix()}` });
+
+    expect(createRes.status).toBe(201);
+    const messageId = createRes.body.message.id;
+
+    const deleteRes = await request(app)
+      .delete(`/api/v1/messages/${messageId}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(deleteRes.status).toBe(200);
+
+    const dbRes = await pool.query(
+      'SELECT id FROM messages WHERE id = $1',
+      [messageId],
+    );
+    expect(dbRes.rows).toHaveLength(0);
+
+    const listRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ channelId });
+
+    expect(listRes.status).toBe(200);
+    const ids = (listRes.body.messages || []).map((message: any) => message.id);
+    expect(ids).not.toContain(messageId);
+  });
+
+  it('returns 404 when deleting an already-deleted message id', async () => {
+    const createRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ channelId, content: `delete-once-${uniqueSuffix()}` });
+
+    expect(createRes.status).toBe(201);
+    const messageId = createRes.body.message.id;
+
+    const firstDelete = await request(app)
+      .delete(`/api/v1/messages/${messageId}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(firstDelete.status).toBe(200);
+
+    const secondDelete = await request(app)
+      .delete(`/api/v1/messages/${messageId}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(secondDelete.status).toBe(404);
+  });
+});

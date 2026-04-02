@@ -11,7 +11,6 @@ const cors         = require('cors');
 const compression  = require('compression');
 const cookieParser = require('cookie-parser');
 const pinoHttp     = require('pino-http');
-const rateLimit    = require('express-rate-limit');
 const passport     = require('passport');
 
 const logger = require('./utils/logger');
@@ -41,14 +40,6 @@ app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 app.use(pinoHttp({ logger }));
 app.use(passport.initialize());
-
-// Global rate limit – tighten per-route as needed
-app.use(rateLimit({
-  windowMs: 60_000,
-  max: 300,
-  standardHeaders: true,
-  legacyHeaders: false,
-}));
 
 // ── Prometheus metrics (no auth required) ─────────────────────────────────────
 const { register } = require('./utils/metrics');

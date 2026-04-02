@@ -130,6 +130,51 @@ describe('DM realtime delivery', () => {
       await closeWebSocket(recipientSocket);
     }
   });
+
+  it('fans out message:deleted to all active sockets for the same recipient', async () => {
+    const sender = await createAuthenticatedUser('dmdeletesender');
+    const recipient = await createAuthenticatedUser('dmdeleterecipient');
+
+    const recipientSocketA = await connectWebSocket(port, recipient.accessToken);
+    const recipientSocketB = await connectWebSocket(port, recipient.accessToken);
+
+    try {
+      const createConversationRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ participantIds: [recipient.user.id] });
+
+      expect(createConversationRes.status).toBe(201);
+      const conversationId = createConversationRes.body.conversation.id;
+
+      const createMessageRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ conversationId, content: 'delete fanout target' });
+
+      expect(createMessageRes.status).toBe(201);
+      const messageId = createMessageRes.body.message.id;
+
+      const deletedEventA = waitForWsEvent(
+        recipientSocketA,
+        (event) => event.event === 'message:deleted' && event.data?.id === messageId,
+      );
+      const deletedEventB = waitForWsEvent(
+        recipientSocketB,
+        (event) => event.event === 'message:deleted' && event.data?.id === messageId,
+      );
+
+      const deleteRes = await request(app)
+        .delete(`/api/v1/messages/${messageId}`)
+        .set('Authorization', `Bearer ${sender.accessToken}`);
+
+      expect(deleteRes.status).toBe(200);
+      await Promise.all([deletedEventA, deletedEventB]);
+    } finally {
+      await closeWebSocket(recipientSocketA);
+      await closeWebSocket(recipientSocketB);
+    }
+  });
 });
 
 // ── Channel auto-subscribe (bootstrap) ───────────────────────────────────────
