@@ -139,7 +139,7 @@ test.describe('messaging in a DM conversation', () => {
     ).toBeVisible();
   });
 
-  test('deletes a sent message @full @heavy-auth @experimental', async () => {
+  test('deletes a sent message @full @heavy-auth @staging @experimental', async () => {
     const content = `Delete me ${Date.now()}`;
 
     await page.getByTestId('message-compose-input').fill(content);
