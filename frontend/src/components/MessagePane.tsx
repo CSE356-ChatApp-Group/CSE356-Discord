@@ -13,6 +13,16 @@ const DEFAULT_MEMBER_LIST_WIDTH = 236;
 const MIN_MEMBER_LIST_WIDTH = 140;
 const MAX_MEMBER_LIST_WIDTH = 420;
 const MEMBER_LIST_WIDTH_STORAGE_KEY = 'chatapp.memberListWidth';
+const MAX_ATTACHMENTS = 4;
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const ACCEPTED_ATTACHMENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+type PendingAttachment = {
+  file: File;
+  previewUrl: string;
+  width?: number;
+  height?: number;
+};
 
 function getMaxMemberListWidth() {
   if (typeof window === 'undefined') return MAX_MEMBER_LIST_WIDTH;
@@ -76,12 +86,16 @@ export default function MessagePane() {
   const [channelInviteLoading, setChannelInviteLoading] = useState(false);
   const [dmActionErr, setDmActionErr] = useState('');
   const [channelInviteErr, setChannelInviteErr] = useState('');
+  const [attachmentError, setAttachmentError] = useState('');
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [memberListWidth, setMemberListWidth] = useState(getInitialMemberListWidth);
   const [isMemberListResizing, setIsMemberListResizing] = useState(false);
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
   const searchInputRef = useRef<HTMLInputElement>(null);
   const inviteInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attachmentsRef = useRef<PendingAttachment[]>([]);
 
   const bottomRef   = useRef(null);
   const inputRef    = useRef(null);
@@ -92,6 +106,25 @@ export default function MessagePane() {
   const exhaustedBeforeRef = useRef<string | null>(null);
   const historyRetryAfterRef = useRef(0);
   useAutoResize(inputRef);
+
+  const clearAttachments = useCallback(() => {
+    setAttachments((prev) => {
+      prev.forEach((attachment) => {
+        URL.revokeObjectURL(attachment.previewUrl);
+      });
+      return [];
+    });
+  }, []);
+
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+
+  useEffect(() => () => {
+    attachmentsRef.current.forEach((attachment) => {
+      URL.revokeObjectURL(attachment.previewUrl);
+    });
+  }, []);
 
   // Default each conversation to newest messages, and only auto-follow when already near bottom.
   useEffect(() => {
@@ -151,6 +184,8 @@ export default function MessagePane() {
     setSelectedChannelInvitees([]);
     setPrivateChannelMembers([]);
     setChannelInviteErr('');
+    setAttachmentError('');
+    clearAttachments();
   }, [key]);
 
   useEffect(() => {
@@ -279,15 +314,102 @@ export default function MessagePane() {
     setLocalQ('');
   }
 
+  async function readImageMeta(file: File) {
+    return new Promise<{ width?: number; height?: number }>((resolve) => {
+      const objectUrl = URL.createObjectURL(file);
+      const image = new Image();
+
+      image.onload = () => {
+        resolve({ width: image.naturalWidth, height: image.naturalHeight });
+        URL.revokeObjectURL(objectUrl);
+      };
+
+      image.onerror = () => {
+        resolve({});
+        URL.revokeObjectURL(objectUrl);
+      };
+
+      image.src = objectUrl;
+    });
+  }
+
+  async function handleAttachmentSelection(event: React.ChangeEvent<HTMLInputElement>) {
+    const picked = Array.from(event.target.files || []);
+    if (!picked.length) return;
+
+    const remainingSlots = MAX_ATTACHMENTS - attachments.length;
+    if (remainingSlots <= 0) {
+      setAttachmentError(`You can attach up to ${MAX_ATTACHMENTS} images.`);
+      event.target.value = '';
+      return;
+    }
+
+    const nextFiles = picked.slice(0, remainingSlots);
+    if (picked.length > remainingSlots) {
+      setAttachmentError(`Only the first ${remainingSlots} image${remainingSlots === 1 ? '' : 's'} were added.`);
+    } else {
+      setAttachmentError('');
+    }
+
+    const invalidType = nextFiles.find((file) => !ACCEPTED_ATTACHMENT_TYPES.has(file.type));
+    if (invalidType) {
+      setAttachmentError('Only JPG, PNG, GIF, and WebP images are allowed.');
+      event.target.value = '';
+      return;
+    }
+
+    const tooLarge = nextFiles.find((file) => file.size > MAX_ATTACHMENT_BYTES);
+    if (tooLarge) {
+      setAttachmentError('Each image must be 8MB or smaller.');
+      event.target.value = '';
+      return;
+    }
+
+    const prepared = await Promise.all(nextFiles.map(async (file) => {
+      const meta = await readImageMeta(file);
+      return {
+        file,
+        previewUrl: URL.createObjectURL(file),
+        width: meta.width,
+        height: meta.height,
+      };
+    }));
+
+    setAttachments((prev) => [...prev, ...prepared]);
+    event.target.value = '';
+  }
+
+  function removeAttachment(index: number) {
+    setAttachments((prev) => {
+      const next = [...prev];
+      const [removed] = next.splice(index, 1);
+      if (removed) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return next;
+    });
+    setAttachmentError('');
+  }
+
   async function handleSend(e) {
     e.preventDefault();
-    if (!content.trim() || sending) return;
+    if ((!content.trim() && attachments.length === 0) || sending) return;
     setSending(true);
     try {
-      await sendMessage(content.trim());
+      await sendMessage({
+        content: content.trim(),
+        attachments: attachments.map((attachment) => ({
+          file: attachment.file,
+          width: attachment.width,
+          height: attachment.height,
+        })),
+      });
       setContent('');
+      setAttachmentError('');
+      clearAttachments();
       setTimeout(() => inputRef.current?.focus(), 0);
-    } catch (err) {
+    } catch (err: any) {
+      setAttachmentError(err?.message || 'Could not send message');
       console.error(err);
     } finally {
       setSending(false);
@@ -722,30 +844,77 @@ export default function MessagePane() {
 
           {/* Input */}
           <form className={styles.inputRow} onSubmit={handleSend} data-testid="message-compose-form">
-            <textarea
-              ref={inputRef}
-              className={styles.input}
-              id="message-compose-input"
-              name="content"
-              value={content}
-              onChange={e => setContent(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              rows={1}
-              maxLength={4000}
-              disabled={sending}
-              data-testid="message-compose-input"
-            />
-            <button
-              type="submit"
-              className={styles.sendBtn}
-              disabled={!content.trim() || sending}
-              title="Send (Enter)"
-              aria-label="Send message"
-              data-testid="message-send"
-            >
-              <SendIcon />
-            </button>
+            {attachments.length > 0 && (
+              <div className={styles.attachmentPreviewRow} data-testid="message-attachment-previews">
+                {attachments.map((attachment, index) => (
+                  <div key={`${attachment.file.name}-${index}`} className={styles.attachmentPreviewCard}>
+                    <img
+                      src={attachment.previewUrl}
+                      alt={attachment.file.name}
+                      className={styles.attachmentPreviewImage}
+                    />
+                    <button
+                      type="button"
+                      className={styles.attachmentRemoveBtn}
+                      onClick={() => removeAttachment(index)}
+                      data-testid={`message-attachment-remove-${index}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {attachmentError && (
+              <div className={styles.attachmentError} role="alert" data-testid="message-attachment-error">
+                {attachmentError}
+              </div>
+            )}
+
+            <div className={styles.composerRow}>
+              <button
+                type="button"
+                className={styles.attachButton}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sending || attachments.length >= MAX_ATTACHMENTS}
+                data-testid="message-attach-button"
+              >
+                Images
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/gif,image/webp"
+                multiple
+                hidden
+                onChange={handleAttachmentSelection}
+              />
+              <textarea
+                ref={inputRef}
+                className={styles.input}
+                id="message-compose-input"
+                name="content"
+                value={content}
+                onChange={e => setContent(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={attachments.length ? 'Add a caption…' : placeholder}
+                rows={1}
+                maxLength={4000}
+                disabled={sending}
+                data-testid="message-compose-input"
+              />
+              <button
+                type="submit"
+                className={styles.sendBtn}
+                disabled={(!content.trim() && attachments.length === 0) || sending}
+                title="Send (Enter)"
+                aria-label="Send message"
+                data-testid="message-send"
+              >
+                <SendIcon />
+              </button>
+            </div>
           </form>
         </div>
 

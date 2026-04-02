@@ -186,22 +186,50 @@ router.get('/',
 );
 
 // ── POST /messages ─────────────────────────────────────────────────────────────
+const ALLOWED_ATTACHMENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const MAX_ATTACHMENTS_PER_MESSAGE = 4;
 router.post('/',
   body('content').optional().isString().isLength({ max: 4000 }),
   body('channelId').optional().isUUID(),
   body('conversationId').optional().isUUID(),
   body('threadId').optional().isUUID(),
+  body('attachments').optional().isArray({ max: MAX_ATTACHMENTS_PER_MESSAGE }),
+  body('attachments.*.storageKey').optional().isString().isLength({ max: 512 }),
+  body('attachments.*.filename').optional().isString().isLength({ max: 255 }),
+  body('attachments.*.contentType').optional().custom((value) => ALLOWED_ATTACHMENT_TYPES.has(value)),
+  body('attachments.*.sizeBytes').optional().isInt({ min: 1, max: 8 * 1024 * 1024 }),
+  body('attachments.*.width').optional().isInt({ min: 1 }),
+  body('attachments.*.height').optional().isInt({ min: 1 }),
   async (req, res, next) => {
     if (!validate(req, res)) return;
+    const client = await pool.connect();
     try {
       const { content, channelId, conversationId, threadId } = req.body;
+      const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
 
       if (!channelId && !conversationId) {
         return res.status(400).json({ error: 'channelId or conversationId required' });
       }
-      if (!content) {
-        return res.status(400).json({ error: 'content required (attach files in a separate request)' });
+      if (!content?.trim() && attachments.length === 0) {
+        return res.status(400).json({ error: 'content or at least one attachment is required' });
       }
+
+      const invalidAttachment = attachments.find((attachment) => (
+        !attachment
+        || typeof attachment.storageKey !== 'string'
+        || !attachment.storageKey.trim()
+        || typeof attachment.filename !== 'string'
+        || !attachment.filename.trim()
+        || !ALLOWED_ATTACHMENT_TYPES.has(attachment.contentType)
+        || !Number.isInteger(Number(attachment.sizeBytes))
+        || Number(attachment.sizeBytes) <= 0
+        || Number(attachment.sizeBytes) > 8 * 1024 * 1024
+      ));
+
+      if (invalidAttachment) {
+        return res.status(400).json({ error: 'attachments must include storageKey, filename, contentType, and sizeBytes' });
+      }
+
       if (conversationId) {
         const isParticipant = await ensureActiveConversationParticipant(conversationId, req.user.id);
         if (!isParticipant) {
@@ -209,12 +237,51 @@ router.post('/',
         }
       }
 
-      const { rows } = await pool.query(
+      if (channelId) {
+        const hasAccess = await ensureChannelAccess(channelId, req.user.id);
+        if (!hasAccess) {
+          return res.status(403).json({ error: 'Access denied' });
+        }
+      }
+
+      await client.query('BEGIN');
+      const { rows } = await client.query(
         `INSERT INTO messages (channel_id, conversation_id, author_id, content, thread_id)
          VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [channelId || null, conversationId || null, req.user.id, content, threadId || null]
+        [channelId || null, conversationId || null, req.user.id, content?.trim() || null, threadId || null]
       );
       const baseMessage = rows[0];
+
+      if (attachments.length > 0) {
+        const values = [];
+        const params = [];
+        let index = 1;
+
+        for (const attachment of attachments) {
+          values.push(
+            `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`
+          );
+          params.push(
+            baseMessage.id,
+            req.user.id,
+            attachment.filename,
+            attachment.contentType,
+            attachment.sizeBytes,
+            attachment.storageKey,
+            attachment.width || null,
+            attachment.height || null
+          );
+        }
+
+        await client.query(
+          `INSERT INTO attachments
+             (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
+           VALUES ${values.join(', ')}`,
+          params
+        );
+      }
+
+      await client.query('COMMIT');
       const message = await loadHydratedMessageById(baseMessage.id);
 
       sideEffects.indexMessage(baseMessage);
@@ -246,7 +313,15 @@ router.post('/',
       }
 
       res.status(201).json({ message: message || baseMessage });
-    } catch (err) { next(err); }
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+      }
+      next(err);
+    } finally {
+      client.release();
+    }
   }
 );
 
