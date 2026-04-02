@@ -5,7 +5,16 @@ import { useAuthStore } from './authStore';
 
 type Entity = Record<string, any>;
 type PresenceStatus = 'online' | 'idle' | 'away' | 'offline';
+type PendingUpload = {
+  file: File;
+  width?: number;
+  height?: number;
+};
 
+type SendMessageInput = {
+  content?: string;
+  attachments?: PendingUpload[];
+};
 type ChatState = {
   communities: Entity[];
   activeCommunity: Entity | null;
@@ -41,7 +50,7 @@ type ChatState = {
   leaveConversation: (conversationId: string) => Promise<void>;
   renameGroupDm: (conversationId: string, name: string) => Promise<void>;
   fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string }) => Promise<Entity[]>;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string | SendMessageInput) => Promise<void>;
   editMessage: (id: string, content: string) => Promise<void>;
   deleteMessage: (id: string) => Promise<void>;
   fetchMembers: (communityId: string) => Promise<void>;
@@ -885,14 +894,71 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     return messages;
   },
 
-  async sendMessage(content: string) {
+  async sendMessage(content: string | SendMessageInput) {
     const { activeChannel, activeConv } = get();
-    const body: { content: string; channelId?: string; conversationId?: string } = { content };
-    if (activeChannel)  body.channelId      = activeChannel.id;
-    if (activeConv)     body.conversationId = activeConv.id;
+    const payload = typeof content === 'string' ? { content } : (content || {});
+    const trimmedContent = (payload.content || '').trim();
+    const pendingUploads = Array.isArray(payload.attachments) ? payload.attachments : [];
+
+    if (!activeChannel && !activeConv) {
+      throw new Error('No active conversation selected');
+    }
+
+    if (!trimmedContent && pendingUploads.length === 0) {
+      throw new Error('Message content or at least one image is required');
+    }
+
+    if (pendingUploads.length > 4) {
+      throw new Error('You can attach up to 4 images');
+    }
+
+    const uploadedAttachments = await Promise.all(
+      pendingUploads.map(async (attachment) => {
+        const file = attachment.file;
+        const presign = await api.post('/attachments/presign', {
+          filename: file.name,
+          contentType: file.type,
+          sizeBytes: file.size,
+        });
+
+        const uploadRes = await fetch(presign.uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type },
+          body: file,
+        });
+
+        if (!uploadRes.ok) {
+          throw new Error(`Upload failed for ${file.name}`);
+        }
+
+        return {
+          storageKey: presign.storageKey,
+          filename: file.name,
+          contentType: file.type,
+          sizeBytes: file.size,
+          width: attachment.width,
+          height: attachment.height,
+        };
+      })
+    );
+
+    const body: { content?: string; attachments?: any[]; channelId?: string; conversationId?: string } = {};
+    if (trimmedContent) body.content = trimmedContent;
+    if (uploadedAttachments.length) body.attachments = uploadedAttachments;
+    if (activeChannel) body.channelId = activeChannel.id;
+    if (activeConv) body.conversationId = activeConv.id;
+
     const { message } = await api.post('/messages', body);
-    // Mark the just-sent message as read immediately
     if (message?.id) {
+      const key = message.channel_id || message.channelId || message.conversation_id || message.conversationId;
+      if (key) {
+        set((s) => ({
+          messages: {
+            ...s.messages,
+            [key]: upsertMessage(s.messages[key], message),
+          },
+        }));
+      }
       markMessageRead(message.id);
     }
   },

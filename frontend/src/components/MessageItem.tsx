@@ -1,8 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { formatDistanceToNow, format, isToday, isYesterday } from 'date-fns';
 import { useChatStore } from '../stores/chatStore';
+import { api } from '../lib/api';
 import { Avatar } from './CommunitySidebar';
 import styles from './MessageItem.module.css';
+
+const attachmentUrlCache = new Map<string, string>();
 
 /** Groups consecutive messages from the same author within 5 minutes */
 function isGrouped(msg, prev) {
@@ -17,6 +20,38 @@ function formatTimestamp(iso) {
   if (isToday(d))     return format(d, 'HH:mm');
   if (isYesterday(d)) return `Yesterday ${format(d, 'HH:mm')}`;
   return format(d, 'MMM d, HH:mm');
+}
+
+function AttachmentImage({ attachment }) {
+  const [src, setSrc] = useState(() => attachmentUrlCache.get(attachment.id) || '');
+
+  useEffect(() => {
+    if (src) return undefined;
+
+    let cancelled = false;
+    api.get(`/attachments/${attachment.id}`)
+      .then((data) => {
+        if (cancelled || !data?.url) return;
+        attachmentUrlCache.set(attachment.id, data.url);
+        setSrc(data.url);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attachment.id, src]);
+
+  if (!src) return null;
+
+  return (
+    <img
+      src={src}
+      alt={attachment.filename}
+      className={styles.image}
+      loading="lazy"
+    />
+  );
 }
 
 export default function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false }) {
@@ -115,14 +150,13 @@ export default function MessageItem({ message: msg, prevMessage, isOwn, showRead
             {msg.deleted_at ? (
               <span className={styles.deleted}>This message was deleted.</span>
             ) : (
-              <p className={styles.text}>{msg.content}</p>
+              msg.content ? <p className={styles.text}>{msg.content}</p> : null
             )}
             {/* Attachments */}
             {msg.attachments?.length > 0 && (
               <div className={styles.attachments}>
                 {msg.attachments.map(a => (
-                  <img key={a.id} src={`/api/v1/attachments/${a.id}`} alt={a.filename}
-                    className={styles.image} loading="lazy" />
+                  <AttachmentImage key={a.id} attachment={a} />
                 ))}
               </div>
             )}
