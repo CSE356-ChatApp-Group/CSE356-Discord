@@ -250,7 +250,7 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
 
 // ── Register ───────────────────────────────────────────────────────────────────
 router.post('/register',
-  body('email').isEmail().normalizeEmail(),
+  body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
   body('username').custom(validateUsername),
   body('password').isLength({ min: 8 }),
   body('displayName').optional().isLength({ max: 64 }),
@@ -260,11 +260,12 @@ router.post('/register',
 
     try {
       const { email, username, password, displayName } = req.body;
+      const normalizedEmail = email || null;
       const hash = await bcrypt.hash(password, 12);
       const { rows } = await pool.query(
         `INSERT INTO users (email, username, password_hash, display_name)
          VALUES ($1,$2,$3,$4) RETURNING *`,
-        [email, username, hash, displayName || username]
+        [normalizedEmail, username, hash, displayName || username]
       );
       res.status(201).json(issueTokens(res, rows[0]));
     } catch (err) {

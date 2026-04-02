@@ -41,6 +41,8 @@ on:
     secrets:
       DEPLOY_SSH_KEY:
         required: true
+      SSH_KNOWN_HOSTS:
+        required: false
 
 permissions:
   contents: read
@@ -133,8 +135,20 @@ jobs:
 
       - name: Add host to known_hosts
         shell: bash
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
-          ssh-keyscan -H "${{ inputs.host }}" >> ~/.ssh/known_hosts
+          touch ~/.ssh/known_hosts
+          if [[ -n "$SSH_KNOWN_HOSTS" ]]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          else
+            for attempt in 1 2 3; do
+              ssh-keyscan -T 15 -H "${{ inputs.host }}" >> ~/.ssh/known_hosts && break
+              echo "keyscan attempt ${attempt}/3 failed; retrying in 5s"
+              sleep 5
+            done
+            test -s ~/.ssh/known_hosts || { echo "Failed to populate known_hosts"; exit 1; }
+          fi
           chmod 600 ~/.ssh/known_hosts
 
       - name: Deploy

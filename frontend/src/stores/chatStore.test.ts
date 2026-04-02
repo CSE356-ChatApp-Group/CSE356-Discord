@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resetChatStore } from './chatStore';
 
 const { apiDelete, apiGet, apiPost } = vi.hoisted(() => ({
   apiDelete: vi.fn(),
@@ -18,7 +19,7 @@ vi.mock('../lib/api', () => ({
 }));
 
 import { useAuthStore } from './authStore';
-import { useChatStore } from './chatStore';
+import { applyDmInviteSyncForTest, useChatStore } from './chatStore';
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -566,5 +567,97 @@ describe('chatStore websocket author hydration', () => {
     const conv = state.conversations.find((c) => c.id === 'conv-group');
     expect(conv?.participants?.some((p) => p.id === 'user-c')).toBe(false);
     expect(conv?.participants?.some((p) => p.id === 'user-b')).toBe(true);
+  });
+});
+
+// ── Issue #39: data leak on logout → register ─────────────────────────────────
+
+describe('resetChatStore / expireSession data isolation', () => {
+  it('reset() clears all chat state', () => {
+    useChatStore.setState({
+      communities:     [{ id: 'comm-1' }],
+      activeCommunity: { id: 'comm-1' },
+      channels:        [{ id: 'ch-1' }],
+      activeChannel:   { id: 'ch-1' },
+      conversations:   [{ id: 'conv-1' }],
+      pendingDmInvites:[{ id: 'inv-1' }],
+      activeConv:      { id: 'conv-1' },
+      messages:        { 'ch-1': [{ id: 'm-1' }] },
+      members:         [{ id: 'user-a' }],
+      presence:        { 'user-a': 'online' } as any,
+      awayMessages:    { 'user-a': 'out' },
+      searchResults:   [{ id: 'r-1' }],
+      searchQuery:     'hello',
+    } as any);
+
+    useChatStore.getState().reset();
+
+    const s = useChatStore.getState();
+    expect(s.communities).toEqual([]);
+    expect(s.activeCommunity).toBeNull();
+    expect(s.channels).toEqual([]);
+    expect(s.activeChannel).toBeNull();
+    expect(s.conversations).toEqual([]);
+    expect(s.pendingDmInvites).toEqual([]);
+    expect(s.activeConv).toBeNull();
+    expect(s.messages).toEqual({});
+    expect(s.members).toEqual([]);
+    expect(s.presence).toEqual({});
+    expect(s.awayMessages).toEqual({});
+    expect(s.searchResults).toBeNull();
+    expect(s.searchQuery).toBe('');
+  });
+
+  it('resetChatStore() clears state so a new user does not see previous user data', () => {
+    // Seed "user A" data
+    useChatStore.setState({
+      communities:  [{ id: 'comm-a', name: 'User A community' }],
+      activeConv:   { id: 'dm-a' },
+      messages:     { 'dm-a': [{ id: 'm-1', content: 'secret message' }] },
+      members:      [{ id: 'user-a' }],
+    } as any);
+
+    // Simulate logout / session expiry
+    resetChatStore();
+
+    const s = useChatStore.getState();
+    expect(s.communities).toEqual([]);
+    expect(s.activeConv).toBeNull();
+    expect(s.messages).toEqual({});
+    expect(s.members).toEqual([]);
+  });
+});
+
+describe('dm invite cross-tab sync', () => {
+  it('removes pending invite when another tab declines it', () => {
+    useChatStore.setState({
+      pendingDmInvites: [{ id: 'conv-10', participants: [{ id: 'user-1' }, { id: 'user-2' }] }],
+    } as any);
+
+    applyDmInviteSyncForTest({ type: 'invite-removed', conversationId: 'conv-10', ts: Date.now() });
+
+    expect(useChatStore.getState().pendingDmInvites).toEqual([]);
+  });
+
+  it('promotes pending invite to conversation when another tab accepts it', () => {
+    useChatStore.setState({
+      conversations: [],
+      pendingDmInvites: [{ id: 'conv-11', participants: [{ id: 'user-1' }, { id: 'user-2' }] }],
+    } as any);
+
+    applyDmInviteSyncForTest({
+      type: 'invite-accepted',
+      conversationId: 'conv-11',
+      conversation: {
+        id: 'conv-11',
+        name: 'Accepted DM',
+        participants: [{ id: 'user-1' }, { id: 'user-2' }],
+      },
+      ts: Date.now(),
+    });
+
+    const state = useChatStore.getState();
+    expect(state.pendingDmInvites).toEqual([]);
+    expect(state.conversations.some((conv) => conv.id === 'conv-11')).toBe(true);
   });
 });

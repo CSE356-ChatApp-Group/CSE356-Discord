@@ -56,9 +56,18 @@ fi
 SSH_TARGET="${SSH_USER}@${SSH_HOST}"
 
 echo "Checking SSH connectivity..."
-if ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
-  echo "ERROR: Unable to SSH to ${SSH_TARGET}."
-  echo "If this is first connection, run: ssh ${SSH_TARGET}"
+SSH_OK=0
+for attempt in 1 2 3; do
+  if ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
+    SSH_OK=1
+    break
+  fi
+  echo "SSH attempt ${attempt}/3 failed; retrying in 10s..."
+  sleep 10
+done
+if [[ "$SSH_OK" -eq 0 ]]; then
+  echo "ERROR: Unable to SSH to ${SSH_TARGET} after 3 attempts."
+  echo "Check that port 22 is open in the cloud firewall/security group for this host."
   exit 1
 fi
 

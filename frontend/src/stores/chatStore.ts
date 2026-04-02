@@ -48,6 +48,7 @@ type ChatState = {
   setPresence: (userId: string, status: PresenceStatus, awayMessage?: string | null) => void;
   search: (q: string) => Promise<void>;
   clearSearch: () => void;
+  reset: () => void;
   _handleWsEvent: (event: any) => void;
 };
 
@@ -156,6 +157,99 @@ const readMarkRecent = new Map<string, number>();
 const READ_MARK_RECENT_MS = 2000;
 const UNREAD_REFRESH_MIN_MS = 1200;
 let wsUserSubscriptionId: string | null = null;
+const DM_INVITE_SYNC_STORAGE_KEY = 'chatapp.dmInviteSync';
+let dmInviteSyncListenerBound = false;
+
+function broadcastDmInviteSync(payload: Record<string, any>) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      DM_INVITE_SYNC_STORAGE_KEY,
+      JSON.stringify({
+        ...payload,
+        ts: Date.now(),
+        nonce: Math.random().toString(36).slice(2),
+      })
+    );
+  } catch {
+    // Ignore storage errors; this sync is best-effort.
+  }
+}
+
+function upsertConversation(conversations: Entity[], conversation: Entity) {
+  const existing = conversations.find((conv) => conv.id === conversation.id);
+  if (!existing) return [conversation, ...conversations];
+  return conversations.map((conv) =>
+    conv.id === conversation.id
+      ? {
+          ...conv,
+          ...conversation,
+          participants: conversation.participants || conv.participants,
+        }
+      : conv
+  );
+}
+
+function applyDmInviteSyncPayload(payload: Record<string, any>) {
+  const type = payload?.type;
+  const conversationId = payload?.conversationId;
+  const conversation = payload?.conversation;
+
+  if (!type) return;
+
+  if (type === 'invite-added' && conversation?.id) {
+    useChatStore.setState((s) => ({
+      pendingDmInvites: [
+        conversation,
+        ...s.pendingDmInvites.filter((invite) => invite.id !== conversation.id),
+      ],
+    }));
+    return;
+  }
+
+  if (type === 'invite-removed' && conversationId) {
+    useChatStore.setState((s) => ({
+      pendingDmInvites: s.pendingDmInvites.filter((invite) => invite.id !== conversationId),
+    }));
+    return;
+  }
+
+  if (type === 'invite-accepted' && (conversationId || conversation?.id)) {
+    const id = conversationId || conversation.id;
+    useChatStore.setState((s) => ({
+      conversations: conversation?.id ? upsertConversation(s.conversations, conversation) : s.conversations,
+      pendingDmInvites: s.pendingDmInvites.filter((invite) => invite.id !== id),
+      activeConv:
+        s.activeConv?.id === id && conversation?.id
+          ? {
+              ...s.activeConv,
+              ...conversation,
+              participants: conversation.participants || s.activeConv.participants,
+            }
+          : s.activeConv,
+    }));
+  }
+}
+
+function ensureDmInviteSyncListener() {
+  if (dmInviteSyncListenerBound || typeof window === 'undefined') return;
+
+  window.addEventListener('storage', (event) => {
+    if (event.key !== DM_INVITE_SYNC_STORAGE_KEY || !event.newValue) return;
+    try {
+      const payload = JSON.parse(event.newValue);
+      applyDmInviteSyncPayload(payload);
+    } catch {
+      // Ignore malformed payloads.
+    }
+  });
+
+  dmInviteSyncListenerBound = true;
+}
+
+export function applyDmInviteSyncForTest(payload: Record<string, any>) {
+  applyDmInviteSyncPayload(payload);
+}
 
 function ensureUserWsSubscription(handler: (event: any) => void) {
   const userId = useAuthStore.getState().user?.id;
@@ -198,6 +292,20 @@ function markMessageRead(messageId?: string | null) {
     });
 }
 
+export function resetChatStore() {
+  // Cancel any in-flight community fetch so the next user starts fresh.
+  communitiesInFlight = null;
+  channelsInFlightByCommunity.clear();
+  readMarkInFlight.clear();
+  readMarkRecent.clear();
+  if (unreadRefreshTimer) {
+    clearTimeout(unreadRefreshTimer);
+    unreadRefreshTimer = null;
+  }
+  wsUserSubscriptionId = null;
+  useChatStore.getState().reset();
+}
+
 export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Data ──────────────────────────────────────────────────────────────────
   communities:     [],
@@ -213,6 +321,24 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   members:         [],   // members of activeCommunity
   searchResults:   null,
   searchQuery:     '',
+
+  reset() {
+    set({
+      communities:     [],
+      activeCommunity: null,
+      channels:        [],
+      activeChannel:   null,
+      conversations:   [],
+      pendingDmInvites: [],
+      activeConv:      null,
+      messages:        {},
+      presence:        {},
+      awayMessages:    {},
+      members:         [],
+      searchResults:   null,
+      searchQuery:     '',
+    });
+  },
 
   // ── Communities ───────────────────────────────────────────────────────────
   async fetchCommunities() {
@@ -611,6 +737,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const { conversation } = await api.post(`/conversations/${conversationId}/accept`, {});
     if (!conversation?.id) return;
 
+    const syncedConversation = {
+      ...invite,
+      ...conversation,
+      participants: conversation.participants || invite.participants,
+    };
+
     set((s) => {
       const existing = s.conversations.find((conv) => conv.id === conversationId);
       const updated = existing
@@ -619,11 +751,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             ...conversation,
             participants: conversation.participants || existing.participants,
           }
-        : {
-            ...invite,
-            ...conversation,
-            participants: conversation.participants || invite.participants,
-          };
+        : syncedConversation;
 
       return {
         conversations: existing
@@ -631,6 +759,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           : [updated, ...s.conversations],
         pendingDmInvites: s.pendingDmInvites.filter((entry) => entry.id !== conversationId),
       };
+    });
+
+    broadcastDmInviteSync({
+      type: 'invite-accepted',
+      conversationId,
+      conversation: syncedConversation,
     });
 
     const acceptedConversation = get().conversations.find((conv) => conv.id === conversationId);
@@ -643,6 +777,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     set((s) => ({
       pendingDmInvites: s.pendingDmInvites.filter((entry) => entry.id !== conversationId),
     }));
+
+    broadcastDmInviteSync({ type: 'invite-removed', conversationId });
 
     await get().leaveConversation(conversationId).catch(() => {});
   },
@@ -1254,6 +1390,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversation = event.data?.conversation;
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
+        const existingBefore = store.conversations.find((conv) => conv.id === conversationId);
 
         wsManager.subscribe(`conversation:${conversationId}`, store._handleWsEvent);
 
@@ -1308,6 +1445,20 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 : s.activeConv,
           };
         });
+
+        if (!existingBefore) {
+          broadcastDmInviteSync({
+            type: 'invite-added',
+            conversationId,
+            conversation,
+          });
+        } else {
+          broadcastDmInviteSync({
+            type: 'invite-accepted',
+            conversationId,
+            conversation,
+          });
+        }
         break;
       }
       case 'conversation:participant_added': {
@@ -1315,6 +1466,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
         const me = useAuthStore.getState().user;
+        const existingBefore = store.conversations.find((conv) => conv.id === conversationId);
         const addedParticipantIds = Array.isArray(event.data?.participantIds)
           ? event.data.participantIds.map((id: any) => String(id))
           : [];
@@ -1373,6 +1525,20 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 : s.activeConv,
           };
         });
+
+        if (iWasJustAdded && !existingBefore) {
+          broadcastDmInviteSync({
+            type: 'invite-added',
+            conversationId,
+            conversation,
+          });
+        } else {
+          broadcastDmInviteSync({
+            type: 'invite-accepted',
+            conversationId,
+            conversation,
+          });
+        }
         break;
       }
       case 'conversation:updated': {
@@ -1441,3 +1607,5 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 }));
+
+ensureDmInviteSyncListener();

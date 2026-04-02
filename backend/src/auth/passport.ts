@@ -20,12 +20,15 @@ const { pool }         = require('../db/pool');
 const { signOAuthPending, verifyOAuthLinkIntent } = require('./oauthTokens');
 
 // ── Local ──────────────────────────────────────────────────────────────────────
+// The 'email' field also accepts a plain username so that accounts registered
+// without an email address can still log in.
 passport.use(new LocalStrategy(
   { usernameField: 'email', passwordField: 'password' },
-  async (email, password, done) => {
+  async (emailOrUsername, password, done) => {
     try {
       const { rows } = await pool.query(
-        'SELECT * FROM users WHERE email = $1 AND is_active = TRUE', [email]
+        'SELECT * FROM users WHERE (email = $1 OR username = $1) AND is_active = TRUE',
+        [emailOrUsername]
       );
       const user = rows[0];
       if (!user || !user.password_hash) {
