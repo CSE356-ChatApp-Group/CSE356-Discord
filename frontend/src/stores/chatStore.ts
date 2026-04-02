@@ -5,6 +5,7 @@ import { useAuthStore } from './authStore';
 
 type Entity = Record<string, any>;
 type PresenceStatus = 'online' | 'idle' | 'away' | 'offline';
+const VALID_PRESENCE_STATUSES = new Set(['online', 'idle', 'away', 'offline']);
 
 type ChatState = {
   communities: Entity[];
@@ -42,6 +43,7 @@ type ChatState = {
   editMessage: (id: string, content: string) => Promise<void>;
   deleteMessage: (id: string) => Promise<void>;
   fetchMembers: (communityId: string) => Promise<void>;
+  hydratePresenceForUsers: (userIds: string[]) => Promise<void>;
   setPresence: (userId: string, status: PresenceStatus, awayMessage?: string | null) => void;
   search: (q: string) => Promise<void>;
   clearSearch: () => void;
@@ -175,6 +177,10 @@ function ensureUserWsSubscription(handler: (event: any) => void) {
   if (!userId || wsUserSubscriptionId === userId) return;
   wsManager.subscribe(`user:${userId}`, handler);
   wsUserSubscriptionId = userId;
+}
+
+function normalizePresenceStatus(value: any): PresenceStatus {
+  return VALID_PRESENCE_STATUSES.has(value) ? value : 'offline';
 }
 
 function scheduleUnreadRefresh(run: () => void) {
@@ -770,27 +776,45 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Members ───────────────────────────────────────────────────────────────
   async fetchMembers(communityId: string) {
     const { members } = await api.get(`/communities/${communityId}/members`);
-    // Seed presence map from member list
-    const presence = {};
-    const awayMessages = {};
-    members.forEach((m: Entity) => { presence[m.id] = m.status || 'offline'; });
-    members.forEach((m: Entity) => {
-      awayMessages[m.id] = m.away_message || m.awayMessage || null;
-    });
-    set({
-      members,
-      presence: { ...get().presence, ...presence },
-      awayMessages: { ...get().awayMessages, ...awayMessages },
+    set({ members });
+    await get().hydratePresenceForUsers(
+      (members || []).map((m: Entity) => String(m?.id || '')).filter(Boolean)
+    );
+  },
+
+  async hydratePresenceForUsers(userIds: string[]) {
+    const ids = Array.from(new Set((userIds || []).map((id) => String(id || '')).filter(Boolean)));
+    if (!ids.length) return;
+
+    const qs = encodeURIComponent(ids.join(','));
+    const data = await api.get(`/presence?userIds=${qs}`);
+    const presenceMap = data?.presence || {};
+    const awayMap = data?.awayMessages || {};
+
+    set((s) => {
+      const nextPresence = { ...s.presence };
+      const nextAwayMessages = { ...s.awayMessages };
+
+      ids.forEach((id) => {
+        const status = normalizePresenceStatus(presenceMap[id]);
+        nextPresence[id] = status;
+        nextAwayMessages[id] = status === 'away' ? (awayMap[id] ?? null) : null;
+      });
+
+      return {
+        presence: nextPresence,
+        awayMessages: nextAwayMessages,
+      };
     });
   },
 
   // ── Presence ──────────────────────────────────────────────────────────────
   setPresence(userId: string, status: PresenceStatus, awayMessage: string | null = null) {
     set(s => ({
-      presence: { ...s.presence, [userId]: status },
+      presence: { ...s.presence, [userId]: normalizePresenceStatus(status) },
       awayMessages: {
         ...s.awayMessages,
-        [userId]: status === 'away' ? (awayMessage || null) : null,
+        [userId]: normalizePresenceStatus(status) === 'away' ? (awayMessage || null) : null,
       },
     }));
   },

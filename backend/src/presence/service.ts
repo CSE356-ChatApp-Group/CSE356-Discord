@@ -143,6 +143,25 @@ async function setPresence(userId, status, awayMessage) {
             ),
           )
           .catch(() => {});
+
+        // Also publish to DM/group conversation channels so participant lists
+        // receive live status updates even when users do not share a community.
+        pool
+          .query(
+            `SELECT conversation_id
+               FROM conversation_participants
+              WHERE user_id = $1
+                AND left_at IS NULL`,
+            [userId],
+          )
+          .then(({ rows }) =>
+            Promise.all(
+              rows.map((r) =>
+                fanout.publish(`conversation:${r.conversation_id}`, payload),
+              ),
+            ),
+          )
+          .catch(() => {});
       } finally {
         fanoutSpan.end();
       }

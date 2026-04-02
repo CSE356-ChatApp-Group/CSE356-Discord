@@ -161,6 +161,9 @@ describe('chatStore quick actions', () => {
       if (path === '/messages?channelId=ch-1&limit=50') {
         return Promise.resolve({ messages: [] });
       }
+      if (path.startsWith('/presence?userIds=')) {
+        return Promise.resolve({ presence: { 'user-1': 'offline' }, awayMessages: {} });
+      }
 
       throw new Error(`Unexpected GET ${path}`);
     });
@@ -201,6 +204,9 @@ describe('chatStore quick actions', () => {
 
       if (path === '/messages?channelId=ch-1&limit=50') {
         return Promise.resolve({ messages: [] });
+      }
+      if (path.startsWith('/presence?userIds=')) {
+        return Promise.resolve({ presence: { 'user-1': 'offline' }, awayMessages: {} });
       }
 
       throw new Error(`Unexpected GET ${path}`);

@@ -1,22 +1,34 @@
+import { useEffect } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { Avatar } from './CommunitySidebar';
 import styles from './MemberList.module.css';
 
 const STATUS_LABEL = { online: 'Online', idle: 'Idle', away: 'Away', offline: 'Offline' };
+const VALID_STATUSES = new Set(['online', 'idle', 'away', 'offline']);
 
 export default function MemberList() {
-  const { members, activeConv, presence, awayMessages } = useChatStore();
+  const { members, activeConv, presence, awayMessages, hydratePresenceForUsers } = useChatStore();
   const currentUser = useAuthStore(s => s.user);
 
   const isDm = !!activeConv;
-  const list = isDm ? (activeConv.participants ?? []) : members;
+  const list: Record<string, any>[] = isDm ? (activeConv.participants ?? []) : members;
   const label = isDm ? 'Participants' : 'Members';
+
+  useEffect(() => {
+    const ids: string[] = Array.from(
+      new Set((list || []).map((m) => (m?.id ? String(m.id) : '')).filter(Boolean))
+    );
+    if (!ids.length) return;
+
+    hydratePresenceForUsers(ids).catch(() => {});
+  }, [list, hydratePresenceForUsers]);
 
   // Group by status
   const groups = { online: [], idle: [], away: [], offline: [] };
   for (const m of list) {
-    const s = presence[m.id] || 'offline';
+    const candidate = presence[m.id] || m.status || 'offline';
+    const s = VALID_STATUSES.has(candidate) ? candidate : 'offline';
     groups[s].push({ ...m, status: s, awayMessage: awayMessages[m.id] || m.away_message || null });
   }
 
