@@ -600,23 +600,25 @@ export default function MessagePane() {
         <div className={styles.headerActions}>
           {activeConv && (
             <>
-              <button
-                type="button"
-                className={styles.dmActionBtn}
-                onClick={handleInviteToDm}
-                data-testid="dm-invite-button"
-              >
-                Invite
-              </button>
               {activeConv?.is_group && (
-                <button
-                  type="button"
-                  className={`${styles.dmActionBtn} ${styles.dmLeaveBtn}`}
-                  onClick={handleLeaveDm}
-                  data-testid="dm-leave-button"
-                >
-                  Leave
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className={styles.dmActionBtn}
+                    onClick={handleInviteToDm}
+                    data-testid="dm-invite-button"
+                  >
+                    Invite
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.dmActionBtn} ${styles.dmLeaveBtn}`}
+                    onClick={handleLeaveDm}
+                    data-testid="dm-leave-button"
+                  >
+                    Leave
+                  </button>
+                </>
               )}
             </>
           )}

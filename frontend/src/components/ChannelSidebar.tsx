@@ -421,8 +421,7 @@ function isConversationUnread(conv, active, currentUserId) {
 
 function DmRow({ conv, currentUserId, unread, active, onClick }) {
   const others = (conv.participants || []).filter(p => p.id !== currentUserId);
-  if (others.length === 0) return null;
-  const name   = conv.name || others.map(p => p.displayName || p.username).join(', ') || 'Unknown';
+  const name   = conv.name || others.map(p => p.displayName || p.username).join(', ') || 'Group DM';
   return (
     <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open direct conversation ${name}`}>
       <span className={styles.dmIcon}>@</span>

@@ -421,6 +421,7 @@ describe('Multi-socket fanout', () => {
   it('delivers user-channel realtime events to multiple sockets for the same user', async () => {
     const owner = await createAuthenticatedUser('wsmultiowner');
     const existing = await createAuthenticatedUser('wsmultiexisting');
+    const base = await createAuthenticatedUser('wsmultibase');
     const invitee = await createAuthenticatedUser('wsmultiinvitee');
 
     const socketA = await connectWebSocket(port, invitee.accessToken);
@@ -430,10 +431,10 @@ describe('Multi-socket fanout', () => {
       const createRes = await request(app)
         .post('/api/v1/conversations')
         .set('Authorization', `Bearer ${owner.accessToken}`)
-        .send({ participantIds: [existing.user.id] });
+        .send({ participantIds: [existing.user.id, base.user.id] });
 
       expect(createRes.status).toBe(201);
-      const original1to1Id = createRes.body.conversation.id;
+      const groupConversationId = createRes.body.conversation.id;
 
       const inviteEventPromiseA = waitForWsEvent(
         socketA,
@@ -445,11 +446,11 @@ describe('Multi-socket fanout', () => {
       );
 
       const inviteRes = await request(app)
-        .post(`/api/v1/conversations/${original1to1Id}/invite`)
+        .post(`/api/v1/conversations/${groupConversationId}/invite`)
         .set('Authorization', `Bearer ${owner.accessToken}`)
         .send({ participantIds: [invitee.user.id] });
 
-      expect(inviteRes.status).toBe(201);
+      expect(inviteRes.status).toBe(200);
       const conversationId = inviteRes.body.conversation.id;
 
       const [eventA, eventB] = await Promise.all([inviteEventPromiseA, inviteEventPromiseB]);
@@ -466,6 +467,7 @@ describe('Multi-socket fanout', () => {
   it('delivers user-channel events after the user reconnects', async () => {
     const owner = await createAuthenticatedUser('wsreconnectowner');
     const existing = await createAuthenticatedUser('wsreconnectexisting');
+    const base = await createAuthenticatedUser('wsreconnectbase');
     const invitee = await createAuthenticatedUser('wsreconnectinvitee');
 
     const firstSocket = await connectWebSocket(port, invitee.accessToken);
@@ -477,10 +479,10 @@ describe('Multi-socket fanout', () => {
       const createRes = await request(app)
         .post('/api/v1/conversations')
         .set('Authorization', `Bearer ${owner.accessToken}`)
-        .send({ participantIds: [existing.user.id] });
+        .send({ participantIds: [existing.user.id, base.user.id] });
 
       expect(createRes.status).toBe(201);
-      const original1to1Id = createRes.body.conversation.id;
+      const groupConversationId = createRes.body.conversation.id;
 
       const inviteEventPromise = waitForWsEvent(
         secondSocket,
@@ -488,11 +490,11 @@ describe('Multi-socket fanout', () => {
       );
 
       const inviteRes = await request(app)
-        .post(`/api/v1/conversations/${original1to1Id}/invite`)
+        .post(`/api/v1/conversations/${groupConversationId}/invite`)
         .set('Authorization', `Bearer ${owner.accessToken}`)
         .send({ participantIds: [invitee.user.id] });
 
-      expect(inviteRes.status).toBe(201);
+      expect(inviteRes.status).toBe(200);
       const conversationId = inviteRes.body.conversation.id;
 
       const inviteEvent = await inviteEventPromise;
@@ -709,6 +711,7 @@ describe('WebSocket reliability', () => {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const owner = await createAuthenticatedUser(`wsinviteowner${attempt}`);
       const existing = await createAuthenticatedUser(`wsinviteexisting${attempt}`);
+      const base = await createAuthenticatedUser(`wsinvitebase${attempt}`);
       const invitee = await createAuthenticatedUser(`wsinviteinvitee${attempt}`);
       const inviteeSocket = await connectWebSocket(port, invitee.accessToken);
 
@@ -716,10 +719,10 @@ describe('WebSocket reliability', () => {
         const createRes = await request(app)
           .post('/api/v1/conversations')
           .set('Authorization', `Bearer ${owner.accessToken}`)
-          .send({ participantIds: [existing.user.id] });
+          .send({ participantIds: [existing.user.id, base.user.id] });
 
         expect(createRes.status).toBe(201);
-        const original1to1Id = createRes.body.conversation.id;
+        const groupConversationId = createRes.body.conversation.id;
 
         const inviteEventPromise = waitForWsEvent(
           inviteeSocket,
@@ -727,11 +730,11 @@ describe('WebSocket reliability', () => {
         );
 
         const inviteRes = await request(app)
-          .post(`/api/v1/conversations/${original1to1Id}/invite`)
+          .post(`/api/v1/conversations/${groupConversationId}/invite`)
           .set('Authorization', `Bearer ${owner.accessToken}`)
           .send({ participantIds: [invitee.user.id] });
 
-        expect(inviteRes.status).toBe(201);
+        expect(inviteRes.status).toBe(200);
         const conversationId = inviteRes.body.conversation.id;
 
         const inviteEvent = await inviteEventPromise;

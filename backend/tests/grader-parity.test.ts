@@ -292,6 +292,7 @@ describe('Grader parity: DM invite realtime', () => {
   it('delivers conversation:invited to a user added to an existing group DM', async () => {
     const owner = await createAuthenticatedUser('graderdmowner');
     const existing = await createAuthenticatedUser('graderdmexisting');
+    const base = await createAuthenticatedUser('graderdmbase');
     const invitee = await createAuthenticatedUser('graderdminvitee');
 
     const inviteeSocket = trackSocket(await connectWebSocket(port, invitee.accessToken));
@@ -299,9 +300,9 @@ describe('Grader parity: DM invite realtime', () => {
       const createDmRes = await request(app)
         .post('/api/v1/conversations')
         .set('Authorization', `Bearer ${owner.accessToken}`)
-        .send({ participantIds: [existing.user.id] });
+        .send({ participantIds: [existing.user.id, base.user.id] });
 
-      const original1to1Id = expectConversationId(createDmRes);
+      const groupConversationId = expectConversationId(createDmRes);
 
       const inviteEventPromise = waitForWsEvent(
         inviteeSocket,
@@ -309,11 +310,11 @@ describe('Grader parity: DM invite realtime', () => {
       );
 
       const inviteRes = await request(app)
-        .post(`/api/v1/conversations/${original1to1Id}/invite`)
+        .post(`/api/v1/conversations/${groupConversationId}/invite`)
         .set('Authorization', `Bearer ${owner.accessToken}`)
         .send({ participantIds: [invitee.user.id] });
 
-      expect(inviteRes.status).toBe(201);
+      expect(inviteRes.status).toBe(200);
       const conversationId = inviteRes.body.conversation.id;
       expect(inviteRes.body.addedParticipantIds).toContain(invitee.user.id);
 

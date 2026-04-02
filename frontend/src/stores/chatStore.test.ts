@@ -494,7 +494,7 @@ describe('chatStore websocket author hydration', () => {
     expect(state.conversations.some((conv) => conv.id === 'conv-3')).toBe(false);
   });
 
-  it('removes 1:1 DM from sidebar when the other participant leaves', () => {
+  it('keeps group DM visible when another participant leaves and only me remains', () => {
     useAuthStore.setState({
       user: {
         id: 'user-me',
@@ -508,6 +508,7 @@ describe('chatStore websocket author hydration', () => {
       conversations: [
         {
           id: 'conv-1on1',
+          is_group: true,
           participants: [
             { id: 'user-me', username: 'me' },
             { id: 'user-other', username: 'other' },
@@ -526,7 +527,10 @@ describe('chatStore websocket author hydration', () => {
     });
 
     const state = useChatStore.getState();
-    expect(state.conversations.some((c) => c.id === 'conv-1on1')).toBe(false);
+    expect(state.conversations.some((c) => c.id === 'conv-1on1')).toBe(true);
+    const conv = state.conversations.find((c) => c.id === 'conv-1on1');
+    expect(conv?.participants?.some((p) => p.id === 'user-other')).toBe(false);
+    expect(conv?.participants?.some((p) => p.id === 'user-me')).toBe(true);
   });
 
   it('keeps group DM in sidebar when one of three participants leaves', () => {

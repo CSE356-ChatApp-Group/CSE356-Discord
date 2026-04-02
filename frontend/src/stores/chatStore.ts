@@ -122,6 +122,7 @@ function countUnreadChannels(channels: Entity[], currentUserId?: string, activeC
 function isVisibleConversation(conv: Entity, currentUserId?: string) {
   if (!conv) return false;
   if (!currentUserId) return true;
+  if (conv.is_group) return true;
   const participants = Array.isArray(conv.participants) ? conv.participants : [];
   return participants.some((participant: Entity) => participant?.id && participant.id !== currentUserId);
 }
@@ -1576,10 +1577,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             s.conversations.find((conv) => conv.id === conversationId)?.participants || []
           ).filter((participant) => participant.id !== leftUserId);
 
-          // If no other participants remain (only me), treat it as if I left too —
-          // this happens when the other person in a 1:1 DM leaves.
           const otherParticipants = updatedParticipants.filter((p) => p.id !== me?.id);
-          if (otherParticipants.length === 0) {
+          if (otherParticipants.length === 0 && !s.conversations.find((conv) => conv.id === conversationId)?.is_group) {
             return {
               conversations: s.conversations.filter((conv) => conv.id !== conversationId),
               activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,

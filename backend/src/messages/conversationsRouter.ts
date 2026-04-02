@@ -187,7 +187,7 @@ router.get('/', async (req, res, next) => {
              AND other_rs.user_id = cp2.user_id
              AND cp2.user_id <> $1
        GROUP  BY c.id, lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at
-      HAVING COUNT(cp2.user_id) > 1
+      HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
        ORDER  BY COALESCE(lm.created_at, c.updated_at) DESC`,
       [req.user.id]
     );
@@ -399,51 +399,14 @@ async function addParticipantsHandler(req, res, next) {
       (participantId) => participantId !== req.user.id && !currentParticipantSet.has(participantId)
     );
 
-    // Bug 3: inviting into a 1:1 DM creates a NEW group conversation instead of
-    // mutating the private conversation. The original 1:1 is left untouched.
     const { rows: [convMeta] } = await client.query(
       'SELECT is_group FROM conversations WHERE id = $1',
       [req.params.id]
     );
 
     if (!convMeta.is_group && participantIdsToAdd.length > 0) {
-      const allNewIds = [...new Set([...currentParticipantIds, ...participantIdsToAdd])];
-
-      const { rows: [newConv] } = await client.query(
-        `INSERT INTO conversations (name, created_by, is_group) VALUES (NULL, $1, TRUE) RETURNING *`,
-        [req.user.id]
-      );
-      for (const uid of allNewIds) {
-        await client.query(
-          `INSERT INTO conversation_participants (conversation_id, user_id) VALUES ($1, $2)`,
-          [newConv.id, uid]
-        );
-      }
-
-      const newConversation = await loadConversationWithParticipants(client, newConv.id);
-      await client.query('COMMIT');
-
-      const sharedEventData = {
-        conversation: newConversation,
-        conversationId: newConv.id,
-        participantIds: participantIdsToAdd,
-        invitedBy: req.user.id,
-      };
-      await publishConversationEvents(
-        allNewIds.map((uid) => `user:${uid}`),
-        'conversation:participant_added',
-        sharedEventData
-      );
-      await publishConversationInviteNotifications(
-        participantIdsToAdd.map((uid) => `user:${uid}`),
-        sharedEventData
-      );
-
-      return res.status(201).json({
-        conversation: newConversation || newConv,
-        addedParticipantIds: participantIdsToAdd,
-        createdNewConversation: true,
-      });
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Cannot invite users to a 1-to-1 DM' });
     }
 
     for (const participantId of participantIdsToAdd) {
@@ -622,12 +585,12 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     );
 
     const activeParticipantIds = await getActiveParticipantIds(client, req.params.id);
-    // If no participants remain, or only one remains, retire the DM to avoid stale self-only entries.
-    let shouldDelete = activeParticipantIds.length <= 1;
+    // Delete only when the final active participant leaves.
+    const shouldDelete = activeParticipantIds.length === 0;
 
-    // Emit system message for leaving group DMs (2+ participants remain, or would have been 3+ before deletion)
+    // Emit system message for surviving group DMs.
     let leftGroupMessage = null;
-    if (!shouldDelete && activeParticipantIds.length >= 2) {
+    if (!shouldDelete) {
       const leftUserName = await getUserDisplayName(client, req.user.id);
       leftGroupMessage = await createSystemMessage(client, req.params.id, `${leftUserName} left the group.`);
     }

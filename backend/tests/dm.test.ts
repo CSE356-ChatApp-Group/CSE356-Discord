@@ -317,9 +317,10 @@ describe('DM leave and access guards', () => {
     expect(readRes.body.error).toMatch(/access denied/i);
   });
 
-  it('blocks leaving 1:1 DM conversations', async () => {
+  it('blocks inviting additional users into a 1:1 DM conversation', async () => {
     const userA = await createAuthenticatedUser('dm1to1a');
     const userB = await createAuthenticatedUser('dm1to1b');
+    const userC = await createAuthenticatedUser('dm1to1c');
 
     const createRes = await request(app)
       .post('/api/v1/conversations')
@@ -329,13 +330,13 @@ describe('DM leave and access guards', () => {
     expect(createRes.status).toBe(201);
     const conversationId = createRes.body.conversation.id;
 
-    const leaveRes = await request(app)
-      .post(`/api/v1/conversations/${conversationId}/leave`)
+    const inviteRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/invite`)
       .set('Authorization', `Bearer ${userA.accessToken}`)
-      .send({});
+      .send({ participantIds: [userC.user.id] });
 
-    expect(leaveRes.status).toBe(403);
-    expect(leaveRes.body.error).toMatch(/cannot leave a 1-to-1 dm/i);
+    expect(inviteRes.status).toBe(403);
+    expect(inviteRes.body.error).toMatch(/cannot invite users to a 1-to-1 dm/i);
 
     const listResB = await request(app)
       .get('/api/v1/conversations')
@@ -350,6 +351,64 @@ describe('DM leave and access guards', () => {
 
     expect(listResA.status).toBe(200);
     expect(listResA.body.conversations.find((c: any) => c.id === conversationId)).toBeDefined();
+  });
+
+  it('deletes a group DM and all history when the last participant leaves', async () => {
+    const userA = await createAuthenticatedUser('dmgrouplastleavera');
+    const userB = await createAuthenticatedUser('dmgrouplastleaverb');
+    const userC = await createAuthenticatedUser('dmgrouplastleaverc');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ participantIds: [userB.user.id, userC.user.id] });
+
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const messageRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({ conversationId, content: 'group history that should be cleaned up' });
+
+    expect(messageRes.status).toBe(201);
+
+    const leaveARes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${userA.accessToken}`)
+      .send({});
+    expect(leaveARes.status).toBe(200);
+
+    const leaveBRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${userB.accessToken}`)
+      .send({});
+    expect(leaveBRes.status).toBe(200);
+
+    const listResCBeforeFinalLeave = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${userC.accessToken}`);
+
+    expect(listResCBeforeFinalLeave.status).toBe(200);
+    expect(listResCBeforeFinalLeave.body.conversations.find((c: any) => c.id === conversationId)).toBeDefined();
+
+    const leaveCRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${userC.accessToken}`)
+      .send({});
+    expect(leaveCRes.status).toBe(200);
+
+    const dbConversationRes = await pool.query(
+      'SELECT COUNT(*)::int AS count FROM conversations WHERE id = $1',
+      [conversationId]
+    );
+    expect(dbConversationRes.rows[0].count).toBe(0);
+
+    const dbMessageRes = await pool.query(
+      'SELECT COUNT(*)::int AS count FROM messages WHERE conversation_id = $1',
+      [conversationId]
+    );
+    expect(dbMessageRes.rows[0].count).toBe(0);
   });
 
   it('retains group DM history for remaining participants when one leaves', async () => {
