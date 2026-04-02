@@ -1,8 +1,6 @@
-name: Nightly Staging E2E
+name: Manual Staging E2E
 
 on:
-  schedule:
-    - cron: '15 9 * * *'
   workflow_dispatch:
 
 permissions:
