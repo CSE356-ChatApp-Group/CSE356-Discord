@@ -42,6 +42,9 @@ test.describe('community and channel', () => {
     await expect(
       page.getByTestId('channel-create-open'),
     ).toBeVisible({ timeout: 10_000 });
+    await expect(
+      page.locator('[data-testid^="channel-item-"]').filter({ hasText: 'general' }).first(),
+    ).toBeVisible({ timeout: 10_000 });
 
     // ── 2. Create channel ────────────────────────────────────────────────────
     const channelName = `chan${randSuffix().slice(0, 4)}`;
@@ -71,6 +74,9 @@ test.describe('community and channel', () => {
     await page.getByTestId('community-create-slug').fill(`e2emsg${suffix}`);
     await page.getByTestId('community-create-submit').click();
     await expect(page.getByTestId('channel-create-open')).toBeVisible({ timeout: 10_000 });
+    await expect(
+      page.locator('[data-testid^="channel-item-"]').filter({ hasText: 'general' }).first(),
+    ).toBeVisible({ timeout: 10_000 });
 
     const channelName = `msg${randSuffix().slice(0, 4)}`;
     await page.getByTestId('channel-create-open').click();
@@ -80,10 +86,12 @@ test.describe('community and channel', () => {
     await expect(page.getByTestId('channel-create-form')).not.toBeVisible({ timeout: 10_000 });
 
     // Open the channel.
-    await page
+    const channelItem = page
       .locator('[data-testid^="channel-item-"]')
       .filter({ hasText: channelName })
-      .click();
+      .first();
+    await expect(channelItem).toBeVisible({ timeout: 20_000 });
+    await channelItem.click();
     await expect(page.getByTestId('message-pane')).toBeVisible();
 
     // Send a message and verify it appears in the list.

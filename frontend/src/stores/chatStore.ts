@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api } from '../lib/api';
+import { api, invalidateApiCache } from '../lib/api';
 import { wsManager } from '../lib/ws';
 import { useAuthStore } from './authStore';
 
@@ -72,6 +72,38 @@ function dedupeMessages(messages: Entity[]) {
   }
 
   return deduped;
+}
+
+function channelCommunityId(channel: Entity) {
+  return channel?.community_id || channel?.communityId || null;
+}
+
+function upsertChannel(channels: Entity[], incoming: Entity) {
+  if (!incoming?.id) return channels || [];
+  const list = Array.isArray(channels) ? channels : [];
+  const index = list.findIndex((channel) => channel.id === incoming.id);
+  if (index === -1) return [...list, incoming];
+
+  const next = [...list];
+  next[index] = { ...next[index], ...incoming };
+  return next;
+}
+
+function preserveRecentLocalChannels(serverChannels: Entity[], existingChannels: Entity[], communityId: string) {
+  const merged = Array.isArray(serverChannels) ? [...serverChannels] : [];
+  const seen = new Set(merged.map((channel) => channel?.id).filter(Boolean));
+  const now = Date.now();
+
+  for (const channel of Array.isArray(existingChannels) ? existingChannels : []) {
+    if (!channel?.id || seen.has(channel.id)) continue;
+    if (channelCommunityId(channel) !== communityId) continue;
+    const localCreatedAt = Number(channel._localCreatedAt || 0);
+    if (!localCreatedAt || now - localCreatedAt > 15_000) continue;
+    merged.push(channel);
+    seen.add(channel.id);
+  }
+
+  return merged;
 }
 
 function upsertMessage(messages, incoming) {
@@ -161,6 +193,8 @@ let unreadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let lastUnreadRefreshAt = 0;
 let communitiesInFlight: Promise<Entity[]> | null = null;
 const channelsInFlightByCommunity = new Map<string, Promise<Entity[]>>();
+let channelsFetchTokenCounter = 0;
+const latestChannelsFetchTokenByCommunity = new Map<string, number>();
 const readMarkInFlight = new Set<string>();
 const readMarkRecent = new Map<string, number>();
 
@@ -325,6 +359,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   async createCommunity(slug: string, name: string, description: string) {
     const { community } = await api.post('/communities', { slug, name, description });
+    invalidateApiCache('/communities');
     const created = {
       ...community,
       my_role: community?.my_role || 'owner',
@@ -336,11 +371,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   async deleteCommunity(communityId: string) {
     await api.delete(`/communities/${communityId}`);
+    invalidateApiCache('/communities');
     set((s) => removeCommunityState(s, communityId));
   },
 
   async leaveCommunity(communityId: string) {
     await api.delete(`/communities/${communityId}/leave`);
+    invalidateApiCache('/communities');
     set((s) => removeCommunityState(s, communityId));
   },
 
@@ -385,40 +422,49 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       return channelsInFlightByCommunity.get(communityId)!;
     }
 
+    const requestToken = ++channelsFetchTokenCounter;
+    latestChannelsFetchTokenByCommunity.set(communityId, requestToken);
+
     const inFlight = (async () => {
       const { channels } = await api.get(`/channels?communityId=${communityId}`);
-      set(s => ({
-        channels: channels.map((channel: Entity) => {
-          const previous = s.channels.find((ch: Entity) => ch.id === channel.id);
-          const hadActivity = Boolean(previous?.has_new_activity ?? previous?.hasNewActivity);
-          // Prefer the larger of: server-provided count vs in-memory incremented count
-          const serverCount = channel.unread_message_count ?? 0;
-          const prevCount = previous?.unread_message_count ?? 0;
-          const unreadCount = Math.max(serverCount, prevCount);
-          return hadActivity
-            ? {
-                ...channel,
-                has_new_activity: true,
-                hasNewActivity: true,
-                unread_message_count: unreadCount,
-              }
-            : {
-                ...channel,
-                unread_message_count: unreadCount,
-              };
-        }),
-        activeChannel: s.activeChannel
-          ? (channels.find((ch: Entity) => ch.id === s.activeChannel?.id)
+      if (latestChannelsFetchTokenByCommunity.get(communityId) !== requestToken) {
+        return channels;
+      }
+      set(s => {
+        const mergedChannels = preserveRecentLocalChannels(channels || [], s.channels, communityId);
+        return {
+          channels: mergedChannels.map((channel: Entity) => {
+            const previous = s.channels.find((ch: Entity) => ch.id === channel.id);
+            const hadActivity = Boolean(previous?.has_new_activity ?? previous?.hasNewActivity);
+            // Prefer the larger of: server-provided count vs in-memory incremented count
+            const serverCount = channel.unread_message_count ?? 0;
+            const prevCount = previous?.unread_message_count ?? 0;
+            const unreadCount = Math.max(serverCount, prevCount);
+            return hadActivity
               ? {
-                  ...(channels.find((ch: Entity) => ch.id === s.activeChannel?.id) as Entity),
-                  has_new_activity: false,
-                  hasNewActivity: false,
-                  unread_message_count: 0,
+                  ...channel,
+                  has_new_activity: true,
+                  hasNewActivity: true,
+                  unread_message_count: unreadCount,
                 }
-              : s.activeChannel)
-          : s.activeChannel,
-      }));
-      channels.forEach((channel: Entity) => {
+              : {
+                  ...channel,
+                  unread_message_count: unreadCount,
+                };
+          }),
+          activeChannel: s.activeChannel
+            ? (mergedChannels.find((ch: Entity) => ch.id === s.activeChannel?.id)
+                ? {
+                    ...(mergedChannels.find((ch: Entity) => ch.id === s.activeChannel?.id) as Entity),
+                    has_new_activity: false,
+                    hasNewActivity: false,
+                    unread_message_count: 0,
+                  }
+                : s.activeChannel)
+            : s.activeChannel,
+        };
+      });
+      (channels || []).forEach((channel: Entity) => {
         const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
         if (channel?.id && canAccess) {
           wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
@@ -442,7 +488,27 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   async createChannel(communityId: string, name: string, isPrivate = false, description = '') {
     const { channel } = await api.post('/channels', { communityId, name, isPrivate, description });
-    set(s => ({ channels: [...s.channels, channel] }));
+    const createdChannel = {
+      ...channel,
+      _localCreatedAt: Date.now(),
+    };
+    invalidateApiCache(`/channels?communityId=${communityId}`);
+    latestChannelsFetchTokenByCommunity.set(communityId, ++channelsFetchTokenCounter);
+    set(s => ({
+      channels: upsertChannel(s.channels, createdChannel),
+    }));
+
+    if (get().activeCommunity?.id === communityId) {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        invalidateApiCache(`/channels?communityId=${communityId}`);
+        const refreshed = await get().fetchChannels(communityId).catch(() => null);
+        if (Array.isArray(refreshed) && refreshed.some((existing) => existing.id === channel.id)) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      }
+    }
+
     return channel;
   },
 
@@ -450,6 +516,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const { members } = await api.post(`/channels/${channelId}/members`, { userIds });
     const communityId = get().activeCommunity?.id;
     if (communityId) {
+      invalidateApiCache(`/channels?communityId=${communityId}`);
       await get().fetchChannels(communityId);
     }
     return members || [];
@@ -1286,13 +1353,23 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         if (!channel?.community_id && !channel?.communityId) break;
         const communityId = channel.community_id || channel.communityId;
         if (store.activeCommunity?.id === communityId) {
-          store.fetchChannels(communityId);
+          set((s) => ({
+            channels: upsertChannel(s.channels, {
+              ...channel,
+              _localCreatedAt: channel._localCreatedAt || Date.now(),
+            }),
+          }));
+          setTimeout(() => {
+            invalidateApiCache(`/channels?communityId=${communityId}`);
+            store.fetchChannels(communityId).catch(() => {});
+          }, 400);
         }
         break;
       }
       case 'channel:membership_updated': {
         const { communityId } = event.data || {};
         if (communityId && store.activeCommunity?.id === communityId) {
+          invalidateApiCache(`/channels?communityId=${communityId}`);
           store.fetchChannels(communityId).catch(() => {});
         }
         break;

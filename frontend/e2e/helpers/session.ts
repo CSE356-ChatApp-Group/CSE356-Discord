@@ -61,7 +61,7 @@ export async function registerOrLogin(request: APIRequestContext, user: TestUser
     await waitForAuthSlot();
     const login = await request.post('/api/v1/auth/login', {
       data: {
-        email: user.username,
+        email: user.email,
         password: user.password,
       },
       timeout: 10_000,
@@ -93,7 +93,7 @@ export async function registerOrLogin(request: APIRequestContext, user: TestUser
 }
 
 export async function ensureUserExists(request: APIRequestContext, user: TestUser) {
-  await registerOrLogin(request, user);
+  return await registerOrLogin(request, user);
 }
 
 export async function findExistingUsername(
@@ -139,44 +139,47 @@ export async function bootstrapPageWithToken(page: Page, token: string) {
 }
 
 export async function loginViaUiWithRetry(page: Page, user: TestUser) {
-  const LOGIN_ATTEMPTS = 2;
-  for (let attempt = 1; attempt <= LOGIN_ATTEMPTS; attempt += 1) {
+  const identifiers = [user.username, user.email].filter(Boolean);
+
+  for (const [index, loginIdentifier] of identifiers.entries()) {
     await page.goto('/login');
-    const alreadyLoggedIn = await page.getByTestId('route-chat').isVisible({ timeout: 2_000 }).catch(() => false);
-    if (alreadyLoggedIn) return;
+    await expect(page.getByTestId('route-login')).toBeVisible({ timeout: 10_000 });
 
-    const onLoginRoute = await page.getByTestId('route-login').isVisible({ timeout: 4_000 }).catch(() => false);
-    if (!onLoginRoute) {
-      if (attempt < LOGIN_ATTEMPTS) {
-        await new Promise((r) => setTimeout(r, 1_200 * attempt));
-        continue;
-      }
-      break;
-    }
-
-    await page.getByTestId('login-email').fill(user.username);
+    await page.getByTestId('login-email').fill(loginIdentifier);
     await page.getByTestId('login-password').fill(user.password);
+
+    const loginResponsePromise = page.waitForResponse(
+      (response) => response.url().includes('/api/v1/auth/login'),
+      { timeout: 15_000 },
+    ).catch(() => null);
+
     await page.getByTestId('login-submit').click();
 
-    const serverBusy = await page
-      .getByTestId('login-error')
-      .filter({ hasText: 'Service Temporarily Unavailable' })
-      .isVisible({ timeout: 1_500 })
-      .catch(() => false);
-    if (serverBusy) {
-      await new Promise((r) => setTimeout(r, 1_500));
+    const loginResponse = await loginResponsePromise;
+    const loginStatus = loginResponse?.status() ?? 0;
+
+    if (loginStatus === 429 || loginStatus === 503) {
+      await new Promise((r) => setTimeout(r, 1_500 * (index + 1)));
       continue;
     }
 
-    const loggedIn = await page.getByTestId('route-chat').isVisible({ timeout: 10_000 }).catch(() => false);
+    await page.waitForURL((url) => !url.pathname.endsWith('/login'), { timeout: 15_000 }).catch(() => {});
+
+    const loggedIn = await page.getByTestId('route-chat').isVisible({ timeout: 20_000 }).catch(() => false);
     if (loggedIn) return;
 
-    if (attempt < LOGIN_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 1_200 * attempt));
+    const invalidCredentials = await page
+      .getByTestId('login-error')
+      .filter({ hasText: 'Invalid credentials' })
+      .isVisible({ timeout: 1_000 })
+      .catch(() => false);
+
+    if (invalidCredentials) {
+      continue;
     }
   }
 
-  await expect(page.getByTestId('route-chat')).toBeVisible();
+  await expect(page.getByTestId('route-chat')).toBeVisible({ timeout: 20_000 });
 }
 
 export async function ensureAuthenticated(context: BrowserContext, page: Page, user: TestUser): Promise<string> {
@@ -195,12 +198,18 @@ export async function ensureAuthenticated(context: BrowserContext, page: Page, u
 export async function createGroupAndInvite(
   request: APIRequestContext,
   initialParticipants: string[],
-  invitedParticipant: string
+  invitedParticipant: string,
+  accessToken?: string,
 ) {
+  const headers = accessToken
+    ? { Authorization: `Bearer ${accessToken}` }
+    : undefined;
+
   const created = await request.post('/api/v1/conversations', {
     data: {
       participantIds: initialParticipants,
     },
+    headers,
     timeout: 10_000,
   });
 
@@ -216,6 +225,7 @@ export async function createGroupAndInvite(
     data: {
       participantIds: [invitedParticipant],
     },
+    headers,
     timeout: 10_000,
   });
 

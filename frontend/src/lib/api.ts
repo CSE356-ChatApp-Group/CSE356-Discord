@@ -43,6 +43,21 @@ export function setToken(t: string | null) {
 
 export function getToken() { return _accessToken; }
 
+export function invalidateApiCache(pathPrefix?: string) {
+  if (!pathPrefix) {
+    _inFlightGets.clear();
+    _recentGets.clear();
+    return;
+  }
+
+  for (const key of Array.from(_inFlightGets.keys())) {
+    if (key.startsWith(pathPrefix)) _inFlightGets.delete(key);
+  }
+  for (const key of Array.from(_recentGets.keys())) {
+    if (key.startsWith(pathPrefix)) _recentGets.delete(key);
+  }
+}
+
 async function requestFormData(path: string, formData: FormData) {
   if (_authInvalid && !path.startsWith('/auth/')) {
     notifySessionExpired();

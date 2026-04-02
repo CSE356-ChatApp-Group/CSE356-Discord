@@ -13,7 +13,9 @@ test.describe('authentication', () => {
     await page.goto('/register');
     await expect(page.getByTestId('route-register')).toBeVisible();
 
+    await page.locator('#register-email').fill(user.email);
     await page.locator('#register-username').fill(user.username);
+    await page.locator('#register-display-name').fill(user.displayName);
     await page.locator('#register-password').fill(user.password);
     await page.getByTestId('register-submit').click();
 
@@ -38,7 +40,7 @@ test.describe('authentication', () => {
     const user = registeredUser!;
 
     await page.goto('/login');
-    await page.getByTestId('login-email').fill(user.username);
+    await page.getByTestId('login-email').fill(user.email);
     await page.getByTestId('login-password').fill('Definitely!Wrong!99');
     await page.getByTestId('login-submit').click();
 

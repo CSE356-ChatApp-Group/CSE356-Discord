@@ -5,7 +5,6 @@ import {
   createGroupAndInvite,
   ensureUserExists,
   ensureAuthenticated,
-  findExistingUsername,
   waitForSidebar,
   waitForAuthSlot,
 } from './helpers/session';
@@ -17,6 +16,7 @@ test.describe('DM invite multi-client sync', () => {
     const userA = buildUser('alice');
     const userB = buildUser('bob');
     const userC = buildUser('carol');
+    const userD = buildUser('dave');
 
     const contextA = await browser.newContext();
     const contextB = await browser.newContext();
@@ -25,8 +25,9 @@ test.describe('DM invite multi-client sync', () => {
       const aTab1 = await contextA.newPage();
 
       const aliceToken = await ensureAuthenticated(contextA, aTab1, userA);
-      await ensureUserExists(contextB.request, userB);
+      const bobToken = await ensureUserExists(contextB.request, userB);
       await ensureUserExists(contextB.request, userC);
+      await ensureUserExists(contextB.request, userD);
 
       const aTab2 = await contextA.newPage();
       await waitForAuthSlot();
@@ -40,8 +41,9 @@ test.describe('DM invite multi-client sync', () => {
 
       const conversationId = await createGroupAndInvite(
         contextB.request,
-        [userB.username, userC.username],
+        [userC.username, userD.username],
         userA.username,
+        bobToken,
       );
 
       await expect.poll(async () => aTab1.getByTestId(`dm-item-${conversationId}`).count(), { timeout: 15_000 }).toBe(1);

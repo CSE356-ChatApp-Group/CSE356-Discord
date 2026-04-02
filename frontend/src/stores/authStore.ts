@@ -149,7 +149,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   async logout() {
-    try { await api.post('/auth/logout'); } catch { /* ignore */ }
+    const revokeSession = api.post('/auth/logout').catch(() => null);
     get().expireSession();
+    await revokeSession;
   },
 }));

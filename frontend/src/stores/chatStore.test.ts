@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetChatStore } from './chatStore';
 
-const { apiDelete, apiGet, apiPost } = vi.hoisted(() => ({
+const { apiDelete, apiGet, apiPost, invalidateApiCache } = vi.hoisted(() => ({
   apiDelete: vi.fn(),
   apiGet: vi.fn(),
   apiPost: vi.fn(),
+  invalidateApiCache: vi.fn(),
 }));
 
 vi.mock('../lib/api', () => ({
@@ -16,6 +17,7 @@ vi.mock('../lib/api', () => ({
     put: vi.fn(),
     delete: apiDelete,
   },
+  invalidateApiCache,
 }));
 
 import { useAuthStore } from './authStore';
@@ -257,6 +259,29 @@ describe('chatStore quick actions', () => {
     expect(state.activeChannel).toBeNull();
     expect(state.channels).toEqual([]);
     expect(state.messages['ch-1']).toBeUndefined();
+  });
+
+  it('keeps a newly created channel visible when the immediate refresh is stale', async () => {
+    apiPost.mockResolvedValue({
+      channel: { id: 'ch-2', community_id: 'comm-1', name: 'fresh' },
+    });
+    apiGet.mockResolvedValue({
+      channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'general' }],
+    });
+
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'general' }],
+    } as any);
+
+    await useChatStore.getState().createChannel('comm-1', 'fresh');
+    useChatStore.getState()._handleWsEvent({
+      event: 'channel:created',
+      data: { id: 'ch-2', community_id: 'comm-1', name: 'fresh' },
+    });
+    await Promise.resolve();
+
+    expect(useChatStore.getState().channels.map((channel) => channel.id)).toContain('ch-2');
   });
 
   it('refreshes channels when a private-channel membership update arrives for the active community', () => {
