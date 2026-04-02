@@ -4,8 +4,9 @@ import { wsManager } from '../lib/ws';
 import { useAuthStore } from './authStore';
 
 type Entity = Record<string, any>;
-type PresenceStatus = 'online' | 'idle' | 'away' | 'offline';
-const VALID_PRESENCE_STATUSES = new Set(['online', 'idle', 'away', 'offline']);
+export const PRESENCE_STATUSES = ['online', 'idle', 'away', 'offline'] as const;
+export type PresenceStatus = (typeof PRESENCE_STATUSES)[number];
+const VALID_PRESENCE_STATUSES = new Set<string>(PRESENCE_STATUSES);
 type PendingUpload = {
   file: File;
   width?: number;

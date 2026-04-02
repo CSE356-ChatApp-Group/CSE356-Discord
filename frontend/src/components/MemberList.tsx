@@ -1,11 +1,15 @@
 import { useEffect } from 'react';
-import { useChatStore } from '../stores/chatStore';
+import { PRESENCE_STATUSES, useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { Avatar } from './CommunitySidebar';
 import styles from './MemberList.module.css';
 
-const STATUS_LABEL = { online: 'Online', idle: 'Idle', away: 'Away', offline: 'Offline' };
-const VALID_STATUSES = new Set(['online', 'idle', 'away', 'offline']);
+const STATUS_LABEL: Record<(typeof PRESENCE_STATUSES)[number], string> = {
+  online: 'Online',
+  idle: 'Idle',
+  away: 'Away',
+  offline: 'Offline',
+};
 
 export default function MemberList() {
   const { members, activeConv, presence, awayMessages, hydratePresenceForUsers } = useChatStore();
@@ -28,7 +32,7 @@ export default function MemberList() {
   const groups = { online: [], idle: [], away: [], offline: [] };
   for (const m of list) {
     const candidate = presence[m.id] || m.status || 'offline';
-    const s = VALID_STATUSES.has(candidate) ? candidate : 'offline';
+    const s = PRESENCE_STATUSES.includes(candidate) ? candidate : 'offline';
     groups[s].push({ ...m, status: s, awayMessage: awayMessages[m.id] || m.away_message || null });
   }
 
@@ -36,7 +40,7 @@ export default function MemberList() {
     <aside className={`${styles.list} memberList`} aria-label="Community members" data-testid="member-list">
       <div className={styles.header} data-testid="member-list-header">{label} <span className={styles.count}>{list.length}</span></div>
       <div className={styles.scroll} data-testid="member-list-scroll">
-        {['online', 'idle', 'away', 'offline'].map(status => {
+        {PRESENCE_STATUSES.map(status => {
           const grp = groups[status];
           if (!grp.length) return null;
           return (
