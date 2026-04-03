@@ -71,6 +71,7 @@ When something breaks in production, start here:
 - **Health check:** `http://localhost/health`
 - **Prometheus metrics:** `http://localhost/metrics`
 - **Grafana traces:** `http://localhost:3001` → **Explore** → select **Tempo**
+- **Grafana dashboard:** `http://localhost:3001` → **Dashboards** → **ChatApp** → **ChatApp Overview**
 - **Alertmanager UI:** `http://localhost:9093`
 - **Prometheus alerts:** check the `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, and `ChatAppEventLoopLagHigh` rules.
 
