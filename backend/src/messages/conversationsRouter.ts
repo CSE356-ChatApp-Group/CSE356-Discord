@@ -13,6 +13,7 @@ const { body, param, validationResult } = require('express-validator');
 const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
+const presenceService  = require('../presence/service');
 
 const router = express.Router();
 router.use(authenticate);
@@ -261,6 +262,9 @@ router.post('/',
       const conversation = await loadConversationWithParticipants(client, conv.id);
       const invitedUserIds = allIds.filter(id => id !== req.user.id);
       await client.query('COMMIT');
+      await Promise.allSettled(
+        allIds.map((participantId) => presenceService.invalidatePresenceFanoutTargets(participantId))
+      );
 
       if (conversation) {
         await publishConversationInviteNotifications(
@@ -434,6 +438,13 @@ async function addParticipantsHandler(req, res, next) {
       : currentParticipantIds;
 
     await client.query('COMMIT');
+    if (participantIdsToAdd.length > 0) {
+      await Promise.allSettled(
+        participantIdsToAdd.map((participantId) =>
+          presenceService.invalidatePresenceFanoutTargets(participantId)
+        )
+      );
+    }
 
     if (joinedGroupMessages.length > 0) {
       const targets = [
@@ -533,6 +544,7 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       await client.query('DELETE FROM conversations WHERE id = $1', [req.params.id]);
     }
     await client.query('COMMIT');
+    await presenceService.invalidatePresenceFanoutTargets(req.user.id);
 
     // Broadcast system message if group DM and not deleted
     if (leftGroupMessage) {

@@ -163,7 +163,7 @@ async function recomputeUserPresence(userId) {
       stateByConn.push("idle");
     } else {
       if (!isActive) {
-        logger.info({
+        logger.debug({
           event: "presence.activity_expired",
           userId,
           connectionId: connId,
@@ -250,11 +250,11 @@ function deliverPubsubMessage(channel, message) {
     recipientCount,
   );
 
-  // Per-event structured log for presence fanouts so Loki can drill down by userId
+  // Keep this at debug level to avoid log floods during high presence churn.
   if (channelType === "user" && recipientCount > 0) {
     try {
       const payload = JSON.parse(message);
-      logger.info({
+      logger.debug({
         event: "presence.fanout.delivered",
         channel,
         recipientCount,

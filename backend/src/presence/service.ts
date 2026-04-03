@@ -21,6 +21,10 @@ const { presenceFanoutTotal } = require("../utils/metrics");
 const { tracer } = require("../utils/tracer");
 
 const TTL_SECONDS = 90;
+const rawFanoutCacheTtl = Number(process.env.PRESENCE_FANOUT_CACHE_TTL_SECONDS || 120);
+const PRESENCE_FANOUT_CACHE_TTL_SECONDS = Number.isFinite(rawFanoutCacheTtl) && rawFanoutCacheTtl > 0
+  ? Math.floor(rawFanoutCacheTtl)
+  : 120;
 
 function presenceStatusKey(userId) {
   return `presence:${userId}`;
@@ -36,6 +40,57 @@ function connectionSetKey(userId) {
 
 function connectionStatusHashKey(userId) {
   return `user:${userId}:connection_status`;
+}
+
+function fanoutTargetsKey(userId) {
+  return `presence:${userId}:fanout_targets`;
+}
+
+async function invalidatePresenceFanoutTargets(userId) {
+  await redis.del(fanoutTargetsKey(userId));
+}
+
+async function getPresenceFanoutTargets(userId) {
+  const cacheKey = fanoutTargetsKey(userId);
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      return {
+        communityIds: Array.isArray(parsed.communityIds) ? parsed.communityIds : [],
+        conversationIds: Array.isArray(parsed.conversationIds) ? parsed.conversationIds : [],
+      };
+    } catch {
+      await redis.del(cacheKey);
+    }
+  }
+
+  const { rows } = await pool.query(
+    `SELECT 'community' AS target_type, community_id::text AS target_id
+       FROM community_members
+      WHERE user_id = $1
+      UNION ALL
+     SELECT 'conversation' AS target_type, conversation_id::text AS target_id
+       FROM conversation_participants
+      WHERE user_id = $1
+        AND left_at IS NULL`,
+    [userId],
+  );
+
+  const targets = { communityIds: [], conversationIds: [] };
+  for (const row of rows) {
+    if (row.target_type === 'community') targets.communityIds.push(row.target_id);
+    if (row.target_type === 'conversation') targets.conversationIds.push(row.target_id);
+  }
+
+  await redis.set(
+    cacheKey,
+    JSON.stringify(targets),
+    'EX',
+    PRESENCE_FANOUT_CACHE_TTL_SECONDS,
+  );
+
+  return targets;
 }
 
 function normalizeAwayMessage(value) {
@@ -98,7 +153,7 @@ async function setPresence(userId, status, awayMessage) {
     status === "offline";
 
   presenceFanoutTotal.inc({ status, throttled: String(!shouldFanout) });
-  logger.info({
+  logger.debug({
     event: "presence.fanout",
     userId,
     status,
@@ -118,50 +173,32 @@ async function setPresence(userId, status, awayMessage) {
     await tracer.startActiveSpan("presence.fanout", async (fanoutSpan) => {
       fanoutSpan.setAttributes({ userId, status });
       try {
-        // Publish to the user's personal channel
+        // Publish to the user's personal channel first.
         await fanout.publish(`user:${userId}`, payload);
 
-        // Fan out to every community the user belongs to (non-blocking, best-effort)
-        pool
-          .query(
-            "SELECT community_id FROM community_members WHERE user_id = $1",
-            [userId],
-          )
-          .then(({ rows }) =>
-            Promise.all(
-              rows.map((r) => {
-                const communitySpan = tracer.startSpan(
-                  "presence.community_fanout",
-                  {
-                    attributes: { communityId: r.community_id, userId, status },
-                  },
-                );
-                return fanout
-                  .publish(`community:${r.community_id}`, payload)
-                  .finally(() => communitySpan.end());
-              }),
+        // Reuse a short-lived Redis cache for fanout targets so high-frequency
+        // presence updates do not hammer Postgres as traffic grows.
+        try {
+          const { communityIds, conversationIds } = await getPresenceFanoutTargets(userId);
+          await Promise.allSettled([
+            ...communityIds.map((communityId) => {
+              const communitySpan = tracer.startSpan(
+                "presence.community_fanout",
+                {
+                  attributes: { communityId, userId, status },
+                },
+              );
+              return fanout
+                .publish(`community:${communityId}`, payload)
+                .finally(() => communitySpan.end());
+            }),
+            ...conversationIds.map((conversationId) =>
+              fanout.publish(`conversation:${conversationId}`, payload),
             ),
-          )
-          .catch(() => {});
-
-        // Also publish to DM/group conversation channels so participant lists
-        // receive live status updates even when users do not share a community.
-        pool
-          .query(
-            `SELECT conversation_id
-               FROM conversation_participants
-              WHERE user_id = $1
-                AND left_at IS NULL`,
-            [userId],
-          )
-          .then(({ rows }) =>
-            Promise.all(
-              rows.map((r) =>
-                fanout.publish(`conversation:${r.conversation_id}`, payload),
-              ),
-            ),
-          )
-          .catch(() => {});
+          ]);
+        } catch (err) {
+          logger.debug({ err, userId }, 'Presence secondary fanout lookup failed');
+        }
       } finally {
         fanoutSpan.end();
       }
@@ -224,6 +261,7 @@ module.exports = {
   setAwayMessage,
   getAwayMessage,
   syncConnectionStatuses,
+  invalidatePresenceFanoutTargets,
   getPresence,
   getPresenceDetails,
   getBulkPresence,

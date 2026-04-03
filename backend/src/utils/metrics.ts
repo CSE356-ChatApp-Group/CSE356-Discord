@@ -53,10 +53,49 @@ const fanoutRecipientsHistogram = new client.Histogram({
   buckets: [0, 1, 5, 10, 25, 50, 100, 250, 500],
 });
 
+// ── Async side-effect queue ───────────────────────────────────────────────────
+
+const sideEffectQueueDepth = new client.Gauge({
+  name: 'side_effect_queue_depth',
+  help: 'Number of pending async side-effect jobs waiting to be processed',
+  labelNames: ['queue'],
+});
+
+const sideEffectQueueActiveWorkers = new client.Gauge({
+  name: 'side_effect_queue_active_workers',
+  help: 'Number of workers currently draining the async side-effect queue',
+  labelNames: ['queue'],
+});
+
+const sideEffectQueueDelayMs = new client.Histogram({
+  name: 'side_effect_queue_delay_ms',
+  help: 'Time a side-effect job spends waiting in the queue before execution',
+  labelNames: ['queue', 'name'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+const sideEffectJobDurationMs = new client.Histogram({
+  name: 'side_effect_job_duration_ms',
+  help: 'Execution time of async side-effect jobs',
+  labelNames: ['queue', 'name', 'status'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+const sideEffectQueueDroppedTotal = new client.Counter({
+  name: 'side_effect_queue_dropped_total',
+  help: 'Number of side-effect jobs dropped before execution due to overload safeguards',
+  labelNames: ['queue', 'name', 'reason'],
+});
+
 module.exports = {
   register: client.register,
   httpRequestsTotal,
   httpRequestDurationMs,
   presenceFanoutTotal,
   fanoutRecipientsHistogram,
+  sideEffectQueueDepth,
+  sideEffectQueueActiveWorkers,
+  sideEffectQueueDelayMs,
+  sideEffectJobDurationMs,
+  sideEffectQueueDroppedTotal,
 };

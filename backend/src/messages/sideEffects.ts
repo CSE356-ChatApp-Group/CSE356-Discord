@@ -6,33 +6,126 @@ const overload = require('../utils/overload');
 const logger = require('../utils/logger');
 const redis = require('../db/redis');
 const { pool } = require('../db/pool');
+const {
+  sideEffectQueueDepth,
+  sideEffectQueueActiveWorkers,
+  sideEffectQueueDelayMs,
+  sideEffectJobDurationMs,
+  sideEffectQueueDroppedTotal,
+} = require('../utils/metrics');
 
-const queue = [];
-let draining = false;
+const queues = {
+  fanout: [],
+  search: [],
+};
+const rawSearchConcurrency = Number(process.env.SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY || 2);
+const rawSearchMaxDepth = Number(process.env.SEARCH_SIDE_EFFECT_QUEUE_MAX_DEPTH || 5000);
+const SEARCH_WORKER_CONCURRENCY = Number.isFinite(rawSearchConcurrency) && rawSearchConcurrency > 0
+  ? Math.floor(rawSearchConcurrency)
+  : 2;
+const SEARCH_MAX_QUEUE_DEPTH = Number.isFinite(rawSearchMaxDepth) && rawSearchMaxDepth > 0
+  ? Math.floor(rawSearchMaxDepth)
+  : 5000;
+const activeWorkers = {
+  fanout: 0,
+  search: 0,
+};
+
+function queueNameForJob(name) {
+  return name.startsWith('search.') ? 'search' : 'fanout';
+}
+
+function queueConfig(queueName) {
+  if (queueName === 'search') {
+    return {
+      concurrency: SEARCH_WORKER_CONCURRENCY,
+      maxDepth: SEARCH_MAX_QUEUE_DEPTH,
+      dropOnOverflow: true,
+    };
+  }
+
+  return {
+    concurrency: 1,
+    maxDepth: Number.POSITIVE_INFINITY,
+    dropOnOverflow: false,
+  };
+}
+
+function refreshQueueMetrics(queueName) {
+  sideEffectQueueDepth.set({ queue: queueName }, queues[queueName].length);
+  sideEffectQueueActiveWorkers.set({ queue: queueName }, activeWorkers[queueName]);
+}
+
+function maybeStartWorkers(queueName) {
+  const { concurrency } = queueConfig(queueName);
+  while (activeWorkers[queueName] < concurrency && queues[queueName].length > 0) {
+    activeWorkers[queueName] += 1;
+    refreshQueueMetrics(queueName);
+    setImmediate(() => {
+      void drainWorker(queueName);
+    });
+  }
+}
 
 function enqueue(name, fn) {
-  queue.push({ name, fn, enqueuedAt: Date.now() });
-  if (!draining) {
-    draining = true;
-    setImmediate(drain);
+  const queueName = queueNameForJob(name);
+  const queue = queues[queueName];
+  const { maxDepth, dropOnOverflow } = queueConfig(queueName);
+
+  if (dropOnOverflow && queue.length >= maxDepth) {
+    sideEffectQueueDroppedTotal.inc({ queue: queueName, name, reason: 'queue_full' });
+    logger.warn(
+      { sideEffect: name, queue: queueName, queueDepth: queue.length, maxQueueDepth: maxDepth },
+      'Dropping non-essential async side-effect due to queue pressure'
+    );
+    return false;
+  }
+
+  queue.push({ name, fn, enqueuedAt: Date.now(), queueName });
+  refreshQueueMetrics(queueName);
+  maybeStartWorkers(queueName);
+  return true;
+}
+
+async function drainWorker(queueName) {
+  const queue = queues[queueName];
+  try {
+    while (queue.length) {
+      const job = queue.shift();
+      refreshQueueMetrics(queueName);
+      if (!job) continue;
+
+      const queueDelayMs = Math.max(0, Date.now() - job.enqueuedAt);
+      sideEffectQueueDelayMs.observe({ queue: queueName, name: job.name }, queueDelayMs);
+
+      const startedAt = process.hrtime.bigint();
+      try {
+        await job.fn();
+        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+        sideEffectJobDurationMs.observe(
+          { queue: queueName, name: job.name, status: 'success' },
+          durationMs
+        );
+      } catch (err) {
+        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+        sideEffectJobDurationMs.observe(
+          { queue: queueName, name: job.name, status: 'error' },
+          durationMs
+        );
+        logger.warn({ err, sideEffect: job.name, queue: queueName }, 'Async side-effect failed');
+      }
+    }
+  } finally {
+    activeWorkers[queueName] = Math.max(0, activeWorkers[queueName] - 1);
+    refreshQueueMetrics(queueName);
+    if (queue.length) {
+      maybeStartWorkers(queueName);
+    }
   }
 }
 
-async function drain() {
-  while (queue.length) {
-    const job = queue.shift();
-    try {
-      await job.fn();
-    } catch (err) {
-      logger.warn({ err, sideEffect: job.name }, 'Async side-effect failed');
-    }
-  }
-  draining = false;
-  if (queue.length) {
-    draining = true;
-    setImmediate(drain);
-  }
-}
+refreshQueueMetrics('fanout');
+refreshQueueMetrics('search');
 
 function publishMessageEvent(target, event, data) {
   enqueue('fanout.publish', async () => {
@@ -84,7 +177,7 @@ function deleteMessage(messageId) {
 }
 
 function getQueueDepth() {
-  return queue.length;
+  return queues.fanout.length + queues.search.length;
 }
 
 module.exports = {

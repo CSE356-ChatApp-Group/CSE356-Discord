@@ -44,38 +44,61 @@ async function loadMembership(req, res, next) {
 router.get('/', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT c.*,
-              cm.role AS my_role,
-              (SELECT COUNT(*) FROM community_members WHERE community_id = c.id) AS member_count,
-              COALESCE(unread.unread_channel_count, 0) AS unread_channel_count,
-              (COALESCE(unread.unread_channel_count, 0) > 0) AS has_unread_channels
-       FROM   communities c
-       LEFT JOIN community_members cm ON cm.community_id = c.id AND cm.user_id = $1
-       LEFT JOIN LATERAL (
-         SELECT COUNT(*)::int AS unread_channel_count
+      `WITH visible_communities AS (
+         SELECT c.*, cm.role AS my_role
+         FROM communities c
+         LEFT JOIN community_members cm
+           ON cm.community_id = c.id
+          AND cm.user_id = $1
+         WHERE c.is_public = TRUE OR cm.user_id IS NOT NULL
+       ),
+       member_counts AS (
+         SELECT cm.community_id, COUNT(*)::int AS member_count
+         FROM community_members cm
+         JOIN visible_communities vc ON vc.id = cm.community_id
+         GROUP BY cm.community_id
+       ),
+       visible_channels AS (
+         SELECT ch.id, ch.community_id
          FROM channels ch
-         LEFT JOIN LATERAL (
-           SELECT m.id, m.author_id
-           FROM messages m
-           WHERE m.channel_id = ch.id AND m.deleted_at IS NULL
-           ORDER BY m.created_at DESC
-           LIMIT 1
-         ) lm ON TRUE
+         JOIN visible_communities vc ON vc.id = ch.community_id
+         WHERE ch.is_private = FALSE
+            OR EXISTS (
+              SELECT 1
+              FROM channel_members chm
+              WHERE chm.channel_id = ch.id
+                AND chm.user_id = $1
+            )
+       ),
+       latest_messages AS (
+         SELECT DISTINCT ON (m.channel_id)
+                m.channel_id,
+                m.id,
+                m.author_id
+         FROM messages m
+         JOIN visible_channels ch ON ch.id = m.channel_id
+         WHERE m.deleted_at IS NULL
+         ORDER BY m.channel_id, m.created_at DESC
+       ),
+       unread_counts AS (
+         SELECT ch.community_id, COUNT(*)::int AS unread_channel_count
+         FROM visible_channels ch
+         JOIN latest_messages lm ON lm.channel_id = ch.id
          LEFT JOIN read_states rs
-                ON rs.channel_id = ch.id
-               AND rs.user_id = $1
-         WHERE ch.community_id = c.id
-           AND (ch.is_private = FALSE
-                OR EXISTS (
-                  SELECT 1 FROM channel_members chm
-                  WHERE chm.channel_id = ch.id AND chm.user_id = $1
-                ))
-           AND lm.id IS NOT NULL
-           AND lm.author_id <> $1
+           ON rs.channel_id = ch.id
+          AND rs.user_id = $1
+         WHERE lm.author_id <> $1
            AND rs.last_read_message_id IS DISTINCT FROM lm.id
-       ) unread ON TRUE
-       WHERE  c.is_public = TRUE OR cm.user_id IS NOT NULL
-       ORDER  BY c.name`,
+         GROUP BY ch.community_id
+       )
+       SELECT vc.*,
+              COALESCE(mc.member_count, 0) AS member_count,
+              COALESCE(uc.unread_channel_count, 0) AS unread_channel_count,
+              (COALESCE(uc.unread_channel_count, 0) > 0) AS has_unread_channels
+       FROM visible_communities vc
+       LEFT JOIN member_counts mc ON mc.community_id = vc.id
+       LEFT JOIN unread_counts uc ON uc.community_id = vc.id
+       ORDER BY vc.name`,
       [req.user.id]
     );
     res.json({ communities: rows });
@@ -121,6 +144,7 @@ router.post('/',
       );
 
       await client.query('COMMIT');
+      await presenceService.invalidatePresenceFanoutTargets(req.user.id);
       res.status(201).json({ community });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -190,6 +214,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
       `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
       [req.params.id, req.user.id]
     );
+    await presenceService.invalidatePresenceFanoutTargets(req.user.id);
 
     await fanout.publish(`community:${req.params.id}`, {
       event: 'community:member_joined',
@@ -208,6 +233,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       `DELETE FROM community_members WHERE community_id=$1 AND user_id=$2 AND role != 'owner'`,
       [req.params.id, req.user.id]
     );
+    await presenceService.invalidatePresenceFanoutTargets(req.user.id);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
