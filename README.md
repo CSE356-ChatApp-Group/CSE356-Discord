@@ -71,7 +71,44 @@ When something breaks in production, start here:
 - **Health check:** `http://localhost/health`
 - **Prometheus metrics:** `http://localhost/metrics`
 - **Grafana traces:** `http://localhost:3001` → **Explore** → select **Tempo**
+- **Alertmanager UI:** `http://localhost:9093`
 - **Prometheus alerts:** check the `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, and `ChatAppEventLoopLagHigh` rules.
+
+### Discord alerting setup
+
+Recommended channel layout:
+
+- `local` → no alerts by default, or a personal test channel
+- `staging` → `#chatapp-staging-alerts`
+- `production` → `#chatapp-prod-alerts`
+
+Set the environment and webhook in `.env`:
+
+```bash
+ALERT_ENVIRONMENT=local           # local | staging | production
+DISCORD_WEBHOOK_URL_LOCAL=
+DISCORD_WEBHOOK_URL_STAGING=
+DISCORD_WEBHOOK_URL_PROD=
+```
+
+Then start or reload the monitoring services:
+
+```bash
+docker compose up -d --force-recreate alertmanager prometheus
+```
+
+Checks:
+
+1. Confirm Alertmanager is healthy at `http://localhost:9093/#/status`.
+2. Test the full path by temporarily stopping the API:
+   ```bash
+   docker compose stop api
+   # wait ~2 minutes for ChatAppApiDown
+   docker compose start api
+   ```
+3. Alerts now include the `environment` label so the message clearly says `local`, `staging`, or `production`.
+
+> Critical alerts will ping `@here`; warning alerts will post without paging everyone. Keeping staging and prod in separate channels is the most usable setup.
 
 ### Production logging behavior
 

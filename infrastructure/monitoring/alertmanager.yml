@@ -1,0 +1,59 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: discord-default
+  group_by: [environment, alertname, job, severity]
+  group_wait: 15s
+  group_interval: 5m
+  repeat_interval: 3h
+  routes:
+    - receiver: "null"
+      matchers:
+        - alertname="Watchdog"
+    - receiver: discord-critical
+      matchers:
+        - severity="critical"
+
+receivers:
+  - name: "null"
+
+  - name: discord-default
+    discord_configs:
+      - webhook_url_file: /alertmanager/secrets/discord_webhook_url
+        send_resolved: true
+        username: ChatApp Alerts
+        title: '{{ if eq .Status "firing" }}🔥{{ else }}✅{{ end }} [{{ with .CommonLabels.environment }}{{ . | toUpper }}{{ else }}UNKNOWN{{ end }}] {{ .CommonLabels.alertname }}'
+        message: |
+          **Environment:** {{ with .CommonLabels.environment }}{{ . }}{{ else }}unknown{{ end }}
+          **Status:** {{ .Status | toUpper }}
+          **Severity:** {{ with .CommonLabels.severity }}{{ . }}{{ else }}unknown{{ end }}
+          **Job:** {{ with .CommonLabels.job }}{{ . }}{{ else }}chatapp-api{{ end }}
+          {{ range .Alerts }}
+          • {{ with .Annotations.summary }}{{ . }}{{ else }}{{ with .Annotations.description }}{{ . }}{{ else }}No summary provided.{{ end }}{{ end }}
+          {{ with .Annotations.description }}  {{ . }}{{ end }}
+          {{ end }}
+
+  - name: discord-critical
+    discord_configs:
+      - webhook_url_file: /alertmanager/secrets/discord_webhook_url
+        send_resolved: true
+        username: ChatApp Alerts
+        content: '@here'
+        title: '{{ if eq .Status "firing" }}🚨 CRITICAL{{ else }}✅ RESOLVED{{ end }} · [{{ with .CommonLabels.environment }}{{ . | toUpper }}{{ else }}UNKNOWN{{ end }}] {{ .CommonLabels.alertname }}'
+        message: |
+          **Environment:** {{ with .CommonLabels.environment }}{{ . }}{{ else }}unknown{{ end }}
+          **Status:** {{ .Status | toUpper }}
+          **Severity:** {{ with .CommonLabels.severity }}{{ . }}{{ else }}critical{{ end }}
+          **Job:** {{ with .CommonLabels.job }}{{ . }}{{ else }}chatapp-api{{ end }}
+          {{ range .Alerts }}
+          • {{ with .Annotations.summary }}{{ . }}{{ else }}{{ with .Annotations.description }}{{ . }}{{ else }}No summary provided.{{ end }}{{ end }}
+          {{ with .Annotations.description }}  {{ . }}{{ end }}
+          {{ end }}
+
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity=~"warning|info"
+    equal: ['alertname', 'job', 'instance']

@@ -26,6 +26,7 @@ volumes:
   grafana_data:
   loki_data:
   tempo_data:
+  alertmanager_data:
 
 services:
   # ── Node 1 · Database ─────────────────────────────────────────────────────────
@@ -194,10 +195,56 @@ services:
   prometheus:
     image: prom/prometheus:v2.53.1
     restart: unless-stopped
+    depends_on: [alertmanager]
+    environment:
+      ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-local}
+    entrypoint:
+      - sh
+      - -ec
+    command:
+      - |
+        sed "s/__ALERT_ENVIRONMENT__/$${ALERT_ENVIRONMENT:-local}/g" /etc/prometheus/prometheus.yml.template >/tmp/prometheus.yml
+        exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus
     volumes:
-      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml.template:ro
       - ./infrastructure/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
+    networks: [chatapp]
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    restart: unless-stopped
+    environment:
+      ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-local}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      DISCORD_WEBHOOK_URL_LOCAL: ${DISCORD_WEBHOOK_URL_LOCAL:-}
+      DISCORD_WEBHOOK_URL_STAGING: ${DISCORD_WEBHOOK_URL_STAGING:-}
+      DISCORD_WEBHOOK_URL_PROD: ${DISCORD_WEBHOOK_URL_PROD:-}
+    entrypoint:
+      - sh
+      - -ec
+    command:
+      - |
+        mkdir -p /alertmanager/secrets
+        WEBHOOK="$$DISCORD_WEBHOOK_URL"
+        case "$${ALERT_ENVIRONMENT:-local}" in
+          prod|production)
+            [ -n "$$DISCORD_WEBHOOK_URL_PROD" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_PROD"
+            ;;
+          stage|staging)
+            [ -n "$$DISCORD_WEBHOOK_URL_STAGING" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_STAGING"
+            ;;
+          local|dev|development)
+            [ -n "$$DISCORD_WEBHOOK_URL_LOCAL" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_LOCAL"
+            ;;
+        esac
+        printf '%s\n' "$$WEBHOOK" >/alertmanager/secrets/discord_webhook_url
+        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager
+    volumes:
+      - ./infrastructure/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
     networks: [chatapp]
 
   grafana:
