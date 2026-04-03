@@ -80,8 +80,16 @@ server {
     return 301 /grafana/;
   }
 
+  location = /grafana/ {
+    return 302 /grafana/login;
+  }
+
+  location = /login {
+    return 302 /grafana/login;
+  }
+
   location /grafana/ {
-    proxy_pass http://127.0.0.1:3001/;
+    proxy_pass http://127.0.0.1:3001;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -89,6 +97,7 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Host $host;
     proxy_set_header X-Forwarded-Prefix /grafana;
+    proxy_redirect ~^/(.*)$ /grafana/$1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_read_timeout 300s;
