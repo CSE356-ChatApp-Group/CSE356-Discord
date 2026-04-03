@@ -15,6 +15,8 @@ CURRENT_LINK="/opt/chatapp/current"
 CANDIDATE_PORT=4001
 LIVE_PORT=4000
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REMOTE_CANDIDATE_PID_FILE="/tmp/chatapp-${RELEASE_SHA}-candidate.pid"
+CUTOVER_COMPLETED=0
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
@@ -37,6 +39,25 @@ fi
 
 echo "Current live port: ${LIVE_PORT}"
 echo "Candidate port: ${CANDIDATE_PORT}"
+
+cleanup_candidate() {
+  if [[ "${CUTOVER_COMPLETED}" == "1" ]]; then
+    return 0
+  fi
+
+  echo "Deployment failed before cutover; cleaning up candidate port ${CANDIDATE_PORT}..."
+  ssh "${STAGING_USER}@${STAGING_HOST}" "
+    set +e
+    if [ -f '${REMOTE_CANDIDATE_PID_FILE}' ]; then
+      kill \$(cat '${REMOTE_CANDIDATE_PID_FILE}') 2>/dev/null || true
+      rm -f '${REMOTE_CANDIDATE_PID_FILE}'
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+      lsof -ti :${CANDIDATE_PORT} 2>/dev/null | xargs -r kill 2>/dev/null || true
+    fi
+  " >/dev/null 2>&1 || true
+}
+trap cleanup_candidate ERR
 
 echo "0) Ensuring Nginx serves frontend UI and proxies backend routes..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
@@ -164,6 +185,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 
   # Clean up any stale candidate PID files from prior failed runs.
   rm -f /tmp/chatapp-*-candidate.pid 2>/dev/null || true
+  rm -f '${REMOTE_CANDIDATE_PID_FILE}' 2>/dev/null || true
 
   if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
     echo 'Candidate port ${CANDIDATE_PORT} is already in use; attempting stale process cleanup...'
@@ -206,10 +228,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   export NODE_ENV=staging
   export PORT=${CANDIDATE_PORT}
   nohup npm --prefix backend start > /tmp/chatapp-${RELEASE_SHA}-candidate.log 2>&1 &
-  echo \$! > /tmp/chatapp-${RELEASE_SHA}-candidate.pid
+  echo \$! > '${REMOTE_CANDIDATE_PID_FILE}'
 
   sleep 4
-  kill -0 \$(cat /tmp/chatapp-${RELEASE_SHA}-candidate.pid)
+  kill -0 \$(cat '${REMOTE_CANDIDATE_PID_FILE}')
 "
 
 echo "5) Running health and smoke checks on candidate..."
@@ -226,6 +248,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo nginx -t
   sudo systemctl reload nginx
 "
+CUTOVER_COMPLETED=1
 
 echo "7) Updating current symlink to new release..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
@@ -241,6 +264,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   curl -fsS http://127.0.0.1/ >/dev/null
 "
+
+trap - ERR
 
 echo ""
 echo "Staging deployment successful."
