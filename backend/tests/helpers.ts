@@ -123,6 +123,47 @@ export function connectWebSocketWithOpenFrame(
   });
 }
 
+export function waitForRejectedWebSocketConnection(
+  port: number,
+  token: string,
+  timeoutMs = 3000,
+): Promise<{ closeCode: number; sawError: boolean; errorMessage: string | null }> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`);
+    let settled = false;
+    let sawError = false;
+    let errorMessage: string | null = null;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        ws.terminate();
+      } catch {
+        // Ignore cleanup errors from the timeout path.
+      }
+      reject(new Error('Expected revoked websocket token to be rejected'));
+    }, timeoutMs);
+
+    ws.once('open', () => {
+      // The server authenticates immediately after upgrade, so a revoked token
+      // may briefly reach OPEN before being closed.
+    });
+
+    ws.once('error', (err: Error) => {
+      sawError = true;
+      errorMessage = err?.message || null;
+    });
+
+    ws.once('close', (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ closeCode: code, sawError, errorMessage });
+    });
+  });
+}
+
 export function closeWebSocket(ws: any): Promise<void> {
   return new Promise((resolve) => {
     if (!ws || ws.readyState === WebSocket.CLOSED) {

@@ -262,26 +262,38 @@ describe('chatStore quick actions', () => {
   });
 
   it('keeps a newly created channel visible when the immediate refresh is stale', async () => {
-    apiPost.mockResolvedValue({
-      channel: { id: 'ch-2', community_id: 'comm-1', name: 'fresh' },
-    });
-    apiGet.mockResolvedValue({
-      channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'general' }],
-    });
+    // createChannel retries up to 4 times with real sleeps (250+500+750+1000ms = 2500ms)
+    // when the server response doesn't yet include the new channel. Use fake timers so the
+    // test completes instantly instead of burning ~2.5 s of real wall-clock time.
+    vi.useFakeTimers();
+    try {
+      apiPost.mockResolvedValue({
+        channel: { id: 'ch-2', community_id: 'comm-1', name: 'fresh' },
+      });
+      apiGet.mockResolvedValue({
+        channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'general' }],
+      });
 
-    useChatStore.setState({
-      activeCommunity: { id: 'comm-1', name: 'One' },
-      channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'general' }],
-    } as any);
+      useChatStore.setState({
+        activeCommunity: { id: 'comm-1', name: 'One' },
+        channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'general' }],
+      } as any);
 
-    await useChatStore.getState().createChannel('comm-1', 'fresh');
-    useChatStore.getState()._handleWsEvent({
-      event: 'channel:created',
-      data: { id: 'ch-2', community_id: 'comm-1', name: 'fresh' },
-    });
-    await Promise.resolve();
+      // Don't await immediately — advance fake timers past all 4 retry sleeps first.
+      const createPromise = useChatStore.getState().createChannel('comm-1', 'fresh');
+      await vi.advanceTimersByTimeAsync(3000);
+      await createPromise;
 
-    expect(useChatStore.getState().channels.map((channel) => channel.id)).toContain('ch-2');
+      useChatStore.getState()._handleWsEvent({
+        event: 'channel:created',
+        data: { id: 'ch-2', community_id: 'comm-1', name: 'fresh' },
+      });
+      await Promise.resolve();
+
+      expect(useChatStore.getState().channels.map((channel) => channel.id)).toContain('ch-2');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('refreshes channels when a private-channel membership update arrives for the active community', () => {

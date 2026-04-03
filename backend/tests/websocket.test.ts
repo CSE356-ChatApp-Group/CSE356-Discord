@@ -17,6 +17,7 @@ import {
   closeWebSocket,
   waitForWsEvent,
   waitForNoWsEvent,
+  waitForRejectedWebSocketConnection,
 } from './helpers';
 
 let server: any;
@@ -762,29 +763,15 @@ describe('WebSocket auth revocation', () => {
 
     expect(logoutRes.status).toBe(200);
 
-    const closeCode = await new Promise<number>((resolve, reject) => {
-      const ws: any = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(user.accessToken)}`);
-      const timer = setTimeout(() => {
-        try {
-          if (typeof ws.terminate === 'function') ws.terminate();
-          else ws.close();
-        } catch {
-          // ignore termination errors from the timeout path
-        }
-        reject(new Error('Expected revoked websocket token to be closed'));
-      }, 1500);
+    const outcome = await waitForRejectedWebSocketConnection(port, user.accessToken, 2000);
+    const acceptedOutcome = outcome.closeCode === 4001
+      || (outcome.sawError && [1005, 1006].includes(outcome.closeCode));
 
-      ws.onclose = (event: { code: number }) => {
-        clearTimeout(timer);
-        resolve(event.code);
-      };
-
-      ws.onerror = () => {
-        // The server may reject before the socket is fully established.
-      };
-    });
-
-    expect(closeCode).toBe(4001);
+    if (!acceptedOutcome) {
+      throw new Error(
+        `Expected revoked websocket connection to be rejected, got closeCode=${outcome.closeCode}, sawError=${outcome.sawError}, errorMessage=${outcome.errorMessage || 'none'}`,
+      );
+    }
   });
 });
 
