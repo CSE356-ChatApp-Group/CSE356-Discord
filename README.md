@@ -76,6 +76,9 @@ When something breaks in production, start here:
 - **Prometheus UI:** `http://127.0.0.1:9090`
 - **Loki API:** `http://127.0.0.1:3100`
 - **Tempo API / metrics:** `http://127.0.0.1:3200`
+- **Remote browser access:**
+  - Staging Grafana: `http://136.114.103.71/grafana/`
+  - Production Grafana: `https://group-8.cse356.compas.cs.stonybrook.edu/grafana/`
 - **Prometheus alerts:** check the `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, and `ChatAppEventLoopLagHigh` rules.
 
 ### Monitoring quick commands
