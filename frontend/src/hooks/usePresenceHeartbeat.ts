@@ -21,17 +21,26 @@ export function usePresenceHeartbeat() {
       });
     }
 
-    sendPresenceFromIntent();
-    const unsubscribeOpen = wsManager.onOpen(sendPresenceFromIntent);
-
-    function reportActivity() {
+    function sendActivity(force = false) {
       if (document.hidden) return;
       if (readPresenceIntent().status === 'away') return;
       const now = Date.now();
-      if (now - lastActivityAtRef.current < ACTIVITY_THROTTLE_MS) return;
+      if (!force && now - lastActivityAtRef.current < ACTIVITY_THROTTLE_MS) return;
       lastActivityAtRef.current = now;
       wsManager.send({ type: 'activity' });
     }
+
+    function reportActivity() {
+      sendActivity(false);
+    }
+
+    function syncPresenceOnConnect() {
+      sendPresenceFromIntent();
+      sendActivity(true);
+    }
+
+    syncPresenceOnConnect();
+    const unsubscribeOpen = wsManager.onOpen(syncPresenceOnConnect);
 
     function onVisibility() {
       if (!document.hidden) reportActivity();

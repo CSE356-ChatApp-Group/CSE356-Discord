@@ -107,10 +107,6 @@ server {
     return 301 /grafana/;
   }
 
-  location = /grafana/ {
-    return 302 /grafana/login;
-  }
-
   location = /login {
     return 302 /grafana/login;
   }

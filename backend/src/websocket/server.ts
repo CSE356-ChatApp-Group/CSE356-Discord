@@ -417,9 +417,12 @@ wss.on("connection", async (ws, req) => {
     markConnectionAlive(user.id, ws._connectionId).catch(() => {});
   });
 
-  upsertConnectionState(user.id, ws._connectionId, "idle")
+  upsertConnectionState(user.id, ws._connectionId, "online")
     .then(async () => {
-      await markConnectionAlive(user.id, ws._connectionId);
+      await Promise.all([
+        markConnectionAlive(user.id, ws._connectionId),
+        markConnectionActive(user.id, ws._connectionId),
+      ]);
       await recomputeUserPresence(user.id);
     })
     .catch((err) =>
@@ -478,6 +481,9 @@ async function handleClientMessage(ws, user, msg) {
           .then(async () => {
             if (msg.status === "away") {
               await presenceService.setAwayMessage(user.id, msg.awayMessage);
+            }
+            if (msg.status === "online") {
+              await markConnectionActive(user.id, ws._connectionId);
             }
             await recomputeUserPresence(user.id);
           })

@@ -71,4 +71,15 @@ describe('usePresenceHeartbeat', () => {
     const awayPresenceCalls = sendMock.mock.calls.filter(([payload]) => payload?.type === 'presence' && payload?.status === 'away');
     expect(awayPresenceCalls).toHaveLength(2);
   });
+
+  it('sends an immediate activity heartbeat for normal online presence so users do not appear idle on connect', () => {
+    render(<Harness />);
+
+    expect(sendMock).toHaveBeenCalledWith({
+      type: 'presence',
+      status: 'online',
+      awayMessage: null,
+    });
+    expect(sendMock).toHaveBeenCalledWith({ type: 'activity' });
+  });
 });
