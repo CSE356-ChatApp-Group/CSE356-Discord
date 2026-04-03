@@ -12,11 +12,11 @@
 'use strict';
 
 const express  = require('express');
-const bcrypt   = require('bcrypt');
 const multer   = require('multer');
 const { body, validationResult } = require('express-validator');
 const { pool }         = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
+const { hashPassword } = require('./passwords');
 const presenceService  = require('../presence/service');
 
 const router = express.Router();
@@ -93,7 +93,7 @@ router.patch('/me',
       const updates: Record<string, unknown> = {};
       if (req.body.displayName) updates.display_name = req.body.displayName;
       if (req.body.bio !== undefined) updates.bio = req.body.bio;
-      if (req.body.password) updates.password_hash = await bcrypt.hash(req.body.password, 12);
+      if (req.body.password) updates.password_hash = await hashPassword(req.body.password, 'user_update_hash');
 
       if (!Object.keys(updates).length) return res.status(400).json({ error: 'Nothing to update' });
 

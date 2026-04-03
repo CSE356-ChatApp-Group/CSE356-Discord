@@ -14,13 +14,15 @@
 'use strict';
 
 const express  = require('express');
-const bcrypt   = require('bcrypt');
+const { rateLimit } = require('express-rate-limit');
 const passport = require('passport');
 const { body, validationResult } = require('express-validator');
 
 const { pool }         = require('../db/pool');
 const { signAccess, signRefresh, verifyRefresh, denyToken } = require('../utils/jwt');
 const { authenticate } = require('../middleware/authenticate');
+const { authRateLimitHitsTotal } = require('../utils/metrics');
+const { hashPassword, comparePassword } = require('./passwords');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('./bypass');
 const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLinkIntent } = require('./oauthTokens');
 
@@ -41,6 +43,11 @@ function parseBooleanEnv(value) {
   if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
   if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
   return null;
+}
+
+function parsePositiveIntEnv(value, fallback) {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function shouldUseSecureCookies() {
@@ -69,13 +76,72 @@ function getRefreshCookieClearOptions() {
   return clearOptions;
 }
 
+function serializeAuthUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email || null,
+    displayName: user.display_name ?? user.displayName ?? user.username,
+    avatarUrl: user.avatar_url ?? user.avatarUrl ?? null,
+    updatedAt: user.updated_at ?? user.updatedAt ?? null,
+  };
+}
+
 function issueTokens(res, user) {
   const payload = { id: user.id, username: user.username, email: user.email };
   const accessToken  = signAccess(payload);
   const refreshToken = signRefresh(payload);
   res.cookie(REFRESH_COOKIE, refreshToken, getRefreshCookieOptions());
-  return { accessToken, user: payload };
+  return { accessToken, user: serializeAuthUser(user) };
 }
+
+function buildAuthKey(req, route) {
+  const forwardedFor = req.headers['x-forwarded-for'];
+  const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+  const clientIp = (firstForwarded ? firstForwarded.split(',')[0] : req.ip || req.socket?.remoteAddress || 'unknown').trim();
+  const credential = typeof req.body?.email === 'string'
+    ? req.body.email.trim().toLowerCase()
+    : typeof req.body?.username === 'string'
+      ? req.body.username.trim().toLowerCase()
+      : 'anonymous';
+  return `${route}:${clientIp}:${credential}`;
+}
+
+function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
+  return rateLimit({
+    windowMs: parsePositiveIntEnv(process.env[windowEnv], windowMs),
+    limit: parsePositiveIntEnv(process.env[limitEnv], limit),
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => buildAuthKey(req, route),
+    message: { error: 'Too many auth attempts. Please wait a minute and try again.' },
+    handler: (_req, res, _next, options) => {
+      authRateLimitHitsTotal.inc({ route });
+      res.status(options.statusCode).json(options.message);
+    },
+  });
+}
+
+const registerLimiter = buildAuthLimiter('register', {
+  limit: 20,
+  windowMs: 10 * 60 * 1000,
+  limitEnv: 'AUTH_REGISTER_RATE_LIMIT_MAX',
+  windowEnv: 'AUTH_REGISTER_RATE_LIMIT_WINDOW_MS',
+});
+
+const loginLimiter = buildAuthLimiter('login', {
+  limit: 60,
+  windowMs: 60 * 1000,
+  limitEnv: 'AUTH_LOGIN_RATE_LIMIT_MAX',
+  windowEnv: 'AUTH_LOGIN_RATE_LIMIT_WINDOW_MS',
+});
+
+const passwordConnectLimiter = buildAuthLimiter('oauth-connect', {
+  limit: 30,
+  windowMs: 5 * 60 * 1000,
+  limitEnv: 'AUTH_CONNECT_RATE_LIMIT_MAX',
+  windowEnv: 'AUTH_CONNECT_RATE_LIMIT_WINDOW_MS',
+});
 
 function buildFrontendUrl(path, query = {}) {
   const base = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
@@ -250,6 +316,7 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
 
 // ── Register ───────────────────────────────────────────────────────────────────
 router.post('/register',
+  registerLimiter,
   body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
   body('username').custom(validateUsername),
   body('password').isLength({ min: 8 }),
@@ -261,7 +328,7 @@ router.post('/register',
     try {
       const { email, username, password, displayName } = req.body;
       const normalizedEmail = email || null;
-      const hash = await bcrypt.hash(password, 12);
+      const hash = await hashPassword(password, 'register_hash');
       const { rows } = await pool.query(
         `INSERT INTO users (email, username, password_hash, display_name)
          VALUES ($1,$2,$3,$4) RETURNING *`,
@@ -278,7 +345,7 @@ router.post('/register',
 );
 
 // ── Local Login ────────────────────────────────────────────────────────────────
-router.post('/login', (req, res, next) => {
+router.post('/login', loginLimiter, (req, res, next) => {
   passport.authenticate('local', { session: false }, (err, user, info) => {
     if (err)   return next(err);
     if (!user) return res.status(401).json({ error: info?.message || 'Invalid credentials' });
@@ -339,6 +406,7 @@ router.get('/session', async (_req, res, next) => {
 });
 
 router.post('/oauth/complete-create',
+  registerLimiter,
   body('pendingToken').isString().isLength({ min: 20 }),
   body('username').optional().custom(validateUsername),
   body('displayName').optional().isLength({ min: 1, max: 64 }),
@@ -390,7 +458,7 @@ router.post('/oauth/complete-create',
         return res.status(409).json({ error: 'Email already exists. Use connect-existing flow.' });
       }
 
-      const passwordHash = req.body.password ? await bcrypt.hash(req.body.password, 12) : null;
+      const passwordHash = req.body.password ? await hashPassword(req.body.password, 'oauth_create_hash') : null;
       const created = await client.query(
         `INSERT INTO users (email, username, display_name, password_hash)
          VALUES ($1, $2, $3, $4)
@@ -419,6 +487,7 @@ router.post('/oauth/complete-create',
 );
 
 router.post('/oauth/complete-connect',
+  passwordConnectLimiter,
   body('pendingToken').isString().isLength({ min: 20 }),
   body('email').isEmail().normalizeEmail(),
   body('password').isLength({ min: 8 }),
@@ -458,7 +527,7 @@ router.post('/oauth/complete-connect',
         return res.status(400).json({ error: 'Existing account has no password; set one first before connecting by credentials' });
       }
 
-      const ok = await bcrypt.compare(req.body.password, user.password_hash);
+      const ok = await comparePassword(req.body.password, user.password_hash, 'oauth_connect_compare');
       if (!ok) {
         await client.query('ROLLBACK');
         return res.status(401).json({ error: 'Invalid credentials for existing account' });

@@ -87,6 +87,21 @@ const sideEffectQueueDroppedTotal = new client.Counter({
   labelNames: ['queue', 'name', 'reason'],
 });
 
+// ── Auth cost / throttling ───────────────────────────────────────────────────
+
+const authBcryptDurationMs = new client.Histogram({
+  name: 'auth_bcrypt_duration_ms',
+  help: 'Time spent performing bcrypt password hashing and comparison for auth-related flows',
+  labelNames: ['operation', 'result', 'rounds'],
+  buckets: [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+const authRateLimitHitsTotal = new client.Counter({
+  name: 'auth_rate_limit_hits_total',
+  help: 'Number of auth requests rejected by the auth-specific rate limiter',
+  labelNames: ['route'],
+});
+
 module.exports = {
   register: client.register,
   httpRequestsTotal,
@@ -98,4 +113,6 @@ module.exports = {
   sideEffectQueueDelayMs,
   sideEffectJobDurationMs,
   sideEffectQueueDroppedTotal,
+  authBcryptDurationMs,
+  authRateLimitHitsTotal,
 };

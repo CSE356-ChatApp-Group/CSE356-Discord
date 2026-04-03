@@ -126,11 +126,13 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     const data = await api.post('/auth/login', { email, password });
     setToken(data.accessToken);
     let user = normalizeAuthUser(data.user);
-    try {
-      const profile = await api.get('/users/me');
-      if (profile?.user) user = normalizeAuthUser(profile.user);
-    } catch {
-      // Fall back to auth payload if profile hydrate fails.
+    if (!user?.id) {
+      try {
+        const profile = await api.get('/users/me');
+        if (profile?.user) user = normalizeAuthUser(profile.user);
+      } catch {
+        // Fall back to auth payload if profile hydrate fails.
+      }
     }
     set({ user, authBypass: false });
     wsManager.connect();
@@ -141,11 +143,13 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     const data = await api.post('/auth/register', { email: email || undefined, username, password, displayName });
     setToken(data.accessToken);
     let user = normalizeAuthUser(data.user);
-    try {
-      const profile = await api.get('/users/me');
-      if (profile?.user) user = normalizeAuthUser(profile.user);
-    } catch {
-      // Fall back to auth payload if profile hydrate fails.
+    if (!user?.id) {
+      try {
+        const profile = await api.get('/users/me');
+        if (profile?.user) user = normalizeAuthUser(profile.user);
+      } catch {
+        // Fall back to auth payload if profile hydrate fails.
+      }
     }
     set({ user, authBypass: false });
     wsManager.connect();

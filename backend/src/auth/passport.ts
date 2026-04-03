@@ -15,8 +15,8 @@ const passport         = require('passport');
 const LocalStrategy    = require('passport-local').Strategy;
 const GoogleStrategy   = require('passport-google-oauth20').Strategy;
 const GitHubStrategy   = require('passport-github2').Strategy;
-const bcrypt           = require('bcrypt');
 const { pool }         = require('../db/pool');
+const { comparePassword } = require('./passwords');
 const { signOAuthPending, verifyOAuthLinkIntent } = require('./oauthTokens');
 
 // ── Local ──────────────────────────────────────────────────────────────────────
@@ -34,7 +34,7 @@ passport.use(new LocalStrategy(
       if (!user || !user.password_hash) {
         return done(null, false, { message: 'Invalid credentials' });
       }
-      const match = await bcrypt.compare(password, user.password_hash);
+      const match = await comparePassword(password, user.password_hash, 'login_compare');
       if (!match) return done(null, false, { message: 'Invalid credentials' });
       return done(null, user);
     } catch (err) {

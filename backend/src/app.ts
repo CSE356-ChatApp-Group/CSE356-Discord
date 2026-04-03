@@ -29,6 +29,7 @@ const attachmentsRouter  = require('./attachments/router');
 const usersRouter        = require('./auth/usersRouter');
 
 const app = express();
+app.set('trust proxy', 1);
 const { register, httpRequestsTotal, httpRequestDurationMs } = require('./utils/metrics');
 
 function isQuietPath(path = '') {
