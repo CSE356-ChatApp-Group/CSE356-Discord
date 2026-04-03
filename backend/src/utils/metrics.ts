@@ -2,8 +2,26 @@
 
 const client = require('prom-client');
 
+client.register.setDefaultLabels({
+  service: 'chatapp-api',
+  env: process.env.NODE_ENV || 'development',
+});
+
 // Collect default Node.js process metrics (event loop lag, heap, GC, etc.)
 client.collectDefaultMetrics();
+
+const httpRequestsTotal = new client.Counter({
+  name: 'http_server_requests_total',
+  help: 'Total number of completed HTTP requests',
+  labelNames: ['method', 'route', 'status_class'],
+});
+
+const httpRequestDurationMs = new client.Histogram({
+  name: 'http_server_request_duration_ms',
+  help: 'Latency of completed HTTP requests in milliseconds',
+  labelNames: ['method', 'route', 'status_class'],
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
 
 // ── Presence fanout ────────────────────────────────────────────────────────────
 
@@ -37,6 +55,8 @@ const fanoutRecipientsHistogram = new client.Histogram({
 
 module.exports = {
   register: client.register,
+  httpRequestsTotal,
+  httpRequestDurationMs,
   presenceFanoutTotal,
   fanoutRecipientsHistogram,
 };

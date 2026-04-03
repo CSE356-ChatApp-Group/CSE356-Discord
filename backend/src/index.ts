@@ -19,6 +19,37 @@ const { pool } = require('./db/pool');
 const redis    = require('./db/redis');
 
 const PORT = process.env.PORT || 3000;
+let server;
+let shuttingDown = false;
+
+async function shutdown(signal, err = null) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  if (err) {
+    logger.fatal({ err, signal }, 'Fatal runtime error; shutting down');
+  } else {
+    logger.info({ signal }, 'Shutting down…');
+  }
+
+  const forceExitTimer = setTimeout(() => {
+    logger.error({ signal }, 'Forced shutdown after timeout');
+    process.exit(err ? 1 : 0);
+  }, 10_000);
+  forceExitTimer.unref();
+
+  if (server) {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  await Promise.allSettled([
+    pool.end(),
+    redis.quit(),
+  ]);
+
+  clearTimeout(forceExitTimer);
+  process.exit(err ? 1 : 0);
+}
 
 async function start() {
   // Verify DB connectivity before accepting traffic
@@ -28,7 +59,7 @@ async function start() {
   await redis.ping();
   logger.info('Redis connected');
 
-  const server = http.createServer(app);
+  server = http.createServer(app);
 
   // Attach WebSocket upgrade handler to the same HTTP server
   server.on('upgrade', wsServer.handleUpgrade);
@@ -37,21 +68,18 @@ async function start() {
     logger.info({ port: PORT }, 'ChatApp API listening');
   });
 
-  // Graceful shutdown
-  const shutdown = async (signal) => {
-    logger.info({ signal }, 'Shutting down…');
-    server.close(async () => {
-      await pool.end();
-      await redis.quit();
-      process.exit(0);
-    });
-  };
-
   process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT',  () => shutdown('SIGINT'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('unhandledRejection', (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    shutdown('unhandledRejection', err);
+  });
+  process.on('uncaughtException', (err) => {
+    shutdown('uncaughtException', err);
+  });
 }
 
 start().catch((err) => {
-  logger.error(err, 'Fatal startup error');
+  logger.error({ err }, 'Fatal startup error');
   process.exit(1);
 });

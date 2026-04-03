@@ -1,0 +1,46 @@
+groups:
+  - name: chatapp-api
+    rules:
+      - alert: ChatAppApiDown
+        expr: up{job="chatapp-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: ChatApp API target is down
+          description: Prometheus has not been able to scrape one of the ChatApp API instances for at least 2 minutes.
+
+      - alert: ChatAppHigh5xxRate
+        expr: |
+          sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[5m]))
+            /
+          clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m])), 1)
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp API 5xx rate is elevated
+          description: More than 5% of recent ChatApp API responses are 5xx over the last 10 minutes.
+
+      - alert: ChatAppHighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",route!="/metrics"}[5m]))
+          ) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp API p95 latency is high
+          description: p95 request latency for route {{ $labels.route }} has exceeded 1000ms for 10 minutes.
+
+      - alert: ChatAppEventLoopLagHigh
+        expr: nodejs_eventloop_lag_p99_seconds{job="chatapp-api"} > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp event loop lag is elevated
+          description: Node.js event loop p99 lag is above 250ms for at least 10 minutes.

@@ -56,6 +56,40 @@ docker compose up -d
 curl http://localhost/health   # → {"status":"ok"}
 ```
 
+## Observability & Production Debugging
+
+When something breaks in production, start here:
+
+### Where to see logs
+
+- **Fastest path:** `docker compose logs -f api nginx`
+- **Grafana logs UI:** `http://localhost:3001` → **Explore** → select **Loki**
+- Logs now include a **request ID** (`x-request-id`) so you can trace one failing request end-to-end.
+
+### Where to see metrics and traces
+
+- **Health check:** `http://localhost/health`
+- **Prometheus metrics:** `http://localhost/metrics`
+- **Grafana traces:** `http://localhost:3001` → **Explore** → select **Tempo**
+- **Prometheus alerts:** check the `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, and `ChatAppEventLoopLagHigh` rules.
+
+### Production logging behavior
+
+To avoid slowing down a busy server:
+
+- successful, fast requests are mostly **suppressed in production**
+- **4xx**, **5xx**, and **slow requests** are still logged
+- sensitive fields like tokens, cookies, and passwords are **redacted**
+- tracing is **sampled** by default in production (`OTEL_TRACES_SAMPLE_RATIO=0.1` unless overridden)
+
+Useful env knobs:
+
+```bash
+LOG_LEVEL=info
+OTEL_ENABLED=true
+OTEL_TRACES_SAMPLE_RATIO=0.1
+```
+
 ## Testing
 
 Run all tests from the monorepo root:
