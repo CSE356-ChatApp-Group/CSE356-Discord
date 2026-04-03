@@ -142,7 +142,19 @@ export async function loginViaUiWithRetry(page: Page, user: TestUser) {
   const identifiers = [user.username, user.email].filter(Boolean);
 
   for (const [index, loginIdentifier] of identifiers.entries()) {
-    await page.goto('/login');
+    // Retry the navigation itself in case of a transient runner-level network
+    // error (e.g. ERR_NETWORK_CHANGED on a GitHub Actions worker).
+    for (let navAttempt = 0; navAttempt < 3; navAttempt += 1) {
+      try {
+        await page.goto('/login');
+        break;
+      } catch (err: any) {
+        if (navAttempt === 2 || !/ERR_NETWORK_CHANGED|ERR_NETWORK_IO_SUSPENDED|ERR_INTERNET_DISCONNECTED/.test(String(err))) {
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, 1_000 * (navAttempt + 1)));
+      }
+    }
     await page.waitForLoadState('domcontentloaded');
 
     await expect(
