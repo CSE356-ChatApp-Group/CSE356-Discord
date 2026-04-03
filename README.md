@@ -73,7 +73,19 @@ When something breaks in production, start here:
 - **Grafana traces:** `http://localhost:3001` → **Explore** → select **Tempo**
 - **Grafana dashboard:** `http://localhost:3001` → **Dashboards** → **ChatApp** → **ChatApp Overview**
 - **Alertmanager UI:** `http://localhost:9093`
+- **Prometheus UI:** `http://127.0.0.1:9090`
+- **Loki API:** `http://127.0.0.1:3100`
+- **Tempo API / metrics:** `http://127.0.0.1:3200`
 - **Prometheus alerts:** check the `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, and `ChatAppEventLoopLagHigh` rules.
+
+### Monitoring quick commands
+
+```bash
+npm run monitoring:up       # start / refresh Grafana, Prometheus, Loki, Tempo, etc.
+npm run monitoring:status   # one-screen health summary + URLs
+npm run monitoring:logs     # tail monitoring logs
+npm run monitoring:down     # stop only monitoring services
+```
 
 ### Discord alerting setup
 

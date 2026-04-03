@@ -198,6 +198,14 @@ services:
     depends_on: [alertmanager]
     environment:
       ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-local}
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/-/healthy >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     entrypoint:
       - sh
       - -ec
@@ -220,6 +228,12 @@ services:
       DISCORD_WEBHOOK_URL_LOCAL: ${DISCORD_WEBHOOK_URL_LOCAL:-}
       DISCORD_WEBHOOK_URL_STAGING: ${DISCORD_WEBHOOK_URL_STAGING:-}
       DISCORD_WEBHOOK_URL_PROD: ${DISCORD_WEBHOOK_URL_PROD:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9093/-/ready >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     entrypoint:
       - sh
       - -ec
@@ -257,6 +271,12 @@ services:
       - ./infrastructure/monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
     ports:
       - "3001:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q '\"database\":\"ok\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks: [chatapp]
 
   tempo:
@@ -266,6 +286,16 @@ services:
     volumes:
       - ./infrastructure/monitoring/tempo-config.yml:/etc/tempo/config.yml:ro
       - tempo_data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/metrics >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks: [chatapp]
 
   loki:
@@ -274,6 +304,14 @@ services:
     volumes:
       - ./infrastructure/monitoring/loki-config.yml:/etc/loki/local-config.yaml:ro
       - loki_data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks: [chatapp]
 
   promtail:
