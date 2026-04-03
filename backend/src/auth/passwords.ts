@@ -3,7 +3,9 @@
 const bcrypt = require('bcrypt');
 const { authBcryptDurationMs } = require('../utils/metrics');
 
-const DEFAULT_BCRYPT_ROUNDS = 12;
+// Default to 11 rounds for a better interactive login latency/CPU balance on
+// small 2-vCPU instances; override with BCRYPT_ROUNDS when stricter hashing is needed.
+const DEFAULT_BCRYPT_ROUNDS = 11;
 const MIN_BCRYPT_ROUNDS = 8;
 const MAX_BCRYPT_ROUNDS = 14;
 
