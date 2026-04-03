@@ -141,7 +141,9 @@ function OAuthCallback() {
     <div style={{ minHeight: '100dvh', display: 'grid', placeItems: 'center', background: 'var(--bg-0)', padding: 24 }} data-testid="oauth-callback-page">
       <div style={{ width: 'min(540px, 96vw)', background: 'var(--bg-1)', border: '1px solid var(--border-light)', borderRadius: 12, padding: 20 }} data-testid="oauth-callback-card">
         <h2 style={{ marginTop: 0 }}>Complete OAuth sign in</h2>
-        <p style={{ color: 'var(--text-muted)', marginTop: 0 }}>Choose whether to create a new account or connect this OAuth login to an existing account.</p>
+        <p style={{ color: 'var(--text-muted)', marginTop: 0 }}>
+          If this is your first OAuth sign-in, choose whether to create a new chat account or link this OAuth login to an existing one.
+        </p>
 
         <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
           <button

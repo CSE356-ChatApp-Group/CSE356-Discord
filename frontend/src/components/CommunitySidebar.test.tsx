@@ -185,6 +185,44 @@ describe('CommunitySidebar presence badge', () => {
     });
   });
 
+  it('does not offer OAuth linking buttons in the account modal', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/auth/oauth/linked') {
+        return Promise.resolve({ providers: ['google'], hasPassword: true });
+      }
+      if (path === '/users/me') {
+        return Promise.resolve({
+          user: {
+            id: 'user-1',
+            username: 'sam',
+            displayName: 'Sam',
+            email: 'sam@example.com',
+          },
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    act(() => {
+      useAuthStore.setState({
+        user: {
+          id: 'user-1',
+          username: 'sam',
+          displayName: 'Sam',
+          email: 'sam@example.com',
+        },
+      } as any);
+    });
+
+    render(<CommunitySidebar />);
+    fireEvent.click(screen.getByTestId('account-open'));
+    expect(await screen.findByTestId('account-logout')).toBeInTheDocument();
+
+    expect(screen.queryByTestId('account-link-google')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('account-link-github')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('account-link-course')).not.toBeInTheDocument();
+  });
+
   it('hides DM unread indicator when user is already on DM tab', () => {
     act(() => {
       useAuthStore.setState({

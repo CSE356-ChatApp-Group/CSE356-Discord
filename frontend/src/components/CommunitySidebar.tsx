@@ -26,10 +26,7 @@ export default function CommunitySidebar() {
   const [showCreate, setShowCreate] = useState(false);
   const [showJoin, setShowJoin] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
-  const [linkedProviders, setLinkedProviders] = useState<string[]>([]);
   const [hasPassword, setHasPassword] = useState(false);
-  const [loadingLinks, setLoadingLinks] = useState(false);
-  const [linkBusyProvider, setLinkBusyProvider] = useState<string | null>(null);
   const [accountError, setAccountError] = useState('');
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ newPassword: '', confirmPassword: '' });
@@ -47,14 +44,13 @@ export default function CommunitySidebar() {
     const requestId = ++accountRequestIdRef.current;
     setShowAccount(true);
     setAccountError('');
-    setLoadingLinks(true);
     try {
-      const data = await api.get('/auth/oauth/linked');
+      const [linkedData, me] = await Promise.all([
+        api.get('/auth/oauth/linked').catch(() => null),
+        api.get('/users/me'),
+      ]);
       if (accountRequestIdRef.current !== requestId) return;
-      setLinkedProviders(Array.isArray(data?.providers) ? data.providers : []);
-      setHasPassword(Boolean(data?.hasPassword));
-      const me = await api.get('/users/me');
-      if (accountRequestIdRef.current !== requestId) return;
+      setHasPassword(Boolean(linkedData?.hasPassword));
       const status = me?.user?.status === 'away' ? 'away' : 'online';
       setPresenceStatus(status);
       setAwayMessage(me?.user?.away_message || me?.user?.awayMessage || '');
@@ -64,15 +60,10 @@ export default function CommunitySidebar() {
       setPresenceMsg('');
     } catch (e) {
       if (accountRequestIdRef.current !== requestId) return;
-      setAccountError(e?.message || 'Could not load linked providers');
-      setLinkedProviders([]);
+      setAccountError(e?.message || 'Could not load account details');
       setHasPassword(false);
       setPresenceStatus('online');
       setAwayMessage('');
-    } finally {
-      if (accountRequestIdRef.current === requestId) {
-        setLoadingLinks(false);
-      }
     }
   }
 
@@ -95,19 +86,6 @@ export default function CommunitySidebar() {
       setAccountError(e?.message || 'Could not update presence');
     } finally {
       setPresenceBusy(false);
-    }
-  }
-
-  async function startLinkFlow(provider) {
-    setAccountError('');
-    setLinkBusyProvider(provider);
-    try {
-      const data = await api.post('/auth/oauth/link-intent', { provider });
-      if (!data?.authUrl) throw new Error('Missing OAuth link URL');
-      window.location.href = data.authUrl;
-    } catch (e) {
-      setAccountError(e?.message || 'Could not start provider linking');
-      setLinkBusyProvider(null);
     }
   }
 
@@ -334,17 +312,6 @@ export default function CommunitySidebar() {
             </div>
 
             <div>
-              <p className={styles.accountSectionTitle}>Connected providers</p>
-              {loadingLinks ? (
-                <p className={styles.accountMuted}>Loading providers…</p>
-              ) : linkedProviders.length ? (
-                <p className={styles.accountConnected}>{linkedProviders.join(', ')}</p>
-              ) : (
-                <p className={styles.accountMuted}>No providers linked yet.</p>
-              )}
-            </div>
-
-            <div>
               <p className={styles.accountSectionTitle}>Local password</p>
               <p className={styles.accountMuted}>{hasPassword ? 'Configured' : 'Not configured'}</p>
               <form className={styles.passwordForm} onSubmit={submitPassword} data-testid="account-password-form">
@@ -375,35 +342,9 @@ export default function CommunitySidebar() {
               {passwordMsg && <p className={styles.passwordMsg}>{passwordMsg}</p>}
             </div>
 
-            <div className={styles.accountActions}>
-              <button
-                className={styles.linkBtn}
-                type="button"
-                disabled={linkBusyProvider !== null}
-                onClick={() => startLinkFlow('google')}
-                data-testid="account-link-google"
-              >
-                {linkBusyProvider === 'google' ? 'Opening Google…' : 'Link Google'}
-              </button>
-              <button
-                className={styles.linkBtn}
-                type="button"
-                disabled={linkBusyProvider !== null}
-                onClick={() => startLinkFlow('github')}
-                data-testid="account-link-github"
-              >
-                {linkBusyProvider === 'github' ? 'Opening GitHub…' : 'Link GitHub'}
-              </button>
-              <button
-                className={styles.linkBtn}
-                type="button"
-                disabled={linkBusyProvider !== null}
-                onClick={() => startLinkFlow('course')}
-                data-testid="account-link-course"
-              >
-                {linkBusyProvider === 'course' ? 'Opening Course OAuth…' : 'Link Course OAuth'}
-              </button>
-            </div>
+            <p className={styles.accountMuted}>
+              If you sign in with OAuth for the first time, the app will prompt you then to create or link your chat account.
+            </p>
 
             {accountError && <p className={styles.err} role="alert" data-testid="account-error">{accountError}</p>}
 
