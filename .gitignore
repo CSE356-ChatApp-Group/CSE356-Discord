@@ -10,3 +10,5 @@ releases/
 frontend/test-results/
 frontend/playwright-report/
 frontend/blob-report/
+artifacts/load-tests/*
+!artifacts/load-tests/.gitkeep
