@@ -9,6 +9,25 @@ const REDIS_CONTAINER = 'chatapp-test-redis';
 const PG_PORT = process.env.TEST_PG_PORT || '55432';
 const REDIS_PORT = process.env.TEST_REDIS_PORT || '56379';
 const jestArgs = process.argv.slice(2);
+const isCiEnvironment = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
+
+function hasArg(args, flag) {
+  return args.includes(flag) || args.some((arg) => arg.startsWith(`${flag}=`));
+}
+
+function getEffectiveJestArgs() {
+  const effectiveArgs = [...jestArgs];
+
+  if (isCiEnvironment && !hasArg(effectiveArgs, '--runInBand')) {
+    effectiveArgs.unshift('--runInBand');
+  }
+
+  if (isCiEnvironment && !hasArg(effectiveArgs, '--verbose')) {
+    effectiveArgs.push('--verbose');
+  }
+
+  return effectiveArgs;
+}
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -98,7 +117,8 @@ function runLocalTests() {
   let code = run('npm', ['run', 'migrate'], { env });
   if (code !== 0) return code;
 
-  const testArgs = jestArgs.length ? ['run', 'test:raw', '--', ...jestArgs] : ['run', 'test:raw'];
+  const effectiveJestArgs = getEffectiveJestArgs();
+  const testArgs = effectiveJestArgs.length ? ['run', 'test:raw', '--', ...effectiveJestArgs] : ['run', 'test:raw'];
   code = run('npm', testArgs, { env });
   return code;
 }
@@ -108,7 +128,8 @@ function runCiStyleTests() {
     ...process.env,
     DISABLE_SEARCH_INIT: process.env.DISABLE_SEARCH_INIT || 'true',
   };
-  const testArgs = jestArgs.length ? ['run', 'test:raw', '--', ...jestArgs] : ['run', 'test:raw'];
+  const effectiveJestArgs = getEffectiveJestArgs();
+  const testArgs = effectiveJestArgs.length ? ['run', 'test:raw', '--', ...effectiveJestArgs] : ['run', 'test:raw'];
   return run('npm', testArgs, { env });
 }
 

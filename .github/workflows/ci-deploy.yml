@@ -51,7 +51,15 @@ jobs:
         run: npm run typecheck --workspace=backend
 
       - name: Backend tests
-        run: npm run test --workspace=backend
+        run: |
+          set -o pipefail
+          npm run test --workspace=backend -- --runInBand --verbose 2>&1 | tee backend-test.log
+
+      - name: Backend failure summary
+        if: failure()
+        run: |
+          echo "---- Extracted Jest failure summary ----"
+          grep -E '^(FAIL|  ●|  ✕|Test Suites:|Tests:)' backend-test.log || true
 
       - name: Build backend
         run: npm run build --workspace=backend
