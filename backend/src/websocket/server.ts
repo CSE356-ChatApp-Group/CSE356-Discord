@@ -29,7 +29,7 @@
 
 const { randomUUID } = require("crypto");
 const { WebSocketServer, WebSocket } = require("ws");
-const { verifyAccess } = require("../utils/jwt");
+const { authenticateAccessToken } = require("../utils/jwt");
 const redis = require("../db/redis");
 const { redisSub } = require("../db/redis");
 const { pool } = require("../db/pool");
@@ -87,6 +87,31 @@ async function markConnectionActive(userId, connectionId) {
     "EX",
     IDLE_TTL_SECONDS,
   );
+}
+
+async function refreshConnectionTtls(userId, connectionId, { active = false } = {}) {
+  const pipeline = redis.pipeline();
+  pipeline.set(
+    connectionAliveKey(userId, connectionId),
+    "1",
+    "EX",
+    CONNECTION_ALIVE_TTL_SECONDS,
+  );
+  if (active) {
+    pipeline.set(
+      connectionActivityKey(userId, connectionId),
+      "1",
+      "EX",
+      IDLE_TTL_SECONDS,
+    );
+  }
+  await pipeline.exec();
+}
+
+function shouldRefreshOnlinePresence(ws) {
+  if (ws._presenceStatus !== "online") return true;
+  const lastActivityAt = Number(ws._lastActivityAt || 0);
+  return !lastActivityAt || Date.now() - lastActivityAt >= IDLE_TTL_SECONDS * 1000;
 }
 
 async function upsertConnectionState(userId, connectionId, status) {
@@ -369,7 +394,7 @@ wss.on("connection", async (ws, req) => {
       if (!isAuthBypassEnabled()) throw new Error("No token");
       ({ user } = await getBypassAuthContext());
     } else {
-      user = verifyAccess(token);
+      user = await authenticateAccessToken(token);
     }
   } catch {
     ws.close(4001, "Unauthorized");
@@ -381,6 +406,9 @@ wss.on("connection", async (ws, req) => {
   ws._userId = user.id;
   ws._connectionId = randomUUID();
   ws._bootstrapReady = false;
+  ws._presenceStatus = "online";
+  ws._lastActivityAt = Date.now();
+  ws._awayMessage = null;
 
   ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
     .then(() => {
@@ -414,15 +442,12 @@ wss.on("connection", async (ws, req) => {
   ws.isAlive = true;
   ws.on("pong", () => {
     ws.isAlive = true;
-    markConnectionAlive(user.id, ws._connectionId).catch(() => {});
+    refreshConnectionTtls(user.id, ws._connectionId).catch(() => {});
   });
 
   upsertConnectionState(user.id, ws._connectionId, "online")
     .then(async () => {
-      await Promise.all([
-        markConnectionAlive(user.id, ws._connectionId),
-        markConnectionActive(user.id, ws._connectionId),
-      ]);
+      await refreshConnectionTtls(user.id, ws._connectionId, { active: true });
       await recomputeUserPresence(user.id);
     })
     .catch((err) =>
@@ -443,7 +468,7 @@ async function handleClientMessage(ws, user, msg) {
     return;
   }
 
-  markConnectionAlive(user.id, ws._connectionId).catch(() => {});
+  refreshConnectionTtls(user.id, ws._connectionId).catch(() => {});
 
   switch (msg.type) {
     case "subscribe":
@@ -474,29 +499,58 @@ async function handleClientMessage(ws, user, msg) {
       ws.send(JSON.stringify({ event: "pong" }));
       break;
 
-    case "presence":
+    case "presence": {
       // Client reporting its own presence status
       if (["online", "idle", "away"].includes(msg.status)) {
-        upsertConnectionState(user.id, ws._connectionId, msg.status)
+        const nextStatus = msg.status;
+        const awayMessageChanged =
+          nextStatus === "away" && (msg.awayMessage || null) !== (ws._awayMessage || null);
+        const redundantOnlineRefresh =
+          nextStatus === "online" && !shouldRefreshOnlinePresence(ws);
+
+        if (!awayMessageChanged && nextStatus === ws._presenceStatus && (nextStatus !== "online" || redundantOnlineRefresh)) {
+          if (nextStatus === "online") {
+            ws._lastActivityAt = Date.now();
+            refreshConnectionTtls(user.id, ws._connectionId, { active: true }).catch(() => {});
+          }
+          break;
+        }
+
+        upsertConnectionState(user.id, ws._connectionId, nextStatus)
           .then(async () => {
-            if (msg.status === "away") {
+            ws._presenceStatus = nextStatus;
+            if (nextStatus === "away") {
+              ws._awayMessage = msg.awayMessage || null;
               await presenceService.setAwayMessage(user.id, msg.awayMessage);
+            } else {
+              ws._awayMessage = null;
             }
-            if (msg.status === "online") {
-              await markConnectionActive(user.id, ws._connectionId);
+            if (nextStatus === "online") {
+              ws._lastActivityAt = Date.now();
+              await refreshConnectionTtls(user.id, ws._connectionId, { active: true });
             }
             await recomputeUserPresence(user.id);
           })
           .catch(() => {});
       }
       break;
+    }
 
-    case "activity":
-      markConnectionActive(user.id, ws._connectionId)
-        .then(() => upsertConnectionState(user.id, ws._connectionId, "online"))
-        .then(() => recomputeUserPresence(user.id))
+    case "activity": {
+      const now = Date.now();
+      const needsRefresh = shouldRefreshOnlinePresence(ws);
+      refreshConnectionTtls(user.id, ws._connectionId, { active: true })
+        .then(async () => {
+          ws._lastActivityAt = now;
+          if (!needsRefresh) return;
+          ws._presenceStatus = "online";
+          ws._awayMessage = null;
+          await upsertConnectionState(user.id, ws._connectionId, "online");
+          await recomputeUserPresence(user.id);
+        })
         .catch(() => {});
       break;
+    }
 
     default:
       ws.send(

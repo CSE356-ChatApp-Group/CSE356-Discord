@@ -5,7 +5,7 @@
 
 'use strict';
 
-const { verifyAccess, isDenied } = require('../utils/jwt');
+const { authenticateAccessToken } = require('../utils/jwt');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('../auth/bypass');
 
 async function authenticate(req, res, next) {
@@ -23,16 +23,15 @@ async function authenticate(req, res, next) {
     }
 
     const token = header.slice(7);
-    const payload = verifyAccess(token);
-
-    if (await isDenied(token)) {
-      return res.status(401).json({ error: 'Token has been revoked' });
-    }
+    const payload = await authenticateAccessToken(token);
 
     req.user  = payload;
     req.token = token;
     next();
   } catch (err) {
+    if (err?.code === 'TOKEN_REVOKED') {
+      return res.status(401).json({ error: 'Token has been revoked' });
+    }
     res.status(401).json({ error: 'Invalid or expired token' });
   }
 }

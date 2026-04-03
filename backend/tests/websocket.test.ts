@@ -751,6 +751,43 @@ describe('Unsubscribe isolation', () => {
 
 // ── Soak / reliability checks ─────────────────────────────────────────────────
 
+describe('WebSocket auth revocation', () => {
+  it('rejects revoked access tokens during websocket session establishment', async () => {
+    const user = await createAuthenticatedUser('wsrevoked');
+
+    const logoutRes = await request(app)
+      .post('/api/v1/auth/logout')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({});
+
+    expect(logoutRes.status).toBe(200);
+
+    const closeCode = await new Promise<number>((resolve, reject) => {
+      const ws: any = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(user.accessToken)}`);
+      const timer = setTimeout(() => {
+        try {
+          if (typeof ws.terminate === 'function') ws.terminate();
+          else ws.close();
+        } catch {
+          // ignore termination errors from the timeout path
+        }
+        reject(new Error('Expected revoked websocket token to be closed'));
+      }, 1500);
+
+      ws.onclose = (event: { code: number }) => {
+        clearTimeout(timer);
+        resolve(event.code);
+      };
+
+      ws.onerror = () => {
+        // The server may reject before the socket is fully established.
+      };
+    });
+
+    expect(closeCode).toBe(4001);
+  });
+});
+
 describe('WebSocket reliability', () => {
   it('reliably delivers DM invite events across repeated user-channel notifications', async () => {
     for (let attempt = 0; attempt < 4; attempt += 1) {

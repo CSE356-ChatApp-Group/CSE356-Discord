@@ -128,21 +128,43 @@ async function syncConnectionStatuses(userId, status) {
 
 async function setPresence(userId, status, awayMessage) {
   const key = presenceStatusKey(userId);
+  const awayKey = awayMessageKey(userId);
+  const [previousStatus, previousAwayMessage] = await Promise.all([
+    redis.get(key),
+    redis.get(awayKey),
+  ]);
+
   let nextAwayMessage = null;
 
   if (status === "offline") {
-    await redis.del(key);
-    await redis.del(awayMessageKey(userId));
+    if (!previousStatus && !previousAwayMessage) {
+      return;
+    }
+    await Promise.all([redis.del(key), redis.del(awayKey)]);
   } else {
     await redis.set(key, status, "EX", TTL_SECONDS);
     if (status === "away") {
       if (awayMessage === undefined) {
-        nextAwayMessage = await getAwayMessage(userId);
+        nextAwayMessage = previousAwayMessage || null;
       } else {
-        nextAwayMessage = await setAwayMessage(userId, awayMessage);
+        nextAwayMessage = normalizeAwayMessage(awayMessage);
+        if (nextAwayMessage) {
+          await redis.set(awayKey, nextAwayMessage);
+        } else {
+          await redis.del(awayKey);
+        }
       }
     } else {
-      await redis.del(awayMessageKey(userId));
+      await redis.del(awayKey);
+    }
+
+    const unchangedStatus = previousStatus === status;
+    const unchangedAwayMessage = status === "away"
+      ? (previousAwayMessage || null) === nextAwayMessage
+      : !previousAwayMessage;
+
+    if (unchangedStatus && unchangedAwayMessage) {
+      return;
     }
   }
 
