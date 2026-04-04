@@ -97,14 +97,15 @@ router.get('/', async (req, res, next) => {
             )
        ),
        latest_messages AS (
-         SELECT DISTINCT ON (m.channel_id)
-                m.channel_id,
-                m.id,
-                m.author_id
-         FROM messages m
-         JOIN visible_channels ch ON ch.id = m.channel_id
-         WHERE m.deleted_at IS NULL
-         ORDER BY m.channel_id, m.created_at DESC
+         SELECT ch.id AS channel_id, lm.id, lm.author_id
+         FROM visible_channels ch
+         LEFT JOIN LATERAL (
+           SELECT m.id, m.author_id
+           FROM messages m
+           WHERE m.channel_id = ch.id AND m.deleted_at IS NULL
+           ORDER BY m.created_at DESC
+           LIMIT 1
+         ) lm ON TRUE
        ),
        unread_counts AS (
          SELECT ch.community_id, COUNT(*)::int AS unread_channel_count
