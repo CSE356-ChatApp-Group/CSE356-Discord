@@ -112,7 +112,7 @@ echo "✓ Artifact ready locally"
 # 4. Copy to production server
 echo "4. Copying to production..."
 scp "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
-scp "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "${SCRIPT_DIR}/chatapp@.service" "$PROD_USER@$PROD_HOST:/tmp/"
+scp "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "$PROD_USER@$PROD_HOST:/tmp/"
 rm "$DOWNLOAD_PATH"
 echo "✓ Copied to production"
 
