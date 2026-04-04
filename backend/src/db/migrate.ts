@@ -32,7 +32,7 @@ async function migrate() {
     );
 
     const files = fs.readdirSync(MIGRATIONS_DIR)
-      .filter(f => f.endsWith('.sql'))
+      .filter(f => f.endsWith('.sql') && !f.startsWith('.'))
       .sort();
 
     for (const file of files) {
