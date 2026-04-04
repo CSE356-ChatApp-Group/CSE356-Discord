@@ -181,8 +181,9 @@ router.post('/',
   body('description').optional().isLength({ max: 500 }),
   async (req, res, next) => {
     if (!v(req, res)) return;
-    const client = await pool.connect();
+    let client;
     try {
+      client = await pool.connect();
       const { communityId, name, isPrivate = false, description } = req.body;
 
       // Verify caller is admin+ in the community
@@ -217,12 +218,14 @@ router.post('/',
       sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:created', channel);
       res.status(201).json({ channel });
     } catch (err) {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        // Ignore rollback failures and surface original error.
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore rollback failures and surface original error.
+        }
+        client.release();
       }
-      client.release();
       if (err.code === '23505') return res.status(409).json({ error: 'Channel name already exists' });
       next(err);
     }
@@ -271,8 +274,9 @@ router.post('/:id/members',
   body('userIds.*').isUUID(),
   async (req, res, next) => {
     if (!v(req, res)) return;
-    const client = await pool.connect();
+    let client;
     try {
+      client = await pool.connect();
       const channel = await loadChannelContext(req.params.id, req.user.id);
       if (!channel) {
         client.release();
@@ -339,12 +343,14 @@ router.post('/:id/members',
 
       res.json({ members, addedUserIds: insertedRows.map((row) => row.user_id) });
     } catch (err) {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        // Ignore rollback failures and surface original error.
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore rollback failures and surface original error.
+        }
+        client.release();
       }
-      client.release();
       next(err);
     }
   }

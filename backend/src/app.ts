@@ -171,11 +171,13 @@ app.use((req, res) => {
 // ── Global error handler ───────────────────────────────────────────────────────
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, _next) => {
-  const status = err.status || err.statusCode || 500;
+  // pg-pool connection timeout is a transient resource constraint, not a server error
+  const isPoolTimeout = err.message?.includes('timeout exceeded when trying to connect');
+  const status = isPoolTimeout ? 503 : (err.status || err.statusCode || 500);
   const requestId = req.id;
   logger.error({ err, url: req.url, requestId, status }, 'Unhandled error');
   res.status(status).json({
-    error: status >= 500 ? 'Internal server error' : (err.message || 'Request failed'),
+    error: isPoolTimeout ? 'Server busy, please retry' : (status >= 500 ? 'Internal server error' : (err.message || 'Request failed')),
     requestId,
     ...(err.errors && { errors: err.errors }),
     ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),

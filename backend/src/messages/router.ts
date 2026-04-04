@@ -202,8 +202,9 @@ router.post('/',
   body('attachments.*.height').optional().isInt({ min: 1 }),
   async (req, res, next) => {
     if (!validate(req, res)) return;
-    const client = await pool.connect();
+    let client;
     try {
+      client = await pool.connect();
       const { content, channelId, conversationId, threadId } = req.body;
       const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
 
@@ -314,13 +315,15 @@ router.post('/',
 
       res.status(201).json({ message: message || baseMessage });
     } catch (err) {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+        }
       }
       next(err);
     } finally {
-      client.release();
+      client?.release();
     }
   }
 );

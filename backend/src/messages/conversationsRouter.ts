@@ -205,8 +205,9 @@ router.post('/',
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const client = await pool.connect();
+    let client;
     try {
+      client = await pool.connect();
       await client.query('BEGIN');
 
       const providedParticipants = req.body.participantIds || req.body.participants || [];
@@ -280,9 +281,9 @@ router.post('/',
 
       res.status(201).json({ conversation: conversation || conv, created: true });
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client?.query('ROLLBACK');
       next(err);
-    } finally { client.release(); }
+    } finally { client?.release(); }
   }
 );
 
@@ -372,8 +373,9 @@ async function addParticipantsHandler(req, res, next) {
     return res.status(400).json({ error: 'participantIds, participants, participantId, or userId is required' });
   }
 
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
 
     const conversationExists = await client.query(
@@ -484,10 +486,10 @@ async function addParticipantsHandler(req, res, next) {
 
     res.json({ conversation, addedParticipantIds: participantIdsToAdd });
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client?.query('ROLLBACK');
     next(err);
   } finally {
-    client.release();
+    client?.release();
   }
 }
 
@@ -498,8 +500,9 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
 
     const membership = await client.query(
@@ -572,10 +575,10 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 
     res.json({ success: true });
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client?.query('ROLLBACK');
     next(err);
   } finally {
-    client.release();
+    client?.release();
   }
 });
 

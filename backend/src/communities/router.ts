@@ -113,8 +113,9 @@ router.post('/',
   body('isPublic').optional().isBoolean(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
-    const client = await pool.connect();
+    let client;
     try {
+      client = await pool.connect();
       await client.query('BEGIN');
       const { slug, name, description, isPublic = true } = req.body;
       const { rowCount } = await client.query(
@@ -147,10 +148,10 @@ router.post('/',
       await presenceService.invalidatePresenceFanoutTargets(req.user.id);
       res.status(201).json({ community });
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client?.query('ROLLBACK');
       if (err.code === '23505') return res.status(409).json({ error: 'Slug already taken' });
       next(err);
-    } finally { client.release(); }
+    } finally { client?.release(); }
   }
 );
 

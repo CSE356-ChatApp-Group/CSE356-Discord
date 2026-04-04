@@ -442,8 +442,9 @@ router.post('/oauth/complete-create',
       : `${generatedUsernameBase}${Date.now().toString().slice(-4)}`.slice(0, 32);
     const displayName = req.body.displayName || pending.displayName || username;
 
-    const client = await pool.connect();
+    let client;
     try {
+      client = await pool.connect();
       await client.query('BEGIN');
 
       const existingProvider = await client.query(
@@ -478,13 +479,13 @@ router.post('/oauth/complete-create',
       await client.query('COMMIT');
       return res.json(issueTokens(res, user));
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client?.query('ROLLBACK');
       if (err.code === '23505') {
         return res.status(409).json({ error: 'Could not complete account creation due to conflicting account data' });
       }
       return next(err);
     } finally {
-      client.release();
+      client?.release();
     }
   }
 );
@@ -505,8 +506,9 @@ router.post('/oauth/complete-connect',
       return res.status(401).json({ error: 'Invalid or expired OAuth continuation token' });
     }
 
-    const client = await pool.connect();
+    let client;
     try {
+      client = await pool.connect();
       await client.query('BEGIN');
 
       const existingProvider = await client.query(
@@ -544,13 +546,13 @@ router.post('/oauth/complete-connect',
       await client.query('COMMIT');
       return res.json(issueTokens(res, user));
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client?.query('ROLLBACK');
       if (err.code === '23505') {
         return res.status(409).json({ error: 'OAuth account is already linked to another user' });
       }
       return next(err);
     } finally {
-      client.release();
+      client?.release();
     }
   }
 );

@@ -45,8 +45,9 @@ passport.use(new LocalStrategy(
 
 // ── OAuth helper ───────────────────────────────────────────────────────────────
 async function processOAuthLogin(provider, profileId, email, displayName, stateToken, done) {
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
 
     // Existing linked provider login: return mapped user.
@@ -108,7 +109,7 @@ async function processOAuthLogin(provider, profileId, email, displayName, stateT
       displayName: displayName || null,
     });
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client?.query('ROLLBACK');
 
     // If provider account just got linked by a concurrent request, recover by
     // loading the mapped user and continue login.
@@ -128,7 +129,7 @@ async function processOAuthLogin(provider, profileId, email, displayName, stateT
     }
     return done(err);
   } finally {
-    client.release();
+    client?.release();
   }
 }
 
