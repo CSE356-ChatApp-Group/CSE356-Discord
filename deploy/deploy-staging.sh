@@ -166,7 +166,9 @@ if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
 fi
 
 echo "3) Installing/updating systemd unit on host..."
-scp "${SCRIPT_DIR}/chatapp@.service" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp@.service"
+# Use ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
+# subsystem which misparses '@' in remote paths, causing "Permission denied".
+ssh "${STAGING_USER}@${STAGING_HOST}" 'cat > /tmp/chatapp@.service' < "${SCRIPT_DIR}/chatapp@.service"
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   sed 's/__DEPLOY_USER__/${STAGING_USER}/g' /tmp/chatapp@.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
