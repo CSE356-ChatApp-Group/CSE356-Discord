@@ -17,6 +17,7 @@ const wsServer = require('./websocket/server');
 const logger   = require('./utils/logger');
 const { pool } = require('./db/pool');
 const redis    = require('./db/redis');
+const { startPgPoolMetrics } = require('./utils/metrics');
 
 const PORT = process.env.PORT || 3000;
 let server;
@@ -55,6 +56,8 @@ async function start() {
   // Verify DB connectivity before accepting traffic
   await pool.query('SELECT 1');
   logger.info('Postgres connected');
+
+  startPgPoolMetrics(pool);
 
   await redis.ping();
   logger.info('Redis connected');

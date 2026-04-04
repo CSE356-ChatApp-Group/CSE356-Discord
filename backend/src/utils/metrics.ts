@@ -102,6 +102,38 @@ const authRateLimitHitsTotal = new client.Counter({
   labelNames: ['route'],
 });
 
+// ── PG pool health ─────────────────────────────────────────────────────────────
+
+const pgPoolTotal = new client.Gauge({
+  name: 'pg_pool_total',
+  help: 'Total number of clients in the pg pool (idle + active)',
+});
+const pgPoolIdle = new client.Gauge({
+  name: 'pg_pool_idle',
+  help: 'Number of idle clients in the pg pool',
+});
+const pgPoolWaiting = new client.Gauge({
+  name: 'pg_pool_waiting',
+  help: 'Number of requests waiting for a pg pool client (queue depth)',
+});
+
+/** Call once after pool is created to start sampling every 500ms */
+function startPgPoolMetrics(pool) {
+  setInterval(() => {
+    pgPoolTotal.set(pool.totalCount);
+    pgPoolIdle.set(pool.idleCount);
+    pgPoolWaiting.set(pool.waitingCount);
+  }, 500).unref();
+}
+
+// ── PG pool checkout latency ───────────────────────────────────────────────────
+
+const pgPoolCheckoutMs = new client.Histogram({
+  name: 'pg_pool_checkout_ms',
+  help: 'Time spent waiting for a pg pool connection to be checked out (ms)',
+  buckets: [0.1, 0.5, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
 module.exports = {
   register: client.register,
   httpRequestsTotal,
@@ -115,4 +147,6 @@ module.exports = {
   sideEffectQueueDroppedTotal,
   authBcryptDurationMs,
   authRateLimitHitsTotal,
+  startPgPoolMetrics,
+  pgPoolCheckoutMs,
 };
