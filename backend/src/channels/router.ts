@@ -371,6 +371,9 @@ router.post('/:id/members',
           channelId: req.params.id,
           communityId: channel.community_id,
         });
+        // Bust the newly-invited user's channel list cache so the private
+        // channel appears immediately on their next GET /channels request.
+        redis.del(`channels:list:${channel.community_id}:${user_id}`).catch(() => {});
       });
 
       res.json({ members, addedUserIds: insertedRows.map((row) => row.user_id) });
