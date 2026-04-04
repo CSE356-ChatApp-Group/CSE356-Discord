@@ -226,9 +226,12 @@ ssh "$PROD_USER@$PROD_HOST" "
   # Raise kernel TCP backlog so burst connection ramps don't drop SYN packets.
   sudo sysctl -w net.ipv4.tcp_max_syn_backlog=4096 >/dev/null
   sudo sysctl -w net.core.somaxconn=4096 >/dev/null
-  # Raise nginx worker_connections (Ubuntu default is 768; raise to 4096).
+  # Raise nginx worker_connections and FD limit (Ubuntu defaults: 768 connections, 1024 nofile).
   sudo sed -i 's/worker_connections [0-9]*/worker_connections 4096/' /etc/nginx/nginx.conf
   sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' /etc/nginx/nginx.conf
+  # worker_rlimit_nofile lets nginx workers raise their own nofile limit (bypasses OS default 1024).
+  sudo grep -q 'worker_rlimit_nofile' /etc/nginx/nginx.conf \
+    || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' /etc/nginx/nginx.conf
   sudo nginx -t && sudo systemctl reload nginx
   
   echo 'Nginx upstream switched from port $OLD_PORT to $NEW_PORT'
@@ -262,6 +265,8 @@ echo "11. Updating current release symlink..."
 if ssh "$PROD_USER@$PROD_HOST" "
   ln -sfn $RELEASE_DIR/$RELEASE_SHA $CURRENT_LINK
   echo 'Symlink: $CURRENT_LINK -> $RELEASE_SHA'
+  # Keep only the 3 most recent releases to prevent disk exhaustion (node_modules ~200MB each).
+  ls -t $RELEASE_DIR | tail -n +4 | xargs -I{} rm -rf $RELEASE_DIR/{}
 "; then
   echo "✓ Symlink updated"
 else
