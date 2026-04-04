@@ -88,9 +88,16 @@ async function getConversationFanoutTargets(conversationId) {
 
 async function publishConversationEvent(conversationId, event, data) {
   const targets = await getConversationFanoutTargets(conversationId);
-  [...new Set(targets)].forEach((target) => {
+  const uniqueTargets = [...new Set(targets)];
+  uniqueTargets.forEach((target) => {
     sideEffects.publishMessageEvent(target, event, data);
   });
+  // Bust each participant's GET /conversations cache so last_message_at and
+  // sort order reflect the new event immediately on the next REST request.
+  // User IDs are already present in targets as 'user:<id>' entries — no extra
+  // DB query needed.
+  const userIds = uniqueTargets.filter((t) => t.startsWith('user:')).map((t) => t.slice(5));
+  Promise.allSettled(userIds.map((uid) => redis.del(`conversations:list:${uid}`))).catch(() => {});
 }
 
 async function loadHydratedMessageById(messageId) {
@@ -442,6 +449,10 @@ router.delete('/:id',
 
       const message = rows[0];
       sideEffects.deleteMessage(message.id);
+      // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
+      if (message.channel_id) {
+        redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
+      }
       if (message.conversation_id) {
         await publishConversationEvent(message.conversation_id, 'message:deleted', { id: message.id });
       } else {
