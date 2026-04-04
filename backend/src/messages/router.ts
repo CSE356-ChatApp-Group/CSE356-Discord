@@ -126,7 +126,6 @@ router.get('/',
   qv('limit').optional().isInt({ min: 1, max: 100 }).toInt(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
-    let client;
     try {
       const { channelId, conversationId, before } = req.query;
       const requestedLimit = Number(req.query.limit || 50);
@@ -136,10 +135,8 @@ router.get('/',
         return res.status(400).json({ error: 'channelId or conversationId required' });
       }
 
-      client = await pool.connect();
-
       if (channelId) {
-        const { rows: [channel] } = await client.query(
+        const { rows: [channel] } = await pool.query(
           `SELECT c.id FROM channels c
             WHERE c.id = $1
               AND (c.is_private = FALSE 
@@ -153,7 +150,7 @@ router.get('/',
       }
       
       if (conversationId) {
-        const { rows: [conv] } = await client.query(
+        const { rows: [conv] } = await pool.query(
           `SELECT 1 FROM conversation_participants 
             WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
           [conversationId, req.user.id]
@@ -182,10 +179,9 @@ router.get('/',
         LIMIT  $1
       `;
 
-      const { rows } = await client.query(sql, params);
+      const { rows } = await pool.query(sql, params);
       res.json({ messages: rows.reverse() }); // return in chronological order
     } catch (err) { next(err); }
-    finally { client?.release(); }
   }
 );
 
