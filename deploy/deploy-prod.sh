@@ -19,6 +19,12 @@ MONITOR_SECONDS="${MONITOR_SECONDS:-30}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 
+# Number of Node.js workers to run.  Prod currently has fewer vCPUs than
+# staging so we default to 1.  Increase to 2 once prod is upgraded to 2+ vCPUs.
+# PG pool budget (250 total, leaving ~50 for admin) is divided by this value.
+CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
+PG_POOL_MAX_PER_INSTANCE=$(( 250 / CHATAPP_INSTANCES ))
+
 echo "=== PRODUCTION DEPLOYMENT ==="
 echo "Release: $RELEASE_SHA"
 echo "Target: $PROD_USER@$PROD_HOST"
@@ -166,8 +172,8 @@ ssh "$PROD_USER@$PROD_HOST" "
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=8/' /opt/chatapp/shared/.env \
     || echo 'UV_THREADPOOL_SIZE=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=250/' /opt/chatapp/shared/.env \
-    || echo 'PG_POOL_MAX=250' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
+    || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'"
 echo "✓ systemd unit ready"

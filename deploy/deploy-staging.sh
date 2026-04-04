@@ -17,6 +17,13 @@ LIVE_PORT=4000
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUTOVER_COMPLETED=0
 
+# Number of Node.js workers to run simultaneously.
+# Set to 1 on resource-constrained hosts; 2 to use both vCPUs on the staging VM.
+# PG pool budget (250 total connections, leaving ~50 for admin/maintenance) is
+# divided evenly so the aggregate never exceeds PG max_connections=300.
+CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-2}
+PG_POOL_MAX_PER_INSTANCE=$(( 250 / CHATAPP_INSTANCES ))
+
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
 
@@ -193,11 +200,11 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=8/' /opt/chatapp/shared/.env \
     || echo 'UV_THREADPOOL_SIZE=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # PG_POOL_MAX=250: PG max_connections=300; 250 maximises pool while leaving ~50 for admin/maintenance
-  # without exhausting the server budget. Previous manual value was 100 (break at ~130 iters/s).
+  # PG_POOL_MAX: divide the total connection budget evenly across all instances so the
+  # aggregate pool never exceeds PG max_connections=300 (~50 reserved for admin/maintenance).
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=250/' /opt/chatapp/shared/.env \
-    || echo 'PG_POOL_MAX=250' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
+    || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'
 "
@@ -273,6 +280,79 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   done
 " || echo "Warning: Prometheus config update failed (non-critical)" >&2
 
+# ── Step 7b: companion instance (dual-worker mode) ───────────────────────────
+# When CHATAPP_INSTANCES>=2, the deploy was a blue-green cutover: nginx now
+# points only to CANDIDATE_PORT.  We roll the companion (LIVE_PORT) to the same
+# release while nginx has no traffic going to it, then add it back to the
+# upstream so both workers share the load.
+#
+# Architecture note: all persistent state (connections, presence, cache) lives
+# in Redis/PostgreSQL, so two Node.js instances are fully independent and
+# correct.  PG pool budget is pre-divided by CHATAPP_INSTANCES above.
+if [[ ${CHATAPP_INSTANCES} -ge 2 ]]; then
+  echo "7b) Rolling companion instance on port ${LIVE_PORT} to new release (dual-worker mode)..."
+  ssh "${STAGING_USER}@${STAGING_HOST}" "
+    set -euo pipefail
+    RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
+
+    # Point the companion's systemd drop-in at the new release directory.
+    DROPIN_DIR=/etc/systemd/system/chatapp@${LIVE_PORT}.service.d
+    sudo mkdir -p \"\${DROPIN_DIR}\"
+    printf '[Service]\nWorkingDirectory=%s/backend\n' \"\${RELEASE_PATH}\" \
+      | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
+    sudo systemctl daemon-reload
+
+    # Restart companion.  nginx has no traffic to this port right now so the
+    # brief downtime is invisible to users.
+    sudo systemctl stop chatapp@${LIVE_PORT} 2>/dev/null || true
+    sleep 1
+    sudo systemctl start chatapp@${LIVE_PORT}
+    echo 'Companion started on port ${LIVE_PORT}'
+  "
+
+  echo "7b.1) Health-checking companion on port ${LIVE_PORT}..."
+  ssh "${STAGING_USER}@${STAGING_HOST}" \
+    "/tmp/health-check.sh ${LIVE_PORT} http://127.0.0.1:${LIVE_PORT}"
+
+  echo "7b.2) Adding companion to nginx upstream (load-balancing both workers)..."
+  ssh "${STAGING_USER}@${STAGING_HOST}" "
+    set -euo pipefail
+    # Rewrite the upstream block to include both ports with automatic failover.
+    # max_fails=2 fail_timeout=5s: nginx marks a port unavailable after 2
+    # consecutive errors and retries it after 5 s — handles rolling restarts in
+    # future deploys with zero client-visible errors.
+    sudo python3 - <<'PYEOF'
+import re
+
+cfg_path = '/etc/nginx/sites-available/chatapp'
+config = open(cfg_path).read()
+new_upstream = (
+    'upstream chatapp_upstream {\n'
+    '  server 127.0.0.1:${CANDIDATE_PORT} max_fails=2 fail_timeout=5s;\n'
+    '  server 127.0.0.1:${LIVE_PORT}      max_fails=2 fail_timeout=5s;\n'
+    '  keepalive 512;\n'
+    '  keepalive_requests 100000;\n'
+    '  keepalive_timeout 75s;\n'
+    '}'
+)
+config = re.sub(
+    r'upstream chatapp_upstream \{[^}]+\}',
+    new_upstream,
+    config,
+    flags=re.DOTALL,
+)
+open(cfg_path, 'w').write(config)
+PYEOF
+    sudo nginx -t
+    sudo systemctl reload nginx
+    echo 'nginx upstream now includes both ports ${CANDIDATE_PORT} and ${LIVE_PORT}'
+  "
+
+  echo "7b.3) Enabling companion service for auto-start on reboot..."
+  ssh "${STAGING_USER}@${STAGING_HOST}" \
+    "sudo systemctl enable chatapp@${LIVE_PORT} 2>/dev/null || true"
+fi
+
 echo "8) Enabling candidate service for auto-start on reboot..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "sudo systemctl enable chatapp@${CANDIDATE_PORT} 2>/dev/null || true"
 
@@ -299,12 +379,20 @@ echo ""
 echo "Staging deployment successful."
 echo "- Candidate used port: ${CANDIDATE_PORT}"
 echo "- Live traffic now points to: ${CANDIDATE_PORT}"
-echo "- Previous version was kept for rollback"
+if [[ ${CHATAPP_INSTANCES} -ge 2 ]]; then
+  echo "- Companion worker running on port: ${LIVE_PORT} (same release, load-balanced)"
+  echo ""
+  echo "Rollback (stop companion, point nginx at single old release):"
+  echo "  1. ssh ${STAGING_USER}@${STAGING_HOST} 'sudo systemctl stop chatapp@${LIVE_PORT}'"
+  echo "  2. ssh ${STAGING_USER}@${STAGING_HOST} 'sudo sed -i s/max_fails.*fail_timeout.*s;//g /etc/nginx/sites-available/chatapp && sudo sed -i /server.*${LIVE_PORT}/d /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
+  echo "  (or just re-deploy the previous SHA)"
+else
+  echo "- Previous version was kept for rollback"
+  echo ""
+  echo "Rollback (immediate — old release still running on port ${LIVE_PORT}):"
+  echo "  ssh ${STAGING_USER}@${STAGING_HOST} 'sudo sed -i \"s/127.0.0.1:${CANDIDATE_PORT}/127.0.0.1:${LIVE_PORT}/g\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
+  echo ""
+  echo "To stop the old version after confidence window:"
+  echo "  ssh ${STAGING_USER}@${STAGING_HOST} 'sudo systemctl stop chatapp@${LIVE_PORT}'"
+fi
 echo "- Deployment used immutable release dir: ${RELEASE_DIR}/${RELEASE_SHA}"
-
-echo ""
-echo "Rollback (immediate — old release still running on port ${LIVE_PORT}):"
-echo "  ssh ${STAGING_USER}@${STAGING_HOST} 'sudo sed -i \"s/127.0.0.1:${CANDIDATE_PORT}/127.0.0.1:${LIVE_PORT}/g\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
-echo ""
-echo "To stop the old version after confidence window:"
-echo "  ssh ${STAGING_USER}@${STAGING_HOST} 'sudo systemctl stop chatapp@${LIVE_PORT}'"
