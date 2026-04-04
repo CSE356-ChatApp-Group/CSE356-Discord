@@ -17,6 +17,7 @@ const express = require('express');
 const { body, param, validationResult } = require('express-validator');
 
 const { pool }         = require('../db/pool');
+const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
@@ -40,8 +41,18 @@ async function loadMembership(req, res, next) {
   next();
 }
 
+const COMMUNITIES_CACHE_TTL_SECS = 2;
+function communitiesCacheKey(userId) { return `communities:list:${userId}`; }
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
+  const cacheKey = communitiesCacheKey(req.user.id);
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) return res.json(JSON.parse(cached));
+  } catch {
+    // cache miss – fall through to DB
+  }
   try {
     const { rows } = await pool.query(
       `WITH visible_communities AS (
@@ -101,6 +112,8 @@ router.get('/', async (req, res, next) => {
        ORDER BY vc.name`,
       [req.user.id]
     );
+    const payload = JSON.stringify({ communities: rows });
+    redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, payload).catch(() => {});
     res.json({ communities: rows });
   } catch (err) { next(err); }
 });
@@ -216,6 +229,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
       [req.params.id, req.user.id]
     );
     await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+    redis.del(communitiesCacheKey(req.user.id)).catch(() => {});
 
     await fanout.publish(`community:${req.params.id}`, {
       event: 'community:member_joined',
@@ -235,6 +249,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       [req.params.id, req.user.id]
     );
     await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+    redis.del(communitiesCacheKey(req.user.id)).catch(() => {});
     res.json({ success: true });
   } catch (err) { next(err); }
 });
