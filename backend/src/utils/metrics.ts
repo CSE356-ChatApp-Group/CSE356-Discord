@@ -126,14 +126,6 @@ function startPgPoolMetrics(pool) {
   }, 500).unref();
 }
 
-// ── PG pool checkout latency ───────────────────────────────────────────────────
-
-const pgPoolCheckoutMs = new client.Histogram({
-  name: 'pg_pool_checkout_ms',
-  help: 'Time spent waiting for a pg pool connection to be checked out (ms)',
-  buckets: [0.1, 0.5, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
-});
-
 module.exports = {
   register: client.register,
   httpRequestsTotal,
@@ -148,5 +140,4 @@ module.exports = {
   authBcryptDurationMs,
   authRateLimitHitsTotal,
   startPgPoolMetrics,
-  pgPoolCheckoutMs,
 };
