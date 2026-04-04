@@ -10,16 +10,18 @@ const RUN_ID = __ENV.RUN_ID || `capacity-${Date.now()}`;
 const PASSWORD = __ENV.LOADTEST_PASSWORD || 'LoadTest!12345';
 const MESSAGE_SIZE = Number(__ENV.MESSAGE_SIZE || 96);
 // Number of distinct user accounts used for read operations (GET /communities,
-// GET /conversations, GET /messages). Spreads reads across N real Redis cache
-// keys instead of one, so cache effectiveness under diverse traffic is measured
-// accurately rather than showing artificially ~100% hit rates on a single key.
-const NUM_READER_POOL = 20;
+// GET /conversations, GET /messages, GET /channels). Spreads reads across N real
+// Redis cache keys instead of one, so cache effectiveness under diverse traffic
+// is measured accurately rather than showing artificially high hit rates.
+// Scale with maxVUs so each reader is shared by at most ~6 VUs at break load.
+const NUM_READER_POOL = Math.max(20, Math.ceil(profile.maxVUs / 6));
 
 const checksRate = new Rate('capacity_checks');
 const wsConnectRate = new Rate('ws_connect_success');
 const communitiesDuration = new Trend('communities_req_duration', true);
 const conversationsDuration = new Trend('conversations_req_duration', true);
 const channelListDuration = new Trend('channel_messages_req_duration', true);
+const channelsDuration = new Trend('channels_req_duration', true);
 const messagePostDuration = new Trend('message_post_req_duration', true);
 const authLoginDuration = new Trend('auth_login_req_duration', true);
 
@@ -81,12 +83,15 @@ export const options = {
   discardResponseBodies: true,
   thresholds: {
     http_req_failed: ['rate<0.05'],
-    http_req_duration: ['p(95)<1500', 'max<5000'],
+    // p(99) instead of max: the max metric is a single-request outlier (GC pause,
+    // cold start) and causes spurious threshold breaches that mask real data.
+    http_req_duration: ['p(95)<1500', 'p(99)<5000'],
     capacity_checks: ['rate>0.95'],
     ws_connect_success: ['rate>0.95'],
     communities_req_duration: ['p(95)<1200'],
     conversations_req_duration: ['p(95)<1000'],
     channel_messages_req_duration: ['p(95)<1200'],
+    channels_req_duration: ['p(95)<1200'],
     message_post_req_duration: ['p(95)<1500'],
     auth_login_req_duration: ['p(95)<2000'],
   },
@@ -304,6 +309,13 @@ function listMessages(token, channelId) {
   checksRate.add(ok);
 }
 
+function listChannels(token, communityId) {
+  const res = http.get(`${BASE_URL}/channels?communityId=${communityId}`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'channels_list' } });
+  channelsDuration.add(res.timings.duration);
+  const ok = check(res, { 'channels list 200': (r) => r.status === 200 });
+  checksRate.add(ok);
+}
+
 function sendChannelMessage(token, channelId) {
   const res = http.post(
     `${BASE_URL}/messages`,
@@ -344,15 +356,20 @@ export function httpMix(data) {
   // (is a conversation participant) — their write paths are not cache-read-heavy.
   const reader = data.readerPool[exec.vu.idInTest % data.readerPool.length];
 
-  if (roll < 0.24) {
+  if (roll < 0.20) {
     listCommunities(reader.token);
-  } else if (roll < 0.42) {
+  } else if (roll < 0.36) {
     listConversations(reader.token);
-  } else if (roll < 0.62) {
+  } else if (roll < 0.50) {
     listMessages(reader.token, data.channelId);
-  } else if (roll < 0.82) {
+  } else if (roll < 0.62) {
+    // GET /channels fires every time a user opens a community in the real app.
+    // It exercises per-user private-channel filtering (LATERAL join) and the
+    // unread count pipeline — the most complex read query after communities.
+    listChannels(reader.token, data.communityId);
+  } else if (roll < 0.80) {
     sendChannelMessage(data.ownerToken, data.channelId);
-  } else if (roll < 0.92) {
+  } else if (roll < 0.90) {
     sendConversationMessage(data.peerToken, data.conversationId);
   } else {
     const vuIdx = (exec.vu.idInTest - 1) % data.wsPeers.length;

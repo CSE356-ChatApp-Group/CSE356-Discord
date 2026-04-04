@@ -118,6 +118,7 @@ lines.push(`- Overall p95 latency: ${fmt(metric(summary, 'http_req_duration', 'p
 lines.push(`- Overall p99 latency: ${fmt(metric(summary, 'http_req_duration', 'p(99)'), ' ms')}`);
 lines.push(`- Communities p95: ${fmt(metric(summary, 'communities_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Conversations p95: ${fmt(metric(summary, 'conversations_req_duration', 'p(95)'), ' ms')}`);
+lines.push(`- Channels p95: ${fmt(metric(summary, 'channels_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Message post p95: ${fmt(metric(summary, 'message_post_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Auth login p95: ${fmt(metric(summary, 'auth_login_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- WebSocket success rate: ${fmt((metric(summary, 'ws_connect_success', 'rate') ?? metric(summary, 'ws_connect_success', 'value') ?? 0) * 100, '%')}`);
@@ -125,9 +126,11 @@ lines.push('');
 lines.push('## Prometheus after-run snapshot');
 lines.push('');
 lines.push(`- RSS memory: ${fmt(promScalar(after, 'rss_mb'), ' MB')}`);
+lines.push(`- CPU utilisation: ${fmt((promScalar(after, 'cpu_seconds_rate') ?? 0) * 100, '%')} (Node process, rate over last 2 m)`);
 lines.push(`- Event loop p99: ${fmt(promScalar(after, 'eventloop_p99_ms'), ' ms')}`);
 lines.push(`- 5xx rate: ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
 lines.push(`- PG pool peak-total/min-idle/peak-waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
+lines.push(`- Redis memory: ${fmt(promScalar(after, 'redis_memory_mb'), ' MB')} / connected clients: ${fmt(promScalar(after, 'redis_connected_clients'))}`); 
 
 const queueDepth = promResult(after, 'side_effect_queue_depth');
 if (queueDepth.length) {

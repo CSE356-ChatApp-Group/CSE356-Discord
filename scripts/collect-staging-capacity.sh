@@ -24,6 +24,7 @@ queries = {
     "route_p95_top": 'sort_desc(histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api"}[5m]))))',
     "five_xx_rate": 'sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[5m]))',
     "rss_mb": 'max(process_resident_memory_bytes{job="chatapp-api"}) / 1024 / 1024',
+    "cpu_seconds_rate": 'sum(rate(process_cpu_seconds_total{job="chatapp-api"}[2m]))',
     "eventloop_p99_ms": 'max(nodejs_eventloop_lag_p99_seconds{job="chatapp-api"}) * 1000',
     "side_effect_queue_depth": 'sum(side_effect_queue_depth{job="chatapp-api"}) by (queue)',
     "side_effect_queue_workers": 'sum(side_effect_queue_active_workers{job="chatapp-api"}) by (queue)',
@@ -31,6 +32,8 @@ queries = {
     "pg_pool_total": 'max_over_time(pg_pool_total{job="chatapp-api"}[10m])',
     "pg_pool_idle": 'min_over_time(pg_pool_idle{job="chatapp-api"}[10m])',
     "pg_pool_waiting": 'max_over_time(pg_pool_waiting{job="chatapp-api"}[10m])',
+    "redis_memory_mb": 'redis_memory_used_bytes / 1024 / 1024',
+    "redis_connected_clients": 'redis_connected_clients',
 }
 
 def run_query(name, query):
