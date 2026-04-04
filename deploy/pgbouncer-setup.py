@@ -16,6 +16,8 @@ run on the same VM.  The password in [databases] is used only for the
 PgBouncer → PostgreSQL backend authentication.
 """
 
+import grp
+import pwd
 import re
 import subprocess
 import sys
@@ -43,12 +45,16 @@ pg_host = r.hostname or '127.0.0.1'
 pg_port = r.port or 5432
 pg_db   = r.path.lstrip('/')
 
+# If DATABASE_URL was already rewritten to point at PgBouncer (:6432), use
+# the real PostgreSQL port (5432) for the backend stanza — never loop back.
+pg_backend_port = 5432 if pg_port == 6432 else pg_port
+
 print(f'Parsed DATABASE_URL: user={pg_user} host={pg_host}:{pg_port} db={pg_db}')
 
 # ── Write pgbouncer.ini ─────────────────────────────────────────────────────────
 ini = f"""\
 [databases]
-{pg_db} = host={pg_host} port={pg_port} dbname={pg_db} user={pg_user} password={pg_pass}
+{pg_db} = host={pg_host} port={pg_backend_port} dbname={pg_db} user={pg_user} password={pg_pass}
 
 [pgbouncer]
 listen_addr = 127.0.0.1
@@ -107,20 +113,28 @@ def write_sudo(path, content):
 write_sudo('/etc/pgbouncer/pgbouncer.ini', ini)
 write_sudo('/etc/pgbouncer/userlist.txt', userlist)
 
-# Fix ownership and permissions
+# Determine the correct owner for pgbouncer files.
+# On Ubuntu 22.04, the pgbouncer user may have primary group 'postgres'
+# (not 'pgbouncer'), so we detect it dynamically rather than assuming.
+try:
+    pb_entry = pwd.getpwnam('pgbouncer')
+    pb_group = grp.getgrgid(pb_entry.pw_gid).gr_name
+    pb_owner = f'pgbouncer:{pb_group}'
+except KeyError:
+    # Fall back when pgbouncer user/group doesn't exist yet
+    pb_owner = 'postgres:postgres'
+
+# Fix ownership and permissions on config files
 for f in ('/etc/pgbouncer/pgbouncer.ini', '/etc/pgbouncer/userlist.txt'):
     subprocess.run(['sudo', 'chmod', '640', f], check=True)
-    # pgbouncer service runs as the pgbouncer user — try that first
-    ok = subprocess.run(['sudo', 'chown', 'pgbouncer:pgbouncer', f], capture_output=True).returncode
-    if ok != 0:
-        subprocess.run(['sudo', 'chown', 'postgres:postgres', f], check=True)
+    subprocess.run(['sudo', 'chown', pb_owner, f], check=True)
 
 print('pgbouncer.ini and userlist.txt written.')
 
 # ── Ensure log/run directories exist with correct ownership ────────────────────
 for d in ('/var/log/pgbouncer', '/var/run/pgbouncer'):
     subprocess.run(['sudo', 'mkdir', '-p', d], check=True)
-    subprocess.run(['sudo', 'chown', 'pgbouncer:pgbouncer', d], check=True)
+    subprocess.run(['sudo', 'chown', pb_owner, d], check=True)
     subprocess.run(['sudo', 'chmod', '750', d], check=True)
 
 # ── Redirect DATABASE_URL to PgBouncer ─────────────────────────────────────────
