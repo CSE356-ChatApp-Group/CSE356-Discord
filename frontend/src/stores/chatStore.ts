@@ -1335,7 +1335,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         }));
         break;
       }
-      case 'community:member_joined': {
+      case 'community:member_joined':
+      case 'community:member_left': {
         const { communityId } = event.data;
         if (store.activeCommunity?.id === communityId) {
           store.fetchMembers(communityId);
