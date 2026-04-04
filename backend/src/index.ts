@@ -61,6 +61,11 @@ async function start() {
 
   server = http.createServer(app);
 
+  // keepAliveTimeout must be > nginx keepalive_timeout (75s) to prevent EOF
+  // race where nginx reuses a connection Node already closed.
+  server.keepAliveTimeout = 90_000;
+  server.headersTimeout   = 95_000;
+
   // Attach WebSocket upgrade handler to the same HTTP server
   server.on('upgrade', wsServer.handleUpgrade);
 
