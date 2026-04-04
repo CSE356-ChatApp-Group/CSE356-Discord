@@ -159,6 +159,16 @@ export function setup() {
   const owner = registerOrLogin('owner');
   const peer = registerOrLogin('peer');
 
+  // Register one unique user per WS VU so that:
+  //   - each WS connection bootstraps a DIFFERENT user (no thundering-herd DB
+  //     queries for a single userId on every reconnect attempt)
+  //   - reauthenticate() calls in httpMix each hit a different rate-limit bucket
+  const wsPeers = [];
+  for (let i = 0; i < profile.wsVUs; i++) {
+    const p = registerOrLogin(`ws-peer-${i}`);
+    wsPeers.push({ token: p.token, userId: p.userId, email: p.creds.email });
+  }
+
   const communitySlug = `cap-${RUN_ID}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 32);
   const communityRes = http.post(
     `${BASE_URL}/communities`,
@@ -208,6 +218,7 @@ export function setup() {
     communityId,
     channelId,
     conversationId,
+    wsPeers,
   };
 }
 
@@ -284,17 +295,23 @@ export function httpMix(data) {
   } else if (roll < 0.92) {
     sendConversationMessage(data.peerToken, data.conversationId);
   } else {
-    reauthenticate(data.ownerEmail);
+    // Use VU-specific peer so every re-auth call hits a different rate-limit bucket.
+    const vuIdx = (exec.vu.idInTest - 1) % data.wsPeers.length;
+    reauthenticate(data.wsPeers[vuIdx].email);
   }
 
   sleep(Math.random() * 0.35);
 }
 
 export function presenceSocketStorm(data) {
-  const url = `${WS_URL}?token=${encodeURIComponent(data.peerToken)}`;
+  // Use a VU-specific peer so each concurrent WS connection bootstraps a
+  // different user – avoids N simultaneous DB queries for the same userId.
+  const vuIdx = (exec.vu.idInTest - 1) % data.wsPeers.length;
+  const peer = data.wsPeers[vuIdx];
+  const url = `${WS_URL}?token=${encodeURIComponent(peer.token)}`;
   const response = ws.connect(url, { tags: { endpoint: 'ws_presence' } }, (socket) => {
     socket.on('open', () => {
-      socket.send(JSON.stringify({ type: 'subscribe', channel: `user:${data.peerUserId}` }));
+      socket.send(JSON.stringify({ type: 'subscribe', channel: `user:${peer.userId}` }));
       socket.send(JSON.stringify({ type: 'presence', status: 'online', awayMessage: null }));
     });
 
@@ -316,4 +333,9 @@ export function presenceSocketStorm(data) {
   });
   wsConnectRate.add(ok);
   checksRate.add(ok);
+
+  // Backoff on failure to avoid hammering the server at VU-loop speed.
+  if (!ok) {
+    sleep(1 + Math.random() * 2);
+  }
 }

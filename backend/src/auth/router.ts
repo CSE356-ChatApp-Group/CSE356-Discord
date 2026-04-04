@@ -108,6 +108,9 @@ function buildAuthKey(req, route) {
 }
 
 function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
+  if (process.env.DISABLE_RATE_LIMITS === 'true') {
+    return (_req, _res, next) => next();
+  }
   return rateLimit({
     windowMs: parsePositiveIntEnv(process.env[windowEnv], windowMs),
     limit: parsePositiveIntEnv(process.env[limitEnv], limit),
