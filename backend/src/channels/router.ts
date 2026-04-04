@@ -175,7 +175,7 @@ router.get('/',
               [channelIds, lastReadAts]
             );
 
-            const countMap = new Map(
+            const countMap = new Map<string, { total: number; read: number }>(
               countRows.map(r => [r.channel_id, { total: parseInt(r.total_count, 10), read: parseInt(r.read_count, 10) }])
             );
 
