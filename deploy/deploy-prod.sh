@@ -152,10 +152,10 @@ echo "✓ Candidate release ready"
 echo "5.5. Installing/updating systemd unit..."
 # Use ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
 # subsystem which misparses '@' in remote paths, causing "Permission denied".
-ssh "$PROD_USER@$PROD_HOST" 'cat > /tmp/chatapp@.service' < "${SCRIPT_DIR}/chatapp@.service"
+ssh "$PROD_USER@$PROD_HOST" 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
 ssh "$PROD_USER@$PROD_HOST" "
   set -e
-  sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp@.service | tee /etc/systemd/system/chatapp@.service > /dev/null
+  sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | tee /etc/systemd/system/chatapp@.service > /dev/null
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sed -i '/^PORT=/d' /opt/chatapp/shared/.env
   systemctl daemon-reload
