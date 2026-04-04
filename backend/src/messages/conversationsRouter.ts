@@ -108,9 +108,11 @@ async function resolveParticipantIds(client, rawParticipants) {
   rows.forEach((row) => {
     byAny.set(row.id, row.id);
     byAny.set(row.username, row.id);
-    byAny.set(row.email, row.id);
     byAny.set(row.username.toLowerCase(), row.id);
-    byAny.set(row.email.toLowerCase(), row.id);
+    if (row.email) {
+      byAny.set(row.email, row.id);
+      byAny.set(row.email.toLowerCase(), row.id);
+    }
   });
 
   const resolved = [];

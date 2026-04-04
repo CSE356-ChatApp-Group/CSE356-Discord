@@ -116,6 +116,30 @@ describe('DM invite flow', () => {
   });
 });
 
+describe('DM participant resolution', () => {
+  it('creates a group DM even when one selected participant has no email address', async () => {
+    const owner = await createAuthenticatedUser('dmnullmailowner');
+    const noEmailUser = await createAuthenticatedUser('dmnullmailnoemail', { withEmail: false });
+    const thirdUser = await createAuthenticatedUser('dmnullmailthird');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [noEmailUser.user.id, thirdUser.user.id] });
+
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.created).toBe(true);
+    expect(createRes.body.conversation?.is_group).toBe(true);
+    expect(createRes.body.conversation?.participants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: owner.user.id }),
+        expect.objectContaining({ id: noEmailUser.user.id }),
+        expect.objectContaining({ id: thirdUser.user.id }),
+      ]),
+    );
+  });
+});
+
 // ── Leave / guard rails ───────────────────────────────────────────────────────
 
 describe('DM leave and access guards', () => {
