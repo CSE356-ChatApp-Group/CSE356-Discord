@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 
 const runDir = process.argv[2];
 const exitCode = Number(process.argv[3] || 0);
@@ -52,6 +53,52 @@ function promScalar(snapshot, key, emptyValue = null) {
   return Number.isFinite(parsed) ? parsed : emptyValue;
 }
 
+// Stream metrics.ndjson and bucket http_req_failed + http_req_duration into
+// 30 s windows. Each request emits exactly one Point for each metric, so counts
+// stay in sync. Streaming avoids loading the full 200+ MB file into memory.
+async function buildTimeline(ndjsonPath) {
+  if (!fs.existsSync(ndjsonPath)) return null;
+  let startTime = null;
+  const buckets = new Map();
+  const getBucket = (idx) => {
+    if (!buckets.has(idx)) buckets.set(idx, { count: 0, fails: 0, durations: [] });
+    return buckets.get(idx);
+  };
+  const rl = createInterface({ input: fs.createReadStream(ndjsonPath), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (obj.type !== 'Point') continue;
+    const t = new Date(obj.data?.time).getTime();
+    if (!Number.isFinite(t)) continue;
+    if (startTime === null) startTime = t;
+    const bucketIdx = Math.floor((t - startTime) / 30000);
+    const bucket = getBucket(bucketIdx);
+    if (obj.metric === 'http_req_failed') {
+      bucket.count++;
+      if (obj.data.value > 0) bucket.fails++;
+    } else if (obj.metric === 'http_req_duration') {
+      bucket.durations.push(obj.data.value);
+    }
+  }
+  if (buckets.size === 0) return null;
+  const maxBucket = Math.max(...buckets.keys());
+  const rows = [];
+  for (let i = 0; i <= maxBucket; i++) {
+    const b = buckets.get(i) ?? { count: 0, fails: 0, durations: [] };
+    const mins = Math.floor((i * 30) / 60);
+    const secs = (i * 30) % 60;
+    const elapsed = `${String(mins).padStart(2, '0')}m${String(secs).padStart(2, '0')}s`;
+    const failRate = b.count > 0 ? (b.fails / b.count) * 100 : 0;
+    const sorted = b.durations.sort((a, c) => a - c);
+    const p50 = sorted.length > 0 ? sorted[Math.floor(sorted.length * 0.50)] : null;
+    const p95 = sorted.length > 0 ? sorted[Math.floor(sorted.length * 0.95)] : null;
+    rows.push({ elapsed, count: b.count, fails: b.fails, failRate, p50, p95 });
+  }
+  return rows;
+}
+
 const summary = readJson(path.join(runDir, 'summary.json'));
 const before = readJson(path.join(runDir, 'prometheus-before.json'));
 const after = readJson(path.join(runDir, 'prometheus-after.json'));
@@ -98,6 +145,21 @@ if (routeP95.length) {
   lines.push('### Top p95 routes after the run');
   for (const item of routeP95.slice(0, 8)) {
     lines.push(`- ${item.metric?.route || 'unknown'}: ${fmt(item.numericValue, ' ms')}`);
+  }
+  lines.push('');
+}
+
+const timeline = await buildTimeline(path.join(runDir, 'metrics.ndjson'));
+if (timeline && timeline.length > 0) {
+  lines.push('## Request timeline (30 s buckets)');
+  lines.push('');
+  lines.push('| elapsed | reqs | fails | fail% | p50 ms | p95 ms |');
+  lines.push('|---------|------|-------|-------|--------|--------|');
+  for (const row of timeline) {
+    const mark = row.failRate >= 5 ? ' ⚠' : '';
+    lines.push(
+      `| ${row.elapsed} | ${row.count} | ${row.fails} | ${row.failRate.toFixed(1)}%${mark} | ${fmt(row.p50)} | ${fmt(row.p95)} |`,
+    );
   }
   lines.push('');
 }

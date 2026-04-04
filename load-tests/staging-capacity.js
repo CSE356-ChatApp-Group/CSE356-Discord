@@ -9,6 +9,11 @@ const WS_URL = (__ENV.WS_URL || BASE_URL.replace(/^http/, 'ws').replace(/\/api\/
 const RUN_ID = __ENV.RUN_ID || `capacity-${Date.now()}`;
 const PASSWORD = __ENV.LOADTEST_PASSWORD || 'LoadTest!12345';
 const MESSAGE_SIZE = Number(__ENV.MESSAGE_SIZE || 96);
+// Number of distinct user accounts used for read operations (GET /communities,
+// GET /conversations, GET /messages). Spreads reads across N real Redis cache
+// keys instead of one, so cache effectiveness under diverse traffic is measured
+// accurately rather than showing artificially ~100% hit rates on a single key.
+const NUM_READER_POOL = 20;
 
 const checksRate = new Rate('capacity_checks');
 const wsConnectRate = new Rate('ws_connect_success');
@@ -170,19 +175,52 @@ function registerOrLogin(label) {
   };
 }
 
+// Parallel register+login for a list of credential objects.
+// Returns [{token, userId, email}] in the same order as credsList.
+function batchCreateUsers(credsList) {
+  // Batch register — 409 (already exists) is fine for idempotent reruns.
+  http.batch(
+    credsList.map((creds) => ({
+      method: 'POST',
+      url: `${BASE_URL}/auth/register`,
+      body: JSON.stringify(creds),
+      params: jsonParams(null, { endpoint: 'auth_register' }, true),
+    })),
+  );
+  const loginResponses = http.batch(
+    credsList.map((creds) => ({
+      method: 'POST',
+      url: `${BASE_URL}/auth/login`,
+      body: JSON.stringify({ email: creds.email, password: creds.password }),
+      params: jsonParams(null, { endpoint: 'auth_login' }, true),
+    })),
+  );
+  return loginResponses.map((res, i) => {
+    const body = safeJson(res);
+    if (!body?.accessToken) {
+      throw new Error(`batch user login failed for ${credsList[i].email}: ${res.status} ${res.body}`);
+    }
+    return { token: body.accessToken, userId: body.user.id, email: credsList[i].email };
+  });
+}
+
 export function setup() {
   const owner = registerOrLogin('owner');
   const peer = registerOrLogin('peer');
 
-  // Register one unique user per WS VU so that:
-  //   - each WS connection bootstraps a DIFFERENT user (no thundering-herd DB
-  //     queries for a single userId on every reconnect attempt)
-  //   - reauthenticate() calls in httpMix each hit a different rate-limit bucket
-  const wsPeers = [];
-  for (let i = 0; i < profile.wsVUs; i++) {
-    const p = registerOrLogin(`ws-peer-${i}`);
-    wsPeers.push({ token: p.token, userId: p.userId, email: p.creds.email });
-  }
+  // Batch-create all secondary users in 2 round-trips (register + login) to
+  // keep setup fast regardless of profile.wsVUs or NUM_READER_POOL size.
+  //   wsPeers:    distinct user per WS VU — avoids thundering-herd DB queries
+  //               for the same userId on every reconnect
+  //   readerPool: distinct users for HTTP read ops so each hits its own Redis
+  //               cache key, revealing true cache miss rates under diverse load
+  const allSecondaryCredentials = [
+    ...Array.from({ length: profile.wsVUs }, (_, i) => uniqueUser(`ws-peer-${i}`)),
+    ...Array.from({ length: NUM_READER_POOL }, (_, i) => uniqueUser(`reader-${i}`)),
+  ];
+  const allSecondary = batchCreateUsers(allSecondaryCredentials);
+  const wsPeers = allSecondary.slice(0, profile.wsVUs);
+  const readerPool = allSecondary.slice(profile.wsVUs);
 
   const communitySlug = `cap-${RUN_ID}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 32);
   const communityRes = http.post(
@@ -195,14 +233,16 @@ export function setup() {
   }
   const communityId = safeJson(communityRes).community.id;
 
-  const joinRes = http.post(
-    `${BASE_URL}/communities/${communityId}/join`,
-    JSON.stringify({}),
-    jsonParams(peer.token, { endpoint: 'communities_join' }),
+  // Batch-join peer + all readers so their GET /communities responses are
+  // non-empty, making the cached payload realistic.
+  http.batch(
+    [peer.token, ...readerPool.map((r) => r.token)].map((token) => ({
+      method: 'POST',
+      url: `${BASE_URL}/communities/${communityId}/join`,
+      body: JSON.stringify({}),
+      params: jsonParams(token, { endpoint: 'communities_join' }),
+    })),
   );
-  if (joinRes.status !== 200) {
-    throw new Error(`community join failed: ${joinRes.status} ${joinRes.body}`);
-  }
 
   const channelName = `cap-${RUN_ID}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 28);
   const channelRes = http.post(
@@ -234,6 +274,7 @@ export function setup() {
     channelId,
     conversationId,
     wsPeers,
+    readerPool,
   };
 }
 
@@ -298,19 +339,22 @@ function reauthenticate(email) {
 
 export function httpMix(data) {
   const roll = Math.random();
+  // Pin each VU to a reader so list/read operations hit NUM_READER_POOL distinct
+  // Redis keys. Writes still use ownerToken (has ownership) or peerToken
+  // (is a conversation participant) — their write paths are not cache-read-heavy.
+  const reader = data.readerPool[exec.vu.idInTest % data.readerPool.length];
 
   if (roll < 0.24) {
-    listCommunities(data.ownerToken);
+    listCommunities(reader.token);
   } else if (roll < 0.42) {
-    listConversations(data.ownerToken);
+    listConversations(reader.token);
   } else if (roll < 0.62) {
-    listMessages(data.ownerToken, data.channelId);
+    listMessages(reader.token, data.channelId);
   } else if (roll < 0.82) {
     sendChannelMessage(data.ownerToken, data.channelId);
   } else if (roll < 0.92) {
     sendConversationMessage(data.peerToken, data.conversationId);
   } else {
-    // Use VU-specific peer so every re-auth call hits a different rate-limit bucket.
     const vuIdx = (exec.vu.idInTest - 1) % data.wsPeers.length;
     reauthenticate(data.wsPeers[vuIdx].email);
   }
