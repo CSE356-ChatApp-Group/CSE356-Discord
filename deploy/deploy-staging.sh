@@ -19,10 +19,10 @@ CUTOVER_COMPLETED=0
 
 # Number of Node.js workers to run simultaneously.
 # Set to 1 on resource-constrained hosts; 2 to use both vCPUs on the staging VM.
-# PG pool budget (250 total connections, leaving ~50 for admin/maintenance) is
-# divided evenly so the aggregate never exceeds PG max_connections=300.
+# PG pool budget (350 total connections, leaving ~50 for admin/maintenance) is
+# divided evenly so the aggregate never exceeds PG max_connections=400.
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-2}
-PG_POOL_MAX_PER_INSTANCE=$(( 250 / CHATAPP_INSTANCES ))
+PG_POOL_MAX_PER_INSTANCE=$(( 350 / CHATAPP_INSTANCES ))
 # libuv thread pool per instance: total budget stays 8 so aggregate CPU load
 # from bcrypt/dns/fs threads equals a single-instance deployment.
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))

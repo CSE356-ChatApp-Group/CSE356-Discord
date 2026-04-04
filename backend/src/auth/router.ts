@@ -15,10 +15,12 @@
 
 const express  = require('express');
 const { rateLimit } = require('express-rate-limit');
+const { RedisStore } = require('rate-limit-redis');
 const passport = require('passport');
 const { body, validationResult } = require('express-validator');
 
 const { pool }         = require('../db/pool');
+const redis            = require('../db/redis');
 const { signAccess, signRefresh, verifyRefresh, denyToken } = require('../utils/jwt');
 const { authenticate } = require('../middleware/authenticate');
 const { authRateLimitHitsTotal } = require('../utils/metrics');
@@ -117,6 +119,12 @@ function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: (req) => buildAuthKey(req, route),
+    // Shared Redis store so the limit is consistent across all Node.js instances.
+    // Falls back to the default in-memory store if Redis is unavailable.
+    store: new RedisStore({
+      sendCommand: (...args) => redis.call(...args),
+      prefix: `rl:${route}:`,
+    }),
     message: { error: 'Too many auth attempts. Please wait a minute and try again.' },
     handler: (_req, res, _next, options) => {
       authRateLimitHitsTotal.inc({ route });
