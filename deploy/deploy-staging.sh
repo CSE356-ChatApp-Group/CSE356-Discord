@@ -107,10 +107,6 @@ server {
     return 301 /grafana/;
   }
 
-  location = /login {
-    return 302 /grafana/login;
-  }
-
   location /grafana/ {
     proxy_pass http://127.0.0.1:3001;
     proxy_http_version 1.1;
