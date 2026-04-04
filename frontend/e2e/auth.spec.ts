@@ -1,14 +1,23 @@
 import { test, expect } from '@playwright/test';
-import { buildUser, loginViaUiWithRetry } from './helpers/session';
+import { buildUser, loginViaUiWithRetry, registerOrLogin } from './helpers/session';
 
 test.describe('authentication', () => {
-  test.describe.configure({ mode: 'serial' });
+  // Register a shared user via the API once before any tests run.
+  // Decoupling user creation from the register-UI test means:
+  //   - login/wrong-password tests can each be retried independently
+  //     without re-running the whole describe block
+  //   - tests no longer share state through a module variable
+  //   - no stale refresh-cookie leaking from test 1 into test 2's fresh context
+  let sharedUser: ReturnType<typeof buildUser>;
 
-  let registeredUser: ReturnType<typeof buildUser> | null = null;
+  test.beforeAll(async ({ request }) => {
+    sharedUser = buildUser('auth');
+    await registerOrLogin(request, sharedUser);
+  });
 
   test('registers a new user via the UI and lands on chat @full @heavy-auth @staging', async ({ page }) => {
+    // Each run (including retries) creates its own uniquely-named user.
     const user = buildUser('newbie');
-    registeredUser = user;
 
     await page.goto('/register');
     await expect(page.getByTestId('route-register')).toBeVisible();
@@ -23,10 +32,7 @@ test.describe('authentication', () => {
   });
 
   test('logs in with valid credentials and can log out @full @heavy-auth @staging', async ({ page }) => {
-    expect(registeredUser, 'registered user should exist from previous test').toBeTruthy();
-    const user = registeredUser!;
-
-    await loginViaUiWithRetry(page, user);
+    await loginViaUiWithRetry(page, sharedUser);
     await expect(page.getByTestId('route-chat')).toBeVisible({ timeout: 15_000 });
 
     await page.getByTestId('account-open').click();
@@ -37,11 +43,10 @@ test.describe('authentication', () => {
   });
 
   test('shows an inline error for a wrong password @full @heavy-auth @staging', async ({ page }) => {
-    expect(registeredUser, 'registered user should exist from previous test').toBeTruthy();
-    const user = registeredUser!;
-
     await page.goto('/login');
-    await page.getByTestId('login-email').fill(user.email);
+    await expect(page.getByTestId('route-login')).toBeVisible({ timeout: 15_000 });
+
+    await page.getByTestId('login-email').fill(sharedUser.email);
     await page.getByTestId('login-password').fill('Definitely!Wrong!99');
     await page.getByTestId('login-submit').click();
 

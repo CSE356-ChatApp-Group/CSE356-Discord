@@ -115,9 +115,19 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     }
     })();
 
+    // Belt-and-suspenders: if the entire init sequence takes longer than 10 s
+    // (e.g., the refresh endpoint hangs on a slow staging server), force loading
+    // to false so the app shows the login page rather than spinning indefinitely.
+    // Individual fetch calls already time out at 12 s via api.ts, but this
+    // catches edge-cases where the Promise chain itself stalls for any reason.
+    const initTimeoutId = setTimeout(() => {
+      if (get().loading) set({ user: null, authBypass: false, loading: false });
+    }, 10_000);
+
     try {
       await initInFlight;
     } finally {
+      clearTimeout(initTimeoutId);
       initInFlight = null;
     }
   },

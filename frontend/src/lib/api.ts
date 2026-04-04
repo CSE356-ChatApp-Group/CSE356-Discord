@@ -14,6 +14,17 @@ type ApiError = Error & { status?: number; errors?: unknown };
 // Each browser tab has an independent session. On page load, authStore.init()
 // restores the session via the httpOnly refresh cookie.
 let _accessToken: string | null = null;
+
+// Maximum time to wait for any single API request before aborting. Prevents the
+// app from getting stuck indefinitely when the server is slow or unreachable.
+const REQUEST_TIMEOUT_MS = 12_000;
+
+function fetchWithTimeout(url: string, init: RequestInit, ms = REQUEST_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timerId = setTimeout(() => controller.abort(), ms);
+  return fetch(url, { ...init, signal: controller.signal })
+    .finally(() => clearTimeout(timerId));
+}
 // Remove any stale token left from the previous localStorage-based approach.
 localStorage.removeItem('accessToken');
 let _refreshing   = null; // in-flight refresh promise
@@ -67,7 +78,7 @@ async function requestFormData(path: string, formData: FormData) {
   const headers: Record<string, string> = {};
   if (_accessToken) headers['Authorization'] = `Bearer ${_accessToken}`;
 
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -87,7 +98,7 @@ async function requestFormData(path: string, formData: FormData) {
 }
 
 async function refreshToken() {
-  const res = await fetch(`${BASE}/auth/refresh`, { method: 'POST', credentials: 'include' });
+  const res = await fetchWithTimeout(`${BASE}/auth/refresh`, { method: 'POST', credentials: 'include' });
   if (!res.ok) throw new Error('Session expired');
   const data = await res.json();
   setToken(data.accessToken);
@@ -119,7 +130,7 @@ async function request(method: string, path: string, body?: unknown, retry = tru
     }
   }
 
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     method,
     headers,
     credentials: 'include',
