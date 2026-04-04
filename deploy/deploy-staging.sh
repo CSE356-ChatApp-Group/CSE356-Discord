@@ -186,6 +186,11 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=8/' /opt/chatapp/shared/.env \
     || echo 'UV_THREADPOOL_SIZE=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # PG_POOL_MAX=150: PG max_connections=300; 150 gives headroom above peak load (~100 iters/s)
+  # without exhausting the server budget. Previous manual value was 100 (break at ~130 iters/s).
+  sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=150/' /opt/chatapp/shared/.env \
+    || echo 'PG_POOL_MAX=150' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'
 "

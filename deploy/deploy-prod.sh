@@ -158,6 +158,16 @@ ssh "$PROD_USER@$PROD_HOST" "
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
+  # Ensure performance-critical env vars are set for this deployment.
+  sudo grep -q '^BCRYPT_ROUNDS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=8/' /opt/chatapp/shared/.env \
+    || echo 'BCRYPT_ROUNDS=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=8/' /opt/chatapp/shared/.env \
+    || echo 'UV_THREADPOOL_SIZE=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=150/' /opt/chatapp/shared/.env \
+    || echo 'PG_POOL_MAX=150' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'"
 echo "✓ systemd unit ready"
