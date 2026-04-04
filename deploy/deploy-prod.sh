@@ -166,8 +166,8 @@ ssh "$PROD_USER@$PROD_HOST" "
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=8/' /opt/chatapp/shared/.env \
     || echo 'UV_THREADPOOL_SIZE=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=150/' /opt/chatapp/shared/.env \
-    || echo 'PG_POOL_MAX=150' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=250/' /opt/chatapp/shared/.env \
+    || echo 'PG_POOL_MAX=250' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'"
 echo "✓ systemd unit ready"

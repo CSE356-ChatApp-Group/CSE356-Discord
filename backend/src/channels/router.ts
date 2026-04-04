@@ -51,17 +51,45 @@ function canManagePrivateMembership(role) {
   return ['owner', 'admin', 'moderator'].includes(role);
 }
 
+/**
+ * Bust channels:list cache for every member of a community.
+ * Fire-and-forget — runs after the response has been sent.
+ */
+async function bustChannelListCache(communityId) {
+  try {
+    const { rows } = await pool.query(
+      'SELECT user_id::text FROM community_members WHERE community_id = $1',
+      [communityId]
+    );
+    if (!rows.length) return;
+    const keys = rows.map(r => `channels:list:${communityId}:${r.user_id}`);
+    await redis.del(...keys);
+  } catch (err) {
+    logger.warn({ err }, 'channels:list cache bust failed');
+  }
+}
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/',
   qv('communityId').isUUID(),
   async (req, res, next) => {
     if (!v(req, res)) return;
+    const { communityId } = req.query;
+    const userId = req.user.id;
     try {
+      // Serve from Redis cache when warm (TTL 15 s).  Channel structure changes
+      // are rare admin operations; WS events keep the frontend state current.
+      const cacheKey = `channels:list:${communityId}:${userId}`;
+      const cached = await redis.get(cacheKey).catch(() => null);
+      if (cached) {
+        return res.json(JSON.parse(cached));
+      }
+
       const { rows: membership } = await pool.query(
         `SELECT 1
          FROM community_members
          WHERE community_id = $1 AND user_id = $2`,
-        [req.query.communityId, req.user.id]
+        [communityId, userId]
       );
       if (!membership.length) {
         return res.status(403).json({ error: 'Not a community member' });
@@ -100,11 +128,10 @@ router.get('/',
                AND rs.channel_id = vc.id
                AND rs.user_id = $2
          ORDER  BY vc.position, vc.name`,
-        [req.query.communityId, req.user.id]
+        [communityId, userId]
       );
 
       // Attach Redis-backed unread_message_count to each accessible channel
-      const userId = req.user.id;
       const accessibleRows = rows.filter(ch => ch.can_access);
       if (accessibleRows.length > 0) {
         try {
@@ -129,34 +156,35 @@ router.get('/',
             }
           }
 
-          // For channels missing Redis data: initialize from DB then compute
+          // For channels missing Redis data: initialize via a single batched
+          // SQL query instead of N×2 individual pool checkouts.
           if (missingChannels.length > 0) {
-            const initPipeline = redis.pipeline();
-            const initData = await Promise.all(missingChannels.map(async (ch) => {
-              const lastReadAt = ch.my_last_read_at || null;
-              const [countRes, readRes] = await Promise.all([
-                pool.query(
-                  `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
-                  [ch.id]
-                ),
-                pool.query(
-                  `SELECT COUNT(*)::int AS cnt FROM messages
-                   WHERE channel_id = $1 AND deleted_at IS NULL
-                     AND ($2::timestamptz IS NULL OR created_at <= $2::timestamptz)`,
-                  [ch.id, lastReadAt]
-                ),
-              ]);
-              return {
-                ch,
-                totalCount: countRes.rows[0]?.cnt ?? 0,
-                readCount:  readRes.rows[0]?.cnt ?? 0,
-              };
-            }));
+            const channelIds   = missingChannels.map(ch => ch.id);
+            const lastReadAts  = missingChannels.map(ch => ch.my_last_read_at || null);
 
-            for (const { ch, totalCount, readCount } of initData) {
-              initPipeline.set(`channel:msg_count:${ch.id}`, totalCount, 'NX');
-              initPipeline.set(`user:last_read_count:${ch.id}:${userId}`, readCount, 'NX');
-              ch.unread_message_count = Math.max(0, totalCount - readCount);
+            const { rows: countRows } = await pool.query(
+              `SELECT
+                 refs.channel_id::text,
+                 COUNT(*) FILTER (WHERE m.deleted_at IS NULL)                                                     AS total_count,
+                 COUNT(*) FILTER (WHERE m.deleted_at IS NULL
+                                    AND (refs.last_read_at IS NULL OR m.created_at <= refs.last_read_at)) AS read_count
+               FROM (SELECT unnest($1::uuid[]) AS channel_id,
+                            unnest($2::timestamptz[]) AS last_read_at) AS refs
+               LEFT JOIN messages m ON m.channel_id = refs.channel_id
+               GROUP BY refs.channel_id`,
+              [channelIds, lastReadAts]
+            );
+
+            const countMap = new Map(
+              countRows.map(r => [r.channel_id, { total: parseInt(r.total_count, 10), read: parseInt(r.read_count, 10) }])
+            );
+
+            const initPipeline = redis.pipeline();
+            for (const ch of missingChannels) {
+              const counts = countMap.get(ch.id) || { total: 0, read: 0 };
+              initPipeline.set(`channel:msg_count:${ch.id}`, counts.total, 'NX');
+              initPipeline.set(`user:last_read_count:${ch.id}:${userId}`, counts.read, 'NX');
+              ch.unread_message_count = Math.max(0, counts.total - counts.read);
             }
             await initPipeline.exec();
           }
@@ -168,7 +196,10 @@ router.get('/',
         }
       }
 
-      res.json({ channels: rows });
+      const response = { channels: rows };
+      // Cache per-user per-community for 15 s to absorb repeated REST polls.
+      redis.set(cacheKey, JSON.stringify(response), 'EX', 15).catch(() => {});
+      res.json(response);
     } catch (err) { next(err); }
   }
 );
@@ -216,6 +247,7 @@ router.post('/',
       await client.query('COMMIT');
       client.release();
       sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:created', channel);
+      bustChannelListCache(communityId).catch(() => {});
       res.status(201).json({ channel });
     } catch (err) {
       if (client) {
@@ -370,6 +402,7 @@ router.patch('/:id',
         [req.body.name || null, req.body.description ?? null, req.params.id]
       );
       if (!rows.length) return res.status(404).json({ error: 'Not found' });
+      bustChannelListCache(rows[0].community_id).catch(() => {});
       res.json({ channel: rows[0] });
     } catch (err) { next(err); }
   }
@@ -379,7 +412,11 @@ router.patch('/:id',
 router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
   if (!v(req, res)) return;
   try {
-    await pool.query('DELETE FROM channels WHERE id=$1', [req.params.id]);
+    const { rows } = await pool.query(
+      'DELETE FROM channels WHERE id=$1 RETURNING community_id',
+      [req.params.id]
+    );
+    if (rows.length) bustChannelListCache(rows[0].community_id).catch(() => {});
     res.json({ success: true });
   } catch (err) { next(err); }
 });
