@@ -155,10 +155,10 @@ echo "5.5. Installing/updating systemd unit..."
 ssh "$PROD_USER@$PROD_HOST" 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
 ssh "$PROD_USER@$PROD_HOST" "
   set -e
-  sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | tee /etc/systemd/system/chatapp@.service > /dev/null
+  sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
-  sed -i '/^PORT=/d' /opt/chatapp/shared/.env
-  systemctl daemon-reload
+  sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
+  sudo systemctl daemon-reload
   echo 'systemd unit installed'"
 echo "✓ systemd unit ready"
 
@@ -170,14 +170,14 @@ ssh "$PROD_USER@$PROD_HOST" "
 
   # Write per-port drop-in so systemd uses this release's working directory.
   DROPIN_DIR=/etc/systemd/system/chatapp@${NEW_PORT}.service.d
-  mkdir -p \$DROPIN_DIR
-  printf '[Service]\nWorkingDirectory=%s/backend\n' \$RELEASE_PATH | tee \${DROPIN_DIR}/release.conf > /dev/null
-  systemctl daemon-reload
+  sudo mkdir -p \$DROPIN_DIR
+  printf '[Service]\nWorkingDirectory=%s/backend\n' \$RELEASE_PATH | sudo tee \${DROPIN_DIR}/release.conf > /dev/null
+  sudo systemctl daemon-reload
 
   # Stop any stale process on candidate port, then start fresh.
-  systemctl stop chatapp@${NEW_PORT} 2>/dev/null || true
+  sudo systemctl stop chatapp@${NEW_PORT} 2>/dev/null || true
   sleep 1
-  systemctl start chatapp@${NEW_PORT}
+  sudo systemctl start chatapp@${NEW_PORT}
 
   echo 'Candidate started via systemd (chatapp@${NEW_PORT})'
 "
@@ -187,7 +187,7 @@ echo "✓ Candidate process started on port $NEW_PORT"
 echo "7. Running health checks on candidate..."
 ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
   echo "ERROR: Health check failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "systemctl stop chatapp@${NEW_PORT} || true"
+  ssh "$PROD_USER@$PROD_HOST" "sudo systemctl stop chatapp@${NEW_PORT} || true"
   exit 1
 }
 echo "✓ Health checks passed"
@@ -196,7 +196,7 @@ echo "✓ Health checks passed"
 echo "8. Running smoke tests..."
 ssh "$PROD_USER@$PROD_HOST" "/tmp/smoke-test.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
   echo "ERROR: Smoke tests failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "systemctl stop chatapp@${NEW_PORT} || true"
+  ssh "$PROD_USER@$PROD_HOST" "sudo systemctl stop chatapp@${NEW_PORT} || true"
   exit 1
 }
 echo "✓ Smoke tests passed"
@@ -217,7 +217,7 @@ echo "✓ Nginx switched to new version"
 
 # 9.5. Enable new service for auto-start on reboot
 echo "9.5 Enabling candidate service for auto-start on reboot..."
-ssh "$PROD_USER@$PROD_HOST" "systemctl enable chatapp@${NEW_PORT} 2>/dev/null || true"
+ssh "$PROD_USER@$PROD_HOST" "sudo systemctl enable chatapp@${NEW_PORT} 2>/dev/null || true"
 echo "✓ Service enabled"
 
 # 10. Monitor briefly
