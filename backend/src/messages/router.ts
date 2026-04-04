@@ -135,51 +135,64 @@ router.get('/',
         return res.status(400).json({ error: 'channelId or conversationId required' });
       }
 
+      // Build a single query that enforces access control and returns messages in one pool checkout.
+      const params: any[] = [limit, req.user.id];
+
+      let accessWhere: string;
+      let targetWhere: string;
+
       if (channelId) {
-        const { rows: [channel] } = await pool.query(
-          `SELECT c.id FROM channels c
-            WHERE c.id = $1
-              AND (c.is_private = FALSE 
-                  OR EXISTS (
-                    SELECT 1 FROM channel_members cm
-                    WHERE cm.channel_id = c.id AND cm.user_id = $2
-                  ))`,
-          [channelId, req.user.id]
-        );
-        if (!channel) return res.status(403).json({ error: 'Access denied' });
+        params.push(channelId);
+        const ci = params.length; // $3
+        accessWhere = `EXISTS (
+          SELECT 1 FROM channels c
+          WHERE c.id = $${ci}
+            AND (c.is_private = FALSE
+                 OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
+        )`;
+        targetWhere = `m.channel_id = $${ci}`;
+      } else {
+        params.push(conversationId);
+        const ci = params.length; // $3
+        accessWhere = `EXISTS (
+          SELECT 1 FROM conversation_participants cp
+          WHERE cp.conversation_id = $${ci} AND cp.user_id = $2 AND cp.left_at IS NULL
+        )`;
+        targetWhere = `m.conversation_id = $${ci}`;
       }
-      
-      if (conversationId) {
-        const { rows: [conv] } = await pool.query(
-          `SELECT 1 FROM conversation_participants 
-            WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
-          [conversationId, req.user.id]
-        );
-        if (!conv) return res.status(403).json({ error: 'Not a participant' });
-      }
-      const params = [limit];
-      let where = channelId
-        ? `m.channel_id = $${params.push(channelId)}`
-        : `m.conversation_id = $${params.push(conversationId)}`;
 
       if (before) {
-        where += ` AND m.created_at < (SELECT created_at FROM messages WHERE id = $${params.push(before)})`;
+        params.push(before);
+        targetWhere += ` AND m.created_at < (SELECT created_at FROM messages WHERE id = $${params.length})`;
       }
 
       const sql = `
         SELECT m.*,
-           CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+               CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
                COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
         FROM   messages m
-         LEFT JOIN users u ON u.id = m.author_id
+        LEFT JOIN users u ON u.id = m.author_id
         LEFT JOIN attachments a ON a.message_id = m.id
-        WHERE  ${where} AND m.deleted_at IS NULL
+        WHERE  ${targetWhere} AND m.deleted_at IS NULL
+          AND  ${accessWhere}
         GROUP  BY m.id, u.id
         ORDER  BY m.created_at DESC
         LIMIT  $1
       `;
 
       const { rows } = await pool.query(sql, params);
+
+      if (rows.length === 0) {
+        // Distinguish "no messages" from "access denied" with a lightweight check.
+        const accessCheck = await pool.query(
+          channelId
+            ? `SELECT 1 FROM channels WHERE id = $1 AND (is_private = FALSE OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2))`
+            : `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+          [channelId ?? conversationId, req.user.id]
+        );
+        if (!accessCheck.rows.length) return res.status(403).json({ error: channelId ? 'Access denied' : 'Not a participant' });
+      }
+
       res.json({ messages: rows.reverse() }); // return in chronological order
     } catch (err) { next(err); }
   }
@@ -308,6 +321,11 @@ router.post('/',
          GROUP  BY m.id, u.id`,
         [baseMessage.id]
       );
+
+      // Release the pool connection before fanout/side-effects so it doesn't
+      // hold a slot while publishConversationEvent does its own pool.query().
+      client.release();
+      client = null;
 
       sideEffects.indexMessage(baseMessage);
       if (conversationId) {

@@ -80,8 +80,7 @@ lines.push('');
 lines.push(`- RSS memory: ${fmt(promScalar(after, 'rss_mb'), ' MB')}`);
 lines.push(`- Event loop p99: ${fmt(promScalar(after, 'eventloop_p99_ms'), ' ms')}`);
 lines.push(`- 5xx rate: ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
-lines.push(`- PG pool total/idle/waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
-
+lines.push(`- PG pool peak-total/min-idle/peak-waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
 
 const queueDepth = promResult(after, 'side_effect_queue_depth');
 if (queueDepth.length) {

@@ -28,9 +28,9 @@ queries = {
     "side_effect_queue_depth": 'sum(side_effect_queue_depth{job="chatapp-api"}) by (queue)',
     "side_effect_queue_workers": 'sum(side_effect_queue_active_workers{job="chatapp-api"}) by (queue)',
     "presence_fanout_rate": 'sum by (status, throttled) (rate(presence_fanout_total{job="chatapp-api"}[5m]))',
-    "pg_pool_total": 'max(pg_pool_total{job="chatapp-api"})',
-    "pg_pool_idle": 'max(pg_pool_idle{job="chatapp-api"})',
-    "pg_pool_waiting": 'max(pg_pool_waiting{job="chatapp-api"})',
+    "pg_pool_total": 'max_over_time(pg_pool_total{job="chatapp-api"}[10m])',
+    "pg_pool_idle": 'min_over_time(pg_pool_idle{job="chatapp-api"}[10m])',
+    "pg_pool_waiting": 'max_over_time(pg_pool_waiting{job="chatapp-api"}[10m])',
 }
 
 def run_query(name, query):
