@@ -58,7 +58,9 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo tee /etc/nginx/sites-available/chatapp >/dev/null <<'EOF'
 upstream chatapp_upstream {
   server 127.0.0.1:__LIVE_PORT__;
-  keepalive 32;
+  keepalive 128;
+  keepalive_requests 10000;
+  keepalive_timeout 75s;
 }
 
 server {
@@ -82,7 +84,7 @@ server {
   location /api/ {
     proxy_pass http://chatapp_upstream;
     proxy_http_version 1.1;
-    proxy_set_header Connection "";
+    proxy_set_header Connection \"\";
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
