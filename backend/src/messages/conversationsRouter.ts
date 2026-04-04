@@ -376,11 +376,18 @@ router.patch(
         );
 
         const conv = await loadConversationWithParticipants(client, id);
-        await publishConversationEvents(
-          [`conversation:${id}`],
-          'conversation:updated',
-          { conversation: conv, conversationId: id }
-        );
+        const participantIds: string[] = Array.isArray(conv?.participants)
+          ? conv.participants.map((p: { id: string }) => p.id)
+          : [];
+
+        await Promise.allSettled([
+          publishConversationEvents(
+            [`conversation:${id}`],
+            'conversation:updated',
+            { conversation: conv, conversationId: id }
+          ),
+          ...participantIds.map((uid) => redis.del(conversationsCacheKey(uid))),
+        ]);
         res.json({ conversation: conv });
       } finally {
         client.release();
@@ -474,11 +481,16 @@ async function addParticipantsHandler(req, res, next) {
 
     await client.query('COMMIT');
     if (participantIdsToAdd.length > 0) {
-      await Promise.allSettled(
-        participantIdsToAdd.map((participantId) =>
+      await Promise.allSettled([
+        ...participantIdsToAdd.map((participantId) =>
           presenceService.invalidatePresenceFanoutTargets(participantId)
-        )
-      );
+        ),
+        // Invalidate conversation list cache for newly added AND existing
+        // participants so everyone sees the updated participant list immediately.
+        ...[...participantIdsToAdd, ...currentParticipantIds].map((uid) =>
+          redis.del(conversationsCacheKey(uid))
+        ),
+      ]);
     }
 
     if (joinedGroupMessages.length > 0) {

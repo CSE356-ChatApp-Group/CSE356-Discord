@@ -11,15 +11,32 @@ test.describe('community and channel', () => {
 
   let context: BrowserContext;
   let page: Page;
+  let authToken: string;
 
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(90_000);
     context = await browser.newContext();
     page = await context.newPage();
-    await ensureAuthenticated(context, page, buildUser('community'));
+    authToken = await ensureAuthenticated(context, page, buildUser('community'));
   });
 
   test.afterAll(async () => {
+    // Delete all communities owned by this test user so staging doesn't accumulate them.
+    try {
+      const res = await context.request.get('/api/v1/communities', {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (res.ok()) {
+        const { communities } = await res.json();
+        await Promise.allSettled(
+          (communities as Array<{ id: string; owner_id?: string }>).map((c) =>
+            context.request.delete(`/api/v1/communities/${c.id}`, {
+              headers: { Authorization: `Bearer ${authToken}` },
+            })
+          )
+        );
+      }
+    } catch { /* best-effort cleanup */ }
     await context?.close();
   });
 

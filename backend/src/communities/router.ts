@@ -182,6 +182,7 @@ router.post('/',
 
       await client.query('COMMIT');
       await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+      redis.del(communitiesCacheKey(req.user.id)).catch(() => {});
       res.status(201).json({ community });
     } catch (err) {
       await client?.query('ROLLBACK');
@@ -223,12 +224,20 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
+    const { rows: memberRows } = await pool.query(
+      'SELECT user_id FROM community_members WHERE community_id=$1',
+      [req.params.id]
+    );
+
     await pool.query('DELETE FROM communities WHERE id=$1', [req.params.id]);
 
-    await fanout.publish(`community:${req.params.id}`, {
-      event: 'community:deleted',
-      data: { communityId: req.params.id },
-    });
+    await Promise.allSettled([
+      ...memberRows.map(r => redis.del(communitiesCacheKey(r.user_id))),
+      fanout.publish(`community:${req.params.id}`, {
+        event: 'community:deleted',
+        data: { communityId: req.params.id },
+      }),
+    ]);
 
     res.json({ success: true });
   } catch (err) { next(err); }
