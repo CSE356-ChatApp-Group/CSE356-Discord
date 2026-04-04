@@ -208,8 +208,14 @@ ssh "$PROD_USER@$PROD_HOST" "
   
   # Update Nginx upstream
   sudo sed -i -E \"s/(127\\\\.0\\\\.0\\\\.1|localhost):$OLD_PORT/localhost:$NEW_PORT/g\" /etc/nginx/sites-available/chatapp
+  # Ensure listen backlog is high enough for burst connection ramps.
+  sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' /etc/nginx/sites-available/chatapp
+  sudo sed -i 's/listen \[::\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' /etc/nginx/sites-available/chatapp
   sudo nginx -t >/dev/null
   sudo systemctl reload nginx
+  # Raise kernel TCP backlog so burst connection ramps don't drop SYN packets.
+  sudo sysctl -w net.ipv4.tcp_max_syn_backlog=4096 >/dev/null
+  sudo sysctl -w net.core.somaxconn=4096 >/dev/null
   
   echo 'Nginx upstream switched from port $OLD_PORT to $NEW_PORT'
 "

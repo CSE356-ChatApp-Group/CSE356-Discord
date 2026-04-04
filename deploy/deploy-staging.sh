@@ -64,8 +64,8 @@ upstream chatapp_upstream {
 }
 
 server {
-  listen 80 default_server;
-  listen [::]:80 default_server;
+  listen 80 default_server backlog=4096;
+  listen [::]:80 default_server backlog=4096;
   server_name _;
 
   location /ws {
@@ -140,6 +140,9 @@ EOF
   sudo rm -f /etc/nginx/sites-enabled/default
   sudo nginx -t
   sudo systemctl reload nginx
+  # Raise kernel TCP backlog so burst connection ramps don't drop SYN packets.
+  sudo sysctl -w net.ipv4.tcp_max_syn_backlog=4096 >/dev/null
+  sudo sysctl -w net.core.somaxconn=4096 >/dev/null
 "
 
 if [[ -z "$LOCAL_ARTIFACT_PATH" ]] && ! command -v gh >/dev/null 2>&1; then
