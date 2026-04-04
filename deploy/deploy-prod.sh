@@ -226,6 +226,10 @@ ssh "$PROD_USER@$PROD_HOST" "
   # Raise kernel TCP backlog so burst connection ramps don't drop SYN packets.
   sudo sysctl -w net.ipv4.tcp_max_syn_backlog=4096 >/dev/null
   sudo sysctl -w net.core.somaxconn=4096 >/dev/null
+  # Raise nginx worker_connections (Ubuntu default is 768; raise to 4096).
+  sudo sed -i 's/worker_connections [0-9]*/worker_connections 4096/' /etc/nginx/nginx.conf
+  sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' /etc/nginx/nginx.conf
+  sudo nginx -t && sudo systemctl reload nginx
   
   echo 'Nginx upstream switched from port $OLD_PORT to $NEW_PORT'
 "
