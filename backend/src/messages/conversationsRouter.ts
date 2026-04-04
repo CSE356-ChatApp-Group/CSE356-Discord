@@ -11,6 +11,7 @@
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
 const { pool }         = require('../db/pool');
+const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
 const presenceService  = require('../presence/service');
@@ -151,8 +152,18 @@ async function isGroupConversation(client, conversationId) {
   return Boolean(rows[0].is_group);
 }
 
+const CONVERSATIONS_CACHE_TTL_SECS = 2;
+function conversationsCacheKey(userId) { return `conversations:list:${userId}`; }
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
+  const cacheKey = conversationsCacheKey(req.user.id);
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) return res.json(JSON.parse(cached));
+  } catch {
+    // cache miss – fall through to DB
+  }
   try {
     const { rows } = await pool.query(
       `SELECT c.*,
@@ -192,6 +203,8 @@ router.get('/', async (req, res, next) => {
        ORDER  BY COALESCE(lm.created_at, c.updated_at) DESC`,
       [req.user.id]
     );
+    const payload = JSON.stringify({ conversations: rows });
+    redis.setex(cacheKey, CONVERSATIONS_CACHE_TTL_SECS, payload).catch(() => {});
     res.json({ conversations: rows });
   } catch (err) { next(err); }
 });
@@ -263,9 +276,10 @@ router.post('/',
       const conversation = await loadConversationWithParticipants(client, conv.id);
       const invitedUserIds = allIds.filter(id => id !== req.user.id);
       await client.query('COMMIT');
-      await Promise.allSettled(
-        allIds.map((participantId) => presenceService.invalidatePresenceFanoutTargets(participantId))
-      );
+      await Promise.allSettled([
+        ...allIds.map((participantId) => presenceService.invalidatePresenceFanoutTargets(participantId)),
+        ...allIds.map((uid) => redis.del(conversationsCacheKey(uid))),
+      ]);
 
       if (conversation) {
         await publishConversationInviteNotifications(
@@ -548,6 +562,7 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     }
     await client.query('COMMIT');
     await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+    redis.del(conversationsCacheKey(req.user.id)).catch(() => {});
 
     // Broadcast system message if group DM and not deleted
     if (leftGroupMessage) {

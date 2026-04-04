@@ -30,6 +30,18 @@ const PROFILES = {
     wsVUs: 10,
     wsDuration: '2m',
   },
+  // Same peak load as 'peak' but compressed into ~2.5min for fast iteration
+  quick: {
+    httpStages: [
+      { target: 50, duration: '30s' },
+      { target: 100, duration: '1m' },
+      { target: 0, duration: '20s' },
+    ],
+    preAllocatedVUs: 60,
+    maxVUs: 180,
+    wsVUs: 30,
+    wsDuration: '2m30s',
+  },
   peak: {
     httpStages: [
       { target: 20, duration: '1m' },
