@@ -24,6 +24,7 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 # PG pool budget (250 total, leaving ~50 for admin) is divided by this value.
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
 PG_POOL_MAX_PER_INSTANCE=$(( 250 / CHATAPP_INSTANCES ))
+UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
 
 echo "=== PRODUCTION DEPLOYMENT ==="
 echo "Release: $RELEASE_SHA"
@@ -169,8 +170,8 @@ ssh "$PROD_USER@$PROD_HOST" "
     && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=8/' /opt/chatapp/shared/.env \
     || echo 'BCRYPT_ROUNDS=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=8/' /opt/chatapp/shared/.env \
-    || echo 'UV_THREADPOOL_SIZE=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \
+    || echo 'UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null

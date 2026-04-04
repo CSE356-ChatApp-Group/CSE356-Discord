@@ -23,6 +23,9 @@ CUTOVER_COMPLETED=0
 # divided evenly so the aggregate never exceeds PG max_connections=300.
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-2}
 PG_POOL_MAX_PER_INSTANCE=$(( 250 / CHATAPP_INSTANCES ))
+# libuv thread pool per instance: total budget stays 8 so aggregate CPU load
+# from bcrypt/dns/fs threads equals a single-instance deployment.
+UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
@@ -198,8 +201,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     || echo 'BCRYPT_ROUNDS=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # UV_THREADPOOL_SIZE: increase libuv thread pool for concurrent bcrypt/dns/fs work.
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=8/' /opt/chatapp/shared/.env \
-    || echo 'UV_THREADPOOL_SIZE=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \
+    || echo 'UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # PG_POOL_MAX: divide the total connection budget evenly across all instances so the
   # aggregate pool never exceeds PG max_connections=300 (~50 reserved for admin/maintenance).
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
