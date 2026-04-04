@@ -41,8 +41,12 @@ async function loadMembership(req, res, next) {
   next();
 }
 
-const COMMUNITIES_CACHE_TTL_SECS = 2;
+const COMMUNITIES_CACHE_TTL_SECS = 30;
 function communitiesCacheKey(userId) { return `communities:list:${userId}`; }
+
+// In-process singleflight: prevents thundering-herd when cache expires.
+// All concurrent requests for the same key share one DB query in flight.
+const communitiesInflight: Map<string, Promise<{ communities: any[] }>> = new Map();
 
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
@@ -53,7 +57,18 @@ router.get('/', async (req, res, next) => {
   } catch {
     // cache miss – fall through to DB
   }
-  try {
+
+  // Singleflight: if a DB query is already in-flight for this key, wait for it
+  // rather than spawning a second concurrent query (thundering-herd defence).
+  if (communitiesInflight.has(cacheKey)) {
+    try {
+      return res.json(await communitiesInflight.get(cacheKey));
+    } catch (err) {
+      return next(err);
+    }
+  }
+
+  const promise: Promise<{ communities: any[] }> = (async () => {
     const { rows } = await pool.query(
       `WITH visible_communities AS (
          SELECT c.*, cm.role AS my_role
@@ -112,9 +127,16 @@ router.get('/', async (req, res, next) => {
        ORDER BY vc.name`,
       [req.user.id]
     );
-    const payload = JSON.stringify({ communities: rows });
-    redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, payload).catch(() => {});
-    res.json({ communities: rows });
+    const payload = { communities: rows };
+    redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
+    return payload;
+  })();
+
+  communitiesInflight.set(cacheKey, promise);
+  promise.finally(() => communitiesInflight.delete(cacheKey));
+
+  try {
+    res.json(await promise);
   } catch (err) { next(err); }
 });
 

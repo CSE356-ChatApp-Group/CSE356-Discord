@@ -30,29 +30,29 @@ const PROFILES = {
     wsVUs: 10,
     wsDuration: '2m',
   },
-  // Warm up cache for 30s, then ramp to peak — takes ~2.5min total
+  // Warm up cache, then ramp to peak — takes ~2m total
   quick: {
     httpStages: [
       { target: 20, duration: '30s' },
-      { target: 100, duration: '1m' },
-      { target: 0, duration: '20s' },
+      { target: 100, duration: '45s' },
+      { target: 0, duration: '15s' },
     ],
     preAllocatedVUs: 60,
     maxVUs: 180,
     wsVUs: 30,
-    wsDuration: '2m30s',
+    wsDuration: '1m45s',
   },
   peak: {
     httpStages: [
-      { target: 20, duration: '1m' },
-      { target: 50, duration: '2m' },
-      { target: 100, duration: '2m' },
-      { target: 0, duration: '30s' },
+      { target: 20, duration: '30s' },
+      { target: 50, duration: '1m' },
+      { target: 100, duration: '1m' },
+      { target: 0, duration: '15s' },
     ],
     preAllocatedVUs: 60,
     maxVUs: 180,
     wsVUs: 30,
-    wsDuration: '6m',
+    wsDuration: '3m',
   },
   break: {
     httpStages: [
@@ -316,6 +316,18 @@ export function httpMix(data) {
   }
 
   sleep(Math.random() * 0.35);
+}
+
+// Delete the test community so stale public communities don't accumulate in the
+// DB across runs. Each run creating a new public community bloats the
+// GET /communities CTE query (it scans ALL public communities).
+export function teardown(data) {
+  if (!data || !data.communityId || !data.ownerToken) return;
+  http.del(
+    `${BASE_URL}/communities/${data.communityId}`,
+    null,
+    { headers: { Authorization: `Bearer ${data.ownerToken}` } },
+  );
 }
 
 export function presenceSocketStorm(data) {

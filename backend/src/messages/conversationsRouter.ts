@@ -152,8 +152,11 @@ async function isGroupConversation(client, conversationId) {
   return Boolean(rows[0].is_group);
 }
 
-const CONVERSATIONS_CACHE_TTL_SECS = 2;
+const CONVERSATIONS_CACHE_TTL_SECS = 15;
 function conversationsCacheKey(userId) { return `conversations:list:${userId}`; }
+
+// In-process singleflight: prevents thundering-herd on cache expiry.
+const conversationsInflight: Map<string, Promise<{ conversations: any[] }>> = new Map();
 
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
@@ -164,7 +167,16 @@ router.get('/', async (req, res, next) => {
   } catch {
     // cache miss – fall through to DB
   }
-  try {
+
+  if (conversationsInflight.has(cacheKey)) {
+    try {
+      return res.json(await conversationsInflight.get(cacheKey));
+    } catch (err) {
+      return next(err);
+    }
+  }
+
+  const promise: Promise<{ conversations: any[] }> = (async () => {
     const { rows } = await pool.query(
       `SELECT c.*,
               lm.id AS last_message_id,
@@ -203,9 +215,16 @@ router.get('/', async (req, res, next) => {
        ORDER  BY COALESCE(lm.created_at, c.updated_at) DESC`,
       [req.user.id]
     );
-    const payload = JSON.stringify({ conversations: rows });
-    redis.setex(cacheKey, CONVERSATIONS_CACHE_TTL_SECS, payload).catch(() => {});
-    res.json({ conversations: rows });
+    const payload = { conversations: rows };
+    redis.setex(cacheKey, CONVERSATIONS_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
+    return payload;
+  })();
+
+  conversationsInflight.set(cacheKey, promise);
+  promise.finally(() => conversationsInflight.delete(cacheKey));
+
+  try {
+    res.json(await promise);
   } catch (err) { next(err); }
 });
 

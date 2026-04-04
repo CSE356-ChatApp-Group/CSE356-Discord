@@ -172,6 +172,15 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sed 's/__DEPLOY_USER__/${STAGING_USER}/g' /tmp/chatapp@.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
+  # Ensure performance-critical env vars are set for this deployment.
+  # BCRYPT_ROUNDS=8: ~125ms/op on a 2-vCPU Xeon vs ~500ms at rounds=10.
+  sudo grep -q '^BCRYPT_ROUNDS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=8/' /opt/chatapp/shared/.env \
+    || echo 'BCRYPT_ROUNDS=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # UV_THREADPOOL_SIZE: increase libuv thread pool for concurrent bcrypt/dns/fs work.
+  sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=8/' /opt/chatapp/shared/.env \
+    || echo 'UV_THREADPOOL_SIZE=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'
 "
@@ -232,6 +241,20 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo systemctl reload nginx
 "
 CUTOVER_COMPLETED=1
+
+echo "7a) Updating Prometheus scrape target to new live port ${CANDIDATE_PORT}..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  # Try common Prometheus config locations; update the API scrape target port.
+  for PROM_CFG in /etc/prometheus/prometheus.yml /opt/prometheus/prometheus.yml; do
+    if [ -f \"\$PROM_CFG\" ]; then
+      sudo sed -i 's/127\.0\.0\.1:${LIVE_PORT}/127.0.0.1:${CANDIDATE_PORT}/g' \"\$PROM_CFG\"
+      # Reload Prometheus if running (ignore errors — monitoring is non-critical).
+      curl -fsS -X POST 'http://127.0.0.1:9090/-/reload' 2>/dev/null || true
+      echo \"Updated Prometheus config at \$PROM_CFG\"
+      break
+    fi
+  done
+" || echo "Warning: Prometheus config update failed (non-critical)" >&2
 
 echo "8) Enabling candidate service for auto-start on reboot..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "sudo systemctl enable chatapp@${CANDIDATE_PORT} 2>/dev/null || true"
