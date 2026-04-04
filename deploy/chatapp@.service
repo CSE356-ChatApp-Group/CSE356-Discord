@@ -1,0 +1,25 @@
+[Unit]
+Description=ChatApp Node.js (port %i)
+After=network.target postgresql.service redis.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=__DEPLOY_USER__
+# PORT must NOT be set in the shared .env — systemd injects it via PORT=%i.
+# EnvironmentFile is loaded first; Environment= entries that follow override it.
+EnvironmentFile=/opt/chatapp/shared/.env
+Environment=PORT=%i
+# WorkingDirectory is overridden per-deploy via drop-in:
+#   /etc/systemd/system/chatapp@PORT.service.d/release.conf
+WorkingDirectory=/opt/chatapp/current/backend
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chatapp-%i
+
+[Install]
+WantedBy=multi-user.target

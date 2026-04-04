@@ -15,7 +15,6 @@ CURRENT_LINK="/opt/chatapp/current"
 OLD_PORT=4000
 NEW_PORT=4001
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REMOTE_CANDIDATE_PID_FILE="/tmp/chatapp-${RELEASE_SHA}-candidate.pid"
 MONITOR_SECONDS="${MONITOR_SECONDS:-30}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
@@ -113,7 +112,7 @@ echo "✓ Artifact ready locally"
 # 4. Copy to production server
 echo "4. Copying to production..."
 scp "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
-scp "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "$PROD_USER@$PROD_HOST:/tmp/"
+scp "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "${SCRIPT_DIR}/chatapp@.service" "$PROD_USER@$PROD_HOST:/tmp/"
 rm "$DOWNLOAD_PATH"
 echo "✓ Copied to production"
 
@@ -149,41 +148,36 @@ ssh "$PROD_USER@$PROD_HOST" "
 "
 echo "✓ Candidate release ready"
 
-# 6. Start candidate on alternate port
-echo "6. Starting candidate process..."
+# 5.5. Install/update systemd unit
+echo "5.5. Installing/updating systemd unit..."
+scp "${SCRIPT_DIR}/chatapp@.service" "$PROD_USER@$PROD_HOST:/tmp/chatapp@.service"
+ssh "$PROD_USER@$PROD_HOST" "
+  set -e
+  sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp@.service | tee /etc/systemd/system/chatapp@.service > /dev/null
+  # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
+  sed -i '/^PORT=/d' /opt/chatapp/shared/.env
+  systemctl daemon-reload
+  echo 'systemd unit installed'"
+echo "✓ systemd unit ready"
+
+# 6. Start candidate on alternate port via systemd
+echo "6. Starting candidate process via systemd..."
 ssh "$PROD_USER@$PROD_HOST" "
   set -e
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
-  
-  cd \$RELEASE_PATH
-  set -a
-  source /opt/chatapp/shared/.env
-  set +a
-  export NODE_ENV=production
-  export PORT=$NEW_PORT
-  
-  # Kill any existing process on the candidate port
-  if lsof -i :$NEW_PORT >/dev/null 2>&1; then
-    echo 'Killing existing process on port $NEW_PORT'
-    lsof -ti :$NEW_PORT | xargs kill -9 2>/dev/null || true
-    sleep 1
-  fi
-  
-  # Start candidate in background
-  nohup npm --prefix backend start > /tmp/chatapp-${RELEASE_SHA}-candidate.log 2>&1 &
-  CANDIDATE_PID=\$!
-  echo \$CANDIDATE_PID > ${REMOTE_CANDIDATE_PID_FILE}
-  
-  # Wait for startup
-  sleep 4
-  
-  if ! kill -0 \$CANDIDATE_PID 2>/dev/null; then
-    echo 'ERROR: Candidate process exited immediately'
-    tail -30 /tmp/chatapp-${RELEASE_SHA}-candidate.log
-    exit 1
-  fi
-  
-  echo 'Candidate process started (PID: '\$CANDIDATE_PID')'
+
+  # Write per-port drop-in so systemd uses this release's working directory.
+  DROPIN_DIR=/etc/systemd/system/chatapp@${NEW_PORT}.service.d
+  mkdir -p \$DROPIN_DIR
+  printf '[Service]\nWorkingDirectory=%s/backend\n' \$RELEASE_PATH | tee \${DROPIN_DIR}/release.conf > /dev/null
+  systemctl daemon-reload
+
+  # Stop any stale process on candidate port, then start fresh.
+  systemctl stop chatapp@${NEW_PORT} 2>/dev/null || true
+  sleep 1
+  systemctl start chatapp@${NEW_PORT}
+
+  echo 'Candidate started via systemd (chatapp@${NEW_PORT})'
 "
 echo "✓ Candidate process started on port $NEW_PORT"
 
@@ -191,7 +185,7 @@ echo "✓ Candidate process started on port $NEW_PORT"
 echo "7. Running health checks on candidate..."
 ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
   echo "ERROR: Health check failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "kill \$(cat ${REMOTE_CANDIDATE_PID_FILE}) || true; rm -f ${REMOTE_CANDIDATE_PID_FILE}"
+  ssh "$PROD_USER@$PROD_HOST" "systemctl stop chatapp@${NEW_PORT} || true"
   exit 1
 }
 echo "✓ Health checks passed"
@@ -200,7 +194,7 @@ echo "✓ Health checks passed"
 echo "8. Running smoke tests..."
 ssh "$PROD_USER@$PROD_HOST" "/tmp/smoke-test.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
   echo "ERROR: Smoke tests failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "kill \$(cat ${REMOTE_CANDIDATE_PID_FILE}) || true; rm -f ${REMOTE_CANDIDATE_PID_FILE}"
+  ssh "$PROD_USER@$PROD_HOST" "systemctl stop chatapp@${NEW_PORT} || true"
   exit 1
 }
 echo "✓ Smoke tests passed"
@@ -218,6 +212,11 @@ ssh "$PROD_USER@$PROD_HOST" "
   echo 'Nginx upstream switched from port $OLD_PORT to $NEW_PORT'
 "
 echo "✓ Nginx switched to new version"
+
+# 9.5. Enable new service for auto-start on reboot
+echo "9.5 Enabling candidate service for auto-start on reboot..."
+ssh "$PROD_USER@$PROD_HOST" "systemctl enable chatapp@${NEW_PORT} 2>/dev/null || true"
+echo "✓ Service enabled"
 
 # 10. Monitor briefly
 MONITOR_CHECKS=$((MONITOR_SECONDS / 5))
@@ -282,4 +281,4 @@ echo "To rollback immediately:"
 echo "  ssh $PROD_USER@$PROD_HOST 'sudo sed -i -E \"s/(127\\.0\\.0\\.1|localhost):$NEW_PORT/localhost:$OLD_PORT/g\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
 echo ""
 echo "To stop the old version after confidence window (keep for ~10 min):"
-echo "  ssh $PROD_USER@$PROD_HOST 'pkill -f \"PORT=$OLD_PORT\" || true'"
+echo "  ssh $PROD_USER@$PROD_HOST 'systemctl stop chatapp@$OLD_PORT'"

@@ -15,7 +15,6 @@ CURRENT_LINK="/opt/chatapp/current"
 CANDIDATE_PORT=4001
 LIVE_PORT=4000
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REMOTE_CANDIDATE_PID_FILE="/tmp/chatapp-${RELEASE_SHA}-candidate.pid"
 CUTOVER_COMPLETED=0
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
@@ -47,14 +46,7 @@ cleanup_candidate() {
 
   echo "Deployment failed before cutover; cleaning up candidate port ${CANDIDATE_PORT}..."
   ssh "${STAGING_USER}@${STAGING_HOST}" "
-    set +e
-    if [ -f '${REMOTE_CANDIDATE_PID_FILE}' ]; then
-      kill \$(cat '${REMOTE_CANDIDATE_PID_FILE}') 2>/dev/null || true
-      rm -f '${REMOTE_CANDIDATE_PID_FILE}'
-    fi
-    if command -v lsof >/dev/null 2>&1; then
-      lsof -ti :${CANDIDATE_PORT} 2>/dev/null | xargs -r kill 2>/dev/null || true
-    fi
+    sudo systemctl stop chatapp@${CANDIDATE_PORT} 2>/dev/null || true
   " >/dev/null 2>&1 || true
 }
 trap cleanup_candidate ERR
@@ -170,7 +162,18 @@ if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
   rm -f "${DOWNLOADED_ARTIFACT}"
 fi
 
-echo "3) Unpacking artifact into immutable release directory..."
+echo "3) Installing/updating systemd unit on host..."
+scp "${SCRIPT_DIR}/chatapp@.service" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp@.service"
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  sed 's/__DEPLOY_USER__/${STAGING_USER}/g' /tmp/chatapp@.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
+  # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
+  sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
+  sudo systemctl daemon-reload
+  echo 'systemd unit installed'
+"
+
+echo "4) Unpacking artifact into immutable release directory..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
@@ -193,74 +196,32 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   chmod +x /tmp/health-check.sh /tmp/smoke-test.sh
 "
 
-echo "4) Starting candidate app on port ${CANDIDATE_PORT}..."
+echo "5) Starting candidate app on port ${CANDIDATE_PORT} via systemd..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
 
-  get_port_pids() {
-    lsof -ti :${CANDIDATE_PORT} 2>/dev/null | sort -u || true
-  }
+  # Write per-port drop-in so systemd uses this release's working directory.
+  DROPIN_DIR=/etc/systemd/system/chatapp@${CANDIDATE_PORT}.service.d
+  sudo mkdir -p \"\${DROPIN_DIR}\"
+  printf '[Service]\nWorkingDirectory=%s/backend\n' \"\${RELEASE_PATH}\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
+  sudo systemctl daemon-reload
 
-  # Clean up any stale candidate PID files from prior failed runs.
-  rm -f /tmp/chatapp-*-candidate.pid 2>/dev/null || true
-  rm -f '${REMOTE_CANDIDATE_PID_FILE}' 2>/dev/null || true
-
-  if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
-    echo 'Candidate port ${CANDIDATE_PORT} is already in use; attempting stale process cleanup...'
-    PIDS=\$(get_port_pids)
-    for PID in \$PIDS; do
-      kill \"\$PID\" 2>/dev/null || true
-    done
-    sleep 1
-
-    PIDS=\$(get_port_pids)
-    if [ -n \"\$PIDS\" ]; then
-      echo 'Force killing remaining processes on port ${CANDIDATE_PORT}...'
-      for PID in \$PIDS; do
-        sudo kill -9 \"\$PID\" 2>/dev/null || true
-      done
-    fi
-    sleep 1
-    
-    if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
-      echo 'Using fuser to force-release port ${CANDIDATE_PORT}...'
-      if command -v fuser >/dev/null 2>&1; then
-        sudo fuser -k ${CANDIDATE_PORT}/tcp 2>/dev/null || true
-      fi
-      sleep 2
-    fi
-    
-    if lsof -i :${CANDIDATE_PORT} >/dev/null 2>&1; then
-      echo 'ERROR: Candidate port ${CANDIDATE_PORT} still in use after cleanup.'
-      echo 'Processes holding the port:'
-      lsof -i :${CANDIDATE_PORT} || true
-      ss -lptn 2>/dev/null | grep -E ":${CANDIDATE_PORT}[[:space:]]" || true
-      exit 1
-    fi
-  fi
-
-  cd \"\${RELEASE_PATH}\"
-  set -a
-  source /opt/chatapp/shared/.env
-  set +a
-  export NODE_ENV=staging
-  export PORT=${CANDIDATE_PORT}
-  nohup npm --prefix backend start > /tmp/chatapp-${RELEASE_SHA}-candidate.log 2>&1 &
-  echo \$! > '${REMOTE_CANDIDATE_PID_FILE}'
-
-  sleep 4
-  kill -0 \$(cat '${REMOTE_CANDIDATE_PID_FILE}')
+  # Stop any stale candidate, then start fresh.
+  sudo systemctl stop chatapp@${CANDIDATE_PORT} 2>/dev/null || true
+  sleep 1
+  sudo systemctl start chatapp@${CANDIDATE_PORT}
+  echo 'Candidate started via systemd (chatapp@${CANDIDATE_PORT})'
 "
 
-echo "5) Running health and smoke checks on candidate..."
+echo "6) Running health and smoke checks on candidate..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   /tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}
   /tmp/smoke-test.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}
 "
 
-echo "6) Switching Nginx upstream from ${LIVE_PORT} to ${CANDIDATE_PORT}..."
+echo "7) Switching Nginx upstream from ${LIVE_PORT} to ${CANDIDATE_PORT}..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   sudo sed -i 's/127.0.0.1:${LIVE_PORT}/127.0.0.1:${CANDIDATE_PORT}/g' /etc/nginx/sites-available/chatapp
@@ -269,16 +230,19 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 CUTOVER_COMPLETED=1
 
-echo "7) Updating current symlink to new release..."
+echo "8) Enabling candidate service for auto-start on reboot..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "sudo systemctl enable chatapp@${CANDIDATE_PORT} 2>/dev/null || true"
+
+echo "9) Updating current symlink to new release..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   ln -sfn '${RELEASE_DIR}/${RELEASE_SHA}' '${CURRENT_LINK}'
 "
 
-echo "8) Post-cutover verification..."
+echo "10) Post-cutover verification..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "/tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}"
 
-echo "9) Verifying frontend root from Nginx..."
+echo "11) Verifying frontend root from Nginx..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   curl -fsS http://127.0.0.1/ >/dev/null
@@ -294,5 +258,8 @@ echo "- Previous version was kept for rollback"
 echo "- Deployment used immutable release dir: ${RELEASE_DIR}/${RELEASE_SHA}"
 
 echo ""
-echo "Rollback (immediate):"
+echo "Rollback (immediate — old release still running on port ${LIVE_PORT}):"
 echo "  ssh ${STAGING_USER}@${STAGING_HOST} 'sudo sed -i \"s/127.0.0.1:${CANDIDATE_PORT}/127.0.0.1:${LIVE_PORT}/g\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
+echo ""
+echo "To stop the old version after confidence window:"
+echo "  ssh ${STAGING_USER}@${STAGING_HOST} 'sudo systemctl stop chatapp@${LIVE_PORT}'"

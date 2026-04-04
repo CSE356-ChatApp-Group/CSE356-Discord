@@ -112,8 +112,11 @@ function safeJson(res) {
 
 function uniqueUser(label) {
   const suffix = `${RUN_ID}-${label}`.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  // Use only the last 8 chars of RUN_ID so the varying label part isn't truncated.
+  const runShort = RUN_ID.replace(/[^a-z0-9]/gi, '').slice(-8).toLowerCase();
+  const labelSlug = label.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   return {
-    username: `lt-${suffix}`.slice(0, 30),
+    username: `lt-${runShort}-${labelSlug}`.slice(0, 30),
     email: `lt-${suffix}@example.com`,
     password: PASSWORD,
   };
