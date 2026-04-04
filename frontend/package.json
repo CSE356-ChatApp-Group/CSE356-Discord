@@ -15,7 +15,7 @@
     "e2e:full": "playwright test --grep @full --grep-invert @heavy-auth",
     "e2e:full:ci": "playwright test --grep @full --grep-invert @heavy-auth --reporter=list",
     "e2e:staging": "playwright test --grep @staging --workers=1 --retries=0",
-    "e2e:staging:ci": "playwright test --grep @staging --workers=1 --retries=2 --reporter=list",
+    "e2e:staging:ci": "playwright test --grep @staging --workers=1 --retries=2",
     "e2e:heavy": "playwright test --grep @heavy-auth",
     "e2e:experimental": "playwright test --grep @experimental --workers=1 --retries=0",
     "e2e:auth": "playwright test e2e/auth.spec.ts",
