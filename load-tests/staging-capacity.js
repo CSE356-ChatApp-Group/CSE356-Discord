@@ -9,13 +9,6 @@ const WS_URL = (__ENV.WS_URL || BASE_URL.replace(/^http/, 'ws').replace(/\/api\/
 const RUN_ID = __ENV.RUN_ID || `capacity-${Date.now()}`;
 const PASSWORD = __ENV.LOADTEST_PASSWORD || 'LoadTest!12345';
 const MESSAGE_SIZE = Number(__ENV.MESSAGE_SIZE || 96);
-// Number of distinct user accounts used for read operations (GET /communities,
-// GET /conversations, GET /messages, GET /channels). Spreads reads across N real
-// Redis cache keys instead of one, so cache effectiveness under diverse traffic
-// is measured accurately rather than showing artificially high hit rates.
-// Scale with maxVUs so each reader is shared by at most ~6 VUs at break load.
-const NUM_READER_POOL = Math.max(20, Math.ceil(profile.maxVUs / 6));
-
 const checksRate = new Rate('capacity_checks');
 const wsConnectRate = new Rate('ws_connect_success');
 const communitiesDuration = new Trend('communities_req_duration', true);
@@ -61,6 +54,22 @@ const PROFILES = {
     wsVUs: 30,
     wsDuration: '3m',
   },
+  // Faster break test: same load curve but tighter stage durations (~6m total).
+  // Reaches the historical break point (150-300 iters/s) quickly to confirm fixes.
+  'break-fast': {
+    httpStages: [
+      { target: 25, duration: '30s' },
+      { target: 75, duration: '1m' },
+      { target: 150, duration: '1m' },
+      { target: 300, duration: '1m' },
+      { target: 500, duration: '1m' },
+      { target: 0, duration: '30s' },
+    ],
+    preAllocatedVUs: 100,
+    maxVUs: 600,
+    wsVUs: 60,
+    wsDuration: '6m',
+  },
   break: {
     httpStages: [
       { target: 25, duration: '1m' },
@@ -78,6 +87,13 @@ const PROFILES = {
 };
 
 const profile = PROFILES[__ENV.LOAD_PROFILE || 'break'] || PROFILES.break;
+
+// Number of distinct user accounts used for read operations (GET /communities,
+// GET /conversations, GET /messages, GET /channels). Spreads reads across N real
+// Redis cache keys instead of one, so cache effectiveness under diverse traffic
+// is measured accurately rather than showing artificially high hit rates.
+// Scale with maxVUs so each reader is shared by at most ~6 VUs at break load.
+const NUM_READER_POOL = Math.max(20, Math.ceil(profile.maxVUs / 6));
 
 export const options = {
   discardResponseBodies: true,
@@ -202,7 +218,7 @@ function batchCreateUsers(credsList) {
   );
   return loginResponses.map((res, i) => {
     const body = safeJson(res);
-    if (!body?.accessToken) {
+    if (!body || !body.accessToken) {
       throw new Error(`batch user login failed for ${credsList[i].email}: ${res.status} ${res.body}`);
     }
     return { token: body.accessToken, userId: body.user.id, email: credsList[i].email };
