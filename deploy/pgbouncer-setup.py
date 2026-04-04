@@ -7,7 +7,7 @@ Reads /opt/chatapp/shared/.env, parses DATABASE_URL, writes pgbouncer.ini
 and userlist.txt, then rewrites DATABASE_URL to point at PgBouncer (:6432).
 
 PgBouncer is configured in transaction-pooling mode with:
-  - default_pool_size = 20  (real PG backends; healthy on 2-CPU VM)
+  - default_pool_size = 25 × nCPU  (real PG backends; ~25/CPU before thrash)
   - max_client_conn  = 1000 (virtual connections from Node instances)
   - auth_type        = trust (loopback-only; no client password needed)
 
@@ -51,6 +51,16 @@ pg_backend_port = 5432 if pg_port == 6432 else pg_port
 
 print(f'Parsed DATABASE_URL: user={pg_user} host={pg_host}:{pg_port} db={pg_db}')
 
+# ── PgBouncer pool sizing: ~25 real PG backends per CPU ────────────────────────
+# PG throughput scales roughly linearly with CPUs up to ~25 active workers/CPU
+# before context-switch overhead dominates.  Beyond that, PgBouncer queues
+# excess requests instead of spawning more backends.
+import multiprocessing
+_ncpu = multiprocessing.cpu_count()
+PGBOUNCER_POOL_SIZE = _ncpu * 25          # e.g. 50 on 2-CPU, 100 on 4-CPU
+PGBOUNCER_RESERVE_SIZE = max(5, _ncpu * 5)
+print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE}')
+
 # ── Write pgbouncer.ini ─────────────────────────────────────────────────────────
 ini = f"""\
 [databases]
@@ -75,10 +85,10 @@ auth_file = /etc/pgbouncer/userlist.txt
 ; statements or session-level SET commands that must persist across queries.
 pool_mode = transaction
 
-; 1000 virtual clients, 20 real PG backends — keeps PG concurrency sane on 2 CPUs.
+; 1000 virtual clients, ~25×nCPU real PG backends — auto-tuned at deploy time.
 max_client_conn     = 1000
-default_pool_size   = 20
-reserve_pool_size   = 5
+default_pool_size   = {PGBOUNCER_POOL_SIZE}
+reserve_pool_size   = {PGBOUNCER_RESERVE_SIZE}
 reserve_pool_timeout = 3.0
 
 ; Timeouts (seconds)

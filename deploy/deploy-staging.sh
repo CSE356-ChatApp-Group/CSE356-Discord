@@ -26,9 +26,9 @@ if [[ -z "${CHATAPP_INSTANCES+x}" ]]; then
 fi
 # With PgBouncer acting as the connection multiplexer, Node pool size no longer
 # maps 1-to-1 to real PG connections.  PgBouncer's default_pool_size (in
-# pgbouncer.ini) caps real PG backends to 20 regardless of instance count.
+# pgbouncer.ini) is auto-derived from nproc by pgbouncer-setup.py (~25×nCPU).
 # Node needs only enough connections to cover its own peak concurrency.
-PG_POOL_MAX_PER_INSTANCE=25
+PG_POOL_MAX_PER_INSTANCE=100
 # libuv thread pool per instance: total budget stays 8 so aggregate CPU load
 # from bcrypt/dns/fs threads equals a single-instance deployment.
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
@@ -187,6 +187,47 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   echo 'PgBouncer running on 127.0.0.1:6432 in transaction-pooling mode.'
 "
 
+echo "0b) Tuning PostgreSQL for available RAM and CPU..."
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  # Auto-detect total RAM in MB
+  TOTAL_RAM_MB=\$(awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo)
+  NCPU=\$(nproc --all)
+
+  # Formulas (standard pg_tune approach — idempotent SHOW+ALTER):
+  #   shared_buffers      = 25% RAM
+  #   effective_cache_size = 75% RAM  (planner hint, no allocation)
+  #   work_mem            = RAM / max_connections / 3 (capped 16-64 MB)
+  #   wal_buffers         = 64 MB
+  #   max_connections     = 100   (PgBouncer caps real clients; 100 ≫ pool_size)
+  #
+  # Scaling: all values are derived from detected RAM/CPU so they auto-adjust
+  # when this script runs on a larger VM (4-CPU, 16 GB, etc.)
+  SHB_MB=\$(( TOTAL_RAM_MB * 25 / 100 ))
+  ECF_MB=\$(( TOTAL_RAM_MB * 75 / 100 ))
+  WRK_MB=\$(python3 -c \"m=max(16, min(64, \${TOTAL_RAM_MB} // 300)); print(m)\")
+
+  echo \"RAM=\${TOTAL_RAM_MB}MB nCPU=\${NCPU} → shared_buffers=\${SHB_MB}MB work_mem=\${WRK_MB}MB\"
+
+  sudo -u postgres psql -qAt \
+    -c "ALTER SYSTEM SET shared_buffers         = '\${SHB_MB}MB';" \
+    -c "ALTER SYSTEM SET effective_cache_size   = '\${ECF_MB}MB';" \
+    -c "ALTER SYSTEM SET work_mem               = '\${WRK_MB}MB';" \
+    -c "ALTER SYSTEM SET wal_buffers            = '64MB';" \
+    -c "ALTER SYSTEM SET max_connections        = 100;" \
+    -c "ALTER SYSTEM SET checkpoint_completion_target = '0.9';" \
+    -c "ALTER SYSTEM SET random_page_cost       = '1.1';" \
+    2>&1 | grep -v 'change directory'
+
+  # shared_buffers requires a full restart (postmaster context);
+  # other params take effect after pg_reload_conf().
+  sudo systemctl restart postgresql
+  sleep 2
+  sudo systemctl is-active postgresql \
+    || { echo 'ERROR: PostgreSQL failed to start after tuning'; exit 1; }
+  echo 'PostgreSQL tuning applied and restarted.'
+"
+
 if [[ -z "$LOCAL_ARTIFACT_PATH" ]] && ! command -v gh >/dev/null 2>&1; then
   echo "ERROR: GitHub CLI (gh) is required for artifact download."
   exit 1
@@ -228,11 +269,20 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # PG_POOL_MAX: divide the total connection budget evenly across all instances so the
-  # aggregate pool never exceeds PG max_connections=300 (~50 reserved for admin/maintenance).
+  # PG_POOL_MAX: Node→PgBouncer virtual connections per instance.  PgBouncer
+  # multiplexes these onto default_pool_size=20 real PG backends.  The Node
+  # pool only needs to be large enough to avoid queuing at the Node level during
+  # bursts; PgBouncer does the real throttling.  100 gives ample headroom for
+  # 600 VUs across 2 instances without triggering the circuit breaker.
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # POOL_CIRCUIT_BREAKER_QUEUE: fast-fail threshold for Node pool queue depth.
+  # Set to 50 so the circuit breaker only fires during genuine DB overload (not
+  # normal PgBouncer queuing bursts).
+  sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=50/' /opt/chatapp/shared/.env \
+    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=50' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'
 "

@@ -54,6 +54,22 @@ const PROFILES = {
     wsVUs: 30,
     wsDuration: '3m',
   },
+  // Fast tuning profile (~3m total): 45s warmup to fill PG/Redis caches, then
+  // ramp to full peak to get a stable failure rate comparable to break-fast.
+  // Use this when iterating on config (pool sizes, circuit breaker) to get a quick
+  // signal on failure rate without waiting 6+ minutes per run.
+  tune: {
+    httpStages: [
+      { target: 20,  duration: '45s' },  // cache warmup
+      { target: 200, duration: '30s' },  // ramp
+      { target: 500, duration: '1m' },   // sustained peak
+      { target: 0,   duration: '15s' },  // drain
+    ],
+    preAllocatedVUs: 100,
+    maxVUs: 600,
+    wsVUs: 60,
+    wsDuration: '2m45s',
+  },
   // Faster break test: same load curve but tighter stage durations (~6m total).
   // Reaches the historical break point (150-300 iters/s) quickly to confirm fixes.
   'break-fast': {
