@@ -276,12 +276,32 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
 router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    await pool.query(
-      `DELETE FROM community_members WHERE community_id=$1 AND user_id=$2 AND role != 'owner'`,
+    const { rowCount } = await pool.query(
+      `DELETE FROM community_members
+       WHERE community_id=$1 AND user_id=$2 AND role != 'owner'
+       RETURNING user_id`,
       [req.params.id, req.user.id]
     );
+    if (!rowCount) {
+      return res.json({ success: true });
+    }
+
+    const { rows: remainingMembers } = await pool.query(
+      'SELECT user_id FROM community_members WHERE community_id=$1',
+      [req.params.id]
+    );
+
     await presenceService.invalidatePresenceFanoutTargets(req.user.id);
-    redis.del(communitiesCacheKey(req.user.id)).catch(() => {});
+
+    await Promise.allSettled([
+      redis.del(communitiesCacheKey(req.user.id)),
+      ...remainingMembers.map((member) => redis.del(communitiesCacheKey(member.user_id))),
+      fanout.publish(`community:${req.params.id}`, {
+        event: 'community:member_left',
+        data: { userId: req.user.id, leftUserId: req.user.id, communityId: req.params.id },
+      }),
+    ]);
+
     res.json({ success: true });
   } catch (err) { next(err); }
 });
