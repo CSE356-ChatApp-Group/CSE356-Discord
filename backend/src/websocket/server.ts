@@ -32,7 +32,7 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { authenticateAccessToken } = require("../utils/jwt");
 const redis = require("../db/redis");
 const { redisSub } = require("../db/redis");
-const { pool } = require("../db/pool");
+const { query } = require("../db/pool");
 const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
@@ -315,19 +315,19 @@ redisSub.on("message", (channel, message) => {
 
 async function listAutoSubscriptionChannels(userId) {
   const [conversationRes, communityRes, channelRes] = await Promise.all([
-    pool.query(
+    query(
       `SELECT conversation_id::text AS id
        FROM conversation_participants
        WHERE user_id = $1 AND left_at IS NULL`,
       [userId],
     ),
-    pool.query(
+    query(
       `SELECT community_id::text AS id
        FROM community_members
        WHERE user_id = $1`,
       [userId],
     ),
-    pool.query(
+    query(
       `SELECT c.id::text AS id
        FROM channels c
        JOIN community_members cm
@@ -578,7 +578,7 @@ async function isAllowedChannel(user, channel) {
   }
 
   if (parsed.type === "community") {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT 1
        FROM community_members
        WHERE community_id = $1 AND user_id = $2`,
@@ -588,7 +588,7 @@ async function isAllowedChannel(user, channel) {
   }
 
   if (parsed.type === "conversation") {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT 1
        FROM conversation_participants
        WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
@@ -597,7 +597,7 @@ async function isAllowedChannel(user, channel) {
     return rows.length > 0;
   }
 
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT 1
      FROM channels c
      JOIN community_members cm

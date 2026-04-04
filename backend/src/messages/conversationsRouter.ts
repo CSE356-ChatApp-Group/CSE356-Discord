@@ -10,7 +10,7 @@
 
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
-const { pool }         = require('../db/pool');
+const { query, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
@@ -179,7 +179,7 @@ router.get('/', async (req, res, next) => {
   }
 
   const promise: Promise<{ conversations: any[] }> = (async () => {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT c.*,
               lm.id AS last_message_id,
               lm.author_id AS last_message_author_id,
@@ -241,7 +241,7 @@ router.post('/',
 
     let client;
     try {
-      client = await pool.connect();
+      client = await getClient();
       await client.query('BEGIN');
 
       const providedParticipants = req.body.participantIds || req.body.participants || [];
@@ -325,7 +325,7 @@ router.post('/',
 // ── Get single ─────────────────────────────────────────────────────────────────
 router.get('/:id', async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT c.*,
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name))
                 AS participants
@@ -358,7 +358,7 @@ router.patch(
       const { id } = req.params;
       const userId = req.user.id;
 
-      const client = await pool.connect();
+      const client = await getClient();
       try {
         const { rows } = await client.query(
           `SELECT c.is_group
@@ -417,7 +417,7 @@ async function addParticipantsHandler(req, res, next) {
 
   let client;
   try {
-    client = await pool.connect();
+    client = await getClient();
     await client.query('BEGIN');
 
     const conversationExists = await client.query(
@@ -549,7 +549,7 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 
   let client;
   try {
-    client = await pool.connect();
+    client = await getClient();
     await client.query('BEGIN');
 
     const membership = await client.query(

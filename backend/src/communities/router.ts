@@ -16,7 +16,7 @@
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
 
-const { pool }         = require('../db/pool');
+const { query, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
@@ -33,7 +33,7 @@ function validate(req, res) {
 
 /** Middleware: load caller's community membership into req.membership */
 async function loadMembership(req, res, next) {
-  const { rows } = await pool.query(
+  const { rows } = await query(
     'SELECT * FROM community_members WHERE community_id=$1 AND user_id=$2',
     [req.params.id, req.user.id]
   );
@@ -69,7 +69,7 @@ router.get('/', async (req, res, next) => {
   }
 
   const promise: Promise<{ communities: any[] }> = (async () => {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `WITH visible_communities AS (
          SELECT c.*, cm.role AS my_role
          FROM communities c
@@ -151,7 +151,7 @@ router.post('/',
     if (!validate(req, res)) return;
     let client;
     try {
-      client = await pool.connect();
+      client = await getClient();
       await client.query('BEGIN');
       const { slug, name, description, isPublic = true } = req.body;
       const { rowCount } = await client.query(
@@ -196,7 +196,7 @@ router.post('/',
 router.get('/:id', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT c.*,
               (SELECT COUNT(*) FROM community_members WHERE community_id = c.id) AS member_count,
               json_agg(ch.* ORDER BY ch.position) FILTER (WHERE ch.id IS NOT NULL) AS channels
@@ -215,7 +215,7 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
 router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    const { rows: [community] } = await pool.query(
+    const { rows: [community] } = await query(
       'SELECT id, owner_id FROM communities WHERE id=$1',
       [req.params.id]
     );
@@ -224,12 +224,12 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
-    const { rows: memberRows } = await pool.query(
+    const { rows: memberRows } = await query(
       'SELECT user_id FROM community_members WHERE community_id=$1',
       [req.params.id]
     );
 
-    await pool.query('DELETE FROM communities WHERE id=$1', [req.params.id]);
+    await query('DELETE FROM communities WHERE id=$1', [req.params.id]);
 
     await Promise.allSettled([
       ...memberRows.map(r => redis.del(communitiesCacheKey(r.user_id))),
@@ -247,7 +247,7 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
 router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    const { rows: [community] } = await pool.query(
+    const { rows: [community] } = await query(
       'SELECT * FROM communities WHERE id=$1', [req.params.id]
     );
     if (!community) return res.status(404).json({ error: 'Community not found' });
@@ -256,7 +256,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
       return res.status(403).json({ error: 'Community is private' });
     }
 
-    await pool.query(
+    await query(
       `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
       [req.params.id, req.user.id]
     );
@@ -276,7 +276,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
 router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    const { rowCount } = await pool.query(
+    const { rowCount } = await query(
       `DELETE FROM community_members
        WHERE community_id=$1 AND user_id=$2 AND role != 'owner'
        RETURNING user_id`,
@@ -286,7 +286,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       return res.json({ success: true });
     }
 
-    const { rows: remainingMembers } = await pool.query(
+    const { rows: remainingMembers } = await query(
       'SELECT user_id FROM community_members WHERE community_id=$1',
       [req.params.id]
     );
@@ -310,7 +310,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
        FROM community_members cm JOIN users u ON u.id = cm.user_id
        WHERE cm.community_id = $1

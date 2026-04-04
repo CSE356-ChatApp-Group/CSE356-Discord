@@ -15,7 +15,7 @@ const http     = require('http');
 const app      = require('./app');
 const wsServer = require('./websocket/server');
 const logger   = require('./utils/logger');
-const { pool } = require('./db/pool');
+const { pool, query: dbQuery, poolStats } = require('./db/pool');
 const redis    = require('./db/redis');
 const { startPgPoolMetrics } = require('./utils/metrics');
 
@@ -53,9 +53,10 @@ async function shutdown(signal, err = null) {
 }
 
 async function start() {
-  // Verify DB connectivity before accepting traffic
-  await pool.query('SELECT 1');
-  logger.info('Postgres connected');
+  // Verify DB connectivity before accepting traffic.  Uses the circuit-broken
+  // wrapper so any misconfiguration surfaces clearly at boot time.
+  await dbQuery('SELECT 1');
+  logger.info({ pool: poolStats() }, 'Postgres connected');
 
   startPgPoolMetrics(pool);
 
@@ -81,13 +82,14 @@ async function start() {
   process.on('unhandledRejection', (reason) => {
     const err = reason instanceof Error ? reason : new Error(String(reason));
     // Transient pg-pool errors (checkout timeout or stale connection terminated by a network device)
-    // are per-request failures, not server-fatal events — log and continue.
+    // are per-request failures, not server-fatal events — log with pool stats and continue.
     if (
       err.message?.includes('timeout exceeded when trying to connect') ||
       err.message?.includes('Connection terminated') ||
-      err.message?.includes('connection timeout')
+      err.message?.includes('connection timeout') ||
+      (err as any).code === 'POOL_CIRCUIT_OPEN'
     ) {
-      logger.error({ err }, 'pg-pool transient error (unhandled); request failed without response');
+      logger.error({ err, pool: poolStats() }, 'pg-pool transient error (unhandled); request failed without response');
       return;
     }
     shutdown('unhandledRejection', err);

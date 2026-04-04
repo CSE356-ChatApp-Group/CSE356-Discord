@@ -11,7 +11,7 @@
 
 const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
-const { pool }         = require('../db/pool');
+const { query, getClient } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('../messages/sideEffects');
 const redis            = require('../db/redis');
@@ -27,7 +27,7 @@ function v(req, res) {
 }
 
 async function loadChannelContext(channelId, userId) {
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT ch.id,
             ch.community_id,
             ch.is_private,
@@ -57,7 +57,7 @@ function canManagePrivateMembership(role) {
  */
 async function bustChannelListCache(communityId) {
   try {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       'SELECT user_id::text FROM community_members WHERE community_id = $1',
       [communityId]
     );
@@ -85,7 +85,7 @@ router.get('/',
         return res.json(JSON.parse(cached));
       }
 
-      const { rows: membership } = await pool.query(
+      const { rows: membership } = await query(
         `SELECT 1
          FROM community_members
          WHERE community_id = $1 AND user_id = $2`,
@@ -97,7 +97,7 @@ router.get('/',
 
       // Return all visible channel names. Private-channel metadata/content pointers
       // are redacted for users who are not invited to that private channel.
-      const { rows } = await pool.query(
+      const { rows } = await query(
         `WITH visible_channels AS (
            SELECT ch.*,
                   (ch.is_private = FALSE
@@ -162,7 +162,7 @@ router.get('/',
             const channelIds   = missingChannels.map(ch => ch.id);
             const lastReadAts  = missingChannels.map(ch => ch.my_last_read_at || null);
 
-            const { rows: countRows } = await pool.query(
+            const { rows: countRows } = await query(
               `SELECT
                  refs.channel_id::text,
                  COUNT(*) FILTER (WHERE m.deleted_at IS NULL)                                                     AS total_count,
@@ -214,7 +214,7 @@ router.post('/',
     if (!v(req, res)) return;
     let client;
     try {
-      client = await pool.connect();
+      client = await getClient();
       const { communityId, name, isPrivate = false, description } = req.body;
 
       // Verify caller is admin+ in the community
@@ -277,7 +277,7 @@ router.get('/:id/members',
         return res.status(403).json({ error: 'Channel not allowed' });
       }
 
-      const { rows } = await pool.query(
+      const { rows } = await query(
         channel.is_private
           ? `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role
              FROM channel_members chm
@@ -308,7 +308,7 @@ router.post('/:id/members',
     if (!v(req, res)) return;
     let client;
     try {
-      client = await pool.connect();
+      client = await getClient();
       const channel = await loadChannelContext(req.params.id, req.user.id);
       if (!channel) {
         client.release();
@@ -399,7 +399,7 @@ router.patch('/:id',
   async (req, res, next) => {
     if (!v(req, res)) return;
     try {
-      const { rows } = await pool.query(
+      const { rows } = await query(
         `UPDATE channels SET name=COALESCE($1,name), description=COALESCE($2,description), updated_at=NOW()
          WHERE id=$3 RETURNING *`,
         [req.body.name || null, req.body.description ?? null, req.params.id]
@@ -415,7 +415,7 @@ router.patch('/:id',
 router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
   if (!v(req, res)) return;
   try {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       'DELETE FROM channels WHERE id=$1 RETURNING community_id',
       [req.params.id]
     );

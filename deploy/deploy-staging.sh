@@ -17,12 +17,18 @@ LIVE_PORT=4000
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUTOVER_COMPLETED=0
 
-# Number of Node.js workers to run simultaneously.
-# Set to 1 on resource-constrained hosts; 2 to use both vCPUs on the staging VM.
-# PG pool budget (350 total connections, leaving ~50 for admin/maintenance) is
-# divided evenly so the aggregate never exceeds PG max_connections=400.
-CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-2}
-PG_POOL_MAX_PER_INSTANCE=$(( 350 / CHATAPP_INSTANCES ))
+# Auto-detect CPU count on the target host and derive CHATAPP_INSTANCES.
+# Clamped to [1, 4]: beyond 4 workers there is no measurable benefit on
+# typical staging CPUs, and PG/Redis lock contention grows with workers.
+if [[ -z "${CHATAPP_INSTANCES+x}" ]]; then
+  _REMOTE_NPROC=$(ssh "${STAGING_USER}@${STAGING_HOST}" 'nproc --all' 2>/dev/null || echo 2)
+  CHATAPP_INSTANCES=$(python3 -c "n=int('${_REMOTE_NPROC}'); print(min(max(n,1),4))")
+fi
+# With PgBouncer acting as the connection multiplexer, Node pool size no longer
+# maps 1-to-1 to real PG connections.  PgBouncer's default_pool_size (in
+# pgbouncer.ini) caps real PG backends to 20 regardless of instance count.
+# Node needs only enough connections to cover its own peak concurrency.
+PG_POOL_MAX_PER_INSTANCE=25
 # libuv thread pool per instance: total budget stays 8 so aggregate CPU load
 # from bcrypt/dns/fs threads equals a single-instance deployment.
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
@@ -67,9 +73,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   LIVE_PORT='${LIVE_PORT}'
   sudo tee /etc/nginx/sites-available/chatapp >/dev/null <<'EOF'
 upstream chatapp_upstream {
+  least_conn;
   server 127.0.0.1:__LIVE_PORT__;
-  keepalive 512;
-  keepalive_requests 100000;
+  keepalive 256;
+  keepalive_requests 10000;
   keepalive_timeout 75s;
 }
 
@@ -162,6 +169,24 @@ EOF
   sudo nginx -t && sudo systemctl reload nginx
 "
 
+echo "0a) Installing and configuring PgBouncer (transaction-mode connection pooler)..."
+scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/pgbouncer-setup.py"
+ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  # Install PgBouncer if not already present on this host
+  if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
+    sudo apt-get install -y pgbouncer
+    echo 'PgBouncer installed.'
+  fi
+  sudo python3 /tmp/pgbouncer-setup.py
+  sudo systemctl enable pgbouncer
+  sudo systemctl restart pgbouncer
+  sleep 1
+  sudo systemctl is-active pgbouncer \
+    || { echo 'ERROR: pgbouncer failed to start'; sudo journalctl -u pgbouncer --no-pager -n 30; exit 1; }
+  echo 'PgBouncer running on 127.0.0.1:6432 in transaction-pooling mode.'
+"
+
 if [[ -z "$LOCAL_ARTIFACT_PATH" ]] && ! command -v gh >/dev/null 2>&1; then
   echo "ERROR: GitHub CLI (gh) is required for artifact download."
   exit 1
@@ -180,7 +205,7 @@ fi
 
 echo "2) Copying artifact and verification scripts to staging host..."
 scp "${SOURCE_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
-scp deploy/health-check.sh deploy/smoke-test.sh "${STAGING_USER}@${STAGING_HOST}:/tmp/"
+scp deploy/health-check.sh deploy/smoke-test.sh deploy/pgbouncer-setup.py "${STAGING_USER}@${STAGING_HOST}:/tmp/"
 if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
   rm -f "${DOWNLOADED_ARTIFACT}"
 fi
@@ -331,10 +356,11 @@ cfg_path = '/etc/nginx/sites-available/chatapp'
 config = open(cfg_path).read()
 new_upstream = (
     'upstream chatapp_upstream {\n'
-    '  server 127.0.0.1:${CANDIDATE_PORT} max_fails=2 fail_timeout=5s;\n'
-    '  server 127.0.0.1:${LIVE_PORT}      max_fails=2 fail_timeout=5s;\n'
-    '  keepalive 512;\n'
-    '  keepalive_requests 100000;\n'
+    '  least_conn;\n'
+    '  server 127.0.0.1:${CANDIDATE_PORT};\n'
+    '  server 127.0.0.1:${LIVE_PORT};\n'
+    '  keepalive 256;\n'
+    '  keepalive_requests 10000;\n'
     '  keepalive_timeout 75s;\n'
     '}'
 )

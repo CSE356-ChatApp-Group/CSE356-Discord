@@ -1,29 +1,179 @@
 /**
- * Postgres connection pool (singleton).
- * All modules import from here to share the same pool.
+ * Postgres connection pool (singleton) with circuit breaker.
+ *
+ * All DB access goes through the exported `query()` and `getClient()` helpers
+ * rather than calling `pool.query()` / `pool.connect()` directly.  These
+ * wrappers add:
+ *
+ *   1. Circuit breaker – immediately rejects new requests when the checkout
+ *      queue exceeds POOL_CIRCUIT_BREAKER_QUEUE, preventing cascading 5 s
+ *      timeout storms from building up under sustained overload.
+ *
+ *   2. Slow-query logging – any query exceeding PG_SLOW_QUERY_MS is logged
+ *      at WARN with truncated SQL and current pool stats.
+ *
+ *   3. Structured error context – every pool error includes pool stats
+ *      (total / idle / waiting / max) so post-mortem is instant.
+ *
+ * Connection target: PgBouncer (loopback :6432) in transaction-pooling mode.
+ * PgBouncer caps real PG backends to a small fixed number (default_pool_size
+ * in pgbouncer.ini) regardless of how many Node.js instances are running.
+ * PG keepalive / NAT tricks are not needed for a loopback socket.
+ *
+ * Exports:
+ *   pool          – raw pg-Pool (used by index.ts for metrics + graceful shutdown only)
+ *   query(sql, params)             – circuit-broken single query (auto-commit)
+ *   getClient()                    – circuit-broken client checkout for transactions
+ *   withTransaction(callback)      – acquire client, BEGIN, run callback, COMMIT/ROLLBACK, release
+ *   poolStats()                    – snapshot of pool counters (used by health check)
+ *   PoolCircuitBreakerError        – error class thrown when circuit is open
  */
 
 'use strict';
 
 const { Pool } = require('pg');
+const logger = require('../utils/logger');
+
+// ── Configuration ──────────────────────────────────────────────────────────────
+
+/**
+ * PG_POOL_MAX: connections from THIS Node.js process to PgBouncer.
+ * PgBouncer handles multiplexing down to the true PG connection limit via its
+ * own default_pool_size.  Keep this large enough to cover peak concurrency per
+ * instance without excess; 25 is well above the ~10-15 concurrent queries a
+ * single Node process can drive before the event loop becomes the bottleneck.
+ */
+const POOL_MAX = parseInt(process.env.PG_POOL_MAX || '25', 10);
+
+/**
+ * POOL_CIRCUIT_BREAKER_QUEUE: max number of requests allowed to wait for a
+ * connection before the circuit opens and we return 503 immediately.
+ * With PgBouncer in the stack, checkout latency is sub-millisecond when
+ * connections are available, so a growing queue signals real DB overload.
+ */
+const CIRCUIT_BREAKER_QUEUE = parseInt(process.env.POOL_CIRCUIT_BREAKER_QUEUE || '10', 10);
+
+/**
+ * PG_SLOW_QUERY_MS: queries slower than this (milliseconds) are logged at WARN.
+ */
+const SLOW_QUERY_MS = parseInt(process.env.PG_SLOW_QUERY_MS || '3000', 10);
+
+/**
+ * PgBouncer is a loopback socket – no NAT involved, so no keepalive needed.
+ * connectionTimeoutMillis is kept short because PgBouncer should respond
+ * in microseconds unless it is itself overwhelmed.
+ */
+const CONNECTION_TIMEOUT_MS = parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '5000', 10);
+
+/**
+ * Idle timeout for Node→PgBouncer connections.  PgBouncer manages the real
+ * PG idle connections on its side; this just prevents Node from holding
+ * surplus connections to PgBouncer that PgBouncer itself keeps alive.
+ */
+const IDLE_TIMEOUT_MS = parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10);
+
+const APPLICATION_NAME = `chatapp-${process.env.PORT || 'unknown'}`;
+
+// ── Pool ───────────────────────────────────────────────────────────────────────
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: parseInt(process.env.PG_POOL_MAX || '50', 10),
-  // Set below typical cloud NAT/firewall idle timeout (~30-60s) so connections are
-  // evicted from the pool before the NAT silently drops the underlying TCP session.
-  // This prevents "Connection terminated unexpectedly" on first use of a stale connection.
-  idleTimeoutMillis: 8_000,
-  connectionTimeoutMillis: 5_000,
-  // Send TCP keepalive probes on idle connections so NAT/firewall mappings stay
-  // alive and the pool gets fast notification when a connection is silently dropped
-  // rather than discovering it mid-request as "Connection terminated unexpectedly".
-  keepAlive: true,
-  keepAliveInitialDelayMillis: 10_000,
+  max: POOL_MAX,
+  connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+  idleTimeoutMillis: IDLE_TIMEOUT_MS,
+  // No keepAlive: loopback socket to PgBouncer, no NAT timeout risk.
+  keepAlive: false,
+  application_name: APPLICATION_NAME,
 });
 
 pool.on('error', (err) => {
-  require('../utils/logger').error(err, 'Unexpected Postgres pool error');
+  logger.error({ err, pool: poolStats() }, 'pg-pool background client error');
 });
 
-module.exports = { pool };
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+function poolStats() {
+  return {
+    total:   pool.totalCount,
+    idle:    pool.idleCount,
+    waiting: pool.waitingCount,
+    max:     POOL_MAX,
+  };
+}
+
+function truncateSql(sql) {
+  if (!sql) return undefined;
+  const text = typeof sql === 'string' ? sql : (sql.text || String(sql));
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+}
+
+// ── Circuit breaker ────────────────────────────────────────────────────────────
+
+class PoolCircuitBreakerError extends Error {
+  code: string;
+  statusCode: number;
+  constructor() {
+    super('Database pool queue exceeded – server busy, please retry');
+    this.name       = 'PoolCircuitBreakerError';
+    this.code       = 'POOL_CIRCUIT_OPEN';
+    this.statusCode = 503;
+  }
+}
+
+function checkCircuitBreaker(operation) {
+  if (pool.waitingCount >= CIRCUIT_BREAKER_QUEUE) {
+    logger.warn({ pool: poolStats(), operation }, 'pg-pool circuit breaker open: rejected');
+    throw new PoolCircuitBreakerError();
+  }
+}
+
+// ── Wrapped single query ───────────────────────────────────────────────────────
+
+async function query(sql, params) {
+  checkCircuitBreaker('query');
+  const start = Date.now();
+  try {
+    const result = await pool.query(sql, params);
+    const durationMs = Date.now() - start;
+    if (durationMs >= SLOW_QUERY_MS) {
+      logger.warn({ durationMs, sql: truncateSql(sql), pool: poolStats() }, 'pg: slow query');
+    }
+    return result;
+  } catch (err) {
+    const durationMs = Date.now() - start;
+    logger.error({ err, durationMs, sql: truncateSql(sql), pool: poolStats() }, 'pg: query error');
+    throw err;
+  }
+}
+
+// ── Wrapped client checkout ────────────────────────────────────────────────────
+
+async function getClient() {
+  checkCircuitBreaker('getClient');
+  return pool.connect();
+}
+
+// ── Transaction convenience wrapper ───────────────────────────────────────────
+
+/**
+ * Runs `callback(client)` inside a transaction.
+ * The caller must not release the client; withTransaction handles that.
+ * Any exception thrown by the callback causes a ROLLBACK.
+ */
+async function withTransaction(callback) {
+  checkCircuitBreaker('withTransaction');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { pool, query, getClient, withTransaction, poolStats, PoolCircuitBreakerError };

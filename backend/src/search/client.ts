@@ -11,7 +11,7 @@
 'use strict';
 
 const { MeiliSearch } = require('meilisearch');
-const { pool } = require('../db/pool');
+const { query } = require('../db/pool');
 const logger = require('../utils/logger');
 
 const useMeilisearch = process.env.USE_MEILISEARCH === 'true';
@@ -92,7 +92,7 @@ async function attachAuthorDisplayNames(hits = []) {
 
   if (!authorIds.length) return hits;
 
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT id::text AS id,
             COALESCE(NULLIF(display_name, ''), username) AS "authorDisplayName"
      FROM users
@@ -139,7 +139,7 @@ async function searchPostgres(q, opts: Record<string, any> = {}) {
   params.push(offset);
   const offsetIndex = params.length;
 
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT m.id,
             m.content,
             m.author_id AS "authorId",

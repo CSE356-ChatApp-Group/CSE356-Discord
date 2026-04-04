@@ -14,7 +14,7 @@
 
 const redis = require("../db/redis");
 const fanout = require("../websocket/fanout");
-const { pool } = require("../db/pool");
+const { query } = require("../db/pool");
 const overload = require("../utils/overload");
 const logger = require("../utils/logger");
 const { presenceFanoutTotal } = require("../utils/metrics");
@@ -65,7 +65,7 @@ async function getPresenceFanoutTargets(userId) {
     }
   }
 
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT 'community' AS target_type, community_id::text AS target_id
        FROM community_members
       WHERE user_id = $1
@@ -229,14 +229,12 @@ async function setPresence(userId, status, awayMessage) {
 
   if (!overload.shouldSkipPresenceMirror()) {
     // Mirror to Postgres (non-blocking)
-    pool
-      .query(
-        `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
+    query(
+      `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
        VALUES ($1,$2,$3,NOW())
        ON CONFLICT (user_id) DO UPDATE SET status=$2, custom_msg=$3, updated_at=NOW()`,
-        [userId, status, status === "away" ? nextAwayMessage : null],
-      )
-      .catch(() => {});
+      [userId, status, status === "away" ? nextAwayMessage : null],
+    ).catch(() => {});
   }
 }
 

@@ -136,13 +136,13 @@ app.get('/metrics', async (_req, res) => {
 // ── Health check (no auth required) ───────────────────────────────────────────
 app.get('/health', async (_req, res) => {
   try {
-    // Check DB
-    await require('./db/pool').pool.query('SELECT 1');
-    // Check Redis
+    const { query, poolStats } = require('./db/pool');
+    await query('SELECT 1');
     await require('./db/redis').ping();
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.json({ status: 'ok', timestamp: new Date().toISOString(), pool: poolStats() });
   } catch (err) {
-    logger.warn({ err }, 'Health check failed');
+    const { poolStats } = require('./db/pool');
+    logger.warn({ err, pool: poolStats() }, 'Health check failed');
     res.status(503).json({ status: 'unhealthy', error: err.message });
   }
 });
@@ -171,13 +171,18 @@ app.use((req, res) => {
 // ── Global error handler ───────────────────────────────────────────────────────
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, _next) => {
-  // pg-pool connection timeout is a transient resource constraint, not a server error
-  const isPoolTimeout = err.message?.includes('timeout exceeded when trying to connect');
-  const status = isPoolTimeout ? 503 : (err.status || err.statusCode || 500);
+  const { poolStats } = require('./db/pool');
+  // Circuit breaker open or pg-pool checkout timeout → 503, not a server bug
+  const isPoolBusy =
+    err.code === 'POOL_CIRCUIT_OPEN' ||
+    err.message?.includes('timeout exceeded when trying to connect');
+  const status = isPoolBusy ? 503 : (err.status || err.statusCode || 500);
   const requestId = req.id;
-  logger.error({ err, url: req.url, requestId, status }, 'Unhandled error');
+  logger.error({ err, url: req.url, requestId, status, pool: poolStats() }, 'Unhandled error');
   res.status(status).json({
-    error: isPoolTimeout ? 'Server busy, please retry' : (status >= 500 ? 'Internal server error' : (err.message || 'Request failed')),
+    error: isPoolBusy
+      ? 'Server busy, please retry'
+      : (status >= 500 ? 'Internal server error' : (err.message || 'Request failed')),
     requestId,
     ...(err.errors && { errors: err.errors }),
     ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),

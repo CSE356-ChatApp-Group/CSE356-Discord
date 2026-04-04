@@ -15,7 +15,7 @@ const passport         = require('passport');
 const LocalStrategy    = require('passport-local').Strategy;
 const GoogleStrategy   = require('passport-google-oauth20').Strategy;
 const GitHubStrategy   = require('passport-github2').Strategy;
-const { pool }         = require('../db/pool');
+const { query, getClient } = require('../db/pool');
 const { comparePassword } = require('./passwords');
 const { signOAuthPending, verifyOAuthLinkIntent } = require('./oauthTokens');
 
@@ -26,7 +26,7 @@ passport.use(new LocalStrategy(
   { usernameField: 'email', passwordField: 'password' },
   async (emailOrUsername, password, done) => {
     try {
-      const { rows } = await pool.query(
+      const { rows } = await query(
         'SELECT * FROM users WHERE (email = $1 OR username = $1) AND is_active = TRUE',
         [emailOrUsername]
       );
@@ -47,7 +47,7 @@ passport.use(new LocalStrategy(
 async function processOAuthLogin(provider, profileId, email, displayName, stateToken, done) {
   let client;
   try {
-    client = await pool.connect();
+    client = await getClient();
     await client.query('BEGIN');
 
     // Existing linked provider login: return mapped user.

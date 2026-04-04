@@ -13,7 +13,7 @@
 const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
-const { pool }         = require('../db/pool');
+const { query, getClient } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
 const overload         = require('../utils/overload');
@@ -39,7 +39,7 @@ function targetKey(channelId, conversationId) {
 }
 
 async function ensureActiveConversationParticipant(conversationId, userId) {
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT 1
      FROM conversation_participants
      WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
@@ -49,7 +49,7 @@ async function ensureActiveConversationParticipant(conversationId, userId) {
 }
 
 async function ensureChannelAccess(channelId, userId) {
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT 1
      FROM channels c
      WHERE c.id = $1
@@ -73,7 +73,7 @@ async function ensureMessageAccess({ channelId, conversationId }, userId) {
 }
 
 async function getConversationFanoutTargets(conversationId) {
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT user_id::text AS user_id
      FROM conversation_participants
      WHERE conversation_id = $1 AND left_at IS NULL`,
@@ -101,7 +101,7 @@ async function publishConversationEvent(conversationId, event, data) {
 }
 
 async function loadHydratedMessageById(messageId) {
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT m.*,
             CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
             COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
@@ -116,7 +116,7 @@ async function loadHydratedMessageById(messageId) {
 }
 
 async function loadMessageTarget(messageId) {
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `SELECT id, author_id, channel_id, conversation_id
      FROM messages
      WHERE id = $1 AND deleted_at IS NULL`,
@@ -187,11 +187,11 @@ router.get('/',
         LIMIT  $1
       `;
 
-      const { rows } = await pool.query(sql, params);
+      const { rows } = await query(sql, params);
 
       if (rows.length === 0) {
         // Distinguish "no messages" from "access denied" with a lightweight check.
-        const accessCheck = await pool.query(
+        const accessCheck = await query(
           channelId
             ? `SELECT 1 FROM channels WHERE id = $1 AND (is_private = FALSE OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2))`
             : `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
@@ -224,7 +224,7 @@ router.post('/',
     if (!validate(req, res)) return;
     let client;
     try {
-      client = await pool.connect();
+      client = await getClient();
       const { content, channelId, conversationId, threadId } = req.body;
       const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
 
@@ -330,7 +330,7 @@ router.post('/',
       );
 
       // Release the pool connection before fanout/side-effects so it doesn't
-      // hold a slot while publishConversationEvent does its own pool.query().
+      // hold a slot while publishConversationEvent does its own query().
       client.release();
       client = null;
 
@@ -393,7 +393,7 @@ router.patch('/:id',
         return res.status(403).json({ error: 'Access denied' });
       }
 
-      const { rows } = await pool.query(
+      const { rows } = await query(
         `UPDATE messages
          SET content=$1, edited_at=NOW(), updated_at=NOW()
          WHERE id=$2 AND author_id=$3 AND deleted_at IS NULL
@@ -439,7 +439,7 @@ router.delete('/:id',
         return res.status(403).json({ error: 'Access denied' });
       }
 
-      const { rows } = await pool.query(
+      const { rows } = await query(
         `DELETE FROM messages
          WHERE id=$1 AND author_id=$2
          RETURNING id, channel_id, conversation_id`,
@@ -486,7 +486,7 @@ router.put('/:id/read',
       }
 
       const { channel_id, conversation_id } = target;
-      const { rows: upsertRows } = await pool.query(
+      const { rows: upsertRows } = await query(
         `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
          VALUES ($1,$2,$3,$4,NOW())
          ON CONFLICT (user_id, COALESCE(channel_id, conversation_id))
@@ -519,7 +519,7 @@ router.put('/:id/read',
             await redis.set(readKey, currentCount);
           } else {
             // Channel counter not yet in Redis; initialize both
-            const { rows: cntRows } = await pool.query(
+            const { rows: cntRows } = await query(
               `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
               [channel_id]
             );

@@ -1,6 +1,6 @@
 'use strict';
 
-const { pool } = require('../db/pool');
+const { query } = require('../db/pool');
 
 const BYPASS_USER = {
   id: process.env.AUTH_BYPASS_USER_ID || '00000000-0000-4000-8000-000000000001',
@@ -27,7 +27,7 @@ async function ensureBypassUser() {
 }
 
 async function upsertBypassUser() {
-  const { rows } = await pool.query(
+  const { rows } = await query(
     `INSERT INTO users (id, email, username, display_name, password_hash)
      VALUES ($1, $2, $3, $4, NULL)
      ON CONFLICT (id)

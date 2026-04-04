@@ -14,7 +14,7 @@
 const express  = require('express');
 const multer   = require('multer');
 const { body, validationResult } = require('express-validator');
-const { pool }         = require('../db/pool');
+const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const { hashPassword } = require('./passwords');
 const presenceService  = require('../presence/service');
@@ -42,7 +42,7 @@ router.get('/', authenticate, async (req, res, next) => {
       return res.status(400).json({ error: 'q query param required' });
     }
     const pattern = `%${q}%`;
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT ${PUBLIC_FIELDS}
        FROM   users
        WHERE  is_active = TRUE
@@ -58,7 +58,7 @@ router.get('/', authenticate, async (req, res, next) => {
 // ── Serve avatar image (public — browsers cannot send Authorization via <img>) ──
 router.get('/:id/avatar', async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT avatar_data, avatar_content_type FROM users WHERE id=$1`,
       [req.params.id]
     );
@@ -75,7 +75,7 @@ router.use(authenticate);
 
 router.get('/me', async (req, res, next) => {
   try {
-    const { rows } = await pool.query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
+    const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     const { status, awayMessage } = await presenceService.getPresenceDetails(req.user.id);
     res.json({ user: { ...rows[0], status, away_message: awayMessage } });
@@ -98,7 +98,7 @@ router.patch('/me',
       if (!Object.keys(updates).length) return res.status(400).json({ error: 'Nothing to update' });
 
       const setClauses = Object.keys(updates).map((k, i) => `${k}=$${i + 2}`).join(', ');
-      const { rows } = await pool.query(
+      const { rows } = await query(
         `UPDATE users SET ${setClauses}, updated_at=NOW() WHERE id=$1 RETURNING ${PUBLIC_FIELDS}, email`,
         [req.user.id, ...Object.values(updates)]
       );
@@ -112,11 +112,11 @@ router.post('/me/avatar', upload.single('avatar'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No image file provided (field: avatar)' });
     const avatarUrl = `/api/v1/users/${req.user.id}/avatar`;
-    await pool.query(
+    await query(
       `UPDATE users SET avatar_url=$2, avatar_data=$3, avatar_content_type=$4, updated_at=NOW() WHERE id=$1`,
       [req.user.id, avatarUrl, req.file.buffer, req.file.mimetype]
     );
-    const { rows } = await pool.query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
+    const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
     res.json({ user: rows[0] });
   } catch (err) { next(err); }
 });
@@ -126,11 +126,11 @@ router.put('/me/avatar', upload.single('avatar'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No image file provided (field: avatar)' });
     const avatarUrl = `/api/v1/users/${req.user.id}/avatar`;
-    await pool.query(
+    await query(
       `UPDATE users SET avatar_url=$2, avatar_data=$3, avatar_content_type=$4, updated_at=NOW() WHERE id=$1`,
       [req.user.id, avatarUrl, req.file.buffer, req.file.mimetype]
     );
-    const { rows } = await pool.query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
+    const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
     res.json({ user: rows[0] });
   } catch (err) { next(err); }
 });
@@ -139,7 +139,7 @@ router.put('/me/avatar', upload.single('avatar'), async (req, res, next) => {
 router.get('/:id', async (req, res, next) => {
   try {
     // Include email so clients can map SSO usernames
-    const { rows } = await pool.query(
+    const { rows } = await query(
       `SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`,
       [req.params.id]
     );

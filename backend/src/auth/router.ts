@@ -19,7 +19,7 @@ const { RedisStore } = require('rate-limit-redis');
 const passport = require('passport');
 const { body, validationResult } = require('express-validator');
 
-const { pool }         = require('../db/pool');
+const { query, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const { signAccess, signRefresh, verifyRefresh, denyToken } = require('../utils/jwt');
 const { authenticate } = require('../middleware/authenticate');
@@ -219,7 +219,7 @@ function getCourseCallbackUrl(req) {
 }
 
 async function resolveOAuthAccount(provider, providerId, email, displayName, linkToken, preferredUsername?) {
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query('BEGIN');
 
@@ -340,7 +340,7 @@ router.post('/register',
       const { email, username, password, displayName } = req.body;
       const normalizedEmail = email || null;
       const hash = await hashPassword(password, 'register_hash');
-      const { rows } = await pool.query(
+      const { rows } = await query(
         `INSERT INTO users (email, username, password_hash, display_name)
          VALUES ($1,$2,$3,$4) RETURNING *`,
         [normalizedEmail, username, hash, displayName || username]
@@ -452,7 +452,7 @@ router.post('/oauth/complete-create',
 
     let client;
     try {
-      client = await pool.connect();
+      client = await getClient();
       await client.query('BEGIN');
 
       const existingProvider = await client.query(
@@ -516,7 +516,7 @@ router.post('/oauth/complete-connect',
 
     let client;
     try {
-      client = await pool.connect();
+      client = await getClient();
       await client.query('BEGIN');
 
       const existingProvider = await client.query(
@@ -585,11 +585,11 @@ router.post('/oauth/link-intent', authenticate,
 
 router.get('/oauth/linked', authenticate, async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
+    const { rows } = await query(
       'SELECT provider FROM oauth_accounts WHERE user_id = $1 ORDER BY provider ASC',
       [req.user.id]
     );
-    const passwordRow = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    const passwordRow = await query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
     return res.json({
       providers: rows.map(r => r.provider),
       hasPassword: Boolean(passwordRow.rows[0]?.password_hash),

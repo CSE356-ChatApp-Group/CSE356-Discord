@@ -12,12 +12,12 @@ require('dotenv').config();
 
 const path = require('path');
 const fs   = require('fs');
-const { pool } = require('./pool');
+const { pool, getClient } = require('./pool');
 
 const MIGRATIONS_DIR = path.join(__dirname, '../../../migrations');
 
 async function migrate() {
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     // Ensure tracking table exists
     await client.query(`

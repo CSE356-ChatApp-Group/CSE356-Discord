@@ -14,7 +14,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 }  = require('uuid');
 const { body, param, validationResult } = require('express-validator');
 
-const { pool }         = require('../db/pool');
+const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 
 const router = express.Router();
@@ -84,14 +84,14 @@ router.post('/',
       const { messageId, storageKey, filename, contentType, sizeBytes, width, height } = req.body;
 
       // Enforce per-message attachment limit
-      const { rows: existing } = await pool.query(
+      const { rows: existing } = await query(
         'SELECT COUNT(*) FROM attachments WHERE message_id=$1', [messageId]
       );
       if (parseInt(existing[0].count, 10) >= MAX_IMAGES_PER_MESSAGE) {
         return res.status(400).json({ error: `Max ${MAX_IMAGES_PER_MESSAGE} attachments per message` });
       }
 
-      const { rows } = await pool.query(
+      const { rows } = await query(
         `INSERT INTO attachments (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
          VALUES ($1,$2,'image',$3,$4,$5,$6,$7,$8) RETURNING *`,
         [messageId, req.user.id, filename, contentType, sizeBytes, storageKey, width || null, height || null]
@@ -107,7 +107,7 @@ router.get('/:id',
   param('id').isUUID(),
   async (req, res, next) => {
     try {
-      const { rows } = await pool.query('SELECT * FROM attachments WHERE id=$1', [req.params.id]);
+      const { rows } = await query('SELECT * FROM attachments WHERE id=$1', [req.params.id]);
       if (!rows.length) return res.status(404).json({ error: 'Not found' });
 
       const attachment = rows[0];

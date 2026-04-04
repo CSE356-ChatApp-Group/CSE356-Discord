@@ -5,7 +5,7 @@ const searchClient = require('../search/client');
 const overload = require('../utils/overload');
 const logger = require('../utils/logger');
 const redis = require('../db/redis');
-const { pool } = require('../db/pool');
+const { query } = require('../db/pool');
 const {
   sideEffectQueueDepth,
   sideEffectQueueActiveWorkers,
@@ -146,7 +146,7 @@ function publishMessageEventWithUnread(target, event, data, channelId) {
       const countKey = `channel:msg_count:${channelId}`;
       const exists = await redis.exists(countKey);
       if (!exists) {
-        const { rows } = await pool.query(
+        const { rows } = await query(
           `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
           [channelId]
         );
