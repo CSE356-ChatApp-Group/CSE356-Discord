@@ -54,6 +54,10 @@ ini = f"""\
 listen_addr = 127.0.0.1
 listen_port = 6432
 
+; Required for daemon mode (init.d / sysv service on Ubuntu 22.04)
+logfile = /var/log/pgbouncer/pgbouncer.log
+pidfile = /var/run/pgbouncer/pgbouncer.pid
+
 ; Trust connections from localhost – Node processes run on the same VM.
 ; The password above is used only for PgBouncer → PostgreSQL auth.
 auth_type = trust
@@ -106,12 +110,18 @@ write_sudo('/etc/pgbouncer/userlist.txt', userlist)
 # Fix ownership and permissions
 for f in ('/etc/pgbouncer/pgbouncer.ini', '/etc/pgbouncer/userlist.txt'):
     subprocess.run(['sudo', 'chmod', '640', f], check=True)
-    # Try postgres:postgres first (common), fall back to pgbouncer:pgbouncer
-    ok = subprocess.run(['sudo', 'chown', 'postgres:postgres', f], capture_output=True).returncode
+    # pgbouncer service runs as the pgbouncer user — try that first
+    ok = subprocess.run(['sudo', 'chown', 'pgbouncer:pgbouncer', f], capture_output=True).returncode
     if ok != 0:
-        subprocess.run(['sudo', 'chown', 'pgbouncer:pgbouncer', f], check=True)
+        subprocess.run(['sudo', 'chown', 'postgres:postgres', f], check=True)
 
 print('pgbouncer.ini and userlist.txt written.')
+
+# ── Ensure log/run directories exist with correct ownership ────────────────────
+for d in ('/var/log/pgbouncer', '/var/run/pgbouncer'):
+    subprocess.run(['sudo', 'mkdir', '-p', d], check=True)
+    subprocess.run(['sudo', 'chown', 'pgbouncer:pgbouncer', d], check=True)
+    subprocess.run(['sudo', 'chmod', '750', d], check=True)
 
 # ── Redirect DATABASE_URL to PgBouncer ─────────────────────────────────────────
 if str(pg_port) != '6432':
@@ -127,8 +137,8 @@ else:
 # ── Set PG role timeouts (safety backstop behind PgBouncer query_timeout) ───────
 result = subprocess.run(
     ['sudo', '-u', 'postgres', 'psql', '-qAt', '-c',
-     f"ALTER ROLE {pg_user} SET statement_timeout='15s'; "
-     f"ALTER ROLE {pg_user} SET idle_in_transaction_session_timeout='10s';"],
+     f"ALTER ROLE \"{pg_user}\" SET statement_timeout='15s'; "
+     f"ALTER ROLE \"{pg_user}\" SET idle_in_transaction_session_timeout='10s';"],
     capture_output=True,
     text=True,
 )
