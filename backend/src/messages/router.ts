@@ -232,17 +232,29 @@ router.post('/',
       }
 
       if (conversationId) {
-        const isParticipant = await ensureActiveConversationParticipant(conversationId, req.user.id);
-        if (!isParticipant) {
+        const { rows: [p] } = await client.query(
+          `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+          [conversationId, req.user.id]
+        );
+        if (!p) {
+          await client.query('ROLLBACK');
           return res.status(403).json({ error: 'Not a participant' });
         }
       }
 
+      let communityId: string | null = null;
       if (channelId) {
-        const hasAccess = await ensureChannelAccess(channelId, req.user.id);
-        if (!hasAccess) {
+        const { rows: [ch] } = await client.query(
+          `SELECT community_id FROM channels WHERE id = $1
+           AND (is_private = FALSE
+             OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2))`,
+          [channelId, req.user.id]
+        );
+        if (!ch) {
+          await client.query('ROLLBACK');
           return res.status(403).json({ error: 'Access denied' });
         }
+        communityId = ch.community_id;
       }
 
       await client.query('BEGIN');
@@ -283,7 +295,19 @@ router.post('/',
       }
 
       await client.query('COMMIT');
-      const message = await loadHydratedMessageById(baseMessage.id);
+
+      // Load hydrated message on the same client connection (no extra checkout)
+      const { rows: [message] } = await client.query(
+        `SELECT m.*,
+                CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+                COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
+         FROM   messages m
+         LEFT JOIN users u ON u.id = m.author_id
+         LEFT JOIN attachments a ON a.message_id = m.id
+         WHERE  m.id = $1
+         GROUP  BY m.id, u.id`,
+        [baseMessage.id]
+      );
 
       sideEffects.indexMessage(baseMessage);
       if (conversationId) {
@@ -296,21 +320,14 @@ router.post('/',
           channelId
         );
       }
-      if (channelId) {
-        const { rows: channelRows } = await pool.query(
-          'SELECT community_id FROM channels WHERE id = $1',
-          [channelId]
-        );
-        const communityId = channelRows[0]?.community_id;
-        if (communityId) {
-          sideEffects.publishMessageEvent(`community:${communityId}`, 'community:channel_message', {
-            communityId,
-            channelId,
-            messageId: baseMessage.id,
-            authorId: baseMessage.author_id,
-            createdAt: baseMessage.created_at,
-          });
-        }
+      if (communityId) {
+        sideEffects.publishMessageEvent(`community:${communityId}`, 'community:channel_message', {
+          communityId,
+          channelId,
+          messageId: baseMessage.id,
+          authorId: baseMessage.author_id,
+          createdAt: baseMessage.created_at,
+        });
       }
 
       res.status(201).json({ message: message || baseMessage });
