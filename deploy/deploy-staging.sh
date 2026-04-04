@@ -58,8 +58,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo tee /etc/nginx/sites-available/chatapp >/dev/null <<'EOF'
 upstream chatapp_upstream {
   server 127.0.0.1:__LIVE_PORT__;
-  keepalive 128;
-  keepalive_requests 10000;
+  keepalive 512;
+  keepalive_requests 100000;
   keepalive_timeout 75s;
 }
 

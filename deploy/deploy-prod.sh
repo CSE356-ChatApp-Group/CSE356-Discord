@@ -221,6 +221,11 @@ ssh "$PROD_USER@$PROD_HOST" "
   # Ensure listen backlog is high enough for burst connection ramps.
   sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' /etc/nginx/sites-available/chatapp
   sudo sed -i 's/listen \[::\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' /etc/nginx/sites-available/chatapp
+  # Increase upstream keepalive pool so peak load reuses connections instead of opening new ones.
+  sudo sed -i 's/keepalive [0-9]*/keepalive 512/' /etc/nginx/sites-available/chatapp
+  sudo grep -q 'keepalive_requests' /etc/nginx/sites-available/chatapp \
+    || sudo sed -i '/keepalive 512/a\\  keepalive_requests 100000;\n  keepalive_timeout 75s;' /etc/nginx/sites-available/chatapp
+  sudo sed -i 's/keepalive_requests [0-9]*/keepalive_requests 100000/' /etc/nginx/sites-available/chatapp
   sudo nginx -t >/dev/null
   sudo systemctl reload nginx
   # Raise kernel TCP backlog so burst connection ramps don't drop SYN packets.

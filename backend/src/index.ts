@@ -72,7 +72,7 @@ async function start() {
   // Attach WebSocket upgrade handler to the same HTTP server
   server.on('upgrade', wsServer.handleUpgrade);
 
-  server.listen(PORT, () => {
+  server.listen({ port: PORT, backlog: 4096 }, () => {
     logger.info({ port: PORT }, 'ChatApp API listening');
   });
 
