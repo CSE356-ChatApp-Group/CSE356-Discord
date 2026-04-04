@@ -80,9 +80,14 @@ async function start() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('unhandledRejection', (reason) => {
     const err = reason instanceof Error ? reason : new Error(String(reason));
-    // Pool checkout timeouts are transient per-request errors; log and skip rather than crash the server
-    if (err.message?.includes('timeout exceeded when trying to connect')) {
-      logger.error({ err }, 'pg-pool checkout timeout (unhandled); request failed without response');
+    // Transient pg-pool errors (checkout timeout or stale connection terminated by a network device)
+    // are per-request failures, not server-fatal events — log and continue.
+    if (
+      err.message?.includes('timeout exceeded when trying to connect') ||
+      err.message?.includes('Connection terminated') ||
+      err.message?.includes('connection timeout')
+    ) {
+      logger.error({ err }, 'pg-pool transient error (unhandled); request failed without response');
       return;
     }
     shutdown('unhandledRejection', err);
