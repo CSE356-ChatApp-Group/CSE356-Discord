@@ -29,6 +29,17 @@ scrape_configs:
           # - '10.0.1.4:3000'
     metrics_path: '/metrics'
 
+  # ── MinIO attachment store health ─────────────────────────────────────────
+  - job_name: 'minio'
+    metrics_path: '/minio/health/live'
+    static_configs:
+      - targets: ['minio:9000']
+
+  # ── Host resource metrics ──────────────────────────────────────────────────
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
   # ── Postgres exporter ──────────────────────────────────────────────────────
   # Uncomment after adding postgres-exporter to docker-compose.yml
   # - job_name: 'postgres'

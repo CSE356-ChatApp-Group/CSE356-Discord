@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-SERVICES=(prometheus grafana alertmanager loki promtail tempo)
+SERVICES=(prometheus grafana alertmanager loki promtail tempo node-exporter)
 
 check_http() {
   local label=$1
@@ -25,6 +25,7 @@ check_http "Prometheus" "http://127.0.0.1:9090/graph"
 check_http "Alertmanager" "http://127.0.0.1:9093/"
 check_http "Loki" "http://127.0.0.1:3100/metrics"
 check_http "Tempo" "http://127.0.0.1:3200/metrics"
+check_http "Node Exporter" "http://127.0.0.1:9100/metrics"
 
 if nc -z 127.0.0.1 4318 >/dev/null 2>&1; then
   echo "Tempo OTLP HTTP: open (127.0.0.1:4318)"

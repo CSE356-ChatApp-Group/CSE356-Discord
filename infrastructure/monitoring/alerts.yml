@@ -57,3 +57,71 @@ groups:
         annotations:
           summary: ChatApp API memory usage is high
           description: Node.js RSS is above 400 MB for 5 minutes. The prod VM has 2 GB total — OOM risk if this persists.
+
+      - alert: ChatAppCpuSaturationHigh
+        expr: max by (instance) (rate(process_cpu_seconds_total{job="chatapp-api"}[5m])) > 0.80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp API CPU saturation is high
+          description: API instance {{ $labels.instance }} has used more than 80% of one CPU core for 15 minutes. On production this is a practical scale-up signal.
+
+      - alert: ChatAppPgPoolSaturated
+        expr: max(pg_pool_waiting{job="chatapp-api"}) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp Postgres pool is saturating
+          description: More than 5 requests are waiting for a pg pool client for 10 minutes. This usually means the app tier or database tier needs more headroom.
+
+      - alert: ChatAppOverloadSheddingActive
+        expr: max(chatapp_overload_stage{job="chatapp-api"}) >= 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp overload shedding is active
+          description: The overload guard has reached stage {{ $value }}, which means search or write protection is engaged. This is a strong signal that the current server size is under pressure.
+
+      - alert: ChatAppMinioDown
+        expr: sum(up{job="minio",environment="production"}) < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Production MinIO attachment store is unavailable
+          description: Prometheus cannot reach production MinIO on /minio/health/live. Attachment uploads and downloads may fail until it recovers.
+
+      - alert: ChatAppHostCpuHigh
+        expr: 100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m]))) > 85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host CPU usage is high
+          description: Host {{ $labels.instance }} has been above 85% CPU for 15 minutes. If latency is rising too, this is a good time to scale up prod.
+
+      - alert: ChatAppHostMemoryPressure
+        expr: (node_memory_MemAvailable_bytes{job="node"} / node_memory_MemTotal_bytes{job="node"}) < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host memory pressure is high
+          description: Less than 15% of system memory is available on {{ $labels.instance }} for 10 minutes. Prod is close to needing a larger VM.
+
+      - alert: ChatAppDiskSpaceLow
+        expr: |
+          (
+            node_filesystem_avail_bytes{job="node",mountpoint="/",fstype!~"tmpfs|overlay"}
+              /
+            node_filesystem_size_bytes{job="node",mountpoint="/",fstype!~"tmpfs|overlay"}
+          ) < 0.15
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host disk space is running low
+          description: Less than 15% disk space remains on the root filesystem for 30 minutes.

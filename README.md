@@ -79,7 +79,7 @@ When something breaks in production, start here:
 - **Remote browser access:**
   - Staging Grafana: `http://136.114.103.71/grafana/`
   - Production Grafana: `https://group-8.cse356.compas.cs.stonybrook.edu/grafana/`
-- **Prometheus alerts:** check the `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, and `ChatAppEventLoopLagHigh` rules.
+- **Prometheus alerts:** check `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, `ChatAppEventLoopLagHigh`, `ChatAppCpuSaturationHigh`, `ChatAppPgPoolSaturated`, `ChatAppOverloadSheddingActive`, `ChatAppHostCpuHigh`, `ChatAppHostMemoryPressure`, `ChatAppDiskSpaceLow`, and `ChatAppMinioDown`.
 
 ### Monitoring quick commands
 
@@ -98,6 +98,16 @@ npm run monitoring:down     # stop only monitoring services
 4. Use the same time window in **Tempo** to inspect sampled traces for the failing path.
 
 If you only have shell access, `docker compose logs -f api nginx` is still the fastest first look.
+
+### Scale-up signals to watch most closely
+
+If your main question is **"do we need a bigger prod server yet?"**, the best alerts are:
+
+1. `ChatAppHostCpuHigh` or `ChatAppCpuSaturationHigh` for 10–15 minutes
+2. `ChatAppPgPoolSaturated` or `ChatAppOverloadSheddingActive`
+3. `ChatAppHighP95Latency` together with CPU / memory pressure
+
+Those three together are the clearest early warning that prod needs more headroom.
 
 ### Discord alerting setup
 
