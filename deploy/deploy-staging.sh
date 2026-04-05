@@ -238,19 +238,19 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   # postgresql.conf, so the sed approach is not needed and was fragile against
   # the commented-out default form: #shared_preload_libraries = ''
   sudo -u postgres psql -qAt \
-    -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';" \
+    -c \"ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';\" \
     2>&1 | grep -v 'change directory'
-  echo "pg_stat_statements set via ALTER SYSTEM"
+  echo \"pg_stat_statements set via ALTER SYSTEM\"
 
   sudo -u postgres psql -qAt \
-    -c "ALTER SYSTEM SET shared_buffers         = '\${SHB_MB}MB';" \
-    -c "ALTER SYSTEM SET effective_cache_size   = '\${ECF_MB}MB';" \
-    -c "ALTER SYSTEM SET work_mem               = '\${WRK_MB}MB';" \
-    -c "ALTER SYSTEM SET wal_buffers            = '64MB';" \
-    -c "ALTER SYSTEM SET max_connections        = 100;" \
-    -c "ALTER SYSTEM SET checkpoint_completion_target = '0.9';" \
-    -c "ALTER SYSTEM SET random_page_cost       = '1.1';" \
-    -c "ALTER SYSTEM SET pg_stat_statements.track = 'all';" \
+    -c \"ALTER SYSTEM SET shared_buffers         = '\${SHB_MB}MB';\" \
+    -c \"ALTER SYSTEM SET effective_cache_size   = '\${ECF_MB}MB';\" \
+    -c \"ALTER SYSTEM SET work_mem               = '\${WRK_MB}MB';\" \
+    -c \"ALTER SYSTEM SET wal_buffers            = '64MB';\" \
+    -c \"ALTER SYSTEM SET max_connections        = 100;\" \
+    -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
+    -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
+    -c \"ALTER SYSTEM SET pg_stat_statements.track = 'all';\" \
     2>&1 | grep -v 'change directory'
 
   # shared_buffers requires a full restart (postmaster context);
@@ -261,7 +261,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     || { echo 'ERROR: PostgreSQL failed to start after tuning'; exit 1; }
   # Enable pg_stat_statements extension in the DB (idempotent, needs preload above)
   sudo -u postgres psql chatapp_staging -qAt \
-    -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" \
+    -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\" \
     2>&1 | grep -v 'change directory' || true
   echo 'PostgreSQL tuning applied and restarted.'
 "
