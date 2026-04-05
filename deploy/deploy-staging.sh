@@ -45,10 +45,16 @@ PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} *
 # from bcrypt/dns/fs threads equals a single-instance deployment.
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
-# 35% of total RAM, shared across instances.  Capped at 1500 MB so we don't
-# exceed heap budget on the 7.8 GB staging VM.
+# Formula: min(1500, max(RAM_MB * 12%, 192))
+#   - 12% of RAM scaled per instance (not a flat % so it works on small and large VMs)
+#   - Floor of 192 MB (enough for startup overhead on any supported machine)
+#   - Cap of 1500 MB (prevent single instance monopolising memory on large VMs)
+# Examples:
+#   2 GB / 1 inst: min(1500, max(246, 192)) = 246 MB   ← leaves room for PG + pgbouncer
+#   2 GB / 2 inst: min(1500, max(123, 192)) = 192 MB   (floor kicks in)
+#   7.8 GB / 2 inst: min(1500, max(468, 192)) = 468 MB ← reasonable on staging
 _REMOTE_RAM_MB=$(ssh "${STAGING_USER}@${STAGING_HOST}" "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 7800)
-NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(512, ${_REMOTE_RAM_MB} * 35 // 100 // ${CHATAPP_INSTANCES})))")
+NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"

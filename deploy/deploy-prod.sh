@@ -22,15 +22,17 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 # Number of Node.js workers to run.  Prod currently has fewer vCPUs than
 # staging so we default to 1.  Increase to 2 once prod is upgraded to 2+ vCPUs.
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
-# PG pool sizing — prod has no PgBouncer; Node connects directly to Postgres.
-# PG max_connections=100 (default); reserve 10 for superuser/admin = budget 90.
-# For 1 instance: 90 pool slots.  Divide by instances if ever scaled to 2.
-PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(90, 90 // ${CHATAPP_INSTANCES})))")
+# PG pool sizing — prod uses PgBouncer in transaction mode (same formula as staging).
+# PgBouncer pool_size = min(instances × 40, 90) real backends.
+# PG_POOL_MAX_PER_INSTANCE = pool_size × 2.5 / instances = virtual Node connections.
+_PGB_SIZE=$(python3 -c "print(min(${CHATAPP_INSTANCES} * 40, 90))")
+PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} * 5 // (${CHATAPP_INSTANCES} * 2)))))")
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
-# 35% of total RAM shared across instances, capped at 1500 MB.
+# Formula: min(1500, max(RAM_MB * 12%, 192)) — same as deploy-staging.sh.
+# On a 2 GB prod machine: min(1500, max(246, 192)) = 246 MB.
 _REMOTE_RAM_MB=$(ssh "${PROD_USER}@${PROD_HOST}" "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 2048)
-NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(512, ${_REMOTE_RAM_MB} * 35 // 100 // ${CHATAPP_INSTANCES})))")
+NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== PRODUCTION DEPLOYMENT ==="
 echo "Release: $RELEASE_SHA"
@@ -106,6 +108,66 @@ ssh "$PROD_USER@$PROD_HOST" "
   echo "WARNING: Database backup failed, but continuing"
 }
 echo "✓ Backup prepared"
+
+# 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
+echo "2b) Installing and configuring PgBouncer..."
+scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:/tmp/pgbouncer-setup.py"
+ssh "$PROD_USER@$PROD_HOST" "
+  set -euo pipefail
+  export PGBOUNCER_POOL_SIZE=${_PGB_SIZE}
+  if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
+    sudo apt-get install -y pgbouncer
+    echo 'PgBouncer installed.'
+  fi
+  sudo python3 /tmp/pgbouncer-setup.py
+  sudo systemctl enable pgbouncer
+  sudo service pgbouncer stop 2>/dev/null || true
+  sudo pkill -x pgbouncer 2>/dev/null || true
+  sleep 1
+  sudo service pgbouncer start
+  sleep 1
+  sudo systemctl is-active pgbouncer \
+    || { echo 'ERROR: pgbouncer failed to start'; sudo journalctl -u pgbouncer --no-pager -n 20; exit 1; }
+  echo 'PgBouncer running on 127.0.0.1:6432 in transaction-pooling mode.'
+"
+echo "✓ PgBouncer configured"
+
+# 2c. PostgreSQL tuning (conservative for 2 GB prod VM)
+echo "2c) Tuning PostgreSQL for prod VM..."
+ssh "$PROD_USER@$PROD_HOST" "
+  set -euo pipefail
+  TOTAL_RAM_MB=\$(awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo)
+  NCPU=\$(nproc --all)
+  SHB_MB=\$(( TOTAL_RAM_MB * 19 / 100 ))
+  ECF_MB=\$(( TOTAL_RAM_MB * 75 / 100 ))
+  WRK_MB=\$(python3 -c \"m=max(8, min(32, \${TOTAL_RAM_MB} // 250)); print(m)\")
+  echo \"RAM=\${TOTAL_RAM_MB}MB → shared_buffers=\${SHB_MB}MB work_mem=\${WRK_MB}MB\"
+  sudo -u postgres psql -qAt \
+    -c \"ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';\" \
+    2>&1 | grep -v 'change directory' || true
+  sudo -u postgres psql -qAt \
+    -c \"ALTER SYSTEM SET shared_buffers         = '\${SHB_MB}MB';\" \
+    -c \"ALTER SYSTEM SET effective_cache_size   = '\${ECF_MB}MB';\" \
+    -c \"ALTER SYSTEM SET work_mem               = '\${WRK_MB}MB';\" \
+    -c \"ALTER SYSTEM SET wal_buffers            = '32MB';\" \
+    -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
+    -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
+    -c \"ALTER SYSTEM SET max_connections        = 100;\" \
+    2>&1 | grep -v 'change directory' || true
+  sudo systemctl restart postgresql
+  sleep 3
+  sudo systemctl is-active postgresql \
+    || { echo 'ERROR: PostgreSQL failed to start after tuning'; exit 1; }
+  sudo -u postgres psql chatapp_prod -qAt \
+    -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\" \
+    2>&1 | grep -v 'change directory' || true
+  sudo -u postgres psql -qAt \
+    -c \"ALTER SYSTEM SET pg_stat_statements.track = 'all';\" \
+    2>&1 | grep -v 'change directory' || true
+  sudo -u postgres psql -qAt -c \"SELECT pg_reload_conf();\" > /dev/null || true
+  echo 'PostgreSQL tuning applied.'
+"
+echo "✓ PostgreSQL tuned"
 
 DOWNLOAD_PATH="/tmp/chatapp-${RELEASE_SHA}.tar.gz"
 # 3. Download artifact to prod
