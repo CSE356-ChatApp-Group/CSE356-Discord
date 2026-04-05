@@ -25,10 +25,12 @@ if [[ -z "${CHATAPP_INSTANCES+x}" ]]; then
   CHATAPP_INSTANCES=$(python3 -c "n=int('${_REMOTE_NPROC}'); print(min(max(n,1),4))")
 fi
 # With PgBouncer acting as the connection multiplexer, Node pool size no longer
-# maps 1-to-1 to real PG connections.  PgBouncer's default_pool_size (in
-# pgbouncer.ini) is auto-derived from nproc by pgbouncer-setup.py (~25×nCPU).
-# Node needs only enough connections to cover its own peak concurrency.
-PG_POOL_MAX_PER_INSTANCE=100
+# maps 1-to-1 to real PG connections.  Keep PG_POOL_MAX at 50 per instance;
+# with 2 instances that's 100 total Node→PgBouncer connections against
+# default_pool_size=80 real PG backends — a healthy 1.25:1 ratio.  100 per
+# instance caused 200 total connections competing for 50 PG slots (4:1),
+# making PgBouncer the bottleneck and bypassing the Node-level circuit breaker.
+PG_POOL_MAX_PER_INSTANCE=50
 # libuv thread pool per instance: total budget stays 8 so aggregate CPU load
 # from bcrypt/dns/fs threads equals a single-instance deployment.
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
@@ -74,7 +76,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo tee /etc/nginx/sites-available/chatapp >/dev/null <<'EOF'
 upstream chatapp_upstream {
   least_conn;
-  server 127.0.0.1:__LIVE_PORT__;
+  server 127.0.0.1:__LIVE_PORT__ max_fails=0;
   keepalive 256;
   keepalive_requests 10000;
   keepalive_timeout 75s;
@@ -282,11 +284,11 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # PG_POOL_MAX: Node→PgBouncer virtual connections per instance.  PgBouncer
-  # multiplexes these onto default_pool_size=20 real PG backends.  The Node
-  # pool only needs to be large enough to avoid queuing at the Node level during
-  # bursts; PgBouncer does the real throttling.  100 gives ample headroom for
-  # 600 VUs across 2 instances without triggering the circuit breaker.
+  # PG_POOL_MAX: Node→PgBouncer virtual connections per instance.  With 2
+  # instances × 50 = 100 total Node connections against pgbouncer
+  # default_pool_size=80 real PG backends (1.25:1 ratio).  Raising this above
+  # 50 causes PgBouncer to become the bottleneck before the Node-level circuit
+  # breaker can fire, producing slow timeout failures instead of fast 503s.
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -410,10 +412,11 @@ if [[ ${CHATAPP_INSTANCES} -ge 2 ]]; then
   echo "7b.2) Adding companion to nginx upstream (load-balancing both workers)..."
   ssh "${STAGING_USER}@${STAGING_HOST}" "
     set -euo pipefail
-    # Rewrite the upstream block to include both ports with automatic failover.
-    # max_fails=2 fail_timeout=5s: nginx marks a port unavailable after 2
-    # consecutive errors and retries it after 5 s — handles rolling restarts in
-    # future deploys with zero client-visible errors.
+    # Rewrite the upstream block to include both ports. max_fails=0 disables
+    # nginx's passive health check — the Node-level circuit breaker already
+    # handles overload via fast 503s; if nginx also marks upstreams "down" on
+    # 503s, both instances get marked unavailable simultaneously and nginx
+    # returns 502 "no live upstreams" for every subsequent request (death spiral).
     sudo python3 - <<'PYEOF'
 import re
 
@@ -422,8 +425,8 @@ config = open(cfg_path).read()
 new_upstream = (
     'upstream chatapp_upstream {\n'
     '  least_conn;\n'
-    '  server 127.0.0.1:${CANDIDATE_PORT};\n'
-    '  server 127.0.0.1:${LIVE_PORT};\n'
+    '  server 127.0.0.1:${CANDIDATE_PORT} max_fails=0;\n'
+    '  server 127.0.0.1:${LIVE_PORT} max_fails=0;\n'
     '  keepalive 256;\n'
     '  keepalive_requests 10000;\n'
     '  keepalive_timeout 75s;\n'
