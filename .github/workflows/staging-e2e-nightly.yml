@@ -1,7 +1,10 @@
-name: Manual Staging E2E
+name: Staging E2E
 
 on:
   workflow_dispatch:
+  schedule:
+    # 03:00 UTC every night — staging is idle, no load tests running
+    - cron: '0 3 * * *'
 
 permissions:
   actions: read
