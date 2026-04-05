@@ -147,8 +147,22 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+const overload = require('./utils/overload');
+
 // ── API routes ─────────────────────────────────────────────────────────────────
 const api = express.Router();
+
+// Global request shedding: when the event loop p99 lag exceeds
+// OVERLOAD_LAG_SHED_MS (default 300 ms), return 503 immediately instead of
+// queuing the request.  Prevents the 30-second timeout cliff that builds up
+// when the Node.js event loop is fully saturated under extreme CPU load.
+api.use((_req, res, next) => {
+  if (overload.shouldShedIncomingRequests()) {
+    return res.status(503).json({ error: 'Server busy, please retry' });
+  }
+  next();
+});
+
 api.use('/auth',          authRouter);
 api.use('/users',         usersRouter);
 api.use('/communities',   communitiesRouter);

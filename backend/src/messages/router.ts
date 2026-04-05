@@ -129,11 +129,12 @@ async function loadMessageTarget(messageId) {
 const MESSAGES_CACHE_TTL_SECS = 15;
 function channelMsgCacheKey(channelId) { return `messages:channel:${channelId}`; }
 
-// In-process singleflight: prevents thundering-herd when the channel message
-// cache expires.  All concurrent requests for the same channel share one DB
+// In-process singleflight: prevents thundering-herd when the channel/conversation
+// message cache expires.  All concurrent requests for the same key share one DB
 // query in flight, eliminating the avalanche of identical queries that fires
-// when a popular channel's cache key expires simultaneously for many readers.
+// when a popular target's cache key expires simultaneously for many readers.
 const msgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
+const convMsgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
 
 // ── GET /messages ──────────────────────────────────────────────────────────────
 router.get('/',
@@ -226,7 +227,69 @@ router.get('/',
         }
       }
 
-      // Non-channel or paginated request — no caching, no singleflight.
+      // Conversation messages (non-paginated) — same singleflight+cache pattern as channels.
+      // All participants see identical message history so the cache is shared by conversationId.
+      // NOTE: cache is NOT busted on POST — WS events deliver new messages in real-time.
+      if (conversationId && !before) {
+        const cacheKey = `messages:conversation:${conversationId}`;
+        try {
+          const cached = await redis.get(cacheKey);
+          if (cached) return res.json(JSON.parse(cached));
+        } catch { /* cache miss – fall through */ }
+
+        if (convMsgInflight.has(cacheKey)) {
+          try {
+            return res.json(await convMsgInflight.get(cacheKey));
+          } catch (err) {
+            return next(err);
+          }
+        }
+
+        const promise: Promise<{ messages: any[] }> = (async () => {
+          const { rows } = await query(`
+            SELECT m.*,
+                   CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+                   COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
+            FROM   messages m
+            LEFT JOIN users u ON u.id = m.author_id
+            LEFT JOIN attachments a ON a.message_id = m.id
+            WHERE  m.conversation_id = $3 AND m.deleted_at IS NULL
+              AND  EXISTS (
+                SELECT 1 FROM conversation_participants cp
+                WHERE cp.conversation_id = $3 AND cp.user_id = $2 AND cp.left_at IS NULL
+              )
+            GROUP  BY m.id, u.id
+            ORDER  BY m.created_at DESC
+            LIMIT  $1
+          `, [limit, req.user.id, conversationId]);
+          if (rows.length === 0) {
+            const accessCheck = await query(
+              `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+              [conversationId, req.user.id]
+            );
+            if (!accessCheck.rows.length) {
+              const err: any = new Error('Not a participant');
+              err.statusCode = 403;
+              throw err;
+            }
+          }
+          const body = { messages: rows.reverse() };
+          redis.set(cacheKey, JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
+          return body;
+        })();
+
+        convMsgInflight.set(cacheKey, promise);
+        promise.finally(() => convMsgInflight.delete(cacheKey)).catch(() => {});
+
+        try {
+          return res.json(await promise);
+        } catch (err: any) {
+          if (err.statusCode === 403) return res.status(403).json({ error: err.message });
+          return next(err);
+        }
+      }
+
+      // Paginated requests (before= cursor) — no caching.
       // Build a single query that enforces access control and returns messages in one pool checkout.
       const params: any[] = [limit, req.user.id];
 

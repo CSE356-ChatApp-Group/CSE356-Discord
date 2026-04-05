@@ -16,7 +16,7 @@ const LocalStrategy    = require('passport-local').Strategy;
 const GoogleStrategy   = require('passport-google-oauth20').Strategy;
 const GitHubStrategy   = require('passport-github2').Strategy;
 const { query, getClient } = require('../db/pool');
-const { comparePassword } = require('./passwords');
+const { comparePassword, hashPassword, getBcryptRounds, getRoundsFromHash } = require('./passwords');
 const { signOAuthPending, verifyOAuthLinkIntent } = require('./oauthTokens');
 
 // ── Local ──────────────────────────────────────────────────────────────────────
@@ -36,6 +36,21 @@ passport.use(new LocalStrategy(
       }
       const match = await comparePassword(password, user.password_hash, 'login_compare');
       if (!match) return done(null, false, { message: 'Invalid credentials' });
+
+      // Transparent rehash: if the stored cost factor is below the current target
+      // (e.g. existing 8-round accounts after we lowered BCRYPT_ROUNDS to 6),
+      // upgrade the hash on successful login.  Fire-and-forget — failure here
+      // must never block or fail the login response.
+      const storedRounds = getRoundsFromHash(user.password_hash);
+      if (storedRounds !== null && storedRounds > getBcryptRounds()) {
+        hashPassword(password, 'rehash')
+          .then((newHash) => query(
+            'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+            [newHash, user.id]
+          ))
+          .catch(() => {});
+      }
+
       return done(null, user);
     } catch (err) {
       return done(err);

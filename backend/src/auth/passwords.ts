@@ -49,8 +49,17 @@ async function comparePassword(password, passwordHash, operation = 'compare') {
   }
 }
 
+/**
+ * Extract the cost factor stored inside a bcrypt hash string.
+ * Returns null if the hash is malformed (e.g. OAuth-only accounts with no hash).
+ */
+function getRoundsFromHash(hash) {
+  try { return bcrypt.getRounds(hash); } catch { return null; }
+}
+
 module.exports = {
   getBcryptRounds,
   hashPassword,
   comparePassword,
+  getRoundsFromHash,
 };

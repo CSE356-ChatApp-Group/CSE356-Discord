@@ -85,6 +85,17 @@ function shouldRestrictNonEssentialWrites() {
   return getStage() >= 3;
 }
 
+/**
+ * shouldShedIncomingRequests – returns true when the event loop p99 lag
+ * exceeds OVERLOAD_LAG_SHED_MS (default 300 ms).  At this point the server
+ * is severely saturated; returning 503 immediately is better than queuing
+ * requests for 30+ seconds until k6 / browser timeouts fire.
+ */
+function shouldShedIncomingRequests() {
+  const lagP99Ms = Math.round(lag.percentile(99) / 1e6);
+  return lagP99Ms >= getThreshold('OVERLOAD_LAG_SHED_MS', 300);
+}
+
 function historyLimit(baseLimit) {
   const stage = getStage();
   if (stage >= 2) return Math.min(baseLimit, 30);
@@ -99,5 +110,6 @@ module.exports = {
   searchLimit,
   shouldDeferSearchIndexing,
   shouldRestrictNonEssentialWrites,
+  shouldShedIncomingRequests,
   historyLimit,
 };
