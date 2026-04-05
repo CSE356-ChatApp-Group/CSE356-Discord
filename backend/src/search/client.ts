@@ -182,7 +182,7 @@ async function searchFts(q: string, opts: Record<string, any>): Promise<any> {
     WHERE m.deleted_at IS NULL
       AND m.content_tsv @@ websearch_to_tsquery('english', $1)
       ${filters}
-    ORDER BY _rank DESC, m.created_at DESC
+    ORDER BY m.created_at DESC
     LIMIT ${limitPh} OFFSET ${offsetPh}`;
 
   const { rows } = await query(sql, params);

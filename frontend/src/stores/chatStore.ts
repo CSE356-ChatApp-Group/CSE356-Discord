@@ -959,10 +959,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   async search(q: string) {
     set({ searchQuery: q });
     if (!q || q.length < 2) { set({ searchResults: null }); return; }
-    const { activeChannel, activeConv } = get();
+    const { activeCommunity, activeConv } = get();
     const qs = new URLSearchParams({ q, limit: '30' });
-    if (activeChannel) qs.set('channelId', activeChannel.id);
-    if (activeConv)    qs.set('conversationId', activeConv.id);
+    // Scope: community (all accessible channels) or DM conversation — per spec.
+    if (activeConv)          qs.set('conversationId', activeConv.id);
+    else if (activeCommunity) qs.set('communityId', activeCommunity.id);
     const results = await api.get(`/search?${qs}`);
     set({ searchResults: results.hits || [] });
   },
