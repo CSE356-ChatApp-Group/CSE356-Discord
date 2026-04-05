@@ -8,7 +8,11 @@ groups:
           severity: critical
         annotations:
           summary: ChatApp API is down
-          description: No ChatApp API instance has been reachable for more than 5 minutes. Check systemd (chatapp@<port>) and nginx on the host.
+          description: >
+            No ChatApp API instance has been reachable for more than 5 minutes.
+            Check https://group-8.cse356.compas.cs.stonybrook.edu/health (prod)
+            or http://136.114.103.71/health (staging).
+            On the host: systemctl status 'chatapp@*'; journalctl -u 'chatapp@*' -n 50.
 
       - alert: ChatAppHigh5xxRate
         expr: |

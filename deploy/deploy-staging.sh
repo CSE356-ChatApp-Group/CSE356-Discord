@@ -464,19 +464,17 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 CUTOVER_COMPLETED=1
 
-echo "7a) Updating Prometheus scrape target to new live port ${CANDIDATE_PORT}..."
+echo "7a) Prometheus scrape config check (staging always runs both 4000+4001)..."
+# Staging runs CHATAPP_INSTANCES>=2 so both ports are always in the Prometheus
+# config — no port substitution needed. Just verify the container is healthy.
 ssh "${STAGING_USER}@${STAGING_HOST}" "
-  # Try common Prometheus config locations; update the API scrape target port.
-  for PROM_CFG in /etc/prometheus/prometheus.yml /opt/prometheus/prometheus.yml; do
-    if [ -f \"\$PROM_CFG\" ]; then
-      sudo sed -i 's/127\.0\.0\.1:${LIVE_PORT}/127.0.0.1:${CANDIDATE_PORT}/g' \"\$PROM_CFG\"
-      # Reload Prometheus if running (ignore errors — monitoring is non-critical).
-      curl -fsS -X POST 'http://127.0.0.1:9090/-/reload' 2>/dev/null || true
-      echo \"Updated Prometheus config at \$PROM_CFG\"
-      break
-    fi
-  done
-" || echo "Warning: Prometheus config update failed (non-critical)" >&2
+  if sudo docker inspect chatapp-monitoring-prometheus-1 >/dev/null 2>&1; then
+    STATUS=\$(sudo docker inspect -f '{{.State.Running}}' chatapp-monitoring-prometheus-1)
+    echo \"Prometheus container running=\$STATUS\"
+  else
+    echo 'WARN: Prometheus container not found (non-critical)'
+  fi
+" || echo "Warning: Prometheus check failed (non-critical)" >&2
 
 # ── Step 7b: companion instance (dual-worker mode) ───────────────────────────
 # When CHATAPP_INSTANCES>=2, the deploy was a blue-green cutover: nginx now

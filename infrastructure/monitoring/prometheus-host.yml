@@ -17,10 +17,15 @@ scrape_configs:
   - job_name: 'chatapp-api'
     metrics_path: '/metrics'
     static_configs:
-      # Updated by deploy script (step 10.6) to the active port after each cutover.
+      # Staging: both instances always run. deploy-staging.sh does not modify this.
+      # Prod: deploy-prod.sh step 10.6 sed-replaces the active port on each cutover,
+      # then restarts the Prometheus container to re-render this template.
+      - targets: ['127.0.0.1:4000']
+        labels:
+          node: live-4000
       - targets: ['127.0.0.1:4001']
         labels:
-          node: live
+          node: candidate-4001
 
   - job_name: 'prometheus'
     static_configs:
