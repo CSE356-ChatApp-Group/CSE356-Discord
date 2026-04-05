@@ -21,6 +21,7 @@ const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
+const { invalidateWsBootstrapCache } = require('../websocket/server');
 
 const router = express.Router();
 router.use(authenticate);
@@ -181,7 +182,10 @@ router.post('/',
       );
 
       await client.query('COMMIT');
-      await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+      await Promise.allSettled([
+        presenceService.invalidatePresenceFanoutTargets(req.user.id),
+        invalidateWsBootstrapCache(req.user.id),
+      ]);
       redis.del(communitiesCacheKey(req.user.id)).catch(() => {});
       res.status(201).json({ community });
     } catch (err) {
@@ -260,7 +264,10 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
       `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
       [req.params.id, req.user.id]
     );
-    await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+    await Promise.allSettled([
+      presenceService.invalidatePresenceFanoutTargets(req.user.id),
+      invalidateWsBootstrapCache(req.user.id),
+    ]);
     redis.del(communitiesCacheKey(req.user.id)).catch(() => {});
 
     await fanout.publish(`community:${req.params.id}`, {
@@ -292,6 +299,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     );
 
     await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+    invalidateWsBootstrapCache(req.user.id).catch(() => {});
 
     await Promise.allSettled([
       redis.del(communitiesCacheKey(req.user.id)),

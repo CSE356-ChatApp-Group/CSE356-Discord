@@ -209,6 +209,14 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 
   echo \"RAM=\${TOTAL_RAM_MB}MB nCPU=\${NCPU} → shared_buffers=\${SHB_MB}MB work_mem=\${WRK_MB}MB\"
 
+  # Enable pg_stat_statements via shared_preload_libraries (requires restart).
+  # This is idempotent: grep avoids duplicate entries in postgresql.conf.
+  PG_CONF=\$(sudo -u postgres psql -tAc "SHOW config_file;")
+  if ! sudo grep -q "pg_stat_statements" "\${PG_CONF}"; then
+    sudo sed -i "s/^#*shared_preload_libraries.*/shared_preload_libraries = 'pg_stat_statements'/" "\${PG_CONF}"
+    echo "pg_stat_statements added to shared_preload_libraries"
+  fi
+
   sudo -u postgres psql -qAt \
     -c "ALTER SYSTEM SET shared_buffers         = '\${SHB_MB}MB';" \
     -c "ALTER SYSTEM SET effective_cache_size   = '\${ECF_MB}MB';" \
@@ -217,6 +225,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     -c "ALTER SYSTEM SET max_connections        = 100;" \
     -c "ALTER SYSTEM SET checkpoint_completion_target = '0.9';" \
     -c "ALTER SYSTEM SET random_page_cost       = '1.1';" \
+    -c "ALTER SYSTEM SET pg_stat_statements.track = 'all';" \
     2>&1 | grep -v 'change directory'
 
   # shared_buffers requires a full restart (postmaster context);
@@ -225,6 +234,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sleep 2
   sudo systemctl is-active postgresql \
     || { echo 'ERROR: PostgreSQL failed to start after tuning'; exit 1; }
+  # Enable pg_stat_statements extension in the DB (idempotent, needs preload above)
+  sudo -u postgres psql chatapp_staging -qAt \
+    -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" \
+    2>&1 | grep -v 'change directory' || true
   echo 'PostgreSQL tuning applied and restarted.'
 "
 

@@ -15,6 +15,7 @@ const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
 const presenceService  = require('../presence/service');
+const { invalidateWsBootstrapCache } = require('../websocket/server');
 
 const router = express.Router();
 router.use(authenticate);
@@ -299,6 +300,7 @@ router.post('/',
       await client.query('COMMIT');
       await Promise.allSettled([
         ...allIds.map((participantId) => presenceService.invalidatePresenceFanoutTargets(participantId)),
+        ...allIds.map((participantId) => invalidateWsBootstrapCache(participantId)),
         ...allIds.map((uid) => redis.del(conversationsCacheKey(uid))),
       ]);
 
@@ -487,6 +489,9 @@ async function addParticipantsHandler(req, res, next) {
         ...participantIdsToAdd.map((participantId) =>
           presenceService.invalidatePresenceFanoutTargets(participantId)
         ),
+        ...participantIdsToAdd.map((participantId) =>
+          invalidateWsBootstrapCache(participantId)
+        ),
         // Invalidate conversation list cache for newly added AND existing
         // participants so everyone sees the updated participant list immediately.
         ...[...participantIdsToAdd, ...currentParticipantIds].map((uid) =>
@@ -594,7 +599,10 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       await client.query('DELETE FROM conversations WHERE id = $1', [req.params.id]);
     }
     await client.query('COMMIT');
-    await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+    await Promise.allSettled([
+      presenceService.invalidatePresenceFanoutTargets(req.user.id),
+      invalidateWsBootstrapCache(req.user.id),
+    ]);
     redis.del(conversationsCacheKey(req.user.id)).catch(() => {});
 
     // Broadcast system message if group DM and not deleted

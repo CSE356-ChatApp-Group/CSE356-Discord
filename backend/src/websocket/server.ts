@@ -313,7 +313,32 @@ redisSub.on("message", (channel, message) => {
   deliverPubsubMessage(channel, message);
 });
 
+const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
+  process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '30',
+  10,
+);
+
+function wsBootstrapCacheKey(userId) {
+  return `ws:bootstrap:${userId}`;
+}
+
+/** Invalidate the cached WS subscription list for a user. Call this whenever
+ *  their community membership, channel access, or conversation list changes. */
+async function invalidateWsBootstrapCache(userId) {
+  await redis.del(wsBootstrapCacheKey(userId));
+}
+
 async function listAutoSubscriptionChannels(userId) {
+  const cacheKey = wsBootstrapCacheKey(userId);
+  const cached = await redis.get(cacheKey).catch(() => null);
+  if (cached) {
+    try {
+      return JSON.parse(cached);
+    } catch {
+      await redis.del(cacheKey);
+    }
+  }
+
   const [conversationRes, communityRes, channelRes] = await Promise.all([
     query(
       `SELECT conversation_id::text AS id
@@ -341,11 +366,18 @@ async function listAutoSubscriptionChannels(userId) {
     ),
   ]);
 
-  return [
+  const channels = [
     ...conversationRes.rows.map((row) => `conversation:${row.id}`),
     ...communityRes.rows.map((row) => `community:${row.id}`),
     ...channelRes.rows.map((row) => `channel:${row.id}`),
   ];
+
+  // Cache for a short TTL. Invalidated explicitly on membership changes.
+  redis
+    .set(cacheKey, JSON.stringify(channels), 'EX', WS_BOOTSTRAP_CACHE_TTL_SECONDS)
+    .catch(() => {}); // fire-and-forget, non-critical
+
+  return channels;
 }
 
 async function bootstrapUserSubscriptions(ws, userId) {
@@ -730,4 +762,4 @@ function shutdown() {
   });
 }
 
-module.exports = { handleUpgrade, wss, shutdown };
+module.exports = { handleUpgrade, wss, shutdown, invalidateWsBootstrapCache };

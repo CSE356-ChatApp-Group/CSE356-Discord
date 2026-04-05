@@ -70,21 +70,23 @@ const PROFILES = {
     wsVUs: 60,
     wsDuration: '2m45s',
   },
-  // Faster break test: same load curve but tighter stage durations (~6m total).
-  // Reaches the historical break point (150-300 iters/s) quickly to confirm fixes.
+  // Faster break test: same load curve but tighter stage durations (~6m30s total).
+  // Starts with a 30s cache-warmup stage (matches tune) so results are comparable
+  // and don't include cold-cache penalty for the first ramp segment.
   'break-fast': {
     httpStages: [
-      { target: 25, duration: '30s' },
-      { target: 75, duration: '1m' },
+      { target: 20,  duration: '30s' },  // cache warmup (PG buffer + Redis)
+      { target: 25,  duration: '30s' },
+      { target: 75,  duration: '1m' },
       { target: 150, duration: '1m' },
       { target: 300, duration: '1m' },
       { target: 500, duration: '1m' },
-      { target: 0, duration: '30s' },
+      { target: 0,   duration: '30s' },
     ],
     preAllocatedVUs: 100,
     maxVUs: 600,
     wsVUs: 60,
-    wsDuration: '6m',
+    wsDuration: '6m30s',
   },
   break: {
     httpStages: [
