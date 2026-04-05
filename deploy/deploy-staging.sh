@@ -311,7 +311,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     -c \"ALTER SYSTEM SET effective_cache_size   = '\${ECF_MB}MB';\" \
     -c \"ALTER SYSTEM SET work_mem               = '\${WRK_MB}MB';\" \
     -c \"ALTER SYSTEM SET wal_buffers            = '64MB';\" \
-    -c "ALTER SYSTEM SET max_connections        = 120;" \
+    -c \"ALTER SYSTEM SET max_connections        = 120;\" \\
     -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
     -c \"ALTER SYSTEM SET pg_stat_statements.track = 'all';\" \

@@ -152,7 +152,7 @@ ssh "$PROD_USER@$PROD_HOST" "
     -c \"ALTER SYSTEM SET wal_buffers            = '32MB';\" \
     -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
-    -c "ALTER SYSTEM SET max_connections        = 120;" \
+    -c \"ALTER SYSTEM SET max_connections        = 120;\" \\
     2>&1 | grep -v 'change directory' || true
   sudo systemctl restart postgresql
   sleep 3
