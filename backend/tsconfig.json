@@ -4,16 +4,15 @@
     "module": "CommonJS",
     "moduleResolution": "Node",
     "moduleDetection": "force",
-    "rootDir": "src",
-    "outDir": "dist",
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "strict": false,
     "noImplicitAny": false,
-    "types": ["node", "jest"]
+    "types": ["node", "jest"],
+    "noEmit": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "tests/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }
