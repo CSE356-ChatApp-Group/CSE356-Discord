@@ -126,8 +126,18 @@ lines.push('');
 lines.push('## Prometheus after-run snapshot');
 lines.push('');
 lines.push(`- RSS memory: ${fmt(promScalar(after, 'rss_mb'), ' MB')}`);
-lines.push(`- CPU utilisation: ${fmt((promScalar(after, 'cpu_seconds_rate') ?? 0) * 100, '%')} (Node process, rate over last 2 m)`);
-lines.push(`- Event loop p99: ${fmt(promScalar(after, 'eventloop_p99_ms'), ' ms')}`);
+lines.push(`- CPU utilisation (post-run ~2 m avg): ${fmt((promScalar(after, 'cpu_seconds_rate') ?? 0) * 100, '%')} — use peak below for accurate burst figure`);
+lines.push(`- CPU peak during run (max 1 m rate over 12 m): ${fmt((promScalar(after, 'cpu_peak_rate') ?? 0) * 100, '%')}`);
+const cpuByInstance = promResult(after, 'cpu_by_instance');
+if (cpuByInstance.length > 1) {
+  for (const item of cpuByInstance) {
+    const inst = item.metric?.instance ?? 'unknown';
+    const val = Number(item.value?.[1]);
+    if (Number.isFinite(val)) lines.push(`  - ${inst}: ${fmt(val * 100, '%')}`);
+  }
+}
+lines.push(`- Event loop p99 (post-run): ${fmt(promScalar(after, 'eventloop_p99_ms'), ' ms')}`);
+lines.push(`- Event loop p99 peak: ${fmt(promScalar(after, 'eventloop_peak_ms'), ' ms')}`);
 lines.push(`- 5xx rate: ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
 lines.push(`- PG pool peak-total/min-idle/peak-waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
 lines.push(`- Redis memory: ${fmt(promScalar(after, 'redis_memory_mb'), ' MB')} / connected clients: ${fmt(promScalar(after, 'redis_connected_clients'))}`); 

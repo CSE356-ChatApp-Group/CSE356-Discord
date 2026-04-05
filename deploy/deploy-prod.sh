@@ -25,9 +25,9 @@ CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
 # PG pool sizing — prod uses PgBouncer in transaction mode (same formula as staging).
 # PgBouncer pool_size = min(instances × 40, 90) real backends.
 # PG_POOL_MAX_PER_INSTANCE = pool_size × 2.5 / instances = virtual Node connections.
-_PGB_SIZE=$(python3 -c "print(min(${CHATAPP_INSTANCES} * 40, 90))")
-PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} * 5 // (${CHATAPP_INSTANCES} * 2)))))")
-UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
+_PGB_SIZE=$(python3 -c "print(min(${CHATAPP_INSTANCES} * 50, 120))")
+PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} * 5 // (${CHATAPP_INSTANCES} * 2)))))") # 2.5:1 = ×5÷(n×2)
+UV_THREADPOOL_PER_INSTANCE=$(python3 -c "print(max(8, 16 // max(1, ${CHATAPP_INSTANCES})))")
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
 # Formula: min(1500, max(RAM_MB * 12%, 192)) — same as deploy-staging.sh.
 # On a 2 GB prod machine: min(1500, max(246, 192)) = 246 MB.
@@ -152,7 +152,7 @@ ssh "$PROD_USER@$PROD_HOST" "
     -c \"ALTER SYSTEM SET wal_buffers            = '32MB';\" \
     -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
-    -c \"ALTER SYSTEM SET max_connections        = 100;\" \
+    -c "ALTER SYSTEM SET max_connections        = 120;" \
     2>&1 | grep -v 'change directory' || true
   sudo systemctl restart postgresql
   sleep 3

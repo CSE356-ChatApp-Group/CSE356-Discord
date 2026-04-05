@@ -60,9 +60,9 @@ print(f'Parsed DATABASE_URL: user={pg_user} host={pg_host}:{pg_port} db={pg_db}'
 # value from CHATAPP_INSTANCES (ensures consistency whether 1 or 4 instances run).
 import multiprocessing
 _ncpu = multiprocessing.cpu_count()
-_default_pool_size = min(_ncpu * 40, 90)
+_default_pool_size = min(_ncpu * 50, 120)
 PGBOUNCER_POOL_SIZE = int(os.environ.get('PGBOUNCER_POOL_SIZE', _default_pool_size))
-PGBOUNCER_POOL_SIZE = min(PGBOUNCER_POOL_SIZE, 90)   # hard cap regardless of env
+PGBOUNCER_POOL_SIZE = min(PGBOUNCER_POOL_SIZE, 120)   # hard cap regardless of env
 PGBOUNCER_RESERVE_SIZE = max(5, _ncpu * 5)
 print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} (PGBOUNCER_POOL_SIZE env={os.environ.get("PGBOUNCER_POOL_SIZE", "not set")})')
 

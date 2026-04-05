@@ -24,8 +24,13 @@ queries = {
     "route_p95_top": 'sort_desc(histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api"}[5m]))))',
     "five_xx_rate": 'sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[5m]))',
     "rss_mb": 'max(process_resident_memory_bytes{job="chatapp-api"}) / 1024 / 1024',
+    # cpu_seconds_rate: instantaneous rate at snapshot time (post-run, reflects cooldown — not peak).
+    # cpu_peak_rate: max 1-minute rate seen during the last 12 minutes — captures burst during the test.
     "cpu_seconds_rate": 'sum(rate(process_cpu_seconds_total{job="chatapp-api"}[2m]))',
+    "cpu_peak_rate": 'max_over_time(sum(rate(process_cpu_seconds_total{job="chatapp-api"}[1m]))[12m:30s])',
+    "cpu_by_instance": 'max_over_time(rate(process_cpu_seconds_total{job="chatapp-api"}[1m])[12m:30s])',
     "eventloop_p99_ms": 'max(nodejs_eventloop_lag_p99_seconds{job="chatapp-api"}) * 1000',
+    "eventloop_peak_ms": 'max_over_time(max(nodejs_eventloop_lag_p99_seconds{job="chatapp-api"})[12m:30s]) * 1000',
     "side_effect_queue_depth": 'sum(side_effect_queue_depth{job="chatapp-api"}) by (queue)',
     "side_effect_queue_workers": 'sum(side_effect_queue_active_workers{job="chatapp-api"}) by (queue)',
     "presence_fanout_rate": 'sum by (status, throttled) (rate(presence_fanout_total{job="chatapp-api"}[5m]))',

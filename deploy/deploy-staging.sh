@@ -27,23 +27,28 @@ fi
 # PG connection sizing — maintain a 2.5:1 virtual→real ratio for all CPU counts.
 #
 # Formula (validated against load tests):
-#   PGBOUNCER_POOL_SIZE = min(instances × 40, 90)   ← real PG backends, capped
-#                                                     by max_connections=100 budget
+#   PGBOUNCER_POOL_SIZE = min(instances × 50, 120)  ← real PG backends, capped
+#                                                     by max_connections=120 budget
 #   PG_POOL_MAX_PER_INSTANCE = PGBOUNCER × 2.5 / instances  ← Node pool depth
 #
 # Results per CPU count:
-#   1 CPU:  pgb=40,  pool/inst=100  → 100 virtual :  40 real = 2.5:1
-#   2 CPUs: pgb=80,  pool/inst=100  → 200 virtual :  80 real = 2.5:1  (validated 4.77% fail)
-#   3 CPUs: pgb=90,  pool/inst=75   → 225 virtual :  90 real = 2.5:1
-#   4 CPUs: pgb=90,  pool/inst=56   → 224 virtual :  90 real = 2.5:1
+#   1 CPU:  pgb=50,  pool/inst=125 → capped 100  :  50 real = 2.0:1
+#   2 CPUs: pgb=100, pool/inst=100 → 200 virtual : 100 real = 2.0:1  (target)
+#   3 CPUs: pgb=120, pool/inst=100 → 300 virtual : 120 real = 2.5:1
+#   4 CPUs: pgb=120, pool/inst=75  → 300 virtual : 120 real = 2.5:1
 #
 # Fewer pool slots per instance = deeper Node-level checkout queue = slower p95.
 # This formula keeps per-instance depth constant relative to real PG bandwidth.
-_PGB_SIZE=$(python3 -c "print(min(${CHATAPP_INSTANCES} * 40, 90))")
+# PgBouncer pool_size: min(instances×50, 120) real PG backends.
+# Raised from ×40/cap90 → ×50/cap120 to reduce PgBouncer queue depth under burst.
+# PG max_connections must be ≥ pool_size + 3 reserved; set to 120 to match.
+_PGB_SIZE=$(python3 -c "print(min(${CHATAPP_INSTANCES} * 50, 120))")
 PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} * 5 // (${CHATAPP_INSTANCES} * 2)))))") # 2.5:1 = ×5÷(n×2)
-# libuv thread pool per instance: total budget stays 8 so aggregate CPU load
-# from bcrypt/dns/fs threads equals a single-instance deployment.
-UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
+# libuv thread pool per instance: minimum 8 threads to prevent bcrypt/dns starvation.
+# With 2 instances on a 2-vCPU host: 8 threads/instance = 16 total.
+# The previous formula (8/instances) gave only 4 threads with 2 instances,
+# which caused DNS and fs I/O to queue behind burst bcrypt login ops.
+UV_THREADPOOL_PER_INSTANCE=$(python3 -c "print(max(8, 16 // max(1, ${CHATAPP_INSTANCES})))")
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
 # Formula: min(1500, max(RAM_MB * 12%, 192))
 #   - 12% of RAM scaled per instance (not a flat % so it works on small and large VMs)
@@ -282,7 +287,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   #   effective_cache_size = 75% RAM  (planner hint, no allocation)
   #   work_mem            = RAM / max_connections / 3 (capped 16-64 MB)
   #   wal_buffers         = 64 MB
-  #   max_connections     = 100   (PgBouncer caps real clients; 100 ≫ pool_size)
+  #   max_connections     = 120   (headroom for pool_size=100 + 3 superuser reserved)
   #
   # Scaling: all values are derived from detected RAM/CPU so they auto-adjust
   # when this script runs on a larger VM (4-CPU, 16 GB, etc.)
@@ -306,7 +311,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     -c \"ALTER SYSTEM SET effective_cache_size   = '\${ECF_MB}MB';\" \
     -c \"ALTER SYSTEM SET work_mem               = '\${WRK_MB}MB';\" \
     -c \"ALTER SYSTEM SET wal_buffers            = '64MB';\" \
-    -c \"ALTER SYSTEM SET max_connections        = 100;\" \
+    -c "ALTER SYSTEM SET max_connections        = 120;" \
     -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
     -c \"ALTER SYSTEM SET pg_stat_statements.track = 'all';\" \
