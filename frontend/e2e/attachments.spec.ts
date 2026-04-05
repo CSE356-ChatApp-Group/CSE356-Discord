@@ -54,17 +54,17 @@ test.describe('attachment upload and access', () => {
     expect(commRes.ok(), `create community: ${commRes.status()}`).toBeTruthy();
     communityId = (await commRes.json()).community.id;
 
-    const chanRes = await aliceCtx.request.post(`/api/v1/communities/${communityId}/channels`, {
+    const chanRes = await aliceCtx.request.post('/api/v1/channels', {
       headers: { Authorization: `Bearer ${aliceToken}` },
-      data: { name: 'attach-test', is_private: false },
+      data: { communityId, name: 'attach-test', isPrivate: false },
     });
     expect(chanRes.ok(), `create channel: ${chanRes.status()}`).toBeTruthy();
     channelId = (await chanRes.json()).channel.id;
 
     // ── Message authored by Alice ─────────────────────────────────────────
-    const msgRes = await aliceCtx.request.post(`/api/v1/channels/${channelId}/messages`, {
+    const msgRes = await aliceCtx.request.post('/api/v1/messages', {
       headers: { Authorization: `Bearer ${aliceToken}` },
-      data: { content: 'attachment test message' },
+      data: { channelId, content: 'attachment test message' },
     });
     expect(msgRes.ok(), `create message: ${msgRes.status()}`).toBeTruthy();
     messageId = (await msgRes.json()).message.id;

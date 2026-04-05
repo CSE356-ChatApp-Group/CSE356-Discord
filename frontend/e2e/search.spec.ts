@@ -38,9 +38,9 @@ test.describe('message search', () => {
     expect(commRes.ok(), `create community: ${commRes.status()}`).toBeTruthy();
     communityId = (await commRes.json()).community.id;
 
-    const chanRes = await context.request.post(`/api/v1/communities/${communityId}/channels`, {
+    const chanRes = await context.request.post('/api/v1/channels', {
       headers: { Authorization: `Bearer ${token}` },
-      data: { name: 'search-test', is_private: false },
+      data: { communityId, name: 'search-test', isPrivate: false },
     });
     expect(chanRes.ok(), `create channel: ${chanRes.status()}`).toBeTruthy();
     channelId = (await chanRes.json()).channel.id;
@@ -48,9 +48,9 @@ test.describe('message search', () => {
     // ── Seed a few messages with a unique searchable token ────────────────
     messageToken = uniqueToken();
     for (let i = 0; i < 3; i++) {
-      const msgRes = await context.request.post(`/api/v1/channels/${channelId}/messages`, {
+      const msgRes = await context.request.post('/api/v1/messages', {
         headers: { Authorization: `Bearer ${token}` },
-        data: { content: `${messageToken} message-${i}` },
+        data: { channelId, content: `${messageToken} message-${i}` },
       });
       expect(msgRes.ok(), `seed message ${i}: ${msgRes.status()}`).toBeTruthy();
       const { message } = await msgRes.json();
