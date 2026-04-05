@@ -17,12 +17,10 @@ scrape_configs:
   - job_name: 'chatapp-api'
     metrics_path: '/metrics'
     static_configs:
-      - targets: ['127.0.0.1:4000']
-        labels:
-          node: live-4000
+      # Updated by deploy script (step 10.6) to the active port after each cutover.
       - targets: ['127.0.0.1:4001']
         labels:
-          node: candidate-4001
+          node: live
 
   - job_name: 'prometheus'
     static_configs:

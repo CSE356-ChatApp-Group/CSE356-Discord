@@ -2,13 +2,13 @@ groups:
   - name: chatapp-api
     rules:
       - alert: ChatAppApiDown
-        expr: up{job="chatapp-api"} == 0
-        for: 2m
+        expr: sum(up{job="chatapp-api"}) < 1
+        for: 5m
         labels:
           severity: critical
         annotations:
-          summary: ChatApp API target is down
-          description: Prometheus has not been able to scrape one of the ChatApp API instances for at least 2 minutes.
+          summary: ChatApp API is down
+          description: No ChatApp API instance has been reachable for more than 5 minutes. Check systemd (chatapp@<port>) and nginx on the host.
 
       - alert: ChatAppHigh5xxRate
         expr: |
@@ -44,3 +44,12 @@ groups:
         annotations:
           summary: ChatApp event loop lag is elevated
           description: Node.js event loop p99 lag is above 250ms for at least 10 minutes.
+
+      - alert: ChatAppHighMemoryUsage
+        expr: process_resident_memory_bytes{job="chatapp-api"} > 400e6
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp API memory usage is high
+          description: Node.js RSS is above 400 MB for 5 minutes. The prod VM has 2 GB total — OOM risk if this persists.

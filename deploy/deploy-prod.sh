@@ -362,6 +362,29 @@ ssh "$PROD_USER@$PROD_HOST" "
   echo 'Old instance stopped'"
 echo "✓ Old instance stopped (rollback: re-deploy previous SHA)"
 
+# 10.6. Update Prometheus scrape target to the new active port.
+# prometheus-host.yml is the config template for the monitoring stack.
+# We sed-replace the old port, re-render /tmp/prometheus.yml inside the
+# running Prometheus container, then hot-reload so no scrape gap occurs.
+echo "10.6. Updating Prometheus scrape target to port ${NEW_PORT}..."
+ssh "$PROD_USER@$PROD_HOST" "
+  set -e
+  PROM_TMPL=/opt/chatapp-monitoring/prometheus-host.yml
+  if [ -f \"\$PROM_TMPL\" ]; then
+    sudo sed -i \"s/127\\.0\\.0\\.1:${OLD_PORT}/127.0.0.1:${NEW_PORT}/g\" \"\$PROM_TMPL\"
+    # Re-render /tmp/prometheus.yml inside the container from the updated template.
+    sudo docker exec chatapp-monitoring-prometheus-1 sh -c \
+      'sed \"s/__ALERT_ENVIRONMENT__/\$ALERT_ENVIRONMENT/g\" /etc/prometheus/prometheus.yml.template >/tmp/prometheus.yml' 2>/dev/null || true
+    # Hot-reload Prometheus — no restart or scrape-data loss.
+    curl -sf -X POST http://127.0.0.1:9090/-/reload >/dev/null 2>&1 \
+      && echo \"Prometheus reloaded → scraping port ${NEW_PORT}\" \
+      || echo 'WARN: Prometheus reload skipped (non-fatal)'
+  else
+    echo 'WARN: prometheus-host.yml not found, skipping Prometheus update'
+  fi
+" 2>/dev/null || echo "⚠ Prometheus target update failed (non-fatal)"
+echo "✓ Monitoring updated"
+
 # 11. Update current symlink
 echo "11. Updating current release symlink..."
 if ssh "$PROD_USER@$PROD_HOST" "
