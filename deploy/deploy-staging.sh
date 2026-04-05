@@ -106,7 +106,7 @@ server {
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_read_timeout 8s;   # fail fast when Node is saturated — normal p(95) is <4s
+    proxy_read_timeout 30s;
     client_max_body_size 10m;
   }
 
