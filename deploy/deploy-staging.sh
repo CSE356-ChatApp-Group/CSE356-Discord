@@ -239,7 +239,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   # the commented-out default form: #shared_preload_libraries = ''
   sudo -u postgres psql -qAt \
     -c \"ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';\" \
-    2>&1 | grep -v 'change directory'
+    2>&1 | grep -v 'change directory' || true
   echo \"pg_stat_statements set via ALTER SYSTEM\"
 
   sudo -u postgres psql -qAt \
@@ -251,7 +251,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
     -c \"ALTER SYSTEM SET pg_stat_statements.track = 'all';\" \
-    2>&1 | grep -v 'change directory'
+    2>&1 | grep -v 'change directory' || true
 
   # shared_buffers requires a full restart (postmaster context);
   # other params take effect after pg_reload_conf().
