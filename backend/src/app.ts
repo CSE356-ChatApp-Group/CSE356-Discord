@@ -147,25 +147,8 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-const overload = require('./utils/overload');
-
 // ── API routes ─────────────────────────────────────────────────────────────────
 const api = express.Router();
-
-// Read-only request shedding: when the event loop p99 lag exceeds
-// OVERLOAD_LAG_SHED_MS (default 300 ms), return 503 immediately for
-// idempotent read requests (GET/HEAD) instead of queuing them.
-// Write requests (POST/PUT/PATCH/DELETE) are never shed — a dropped write
-// loses user data (e.g. unsent message), while a dropped read is harmless
-// because the data still exists and the client can retry immediately.
-// The pool circuit breaker in db/pool.ts handles DB-level overload for all
-// request types regardless of this middleware.
-api.use((req, res, next) => {
-  if ((req.method === 'GET' || req.method === 'HEAD') && overload.shouldShedIncomingRequests()) {
-    return res.status(503).json({ error: 'Server busy, please retry' });
-  }
-  next();
-});
 
 api.use('/auth',          authRouter);
 api.use('/users',         usersRouter);
