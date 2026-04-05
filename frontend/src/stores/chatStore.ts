@@ -860,6 +860,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const uploadRes = await fetch(presign.uploadUrl, {
           method: 'PUT',
           headers: { 'Content-Type': file.type },
+          credentials: 'omit',
+          cache: 'no-store',
           body: file,
         });
 

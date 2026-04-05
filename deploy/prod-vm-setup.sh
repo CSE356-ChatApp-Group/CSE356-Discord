@@ -69,6 +69,23 @@ server {
     client_max_body_size 10m;
   }
 
+  location = /minio {
+    return 307 /minio/;
+  }
+
+  location /minio/ {
+    proxy_pass http://127.0.0.1:9000/;
+    proxy_http_version 1.1;
+    proxy_set_header Host 127.0.0.1:9000;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 300s;
+    client_max_body_size 10m;
+  }
+
   # Health endpoint (no logging)
   location /health {
     proxy_pass http://app/health;
@@ -152,11 +169,12 @@ GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 
 # S3 / Object Storage
-S3_BUCKET=chatapp-prod
-S3_ENDPOINT=https://s3.amazonaws.com
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
+S3_ENDPOINT=https://chatapp.example.com/minio
+S3_INTERNAL_ENDPOINT=http://127.0.0.1:9000
+S3_BUCKET=chatapp-attachments
+S3_REGION=us-east-1
+S3_ACCESS_KEY=
+S3_SECRET_KEY=
 
 # Search
 MEILISEARCH_URL=http://localhost:7700
