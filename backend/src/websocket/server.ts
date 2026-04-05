@@ -196,6 +196,7 @@ async function recomputeUserPresence(userId) {
   if (!connIds.length) {
     await redis.srem(connectedUsersKey(), userId);
     await presenceService.setPresence(userId, "offline");
+    lastPresenceComputedAt.delete(userId); // no longer connected; free the Map entry
     return;
   }
 
@@ -262,6 +263,7 @@ async function recomputeUserPresence(userId) {
   if (!stateByConn.length) {
     await redis.srem(connectedUsersKey(), userId);
     await presenceService.setPresence(userId, "offline");
+    lastPresenceComputedAt.delete(userId); // no longer connected; free the Map entry
     idleSpan?.end();
     return;
   }
@@ -289,13 +291,18 @@ async function recomputeUserPresence(userId) {
 async function reconcileAllConnectedUsers() {
   const userIds = await redis.smembers(connectedUsersKey());
   const now = Date.now();
-  for (const userId of userIds) {
+  const stale = userIds.filter((userId) => {
     const last = lastPresenceComputedAt.get(userId) || 0;
-    // Skip users whose presence was recomputed within the last 5 s by a
-    // real event (activity, status change, connect/disconnect).  Their state
-    // is already fresh; re-running saves the Redis smembers + pipeline cost.
-    if (now - last < PRESENCE_SWEEPER_DEBOUNCE_MS) continue;
-    await recomputeUserPresence(userId);
+    return now - last >= PRESENCE_SWEEPER_DEBOUNCE_MS;
+  });
+
+  // Process in parallel with bounded concurrency so the sweeper does not
+  // monopolize the event loop when many users are connected.
+  const CONCURRENCY = 10;
+  for (let i = 0; i < stale.length; i += CONCURRENCY) {
+    await Promise.allSettled(
+      stale.slice(i, i + CONCURRENCY).map((userId) => recomputeUserPresence(userId)),
+    );
   }
 }
 

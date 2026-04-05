@@ -22,7 +22,9 @@ function parsePositiveInt(value, fallback) {
 }
 
 const ACCESS_VERIFY_CACHE_TTL_MS = parsePositiveInt(process.env.JWT_ACCESS_VERIFY_CACHE_TTL_MS, 15_000);
-const DENYLIST_CHECK_CACHE_TTL_MS = parsePositiveInt(process.env.JWT_DENYLIST_CHECK_CACHE_TTL_MS, 1_000);
+// Default matches ACCESS_VERIFY_CACHE_TTL_MS: logout explicitly calls clearTokenCaches(),
+// so a longer TTL has no security impact while saving ~15x Redis round-trips under load.
+const DENYLIST_CHECK_CACHE_TTL_MS = parsePositiveInt(process.env.JWT_DENYLIST_CHECK_CACHE_TTL_MS, 15_000);
 const TOKEN_CACHE_MAX_ENTRIES = parsePositiveInt(process.env.JWT_TOKEN_CACHE_MAX_ENTRIES, 5_000);
 
 const verifiedAccessCache = new Map();
@@ -112,7 +114,17 @@ async function isDenied(token) {
     return cached.denied;
   }
 
-  const denied = (await redis.exists(`deny:${token}`)) === 1;
+  let denied: boolean;
+  try {
+    denied = (await redis.exists(`deny:${token}`)) === 1;
+  } catch (err) {
+    // Redis unavailable: fail open rather than blocking all authenticated requests.
+    // The in-process verify cache already validated the signature; this is a
+    // brief availability trade-off during Redis downtime.
+    const logger = require('./logger');
+    logger.warn({ err }, 'jwt: Redis denylist check failed, failing open');
+    return false;
+  }
   const expiresAtMs = getTokenExpiryMs(token, now + DENYLIST_CHECK_CACHE_TTL_MS);
   setCachedEntry(denylistCache, token, {
     denied,

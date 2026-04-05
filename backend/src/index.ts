@@ -45,7 +45,7 @@ async function shutdown(signal, err = null) {
 
   await Promise.allSettled([
     pool.end(),
-    redis.quit(),
+    redis.closeRedisConnections(),
   ]);
 
   clearTimeout(forceExitTimer);
