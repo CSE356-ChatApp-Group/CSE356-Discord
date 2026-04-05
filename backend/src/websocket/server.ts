@@ -43,6 +43,18 @@ const wss = new WebSocketServer({ noServer: true });
 const IDLE_TTL_SECONDS = 60;
 const CONNECTION_ALIVE_TTL_SECONDS = 120;
 const PRESENCE_SWEEPER_MS = 15_000;
+// Backpressure thresholds for slow WS consumers.
+// DROP: skip this frame if the client's write buffer exceeds 64 KB.
+//   ~130 typical frames. A client this far behind is already visibly lagging;
+//   dropping one frame is better than growing the server-side buffer further.
+// KILL: terminate the connection at 2 MB. The client cannot keep up at all;
+//   holding 2 MB of queued frames wastes heap and blocks on TCP ACK.
+const WS_BACKPRESSURE_DROP_BYTES = parseInt(
+  process.env.WS_BACKPRESSURE_DROP_BYTES || String(64 * 1024), 10,
+);
+const WS_BACKPRESSURE_KILL_BYTES = parseInt(
+  process.env.WS_BACKPRESSURE_KILL_BYTES || String(2 * 1024 * 1024), 10,
+);
 // Skip the sweeper for users whose presence was just recomputed by a real
 // event (activity ping, status change, connect/disconnect).  5 s is well
 // below the 15 s sweep interval so we never miss an idle transition.
@@ -341,9 +353,24 @@ function deliverPubsubMessage(channel, message) {
   }
 
   clients.forEach((ws) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(outbound);
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const buffered: number = (ws as any).bufferedAmount ?? 0;
+    if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
+      logger.warn(
+        { event: 'ws.slow_consumer.killed', userId: (ws as any)._userId, buffered },
+        'WS slow consumer: terminating connection due to excessive backpressure',
+      );
+      ws.terminate();
+      return;
     }
+    if (buffered >= WS_BACKPRESSURE_DROP_BYTES) {
+      logger.debug(
+        { event: 'ws.slow_consumer.frame_dropped', userId: (ws as any)._userId, buffered },
+        'WS slow consumer: dropping frame due to backpressure',
+      );
+      return;
+    }
+    ws.send(outbound);
   });
 }
 

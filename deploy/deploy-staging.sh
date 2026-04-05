@@ -78,6 +78,19 @@ fi
 echo "Current live port: ${LIVE_PORT}"
 echo "Candidate port: ${CANDIDATE_PORT}"
 
+# Before step 0 rewrites nginx, detect whether the companion (CANDIDATE_PORT)
+# was already running from a previous dual-instance deploy.  If it was, we
+# re-add it to the upstream after the config write so we don't halve capacity
+# for the duration of the deploy window (steps 0→7b.2 is ~5–10 minutes).
+_COMPANION_WAS_ACTIVE=false
+if [[ ${CHATAPP_INSTANCES} -ge 2 ]]; then
+  if ssh "${STAGING_USER}@${STAGING_HOST}" \
+       "systemctl is-active chatapp@${CANDIDATE_PORT}" >/dev/null 2>&1; then
+    _COMPANION_WAS_ACTIVE=true
+    echo "  (companion on port ${CANDIDATE_PORT} is active — will restore after nginx rewrite)"
+  fi
+fi
+
 cleanup_candidate() {
   if [[ "${CUTOVER_COMPLETED}" == "1" ]]; then
     return 0
@@ -191,6 +204,41 @@ EOF
     || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' /etc/nginx/nginx.conf
   sudo nginx -t && sudo systemctl reload nginx
 "
+
+# Step 0 wrote nginx with only LIVE_PORT.  If the companion was running before
+# the deploy started, restore it in the upstream immediately so capacity stays
+# at 2 workers during the deploy window instead of dropping to 1.
+# We use the same Python inline approach as step 7b.2.
+if [[ "${_COMPANION_WAS_ACTIVE}" == "true" ]]; then
+  echo "0c) Restoring companion port ${CANDIDATE_PORT} in nginx upstream (capacity preservation)..."
+  ssh "${STAGING_USER}@${STAGING_HOST}" "
+    set -euo pipefail
+    sudo python3 - <<'PYEOF'
+import re
+cfg_path = '/etc/nginx/sites-available/chatapp'
+config = open(cfg_path).read()
+new_upstream = (
+    'upstream chatapp_upstream {\n'
+    '  least_conn;\n'
+    '  server 127.0.0.1:${LIVE_PORT} max_fails=0;\n'
+    '  server 127.0.0.1:${CANDIDATE_PORT} max_fails=0;\n'
+    '  keepalive 256;\n'
+    '  keepalive_requests 10000;\n'
+    '  keepalive_timeout 75s;\n'
+    '}'
+)
+config = re.sub(
+    r'upstream chatapp_upstream \{[^}]+\}',
+    new_upstream,
+    config,
+    flags=re.DOTALL,
+)
+open(cfg_path, 'w').write(config)
+PYEOF
+    sudo nginx -t && sudo systemctl reload nginx
+    echo 'nginx upstream restored: ${LIVE_PORT} + ${CANDIDATE_PORT} (both active)'
+  "
+fi
 
 echo "0a) Installing and configuring PgBouncer (transaction-mode connection pooler)..."
 scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/pgbouncer-setup.py"
@@ -334,6 +382,18 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=50/' /opt/chatapp/shared/.env \
     || echo 'POOL_CIRCUIT_BREAKER_QUEUE=50' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY: 1 per instance on staging — with
+  # CHATAPP_INSTANCES>=2 that means up to 2 total indexing jobs in flight
+  # across the cluster, which matches the 2-CPU budget without over-subscribing.
+  sudo grep -q '^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=.*/SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=1/' /opt/chatapp/shared/.env \
+    || echo 'SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=1' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # FANOUT_QUEUE_CONCURRENCY: parallel fanout:critical workers per instance.
+  # 4 concurrent fanout jobs on staging (2-vCPU, 2 instances) — allows bursting
+  # through queued publishes without serialising on a single worker.
+  sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=4/' /opt/chatapp/shared/.env \
+    || echo 'FANOUT_QUEUE_CONCURRENCY=4' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer interferes.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \

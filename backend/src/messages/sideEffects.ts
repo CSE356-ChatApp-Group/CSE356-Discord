@@ -14,10 +14,15 @@ const {
   sideEffectQueueDroppedTotal,
 } = require('../utils/metrics');
 
-const queues = {
-  fanout: [],
+const queues: Record<string, Array<{ name: string; fn: () => Promise<void>; enqueuedAt: number; queueName: string }>> = {
+  'fanout:critical': [],
+  'fanout:background': [],
   search: [],
 };
+const rawFanoutConcurrency = Number(process.env.FANOUT_QUEUE_CONCURRENCY || 4);
+const FANOUT_QUEUE_CONCURRENCY = Number.isFinite(rawFanoutConcurrency) && rawFanoutConcurrency > 0
+  ? Math.floor(rawFanoutConcurrency)
+  : 4;
 const rawSearchConcurrency = Number(process.env.SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY || 2);
 const rawSearchMaxDepth = Number(process.env.SEARCH_SIDE_EFFECT_QUEUE_MAX_DEPTH || 5000);
 const SEARCH_WORKER_CONCURRENCY = Number.isFinite(rawSearchConcurrency) && rawSearchConcurrency > 0
@@ -26,13 +31,17 @@ const SEARCH_WORKER_CONCURRENCY = Number.isFinite(rawSearchConcurrency) && rawSe
 const SEARCH_MAX_QUEUE_DEPTH = Number.isFinite(rawSearchMaxDepth) && rawSearchMaxDepth > 0
   ? Math.floor(rawSearchMaxDepth)
   : 5000;
-const activeWorkers = {
-  fanout: 0,
+const activeWorkers: Record<string, number> = {
+  'fanout:critical': 0,
+  'fanout:background': 0,
   search: 0,
 };
 
-function queueNameForJob(name) {
-  return name.startsWith('search.') ? 'search' : 'fanout';
+function queueNameForJob(name: string): string {
+  if (name.startsWith('search.')) return 'search';
+  // Background fanout jobs are explicitly tagged; everything else is critical.
+  if (name.startsWith('fanout:background.')) return 'fanout:background';
+  return 'fanout:critical';
 }
 
 function queueConfig(queueName) {
@@ -44,8 +53,19 @@ function queueConfig(queueName) {
     };
   }
 
+  if (queueName === 'fanout:background') {
+    return {
+      concurrency: 2,
+      maxDepth: 10_000,
+      dropOnOverflow: true,
+    };
+  }
+  // fanout:critical — message and presence delivery.  Concurrency > 1 is safe
+  // because each publish is an independent Redis call; within-channel ordering
+  // is best-effort across the cluster anyway (multiple API nodes publish
+  // concurrently).  Higher concurrency reduces queue build-up under burst load.
   return {
-    concurrency: 1,
+    concurrency: FANOUT_QUEUE_CONCURRENCY,
     maxDepth: Number.POSITIVE_INFINITY,
     dropOnOverflow: false,
   };
@@ -124,7 +144,8 @@ async function drainWorker(queueName) {
   }
 }
 
-refreshQueueMetrics('fanout');
+refreshQueueMetrics('fanout:critical');
+refreshQueueMetrics('fanout:background');
 refreshQueueMetrics('search');
 
 function publishMessageEvent(target, event, data) {
@@ -177,7 +198,7 @@ function deleteMessage(messageId) {
 }
 
 function getQueueDepth() {
-  return queues.fanout.length + queues.search.length;
+  return queues['fanout:critical'].length + queues['fanout:background'].length + queues.search.length;
 }
 
 module.exports = {
