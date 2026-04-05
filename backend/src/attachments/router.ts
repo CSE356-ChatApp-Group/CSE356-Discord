@@ -9,8 +9,7 @@
 'use strict';
 
 const express   = require('express');
-const { URL } = require('url');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 }  = require('uuid');
 const { body, param, validationResult } = require('express-validator');
@@ -18,89 +17,13 @@ const { body, param, validationResult } = require('express-validator');
 const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const overload = require('../utils/overload');
+const { s3, BUCKET, toClientFacingUrl } = require('./storage');
 
 const router = express.Router();
 router.use(authenticate);
 
-const BUCKET  = process.env.S3_BUCKET  || 'chatapp-attachments';
-const REGION  = process.env.S3_REGION  || 'us-east-1';
 const MAX_IMAGES_PER_MESSAGE = 4;
 const MAX_SIZE_BYTES = 8 * 1024 * 1024; // 8 MB per image
-
-function normalizeEndpoint(value) {
-  return (value || '').trim().replace(/\/+$/, '');
-}
-
-function parseEndpoint(value) {
-  const normalized = normalizeEndpoint(value);
-  if (!normalized) return null;
-
-  try {
-    const endpoint = new URL(normalized);
-    const pathname = endpoint.pathname && endpoint.pathname !== '/'
-      ? endpoint.pathname.replace(/\/+$/, '')
-      : '';
-    return {
-      href: normalized,
-      origin: endpoint.origin,
-      host: endpoint.host,
-      pathname,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function resolveInternalEndpoint() {
-  const explicit = normalizeEndpoint(process.env.S3_INTERNAL_ENDPOINT);
-  if (explicit) return explicit;
-
-  const publicEndpoint = parseEndpoint(process.env.S3_ENDPOINT);
-  if (publicEndpoint?.pathname) {
-    return 'http://127.0.0.1:9000';
-  }
-
-  return normalizeEndpoint(process.env.S3_ENDPOINT);
-}
-
-function stripBasePath(pathname, basePath) {
-  if (!basePath) return pathname || '/';
-  if (pathname === basePath) return '/';
-  if (pathname?.startsWith(`${basePath}/`)) return pathname.slice(basePath.length) || '/';
-  return pathname || '/';
-}
-
-function joinPath(basePath, suffix) {
-  const normalizedSuffix = suffix && suffix !== '/' ? (suffix.startsWith('/') ? suffix : `/${suffix}`): '';
-  if (!basePath) return normalizedSuffix || '/';
-  return `${basePath}${normalizedSuffix}`.replace(/\/{2,}/g, '/');
-}
-
-const PUBLIC_ENDPOINT = parseEndpoint(process.env.S3_ENDPOINT);
-const INTERNAL_ENDPOINT = parseEndpoint(resolveInternalEndpoint());
-
-function toClientFacingUrl(urlString) {
-  if (!PUBLIC_ENDPOINT || !INTERNAL_ENDPOINT) return urlString;
-  if (PUBLIC_ENDPOINT.href === INTERNAL_ENDPOINT.href) return urlString;
-
-  const signed = new URL(urlString);
-  const suffixPath = stripBasePath(signed.pathname, INTERNAL_ENDPOINT.pathname);
-  const clientUrl = new URL(PUBLIC_ENDPOINT.origin);
-
-  clientUrl.pathname = joinPath(PUBLIC_ENDPOINT.pathname, suffixPath);
-  clientUrl.search = signed.search;
-  return clientUrl.toString();
-}
-
-const s3 = new S3Client({
-  region: REGION,
-  endpoint: INTERNAL_ENDPOINT?.href,
-  forcePathStyle: !!INTERNAL_ENDPOINT,
-  credentials: process.env.S3_ACCESS_KEY ? {
-    accessKeyId:     process.env.S3_ACCESS_KEY,
-    secretAccessKey: process.env.S3_SECRET_KEY,
-  } : undefined, // falls back to IAM role in EC2/ECS
-});
 
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
@@ -134,7 +57,7 @@ router.post('/presign',
         Metadata: { uploaderId: req.user.id },
       });
 
-      const url = toClientFacingUrl(await getSignedUrl(s3, cmd, { expiresIn: 300 })); 
+      const url = toClientFacingUrl(await getSignedUrl(s3, cmd, { expiresIn: 300 }));
 
       res.json({ uploadUrl: url, storageKey: key });
     } catch (err) { next(err); }
@@ -156,6 +79,16 @@ router.post('/',
 
     try {
       const { messageId, storageKey, filename, contentType, sizeBytes, width, height } = req.body;
+
+      // Verify the message exists and belongs to the requesting user so that
+      // one user cannot record attachments against another user's message.
+      const { rows: msgRows } = await query(
+        `SELECT id FROM messages WHERE id = $1 AND author_id = $2 AND deleted_at IS NULL`,
+        [messageId, req.user.id]
+      );
+      if (!msgRows.length) {
+        return res.status(403).json({ error: 'Message not found or not yours' });
+      }
 
       // Enforce per-message attachment limit
       const { rows: existing } = await query(
@@ -180,15 +113,48 @@ router.post('/',
 router.get('/:id',
   param('id').isUUID(),
   async (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
     try {
-      const { rows } = await query('SELECT * FROM attachments WHERE id=$1', [req.params.id]);
+      // Join through messages to get channel/conversation context for access control.
+      const { rows } = await query(`
+        SELECT a.*, m.channel_id, m.conversation_id
+        FROM attachments a
+        JOIN messages m ON m.id = a.message_id
+        WHERE a.id = $1
+      `, [req.params.id]);
+
       if (!rows.length) return res.status(404).json({ error: 'Not found' });
 
       const attachment = rows[0];
+
+      // Enforce that the requester is a member of the channel or conversation
+      // the attachment's message belongs to.
+      if (attachment.channel_id) {
+        const { rows: access } = await query(
+          `SELECT 1 FROM channels WHERE id = $1
+           AND (is_private = FALSE OR EXISTS (
+             SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2
+           ))`,
+          [attachment.channel_id, req.user.id]
+        );
+        if (!access.length) return res.status(403).json({ error: 'Access denied' });
+      } else if (attachment.conversation_id) {
+        const { rows: access } = await query(
+          `SELECT 1 FROM conversation_participants
+           WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
+          [attachment.conversation_id, req.user.id]
+        );
+        if (!access.length) return res.status(403).json({ error: 'Access denied' });
+      }
+
+      // Strip join-only columns from the client response
+      const { channel_id, conversation_id, ...clientAttachment } = attachment;
       const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: attachment.storage_key });
       const url = toClientFacingUrl(await getSignedUrl(s3, cmd, { expiresIn: 3600 }));
 
-      res.json({ attachment, url });
+      res.json({ attachment: clientAttachment, url });
     } catch (err) { next(err); }
   }
 );

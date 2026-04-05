@@ -614,6 +614,15 @@ router.delete('/:id',
         return res.status(403).json({ error: 'Access denied' });
       }
 
+      // Collect attachment storage keys BEFORE the DELETE so we can clean up
+      // S3 objects.  The attachments table has ON DELETE CASCADE, meaning the
+      // rows disappear with the message — they must be captured first.
+      const { rows: attachRows } = await query(
+        'SELECT storage_key FROM attachments WHERE message_id = $1',
+        [req.params.id]
+      );
+      const attachmentKeys = attachRows.map((r) => r.storage_key);
+
       const { rows } = await query(
         `DELETE FROM messages
          WHERE id=$1 AND author_id=$2
@@ -623,6 +632,7 @@ router.delete('/:id',
       if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
 
       const message = rows[0];
+      sideEffects.deleteAttachmentObjects(attachmentKeys);
       sideEffects.deleteMessage(message.id);
       // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
       if (message.channel_id) {

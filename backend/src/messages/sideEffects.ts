@@ -197,6 +197,19 @@ function deleteMessage(messageId) {
   });
 }
 
+/**
+ * Queue best-effort S3 object deletion for attachment storage keys that were
+ * collected before the message DB row was hard-deleted (ON DELETE CASCADE
+ * removes the attachment rows immediately, so they must be captured first).
+ */
+function deleteAttachmentObjects(storageKeys: string[]) {
+  if (!storageKeys.length) return;
+  enqueue('s3.deleteAttachments', async () => {
+    const { deleteStorageKeys } = require('../attachments/storage');
+    await deleteStorageKeys(storageKeys);
+  });
+}
+
 function getQueueDepth() {
   return queues['fanout:critical'].length + queues['fanout:background'].length + queues.search.length;
 }
@@ -206,5 +219,6 @@ module.exports = {
   publishMessageEventWithUnread,
   indexMessage,
   deleteMessage,
+  deleteAttachmentObjects,
   getQueueDepth,
 };
