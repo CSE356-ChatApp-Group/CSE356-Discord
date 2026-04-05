@@ -1,224 +1,196 @@
 /**
- * Search client – wraps Meilisearch for message indexing and querying.
+ * Search client – Postgres native full-text search.
  *
- * Index: "messages"
- * Indexed fields: id, content, authorId, channelId, conversationId, communityId, createdAt
+ * Primary path:  websearch_to_tsquery + tsvector GIN index
+ *                (ranked via ts_rank, highlighted via ts_headline)
+ * Fallback path: pg_trgm ILIKE + GIN trigram index
+ *                (activates when FTS returns 0 results — handles partial /
+ *                 infix queries like "hel" matching "hello")
  *
- * To switch to OpenSearch: implement the same interface using the
- * @opensearch-project/opensearch package.
+ * Access control is built into the query:
+ *   - Scoped (channelId / conversationId): verified by the router before this
+ *     function is called; the scope param is used as a direct WHERE filter.
+ *   - Unscoped: the query restricts results to channels/conversations the
+ *     requesting user belongs to.
  */
 
 'use strict';
 
-const { MeiliSearch } = require('meilisearch');
 const { query } = require('../db/pool');
 const logger = require('../utils/logger');
 
-const useMeilisearch = process.env.USE_MEILISEARCH === 'true';
-const client = useMeilisearch
-  ? new MeiliSearch({
-      host: process.env.MEILISEARCH_URL || 'http://localhost:7700',
-      apiKey: process.env.MEILISEARCH_KEY || '',
-    })
-  : null;
+const SELECT_COLS = `
+  m.id,
+  m.content,
+  m.author_id        AS "authorId",
+  COALESCE(NULLIF(u.display_name, ''), u.username) AS "authorDisplayName",
+  m.channel_id       AS "channelId",
+  m.conversation_id  AS "conversationId",
+  m.created_at       AS "createdAt"`;
 
-const INDEX = 'messages';
-const searchInitDisabled =
-  !useMeilisearch ||
-  process.env.DISABLE_SEARCH_INIT === 'true' ||
-  process.env.NODE_ENV === 'test';
+const FROM_CLAUSE = `
+  FROM messages m
+  JOIN users u ON u.id = m.author_id`;
 
-async function ensureIndex() {
-  try {
-    await client.getIndex(INDEX);
-  } catch {
-    await client.createIndex(INDEX, { primaryKey: 'id' });
-    const index = client.index(INDEX);
-    await index.updateSettings({
-      searchableAttributes: ['content'],
-      filterableAttributes: ['channelId', 'conversationId', 'communityId', 'authorId', 'createdAt'],
-      sortableAttributes: ['createdAt'],
-    });
-    logger.info('Meilisearch index created');
-  }
+/**
+ * Push a value onto params and return its positional placeholder ($N).
+ * This keeps the SQL building readable and avoids manual index tracking.
+ */
+function p(params: any[], v: any): string {
+  params.push(v);
+  return `$${params.length}`;
 }
 
-if (!searchInitDisabled) {
-  ensureIndex().catch(err => logger.warn({ err }, 'Meilisearch init warning'));
-}
-
-async function indexMessage(msg) {
-  if (!useMeilisearch) return;
-  await client.index(INDEX).addDocuments([{
-    id:             msg.id,
-    content:        msg.content || '',
-    authorId:       msg.author_id,
-    channelId:      msg.channel_id || null,
-    conversationId: msg.conversation_id || null,
-    communityId:    msg.community_id || null,
-    createdAt:      msg.created_at,
-  }]);
-}
-
-async function deleteMessage(id) {
-  if (!useMeilisearch) return;
-  await client.index(INDEX).deleteDocument(id);
-}
-
-function escapeRegExp(input) {
-  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function highlight(content, query) {
-  if (!content) return '';
-  const terms = query
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map(escapeRegExp);
-  if (!terms.length) return content;
-
-  const pattern = new RegExp(`(${terms.join('|')})`, 'gi');
-  return content.replace(pattern, '<em>$1</em>');
-}
-
-async function attachAuthorDisplayNames(hits = []) {
-  const authorIds = [...new Set(
-    hits
-      .map(hit => hit?.authorId)
-      .filter(Boolean)
-      .map(String)
-  )];
-
-  if (!authorIds.length) return hits;
-
-  const { rows } = await query(
-    `SELECT id::text AS id,
-            COALESCE(NULLIF(display_name, ''), username) AS "authorDisplayName"
-     FROM users
-     WHERE id::text = ANY($1::text[])`,
-    [authorIds]
-  );
-
-  const nameById = new Map(rows.map(row => [row.id, row.authorDisplayName]));
-  return hits.map(hit => ({
-    ...hit,
-    authorDisplayName: hit.authorDisplayName || nameById.get(String(hit.authorId)) || 'User',
-  }));
-}
-
-async function searchPostgres(q, opts: Record<string, any> = {}) {
-  const params: any[] = [`%${q}%`];
-  const where = ['m.deleted_at IS NULL', `m.content ILIKE $${params.length}`];
+/**
+ * Build WHERE fragments for optional scope + filter params.
+ * params[0] is always the search term (positionally reserved by caller).
+ */
+function buildFilters(params: any[], opts: Record<string, any>): string {
+  const parts: string[] = [];
 
   if (opts.channelId) {
-    params.push(opts.channelId);
-    where.push(`m.channel_id = $${params.length}`);
-  }
-  if (opts.conversationId) {
-    params.push(opts.conversationId);
-    where.push(`m.conversation_id = $${params.length}`);
-  }
-  if (opts.authorId) {
-    params.push(opts.authorId);
-    where.push(`m.author_id = $${params.length}`);
-  }
-  if (opts.after) {
-    params.push(opts.after);
-    where.push(`m.created_at >= $${params.length}::timestamptz`);
-  }
-  if (opts.before) {
-    params.push(opts.before);
-    where.push(`m.created_at <= $${params.length}::timestamptz`);
+    parts.push(`AND m.channel_id = ${p(params, opts.channelId)}`);
+  } else if (opts.conversationId) {
+    parts.push(`AND m.conversation_id = ${p(params, opts.conversationId)}`);
+  } else if (opts.userId) {
+    // Unscoped: restrict to messages the user can actually see.
+    const uid = p(params, opts.userId);
+    parts.push(`
+    AND (
+      (m.channel_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM channels ch
+        LEFT JOIN channel_members cm ON cm.channel_id = ch.id AND cm.user_id = ${uid}
+        WHERE ch.id = m.channel_id
+          AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
+      ))
+      OR
+      (m.conversation_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM conversation_participants cp
+        WHERE cp.conversation_id = m.conversation_id
+          AND cp.user_id = ${uid}
+          AND cp.left_at IS NULL
+      ))
+    )`);
   }
 
-  const limit = Number(opts.limit) || 20;
-  const offset = Number(opts.offset) || 0;
-  params.push(limit);
-  const limitIndex = params.length;
-  params.push(offset);
-  const offsetIndex = params.length;
+  if (opts.authorId) parts.push(`AND m.author_id = ${p(params, opts.authorId)}`);
+  if (opts.after)    parts.push(`AND m.created_at >= ${p(params, opts.after)}::timestamptz`);
+  if (opts.before)   parts.push(`AND m.created_at <= ${p(params, opts.before)}::timestamptz`);
 
-  const { rows } = await query(
-    `SELECT m.id,
-            m.content,
-            m.author_id AS "authorId",
-            COALESCE(NULLIF(u.display_name, ''), u.username) AS "authorDisplayName",
-            m.channel_id AS "channelId",
-            m.conversation_id AS "conversationId",
-            m.created_at AS "createdAt"
-     FROM messages m
-     JOIN users u ON u.id = m.author_id
-     WHERE ${where.join(' AND ')}
-     ORDER BY m.created_at DESC
-     LIMIT $${limitIndex}
-     OFFSET $${offsetIndex}`,
-    params
-  );
+  return parts.join('\n');
+}
 
-  const hits = rows.map(row => ({
-    ...row,
-    _formatted: {
-      content: highlight(row.content, q),
-    },
-  }));
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
+function highlightIlike(content: string, q: string): string {
+  if (!content) return '';
+  const terms = q.trim().split(/\s+/).filter(Boolean).map(escapeRegExp);
+  if (!terms.length) return content;
+  return content.replace(new RegExp(`(${terms.join('|')})`, 'gi'), '<em>$1</em>');
+}
+
+function buildResult(rows: any[], q: string, offset: number, limit: number) {
   return {
-    hits,
+    hits: rows.map(row => ({
+      id:                row.id,
+      content:           row.content,
+      authorId:          row.authorId,
+      authorDisplayName: row.authorDisplayName,
+      channelId:         row.channelId,
+      conversationId:    row.conversationId,
+      createdAt:         row.createdAt,
+      _formatted: { content: row.highlight || row.content || '' },
+    })),
     offset,
     limit,
-    estimatedTotalHits: hits.length,
+    estimatedTotalHits: rows.length,
     processingTimeMs: 0,
     query: q,
   };
 }
 
-async function searchMeilisearch(q, opts: Record<string, any> = {}) {
-  const filters = [];
+/** Primary: ranked FTS via the content_tsv GIN index. */
+async function searchFts(q: string, opts: Record<string, any>): Promise<any> {
+  const params: any[] = [q];    // $1 reserved for the query string
+  const filters  = buildFilters(params, opts);
+  const limit    = Number(opts.limit)  || 20;
+  const offset   = Number(opts.offset) || 0;
+  const limitPh  = p(params, limit);
+  const offsetPh = p(params, offset);
 
-  if (opts.channelId)      filters.push(`channelId = "${opts.channelId}"`);
-  if (opts.conversationId) filters.push(`conversationId = "${opts.conversationId}"`);
-  if (opts.authorId)       filters.push(`authorId = "${opts.authorId}"`);
-  if (opts.after)          filters.push(`createdAt >= "${opts.after}"`);
-  if (opts.before)         filters.push(`createdAt <= "${opts.before}"`);
+  const sql = `
+    SELECT ${SELECT_COLS},
+      ts_headline(
+        'english',
+        coalesce(m.content, ''),
+        websearch_to_tsquery('english', $1),
+        'MaxWords=30, MinWords=15, StartSel=<em>, StopSel=</em>, HighlightAll=FALSE'
+      ) AS highlight,
+      ts_rank(m.content_tsv, websearch_to_tsquery('english', $1)) AS _rank
+    ${FROM_CLAUSE}
+    WHERE m.deleted_at IS NULL
+      AND m.content_tsv @@ websearch_to_tsquery('english', $1)
+      ${filters}
+    ORDER BY _rank DESC, m.created_at DESC
+    LIMIT ${limitPh} OFFSET ${offsetPh}`;
 
-  const result = await client.index(INDEX).search(q, {
-    filter: filters.join(' AND ') || undefined,
-    limit:  opts.limit  || 20,
-    offset: opts.offset || 0,
-    sort:   ['createdAt:desc'],
-  });
-
-  return {
-    ...result,
-    hits: await attachAuthorDisplayNames(result.hits || []),
-  };
+  const { rows } = await query(sql, params);
+  return buildResult(rows, q, offset, limit);
 }
 
 /**
- * search – full-text search with optional filters
- *
- * @param {string}   q          – query string
- * @param {object}   opts
- * @param {string}   opts.channelId
- * @param {string}   opts.conversationId
- * @param {string}   opts.authorId
- * @param {string}   opts.after  – ISO timestamp lower bound
- * @param {string}   opts.before – ISO timestamp upper bound
- * @param {number}   opts.limit
- * @param {number}   opts.offset
+ * Fallback: ILIKE via the existing pg_trgm GIN index.
+ * Activates when FTS returns 0 results — handles partial/infix queries
+ * ("hel" matching "hello") and queries whose lexemes are all stop words.
  */
-async function search(q, opts: Record<string, any> = {}) {
-  if (!useMeilisearch) {
-    return searchPostgres(q, opts);
-  }
+async function searchTrigram(q: string, opts: Record<string, any>): Promise<any> {
+  const params: any[] = [`%${q}%`];   // $1 reserved for the ILIKE pattern
+  const filters  = buildFilters(params, opts);
+  const limit    = Number(opts.limit)  || 20;
+  const offset   = Number(opts.offset) || 0;
+  const limitPh  = p(params, limit);
+  const offsetPh = p(params, offset);
 
+  const sql = `
+    SELECT ${SELECT_COLS}
+    ${FROM_CLAUSE}
+    WHERE m.deleted_at IS NULL
+      AND m.content ILIKE $1
+      ${filters}
+    ORDER BY m.created_at DESC
+    LIMIT ${limitPh} OFFSET ${offsetPh}`;
+
+  const { rows } = await query(sql, params);
+  const processed = rows.map(row => ({ ...row, highlight: highlightIlike(row.content, q) }));
+  return buildResult(processed, q, offset, limit);
+}
+
+/**
+ * search – main entry point.
+ *
+ * Uses FTS (tsvector GIN index) as the primary path for ranked, stemmed,
+ * phrase-aware search.  Falls back to trigram ILIKE when FTS returns zero
+ * results so partial/infix queries still resolve.
+ *
+ * @param q     Raw query string (validated by caller: length ≥ 2)
+ * @param opts  { channelId?, conversationId?, userId, authorId?, after?, before?, limit?, offset? }
+ */
+async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   try {
-    return await searchMeilisearch(q, opts);
+    const fts = await searchFts(q, opts);
+    if (fts.hits.length > 0) return fts;
+    return await searchTrigram(q, opts);
   } catch (err) {
-    logger.warn({ err }, 'Meilisearch query failed, falling back to Postgres search');
-    return searchPostgres(q, opts);
+    logger.warn({ err }, 'FTS search failed, falling back to trigram');
+    try {
+      return await searchTrigram(q, opts);
+    } catch (fallbackErr) {
+      logger.error({ err: fallbackErr }, 'Trigram fallback also failed');
+      throw fallbackErr;
+    }
   }
 }
 
-module.exports = { indexMessage, deleteMessage, search };
+module.exports = { search };

@@ -1,7 +1,6 @@
 'use strict';
 
 const fanout = require('../websocket/fanout');
-const searchClient = require('../search/client');
 const overload = require('../utils/overload');
 const logger = require('../utils/logger');
 const redis = require('../db/redis');
@@ -17,42 +16,23 @@ const {
 const queues: Record<string, Array<{ name: string; fn: () => Promise<void>; enqueuedAt: number; queueName: string }>> = {
   'fanout:critical': [],
   'fanout:background': [],
-  search: [],
 };
 const rawFanoutConcurrency = Number(process.env.FANOUT_QUEUE_CONCURRENCY || 4);
 const FANOUT_QUEUE_CONCURRENCY = Number.isFinite(rawFanoutConcurrency) && rawFanoutConcurrency > 0
   ? Math.floor(rawFanoutConcurrency)
   : 4;
-const rawSearchConcurrency = Number(process.env.SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY || 2);
-const rawSearchMaxDepth = Number(process.env.SEARCH_SIDE_EFFECT_QUEUE_MAX_DEPTH || 5000);
-const SEARCH_WORKER_CONCURRENCY = Number.isFinite(rawSearchConcurrency) && rawSearchConcurrency > 0
-  ? Math.floor(rawSearchConcurrency)
-  : 2;
-const SEARCH_MAX_QUEUE_DEPTH = Number.isFinite(rawSearchMaxDepth) && rawSearchMaxDepth > 0
-  ? Math.floor(rawSearchMaxDepth)
-  : 5000;
 const activeWorkers: Record<string, number> = {
   'fanout:critical': 0,
   'fanout:background': 0,
-  search: 0,
 };
 
 function queueNameForJob(name: string): string {
-  if (name.startsWith('search.')) return 'search';
   // Background fanout jobs are explicitly tagged; everything else is critical.
   if (name.startsWith('fanout:background.')) return 'fanout:background';
   return 'fanout:critical';
 }
 
 function queueConfig(queueName) {
-  if (queueName === 'search') {
-    return {
-      concurrency: SEARCH_WORKER_CONCURRENCY,
-      maxDepth: SEARCH_MAX_QUEUE_DEPTH,
-      dropOnOverflow: true,
-    };
-  }
-
   if (queueName === 'fanout:background') {
     return {
       concurrency: 2,
@@ -146,7 +126,6 @@ async function drainWorker(queueName) {
 
 refreshQueueMetrics('fanout:critical');
 refreshQueueMetrics('fanout:background');
-refreshQueueMetrics('search');
 
 function publishMessageEvent(target, event, data) {
   enqueue('fanout.publish', async () => {
@@ -183,20 +162,6 @@ function publishMessageEventWithUnread(target, event, data, channelId) {
   });
 }
 
-function indexMessage(message) {
-  if (overload.shouldDeferSearchIndexing()) return;
-  enqueue('search.indexMessage', async () => {
-    await searchClient.indexMessage(message);
-  });
-}
-
-function deleteMessage(messageId) {
-  if (overload.shouldDeferSearchIndexing()) return;
-  enqueue('search.deleteMessage', async () => {
-    await searchClient.deleteMessage(messageId);
-  });
-}
-
 /**
  * Queue best-effort S3 object deletion for attachment storage keys that were
  * collected before the message DB row was hard-deleted (ON DELETE CASCADE
@@ -217,8 +182,6 @@ function getQueueDepth() {
 module.exports = {
   publishMessageEvent,
   publishMessageEventWithUnread,
-  indexMessage,
-  deleteMessage,
   deleteAttachmentObjects,
   getQueueDepth,
 };

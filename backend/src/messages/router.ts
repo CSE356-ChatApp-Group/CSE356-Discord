@@ -511,7 +511,6 @@ router.post('/',
       // WebSocket events, so stale GET responses are harmless and the DB savings
       // from keeping the cache warm are significant (see pg_stat_statements).
 
-      sideEffects.indexMessage(baseMessage);
       if (conversationId) {
         await publishConversationEvent(conversationId, 'message:created', message);
       } else {
@@ -579,7 +578,6 @@ router.patch('/:id',
       if (baseMessage.channel_id) {
         redis.del(channelMsgCacheKey(baseMessage.channel_id)).catch(() => {});
       }
-      sideEffects.indexMessage(baseMessage);
       if (baseMessage.conversation_id) {
         await publishConversationEvent(baseMessage.conversation_id, 'message:updated', message || baseMessage);
       } else {
@@ -633,7 +631,6 @@ router.delete('/:id',
 
       const message = rows[0];
       sideEffects.deleteAttachmentObjects(attachmentKeys);
-      sideEffects.deleteMessage(message.id);
       // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
       if (message.channel_id) {
         redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
