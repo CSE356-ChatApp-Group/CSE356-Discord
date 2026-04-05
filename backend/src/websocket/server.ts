@@ -43,7 +43,38 @@ const wss = new WebSocketServer({ noServer: true });
 const IDLE_TTL_SECONDS = 60;
 const CONNECTION_ALIVE_TTL_SECONDS = 120;
 const PRESENCE_SWEEPER_MS = 15_000;
+// Skip the sweeper for users whose presence was just recomputed by a real
+// event (activity ping, status change, connect/disconnect).  5 s is well
+// below the 15 s sweep interval so we never miss an idle transition.
+const PRESENCE_SWEEPER_DEBOUNCE_MS = 5_000;
+// Tracks the last time recomputeUserPresence ran for each user so the
+// reconcile sweeper can skip recently-computed slots.
+const lastPresenceComputedAt: Map<string, number> = new Map();
 let shuttingDown = false;
+
+// ── WS ACL in-process cache ────────────────────────────────────────────────────
+// Caches the result of isAllowedChannel to avoid a DB round-trip on every
+// subscribe message.  Keys are `${userId}:${channel}`.  A 30 s TTL is safe
+// because membership changes (join/leave/delete) explicitly call
+// invalidateWsAclCache() before the client is notified.
+const ACL_CACHE_TTL_MS = 30_000;
+const aclCache: Map<string, { allowed: boolean; expiresAt: number }> = new Map();
+
+function aclCacheKey(userId: string, channel: string) {
+  return `${userId}:${channel}`;
+}
+
+function invalidateWsAclCache(userId: string, channel: string) {
+  aclCache.delete(aclCacheKey(userId, channel));
+}
+
+// Evict expired entries periodically to prevent unbounded growth.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of aclCache) {
+    if (v.expiresAt <= now) aclCache.delete(k);
+  }
+}, 60_000).unref();
 
 function isRedisOperational(client) {
   return ["wait", "connecting", "connect", "ready", "reconnecting"].includes(
@@ -148,6 +179,7 @@ async function removeConnection(userId, connectionId) {
 }
 
 async function recomputeUserPresence(userId) {
+  lastPresenceComputedAt.set(userId, Date.now());
   const connIds = await redis.smembers(connectionSetKey(userId));
   if (!connIds.length) {
     await redis.srem(connectedUsersKey(), userId);
@@ -244,7 +276,13 @@ async function recomputeUserPresence(userId) {
 
 async function reconcileAllConnectedUsers() {
   const userIds = await redis.smembers(connectedUsersKey());
+  const now = Date.now();
   for (const userId of userIds) {
+    const last = lastPresenceComputedAt.get(userId) || 0;
+    // Skip users whose presence was recomputed within the last 5 s by a
+    // real event (activity, status change, connect/disconnect).  Their state
+    // is already fresh; re-running saves the Redis smembers + pipeline cost.
+    if (now - last < PRESENCE_SWEEPER_DEBOUNCE_MS) continue;
     await recomputeUserPresence(userId);
   }
 }
@@ -620,6 +658,16 @@ function parseChannelKey(channel) {
 }
 
 async function isAllowedChannel(user, channel) {
+  const cacheKey = aclCacheKey(user.id, channel);
+  const cached = aclCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.allowed;
+
+  const allowed = await _isAllowedChannelDb(user, channel);
+  aclCache.set(cacheKey, { allowed, expiresAt: Date.now() + ACL_CACHE_TTL_MS });
+  return allowed;
+}
+
+async function _isAllowedChannelDb(user, channel) {
   const parsed = parseChannelKey(channel);
   if (!parsed) return false;
 
@@ -687,6 +735,12 @@ async function unsubscribeClient(ws, redisChannel) {
 
   if ((channelClients.get(redisChannel)?.size || 0) === 0) {
     channelClients.delete(redisChannel);
+    // No local subscribers remain — release the Redis subscription so the
+    // subscriber connection doesn't accumulate channels indefinitely.
+    if (redisSubscribed.has(redisChannel) && isRedisOperational(redisSub)) {
+      redisSubscribed.delete(redisChannel);
+      redisSub.unsubscribe(redisChannel).catch(() => {});
+    }
   }
 }
 
@@ -762,4 +816,4 @@ function shutdown() {
   });
 }
 
-module.exports = { handleUpgrade, wss, shutdown, invalidateWsBootstrapCache };
+module.exports = { handleUpgrade, wss, shutdown, invalidateWsBootstrapCache, invalidateWsAclCache };

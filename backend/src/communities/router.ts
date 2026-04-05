@@ -21,7 +21,7 @@ const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
-const { invalidateWsBootstrapCache } = require('../websocket/server');
+const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
 
 const router = express.Router();
 router.use(authenticate);
@@ -271,6 +271,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
       presenceService.invalidatePresenceFanoutTargets(req.user.id),
       invalidateWsBootstrapCache(req.user.id),
     ]);
+    invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
     redis.del(communitiesCacheKey(req.user.id)).catch(() => {});
     redis.del(membersCacheKey(req.params.id)).catch(() => {});
 
@@ -304,6 +305,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 
     await presenceService.invalidatePresenceFanoutTargets(req.user.id);
     invalidateWsBootstrapCache(req.user.id).catch(() => {});
+    invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
 
     await Promise.allSettled([
       redis.del(communitiesCacheKey(req.user.id)),

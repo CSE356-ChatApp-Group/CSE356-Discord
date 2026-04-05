@@ -16,6 +16,7 @@ const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('../messages/sideEffects');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
+const { invalidateWsAclCache } = require('../websocket/server');
 
 const router = express.Router();
 router.use(authenticate);
@@ -374,6 +375,8 @@ router.post('/:id/members',
         // Bust the newly-invited user's channel list cache so the private
         // channel appears immediately on their next GET /channels request.
         redis.del(`channels:list:${channel.community_id}:${user_id}`).catch(() => {});
+        // Expire the WS ACL cache so subsequent subscribe attempts are checked fresh.
+        invalidateWsAclCache(user_id, `channel:${req.params.id}`);
       });
 
       res.json({ members, addedUserIds: insertedRows.map((row) => row.user_id) });
