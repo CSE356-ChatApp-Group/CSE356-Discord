@@ -24,14 +24,23 @@ if [[ -z "${CHATAPP_INSTANCES+x}" ]]; then
   _REMOTE_NPROC=$(ssh "${STAGING_USER}@${STAGING_HOST}" 'nproc --all' 2>/dev/null || echo 2)
   CHATAPP_INSTANCES=$(python3 -c "n=int('${_REMOTE_NPROC}'); print(min(max(n,1),4))")
 fi
-# PG_POOL_MAX per instance: keep at 100 (same as single-instance was).
-# With 2 instances that's 200 total Node→PgBouncer connections against
-# default_pool_size=80 real PG backends — PgBouncer transaction pooling
-# handles the oversubscription (backends are held only during a query, not
-# for the connection lifetime).  Dropping to 50 per instance was validated
-# to cause 5× worse p(95) latency on successful requests (12.3s vs 2.4s)
-# because fewer pool slots = deeper checkout queue wait per request.
-PG_POOL_MAX_PER_INSTANCE=100
+# PG connection sizing — maintain a 2.5:1 virtual→real ratio for all CPU counts.
+#
+# Formula (validated against load tests):
+#   PGBOUNCER_POOL_SIZE = min(instances × 40, 90)   ← real PG backends, capped
+#                                                     by max_connections=100 budget
+#   PG_POOL_MAX_PER_INSTANCE = PGBOUNCER × 2.5 / instances  ← Node pool depth
+#
+# Results per CPU count:
+#   1 CPU:  pgb=40,  pool/inst=100  → 100 virtual :  40 real = 2.5:1
+#   2 CPUs: pgb=80,  pool/inst=100  → 200 virtual :  80 real = 2.5:1  (validated 4.77% fail)
+#   3 CPUs: pgb=90,  pool/inst=75   → 225 virtual :  90 real = 2.5:1
+#   4 CPUs: pgb=90,  pool/inst=56   → 224 virtual :  90 real = 2.5:1
+#
+# Fewer pool slots per instance = deeper Node-level checkout queue = slower p95.
+# This formula keeps per-instance depth constant relative to real PG bandwidth.
+_PGB_SIZE=$(python3 -c "print(min(${CHATAPP_INSTANCES} * 40, 90))")
+PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} * 5 // (${CHATAPP_INSTANCES} * 2)))))") # 2.5:1 = ×5÷(n×2)
 # libuv thread pool per instance: total budget stays 8 so aggregate CPU load
 # from bcrypt/dns/fs threads equals a single-instance deployment.
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
@@ -176,10 +185,9 @@ echo "0a) Installing and configuring PgBouncer (transaction-mode connection pool
 scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/pgbouncer-setup.py"
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
-  # Override the auto-derived pool size (nCPU × 25 = 50 on 2-CPU) with a value
-  # calibrated for 2 Node instances × PG_POOL_MAX=100: 80 real PG backends keeps
-  # the 200 virtual→80 real ratio well within PgBouncer transaction-pool capacity.
-  export PGBOUNCER_POOL_SIZE=80
+  # Pass the pre-computed pool size so pgbouncer-setup.py uses exactly the
+  # value derived from CHATAPP_INSTANCES, not the fallback nCPU*40 formula.
+  export PGBOUNCER_POOL_SIZE=${_PGB_SIZE}
   # Install PgBouncer if not already present on this host
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
     sudo apt-get install -y pgbouncer

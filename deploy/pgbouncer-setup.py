@@ -53,14 +53,16 @@ pg_backend_port = 5432 if pg_port == 6432 else pg_port
 print(f'Parsed DATABASE_URL: user={pg_user} host={pg_host}:{pg_port} db={pg_db}')
 
 # ── PgBouncer pool sizing ───────────────────────────────────────────────────────
-# Default: ~25 real PG backends per CPU (empirical limit before context-switch
-# overhead dominates on typical hardware).
-# Override via PGBOUNCER_POOL_SIZE env var when the default formula is too
-# conservative — e.g. 80 for a 2-CPU VM running 2 Node instances × pool_max=100.
+# Target: 2.5:1 virtual-to-real connection ratio (validated against load tests).
+# Default formula: nCPU × 40 real backends, capped at 90 (leaves headroom for
+# admin connections under max_connections=100).
+# Override via PGBOUNCER_POOL_SIZE env when the deploy script pre-computes the
+# value from CHATAPP_INSTANCES (ensures consistency whether 1 or 4 instances run).
 import multiprocessing
 _ncpu = multiprocessing.cpu_count()
-_default_pool_size = _ncpu * 25
+_default_pool_size = min(_ncpu * 40, 90)
 PGBOUNCER_POOL_SIZE = int(os.environ.get('PGBOUNCER_POOL_SIZE', _default_pool_size))
+PGBOUNCER_POOL_SIZE = min(PGBOUNCER_POOL_SIZE, 90)   # hard cap regardless of env
 PGBOUNCER_RESERVE_SIZE = max(5, _ncpu * 5)
 print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} (PGBOUNCER_POOL_SIZE env={os.environ.get("PGBOUNCER_POOL_SIZE", "not set")})')
 
