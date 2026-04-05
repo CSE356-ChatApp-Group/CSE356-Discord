@@ -32,9 +32,14 @@ function computeStage() {
   const highRss = getThreshold('OVERLOAD_RSS_HIGH_MB', 1300);
   const criticalRss = getThreshold('OVERLOAD_RSS_CRITICAL_MB', 1700);
 
-  const warnLag = getThreshold('OVERLOAD_LAG_WARN_MS', 60);
-  const highLag = getThreshold('OVERLOAD_LAG_HIGH_MS', 120);
-  const criticalLag = getThreshold('OVERLOAD_LAG_CRITICAL_MS', 250);
+  // Thresholds calibrated for a 2-vCPU Node.js process. At 300+ VU the event
+  // loop lag starts climbing from a ~5ms baseline; 20ms means we're already
+  // queuing callbacks. Shedding non-critical work (stage 1: presence fanout,
+  // stage 2: search indexing) at that point frees event-loop capacity for
+  // actual request handlers before the pool CB needs to kick in.
+  const warnLag = getThreshold('OVERLOAD_LAG_WARN_MS', 20);
+  const highLag = getThreshold('OVERLOAD_LAG_HIGH_MS', 50);
+  const criticalLag = getThreshold('OVERLOAD_LAG_CRITICAL_MS', 100);
 
   if (rssMb >= criticalRss || lagP99Ms >= criticalLag) return 3;
   if (rssMb >= highRss || lagP99Ms >= highLag) return 2;

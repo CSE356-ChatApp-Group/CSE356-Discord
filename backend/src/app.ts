@@ -179,6 +179,9 @@ app.use((err, req, res, _next) => {
   const status = isPoolBusy ? 503 : (err.status || err.statusCode || 500);
   const requestId = req.id;
   logger.error({ err, url: req.url, requestId, status, pool: poolStats() }, 'Unhandled error');
+  if (isPoolBusy) {
+    res.set('Retry-After', '1');
+  }
   res.status(status).json({
     error: isPoolBusy
       ? 'Server busy, please retry'
