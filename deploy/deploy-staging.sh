@@ -195,17 +195,16 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   fi
   sudo python3 /tmp/pgbouncer-setup.py
   sudo systemctl enable pgbouncer
-  # pgbouncer uses an old sysv init script on Ubuntu 22.04 — systemctl restart
-  # fails when a stale process exists outside of systemd's tracking (e.g. after
-  # a manual kill or init.d start).  Kill any orphaned process first, then start.
-  sudo pkill -f 'pgbouncer /etc/pgbouncer' 2>/dev/null || true
+  # pgbouncer is a sysv service on Ubuntu 22.04 — use the init.d script for
+  # reliable stop/start (handles PID file cleanup correctly).  systemctl restart
+  # fails when a process lives outside systemd's cgroup tracking.
+  # 1. Stop cleanly via init.d (reads and cleans PID file)
+  sudo service pgbouncer stop 2>/dev/null || true
+  # 2. Kill any orphaned pgbouncer process by exact name (handles stale PID files)
+  sudo pkill -x pgbouncer 2>/dev/null || true
   sleep 1
-  # Use reload if already active (avoids connection drop), otherwise start fresh.
-  if sudo systemctl is-active pgbouncer >/dev/null 2>&1; then
-    sudo systemctl reload pgbouncer
-  else
-    sudo systemctl start pgbouncer
-  fi
+  # 3. Start fresh
+  sudo service pgbouncer start
   sleep 1
   sudo systemctl is-active pgbouncer \
     || { echo 'ERROR: pgbouncer failed to start'; sudo journalctl -u pgbouncer --no-pager -n 30; exit 1; }
