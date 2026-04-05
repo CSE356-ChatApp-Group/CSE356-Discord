@@ -24,13 +24,14 @@ if [[ -z "${CHATAPP_INSTANCES+x}" ]]; then
   _REMOTE_NPROC=$(ssh "${STAGING_USER}@${STAGING_HOST}" 'nproc --all' 2>/dev/null || echo 2)
   CHATAPP_INSTANCES=$(python3 -c "n=int('${_REMOTE_NPROC}'); print(min(max(n,1),4))")
 fi
-# With PgBouncer acting as the connection multiplexer, Node pool size no longer
-# maps 1-to-1 to real PG connections.  Keep PG_POOL_MAX at 50 per instance;
-# with 2 instances that's 100 total Node→PgBouncer connections against
-# default_pool_size=80 real PG backends — a healthy 1.25:1 ratio.  100 per
-# instance caused 200 total connections competing for 50 PG slots (4:1),
-# making PgBouncer the bottleneck and bypassing the Node-level circuit breaker.
-PG_POOL_MAX_PER_INSTANCE=50
+# PG_POOL_MAX per instance: keep at 100 (same as single-instance was).
+# With 2 instances that's 200 total Node→PgBouncer connections against
+# default_pool_size=80 real PG backends — PgBouncer transaction pooling
+# handles the oversubscription (backends are held only during a query, not
+# for the connection lifetime).  Dropping to 50 per instance was validated
+# to cause 5× worse p(95) latency on successful requests (12.3s vs 2.4s)
+# because fewer pool slots = deeper checkout queue wait per request.
+PG_POOL_MAX_PER_INSTANCE=100
 # libuv thread pool per instance: total budget stays 8 so aggregate CPU load
 # from bcrypt/dns/fs threads equals a single-instance deployment.
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
