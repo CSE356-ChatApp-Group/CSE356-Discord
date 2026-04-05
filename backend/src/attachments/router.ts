@@ -16,6 +16,7 @@ const { body, param, validationResult } = require('express-validator');
 
 const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
+const overload = require('../utils/overload');
 
 const router = express.Router();
 router.use(authenticate);
@@ -46,6 +47,13 @@ router.post('/presign',
   async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    // Reject presign requests under stage-2+ load: S3 signing is non-essential
+    // and the subsequent upload would also fail to reach the DB anyway.
+    if (overload.shouldDeferSearchIndexing()) {
+      res.set('Retry-After', '5');
+      return res.status(503).json({ error: 'Server busy, please retry' });
+    }
 
     try {
       const { filename, contentType, sizeBytes } = req.body;

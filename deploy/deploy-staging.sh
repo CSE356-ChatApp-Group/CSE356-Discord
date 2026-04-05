@@ -44,6 +44,11 @@ PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} *
 # libuv thread pool per instance: total budget stays 8 so aggregate CPU load
 # from bcrypt/dns/fs threads equals a single-instance deployment.
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
+# V8 max-old-space per instance: cap heap below the OOM killer threshold.
+# 35% of total RAM, shared across instances.  Capped at 1500 MB so we don't
+# exceed heap budget on the 7.8 GB staging VM.
+_REMOTE_RAM_MB=$(ssh "${STAGING_USER}@${STAGING_HOST}" "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 7800)
+NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(512, ${_REMOTE_RAM_MB} * 35 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
@@ -323,6 +328,11 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=50/' /opt/chatapp/shared/.env \
     || echo 'POOL_CIRCUIT_BREAKER_QUEUE=50' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
+  # killer interferes.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
+  sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}/' /opt/chatapp/shared/.env \
+    || echo 'NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'
 "

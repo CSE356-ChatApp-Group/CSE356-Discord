@@ -2,6 +2,7 @@
 
 const { monitorEventLoopDelay } = require('node:perf_hooks');
 const logger = require('./logger');
+const { overloadStageGauge } = require('./metrics');
 
 const lag = monitorEventLoopDelay({ resolution: 20 });
 lag.enable();
@@ -53,6 +54,7 @@ function getStage() {
     lastStage = stage;
     logger.info({ stage }, 'Overload stage changed');
   }
+  overloadStageGauge.set(stage);
   return stage;
 }
 

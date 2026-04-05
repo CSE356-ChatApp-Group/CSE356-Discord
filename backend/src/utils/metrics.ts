@@ -117,6 +117,17 @@ const pgPoolWaiting = new client.Gauge({
   help: 'Number of requests waiting for a pg pool client (queue depth)',
 });
 
+// ── Overload stage ───────────────────────────────────────────────────────────
+
+/**
+ * Current overload stage (0–3).  Set by overload.ts on every getStage() call
+ * so Grafana can alert on stage transitions without relying on log scraping.
+ */
+const overloadStageGauge = new client.Gauge({
+  name: 'chatapp_overload_stage',
+  help: 'Current load-shedding stage (0=normal 1=throttle-presence 2=shed-search 3=shed-writes)',
+});
+
 /** Call once after pool is created to start sampling every 500ms */
 function startPgPoolMetrics(pool) {
   setInterval(() => {
@@ -137,6 +148,7 @@ module.exports = {
   sideEffectQueueDelayMs,
   sideEffectJobDurationMs,
   sideEffectQueueDroppedTotal,
+  overloadStageGauge,
   authBcryptDurationMs,
   authRateLimitHitsTotal,
   startPgPoolMetrics,
