@@ -160,6 +160,10 @@ server {
     return 301 /grafana/;
   }
 
+  location = /login {
+    return 302 /grafana/login;
+  }
+
   location /grafana/ {
     proxy_pass http://127.0.0.1:3001;
     proxy_http_version 1.1;
@@ -169,7 +173,13 @@ server {
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Forwarded-Prefix /grafana;
-    proxy_redirect ~^/(.*)$ /grafana/\$1;
+    # Keep Grafana redirects on a single /grafana prefix across older and newer
+    # nginx versions. Older nginx builds may still absolutize /grafana/login
+    # into /grafana/grafana/login unless we rewrite localhost + relative
+    # redirects explicitly.
+    proxy_redirect http://127.0.0.1:3001/ /;
+    proxy_redirect http://localhost/ /;
+    proxy_redirect ~^/(.*)$ /$1;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_read_timeout 300s;

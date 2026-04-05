@@ -90,6 +90,15 @@ npm run monitoring:logs     # tail monitoring logs
 npm run monitoring:down     # stop only monitoring services
 ```
 
+### Error triage workflow
+
+1. Open Grafana → **Explore** → select **Loki**.
+2. Start with `{"service":"chatapp-api"}` or search for a returned `requestId` / `x-request-id`.
+3. For server faults, narrow to `"level":"error"` or the message `Unhandled error`.
+4. Use the same time window in **Tempo** to inspect sampled traces for the failing path.
+
+If you only have shell access, `docker compose logs -f api nginx` is still the fastest first look.
+
 ### Discord alerting setup
 
 Recommended channel layout:
