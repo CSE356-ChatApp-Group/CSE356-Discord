@@ -45,6 +45,9 @@ async function loadMembership(req, res, next) {
 const COMMUNITIES_CACHE_TTL_SECS = 30;
 function communitiesCacheKey(userId) { return `communities:list:${userId}`; }
 
+const MEMBERS_CACHE_TTL_SECS = 30;
+function membersCacheKey(communityId) { return `community:${communityId}:members`; }
+
 // In-process singleflight: prevents thundering-herd when cache expires.
 // All concurrent requests for the same key share one DB query in flight.
 const communitiesInflight: Map<string, Promise<{ communities: any[] }>> = new Map();
@@ -269,6 +272,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
       invalidateWsBootstrapCache(req.user.id),
     ]);
     redis.del(communitiesCacheKey(req.user.id)).catch(() => {});
+    redis.del(membersCacheKey(req.params.id)).catch(() => {});
 
     await fanout.publish(`community:${req.params.id}`, {
       event: 'community:member_joined',
@@ -303,6 +307,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 
     await Promise.allSettled([
       redis.del(communitiesCacheKey(req.user.id)),
+      redis.del(membersCacheKey(req.params.id)),
       ...remainingMembers.map((member) => redis.del(communitiesCacheKey(member.user_id))),
       fanout.publish(`community:${req.params.id}`, {
         event: 'community:member_left',

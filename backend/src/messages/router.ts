@@ -125,6 +125,10 @@ async function loadMessageTarget(messageId) {
   return rows[0] || null;
 }
 
+// ── Helpers ── message cache ─────────────────────────────────────────────────
+const MESSAGES_CACHE_TTL_SECS = 5;
+function channelMsgCacheKey(channelId) { return `messages:channel:${channelId}`; }
+
 // ── GET /messages ──────────────────────────────────────────────────────────────
 router.get('/',
   qv('channelId').optional().isUUID(),
@@ -140,6 +144,16 @@ router.get('/',
 
       if (!channelId && !conversationId) {
         return res.status(400).json({ error: 'channelId or conversationId required' });
+      }
+
+      // Serve the most-recent page of a public/member channel from a short-lived
+      // Redis cache.  All users in a channel see the same messages, so a single
+      // shared key is correct.  Pagination (before=) and DMs are not cached.
+      if (channelId && !before) {
+        try {
+          const cached = await redis.get(channelMsgCacheKey(channelId));
+          if (cached) return res.json(JSON.parse(cached));
+        } catch { /* cache miss – fall through */ }
       }
 
       // Build a single query that enforces access control and returns messages in one pool checkout.
@@ -200,7 +214,11 @@ router.get('/',
         if (!accessCheck.rows.length) return res.status(403).json({ error: channelId ? 'Access denied' : 'Not a participant' });
       }
 
-      res.json({ messages: rows.reverse() }); // return in chronological order
+      const body = { messages: rows.reverse() }; // return in chronological order
+      if (channelId && !before) {
+        redis.set(channelMsgCacheKey(channelId), JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
+      }
+      res.json(body);
     } catch (err) { next(err); }
   }
 );
@@ -334,6 +352,11 @@ router.post('/',
       client.release();
       client = null;
 
+      // Bust the channel message cache so the next reader sees the new message.
+      if (channelId) {
+        redis.del(channelMsgCacheKey(channelId)).catch(() => {});
+      }
+
       sideEffects.indexMessage(baseMessage);
       if (conversationId) {
         await publishConversationEvent(conversationId, 'message:created', message || baseMessage);
@@ -404,6 +427,9 @@ router.patch('/:id',
 
       const baseMessage = rows[0];
       const message = await loadHydratedMessageById(baseMessage.id);
+      if (baseMessage.channel_id) {
+        redis.del(channelMsgCacheKey(baseMessage.channel_id)).catch(() => {});
+      }
       sideEffects.indexMessage(baseMessage);
       if (baseMessage.conversation_id) {
         await publishConversationEvent(baseMessage.conversation_id, 'message:updated', message || baseMessage);
@@ -452,6 +478,7 @@ router.delete('/:id',
       // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
       if (message.channel_id) {
         redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
+        redis.del(channelMsgCacheKey(message.channel_id)).catch(() => {});
       }
       if (message.conversation_id) {
         await publishConversationEvent(message.conversation_id, 'message:deleted', { id: message.id });

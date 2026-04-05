@@ -176,6 +176,10 @@ echo "0a) Installing and configuring PgBouncer (transaction-mode connection pool
 scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/pgbouncer-setup.py"
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
+  # Override the auto-derived pool size (nCPU × 25 = 50 on 2-CPU) with a value
+  # calibrated for 2 Node instances × PG_POOL_MAX=100: 80 real PG backends keeps
+  # the 200 virtual→80 real ratio well within PgBouncer transaction-pool capacity.
+  export PGBOUNCER_POOL_SIZE=80
   # Install PgBouncer if not already present on this host
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
     sudo apt-get install -y pgbouncer

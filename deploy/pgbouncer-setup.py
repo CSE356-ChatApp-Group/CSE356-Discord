@@ -17,6 +17,7 @@ PgBouncer → PostgreSQL backend authentication.
 """
 
 import grp
+import os
 import pwd
 import re
 import subprocess
@@ -51,15 +52,17 @@ pg_backend_port = 5432 if pg_port == 6432 else pg_port
 
 print(f'Parsed DATABASE_URL: user={pg_user} host={pg_host}:{pg_port} db={pg_db}')
 
-# ── PgBouncer pool sizing: ~25 real PG backends per CPU ────────────────────────
-# PG throughput scales roughly linearly with CPUs up to ~25 active workers/CPU
-# before context-switch overhead dominates.  Beyond that, PgBouncer queues
-# excess requests instead of spawning more backends.
+# ── PgBouncer pool sizing ───────────────────────────────────────────────────────
+# Default: ~25 real PG backends per CPU (empirical limit before context-switch
+# overhead dominates on typical hardware).
+# Override via PGBOUNCER_POOL_SIZE env var when the default formula is too
+# conservative — e.g. 80 for a 2-CPU VM running 2 Node instances × pool_max=100.
 import multiprocessing
 _ncpu = multiprocessing.cpu_count()
-PGBOUNCER_POOL_SIZE = _ncpu * 25          # e.g. 50 on 2-CPU, 100 on 4-CPU
+_default_pool_size = _ncpu * 25
+PGBOUNCER_POOL_SIZE = int(os.environ.get('PGBOUNCER_POOL_SIZE', _default_pool_size))
 PGBOUNCER_RESERVE_SIZE = max(5, _ncpu * 5)
-print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE}')
+print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} (PGBOUNCER_POOL_SIZE env={os.environ.get("PGBOUNCER_POOL_SIZE", "not set")})')
 
 # ── Write pgbouncer.ini ─────────────────────────────────────────────────────────
 ini = f"""\
