@@ -26,11 +26,14 @@ const SELECT_COLS = `
   COALESCE(NULLIF(u.display_name, ''), u.username) AS "authorDisplayName",
   m.channel_id       AS "channelId",
   m.conversation_id  AS "conversationId",
-  m.created_at       AS "createdAt"`;
+  m.created_at       AS "createdAt",
+  ch.community_id    AS "communityId",
+  ch.name            AS "channelName"`;
 
 const FROM_CLAUSE = `
   FROM messages m
-  JOIN users u ON u.id = m.author_id`;
+  JOIN users u ON u.id = m.author_id
+  LEFT JOIN channels ch ON ch.id = m.channel_id`;
 
 /**
  * Push a value onto params and return its positional placeholder ($N).
@@ -52,6 +55,20 @@ function buildFilters(params: any[], opts: Record<string, any>): string {
     parts.push(`AND m.channel_id = ${p(params, opts.channelId)}`);
   } else if (opts.conversationId) {
     parts.push(`AND m.conversation_id = ${p(params, opts.conversationId)}`);
+  } else if (opts.communityId) {
+    // Community-scoped: only messages in channels belonging to this community
+    // that the requesting user can access (public or member of private).
+    const cid = p(params, opts.communityId);
+    const uid = p(params, opts.userId);
+    parts.push(`
+    AND m.channel_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM channels ch2
+      LEFT JOIN channel_members cm ON cm.channel_id = ch2.id AND cm.user_id = ${uid}
+      WHERE ch2.id = m.channel_id
+        AND ch2.community_id = ${cid}
+        AND (ch2.is_private = FALSE OR cm.user_id IS NOT NULL)
+    )`);
   } else if (opts.userId) {
     // Unscoped: restrict to messages the user can actually see.
     const uid = p(params, opts.userId);
@@ -84,11 +101,37 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Sanitize a ts_headline() result that uses sentinel delimiters.
+ * Escapes all HTML in the surrounding text, then replaces sentinels with <em>.
+ */
+function sanitizeHeadline(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/%%EM_START%%/g, '<em>')
+    .replace(/%%EM_END%%/g, '</em>');
+}
+
 function highlightIlike(content: string, q: string): string {
   if (!content) return '';
+  // HTML-escape first, then insert <em> markers so the output is safe for innerHTML.
+  const safe = escapeHtml(content);
   const terms = q.trim().split(/\s+/).filter(Boolean).map(escapeRegExp);
-  if (!terms.length) return content;
-  return content.replace(new RegExp(`(${terms.join('|')})`, 'gi'), '<em>$1</em>');
+  if (!terms.length) return safe;
+  return safe.replace(new RegExp(`(${terms.join('|')})`, 'gi'), '<em>$1</em>');
 }
 
 function buildResult(rows: any[], q: string, offset: number, limit: number) {
@@ -100,8 +143,14 @@ function buildResult(rows: any[], q: string, offset: number, limit: number) {
       authorDisplayName: row.authorDisplayName,
       channelId:         row.channelId,
       conversationId:    row.conversationId,
+      communityId:       row.communityId,
+      channelName:       row.channelName,
       createdAt:         row.createdAt,
-      _formatted: { content: row.highlight || row.content || '' },
+      _formatted: {
+        content: row.highlight
+          ? sanitizeHeadline(row.highlight)
+          : escapeHtml(row.content || ''),
+      },
     })),
     offset,
     limit,
@@ -126,7 +175,7 @@ async function searchFts(q: string, opts: Record<string, any>): Promise<any> {
         'english',
         coalesce(m.content, ''),
         websearch_to_tsquery('english', $1),
-        'MaxWords=30, MinWords=15, StartSel=<em>, StopSel=</em>, HighlightAll=FALSE'
+        'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
       ) AS highlight,
       ts_rank(m.content_tsv, websearch_to_tsquery('english', $1)) AS _rank
     ${FROM_CLAUSE}
