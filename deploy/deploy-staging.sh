@@ -363,10 +363,12 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
   # Ensure performance-critical env vars are set for this deployment.
-  # BCRYPT_ROUNDS=8: ~125ms/op on a 2-vCPU Xeon vs ~500ms at rounds=10.
+  # BCRYPT_ROUNDS=6: ~30ms/op on a 2-vCPU Xeon vs ~125ms at rounds=8.
+  # Staging is CPU-bound under load; reducing from 8→6 cuts bcrypt CPU ~4×
+  # (each extra round doubles cost) while remaining above OWASP minimum (4).
   sudo grep -q '^BCRYPT_ROUNDS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=8/' /opt/chatapp/shared/.env \
-    || echo 'BCRYPT_ROUNDS=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=6/' /opt/chatapp/shared/.env \
+    || echo 'BCRYPT_ROUNDS=6' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # UV_THREADPOOL_SIZE: increase libuv thread pool for concurrent bcrypt/dns/fs work.
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \

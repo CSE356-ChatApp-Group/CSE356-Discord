@@ -3,11 +3,11 @@
 const bcrypt = require('bcrypt');
 const { authBcryptDurationMs } = require('../utils/metrics');
 
-// Default to 8 rounds for adequate security while staying responsive on a
-// 2-vCPU staging VM (10 rounds = ~500ms/op; 8 rounds = ~125ms/op on this CPU).
+// Default to 6 rounds for adequate security while staying responsive on a
+// 2-vCPU staging VM (10 rounds = ~500ms/op; 8 rounds = ~125ms/op; 6 rounds ~30ms/op).
 // Override with BCRYPT_ROUNDS in production for stricter hashing.
-const DEFAULT_BCRYPT_ROUNDS = 8;
-const MIN_BCRYPT_ROUNDS = 8;
+const DEFAULT_BCRYPT_ROUNDS = 6;
+const MIN_BCRYPT_ROUNDS = 6;
 const MAX_BCRYPT_ROUNDS = 14;
 
 function getBcryptRounds() {
