@@ -21,10 +21,16 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 
 # Number of Node.js workers to run.  Prod currently has fewer vCPUs than
 # staging so we default to 1.  Increase to 2 once prod is upgraded to 2+ vCPUs.
-# PG pool budget (250 total, leaving ~50 for admin) is divided by this value.
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
-PG_POOL_MAX_PER_INSTANCE=$(( 250 / CHATAPP_INSTANCES ))
+# PG pool sizing — prod has no PgBouncer; Node connects directly to Postgres.
+# PG max_connections=100 (default); reserve 10 for superuser/admin = budget 90.
+# For 1 instance: 90 pool slots.  Divide by instances if ever scaled to 2.
+PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(90, 90 // ${CHATAPP_INSTANCES})))")
 UV_THREADPOOL_PER_INSTANCE=$(( 8 / CHATAPP_INSTANCES ))
+# V8 max-old-space per instance: cap heap below the OOM killer threshold.
+# 35% of total RAM shared across instances, capped at 1500 MB.
+_REMOTE_RAM_MB=$(ssh "${PROD_USER}@${PROD_HOST}" "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 2048)
+NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(512, ${_REMOTE_RAM_MB} * 35 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== PRODUCTION DEPLOYMENT ==="
 echo "Release: $RELEASE_SHA"
@@ -175,6 +181,16 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # POOL_CIRCUIT_BREAKER_QUEUE: fast-fail threshold; keeps failures as quick 503s
+  # rather than letting requests queue until client HTTP timeout.
+  sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=50/' /opt/chatapp/shared/.env \
+    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=50' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
+  # killer fires.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
+  sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}/' /opt/chatapp/shared/.env \
+    || echo 'NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'"
 echo "✓ systemd unit ready"
@@ -272,6 +288,18 @@ for i in $(seq 1 "$MONITOR_CHECKS"); do
 done
 echo "✓ Monitoring window complete"
 
+# 10.5. Stop old port to reclaim memory.
+# Prod runs a single instance (CHATAPP_INSTANCES=1); the old port stays running
+# through the monitoring window for emergency rollback, but afterwards its RAM
+# (~125 MB) is more valuable than instant-rollback convenience on a 2 GB VM.
+# To roll back after this point: re-run this script with the previous SHA.
+echo "10.5. Stopping old instance on port ${OLD_PORT} to reclaim RAM..."
+ssh "$PROD_USER@$PROD_HOST" "
+  sudo systemctl stop chatapp@${OLD_PORT} 2>/dev/null || true
+  sudo systemctl disable chatapp@${OLD_PORT} 2>/dev/null || true
+  echo 'Old instance stopped'"
+echo "✓ Old instance stopped (rollback: re-deploy previous SHA)"
+
 # 11. Update current symlink
 echo "11. Updating current release symlink..."
 if ssh "$PROD_USER@$PROD_HOST" "
@@ -314,10 +342,7 @@ echo "=== Deployment Complete ==="
 echo "Release: $RELEASE_SHA"
 echo "Production: https://$(echo $PROD_HOST | sed 's/.internal.*//')"
 echo ""
-echo "Previous version still running on port $OLD_PORT for rollback."
-echo ""
-echo "To rollback immediately:"
-echo "  ssh $PROD_USER@$PROD_HOST 'sudo sed -i -E \"s/(127\\.0\\.0\\.1|localhost):$NEW_PORT/localhost:$OLD_PORT/g\" /etc/nginx/sites-available/chatapp && sudo nginx -t && sudo systemctl reload nginx'"
+echo "To rollback: re-run ./deploy/deploy-prod.sh <previous-sha>"
 echo ""
 echo "To stop the old version after confidence window (keep for ~10 min):"
 echo "  ssh $PROD_USER@$PROD_HOST 'systemctl stop chatapp@$OLD_PORT'"
