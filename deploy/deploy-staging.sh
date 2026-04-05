@@ -278,11 +278,12 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # POOL_CIRCUIT_BREAKER_QUEUE: fast-fail threshold for Node pool queue depth.
-  # Set to 50 so the circuit breaker only fires during genuine DB overload (not
-  # normal PgBouncer queuing bursts).
+  # With PgBouncer queuing real PG connections, Node's pool can safely absorb
+  # deeper bursts before circuit-opening.  75 avoids false-positive fires at
+  # peak HTTP load while still shedding if the pool is genuinely exhausted.
   sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=50/' /opt/chatapp/shared/.env \
-    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=50' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=75/' /opt/chatapp/shared/.env \
+    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=75' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo systemctl daemon-reload
   echo 'systemd unit installed'
 "

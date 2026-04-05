@@ -355,6 +355,24 @@ async function bootstrapUserSubscriptions(ws, userId) {
   );
 }
 
+// Retry bootstrap on pool circuit-breaker fires (transient under burst load).
+// The connection stays open while we wait; if pool drains within ~3.5s the
+// user gets their subscriptions without noticing anything.
+async function bootstrapWithRetry(ws, userId, attempt = 0) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    await bootstrapUserSubscriptions(ws, userId);
+  } catch (err) {
+    const isCircuitOpen = err && err.code === 'POOL_CIRCUIT_OPEN';
+    if (isCircuitOpen && attempt < 3) {
+      const delayMs = (attempt + 1) * 600; // 600 ms → 1200 ms → 1800 ms
+      await new Promise((r) => setTimeout(r, delayMs));
+      return bootstrapWithRetry(ws, userId, attempt + 1);
+    }
+    throw err; // non-retryable or exhausted – caller logs
+  }
+}
+
 function hasLocalSubscribers(redisChannel) {
   return (channelClients.get(redisChannel)?.size || 0) > 0;
 }
@@ -454,7 +472,7 @@ wss.on("connection", async (ws, req) => {
       logger.warn({ err, userId: user.id }, "WS presence setup failed"),
     );
 
-  bootstrapUserSubscriptions(ws, user.id).catch((err) =>
+  bootstrapWithRetry(ws, user.id).catch((err) =>
     logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed"),
   );
 });
