@@ -126,8 +126,14 @@ async function loadMessageTarget(messageId) {
 }
 
 // ── Helpers ── message cache ─────────────────────────────────────────────────
-const MESSAGES_CACHE_TTL_SECS = 5;
+const MESSAGES_CACHE_TTL_SECS = 15;
 function channelMsgCacheKey(channelId) { return `messages:channel:${channelId}`; }
+
+// In-process singleflight: prevents thundering-herd when the channel message
+// cache expires.  All concurrent requests for the same channel share one DB
+// query in flight, eliminating the avalanche of identical queries that fires
+// when a popular channel's cache key expires simultaneously for many readers.
+const msgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
 
 // ── GET /messages ──────────────────────────────────────────────────────────────
 router.get('/',
@@ -149,13 +155,78 @@ router.get('/',
       // Serve the most-recent page of a public/member channel from a short-lived
       // Redis cache.  All users in a channel see the same messages, so a single
       // shared key is correct.  Pagination (before=) and DMs are not cached.
+      // NOTE: the cache is NOT busted on POST — the 15 s TTL is the invalidation
+      // mechanism.  Clients receive new messages via WebSocket events, so
+      // stale GET responses are harmless and the DB savings are enormous.
       if (channelId && !before) {
+        const cacheKey = channelMsgCacheKey(channelId);
         try {
-          const cached = await redis.get(channelMsgCacheKey(channelId));
+          const cached = await redis.get(cacheKey);
           if (cached) return res.json(JSON.parse(cached));
         } catch { /* cache miss – fall through */ }
+
+        // Singleflight: if a DB query for this channel is already in-flight,
+        // wait for it rather than spawning a duplicate concurrent query.
+        if (msgInflight.has(cacheKey)) {
+          try {
+            return res.json(await msgInflight.get(cacheKey));
+          } catch (err) {
+            return next(err);
+          }
+        }
+
+        const promise: Promise<{ messages: any[] }> = (async () => {
+          const params: any[] = [limit, req.user.id, channelId];
+          const sql = `
+            SELECT m.*,
+                   CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+                   COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
+            FROM   messages m
+            LEFT JOIN users u ON u.id = m.author_id
+            LEFT JOIN attachments a ON a.message_id = m.id
+            WHERE  m.channel_id = $3 AND m.deleted_at IS NULL
+              AND  EXISTS (
+                SELECT 1 FROM channels c
+                WHERE c.id = $3
+                  AND (c.is_private = FALSE
+                       OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
+              )
+            GROUP  BY m.id, u.id
+            ORDER  BY m.created_at DESC
+            LIMIT  $1
+          `;
+          const { rows } = await query(sql, params);
+          if (rows.length === 0) {
+            const accessCheck = await query(
+              `SELECT 1 FROM channels WHERE id = $1 AND (is_private = FALSE OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2))`,
+              [channelId, req.user.id]
+            );
+            if (!accessCheck.rows.length) {
+              const err: any = new Error('Access denied');
+              err.statusCode = 403;
+              throw err;
+            }
+          }
+          const body = { messages: rows.reverse() };
+          redis.set(cacheKey, JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
+          return body;
+        })();
+
+        msgInflight.set(cacheKey, promise);
+        // .catch() is required: if the promise rejects (e.g. 403), .finally()
+        // creates a new rejected promise; without a handler Node fires
+        // unhandledRejection.  The caller below already handles the rejection.
+        promise.finally(() => msgInflight.delete(cacheKey)).catch(() => {});
+
+        try {
+          return res.json(await promise);
+        } catch (err: any) {
+          if (err.statusCode === 403) return res.status(403).json({ error: err.message });
+          return next(err);
+        }
       }
 
+      // Non-channel or paginated request — no caching, no singleflight.
       // Build a single query that enforces access control and returns messages in one pool checkout.
       const params: any[] = [limit, req.user.id];
 
@@ -215,9 +286,6 @@ router.get('/',
       }
 
       const body = { messages: rows.reverse() }; // return in chronological order
-      if (channelId && !before) {
-        redis.set(channelMsgCacheKey(channelId), JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
-      }
       res.json(body);
     } catch (err) { next(err); }
   }
@@ -375,10 +443,10 @@ router.post('/',
         ? (await loadHydratedMessageById(baseMessage.id) ?? baseMessage)
         : baseMessage;
 
-      // Bust the channel message cache so the next reader sees the new message.
-      if (channelId) {
-        redis.del(channelMsgCacheKey(channelId)).catch(() => {});
-      }
+      // Do NOT bust the channel message cache on write — the 15 s TTL is the
+      // sole invalidation mechanism.  Clients learn about new messages via
+      // WebSocket events, so stale GET responses are harmless and the DB savings
+      // from keeping the cache warm are significant (see pg_stat_statements).
 
       sideEffects.indexMessage(baseMessage);
       if (conversationId) {
