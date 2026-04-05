@@ -374,14 +374,18 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # POOL_CIRCUIT_BREAKER_QUEUE: fast-fail threshold for Node pool queue depth.
-  # Keep at 50: low enough to ensure fast 503s under overload rather than
-  # letting requests queue until they hit k6/client HTTP timeout (30s).
-  # tune-5 confirmed CB=50 gives 5% failures (all fast 503s); CB=75 caused
-  # 10% failures from slow pool-queue timeouts (worse UX).
+  # POOL_CIRCUIT_BREAKER_QUEUE: number of requests allowed to wait for a pool
+  # connection before we start returning 503. Raised to 400 so burst traffic is
+  # buffered (messages succeed with latency) rather than failed immediately.
+  # PG_CONNECTION_TIMEOUT_MS=10000 gives each queued request up to 10s to get a
+  # connection before timing out — long enough for the pool to drain under
+  # normal burst conditions while still bounding worst-case wait time.
   sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=50/' /opt/chatapp/shared/.env \
-    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=50' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=400/' /opt/chatapp/shared/.env \
+    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=400' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
+    || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY: 1 per instance on staging — with
   # CHATAPP_INSTANCES>=2 that means up to 2 total indexing jobs in flight
   # across the cluster, which matches the 2-CPU budget without over-subscribing.

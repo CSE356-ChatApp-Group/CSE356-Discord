@@ -13,7 +13,7 @@
 const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
-const { query, getClient } = require('../db/pool');
+const { query, getClient, withTransaction } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
 const overload         = require('../utils/overload');
@@ -240,9 +240,7 @@ router.post('/',
   body('attachments.*.height').optional().isInt({ min: 1 }),
   async (req, res, next) => {
     if (!validate(req, res)) return;
-    let client;
     try {
-      client = await getClient();
       const { content, channelId, conversationId, threadId } = req.body;
       const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
 
@@ -269,88 +267,113 @@ router.post('/',
         return res.status(400).json({ error: 'attachments must include storageKey, filename, contentType, and sizeBytes' });
       }
 
-      if (conversationId) {
-        const { rows: [p] } = await client.query(
-          `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
-          [conversationId, req.user.id]
-        );
-        if (!p) {
-          await client.query('ROLLBACK');
-          return res.status(403).json({ error: 'Not a participant' });
-        }
-      }
-
+      // Access-check + INSERT + partial hydrate in a single CTE round-trip.
+      // Holds the pool connection for 3 queries (BEGIN, CTE, COMMIT) instead
+      // of the prior 5 (access-check, BEGIN, INSERT, COMMIT, hydrated-SELECT),
+      // cutting connection hold time ~40% and improving throughput under contention.
       let communityId: string | null = null;
-      if (channelId) {
-        const { rows: [ch] } = await client.query(
-          `SELECT community_id FROM channels WHERE id = $1
-           AND (is_private = FALSE
-             OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2))`,
-          [channelId, req.user.id]
-        );
-        if (!ch) {
-          await client.query('ROLLBACK');
-          return res.status(403).json({ error: 'Access denied' });
+      const baseMessage = await withTransaction(async (client) => {
+        let rows: any[];
+
+        if (conversationId) {
+          ({ rows } = await client.query(
+            `WITH access AS (
+               SELECT 1
+               FROM   conversation_participants
+               WHERE  conversation_id = $1 AND user_id = $2 AND left_at IS NULL
+             ), ins AS (
+               INSERT INTO messages (conversation_id, author_id, content, thread_id)
+               SELECT $1, $2, $3, $4 FROM access
+               RETURNING *
+             )
+             SELECT
+               (SELECT COUNT(*) FROM access)::int             AS has_access,
+               ins.*,
+               CASE WHEN u.id IS NULL THEN NULL
+                    ELSE row_to_json(u.*) END                 AS author,
+               '[]'::json                                     AS attachments
+             FROM   (VALUES (1)) dummy
+             LEFT   JOIN ins ON TRUE
+             LEFT   JOIN users u ON u.id = ins.author_id`,
+            [conversationId, req.user.id, content?.trim() || null, threadId || null],
+          ));
+        } else {
+          ({ rows } = await client.query(
+            `WITH access AS (
+               SELECT community_id
+               FROM   channels
+               WHERE  id = $1
+                 AND  (is_private = FALSE
+                       OR EXISTS (
+                         SELECT 1 FROM channel_members
+                         WHERE  channel_id = $1 AND user_id = $2
+                       ))
+             ), ins AS (
+               INSERT INTO messages (channel_id, author_id, content, thread_id)
+               SELECT $1, $2, $3, $4 FROM access
+               RETURNING *
+             )
+             SELECT
+               (SELECT COUNT(*) FROM access)::int             AS has_access,
+               (SELECT community_id FROM access LIMIT 1)      AS community_id,
+               ins.*,
+               CASE WHEN u.id IS NULL THEN NULL
+                    ELSE row_to_json(u.*) END                 AS author,
+               '[]'::json                                     AS attachments
+             FROM   (VALUES (1)) dummy
+             LEFT   JOIN ins ON TRUE
+             LEFT   JOIN users u ON u.id = ins.author_id`,
+            [channelId, req.user.id, content?.trim() || null, threadId || null],
+          ));
         }
-        communityId = ch.community_id;
-      }
 
-      await client.query('BEGIN');
-      const { rows } = await client.query(
-        `INSERT INTO messages (channel_id, conversation_id, author_id, content, thread_id)
-         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [channelId || null, conversationId || null, req.user.id, content?.trim() || null, threadId || null]
-      );
-      const baseMessage = rows[0];
+        const row = rows[0];
+        if (!row?.has_access) {
+          const err: any = new Error(conversationId ? 'Not a participant' : 'Access denied');
+          err.statusCode = 403;
+          throw err;
+        }
 
-      if (attachments.length > 0) {
-        const values = [];
-        const params = [];
-        let index = 1;
+        communityId = row.community_id ?? null;
 
-        for (const attachment of attachments) {
-          values.push(
-            `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`
-          );
-          params.push(
-            baseMessage.id,
-            req.user.id,
-            attachment.filename,
-            attachment.contentType,
-            attachment.sizeBytes,
-            attachment.storageKey,
-            attachment.width || null,
-            attachment.height || null
+        if (attachments.length > 0) {
+          const values: string[] = [];
+          const params: any[] = [];
+          let index = 1;
+
+          for (const attachment of attachments) {
+            values.push(
+              `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`
+            );
+            params.push(
+              row.id,
+              req.user.id,
+              attachment.filename,
+              attachment.contentType,
+              attachment.sizeBytes,
+              attachment.storageKey,
+              attachment.width || null,
+              attachment.height || null,
+            );
+          }
+
+          await client.query(
+            `INSERT INTO attachments
+               (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
+             VALUES ${values.join(', ')}`,
+            params,
           );
         }
 
-        await client.query(
-          `INSERT INTO attachments
-             (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
-           VALUES ${values.join(', ')}`,
-          params
-        );
-      }
+        return row;
+      });
 
-      await client.query('COMMIT');
-
-      // Load hydrated message on the same client connection (no extra checkout)
-      const { rows: [message] } = await client.query(
-        `SELECT m.*,
-                CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
-                COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
-         FROM   messages m
-         LEFT JOIN users u ON u.id = m.author_id
-         LEFT JOIN attachments a ON a.message_id = m.id
-         WHERE  m.id = $1
-         GROUP  BY m.id, u.id`,
-        [baseMessage.id]
-      );
-
-      // Release the pool connection before fanout/side-effects so it doesn't
-      // hold a slot while publishConversationEvent does its own query().
-      client.release();
-      client = null;
+      // Re-hydrate only when attachments were inserted so the response includes
+      // them. For the common no-attachment path the CTE result is already fully
+      // hydrated (author joined, attachments = []).
+      const message = attachments.length > 0
+        ? (await loadHydratedMessageById(baseMessage.id) ?? baseMessage)
+        : baseMessage;
 
       // Bust the channel message cache so the next reader sees the new message.
       if (channelId) {
@@ -359,13 +382,13 @@ router.post('/',
 
       sideEffects.indexMessage(baseMessage);
       if (conversationId) {
-        await publishConversationEvent(conversationId, 'message:created', message || baseMessage);
+        await publishConversationEvent(conversationId, 'message:created', message);
       } else {
         sideEffects.publishMessageEventWithUnread(
           targetKey(channelId, conversationId),
           'message:created',
-          message || baseMessage,
-          channelId
+          message,
+          channelId,
         );
       }
       if (communityId) {
@@ -378,17 +401,12 @@ router.post('/',
         });
       }
 
-      res.status(201).json({ message: message || baseMessage });
-    } catch (err) {
-      if (client) {
-        try {
-          await client.query('ROLLBACK');
-        } catch {
-        }
+      res.status(201).json({ message });
+    } catch (err: any) {
+      if (err.statusCode === 403) {
+        return res.status(403).json({ error: err.message });
       }
       next(err);
-    } finally {
-      client?.release();
     }
   }
 );

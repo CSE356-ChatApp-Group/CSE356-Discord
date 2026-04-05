@@ -243,11 +243,17 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # POOL_CIRCUIT_BREAKER_QUEUE: fast-fail threshold; keeps failures as quick 503s
-  # rather than letting requests queue until client HTTP timeout.
+  # POOL_CIRCUIT_BREAKER_QUEUE: number of requests allowed to wait for a pool
+  # connection before returning 503. Raised to 400 so burst traffic is buffered
+  # (messages succeed with latency) rather than failed immediately.
+  # PG_CONNECTION_TIMEOUT_MS=10000 gives each queued request up to 10s to get a
+  # connection before timing out.
   sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=50/' /opt/chatapp/shared/.env \
-    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=50' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=400/' /opt/chatapp/shared/.env \
+    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=400' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
+    || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY: 1 on the 1-CPU prod VM so Meilisearch
   # indexing jobs don't compete with request-handling code for the single CPU.
   sudo grep -q '^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
