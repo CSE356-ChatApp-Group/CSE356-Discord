@@ -212,13 +212,14 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 
   echo \"RAM=\${TOTAL_RAM_MB}MB nCPU=\${NCPU} → shared_buffers=\${SHB_MB}MB work_mem=\${WRK_MB}MB\"
 
-  # Enable pg_stat_statements via shared_preload_libraries (requires restart).
-  # This is idempotent: grep avoids duplicate entries in postgresql.conf.
-  PG_CONF=\$(sudo -u postgres psql -tAc "SHOW config_file;")
-  if ! sudo grep -q "pg_stat_statements" "\${PG_CONF}"; then
-    sudo sed -i "s/^#*shared_preload_libraries.*/shared_preload_libraries = 'pg_stat_statements'/" "\${PG_CONF}"
-    echo "pg_stat_statements added to shared_preload_libraries"
-  fi
+  # Enable pg_stat_statements via ALTER SYSTEM (idempotent, no sed quoting risk).
+  # ALTER SYSTEM writes to postgresql.auto.conf which takes precedence over
+  # postgresql.conf, so the sed approach is not needed and was fragile against
+  # the commented-out default form: #shared_preload_libraries = ''
+  sudo -u postgres psql -qAt \
+    -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';" \
+    2>&1 | grep -v 'change directory'
+  echo "pg_stat_statements set via ALTER SYSTEM"
 
   sudo -u postgres psql -qAt \
     -c "ALTER SYSTEM SET shared_buffers         = '\${SHB_MB}MB';" \
