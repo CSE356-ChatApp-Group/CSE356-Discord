@@ -7,7 +7,7 @@
 # Services map to cloud nodes:
 #   Node 1 (db):        postgres, redis
 #   Node 2 (proxy):     nginx, api (primary)
-#   Node 3 (search):    api (replica), meilisearch
+#   Node 3 (api):       api (replica)
 #   Node 4 (monitor):   api (replica), prometheus, grafana
 # =============================================================================
 
@@ -20,7 +20,6 @@ networks:
 volumes:
   pg_data:
   redis_data:
-  meili_data:
   minio_data:
   prometheus_data:
   grafana_data:
@@ -77,8 +76,6 @@ services:
       PORT: 3000
       DATABASE_URL: postgres://chatapp:${POSTGRES_PASSWORD:-chatapp_dev}@postgres:5432/chatapp
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
-      MEILISEARCH_URL: http://meilisearch:7700
-      MEILISEARCH_KEY: ${MEILISEARCH_KEY:-Go4__jXDHrMr9zpRtT5B8fyIVv_I6u2ZezcGtI14bJI}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change_me_access}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change_me_refresh}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
@@ -132,20 +129,6 @@ services:
       - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
     depends_on: [api]
     networks: [chatapp]
-
-  # ── Node 3 · Search ───────────────────────────────────────────────────────────
-  meilisearch:
-    image: getmeili/meilisearch:v1.9
-    restart: unless-stopped
-    environment:
-      MEILI_MASTER_KEY: ${MEILISEARCH_KEY:-Go4__jXDHrMr9zpRtT5B8fyIVv_I6u2ZezcGtI14bJI}
-      MEILI_ENV: production
-    volumes:
-      - meili_data:/meili_data
-    networks: [chatapp]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
-      interval: 30s
 
   # ── S3-compatible object storage (MinIO) ──────────────────────────────────────
   minio:

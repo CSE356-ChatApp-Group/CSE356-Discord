@@ -65,7 +65,7 @@ components/
 ├── MessagePane.tsx        header, scrollable message list, input form
 ├── MessageItem.tsx        single message with grouping, edit, delete
 ├── MemberList.tsx         right panel — members grouped by presence status
-├── SearchBar.tsx          collapsible search with Meilisearch highlight rendering
+├── SearchBar.tsx          collapsible search with FTS highlight rendering
 ├── WelcomePane.tsx        shown when no channel is selected
 └── Modal.tsx              reusable overlay modal (Escape to close)
 ```

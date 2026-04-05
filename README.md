@@ -224,7 +224,7 @@ chatapp/
 │   │   │   ├── service.ts         Redis TTL + fanout logic
 │   │   │   └── router.ts
 │   │   ├── search/
-│   │   │   ├── client.ts          Meilisearch wrapper
+│   │   │   ├── client.ts          Postgres FTS client (tsvector + websearch_to_tsquery)
 │   │   │   └── router.ts
 │   │   ├── attachments/router.ts  S3 pre-sign + metadata
 │   │   ├── websocket/
@@ -316,8 +316,8 @@ GET /search?q=hello&channelId=<uuid>&authorId=<uuid>&after=2024-01-01&limit=20
 - Services: `nginx`, `api`
 - Exposes port 80/443 to public internet
 
-### Node 3 – API + Search
-- Services: `api`, `meilisearch`
+### Node 3 – API (replica)
+- Services: `api`
 - Internal traffic only (no public port)
 
 ### Node 4 – API + Monitoring
@@ -349,9 +349,10 @@ Integrate WebRTC signaling (e.g. mediasoup) and add a signal-relay route.
 The UUID primary keys and `created_at` cursors are compatible with Citus (Postgres sharding)
 or read-replica routing. Replace `pool.ts` with a read/write split pool when ready.
 
-### Replacing Meilisearch with OpenSearch
-Implement the same interface in `search/client.ts` using `@opensearch-project/opensearch`.
-No other files change.
+### Scaling search
+The FTS implementation in `search/client.ts` uses Postgres `tsvector` + `websearch_to_tsquery`.
+To switch to a dedicated search engine, implement the same `search(q, opts)` interface in `client.ts`.
+No other files need to change.
 
 ### Adding reactions, threads, polls
 All extend `messages` with junction tables. The existing WebSocket fanout and Redis Pub/Sub

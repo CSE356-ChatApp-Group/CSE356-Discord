@@ -161,7 +161,7 @@ CREATE INDEX idx_messages_channel  ON messages (channel_id, created_at DESC) WHE
 CREATE INDEX idx_messages_conv     ON messages (conversation_id, created_at DESC) WHERE deleted_at IS NULL;
 CREATE INDEX idx_messages_author   ON messages (author_id);
 CREATE INDEX idx_messages_thread   ON messages (thread_id) WHERE thread_id IS NOT NULL;
--- Full-text search using pg_trgm (supplement to Meilisearch for simple queries)
+-- pg_trgm GIN index: trigram fallback for partial/infix queries (see search/client.ts)
 CREATE INDEX idx_messages_content_trgm ON messages USING GIN (content gin_trgm_ops) WHERE deleted_at IS NULL;
 
 -- ---------------------------------------------------------------------------

@@ -97,7 +97,7 @@
   word-break: break-word;
 }
 
-/* Meilisearch highlight */
+/* Search highlight (<em> injected by server-side FTS highlight) */
 .hitContent em {
   background: color-mix(in srgb, var(--accent) 28%, transparent);
   color: var(--text-primary);
