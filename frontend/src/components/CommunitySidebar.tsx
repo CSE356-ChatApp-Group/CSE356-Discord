@@ -77,17 +77,24 @@ export default function CommunitySidebar() {
     // reads of presenceStatus after the await resolves.
     const capturedStatus = presenceStatus;
     const capturedMessage = awayMessage;
+    const body = capturedStatus === 'away'
+      ? { status: 'away', awayMessage: capturedMessage.trim() || null }
+      : { status: 'online', awayMessage: null };
+
+    // Apply the intent and send the WS update optimistically, before the HTTP
+    // round-trip.  The WS message is the real-time propagation path; the PUT is
+    // just Redis/DB persistence.  Showing feedback immediately avoids a flaky
+    // >10 s wait in staging E2E tests when the server is under load.
+    writePresenceIntent(capturedStatus, capturedMessage);
+    wsManager.send({ type: 'presence', ...body });
+    setPresenceMsg(capturedStatus === 'away' ? 'Away status updated.' : 'Presence set to online.');
+
     try {
-      const body = capturedStatus === 'away'
-        ? { status: 'away', awayMessage: capturedMessage.trim() || null }
-        : { status: 'online', awayMessage: null };
       await api.put('/presence', body);
-      writePresenceIntent(capturedStatus, capturedMessage);
-      wsManager.send({ type: 'presence', ...body });
-      setPresenceMsg(capturedStatus === 'away' ? 'Away status updated.' : 'Presence set to online.');
       const profile = await api.get('/users/me');
       if (profile?.user) setUser(profile.user);
     } catch (e) {
+      setPresenceMsg('');
       setAccountError(e?.message || 'Could not update presence');
     } finally {
       setPresenceBusy(false);
