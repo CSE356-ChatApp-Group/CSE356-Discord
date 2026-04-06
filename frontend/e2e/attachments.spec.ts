@@ -56,7 +56,7 @@ test.describe('attachment upload and access', () => {
 
     const chanRes = await aliceCtx.request.post('/api/v1/channels', {
       headers: { Authorization: `Bearer ${aliceToken}` },
-      data: { communityId, name: 'attach-test', isPrivate: false },
+      data: { communityId, name: 'attach-test', isPrivate: true },
     });
     expect(chanRes.ok(), `create channel: ${chanRes.status()}`).toBeTruthy();
     channelId = (await chanRes.json()).channel.id;
@@ -112,6 +112,7 @@ test.describe('attachment upload and access', () => {
         storageKey,
         filename: 'test.png',
         contentType: 'image/png',
+        sizeBytes: tinyPngBuffer().length,
         width: 1,
         height: 1,
       },
@@ -129,7 +130,7 @@ test.describe('attachment upload and access', () => {
     });
     expect(getRes.status(), `GET attachment as owner: ${getRes.status()}`).toBe(200);
 
-    const { attachment: fetched, signedUrl } = await getRes.json();
+    const { attachment: fetched, url: signedUrl } = await getRes.json();
     expect(fetched.id).toBe(attachmentId);
     expect(typeof signedUrl).toBe('string');
     expect(signedUrl).toMatch(/^https?:\/\//);
@@ -152,7 +153,7 @@ test.describe('attachment upload and access', () => {
     // Bob tries to record an attachment against Alice's message.
     const presignRes = await bobCtx.request.post('/api/v1/attachments/presign', {
       headers: { Authorization: `Bearer ${bobToken}` },
-      data: { contentType: 'image/png', sizeBytes: 100 },
+      data: { filename: 'bob.png', contentType: 'image/png', sizeBytes: 100 },
     });
     expect(presignRes.ok()).toBeTruthy();
     const { storageKey } = await presignRes.json();
@@ -162,7 +163,9 @@ test.describe('attachment upload and access', () => {
       data: {
         messageId,           // Alice's message
         storageKey,
+        filename: 'bob.png',
         contentType: 'image/png',
+        sizeBytes: 100,
       },
     });
     expect(recordRes.status(), 'should be 403 for wrong owner').toBe(403);
