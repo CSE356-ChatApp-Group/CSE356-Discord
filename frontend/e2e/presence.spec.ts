@@ -92,8 +92,15 @@ test.describe('presence display', () => {
         const presenceSelect = page.getByTestId('account-presence-status');
         await expect(presenceSelect).toBeVisible({ timeout: 10_000 });
 
+        // Wait for the modal's loadAccount() API call to resolve and set the
+        // initial value before we change it (avoids a race where the API
+        // response resets 'away' back to 'online' after selectOption runs).
+        await expect(presenceSelect).toHaveValue('online', { timeout: 10_000 });
+
         // Set presence to "away" (the other user-settable option besides "online").
         await presenceSelect.selectOption('away');
+        // Confirm React processed the change before clicking save.
+        await expect(presenceSelect).toHaveValue('away', { timeout: 5_000 });
         await page.getByTestId('account-presence-save').click();
 
         // The account section shows a confirmation message when the save succeeds.
