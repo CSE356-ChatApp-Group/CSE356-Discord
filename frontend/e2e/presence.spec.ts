@@ -103,11 +103,14 @@ test.describe('presence display', () => {
         await expect(page.getByText('Configured')).toBeVisible({ timeout: 10_000 });
 
         // Set presence to "away" (the other user-settable option besides "online").
-        // Wait for the controlled <select> to reflect 'away' before saving —
-        // on slow/production environments React may not have committed the
-        // re-render by the time the next action fires.
+        // After selectOption, wait for the React-state-driven away-message input
+        // to appear: it renders only when presenceStatus === 'away' in React state
+        // (see CommunitySidebar line ~299: {presenceStatus === 'away' && <input .../>}).
+        // This is a reliable indicator that React committed the state update —
+        // unlike toHaveValue which can pass just because Playwright set the DOM
+        // property directly, before React reconciles it back to 'online'.
         await presenceSelect.selectOption('away');
-        await expect(presenceSelect).toHaveValue('away', { timeout: 3_000 });
+        await expect(page.getByTestId('account-away-message')).toBeVisible({ timeout: 3_000 });
         await page.getByTestId('account-presence-save').click();
 
         // The account section shows a confirmation message when the save succeeds.
