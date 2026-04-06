@@ -20,7 +20,7 @@ const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const { hashPassword } = require('./passwords');
 const presenceService  = require('../presence/service');
-const { BUCKET, s3 } = require('../utils/objectStorage');
+const { BUCKET, s3 } = require('../attachments/storage');
 
 const router = express.Router();
 

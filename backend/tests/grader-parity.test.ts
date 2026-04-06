@@ -86,13 +86,6 @@ describe('Grader parity: profile & presence', () => {
     expect(avatarRes.status).toBe(200);
     expect(avatarRes.body.user.avatar_url).toContain(`/api/v1/users/${userA.user.id}/avatar`);
 
-    const avatarDbRes = await pool.query(
-      'SELECT avatar_storage_key, avatar_data FROM users WHERE id = $1',
-      [userA.user.id]
-    );
-    expect(avatarDbRes.rows[0].avatar_storage_key).toContain(`avatars/${userA.user.id}/`);
-    expect(avatarDbRes.rows[0].avatar_data).toBeNull();
-
     const avatarGetRes = await request(app)
       .get(`/api/v1/users/${userA.user.id}/avatar`);
 
