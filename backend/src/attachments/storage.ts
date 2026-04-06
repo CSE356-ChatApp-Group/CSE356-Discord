@@ -96,6 +96,13 @@ const s3 = new S3Client({
   region: REGION,
   endpoint: INTERNAL_ENDPOINT?.href,
   forcePathStyle: !!INTERNAL_ENDPOINT,
+  // AWS SDK ≥ v3.600 defaults requestChecksumCalculation to 'WHEN_SUPPORTED',
+  // which injects an x-amz-checksum-crc32 header computed over the *empty*
+  // body at presign time.  MinIO then verifies the CRC32 of the actual upload
+  // content and rejects it with 403 because the values differ.
+  // Setting 'WHEN_REQUIRED' restores the pre-v3.600 behaviour where checksums
+  // are omitted unless the service explicitly requires them.
+  requestChecksumCalculation: 'WHEN_REQUIRED' as any,
   credentials: process.env.S3_ACCESS_KEY ? {
     accessKeyId:     process.env.S3_ACCESS_KEY,
     secretAccessKey: process.env.S3_SECRET_KEY,
