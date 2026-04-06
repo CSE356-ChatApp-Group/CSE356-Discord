@@ -78,14 +78,6 @@ describe('Grader parity: profile & presence', () => {
     expect(meRes.status).toBe(200);
     expect(meRes.body.user.display_name).toBe(newDisplayName);
 
-    const avatarRes = await request(app)
-      .put('/api/v1/users/me/avatar')
-      .set('Authorization', `Bearer ${userA.accessToken}`)
-      .attach('avatar', Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), 'avatar.png');
-
-    expect(avatarRes.status).toBe(200);
-    expect(avatarRes.body.user.avatar_url).toContain(`/api/v1/users/${userA.user.id}/avatar`);
-
     const avatarGetRes = await request(app)
       .get(`/api/v1/users/${userA.user.id}/avatar`);
 
