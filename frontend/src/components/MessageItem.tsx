@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { formatDistanceToNow, format, isToday, isYesterday } from 'date-fns';
 import { useChatStore } from '../stores/chatStore';
 import { api } from '../lib/api';
@@ -22,7 +22,7 @@ function formatTimestamp(iso) {
   return format(d, 'MMM d, HH:mm');
 }
 
-function AttachmentImage({ attachment }) {
+const AttachmentImage = memo(function AttachmentImage({ attachment }) {
   const [src, setSrc] = useState(() => attachmentUrlCache.get(attachment.id) || '');
 
   useEffect(() => {
@@ -52,9 +52,9 @@ function AttachmentImage({ attachment }) {
       loading="lazy"
     />
   );
-}
+});
 
-export default function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false }) {
+function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false }) {
   const { editMessage, deleteMessage } = useChatStore();
   const grouped = isGrouped(msg, prevMessage);
   const shouldShowReadReceipt = showReadReceipt && !msg.deleted_at;
@@ -195,6 +195,8 @@ export default function MessageItem({ message: msg, prevMessage, isOwn, showRead
     </div>
   );
 }
+
+export default memo(MessageItem);
 
 function EditIcon() {
   return (

@@ -109,111 +109,14 @@ cleanup_candidate() {
 trap cleanup_candidate ERR
 
 echo "0) Ensuring Nginx serves frontend UI and proxies backend routes..."
+# SCP the standalone nginx config (deploy/nginx/staging.conf → /tmp/chatapp-nginx.conf),
+# then substitute __LIVE_PORT__ on the server and install it.  This keeps the
+# config reviewable and diffable in version control instead of buried in a heredoc.
+scp "${SCRIPT_DIR}/nginx/staging.conf" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp-nginx.conf"
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   LIVE_PORT='${LIVE_PORT}'
-  sudo tee /etc/nginx/sites-available/chatapp >/dev/null <<'EOF'
-upstream chatapp_upstream {
-  least_conn;
-  server 127.0.0.1:__LIVE_PORT__ max_fails=0;
-  keepalive 256;
-  keepalive_requests 10000;
-  keepalive_timeout 75s;
-}
-
-server {
-  listen 80 default_server backlog=4096;
-  listen [::]:80 default_server backlog=4096;
-  server_name _;
-
-  location /ws {
-    proxy_pass http://chatapp_upstream;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection \"upgrade\";
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_read_timeout 86400;
-    proxy_send_timeout 86400;
-  }
-
-  location /api/ {
-    proxy_pass http://chatapp_upstream;
-    proxy_http_version 1.1;
-    proxy_set_header Connection \"\";
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_read_timeout 30s;
-    client_max_body_size 10m;
-  }
-
-  location /health {
-    proxy_pass http://chatapp_upstream/health;
-    access_log off;
-  }
-
-  location /minio/ {
-    proxy_pass http://127.0.0.1:9000/;
-    proxy_http_version 1.1;
-    proxy_set_header Host 127.0.0.1:9000;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_buffering off;
-    proxy_request_buffering off;
-    proxy_read_timeout 300s;
-    proxy_send_timeout 300s;
-    client_max_body_size 10m;
-  }
-
-  location = /grafana {
-    return 301 /grafana/;
-  }
-
-  location /grafana/ {
-    proxy_pass http://127.0.0.1:3001;
-    proxy_http_version 1.1;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header X-Forwarded-Prefix /grafana;
-    # Keep Grafana redirects on a single /grafana prefix across older and newer
-    # nginx versions. Older nginx builds may still absolutize /grafana/login
-    # into /grafana/grafana/login unless we rewrite localhost + relative
-    # redirects explicitly.
-    proxy_redirect http://127.0.0.1:3001/ /;
-    proxy_redirect http://localhost/ /;
-    proxy_redirect ~^/(.*)$ /$1;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_read_timeout 300s;
-  }
-
-  location / {
-    root /opt/chatapp/current/frontend/dist;
-    try_files \$uri /index.html;
-  }
-
-  location = /index.html {
-    root /opt/chatapp/current/frontend/dist;
-    add_header Cache-Control \"no-store\";
-  }
-
-  location /assets/ {
-    root /opt/chatapp/current/frontend/dist;
-    try_files \$uri =404;
-    expires 1h;
-    add_header Cache-Control \"public, max-age=3600\";
-  }
-}
-EOF
-  sudo sed -i \"s/__LIVE_PORT__/\${LIVE_PORT}/g\" /etc/nginx/sites-available/chatapp
+  sed \"s/__LIVE_PORT__/\${LIVE_PORT}/g\" /tmp/chatapp-nginx.conf | sudo tee /etc/nginx/sites-available/chatapp >/dev/null
   sudo ln -sfn /etc/nginx/sites-available/chatapp /etc/nginx/sites-enabled/chatapp
   sudo rm -f /etc/nginx/sites-enabled/default
   sudo nginx -t

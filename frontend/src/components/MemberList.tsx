@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { memo, useEffect, useMemo } from 'react';
 import { PRESENCE_STATUSES, useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { Avatar } from './CommunitySidebar';
@@ -28,13 +28,15 @@ export default function MemberList() {
     hydratePresenceForUsers(ids).catch(() => {});
   }, [list, hydratePresenceForUsers]);
 
-  // Group by status
-  const groups = { online: [], idle: [], away: [], offline: [] };
-  for (const m of list) {
-    const candidate = presence[m.id] || m.status || 'offline';
-    const s = PRESENCE_STATUSES.includes(candidate) ? candidate : 'offline';
-    groups[s].push({ ...m, status: s, awayMessage: awayMessages[m.id] || m.away_message || null });
-  }
+  const groups = useMemo(() => {
+    const g = { online: [], idle: [], away: [], offline: [] };
+    for (const m of list) {
+      const candidate = presence[m.id] || m.status || 'offline';
+      const s = PRESENCE_STATUSES.includes(candidate) ? candidate : 'offline';
+      g[s].push({ ...m, status: s, awayMessage: awayMessages[m.id] || m.away_message || null });
+    }
+    return g;
+  }, [list, presence, awayMessages]);
 
   return (
     <aside className={`${styles.list} memberList`} aria-label="Community members" data-testid="member-list">
@@ -63,7 +65,7 @@ export default function MemberList() {
   );
 }
 
-function MemberRow({ member, isYou }) {
+const MemberRow = memo(function MemberRow({ member, isYou }) {
   const name = member.displayName || member.display_name || member.username;
   return (
     <div className={styles.row} title={`${name}${isYou ? ' (you)' : ''} · ${member.role}`} data-testid={`member-row-${member.id}`} data-member-id={member.id} data-member-status={member.status}>
@@ -85,4 +87,4 @@ function MemberRow({ member, isYou }) {
       </div>
     </div>
   );
-}
+});

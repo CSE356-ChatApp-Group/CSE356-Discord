@@ -72,14 +72,19 @@ export default function CommunitySidebar() {
     setPresenceBusy(true);
     setPresenceMsg('');
     setAccountError('');
+    // Capture state before any await — a concurrent WS presence:updated event
+    // can call setPresenceStatus() while the PUT is in-flight, causing stale
+    // reads of presenceStatus after the await resolves.
+    const capturedStatus = presenceStatus;
+    const capturedMessage = awayMessage;
     try {
-      const body = presenceStatus === 'away'
-        ? { status: 'away', awayMessage: awayMessage.trim() || null }
+      const body = capturedStatus === 'away'
+        ? { status: 'away', awayMessage: capturedMessage.trim() || null }
         : { status: 'online', awayMessage: null };
       await api.put('/presence', body);
-      writePresenceIntent(presenceStatus, awayMessage);
+      writePresenceIntent(capturedStatus, capturedMessage);
       wsManager.send({ type: 'presence', ...body });
-      setPresenceMsg(presenceStatus === 'away' ? 'Away status updated.' : 'Presence set to online.');
+      setPresenceMsg(capturedStatus === 'away' ? 'Away status updated.' : 'Presence set to online.');
       const profile = await api.get('/users/me');
       if (profile?.user) setUser(profile.user);
     } catch (e) {

@@ -206,12 +206,27 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
     const { rows } = await query(
       `SELECT c.*,
               (SELECT COUNT(*) FROM community_members WHERE community_id = c.id) AS member_count,
-              json_agg(ch.* ORDER BY ch.position) FILTER (WHERE ch.id IS NOT NULL) AS channels
+              json_agg(
+                ch.* ORDER BY ch.position
+              ) FILTER (
+                WHERE ch.id IS NOT NULL
+                  AND (
+                    ch.is_private = FALSE
+                    OR EXISTS (
+                      SELECT 1 FROM channel_members cm
+                      WHERE cm.channel_id = ch.id AND cm.user_id = $2
+                    )
+                  )
+              ) AS channels
        FROM communities c
        LEFT JOIN channels ch ON ch.community_id = c.id
        WHERE c.id = $1
+         AND (c.is_public = TRUE OR EXISTS (
+               SELECT 1 FROM community_members cm2
+               WHERE cm2.community_id = c.id AND cm2.user_id = $2
+             ))
        GROUP BY c.id`,
-      [req.params.id]
+      [req.params.id, req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ community: rows[0] });
