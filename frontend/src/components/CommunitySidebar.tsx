@@ -94,6 +94,9 @@ export default function CommunitySidebar() {
       const profile = await api.get('/users/me');
       if (profile?.user) setUser(profile.user);
     } catch (e) {
+      // Clear the success message and show the error. The WS update was already
+      // sent so other clients may already see the change, but we report the
+      // persistence failure honestly.
       setPresenceMsg('');
       setAccountError(e?.message || 'Could not update presence');
     } finally {
@@ -320,7 +323,7 @@ export default function CommunitySidebar() {
                   {presenceBusy ? 'Saving…' : 'Save presence'}
                 </button>
               </form>
-              {presenceMsg && <p className={styles.passwordMsg}>{presenceMsg}</p>}
+              {presenceMsg && <p className={styles.passwordMsg} data-testid="account-presence-msg">{presenceMsg}</p>}
             </div>
 
             <div>

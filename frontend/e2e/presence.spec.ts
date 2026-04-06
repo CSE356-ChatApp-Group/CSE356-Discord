@@ -114,9 +114,11 @@ test.describe('presence display', () => {
         await page.getByTestId('account-presence-save').click();
 
         // The account section shows a confirmation message when the save succeeds.
-        // Note: the <p> is a sibling of the form, not inside it.
-        await expect(page.locator('p').filter({ hasText: 'Away status updated.' })).toBeVisible(
-          { timeout: 10_000 },
+        // With optimistic feedback the message is set synchronously before the
+        // PUT round-trip, so it should appear within milliseconds of the click.
+        await expect(page.getByTestId('account-presence-msg')).toHaveText(
+          'Away status updated.',
+          { timeout: 5_000 },
         );
       } finally {
         await ctx.close();
