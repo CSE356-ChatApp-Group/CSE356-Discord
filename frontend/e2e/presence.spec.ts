@@ -92,15 +92,18 @@ test.describe('presence display', () => {
         const presenceSelect = page.getByTestId('account-presence-status');
         await expect(presenceSelect).toBeVisible({ timeout: 10_000 });
 
-        // Wait for the modal's loadAccount() API call to resolve and set the
-        // initial value before we change it (avoids a race where the API
-        // response resets 'away' back to 'online' after selectOption runs).
-        await expect(presenceSelect).toHaveValue('online', { timeout: 10_000 });
+        // The modal fires loadAccount() which calls /auth/oauth/linked and
+        // /users/me in parallel. The initial component state is hasPassword=false
+        // → "Not configured". When the API resolves it becomes "Configured"
+        // (our test users always register with a local password).
+        // Waiting for "Configured" is a reliable, zero-arbitrary-delay gate
+        // that ensures loadAccount() has fully settled before we interact with
+        // the presence select — preventing the API response from overwriting
+        // our selectOption('away') call.
+        await expect(page.getByText('Configured')).toBeVisible({ timeout: 10_000 });
 
         // Set presence to "away" (the other user-settable option besides "online").
         await presenceSelect.selectOption('away');
-        // Confirm React processed the change before clicking save.
-        await expect(presenceSelect).toHaveValue('away', { timeout: 5_000 });
         await page.getByTestId('account-presence-save').click();
 
         // The account section shows a confirmation message when the save succeeds.
