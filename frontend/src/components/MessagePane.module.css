@@ -35,11 +35,6 @@
   flex-shrink: 0;
 }
 
-.searchResultsSidebar {
-  width: clamp(360px, 34vw, 500px);
-  min-width: 340px;
-}
-
 .header {
   height: var(--header-height);
   border-bottom: 1px solid var(--border);
@@ -527,11 +522,6 @@
     width: var(--member-list-width, 236px);
     min-width: 0;
   }
-
-  .searchResultsSidebar {
-    width: clamp(320px, 40vw, 420px);
-    min-width: 300px;
-  }
 }
 
 @media (max-width: 760px) {
@@ -617,39 +607,15 @@
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
-  right: 0;
+  width: calc(100% + 56px);
+  max-width: min(500px, calc(100vw - 24px));
   background: var(--bg-1);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 16px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35);
   z-index: 100;
   overflow: hidden;
 }
-
-.searchPopoutOption {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  font-size: 14px;
-  color: var(--text-primary);
-  text-align: left;
-  transition: background .1s;
-}
-.searchPopoutOption:hover { background: var(--bg-2); }
-.searchPopoutOption svg { color: var(--text-muted); flex-shrink: 0; }
-.searchPopoutOption strong { font-weight: 600; }
-
-.searchPopoutHint {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  font-size: 13px;
-  color: var(--text-muted);
-}
-.searchPopoutHint svg { flex-shrink: 0; }
 
 .attachButton {
   height: 36px;

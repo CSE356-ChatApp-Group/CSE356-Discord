@@ -216,6 +216,26 @@ async function searchTrigram(q: string, opts: Record<string, any>): Promise<any>
   return buildResult(processed, q, offset, limit);
 }
 
+async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
+  const params: any[] = [];
+  const filters  = buildFilters(params, opts);
+  const limit    = Number(opts.limit)  || 20;
+  const offset   = Number(opts.offset) || 0;
+  const limitPh  = p(params, limit);
+  const offsetPh = p(params, offset);
+
+  const sql = `
+    SELECT ${SELECT_COLS}
+    ${FROM_CLAUSE}
+    WHERE m.deleted_at IS NULL
+      ${filters}
+    ORDER BY m.created_at DESC
+    LIMIT ${limitPh} OFFSET ${offsetPh}`;
+
+  const { rows } = await query(sql, params);
+  return buildResult(rows, '', offset, limit);
+}
+
 /**
  * search – main entry point.
  *
@@ -227,6 +247,10 @@ async function searchTrigram(q: string, opts: Record<string, any>): Promise<any>
  * @param opts  { channelId?, conversationId?, userId, authorId?, after?, before?, limit?, offset? }
  */
 async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
+  if (!String(q || '').trim()) {
+    return searchFilteredOnly(opts);
+  }
+
   try {
     const fts = await searchFts(q, opts);
     if (fts.hits.length > 0) return fts;

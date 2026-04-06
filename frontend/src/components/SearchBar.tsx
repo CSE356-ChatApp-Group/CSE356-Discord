@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { formatDistanceToNow } from 'date-fns';
 import styles from './SearchBar.module.css';
@@ -11,10 +11,8 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     setSearchFilters,
     resetSearchFilters,
     search,
-    members,
-    activeConv,
   } = useChatStore();
-  const [showFilters, setShowFilters] = useState(searchResults === null);
+  const [showFilters, setShowFilters] = useState(true);
 
   function escapeHtml(value) {
     return value
@@ -41,15 +39,6 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     );
   }
 
-  function displayUser(user) {
-    return (
-      user?.displayName ||
-      user?.display_name ||
-      user?.username ||
-      'User'
-    );
-  }
-
   function highlightedContent(hit, query) {
     if (hit._formatted?.content) return hit._formatted.content;
     const safe = escapeHtml(hit.content || '');
@@ -63,40 +52,22 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     return !(filters.after && filters.before && filters.after > filters.before);
   }
 
-  const availableAuthors = useMemo(() => {
-    const source = activeConv
-      ? (Array.isArray(activeConv.participants) ? activeConv.participants : [])
-      : (Array.isArray(members) ? members : []);
-    const deduped = new Map();
-
-    source.forEach((entry) => {
-      if (!entry?.id || deduped.has(entry.id)) return;
-      deduped.set(entry.id, entry);
-    });
-
-    return Array.from(deduped.values()).sort((a, b) =>
-      displayUser(a).localeCompare(displayUser(b), undefined, { sensitivity: 'base' })
-    );
-  }, [activeConv, members]);
-
   function applyFilters(partial) {
     const nextFilters = { ...searchFilters, ...partial };
     setSearchFilters(nextFilters);
-    if (searchQuery.trim().length >= 2 && isRangeValid(nextFilters)) {
+    if (isRangeValid(nextFilters)) {
       void search(searchQuery, nextFilters);
     }
   }
 
   function clearFilters() {
     resetSearchFilters();
-    if (searchQuery.trim().length >= 2) {
-      void search(searchQuery, { authorId: '', after: '', before: '' });
-    }
+    void search(searchQuery, { author: '', after: '', before: '' });
   }
 
   const count = searchResults?.length ?? 0;
   const hasSubmittedSearch = searchResults !== null;
-  const activeFilterCount = [searchFilters.authorId, searchFilters.after, searchFilters.before]
+  const activeFilterCount = [searchFilters.author, searchFilters.after, searchFilters.before]
     .filter(Boolean)
     .length;
   const invalidRange = !isRangeValid(searchFilters);
@@ -105,43 +76,38 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     <div className={styles.panel} data-testid="search-bar">
       <div className={styles.resultsHeader} data-testid="search-results-header">
         <span className={styles.resultCount} data-testid="search-summary">
-          {hasSubmittedSearch ? `${count} Result${count !== 1 ? 's' : ''}` : 'Search Filters'}
+          {hasSubmittedSearch ? `${count} Result${count !== 1 ? 's' : ''}` : 'Filters'}
         </span>
         <div className={styles.resultsActions}>
           <button
             type="button"
             className={`${styles.resultsActionBtn} ${showFilters || activeFilterCount ? styles.resultsActionBtnActive : ''}`}
             onClick={() => setShowFilters((value) => !value)}
-            aria-expanded={showFilters || !hasSubmittedSearch}
+            aria-expanded={showFilters}
             data-testid="search-filters-toggle"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
             Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
           </button>
-          <button className={styles.resultsActionBtn} disabled title="Sort (coming soon)" type="button">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M11 5h10M11 9h7M11 13h4"/><path d="M3 15l3 3 3-3M6 8v10"/></svg>
-            Sort
+          <button type="button" className={styles.resultsActionBtn} onClick={onClose} aria-label="Close search">
+            Done
           </button>
         </div>
       </div>
 
-      {(showFilters || !hasSubmittedSearch) && (
+      {showFilters && (
         <div className={styles.filtersPanel} data-testid="search-filters-panel">
           <label className={styles.filterField}>
-            <span className={styles.filterLabel}>From</span>
-            <select
+            <span className={styles.filterLabel}>Author</span>
+            <input
               className={styles.filterInput}
-              value={searchFilters.authorId}
-              onChange={(event) => applyFilters({ authorId: event.target.value })}
+              type="text"
+              value={searchFilters.author}
+              placeholder="username"
+              autoComplete="off"
+              onChange={(event) => applyFilters({ author: event.target.value })}
               data-testid="search-filter-author"
-            >
-              <option value="">All people</option>
-              {availableAuthors.map((author) => (
-                <option key={author.id} value={author.id}>
-                  {displayUser(author)}
-                </option>
-              ))}
-            </select>
+            />
           </label>
 
           <label className={styles.filterField}>
@@ -178,13 +144,6 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
             >
               Clear filters
             </button>
-            <button
-              type="button"
-              className={styles.filterCloseBtn}
-              onClick={() => setShowFilters(false)}
-            >
-              Done
-            </button>
           </div>
 
           {invalidRange && (
@@ -196,14 +155,8 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
       )}
 
       <div className={styles.results} data-testid="search-results">
-        {!hasSubmittedSearch ? (
-          <p className={styles.none}>
-            {searchQuery.trim()
-              ? 'Press Enter above to search with these filters.'
-              : 'Type a query above, adjust filters here, then search.'}
-          </p>
-        ) : count === 0 ? (
-          <p className={styles.none}>No results for &ldquo;{searchQuery}&rdquo;</p>
+        {!hasSubmittedSearch ? null : count === 0 ? (
+          <p className={styles.none}>No results found.</p>
         ) : (
           searchResults.map(hit => (
             <div key={hit.id} className={styles.hit} data-testid={`search-hit-${hit.id}`}>

@@ -37,7 +37,7 @@ afterEach(() => {
     messages: {},
     searchResults: null,
     searchQuery: '',
-    searchFilters: { authorId: '', after: '', before: '' },
+    searchFilters: { author: '', after: '', before: '' },
   } as any);
 });
 
@@ -632,7 +632,7 @@ describe('resetChatStore / expireSession data isolation', () => {
       awayMessages:    { 'user-a': 'out' },
       searchResults:   [{ id: 'r-1' }],
       searchQuery:     'hello',
-      searchFilters:   { authorId: 'user-a', after: '2026-04-06T08:00', before: '2026-04-06T09:00' },
+      searchFilters:   { author: 'user-a', after: '2026-04-06T08:00', before: '2026-04-06T09:00' },
     } as any);
 
     useChatStore.getState().reset();
@@ -650,7 +650,7 @@ describe('resetChatStore / expireSession data isolation', () => {
     expect(s.awayMessages).toEqual({});
     expect(s.searchResults).toBeNull();
     expect(s.searchQuery).toBe('');
-    expect(s.searchFilters).toEqual({ authorId: '', after: '', before: '' });
+    expect(s.searchFilters).toEqual({ author: '', after: '', before: '' });
   });
 
   it('resetChatStore() clears state so a new user does not see previous user data', () => {
@@ -678,9 +678,13 @@ describe('search filters', () => {
     apiGet.mockResolvedValue({ hits: [] });
 
     useChatStore.setState({
-      activeConv: { id: 'conv-1' },
+      activeConv: {
+        id: 'conv-1',
+        participants: [{ id: 'user-2', username: 'user-2' }],
+      },
+      members: [{ id: 'user-2', username: 'user-2' }],
       searchFilters: {
-        authorId: 'user-2',
+        author: 'user-2',
         after: '2026-04-06T09:15',
         before: '2026-04-06T10:45',
       },
@@ -701,16 +705,17 @@ describe('search filters', () => {
 
     useChatStore.setState({
       activeConv: { id: 'conv-1' },
-      searchFilters: { authorId: '', after: '', before: '' },
+      members: [{ id: 'user-7', username: 'user-7' }],
+      searchFilters: { author: '', after: '', before: '' },
     } as any);
 
     await useChatStore.getState().search('status', {
-      authorId: 'user-7',
+      author: 'user-7',
       after: '2026-04-06T12:00',
     });
 
     expect(useChatStore.getState().searchFilters).toEqual({
-      authorId: 'user-7',
+      author: 'user-7',
       after: '2026-04-06T12:00',
       before: '',
     });

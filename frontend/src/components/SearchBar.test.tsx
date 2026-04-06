@@ -36,7 +36,7 @@ describe('SearchBar filters', () => {
         members: [],
         searchResults: [],
         searchQuery: 'hello',
-        searchFilters: { authorId: '', after: '', before: '' },
+        searchFilters: { author: '', after: '', before: '' },
       } as any);
     });
   });
@@ -48,7 +48,7 @@ describe('SearchBar filters', () => {
         members: [],
         searchResults: null,
         searchQuery: '',
-        searchFilters: { authorId: '', after: '', before: '' },
+        searchFilters: { author: '', after: '', before: '' },
       } as any);
     });
   });
@@ -56,15 +56,13 @@ describe('SearchBar filters', () => {
   it('shows author and time filters and reruns search when they change', async () => {
     render(<SearchBar onClose={() => {}} />);
 
-    fireEvent.click(screen.getByTestId('search-filters-toggle'));
-
     expect(screen.getByTestId('search-filters-panel')).toBeInTheDocument();
     expect(screen.getByTestId('search-filter-author')).toBeInTheDocument();
     expect(screen.getByTestId('search-filter-after')).toBeInTheDocument();
     expect(screen.getByTestId('search-filter-before')).toBeInTheDocument();
 
     fireEvent.change(screen.getByTestId('search-filter-author'), {
-      target: { value: 'user-2' },
+      target: { value: 'abcd' },
     });
 
     await waitFor(() => {

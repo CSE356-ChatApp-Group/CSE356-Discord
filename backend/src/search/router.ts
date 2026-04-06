@@ -25,7 +25,14 @@ router.get('/', async (req, res, next) => {
       return res.status(503).json({ error: 'Search temporarily unavailable under high load' });
     }
 
-    if (!q || q.trim().length < 2) {
+    const normalizedQuery = String(q || '').trim();
+    const hasFilterOnlySearch = Boolean(authorId || after || before);
+
+    if (!normalizedQuery && !hasFilterOnlySearch) {
+      return res.status(400).json({ error: 'Provide a query or at least one search filter' });
+    }
+
+    if (normalizedQuery && normalizedQuery.length < 2) {
       return res.status(400).json({ error: 'Query must be at least 2 characters' });
     }
 
@@ -59,7 +66,7 @@ router.get('/', async (req, res, next) => {
 
     const requestedLimit = parseInt(limit || '20', 10);
     const adjustedLimit = overload.searchLimit(requestedLimit);
-    const results = await searchClient.search(q.trim(), {
+    const results = await searchClient.search(normalizedQuery, {
       communityId, channelId, conversationId, authorId, after, before,
       userId,
       limit: adjustedLimit,

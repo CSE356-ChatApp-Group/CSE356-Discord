@@ -301,9 +301,7 @@ export default function MessagePane() {
 
   async function handleSearchSubmit(e?: React.FormEvent) {
     e?.preventDefault();
-    const query = localQ.trim();
-    if (!query) return;
-    await search(query);
+    await search(localQ);
   }
 
   function handleSearchChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -779,25 +777,9 @@ export default function MessagePane() {
                   aria-label="Close search"
                 >✕</button>
               </form>
-              {searchResults === null && (
-                <div className={styles.searchPopout} data-testid="search-popout">
-                  {localQ.trim() ? (
-                    <button
-                      className={styles.searchPopoutOption}
-                      type="button"
-                      onClick={handleSearchSubmit}
-                    >
-                      <SearchIcon />
-                      <span>Search for <strong>{localQ.trim()}</strong></span>
-                    </button>
-                  ) : (
-                    <div className={styles.searchPopoutHint}>
-                      <SearchIcon />
-                      <span>Start typing to search {activeChannel ? `#${activeChannel.name}` : 'messages'}</span>
-                    </div>
-                  )}
-                </div>
-              )}
+              <div className={styles.searchPopout} data-testid="search-popout">
+                <SearchBar onClose={closeSearch} />
+              </div>
             </div>
           ) : (
             <button
@@ -949,11 +931,6 @@ export default function MessagePane() {
         {(activeChannel || activeConv) && (
           <aside className={styles.searchSidebar} data-testid="message-members-sidebar">
             <MemberList />
-          </aside>
-        )}
-        {showSearch && (
-          <aside className={`${styles.searchSidebar} ${styles.searchResultsSidebar}`} data-testid="message-search-sidebar">
-            <SearchBar onClose={closeSearch} />
           </aside>
         )}
       </div>

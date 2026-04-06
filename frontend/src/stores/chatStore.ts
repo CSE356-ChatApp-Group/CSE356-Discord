@@ -18,7 +18,7 @@ type SendMessageInput = {
   attachments?: PendingUpload[];
 };
 type SearchFilters = {
-  authorId: string;
+  author: string;
   after: string;
   before: string;
 };
@@ -70,7 +70,7 @@ type ChatState = {
 };
 
 const DEFAULT_SEARCH_FILTERS: SearchFilters = {
-  authorId: '',
+  author: '',
   after: '',
   before: '',
 };
@@ -246,6 +246,31 @@ function normalizeSearchDateTime(value?: string | null) {
   if (!trimmed) return '';
   const parsed = new Date(trimmed);
   return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString();
+}
+
+function resolveSearchAuthorId(authorText: string, members: Entity[], activeConv: Entity | null) {
+  const normalized = String(authorText || '').trim().toLowerCase();
+  if (!normalized) return '';
+
+  const candidates = activeConv
+    ? (Array.isArray(activeConv.participants) ? activeConv.participants : [])
+    : (Array.isArray(members) ? members : []);
+
+  const exact = candidates.find((entry) => {
+    const username = String(entry?.username || '').trim().toLowerCase();
+    const displayName = String(entry?.displayName || entry?.display_name || '').trim().toLowerCase();
+    return username === normalized || displayName === normalized;
+  });
+
+  if (exact?.id) return exact.id;
+
+  const partial = candidates.find((entry) => {
+    const username = String(entry?.username || '').trim().toLowerCase();
+    const displayName = String(entry?.displayName || entry?.display_name || '').trim().toLowerCase();
+    return username.includes(normalized) || displayName.includes(normalized);
+  });
+
+  return partial?.id || '';
 }
 
 function scheduleUnreadRefresh(run: () => void) {
@@ -985,15 +1010,30 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       : get().searchFilters;
 
     set({ searchQuery: q, searchFilters: nextFilters });
-    if (!q || q.length < 2) { set({ searchResults: null }); return; }
-    const { activeCommunity, activeConv } = get();
-    const qs = new URLSearchParams({ q, limit: '30' });
+    const normalizedQuery = String(q || '').trim();
+    const after = normalizeSearchDateTime(nextFilters.after);
+    const before = normalizeSearchDateTime(nextFilters.before);
+    const { activeCommunity, activeConv, members } = get();
+    const authorId = resolveSearchAuthorId(nextFilters.author, members, activeConv);
+    const hasAnyFilter = Boolean(nextFilters.author.trim() || after || before);
+    const canSearchText = normalizedQuery.length >= 2;
+
+    if (!canSearchText && !hasAnyFilter) {
+      set({ searchResults: null });
+      return;
+    }
+
+    if (nextFilters.author.trim() && !authorId) {
+      set({ searchResults: [] });
+      return;
+    }
+
+    const qs = new URLSearchParams({ limit: '30' });
     // Scope: community (all accessible channels) or DM conversation — per spec.
     if (activeConv)          qs.set('conversationId', activeConv.id);
     else if (activeCommunity) qs.set('communityId', activeCommunity.id);
-    if (nextFilters.authorId) qs.set('authorId', nextFilters.authorId);
-    const after = normalizeSearchDateTime(nextFilters.after);
-    const before = normalizeSearchDateTime(nextFilters.before);
+    if (canSearchText) qs.set('q', normalizedQuery);
+    if (authorId) qs.set('authorId', authorId);
     if (after) qs.set('after', after);
     if (before) qs.set('before', before);
     const results = await api.get(`/search?${qs}`);
