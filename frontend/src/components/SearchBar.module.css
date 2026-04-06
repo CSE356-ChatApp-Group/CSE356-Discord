@@ -49,6 +49,12 @@
   cursor: default;
 }
 
+.resultsActionBtnPrimary {
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  color: var(--text-primary);
+}
+
 .resultsActionBtnActive {
   background: color-mix(in srgb, var(--accent-subtle) 74%, var(--bg-2));
   color: var(--text-primary);

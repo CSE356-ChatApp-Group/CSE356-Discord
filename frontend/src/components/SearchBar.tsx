@@ -71,6 +71,12 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     .filter(Boolean)
     .length;
   const invalidRange = !isRangeValid(searchFilters);
+  const canSubmit = Boolean(searchQuery.trim() || activeFilterCount);
+
+  function submitSearch() {
+    if (!canSubmit || invalidRange) return;
+    void search(searchQuery, searchFilters);
+  }
 
   return (
     <div className={styles.panel} data-testid="search-bar">
@@ -79,6 +85,15 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
           {hasSubmittedSearch ? `${count} Result${count !== 1 ? 's' : ''}` : 'Filters'}
         </span>
         <div className={styles.resultsActions}>
+          <button
+            type="button"
+            className={`${styles.resultsActionBtn} ${styles.resultsActionBtnPrimary}`}
+            onClick={submitSearch}
+            disabled={!canSubmit || invalidRange}
+            data-testid="search-submit"
+          >
+            Search
+          </button>
           <button
             type="button"
             className={`${styles.resultsActionBtn} ${showFilters || activeFilterCount ? styles.resultsActionBtnActive : ''}`}
