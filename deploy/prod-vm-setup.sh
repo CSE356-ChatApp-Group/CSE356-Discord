@@ -183,8 +183,7 @@ S3_ACCESS_KEY=
 S3_SECRET_KEY=
 
 # Search
-MEILISEARCH_URL=http://localhost:7700
-MEILISEARCH_KEY=prod-key
+# Uses PostgreSQL native FTS; no external search service required.
 
 # CORS
 CORS_ORIGIN=https://chatapp.example.com

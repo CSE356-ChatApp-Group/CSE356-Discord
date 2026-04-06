@@ -85,7 +85,7 @@ test.describe('attachment upload and access', () => {
     // Step 1: get presigned PUT URL
     const presignRes = await aliceCtx.request.post('/api/v1/attachments/presign', {
       headers: { Authorization: `Bearer ${aliceToken}` },
-      data: { contentType: 'image/png', sizeBytes: tinyPngBuffer().length },
+      data: { filename: 'test.png', contentType: 'image/png', sizeBytes: tinyPngBuffer().length },
     });
     expect(presignRes.status(), 'presign should return 200').toBe(200);
 
@@ -110,6 +110,7 @@ test.describe('attachment upload and access', () => {
       data: {
         messageId,
         storageKey,
+        filename: 'test.png',
         contentType: 'image/png',
         width: 1,
         height: 1,
