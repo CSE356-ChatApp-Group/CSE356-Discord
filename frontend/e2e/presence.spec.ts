@@ -103,7 +103,11 @@ test.describe('presence display', () => {
         await expect(page.getByText('Configured')).toBeVisible({ timeout: 10_000 });
 
         // Set presence to "away" (the other user-settable option besides "online").
+        // Wait for the controlled <select> to reflect 'away' before saving —
+        // on slow/production environments React may not have committed the
+        // re-render by the time the next action fires.
         await presenceSelect.selectOption('away');
+        await expect(presenceSelect).toHaveValue('away', { timeout: 3_000 });
         await page.getByTestId('account-presence-save').click();
 
         // The account section shows a confirmation message when the save succeeds.
