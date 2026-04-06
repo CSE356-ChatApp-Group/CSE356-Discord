@@ -110,7 +110,15 @@ test.describe('presence display', () => {
         // unlike toHaveValue which can pass just because Playwright set the DOM
         // property directly, before React reconciles it back to 'online'.
         await presenceSelect.selectOption('away');
+        // Confirm React committed the 'away' state: the away-message input only
+        // renders when presenceStatus === 'away' in component state, so its
+        // visibility is a reliable indicator.
         await expect(page.getByTestId('account-away-message')).toBeVisible({ timeout: 3_000 });
+        // Belt-and-suspenders: assert the select has the committed 'away' value
+        // immediately before clicking save.  If a late openAccountModal API
+        // callback had overwritten the selection this would fail here with a
+        // clear message, rather than on the presence-msg assertion below.
+        await expect(presenceSelect).toHaveValue('away');
         await page.getByTestId('account-presence-save').click();
 
         // The account section shows a confirmation message when the save succeeds.

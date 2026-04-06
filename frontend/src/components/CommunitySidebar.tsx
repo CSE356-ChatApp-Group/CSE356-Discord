@@ -39,9 +39,15 @@ export default function CommunitySidebar() {
   const [avatarMsg, setAvatarMsg] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const accountRequestIdRef = useRef(0);
+  // Tracks whether the user has interacted with the presence select after the
+  // modal opened.  Once true, we don't let a late-arriving openAccountModal API
+  // response overwrite their choice (the Promise.all can straddle the user's
+  // interaction window on a slow/loaded server).
+  const presenceUserEditedRef = useRef(false);
 
   async function openAccountModal() {
     const requestId = ++accountRequestIdRef.current;
+    presenceUserEditedRef.current = false;
     setShowAccount(true);
     setAccountError('');
     try {
@@ -51,9 +57,14 @@ export default function CommunitySidebar() {
       ]);
       if (accountRequestIdRef.current !== requestId) return;
       setHasPassword(Boolean(linkedData?.hasPassword));
-      const status = me?.user?.status === 'away' ? 'away' : 'online';
-      setPresenceStatus(status);
-      setAwayMessage(me?.user?.away_message || me?.user?.awayMessage || '');
+      // Only hydrate the form if the user hasn't already changed the select.
+      // On a loaded server the Promise.all can resolve after selectOption('away')
+      // has been called, and we must not silently revert their choice.
+      if (!presenceUserEditedRef.current) {
+        const status = me?.user?.status === 'away' ? 'away' : 'online';
+        setPresenceStatus(status);
+        setAwayMessage(me?.user?.away_message || me?.user?.awayMessage || '');
+      }
       if (me?.user) {
         setUser(me.user);
       }
@@ -62,8 +73,10 @@ export default function CommunitySidebar() {
       if (accountRequestIdRef.current !== requestId) return;
       setAccountError(e?.message || 'Could not load account details');
       setHasPassword(false);
-      setPresenceStatus('online');
-      setAwayMessage('');
+      if (!presenceUserEditedRef.current) {
+        setPresenceStatus('online');
+        setAwayMessage('');
+      }
     }
   }
 
@@ -305,7 +318,10 @@ export default function CommunitySidebar() {
               <form className={styles.passwordForm} onSubmit={submitPresence} data-testid="account-presence-form">
                 <select
                   value={presenceStatus}
-                  onChange={e => setPresenceStatus(e.target.value === 'away' ? 'away' : 'online')}
+                  onChange={e => {
+                    presenceUserEditedRef.current = true;
+                    setPresenceStatus(e.target.value === 'away' ? 'away' : 'online');
+                  }}
                   data-testid="account-presence-status"
                 >
                   <option value="online">Online / Auto idle</option>
