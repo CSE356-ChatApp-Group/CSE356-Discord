@@ -10,6 +10,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 18px;
   padding: 12px 16px 10px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -24,7 +25,9 @@
 
 .resultsActions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .resultsActionBtn {
@@ -63,9 +66,9 @@
 
 .filtersPanel {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  padding: 14px 16px 16px;
+  grid-template-columns: minmax(190px, 1.25fr) repeat(2, minmax(180px, 1fr));
+  gap: 16px;
+  padding: 18px 20px 16px;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-1) 86%, var(--bg-0));
 }
@@ -102,7 +105,8 @@
 
 .filterActions {
   display: flex;
-  align-items: flex-end;
+  grid-column: 1 / -1;
+  align-items: center;
   gap: 8px;
   justify-content: flex-start;
 }

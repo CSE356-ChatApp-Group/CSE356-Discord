@@ -9,6 +9,7 @@ export default function SearchBar({ onClose, currentQuery }: { onClose: () => vo
     searchFilters,
     setSearchFilters,
     resetSearchFilters,
+    clearSearch,
     search,
   } = useChatStore();
   const [showFilters, setShowFilters] = useState(true);
@@ -54,14 +55,16 @@ export default function SearchBar({ onClose, currentQuery }: { onClose: () => vo
   function applyFilters(partial) {
     const nextFilters = { ...searchFilters, ...partial };
     setSearchFilters(nextFilters);
-    if (isRangeValid(nextFilters)) {
-      void search(currentQuery, nextFilters);
+    if (searchResults !== null) {
+      clearSearch();
     }
   }
 
   function clearFilters() {
     resetSearchFilters();
-    void search(currentQuery, { author: '', after: '', before: '' });
+    if (searchResults !== null) {
+      clearSearch();
+    }
   }
 
   const count = searchResults?.length ?? 0;

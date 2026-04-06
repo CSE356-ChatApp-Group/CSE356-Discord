@@ -306,8 +306,23 @@ export default function MessagePane() {
 
   function handleSearchChange(e: React.ChangeEvent<HTMLInputElement>) {
     setLocalQ(e.target.value);
-    if (searchResults !== null) clearSearch();
   }
+
+  useEffect(() => {
+    if (!showSearch) return;
+
+    const trimmed = localQ.trim();
+    if (trimmed.length < 2) {
+      if (useChatStore.getState().searchResults !== null) clearSearch();
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void search(localQ);
+    }, 220);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [showSearch, localQ]);
 
   function closeSearch() {
     setSearch(false);

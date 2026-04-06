@@ -53,7 +53,7 @@ describe('SearchBar filters', () => {
     });
   });
 
-  it('shows author and time filters and reruns search when they change', async () => {
+  it('stores author and time filters locally and only searches when submitted', async () => {
     render(<SearchBar onClose={() => {}} currentQuery="hello" />);
 
     expect(screen.getByTestId('search-filters-panel')).toBeInTheDocument();
@@ -66,9 +66,10 @@ describe('SearchBar filters', () => {
     });
 
     await waitFor(() => {
-      expect(apiGetMock).toHaveBeenCalledWith(expect.stringContaining('authorId=user-2'));
-      expect(apiGetMock).toHaveBeenCalledWith(expect.stringContaining('conversationId=conv-1'));
+      expect(useChatStore.getState().searchFilters.author).toBe('abcd');
     });
+
+    expect(apiGetMock).not.toHaveBeenCalled();
 
     const afterValue = '2026-04-06T09:15';
     fireEvent.change(screen.getByTestId('search-filter-after'), {
@@ -76,6 +77,16 @@ describe('SearchBar filters', () => {
     });
 
     await waitFor(() => {
+      expect(useChatStore.getState().searchFilters.after).toBe(afterValue);
+    });
+
+    expect(apiGetMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('search-submit'));
+
+    await waitFor(() => {
+      expect(apiGetMock).toHaveBeenCalledWith(expect.stringContaining('authorId=user-2'));
+      expect(apiGetMock).toHaveBeenCalledWith(expect.stringContaining('conversationId=conv-1'));
       expect(apiGetMock).toHaveBeenCalledWith(
         expect.stringContaining(`after=${encodeURIComponent(new Date(afterValue).toISOString())}`)
       );
