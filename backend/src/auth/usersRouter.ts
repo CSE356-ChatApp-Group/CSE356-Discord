@@ -13,25 +13,115 @@
 
 const express  = require('express');
 const multer   = require('multer');
+const { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const { hashPassword } = require('./passwords');
 const presenceService  = require('../presence/service');
+const { BUCKET, s3 } = require('../utils/objectStorage');
 
 const router = express.Router();
 
 const PUBLIC_FIELDS = 'id, username, display_name, avatar_url, bio, created_at, last_seen_at';
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
 // multer in-memory, 5 MB max, images only
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter(_req, file, cb) {
-    const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-    cb(null, allowed.includes(file.mimetype));
+    cb(null, ALLOWED_IMAGE_TYPES.includes(file.mimetype));
   },
 });
+
+function fileExtension(file) {
+  const originalName = file?.originalname || '';
+  const dotIndex = originalName.lastIndexOf('.');
+  if (dotIndex !== -1 && dotIndex < originalName.length - 1) {
+    return originalName.slice(dotIndex + 1).toLowerCase();
+  }
+
+  switch (file?.mimetype) {
+    case 'image/jpeg': return 'jpg';
+    case 'image/png': return 'png';
+    case 'image/gif': return 'gif';
+    case 'image/webp': return 'webp';
+    default: return 'bin';
+  }
+}
+
+async function bodyToBuffer(body) {
+  if (!body) return null;
+  if (Buffer.isBuffer(body)) return body;
+  if (typeof body.transformToByteArray === 'function') {
+    return Buffer.from(await body.transformToByteArray());
+  }
+
+  return await new Promise((resolve, reject) => {
+    const chunks = [];
+    body.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+    body.on('end', () => resolve(Buffer.concat(chunks)));
+    body.on('error', reject);
+  });
+}
+
+async function uploadAvatarObject(userId, file) {
+  const storageKey = `avatars/${userId}/${uuidv4()}.${fileExtension(file)}`;
+
+  await s3.send(new PutObjectCommand({
+    Bucket: BUCKET,
+    Key: storageKey,
+    Body: file.buffer,
+    ContentType: file.mimetype,
+    ContentLength: file.size,
+    CacheControl: 'public, max-age=3600',
+    Metadata: {
+      uploaderId: userId,
+      kind: 'avatar',
+    },
+  }));
+
+  return storageKey;
+}
+
+async function saveAvatarForUser(userId, file) {
+  const { rows: existingRows } = await query(
+    'SELECT avatar_storage_key FROM users WHERE id = $1',
+    [userId]
+  );
+  if (!existingRows.length) {
+    throw Object.assign(new Error('Not found'), { status: 404 });
+  }
+
+  const previousStorageKey = existingRows[0].avatar_storage_key || null;
+  const storageKey = await uploadAvatarObject(userId, file);
+  const avatarUrl = `/api/v1/users/${userId}/avatar`;
+
+  try {
+    await query(
+      `UPDATE users
+       SET avatar_url=$2,
+           avatar_storage_key=$3,
+           avatar_data=NULL,
+           avatar_content_type=$4,
+           updated_at=NOW()
+       WHERE id=$1`,
+      [userId, avatarUrl, storageKey, file.mimetype]
+    );
+  } catch (err) {
+    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: storageKey })).catch(() => {});
+    throw err;
+  }
+
+  if (previousStorageKey && previousStorageKey !== storageKey) {
+    s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: previousStorageKey })).catch(() => {});
+  }
+
+  const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [userId]);
+  return rows[0];
+}
 
 // ── Search users (no auth required, returns public fields) ─────────────────────
 router.get('/', authenticate, async (req, res, next) => {
@@ -59,15 +149,39 @@ router.get('/', authenticate, async (req, res, next) => {
 router.get('/:id/avatar', async (req, res, next) => {
   try {
     const { rows } = await query(
-      `SELECT avatar_data, avatar_content_type FROM users WHERE id=$1`,
+      `SELECT avatar_storage_key, avatar_data, avatar_content_type FROM users WHERE id=$1`,
       [req.params.id]
     );
-    if (!rows.length || !rows[0].avatar_data) {
+    if (!rows.length) {
       return res.status(404).json({ error: 'No avatar' });
     }
-    res.setHeader('Content-Type', rows[0].avatar_content_type || 'image/jpeg');
+
+    const avatar = rows[0];
+    if (avatar.avatar_storage_key) {
+      try {
+        const object = await s3.send(new GetObjectCommand({
+          Bucket: BUCKET,
+          Key: avatar.avatar_storage_key,
+        }));
+        const data = await bodyToBuffer(object.Body);
+        if (!data) return res.status(404).json({ error: 'No avatar' });
+
+        res.setHeader('Content-Type', avatar.avatar_content_type || object.ContentType || 'image/jpeg');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        return res.send(data);
+      } catch (err) {
+        const missing = err?.name === 'NoSuchKey' || err?.$metadata?.httpStatusCode === 404;
+        if (!missing) throw err;
+      }
+    }
+
+    if (!avatar.avatar_data) {
+      return res.status(404).json({ error: 'No avatar' });
+    }
+
+    res.setHeader('Content-Type', avatar.avatar_content_type || 'image/jpeg');
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.send(rows[0].avatar_data);
+    res.send(avatar.avatar_data);
   } catch (err) { next(err); }
 });
 
@@ -111,13 +225,8 @@ router.patch('/me',
 router.post('/me/avatar', upload.single('avatar'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No image file provided (field: avatar)' });
-    const avatarUrl = `/api/v1/users/${req.user.id}/avatar`;
-    await query(
-      `UPDATE users SET avatar_url=$2, avatar_data=$3, avatar_content_type=$4, updated_at=NOW() WHERE id=$1`,
-      [req.user.id, avatarUrl, req.file.buffer, req.file.mimetype]
-    );
-    const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
-    res.json({ user: rows[0] });
+    const user = await saveAvatarForUser(req.user.id, req.file);
+    res.json({ user });
   } catch (err) { next(err); }
 });
 
@@ -125,13 +234,8 @@ router.post('/me/avatar', upload.single('avatar'), async (req, res, next) => {
 router.put('/me/avatar', upload.single('avatar'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No image file provided (field: avatar)' });
-    const avatarUrl = `/api/v1/users/${req.user.id}/avatar`;
-    await query(
-      `UPDATE users SET avatar_url=$2, avatar_data=$3, avatar_content_type=$4, updated_at=NOW() WHERE id=$1`,
-      [req.user.id, avatarUrl, req.file.buffer, req.file.mimetype]
-    );
-    const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
-    res.json({ user: rows[0] });
+    const user = await saveAvatarForUser(req.user.id, req.file);
+    res.json({ user });
   } catch (err) { next(err); }
 });
 
