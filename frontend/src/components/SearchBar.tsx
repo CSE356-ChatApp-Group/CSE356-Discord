@@ -14,7 +14,7 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     members,
     activeConv,
   } = useChatStore();
-  const [showFilters, setShowFilters] = useState(false);
+  const [showFilters, setShowFilters] = useState(searchResults === null);
 
   function escapeHtml(value) {
     return value
@@ -95,6 +95,7 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
   }
 
   const count = searchResults?.length ?? 0;
+  const hasSubmittedSearch = searchResults !== null;
   const activeFilterCount = [searchFilters.authorId, searchFilters.after, searchFilters.before]
     .filter(Boolean)
     .length;
@@ -104,14 +105,14 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     <div className={styles.panel} data-testid="search-bar">
       <div className={styles.resultsHeader} data-testid="search-results-header">
         <span className={styles.resultCount} data-testid="search-summary">
-          {count} Result{count !== 1 ? 's' : ''}
+          {hasSubmittedSearch ? `${count} Result${count !== 1 ? 's' : ''}` : 'Search Filters'}
         </span>
         <div className={styles.resultsActions}>
           <button
             type="button"
             className={`${styles.resultsActionBtn} ${showFilters || activeFilterCount ? styles.resultsActionBtnActive : ''}`}
             onClick={() => setShowFilters((value) => !value)}
-            aria-expanded={showFilters}
+            aria-expanded={showFilters || !hasSubmittedSearch}
             data-testid="search-filters-toggle"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
@@ -124,7 +125,7 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
-      {showFilters && (
+      {(showFilters || !hasSubmittedSearch) && (
         <div className={styles.filtersPanel} data-testid="search-filters-panel">
           <label className={styles.filterField}>
             <span className={styles.filterLabel}>From</span>
@@ -144,18 +145,6 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
           </label>
 
           <label className={styles.filterField}>
-            <span className={styles.filterLabel}>After</span>
-            <input
-              className={styles.filterInput}
-              type="datetime-local"
-              value={searchFilters.after}
-              max={searchFilters.before || undefined}
-              onChange={(event) => applyFilters({ after: event.target.value })}
-              data-testid="search-filter-after"
-            />
-          </label>
-
-          <label className={styles.filterField}>
             <span className={styles.filterLabel}>Before</span>
             <input
               className={styles.filterInput}
@@ -164,6 +153,18 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
               min={searchFilters.after || undefined}
               onChange={(event) => applyFilters({ before: event.target.value })}
               data-testid="search-filter-before"
+            />
+          </label>
+
+          <label className={styles.filterField}>
+            <span className={styles.filterLabel}>After</span>
+            <input
+              className={styles.filterInput}
+              type="datetime-local"
+              value={searchFilters.after}
+              max={searchFilters.before || undefined}
+              onChange={(event) => applyFilters({ after: event.target.value })}
+              data-testid="search-filter-after"
             />
           </label>
 
@@ -195,7 +196,13 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
       )}
 
       <div className={styles.results} data-testid="search-results">
-        {count === 0 ? (
+        {!hasSubmittedSearch ? (
+          <p className={styles.none}>
+            {searchQuery.trim()
+              ? 'Press Enter above to search with these filters.'
+              : 'Type a query above, adjust filters here, then search.'}
+          </p>
+        ) : count === 0 ? (
           <p className={styles.none}>No results for &ldquo;{searchQuery}&rdquo;</p>
         ) : (
           searchResults.map(hit => (

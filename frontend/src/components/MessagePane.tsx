@@ -951,8 +951,8 @@ export default function MessagePane() {
             <MemberList />
           </aside>
         )}
-        {showSearch && searchResults !== null && (
-          <aside className={styles.searchSidebar} data-testid="message-search-sidebar">
+        {showSearch && (
+          <aside className={`${styles.searchSidebar} ${styles.searchResultsSidebar}`} data-testid="message-search-sidebar">
             <SearchBar onClose={closeSearch} />
           </aside>
         )}
