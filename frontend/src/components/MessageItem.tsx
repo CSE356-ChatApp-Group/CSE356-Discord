@@ -22,7 +22,7 @@ function formatTimestamp(iso) {
   return format(d, 'MMM d, HH:mm');
 }
 
-const AttachmentImage = memo(function AttachmentImage({ attachment }) {
+const AttachmentImage = memo(function AttachmentImage({ attachment }: { attachment: Record<string, any> }) {
   const [src, setSrc] = useState(() => attachmentUrlCache.get(attachment.id) || '');
 
   useEffect(() => {

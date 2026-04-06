@@ -65,7 +65,7 @@ export default function MemberList() {
   );
 }
 
-const MemberRow = memo(function MemberRow({ member, isYou }) {
+const MemberRow = memo(function MemberRow({ member, isYou }: { member: Record<string, any>, isYou: boolean }) {
   const name = member.displayName || member.display_name || member.username;
   return (
     <div className={styles.row} title={`${name}${isYou ? ' (you)' : ''} · ${member.role}`} data-testid={`member-row-${member.id}`} data-member-id={member.id} data-member-status={member.status}>
