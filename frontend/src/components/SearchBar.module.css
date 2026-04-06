@@ -49,6 +49,86 @@
   cursor: default;
 }
 
+.resultsActionBtnActive {
+  background: color-mix(in srgb, var(--accent-subtle) 74%, var(--bg-2));
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.filtersPanel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-1) 72%, var(--bg-0));
+}
+
+.filterField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.filterLabel {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.filterInput {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.filterInput:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  outline-offset: 1px;
+}
+
+.filterActions {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.filterResetBtn,
+.filterCloseBtn {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.filterResetBtn:not(:disabled):hover,
+.filterCloseBtn:hover {
+  background: var(--bg-3);
+  color: var(--text-primary);
+}
+
+.filterResetBtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.filterError {
+  margin: 0;
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--danger, #d95763);
+}
+
 .results {
   flex: 1;
   min-height: 0;

@@ -51,6 +51,7 @@ export default function MessagePane() {
     search,
     searchResults,
     clearSearch,
+    resetSearchFilters,
     fetchChannelMembers,
     inviteToChannel,
     inviteToConversation,
@@ -172,6 +173,7 @@ export default function MessagePane() {
     inputRef.current?.focus();
     setSearch(false);
     clearSearch();
+    resetSearchFilters();
     setLocalQ('');
     setShowDmInviteModal(false);
     setShowDmLeaveModal(false);
@@ -230,6 +232,7 @@ export default function MessagePane() {
       requestAnimationFrame(() => searchInputRef.current?.focus());
     } else {
       clearSearch();
+      resetSearchFilters();
       setLocalQ('');
     }
   }, [showSearch]);
@@ -311,6 +314,7 @@ export default function MessagePane() {
   function closeSearch() {
     setSearch(false);
     clearSearch();
+    resetSearchFilters();
     setLocalQ('');
   }
 

@@ -35,6 +35,9 @@ afterEach(() => {
     activeConv: null,
     members: [],
     messages: {},
+    searchResults: null,
+    searchQuery: '',
+    searchFilters: { authorId: '', after: '', before: '' },
   } as any);
 });
 
@@ -629,6 +632,7 @@ describe('resetChatStore / expireSession data isolation', () => {
       awayMessages:    { 'user-a': 'out' },
       searchResults:   [{ id: 'r-1' }],
       searchQuery:     'hello',
+      searchFilters:   { authorId: 'user-a', after: '2026-04-06T08:00', before: '2026-04-06T09:00' },
     } as any);
 
     useChatStore.getState().reset();
@@ -646,6 +650,7 @@ describe('resetChatStore / expireSession data isolation', () => {
     expect(s.awayMessages).toEqual({});
     expect(s.searchResults).toBeNull();
     expect(s.searchQuery).toBe('');
+    expect(s.searchFilters).toEqual({ authorId: '', after: '', before: '' });
   });
 
   it('resetChatStore() clears state so a new user does not see previous user data', () => {
@@ -665,5 +670,49 @@ describe('resetChatStore / expireSession data isolation', () => {
     expect(s.activeConv).toBeNull();
     expect(s.messages).toEqual({});
     expect(s.members).toEqual([]);
+  });
+});
+
+describe('search filters', () => {
+  it('includes author and time range filters in conversation-scoped searches', async () => {
+    apiGet.mockResolvedValue({ hits: [] });
+
+    useChatStore.setState({
+      activeConv: { id: 'conv-1' },
+      searchFilters: {
+        authorId: 'user-2',
+        after: '2026-04-06T09:15',
+        before: '2026-04-06T10:45',
+      },
+    } as any);
+
+    await useChatStore.getState().search('hello');
+
+    const requestedPath = apiGet.mock.calls[0]?.[0] as string;
+    expect(requestedPath).toContain('/search?');
+    expect(requestedPath).toContain('conversationId=conv-1');
+    expect(requestedPath).toContain('authorId=user-2');
+    expect(requestedPath).toContain(`after=${encodeURIComponent(new Date('2026-04-06T09:15').toISOString())}`);
+    expect(requestedPath).toContain(`before=${encodeURIComponent(new Date('2026-04-06T10:45').toISOString())}`);
+  });
+
+  it('stores incoming filter overrides when search is called directly', async () => {
+    apiGet.mockResolvedValue({ hits: [] });
+
+    useChatStore.setState({
+      activeConv: { id: 'conv-1' },
+      searchFilters: { authorId: '', after: '', before: '' },
+    } as any);
+
+    await useChatStore.getState().search('status', {
+      authorId: 'user-7',
+      after: '2026-04-06T12:00',
+    });
+
+    expect(useChatStore.getState().searchFilters).toEqual({
+      authorId: 'user-7',
+      after: '2026-04-06T12:00',
+      before: '',
+    });
   });
 });

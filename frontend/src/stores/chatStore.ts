@@ -17,6 +17,11 @@ type SendMessageInput = {
   content?: string;
   attachments?: PendingUpload[];
 };
+type SearchFilters = {
+  authorId: string;
+  after: string;
+  before: string;
+};
 type ChatState = {
   communities: Entity[];
   activeCommunity: Entity | null;
@@ -30,6 +35,7 @@ type ChatState = {
   members: Entity[];
   searchResults: Entity[] | null;
   searchQuery: string;
+  searchFilters: SearchFilters;
   fetchCommunities: () => Promise<Entity[]>;
   createCommunity: (slug: string, name: string, description: string) => Promise<Entity>;
   deleteCommunity: (communityId: string) => Promise<void>;
@@ -55,10 +61,18 @@ type ChatState = {
   fetchMembers: (communityId: string) => Promise<void>;
   hydratePresenceForUsers: (userIds: string[]) => Promise<void>;
   setPresence: (userId: string, status: PresenceStatus, awayMessage?: string | null) => void;
-  search: (q: string) => Promise<void>;
+  search: (q: string, filters?: Partial<SearchFilters>) => Promise<void>;
+  setSearchFilters: (filters: Partial<SearchFilters>) => void;
+  resetSearchFilters: () => void;
   clearSearch: () => void;
   reset: () => void;
   _handleWsEvent: (event: any) => void;
+};
+
+const DEFAULT_SEARCH_FILTERS: SearchFilters = {
+  authorId: '',
+  after: '',
+  before: '',
 };
 
 function dedupeMessages(messages: Entity[]) {
@@ -227,6 +241,13 @@ function normalizePresenceStatus(value: any): PresenceStatus {
   return VALID_PRESENCE_STATUSES.has(value) ? value : 'offline';
 }
 
+function normalizeSearchDateTime(value?: string | null) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return '';
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString();
+}
+
 function scheduleUnreadRefresh(run: () => void) {
   if (unreadRefreshTimer) return;
   const now = Date.now();
@@ -289,6 +310,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   members:         [],   // members of activeCommunity
   searchResults:   null,
   searchQuery:     '',
+  searchFilters:   DEFAULT_SEARCH_FILTERS,
 
   reset() {
     set({
@@ -304,6 +326,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       members:         [],
       searchResults:   null,
       searchQuery:     '',
+      searchFilters:   DEFAULT_SEARCH_FILTERS,
     });
   },
 
@@ -956,16 +979,38 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   // ── Search ────────────────────────────────────────────────────────────────
-  async search(q: string) {
-    set({ searchQuery: q });
+  async search(q: string, filters?: Partial<SearchFilters>) {
+    const nextFilters = filters
+      ? { ...get().searchFilters, ...filters }
+      : get().searchFilters;
+
+    set({ searchQuery: q, searchFilters: nextFilters });
     if (!q || q.length < 2) { set({ searchResults: null }); return; }
     const { activeCommunity, activeConv } = get();
     const qs = new URLSearchParams({ q, limit: '30' });
     // Scope: community (all accessible channels) or DM conversation — per spec.
     if (activeConv)          qs.set('conversationId', activeConv.id);
     else if (activeCommunity) qs.set('communityId', activeCommunity.id);
+    if (nextFilters.authorId) qs.set('authorId', nextFilters.authorId);
+    const after = normalizeSearchDateTime(nextFilters.after);
+    const before = normalizeSearchDateTime(nextFilters.before);
+    if (after) qs.set('after', after);
+    if (before) qs.set('before', before);
     const results = await api.get(`/search?${qs}`);
     set({ searchResults: results.hits || [] });
+  },
+
+  setSearchFilters(filters: Partial<SearchFilters>) {
+    set((s) => ({
+      searchFilters: {
+        ...s.searchFilters,
+        ...filters,
+      },
+    }));
+  },
+
+  resetSearchFilters() {
+    set({ searchFilters: DEFAULT_SEARCH_FILTERS });
   },
 
   clearSearch() { set({ searchResults: null, searchQuery: '' }); },
