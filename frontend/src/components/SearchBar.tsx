@@ -3,7 +3,7 @@ import { useChatStore } from '../stores/chatStore';
 import { formatDistanceToNow } from 'date-fns';
 import styles from './SearchBar.module.css';
 
-export default function SearchBar({ onClose, currentQuery }: { onClose: () => void; currentQuery: string }) {
+export default function SearchBar({ currentQuery }: { currentQuery: string }) {
   const {
     searchResults,
     searchFilters,
@@ -82,38 +82,29 @@ export default function SearchBar({ onClose, currentQuery }: { onClose: () => vo
 
   return (
     <div className={styles.panel} data-testid="search-bar">
-      <div className={styles.resultsHeader} data-testid="search-results-header">
-        <span className={styles.resultCount} data-testid="search-summary">
-          {hasSubmittedSearch ? `${count} Result${count !== 1 ? 's' : ''}` : 'Filters'}
-        </span>
-        <div className={styles.resultsActions}>
-          <button
-            type="button"
-            className={`${styles.resultsActionBtn} ${styles.resultsActionBtnPrimary}`}
-            onClick={submitSearch}
-            disabled={!canSubmit || invalidRange}
-            data-testid="search-submit"
-          >
-            Search
-          </button>
-          <button type="button" className={styles.resultsActionBtn} onClick={onClose} aria-label="Close search">
-            Done
-          </button>
-        </div>
+      <div className={styles.toolbar} data-testid="search-results-header">
+        <button
+          type="button"
+          className={`${styles.searchSubmitBtn} ${styles.resultsActionBtnPrimary}`}
+          onClick={submitSearch}
+          disabled={!canSubmit || invalidRange}
+          data-testid="search-submit"
+        >
+          Search
+        </button>
+        <button
+          type="button"
+          className={`${styles.filtersDisclosure} ${showFilters ? styles.filtersDisclosureOpen : ''}`}
+          onClick={() => setShowFilters((value) => !value)}
+          aria-expanded={showFilters}
+          data-testid="search-filters-toggle"
+        >
+          <span className={styles.filtersDisclosureLabel}>
+            Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
+          </span>
+          <span className={styles.filtersDisclosureChevron}>{showFilters ? '▾' : '▸'}</span>
+        </button>
       </div>
-
-      <button
-        type="button"
-        className={`${styles.filtersDisclosure} ${showFilters ? styles.filtersDisclosureOpen : ''}`}
-        onClick={() => setShowFilters((value) => !value)}
-        aria-expanded={showFilters}
-        data-testid="search-filters-toggle"
-      >
-        <span className={styles.filtersDisclosureLabel}>
-          Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
-        </span>
-        <span className={styles.filtersDisclosureChevron}>{showFilters ? '▾' : '▸'}</span>
-      </button>
 
       {showFilters && (
         <div className={styles.filtersPanel} data-testid="search-filters-panel">
@@ -175,6 +166,11 @@ export default function SearchBar({ onClose, currentQuery }: { onClose: () => vo
       )}
 
       <div className={styles.results} data-testid="search-results">
+        {!hasSubmittedSearch ? null : (
+          <div className={styles.resultsSummary} data-testid="search-summary">
+            {count} Result{count !== 1 ? 's' : ''}
+          </div>
+        )}
         {!hasSubmittedSearch ? null : count === 0 ? (
           <p className={styles.none}>No results found.</p>
         ) : (

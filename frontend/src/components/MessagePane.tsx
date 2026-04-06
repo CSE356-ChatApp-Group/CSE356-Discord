@@ -93,6 +93,7 @@ export default function MessagePane() {
   const [isMemberListResizing, setIsMemberListResizing] = useState(false);
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl+K';
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchBoxRef = useRef<HTMLDivElement>(null);
   const inviteInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -315,6 +316,21 @@ export default function MessagePane() {
     resetSearchFilters();
     setLocalQ('');
   }
+
+  useEffect(() => {
+    if (!showSearch) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (searchBoxRef.current?.contains(event.target as Node)) return;
+      setSearch(false);
+      clearSearch();
+      resetSearchFilters();
+      setLocalQ('');
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [showSearch, clearSearch, resetSearchFilters]);
 
   async function readImageMeta(file: File) {
     return new Promise<{ width?: number; height?: number }>((resolve) => {
@@ -757,7 +773,7 @@ export default function MessagePane() {
             </button>
           )}
           {showSearch ? (
-            <div className={styles.searchBox} data-testid="search-box">
+            <div className={styles.searchBox} data-testid="search-box" ref={searchBoxRef}>
               <form className={styles.searchForm} onSubmit={handleSearchSubmit}>
                 <span className={styles.searchFormIcon}><SearchIcon /></span>
                 <input
@@ -778,7 +794,7 @@ export default function MessagePane() {
                 >✕</button>
               </form>
               <div className={styles.searchPopout} data-testid="search-popout">
-                <SearchBar onClose={closeSearch} currentQuery={localQ} />
+                <SearchBar currentQuery={localQ} />
               </div>
             </div>
           ) : (
