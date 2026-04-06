@@ -12,7 +12,7 @@ export default function SearchBar({ onClose, currentQuery }: { onClose: () => vo
     clearSearch,
     search,
   } = useChatStore();
-  const [showFilters, setShowFilters] = useState(true);
+  const [showFilters, setShowFilters] = useState(false);
 
   function escapeHtml(value) {
     return value
@@ -96,21 +96,24 @@ export default function SearchBar({ onClose, currentQuery }: { onClose: () => vo
           >
             Search
           </button>
-          <button
-            type="button"
-            className={`${styles.resultsActionBtn} ${showFilters || activeFilterCount ? styles.resultsActionBtnActive : ''}`}
-            onClick={() => setShowFilters((value) => !value)}
-            aria-expanded={showFilters}
-            data-testid="search-filters-toggle"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
-            Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
-          </button>
           <button type="button" className={styles.resultsActionBtn} onClick={onClose} aria-label="Close search">
             Done
           </button>
         </div>
       </div>
+
+      <button
+        type="button"
+        className={`${styles.filtersDisclosure} ${showFilters ? styles.filtersDisclosureOpen : ''}`}
+        onClick={() => setShowFilters((value) => !value)}
+        aria-expanded={showFilters}
+        data-testid="search-filters-toggle"
+      >
+        <span className={styles.filtersDisclosureLabel}>
+          Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
+        </span>
+        <span className={styles.filtersDisclosureChevron}>{showFilters ? '▾' : '▸'}</span>
+      </button>
 
       {showFilters && (
         <div className={styles.filtersPanel} data-testid="search-filters-panel">

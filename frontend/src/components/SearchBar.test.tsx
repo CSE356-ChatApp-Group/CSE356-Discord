@@ -56,6 +56,10 @@ describe('SearchBar filters', () => {
   it('stores author and time filters locally and only searches when submitted', async () => {
     render(<SearchBar onClose={() => {}} currentQuery="hello" />);
 
+    expect(screen.queryByTestId('search-filters-panel')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('search-filters-toggle'));
+
     expect(screen.getByTestId('search-filters-panel')).toBeInTheDocument();
     expect(screen.getByTestId('search-filter-author')).toBeInTheDocument();
     expect(screen.getByTestId('search-filter-after')).toBeInTheDocument();
