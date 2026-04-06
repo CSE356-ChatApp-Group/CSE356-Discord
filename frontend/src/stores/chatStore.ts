@@ -1016,7 +1016,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const { activeCommunity, activeConv, members } = get();
     const authorId = resolveSearchAuthorId(nextFilters.author, members, activeConv);
     const hasAnyFilter = Boolean(nextFilters.author.trim() || after || before);
-    const canSearchText = normalizedQuery.length >= 2;
+    const canSearchText = normalizedQuery.length > 0;
 
     if (!canSearchText && !hasAnyFilter) {
       set({ searchResults: null });

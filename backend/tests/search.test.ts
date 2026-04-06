@@ -5,7 +5,7 @@
  *  - FTS query returns matching messages (channel, community, conversation, unscoped)
  *  - community-scoped search only returns messages from that community's channels
  *  - access control: non-member cannot search a private channel / community
- *  - short-query rejection (< 2 chars)
+ *  - single-character queries are allowed
  *  - highlight XSS sanitization (ts_headline output must be HTML-escaped)
  *  - trigram fallback path for partial/infix queries
  */
@@ -103,12 +103,12 @@ describe('Search – basic FTS', () => {
     expect(res.body.hits.length).toBe(0);
   });
 
-  it('rejects queries shorter than 2 characters with 400', async () => {
+  it('allows single-character queries', async () => {
     const res = await request(app)
       .get(`/api/v1/search?q=a&channelId=${channelId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
   });
 
   it('includes communityId and channelName in each hit', async () => {

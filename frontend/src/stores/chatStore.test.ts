@@ -720,4 +720,28 @@ describe('search filters', () => {
       before: '',
     });
   });
+
+  it('includes a single-character text query instead of dropping it in favor of filters', async () => {
+    apiGet.mockResolvedValue({ hits: [] });
+
+    useChatStore.setState({
+      activeConv: {
+        id: 'conv-1',
+        participants: [{ id: 'user-2', username: 'user-2' }],
+      },
+      members: [{ id: 'user-2', username: 'user-2' }],
+      searchFilters: {
+        author: 'user-2',
+        after: '',
+        before: '',
+      },
+    } as any);
+
+    await useChatStore.getState().search('f');
+
+    const requestedPath = apiGet.mock.calls[0]?.[0] as string;
+    expect(requestedPath).toContain('/search?');
+    expect(requestedPath).toContain('q=f');
+    expect(requestedPath).toContain('authorId=user-2');
+  });
 });

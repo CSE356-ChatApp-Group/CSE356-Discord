@@ -32,10 +32,6 @@ router.get('/', async (req, res, next) => {
       return res.status(400).json({ error: 'Provide a query or at least one search filter' });
     }
 
-    if (normalizedQuery && normalizedQuery.length < 2) {
-      return res.status(400).json({ error: 'Query must be at least 2 characters' });
-    }
-
     const userId = req.user.id;
 
     // Verify scope access before executing the search query.

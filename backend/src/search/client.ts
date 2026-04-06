@@ -243,7 +243,7 @@ async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
  * phrase-aware search.  Falls back to trigram ILIKE when FTS returns zero
  * results so partial/infix queries still resolve.
  *
- * @param q     Raw query string (validated by caller: length ≥ 2)
+ * @param q     Raw query string (validated by caller: non-empty when present)
  * @param opts  { channelId?, conversationId?, userId, authorId?, after?, before?, limit?, offset? }
  */
 async function search(q: string, opts: Record<string, any> = {}): Promise<any> {

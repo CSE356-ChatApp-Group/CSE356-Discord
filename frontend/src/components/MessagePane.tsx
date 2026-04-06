@@ -312,7 +312,7 @@ export default function MessagePane() {
     if (!showSearch) return;
 
     const trimmed = localQ.trim();
-    if (trimmed.length < 2) {
+    if (!trimmed) {
       if (useChatStore.getState().searchResults !== null) clearSearch();
       return;
     }
