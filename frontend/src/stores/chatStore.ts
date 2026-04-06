@@ -256,21 +256,12 @@ function resolveSearchAuthorId(authorText: string, members: Entity[], activeConv
     ? (Array.isArray(activeConv.participants) ? activeConv.participants : [])
     : (Array.isArray(members) ? members : []);
 
-  const exact = candidates.find((entry) => {
+  const exactUsername = candidates.find((entry) => {
     const username = String(entry?.username || '').trim().toLowerCase();
-    const displayName = String(entry?.displayName || entry?.display_name || '').trim().toLowerCase();
-    return username === normalized || displayName === normalized;
+    return username === normalized;
   });
 
-  if (exact?.id) return exact.id;
-
-  const partial = candidates.find((entry) => {
-    const username = String(entry?.username || '').trim().toLowerCase();
-    const displayName = String(entry?.displayName || entry?.display_name || '').trim().toLowerCase();
-    return username.includes(normalized) || displayName.includes(normalized);
-  });
-
-  return partial?.id || '';
+  return exactUsername?.id || '';
 }
 
 function scheduleUnreadRefresh(run: () => void) {

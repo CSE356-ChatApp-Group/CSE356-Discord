@@ -744,4 +744,30 @@ describe('search filters', () => {
     expect(requestedPath).toContain('q=f');
     expect(requestedPath).toContain('authorId=user-2');
   });
+
+  it('does not resolve the author filter from a username substring', async () => {
+    apiGet.mockResolvedValue({ hits: [] });
+
+    useChatStore.setState({
+      activeConv: {
+        id: 'conv-1',
+        participants: [
+          { id: 'user-1', username: 'abcdef' },
+          { id: 'user-2', username: 'abcd' },
+        ],
+      },
+      members: [],
+      searchFilters: {
+        author: 'abc',
+        after: '',
+        before: '',
+      },
+      searchResults: [{ id: 'old-result' }],
+    } as any);
+
+    await useChatStore.getState().search('hello');
+
+    expect(apiGet).not.toHaveBeenCalled();
+    expect(useChatStore.getState().searchResults).toEqual([]);
+  });
 });
