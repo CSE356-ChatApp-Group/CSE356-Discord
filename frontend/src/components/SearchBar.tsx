@@ -3,10 +3,9 @@ import { useChatStore } from '../stores/chatStore';
 import { formatDistanceToNow } from 'date-fns';
 import styles from './SearchBar.module.css';
 
-export default function SearchBar({ onClose }: { onClose: () => void }) {
+export default function SearchBar({ onClose, currentQuery }: { onClose: () => void; currentQuery: string }) {
   const {
     searchResults,
-    searchQuery,
     searchFilters,
     setSearchFilters,
     resetSearchFilters,
@@ -56,13 +55,13 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     const nextFilters = { ...searchFilters, ...partial };
     setSearchFilters(nextFilters);
     if (isRangeValid(nextFilters)) {
-      void search(searchQuery, nextFilters);
+      void search(currentQuery, nextFilters);
     }
   }
 
   function clearFilters() {
     resetSearchFilters();
-    void search(searchQuery, { author: '', after: '', before: '' });
+    void search(currentQuery, { author: '', after: '', before: '' });
   }
 
   const count = searchResults?.length ?? 0;
@@ -71,11 +70,11 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
     .filter(Boolean)
     .length;
   const invalidRange = !isRangeValid(searchFilters);
-  const canSubmit = Boolean(searchQuery.trim() || activeFilterCount);
+  const canSubmit = Boolean(currentQuery.trim() || activeFilterCount);
 
   function submitSearch() {
     if (!canSubmit || invalidRange) return;
-    void search(searchQuery, searchFilters);
+    void search(currentQuery, searchFilters);
   }
 
   return (
@@ -184,7 +183,7 @@ export default function SearchBar({ onClose }: { onClose: () => void }) {
               <p
                 className={styles.hitContent}
                 dangerouslySetInnerHTML={{
-                  __html: highlightedContent(hit, searchQuery),
+                  __html: highlightedContent(hit, currentQuery),
                 }}
               />
             </div>

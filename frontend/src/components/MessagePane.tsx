@@ -778,7 +778,7 @@ export default function MessagePane() {
                 >✕</button>
               </form>
               <div className={styles.searchPopout} data-testid="search-popout">
-                <SearchBar onClose={closeSearch} />
+                <SearchBar onClose={closeSearch} currentQuery={localQ} />
               </div>
             </div>
           ) : (

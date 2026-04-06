@@ -54,7 +54,7 @@ describe('SearchBar filters', () => {
   });
 
   it('shows author and time filters and reruns search when they change', async () => {
-    render(<SearchBar onClose={() => {}} />);
+    render(<SearchBar onClose={() => {}} currentQuery="hello" />);
 
     expect(screen.getByTestId('search-filters-panel')).toBeInTheDocument();
     expect(screen.getByTestId('search-filter-author')).toBeInTheDocument();
