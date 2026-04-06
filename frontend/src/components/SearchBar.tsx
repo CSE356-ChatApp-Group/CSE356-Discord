@@ -85,7 +85,7 @@ export default function SearchBar({ currentQuery }: { currentQuery: string }) {
       <div className={styles.toolbar} data-testid="search-results-header">
         <button
           type="button"
-          className={`${styles.searchSubmitBtn} ${styles.resultsActionBtnPrimary}`}
+          className={`${styles.resultsActionBtn} ${styles.resultsActionBtnPrimary} ${styles.searchSubmitBtn}`}
           onClick={submitSearch}
           disabled={!canSubmit || invalidRange}
           data-testid="search-submit"
