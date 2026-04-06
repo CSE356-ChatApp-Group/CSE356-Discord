@@ -27,6 +27,11 @@ async function migrate() {
       )
     `);
 
+    // Advisory lock prevents two concurrent deploy processes from both trying
+    // to apply the same migration.  Lock is automatically released when the
+    // client is released at end of this function.
+    await client.query('SELECT pg_advisory_lock(5432100)');
+
     const applied = new Set(
       (await client.query('SELECT filename FROM schema_migrations')).rows.map(r => r.filename)
     );

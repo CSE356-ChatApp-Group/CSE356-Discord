@@ -179,3 +179,32 @@ jobs:
       user: ${{ vars.STAGING_USER || 'ssperrottet' }}
       script_path: deploy/deploy-staging.sh
       artifact_name: release-${{ github.sha }}
+
+  e2e-staging:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs:
+      - deploy-staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      E2E_BASE_URL: ${{ format('http://{0}', vars.STAGING_HOST || '136.114.103.71') }}
+      E2E_SKIP_WEBSERVER: "1"
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e:staging:ci --workspace=frontend
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-${{ github.sha }}
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7

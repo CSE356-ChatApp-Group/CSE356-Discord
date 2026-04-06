@@ -40,6 +40,10 @@ async function shutdown(signal, err = null) {
   forceExitTimer.unref();
 
   if (server) {
+    // Close WebSocket connections first so clients reconnect to the new instance
+    // rather than being hard-killed by the 10 s SIGKILL timer.  ws.shutdown()
+    // sends close frames to all connected clients and waits for wss.close().
+    await wsServer.shutdown();
     await new Promise((resolve) => server.close(resolve));
   }
 

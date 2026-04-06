@@ -17,6 +17,10 @@ WorkingDirectory=/opt/chatapp/current/backend
 ExecStart=/usr/bin/node dist/index.js
 Restart=on-failure
 RestartSec=5
+# Allow up to 15 s for graceful shutdown (server.close + pool drain).
+# The app's own 10 s forced-exit timer fires before this deadline, so
+# systemd will never need to send SIGKILL under normal conditions.
+TimeoutStopSec=15
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=chatapp-%i
