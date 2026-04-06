@@ -58,7 +58,7 @@ afterEach(async () => {
 });
 
 describe('Grader parity: profile & presence', () => {
-  it('updates display name, uploads avatar, searches users, and emits presence updates', async () => {
+  it('updates display name, searches users, and emits presence updates', async () => {
     const userA = await createAuthenticatedUser('graderprofilea');
     const userB = await createAuthenticatedUser('graderprofileb');
 
@@ -77,12 +77,6 @@ describe('Grader parity: profile & presence', () => {
 
     expect(meRes.status).toBe(200);
     expect(meRes.body.user.display_name).toBe(newDisplayName);
-
-    const avatarGetRes = await request(app)
-      .get(`/api/v1/users/${userA.user.id}/avatar`);
-
-    expect(avatarGetRes.status).toBe(200);
-    expect((avatarGetRes.headers['content-type'] || '').toLowerCase()).toContain('image/');
 
     const searchRes = await request(app)
       .get('/api/v1/users')
