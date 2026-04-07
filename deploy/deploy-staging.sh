@@ -418,9 +418,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
   export API_CONTRACT_BASE_URL=http://127.0.0.1:${CANDIDATE_PORT}/api/v1
   export API_CONTRACT_WS_URL=ws://127.0.0.1:${CANDIDATE_PORT}/ws
-  # Script lives in /tmp — Node resolves require() from /tmp unless NODE_PATH points at release node_modules.
-  export NODE_PATH=\"\${RELEASE_PATH}/backend/node_modules\"
-  cd \"\${RELEASE_PATH}/backend\" && node /tmp/candidate-ws-smoke.cjs
+  # Run from release backend/ so require('ws') resolves (Node ignores NODE_PATH for /tmp entry reliably).
+  cp /tmp/candidate-ws-smoke.cjs \"\${RELEASE_PATH}/backend/candidate-ws-smoke.cjs\"
+  cd \"\${RELEASE_PATH}/backend\" && node ./candidate-ws-smoke.cjs
+  rm -f \"\${RELEASE_PATH}/backend/candidate-ws-smoke.cjs\"
 "
 
 echo "7) Switching Nginx upstream from ${LIVE_PORT} to ${CANDIDATE_PORT}..."
