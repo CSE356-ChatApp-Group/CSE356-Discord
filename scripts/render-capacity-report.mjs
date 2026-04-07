@@ -72,6 +72,34 @@ function readMetadata(filePath) {
   }
 }
 
+function summarizeAppErrors(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  const lines = fs.readFileSync(filePath, 'utf8').split('\n').map((x) => x.trim()).filter(Boolean);
+  if (!lines.length) return { total: 0, signatures: [] };
+
+  const signatures = new Map();
+  for (const line of lines) {
+    let key = line;
+    try {
+      const obj = JSON.parse(line);
+      const msg = obj.msg || obj.message || 'log';
+      const errCode = obj.err?.code || obj.code || '';
+      const errMsg = obj.err?.message || obj.error || '';
+      key = `${msg}|${errCode}|${errMsg}`.slice(0, 400);
+    } catch {
+      key = line.slice(0, 400);
+    }
+    signatures.set(key, (signatures.get(key) || 0) + 1);
+  }
+
+  return {
+    total: lines.length,
+    signatures: [...signatures.entries()]
+      .map(([signature, count]) => ({ signature, count }))
+      .sort((a, b) => b.count - a.count),
+  };
+}
+
 // Stream metrics.ndjson once and derive timeline + failure attribution.
 async function analyzeNdjson(ndjsonPath) {
   if (!fs.existsSync(ndjsonPath)) return null;
@@ -159,6 +187,7 @@ const summary = readJson(path.join(runDir, 'summary.json'));
 const before = readJson(path.join(runDir, 'prometheus-before.json'));
 const after = readJson(path.join(runDir, 'prometheus-after.json'));
 const metadata = readMetadata(path.join(runDir, 'metadata.txt'));
+const appErrorSummary = summarizeAppErrors(path.join(runDir, 'app-errors.log'));
 
 const lines = [];
 lines.push('# Staging capacity report');
@@ -212,7 +241,8 @@ if (cpuByInstance.length > 1) {
 }
 lines.push(`- Event loop p99 (post-run): ${fmt(promScalar(after, 'eventloop_p99_ms'), ' ms')}`);
 lines.push(`- Event loop p99 peak: ${fmt(promScalar(after, 'eventloop_peak_ms'), ' ms')}`);
-lines.push(`- 5xx rate: ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
+lines.push(`- 5xx rate (post-run instant): ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
+lines.push(`- 5xx rate peak during run: ${fmt(promScalar(after, 'five_xx_peak_rate', 0), ' req/s')}`);
 
 const overloadShedAfter = promScalar(after, 'overload_shed_total', 0);
 const overloadShedBefore = promScalar(before, 'overload_shed_total', 0);
@@ -221,6 +251,26 @@ lines.push(`- HTTP overload shed total (during run): ${fmt(overloadShedDelta)}`)
 lines.push(`- Overload stage max (0–3, post-run instant): ${fmt(promScalar(after, 'overload_stage_max'))}`);
 lines.push(`- PG pool peak-total/min-idle/peak-waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
 lines.push(`- Redis memory: ${fmt(promScalar(after, 'redis_memory_mb'), ' MB')} / connected clients: ${fmt(promScalar(after, 'redis_connected_clients'))}`); 
+
+const topFiveXxRoutes = promResult(after, 'five_xx_by_route_peak')
+  .map((item) => ({ route: item.metric?.route || 'unknown', value: Number(item.value?.[1]) }))
+  .filter((item) => Number.isFinite(item.value) && item.value > 0);
+if (topFiveXxRoutes.length) {
+  lines.push('### Top 5xx routes during run (peak req/s)');
+  for (const item of topFiveXxRoutes.slice(0, 8)) {
+    lines.push(`- ${item.route}: ${fmt(item.value, ' req/s')}`);
+  }
+  lines.push('');
+}
+
+if (appErrorSummary && appErrorSummary.total > 0) {
+  lines.push('### Backend error signatures during run (journalctl)');
+  lines.push(`- Matched error lines: ${fmt(appErrorSummary.total)}`);
+  for (const item of appErrorSummary.signatures.slice(0, 8)) {
+    lines.push(`- ${fmt(item.count)}x ${item.signature}`);
+  }
+  lines.push('');
+}
 
 const queueDepth = promResult(after, 'side_effect_queue_depth');
 if (queueDepth.length) {

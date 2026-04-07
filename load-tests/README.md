@@ -31,8 +31,10 @@ Each run writes to `artifacts/load-tests/<timestamp>/`:
 - `prometheus-after.json` — staging metrics snapshot after load
 - `report.md` — readable capacity summary
 - `metadata.txt` — run configuration snapshot (profile, git SHA, overload/pool knobs)
+- `app.log` — backend journal logs captured for the run window (best-effort)
+- `app-errors.log` — filtered backend error lines used by the report (best-effort)
 
-`report.md` includes **HTTP response shape** from k6: counts of status **0** (timeout / no TCP response), **503** (overload shed, PG pool circuit breaker, or nginx upstream), **4xx**, and **5xx** other than 503, plus Prometheus **`http_overload_shed_total`** and **`chatapp_overload_stage`** when available. Use these to tell **fast 503** from **timeouts** and from **application 5xx**.
+`report.md` includes **HTTP response shape** from k6: counts of status **0** (timeout / no TCP response), **503** (overload shed, PG pool circuit breaker, or nginx upstream), **4xx**, and **5xx** other than 503, plus Prometheus **`http_overload_shed_total`**, **`chatapp_overload_stage`**, **5xx peak rate during run**, and **top 5xx routes** when available. Use these to tell **fast 503** from **timeouts** and from **application 5xx**.
 It also includes **top failing endpoints** from k6 tags, so you can prioritize fixes by route.
 
 ## Environment overrides

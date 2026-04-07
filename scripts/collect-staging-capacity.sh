@@ -23,6 +23,8 @@ output_file, ssh_host, prom_url = sys.argv[1:4]
 queries = {
     "route_p95_top": 'sort_desc(histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api"}[5m]))))',
     "five_xx_rate": 'sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[5m]))',
+    "five_xx_peak_rate": 'max_over_time(sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[1m]))[12m:30s])',
+    "five_xx_by_route_peak": 'sort_desc(max_over_time(sum by (route) (rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[1m]))[12m:30s]))',
     "overload_shed_total": 'sum(http_overload_shed_total{job="chatapp-api"})',
     "overload_stage_max": 'max(chatapp_overload_stage{job="chatapp-api"})',
     "rss_mb": 'max(process_resident_memory_bytes{job="chatapp-api"}) / 1024 / 1024',

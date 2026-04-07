@@ -15,6 +15,7 @@ SHED_LAG_MS="${OVERLOAD_LAG_SHED_MS:-unset}"
 POOL_QUEUE="${POOL_CIRCUIT_BREAKER_QUEUE:-unset}"
 
 mkdir -p "$RUN_DIR"
+RUN_START_EPOCH="$(date -u +%s)"
 
 cat > "$RUN_DIR/metadata.txt" <<EOF
 run_id=$RUN_ID
@@ -65,6 +66,18 @@ set -e
 echo "[3/4] Capturing post-run Prometheus snapshot..."
 if ! "$ROOT_DIR/scripts/collect-staging-capacity.sh" "$RUN_DIR/prometheus-after.json" "$SSH_HOST"; then
   echo "Warning: post-run snapshot failed" >&2
+fi
+
+echo "[3b/4] Capturing app logs for run window..."
+if ! ssh -T -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no "$SSH_HOST" \
+  "sudo journalctl --since '@$RUN_START_EPOCH' -u chatapp@4000 -u chatapp@4001 --no-pager -o cat" \
+  > "$RUN_DIR/app.log"; then
+  echo "Warning: app log capture failed" >&2
+fi
+
+if command -v rg >/dev/null 2>&1 && [[ -s "$RUN_DIR/app.log" ]]; then
+  rg -N "Unhandled error|POOL_CIRCUIT_OPEN|PoolTimeoutError|timeout exceeded|too many clients|statement timeout|query_canceled" \
+    "$RUN_DIR/app.log" > "$RUN_DIR/app-errors.log" || true
 fi
 
 echo "[4/4] Rendering report..."
