@@ -575,10 +575,13 @@ router.patch('/:id',
 
       const baseMessage = rows[0];
       const message = await loadHydratedMessageById(baseMessage.id);
+      // Bust the Redis message cache synchronously (awaited) so that a GET
+      // issued immediately after this PATCH returns the updated content.
       if (baseMessage.channel_id) {
-        redis.del(channelMsgCacheKey(baseMessage.channel_id)).catch(() => {});
+        await redis.del(channelMsgCacheKey(baseMessage.channel_id));
       }
       if (baseMessage.conversation_id) {
+        await redis.del(`messages:conversation:${baseMessage.conversation_id}`);
         await publishConversationEvent(baseMessage.conversation_id, 'message:updated', message || baseMessage);
       } else {
         const key = targetKey(baseMessage.channel_id, baseMessage.conversation_id);
