@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Pre-cutover synthetic: register → create community → WS subscribe → POST message → receive message:created.
- * Run from the release backend directory so `require('ws')` resolves (npm ci already ran).
+ * Deploy sets NODE_PATH to the release's backend/node_modules (script is executed from /tmp).
  *
  * Env: API_CONTRACT_BASE_URL (e.g. http://127.0.0.1:4001/api/v1), API_CONTRACT_WS_URL (ws://127.0.0.1:4001/ws)
  */

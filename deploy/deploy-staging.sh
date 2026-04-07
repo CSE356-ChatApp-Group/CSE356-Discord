@@ -418,6 +418,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
   export API_CONTRACT_BASE_URL=http://127.0.0.1:${CANDIDATE_PORT}/api/v1
   export API_CONTRACT_WS_URL=ws://127.0.0.1:${CANDIDATE_PORT}/ws
+  # Script lives in /tmp — Node resolves require() from /tmp unless NODE_PATH points at release node_modules.
+  export NODE_PATH=\"\${RELEASE_PATH}/backend/node_modules\"
   cd \"\${RELEASE_PATH}/backend\" && node /tmp/candidate-ws-smoke.cjs
 "
 

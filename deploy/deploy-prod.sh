@@ -356,6 +356,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
   export API_CONTRACT_BASE_URL=http://127.0.0.1:$NEW_PORT/api/v1
   export API_CONTRACT_WS_URL=ws://127.0.0.1:$NEW_PORT/ws
+  export NODE_PATH=\"\$RELEASE_PATH/backend/node_modules\"
   cd \"\$RELEASE_PATH/backend\" && node /tmp/candidate-ws-smoke.cjs
 " || {
   echo "ERROR: Candidate WS smoke failed. Stopping candidate."
