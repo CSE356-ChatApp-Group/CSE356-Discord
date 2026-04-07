@@ -19,14 +19,17 @@ MONITOR_SECONDS="${MONITOR_SECONDS:-30}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 
-# Number of Node.js workers to run.  Prod currently has fewer vCPUs than
-# staging so we default to 1.  Increase to 2 once prod is upgraded to 2+ vCPUs.
+# Number of Node.js HTTP workers (systemd chatapp@ ports).  Default 1; set 2 when
+# nginx load-balances two ports like staging.
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
-# PG pool sizing — prod uses PgBouncer in transaction mode (same formula as staging).
-# PgBouncer pool_size = min(instances × 40, 90) real backends.
-# PG_POOL_MAX_PER_INSTANCE = pool_size × 2.5 / instances = virtual Node connections.
-_PGB_SIZE=$(python3 -c "print(min(${CHATAPP_INSTANCES} * 50, 120))")
-PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} * 5 // (${CHATAPP_INSTANCES} * 2)))))") # 2.5:1 = ×5÷(n×2)
+_REMOTE_NCPU=$(ssh "${PROD_USER}@${PROD_HOST}" 'nproc --all' 2>/dev/null || echo 2)
+# Real PgBouncer backends: grow with prod VM CPUs (no manual pool size edits).
+_PGB_SIZE=$(python3 -c "inst=int('${CHATAPP_INSTANCES}'); n=int('${_REMOTE_NCPU}'); print(max(50, min(200, n * 45, 40 + inst * 50)))")
+PG_POOL_MAX_PER_INSTANCE=$(python3 -c "inst=max(1,int('${CHATAPP_INSTANCES}')); p=int('${_PGB_SIZE}'); print(max(25, min(120, (p * 5) // (inst * 2))))")
+POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "pmi=int('${PG_POOL_MAX_PER_INSTANCE}'); inst=max(1,int('${CHATAPP_INSTANCES}')); print(max(48, min(700, pmi * 4 + inst * 60)))")
+PG_MAX_CONNECTIONS=$(python3 -c "b=int('${_PGB_SIZE}'); print(max(100, min(250, b + 45)))")
+BCRYPT_MAX_CONCURRENT=$(python3 -c "n=int('${_REMOTE_NCPU}'); print(min(24, max(6, n * 3)))")
+FANOUT_QUEUE_CONCURRENCY=$(python3 -c "n=int('${_REMOTE_NCPU}'); print(min(8, max(2, (n + 1) // 2)))")
 UV_THREADPOOL_PER_INSTANCE=$(python3 -c "print(max(8, 16 // max(1, ${CHATAPP_INSTANCES})))")
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
 # Formula: min(1500, max(RAM_MB * 12%, 192)) — same as deploy-staging.sh.
@@ -37,6 +40,8 @@ NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 
 echo "=== PRODUCTION DEPLOYMENT ==="
 echo "Release: $RELEASE_SHA"
 echo "Target: $PROD_USER@$PROD_HOST"
+echo "  VM vCPUs: ${_REMOTE_NCPU}  workers: ${CHATAPP_INSTANCES}  pgbouncer_pool: ${_PGB_SIZE}  pg_max_conn: ${PG_MAX_CONNECTIONS}"
+echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: ${POOL_CIRCUIT_BREAKER_QUEUE}"
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
 
 CURRENT_UPSTREAM_PORT=$(ssh "$PROD_USER@$PROD_HOST" "grep -oE '(127\\.0\\.0\\.1|localhost):[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
@@ -140,8 +145,9 @@ ssh "$PROD_USER@$PROD_HOST" "
   NCPU=\$(nproc --all)
   SHB_MB=\$(( TOTAL_RAM_MB * 19 / 100 ))
   ECF_MB=\$(( TOTAL_RAM_MB * 75 / 100 ))
-  WRK_MB=\$(python3 -c \"m=max(8, min(32, \${TOTAL_RAM_MB} // 250)); print(m)\")
-  echo \"RAM=\${TOTAL_RAM_MB}MB → shared_buffers=\${SHB_MB}MB work_mem=\${WRK_MB}MB\"
+  PG_MAX_CONNECTIONS='${PG_MAX_CONNECTIONS}'
+  WRK_MB=\$(python3 -c \"ram=\${TOTAL_RAM_MB}; mc=int('\${PG_MAX_CONNECTIONS}'); print(max(4, min(32, ram // max(mc * 4, 1))))\")
+  echo \"RAM=\${TOTAL_RAM_MB}MB max_conn=\${PG_MAX_CONNECTIONS} → shared_buffers=\${SHB_MB}MB work_mem=\${WRK_MB}MB\"
   sudo -u postgres psql -qAt \
     -c \"ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';\" \
     2>&1 | grep -v 'change directory' || true
@@ -152,7 +158,7 @@ ssh "$PROD_USER@$PROD_HOST" "
     -c \"ALTER SYSTEM SET wal_buffers            = '32MB';\" \
     -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
-    -c \"ALTER SYSTEM SET max_connections        = 120;\" \\
+    -c \"ALTER SYSTEM SET max_connections        = \${PG_MAX_CONNECTIONS};\" \\
     2>&1 | grep -v 'change directory' || true
   sudo systemctl restart postgresql
   sleep 3
@@ -249,8 +255,11 @@ ssh "$PROD_USER@$PROD_HOST" "
   # PG_CONNECTION_TIMEOUT_MS=10000 gives each queued request up to 10s to get a
   # connection before timing out.
   sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=400/' /opt/chatapp/shared/.env \
-    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=400' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}/' /opt/chatapp/shared/.env \
+    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^BCRYPT_MAX_CONCURRENT=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^BCRYPT_MAX_CONCURRENT=.*/BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}/' /opt/chatapp/shared/.env \
+    || echo 'BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
     || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -263,8 +272,8 @@ ssh "$PROD_USER@$PROD_HOST" "
   # Prod has 1 CPU so 2 concurrent fanout jobs is enough — keeps queue latency
   # low without over-parallelising on a single core.
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=2/' /opt/chatapp/shared/.env \
-    || echo 'FANOUT_QUEUE_CONCURRENCY=2' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
+    || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer fires.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \

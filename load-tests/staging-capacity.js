@@ -115,6 +115,9 @@ const PROFILES = {
   // Faster break test: same load curve but tighter stage durations (~6m30s total).
   // Starts with a 30s cache-warmup stage (matches tune) so results are comparable
   // and don't include cold-cache penalty for the first ramp segment.
+  // Peak ~500 iter/s × ~one HTTP req/iter. Under overload, iteration duration can
+  // exceed 10s, so required VUs ≈ rate × duration (e.g. 500×12 ≈ 6000 ceiling).
+  // Cap here balances honest arrival-rate with typical k6 runner RAM (~3k VUs).
   'break-fast': {
     httpStages: [
       { target: 20,  duration: '30s' },  // cache warmup (PG buffer + Redis)
@@ -125,8 +128,8 @@ const PROFILES = {
       { target: 500, duration: '1m' },
       { target: 0,   duration: '30s' },
     ],
-    preAllocatedVUs: 220,
-    maxVUs: 900,
+    preAllocatedVUs: 380,
+    maxVUs: 3200,
     wsVUs: 60,
     wsDuration: '6m30s',
   },
@@ -142,8 +145,8 @@ const PROFILES = {
     ],
     // High preAllocated/max so ramping-arrival-rate does not drop iterations once
     // the target rate exceeds what few warm VUs can schedule (see dropped_iterations in report).
-    preAllocatedVUs: 220,
-    maxVUs: 900,
+    preAllocatedVUs: 380,
+    maxVUs: 3200,
     wsVUs: 60,
     wsDuration: '10m',
   },
@@ -181,8 +184,13 @@ const useConstantArrival = profile.arrivalMode === 'constant';
 // GET /conversations, GET /messages, GET /channels). Spreads reads across N real
 // Redis cache keys instead of one, so cache effectiveness under diverse traffic
 // is measured accurately rather than showing artificially high hit rates.
-// Scale with maxVUs so each reader is shared by at most ~6 VUs at break load.
-const NUM_READER_POOL = Math.max(20, Math.ceil(profile.maxVUs / 6));
+// Scale with maxVUs (~one reader per 6 VUs) but cap so setup() does not create
+// hundreds of accounts when maxVUs is high for arrival-rate headroom only.
+const READER_POOL_CAP = 220;
+const NUM_READER_POOL = Math.max(
+  20,
+  Math.min(READER_POOL_CAP, Math.ceil(profile.maxVUs / 6)),
+);
 
 const httpThresholds = {
   http_req_failed: [`rate<${profile.maxFailureRate != null ? profile.maxFailureRate : 0.05}`],

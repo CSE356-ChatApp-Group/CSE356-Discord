@@ -61,8 +61,13 @@ print(f'Parsed DATABASE_URL: user={pg_user} host={pg_host}:{pg_port} db={pg_db}'
 import multiprocessing
 _ncpu = multiprocessing.cpu_count()
 _default_pool_size = min(_ncpu * 50, 120)
-PGBOUNCER_POOL_SIZE = int(os.environ.get('PGBOUNCER_POOL_SIZE', _default_pool_size))
-PGBOUNCER_POOL_SIZE = min(PGBOUNCER_POOL_SIZE, 120)   # hard cap regardless of env
+# When deploy passes PGBOUNCER_POOL_SIZE (VM-aware), honour it up to HARD_CAP.
+# Standalone runs still use the conservative _default_pool_size.
+_HARD_CAP = int(os.environ.get('PGBOUNCER_POOL_HARD_CAP', '400'))
+if os.environ.get('PGBOUNCER_POOL_SIZE'):
+    PGBOUNCER_POOL_SIZE = min(int(os.environ['PGBOUNCER_POOL_SIZE']), _HARD_CAP)
+else:
+    PGBOUNCER_POOL_SIZE = _default_pool_size
 PGBOUNCER_RESERVE_SIZE = max(5, _ncpu * 5)
 print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} (PGBOUNCER_POOL_SIZE env={os.environ.get("PGBOUNCER_POOL_SIZE", "not set")})')
 

@@ -281,6 +281,12 @@ if (typeof dropped === 'number' || typeof iters === 'number') {
   lines.push(
     `- Iterations **completed**: ${fmt(iters)} — **dropped** (never started): ${fmt(dropped)}${dropPct !== null ? ` (${dropPct}% of planned iterations)` : ''} — if large, raise **preAllocatedVUs** / **maxVUs** so the arrival-rate executor can keep up`,
   );
+  if (dropPct !== null && parseFloat(dropPct) >= 10) {
+    const iterP95 = metric(summary, 'iteration_duration', 'p(95)');
+    lines.push(
+      `- **VU shortfall:** Planned arrival rate was not fully achieved — need roughly **\`maxVUs ≥ iter/s × iteration duration (s)\`** (e.g. p95 iteration ${iterP95 != null ? `${(iterP95 / 1000).toFixed(1)}s` : '…'} × peak stage target). Lower the peak stage \`target\` or raise \`maxVUs\` / runner memory.`,
+    );
+  }
 }
 lines.push(
   `- Iteration duration p95: ${fmt(metric(summary, 'iteration_duration', 'p(95)'), ' ms')} (full httpMix iteration incl. sleep)`,

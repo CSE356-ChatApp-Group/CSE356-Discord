@@ -70,6 +70,10 @@ async function bustChannelListCache(communityId) {
   }
 }
 
+/** Same idea as communities/messages list: load tests pin many VUs to one reader user. */
+const CHANNELS_LIST_CACHE_TTL_SECS = 30;
+const channelsListInflight = new Map();
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/',
   qv('communityId').isUUID(),
@@ -78,134 +82,152 @@ router.get('/',
     const { communityId } = req.query;
     const userId = req.user.id;
     try {
-      // Serve from Redis cache when warm (TTL 15 s).  Channel structure changes
-      // are rare admin operations; WS events keep the frontend state current.
+      // Serve from Redis cache when warm. Channel structure changes are rare;
+      // WS events keep the frontend state current.
       const cacheKey = `channels:list:${communityId}:${userId}`;
       const cached = await redis.get(cacheKey).catch(() => null);
       if (cached) {
         return res.json(JSON.parse(cached));
       }
 
-      const { rows: membership } = await query(
-        `SELECT 1
-         FROM community_members
-         WHERE community_id = $1 AND user_id = $2`,
-        [communityId, userId]
-      );
-      if (!membership.length) {
-        return res.status(403).json({ error: 'Not a community member' });
-      }
-
-      // Return all visible channel names. Private-channel metadata/content pointers
-      // are redacted for users who are not invited to that private channel.
-      const { rows } = await query(
-        `WITH visible_channels AS (
-           SELECT ch.*,
-                  (ch.is_private = FALSE
-                   OR EXISTS (
-                     SELECT 1 FROM channel_members cm
-                     WHERE cm.channel_id = ch.id AND cm.user_id = $2
-                   )) AS can_access
-           FROM channels ch
-           WHERE ch.community_id = $1
-         )
-         SELECT vc.*,
-                vc.can_access,
-                CASE WHEN vc.can_access THEN COALESCE(m_denorm.id, lm.id) ELSE NULL END AS last_message_id,
-                CASE WHEN vc.can_access THEN COALESCE(m_denorm.author_id, lm.author_id) ELSE NULL END AS last_message_author_id,
-                CASE WHEN vc.can_access THEN COALESCE(m_denorm.created_at, lm.created_at) ELSE NULL END AS last_message_at,
-                CASE WHEN vc.can_access THEN rs.last_read_message_id ELSE NULL END AS my_last_read_message_id,
-                CASE WHEN vc.can_access THEN rs.last_read_at ELSE NULL END AS my_last_read_at
-         FROM   visible_channels vc
-         LEFT JOIN messages m_denorm
-                ON vc.can_access
-               AND m_denorm.id = vc.last_message_id
-               AND m_denorm.channel_id = vc.id
-               AND m_denorm.deleted_at IS NULL
-         LEFT JOIN LATERAL (
-           SELECT m.id, m.author_id, m.created_at
-           FROM messages m
-           WHERE m.channel_id = vc.id AND m.deleted_at IS NULL
-           ORDER BY m.created_at DESC
-           LIMIT 1
-         ) lm ON vc.can_access AND m_denorm.id IS NULL
-         LEFT JOIN read_states rs
-                ON vc.can_access
-               AND rs.channel_id = vc.id
-               AND rs.user_id = $2
-         ORDER  BY vc.position, vc.name`,
-        [communityId, userId]
-      );
-
-      // Attach Redis-backed unread_message_count to each accessible channel
-      const accessibleRows = rows.filter(ch => ch.can_access);
-      if (accessibleRows.length > 0) {
+      if (channelsListInflight.has(cacheKey)) {
         try {
-          // Fetch both keys for all channels in one pipeline
-          const pipeline = redis.pipeline();
-          for (const ch of accessibleRows) {
-            pipeline.get(`channel:msg_count:${ch.id}`);
-            pipeline.get(`user:last_read_count:${ch.id}:${userId}`);
+          const result = await channelsListInflight.get(cacheKey);
+          if (!result.ok) {
+            return res.status(403).json({ error: 'Not a community member' });
           }
-          const results = await pipeline.exec();
-
-          // results is array of [err, value] pairs, two per channel
-          const missingChannels = [];
-          for (let i = 0; i < accessibleRows.length; i++) {
-            const ch = accessibleRows[i];
-            const [errCount, rawCount] = results[i * 2];
-            const [errRead, rawRead]   = results[i * 2 + 1];
-            if (errCount || errRead || rawCount === null || rawRead === null) {
-              missingChannels.push(ch);
-            } else {
-              ch.unread_message_count = Math.max(0, parseInt(rawCount, 10) - parseInt(rawRead, 10));
-            }
-          }
-
-          // For channels missing Redis data: initialize via a single batched
-          // SQL query instead of N×2 individual pool checkouts.
-          if (missingChannels.length > 0) {
-            const channelIds   = missingChannels.map(ch => ch.id);
-            const lastReadAts  = missingChannels.map(ch => ch.my_last_read_at || null);
-
-            const { rows: countRows } = await query(
-              `SELECT
-                 refs.channel_id::text,
-                 COUNT(*) FILTER (WHERE m.deleted_at IS NULL)                                                     AS total_count,
-                 COUNT(*) FILTER (WHERE m.deleted_at IS NULL
-                                    AND (refs.last_read_at IS NULL OR m.created_at <= refs.last_read_at)) AS read_count
-               FROM (SELECT unnest($1::uuid[]) AS channel_id,
-                            unnest($2::timestamptz[]) AS last_read_at) AS refs
-               LEFT JOIN messages m ON m.channel_id = refs.channel_id
-               GROUP BY refs.channel_id`,
-              [channelIds, lastReadAts]
-            );
-
-            const countMap = new Map<string, { total: number; read: number }>(
-              countRows.map(r => [r.channel_id, { total: parseInt(r.total_count, 10), read: parseInt(r.read_count, 10) }])
-            );
-
-            const initPipeline = redis.pipeline();
-            for (const ch of missingChannels) {
-              const counts = countMap.get(ch.id) || { total: 0, read: 0 };
-              initPipeline.set(`channel:msg_count:${ch.id}`, counts.total, 'NX');
-              initPipeline.set(`user:last_read_count:${ch.id}:${userId}`, counts.read, 'NX');
-              ch.unread_message_count = Math.max(0, counts.total - counts.read);
-            }
-            await initPipeline.exec();
-          }
+          return res.json(result.body);
         } catch (err) {
-          logger.warn({ err }, 'Failed to fetch unread counts from Redis; defaulting to 0');
-          for (const ch of accessibleRows) {
-            if (ch.unread_message_count === undefined) ch.unread_message_count = 0;
-          }
+          return next(err);
         }
       }
 
-      const response = { channels: rows };
-      // Cache per-user per-community for 15 s to absorb repeated REST polls.
-      redis.set(cacheKey, JSON.stringify(response), 'EX', 15).catch(() => {});
-      res.json(response);
+      const promise = (async () => {
+        const { rows: membership } = await query(
+          `SELECT 1
+           FROM community_members
+           WHERE community_id = $1 AND user_id = $2`,
+          [communityId, userId]
+        );
+        if (!membership.length) {
+          return { ok: false };
+        }
+
+        // Return all visible channel names. Private-channel metadata/content pointers
+        // are redacted for users who are not invited to that private channel.
+        const { rows } = await query(
+          `WITH visible_channels AS (
+             SELECT ch.*,
+                    (ch.is_private = FALSE
+                     OR EXISTS (
+                       SELECT 1 FROM channel_members cm
+                       WHERE cm.channel_id = ch.id AND cm.user_id = $2
+                     )) AS can_access
+             FROM channels ch
+             WHERE ch.community_id = $1
+           )
+           SELECT vc.*,
+                  vc.can_access,
+                  CASE WHEN vc.can_access THEN COALESCE(m_denorm.id, lm.id) ELSE NULL END AS last_message_id,
+                  CASE WHEN vc.can_access THEN COALESCE(m_denorm.author_id, lm.author_id) ELSE NULL END AS last_message_author_id,
+                  CASE WHEN vc.can_access THEN COALESCE(m_denorm.created_at, lm.created_at) ELSE NULL END AS last_message_at,
+                  CASE WHEN vc.can_access THEN rs.last_read_message_id ELSE NULL END AS my_last_read_message_id,
+                  CASE WHEN vc.can_access THEN rs.last_read_at ELSE NULL END AS my_last_read_at
+           FROM   visible_channels vc
+           LEFT JOIN messages m_denorm
+                  ON vc.can_access
+                 AND m_denorm.id = vc.last_message_id
+                 AND m_denorm.channel_id = vc.id
+                 AND m_denorm.deleted_at IS NULL
+           LEFT JOIN LATERAL (
+             SELECT m.id, m.author_id, m.created_at
+             FROM messages m
+             WHERE m.channel_id = vc.id AND m.deleted_at IS NULL
+             ORDER BY m.created_at DESC
+             LIMIT 1
+           ) lm ON vc.can_access AND m_denorm.id IS NULL
+           LEFT JOIN read_states rs
+                  ON vc.can_access
+                 AND rs.channel_id = vc.id
+                 AND rs.user_id = $2
+           ORDER  BY vc.position, vc.name`,
+          [communityId, userId]
+        );
+
+        // Attach Redis-backed unread_message_count to each accessible channel
+        const accessibleRows = rows.filter(ch => ch.can_access);
+        if (accessibleRows.length > 0) {
+          try {
+            const pipeline = redis.pipeline();
+            for (const ch of accessibleRows) {
+              pipeline.get(`channel:msg_count:${ch.id}`);
+              pipeline.get(`user:last_read_count:${ch.id}:${userId}`);
+            }
+            const results = await pipeline.exec();
+
+            const missingChannels = [];
+            for (let i = 0; i < accessibleRows.length; i++) {
+              const ch = accessibleRows[i];
+              const [errCount, rawCount] = results[i * 2];
+              const [errRead, rawRead]   = results[i * 2 + 1];
+              if (errCount || errRead || rawCount === null || rawRead === null) {
+                missingChannels.push(ch);
+              } else {
+                ch.unread_message_count = Math.max(0, parseInt(rawCount, 10) - parseInt(rawRead, 10));
+              }
+            }
+
+            if (missingChannels.length > 0) {
+              const channelIds   = missingChannels.map(ch => ch.id);
+              const lastReadAts  = missingChannels.map(ch => ch.my_last_read_at || null);
+
+              const { rows: countRows } = await query(
+                `SELECT
+                   refs.channel_id::text,
+                   COUNT(*) FILTER (WHERE m.deleted_at IS NULL)                                                     AS total_count,
+                   COUNT(*) FILTER (WHERE m.deleted_at IS NULL
+                                      AND (refs.last_read_at IS NULL OR m.created_at <= refs.last_read_at)) AS read_count
+                 FROM (SELECT unnest($1::uuid[]) AS channel_id,
+                              unnest($2::timestamptz[]) AS last_read_at) AS refs
+                 LEFT JOIN messages m ON m.channel_id = refs.channel_id
+                 GROUP BY refs.channel_id`,
+                [channelIds, lastReadAts]
+              );
+
+              const countMap = new Map<string, { total: number; read: number }>(
+                countRows.map(r => [r.channel_id, { total: parseInt(r.total_count, 10), read: parseInt(r.read_count, 10) }])
+              );
+
+              const initPipeline = redis.pipeline();
+              for (const ch of missingChannels) {
+                const counts = countMap.get(ch.id) || { total: 0, read: 0 };
+                initPipeline.set(`channel:msg_count:${ch.id}`, counts.total, 'NX');
+                initPipeline.set(`user:last_read_count:${ch.id}:${userId}`, counts.read, 'NX');
+                ch.unread_message_count = Math.max(0, counts.total - counts.read);
+              }
+              await initPipeline.exec();
+            }
+          } catch (err) {
+            logger.warn({ err }, 'Failed to fetch unread counts from Redis; defaulting to 0');
+            for (const ch of accessibleRows) {
+              if (ch.unread_message_count === undefined) ch.unread_message_count = 0;
+            }
+          }
+        }
+
+        const response = { channels: rows };
+        redis.set(cacheKey, JSON.stringify(response), 'EX', CHANNELS_LIST_CACHE_TTL_SECS).catch(() => {});
+        return { ok: true, body: response };
+      })();
+
+      channelsListInflight.set(cacheKey, promise);
+      promise.finally(() => channelsListInflight.delete(cacheKey));
+
+      const result = await promise;
+      if (!result.ok) {
+        return res.status(403).json({ error: 'Not a community member' });
+      }
+      return res.json(result.body);
     } catch (err) { next(err); }
   }
 );

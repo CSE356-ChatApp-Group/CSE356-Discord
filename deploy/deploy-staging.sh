@@ -17,33 +17,56 @@ LIVE_PORT=4000
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUTOVER_COMPLETED=0
 
-# Auto-detect CPU count on the target host and derive CHATAPP_INSTANCES.
-# Clamped to [1, 4]: beyond 4 workers there is no measurable benefit on
-# typical staging CPUs, and PG/Redis lock contention grows with workers.
+# Remote VM shape (used for Postgres / PgBouncer — independent of HTTP worker count).
+_REMOTE_NPROC=$(ssh "${STAGING_USER}@${STAGING_HOST}" 'nproc --all' 2>/dev/null || echo 2)
+
+# HTTP workers: staging nginx + systemd only ever load-balance **two** fixed ports
+# (4000 + 4001).  Do **not** use nproc as CHATAPP_INSTANCES — that made pool math
+# assume 3–4 Node processes while only 2 were running, starving each worker.
+# Override CHATAPP_INSTANCES=1 for single-worker staging if desired.
 if [[ -z "${CHATAPP_INSTANCES+x}" ]]; then
-  _REMOTE_NPROC=$(ssh "${STAGING_USER}@${STAGING_HOST}" 'nproc --all' 2>/dev/null || echo 2)
-  CHATAPP_INSTANCES=$(python3 -c "n=int('${_REMOTE_NPROC}'); print(min(max(n,1),4))")
+  CHATAPP_INSTANCES=$(python3 -c "n=int('${_REMOTE_NPROC}'); print(2 if n >= 2 else 1)")
 fi
-# PG connection sizing — maintain a 2.5:1 virtual→real ratio for all CPU counts.
-#
-# Formula (validated against load tests):
-#   PGBOUNCER_POOL_SIZE = min(instances × 50, 120)  ← real PG backends, capped
-#                                                     by max_connections=120 budget
-#   PG_POOL_MAX_PER_INSTANCE = PGBOUNCER × 2.5 / instances  ← Node pool depth
-#
-# Results per CPU count:
-#   1 CPU:  pgb=50,  pool/inst=125 → capped 100  :  50 real = 2.0:1
-#   2 CPUs: pgb=100, pool/inst=100 → 200 virtual : 100 real = 2.0:1  (target)
-#   3 CPUs: pgb=120, pool/inst=100 → 300 virtual : 120 real = 2.5:1
-#   4 CPUs: pgb=120, pool/inst=75  → 300 virtual : 120 real = 2.5:1
-#
-# Fewer pool slots per instance = deeper Node-level checkout queue = slower p95.
-# This formula keeps per-instance depth constant relative to real PG bandwidth.
-# PgBouncer pool_size: min(instances×50, 120) real PG backends.
-# Raised from ×40/cap90 → ×50/cap120 to reduce PgBouncer queue depth under burst.
-# PG max_connections must be ≥ pool_size + 3 reserved; set to 120 to match.
-_PGB_SIZE=$(python3 -c "print(min(${CHATAPP_INSTANCES} * 50, 120))")
-PG_POOL_MAX_PER_INSTANCE=$(python3 -c "print(max(25, min(100, int(${_PGB_SIZE} * 5 // (${CHATAPP_INSTANCES} * 2)))))") # 2.5:1 = ×5÷(n×2)
+
+# PgBouncer **real** backends: scale with VM vCPUs so larger instances get more
+# throughput without hand-editing .env.  Cap keeps shared_buffers / RAM sane.
+# Typical virtual→real multiplexing ~2–3:1 from Node pools in transaction mode.
+_PGB_SIZE=$(python3 -c "
+ncpu = int('${_REMOTE_NPROC}')
+inst = int('${CHATAPP_INSTANCES}')
+x = max(60, min(320, ncpu * 45, 80 + inst * 40))
+print(x)
+")
+
+# Per-Node pool max (virtual connections to PgBouncer): ~2.5:1 vs real backends.
+PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
+p = int('${_PGB_SIZE}')
+inst = max(1, int('${CHATAPP_INSTANCES}'))
+print(max(25, min(140, (p * 5) // (inst * 2))))
+")
+
+# Circuit queue + Postgres max_connections (deploy writes these — no manual vars).
+POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
+pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
+inst = max(1, int('${CHATAPP_INSTANCES}'))
+print(max(64, min(900, pmi * 4 + inst * 80)))
+")
+PG_MAX_CONNECTIONS=$(python3 -c "
+b = int('${_PGB_SIZE}')
+print(max(120, min(450, b + 60)))
+")
+
+# Parallel fanout workers per instance — cheap headroom on larger CPUs.
+FANOUT_QUEUE_CONCURRENCY=$(python3 -c "
+n = int('${_REMOTE_NPROC}')
+print(min(12, max(2, (n + 1) // 2 + 1)))
+")
+
+# bcrypt compare concurrency (staging uses lower BCRYPT_ROUNDS — still cap CPU).
+BCRYPT_MAX_CONCURRENT=$(python3 -c "
+n = int('${_REMOTE_NPROC}')
+print(min(32, max(8, n * 4)))
+")
 # libuv thread pool per instance: minimum 8 threads to prevent bcrypt/dns starvation.
 # With 2 instances on a 2-vCPU host: 8 threads/instance = 16 total.
 # The previous formula (8/instances) gave only 4 threads with 2 instances,
@@ -62,6 +85,8 @@ _REMOTE_RAM_MB=$(ssh "${STAGING_USER}@${STAGING_HOST}" "awk '/MemTotal/{printf \
 NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
+echo "  VM vCPUs: ${_REMOTE_NPROC}  HTTP workers: ${CHATAPP_INSTANCES}  pgbouncer_pool: ${_PGB_SIZE}  pg_max_conn: ${PG_MAX_CONNECTIONS}"
+echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: ${POOL_CIRCUIT_BREAKER_QUEUE}  fanout_conc: ${FANOUT_QUEUE_CONCURRENCY}"
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
 
 CURRENT_UPSTREAM_PORT=$(ssh "${STAGING_USER}@${STAGING_HOST}" "grep -oE '127\.0\.0\.1:[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
@@ -208,17 +233,17 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   # Formulas (standard pg_tune approach — idempotent SHOW+ALTER):
   #   shared_buffers      = 25% RAM
   #   effective_cache_size = 75% RAM  (planner hint, no allocation)
-  #   work_mem            = RAM / max_connections / 3 (capped 16-64 MB)
+  #   work_mem            = derived from RAM / max_connections (capped)
   #   wal_buffers         = 64 MB
-  #   max_connections     = 120   (headroom for pool_size=100 + 3 superuser reserved)
+  #   max_connections     = PG_MAX_CONNECTIONS (from deploy host — scales with VM)
   #
-  # Scaling: all values are derived from detected RAM/CPU so they auto-adjust
-  # when this script runs on a larger VM (4-CPU, 16 GB, etc.)
+  # Scaling: RAM/CPU/max_connections co-vary so larger VMs pick up capacity automatically.
+  PG_MAX_CONNECTIONS='${PG_MAX_CONNECTIONS}'
   SHB_MB=\$(( TOTAL_RAM_MB * 25 / 100 ))
   ECF_MB=\$(( TOTAL_RAM_MB * 75 / 100 ))
-  WRK_MB=\$(python3 -c \"m=max(16, min(64, \${TOTAL_RAM_MB} // 300)); print(m)\")
+  WRK_MB=\$(python3 -c \"import math; ram=\${TOTAL_RAM_MB}; mc=int('\${PG_MAX_CONNECTIONS}'); print(max(4, min(64, ram // max(mc * 4, 1))))\")
 
-  echo \"RAM=\${TOTAL_RAM_MB}MB nCPU=\${NCPU} → shared_buffers=\${SHB_MB}MB work_mem=\${WRK_MB}MB\"
+  echo \"RAM=\${TOTAL_RAM_MB}MB nCPU=\${NCPU} max_conn=\${PG_MAX_CONNECTIONS} → shared_buffers=\${SHB_MB}MB work_mem=\${WRK_MB}MB\"
 
   # Enable pg_stat_statements via ALTER SYSTEM (idempotent, no sed quoting risk).
   # ALTER SYSTEM writes to postgresql.auto.conf which takes precedence over
@@ -234,7 +259,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     -c \"ALTER SYSTEM SET effective_cache_size   = '\${ECF_MB}MB';\" \
     -c \"ALTER SYSTEM SET work_mem               = '\${WRK_MB}MB';\" \
     -c \"ALTER SYSTEM SET wal_buffers            = '64MB';\" \
-    -c \"ALTER SYSTEM SET max_connections        = 120;\" \\
+    -c \"ALTER SYSTEM SET max_connections        = \${PG_MAX_CONNECTIONS};\" \\
     -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
     -c \"ALTER SYSTEM SET pg_stat_statements.track = 'all';\" \
@@ -304,15 +329,13 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # POOL_CIRCUIT_BREAKER_QUEUE: number of requests allowed to wait for a pool
-  # connection before we start returning 503. Raised to 400 so burst traffic is
-  # buffered (messages succeed with latency) rather than failed immediately.
-  # PG_CONNECTION_TIMEOUT_MS=10000 gives each queued request up to 10s to get a
-  # connection before timing out — long enough for the pool to drain under
-  # normal burst conditions while still bounding worst-case wait time.
+  # POOL_CIRCUIT_BREAKER_QUEUE: scales with PG_POOL_MAX (see header formulas).
   sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=400/' /opt/chatapp/shared/.env \
-    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=400' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}/' /opt/chatapp/shared/.env \
+    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^BCRYPT_MAX_CONCURRENT=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^BCRYPT_MAX_CONCURRENT=.*/BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}/' /opt/chatapp/shared/.env \
+    || echo 'BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
     || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -322,12 +345,9 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=.*/SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=1/' /opt/chatapp/shared/.env \
     || echo 'SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=1' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # FANOUT_QUEUE_CONCURRENCY: parallel fanout:critical workers per instance.
-  # 4 concurrent fanout jobs on staging (2-vCPU, 2 instances) — allows bursting
-  # through queued publishes without serialising on a single worker.
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=4/' /opt/chatapp/shared/.env \
-    || echo 'FANOUT_QUEUE_CONCURRENCY=4' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
+    || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer interferes.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
