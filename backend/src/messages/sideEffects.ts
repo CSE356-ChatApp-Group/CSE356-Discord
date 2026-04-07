@@ -176,7 +176,7 @@ function deleteAttachmentObjects(storageKeys: string[]) {
 }
 
 function getQueueDepth() {
-  return queues['fanout:critical'].length + queues['fanout:background'].length + queues.search.length;
+  return queues['fanout:critical'].length + queues['fanout:background'].length;
 }
 
 module.exports = {
