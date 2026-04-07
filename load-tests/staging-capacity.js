@@ -2,7 +2,27 @@ import http from 'k6/http';
 import ws from 'k6/ws';
 import { check, sleep } from 'k6';
 import exec from 'k6/execution';
-import { Rate, Trend } from 'k6/metrics';
+import { Counter, Rate, Trend } from 'k6/metrics';
+
+/** Classify HTTP responses so reports can separate timeouts vs 503 (shed / pool) vs other errors. */
+const httpResStatus0 = new Counter('http_res_status_0_total');
+const httpResStatus503 = new Counter('http_res_status_503_total');
+const httpResStatus4xx = new Counter('http_res_status_4xx_total');
+const httpResStatus5xxOther = new Counter('http_res_status_5xx_other_total');
+const httpErrorByEndpoint = new Counter('http_error_by_endpoint_total');
+
+function recordHttpStatus(res, endpoint = 'unknown') {
+  if (!res) return;
+  const s = res.status;
+  if (s === 0) httpResStatus0.add(1);
+  else if (s === 503) httpResStatus503.add(1);
+  else if (s >= 400 && s < 500) httpResStatus4xx.add(1);
+  else if (s >= 500 && s !== 503) httpResStatus5xxOther.add(1);
+  if (s === 0 || s >= 400) {
+    const statusClass = s === 0 ? '0xx' : `${Math.floor(s / 100)}xx`;
+    httpErrorByEndpoint.add(1, { endpoint, status: String(s), status_class: statusClass });
+  }
+}
 
 const BASE_URL = (__ENV.BASE_URL || 'http://136.114.103.71/api/v1').replace(/\/$/, '');
 const WS_URL = (__ENV.WS_URL || BASE_URL.replace(/^http/, 'ws').replace(/\/api\/v1$/, '/ws')).replace(/\/$/, '');
@@ -185,6 +205,7 @@ function registerOrLogin(label) {
     JSON.stringify(creds),
     jsonParams(null, { endpoint: 'auth_register' }, true),
   );
+  recordHttpStatus(registerRes, 'auth_register');
 
   if (registerRes.status !== 201 && registerRes.status !== 409) {
     throw new Error(`register failed for ${label}: ${registerRes.status} ${registerRes.body}`);
@@ -196,6 +217,7 @@ function registerOrLogin(label) {
     JSON.stringify({ email: creds.email, password: creds.password }),
     jsonParams(null, { endpoint: 'auth_login' }, true),
   );
+  recordHttpStatus(loginRes, 'auth_login');
   authLoginDuration.add(Date.now() - startedAt);
 
   const body = safeJson(loginRes);
@@ -218,7 +240,7 @@ function registerOrLogin(label) {
 // Returns [{token, userId, email}] in the same order as credsList.
 function batchCreateUsers(credsList) {
   // Batch register — 409 (already exists) is fine for idempotent reruns.
-  http.batch(
+  const registerResponses = http.batch(
     credsList.map((creds) => ({
       method: 'POST',
       url: `${BASE_URL}/auth/register`,
@@ -226,6 +248,7 @@ function batchCreateUsers(credsList) {
       params: jsonParams(null, { endpoint: 'auth_register' }, true),
     })),
   );
+  for (const res of registerResponses) recordHttpStatus(res, 'auth_register');
   const loginResponses = http.batch(
     credsList.map((creds) => ({
       method: 'POST',
@@ -234,6 +257,7 @@ function batchCreateUsers(credsList) {
       params: jsonParams(null, { endpoint: 'auth_login' }, true),
     })),
   );
+  for (const res of loginResponses) recordHttpStatus(res, 'auth_login');
   return loginResponses.map((res, i) => {
     const body = safeJson(res);
     if (!body || !body.accessToken) {
@@ -267,6 +291,7 @@ export function setup() {
     JSON.stringify({ slug: communitySlug, name: `Capacity ${RUN_ID}`.slice(0, 100), description: 'staging capacity run' }),
     jsonParams(owner.token, { endpoint: 'communities_create' }, true),
   );
+  recordHttpStatus(communityRes, 'communities_create');
   if (communityRes.status !== 201) {
     throw new Error(`community create failed: ${communityRes.status} ${communityRes.body}`);
   }
@@ -274,7 +299,7 @@ export function setup() {
 
   // Batch-join peer + all readers so their GET /communities responses are
   // non-empty, making the cached payload realistic.
-  http.batch(
+  const joinResponses = http.batch(
     [peer.token, ...readerPool.map((r) => r.token)].map((token) => ({
       method: 'POST',
       url: `${BASE_URL}/communities/${communityId}/join`,
@@ -282,6 +307,7 @@ export function setup() {
       params: jsonParams(token, { endpoint: 'communities_join' }),
     })),
   );
+  for (const res of joinResponses) recordHttpStatus(res, 'communities_join');
 
   const channelName = `cap-${RUN_ID}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 28);
   const channelRes = http.post(
@@ -289,6 +315,7 @@ export function setup() {
     JSON.stringify({ communityId, name: channelName, isPrivate: false, description: 'capacity load channel' }),
     jsonParams(owner.token, { endpoint: 'channels_create' }, true),
   );
+  recordHttpStatus(channelRes, 'channels_create');
   if (channelRes.status !== 201) {
     throw new Error(`channel create failed: ${channelRes.status} ${channelRes.body}`);
   }
@@ -299,6 +326,7 @@ export function setup() {
     JSON.stringify({ participantIds: [peer.userId] }),
     jsonParams(owner.token, { endpoint: 'conversations_create' }, true),
   );
+  recordHttpStatus(conversationRes, 'conversations_create');
   if (conversationRes.status !== 201) {
     throw new Error(`conversation create failed: ${conversationRes.status} ${conversationRes.body}`);
   }
@@ -324,6 +352,7 @@ function randomContent(label) {
 
 function listCommunities(token) {
   const res = http.get(`${BASE_URL}/communities`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'communities_list' } });
+  recordHttpStatus(res, 'communities_list');
   communitiesDuration.add(res.timings.duration);
   const ok = check(res, { 'communities list 200': (r) => r.status === 200 });
   checksRate.add(ok);
@@ -331,6 +360,7 @@ function listCommunities(token) {
 
 function listConversations(token) {
   const res = http.get(`${BASE_URL}/conversations`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'conversations_list' } });
+  recordHttpStatus(res, 'conversations_list');
   conversationsDuration.add(res.timings.duration);
   const ok = check(res, { 'conversations list 200': (r) => r.status === 200 });
   checksRate.add(ok);
@@ -338,6 +368,7 @@ function listConversations(token) {
 
 function listMessages(token, channelId) {
   const res = http.get(`${BASE_URL}/messages?channelId=${channelId}`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'messages_list_channel' } });
+  recordHttpStatus(res, 'messages_list_channel');
   channelListDuration.add(res.timings.duration);
   const ok = check(res, { 'channel message list 200': (r) => r.status === 200 });
   checksRate.add(ok);
@@ -345,6 +376,7 @@ function listMessages(token, channelId) {
 
 function listChannels(token, communityId) {
   const res = http.get(`${BASE_URL}/channels?communityId=${communityId}`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'channels_list' } });
+  recordHttpStatus(res, 'channels_list');
   channelsDuration.add(res.timings.duration);
   const ok = check(res, { 'channels list 200': (r) => r.status === 200 });
   checksRate.add(ok);
@@ -356,6 +388,7 @@ function sendChannelMessage(token, channelId) {
     JSON.stringify({ channelId, content: randomContent('channel') }),
     jsonParams(token, { endpoint: 'messages_post_channel' }),
   );
+  recordHttpStatus(res, 'messages_post_channel');
   messagePostDuration.add(res.timings.duration);
   const ok = check(res, { 'channel message post 201': (r) => r.status === 201 });
   checksRate.add(ok);
@@ -367,6 +400,7 @@ function sendConversationMessage(token, conversationId) {
     JSON.stringify({ conversationId, content: randomContent('conversation') }),
     jsonParams(token, { endpoint: 'messages_post_conversation' }),
   );
+  recordHttpStatus(res, 'messages_post_conversation');
   messagePostDuration.add(res.timings.duration);
   const ok = check(res, { 'conversation message post 201': (r) => r.status === 201 });
   checksRate.add(ok);
@@ -378,6 +412,7 @@ function reauthenticate(email) {
     JSON.stringify({ email, password: PASSWORD }),
     jsonParams(null, { endpoint: 'auth_login' }),
   );
+  recordHttpStatus(res, 'auth_login');
   authLoginDuration.add(res.timings.duration);
   const ok = check(res, { 'auth login 200': (r) => r.status === 200 });
   checksRate.add(ok);
@@ -418,11 +453,12 @@ export function httpMix(data) {
 // GET /communities CTE query (it scans ALL public communities).
 export function teardown(data) {
   if (!data || !data.communityId || !data.ownerToken) return;
-  http.del(
+  const delRes = http.del(
     `${BASE_URL}/communities/${data.communityId}`,
     null,
     { headers: { Authorization: `Bearer ${data.ownerToken}` } },
   );
+  recordHttpStatus(delRes, 'communities_delete');
 }
 
 export function presenceSocketStorm(data) {

@@ -33,7 +33,7 @@ const app = express();
 app.set('trust proxy', 1);
 const { register, httpRequestsTotal, httpRequestDurationMs, httpOverloadShedTotal } = require('./utils/metrics');
 
-// Fail fast when the event loop is severely backed up (see overload.shouldShedIncomingRequests).
+// Optional fail-fast when event-loop lag is extreme (OVERLOAD_HTTP_SHED_ENABLED=true).
 app.use((req, res, next) => {
   const pathOnly = (req.path || '').split('?')[0];
   if (pathOnly === '/health' || pathOnly === '/metrics') return next();

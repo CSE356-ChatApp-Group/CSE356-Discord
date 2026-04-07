@@ -53,15 +53,36 @@ function promScalar(snapshot, key, emptyValue = null) {
   return Number.isFinite(parsed) ? parsed : emptyValue;
 }
 
-// Stream metrics.ndjson and bucket http_req_failed + http_req_duration into
-// 30 s windows. Each request emits exactly one Point for each metric, so counts
-// stay in sync. Streaming avoids loading the full 200+ MB file into memory.
-async function buildTimeline(ndjsonPath) {
+function readMetadata(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const entries = raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const idx = line.indexOf('=');
+        if (idx <= 0) return null;
+        return [line.slice(0, idx), line.slice(idx + 1)];
+      })
+      .filter(Boolean);
+    return Object.fromEntries(entries);
+  } catch {
+    return null;
+  }
+}
+
+// Stream metrics.ndjson once and derive timeline + failure attribution.
+async function analyzeNdjson(ndjsonPath) {
   if (!fs.existsSync(ndjsonPath)) return null;
   let startTime = null;
   const buckets = new Map();
+  const endpointErrorCounts = new Map();
+  const errorStatusCounts = { s0: 0, s503: 0, s4xx: 0, s5xxOther: 0 };
   const getBucket = (idx) => {
-    if (!buckets.has(idx)) buckets.set(idx, { count: 0, fails: 0, durations: [] });
+    if (!buckets.has(idx)) {
+      buckets.set(idx, { count: 0, fails: 0, durations: [], s503: 0, s0: 0 });
+    }
     return buckets.get(idx);
   };
   const rl = createInterface({ input: fs.createReadStream(ndjsonPath), crlfDelay: Infinity });
@@ -80,13 +101,26 @@ async function buildTimeline(ndjsonPath) {
       if (obj.data.value > 0) bucket.fails++;
     } else if (obj.metric === 'http_req_duration') {
       bucket.durations.push(obj.data.value);
+    } else if (obj.metric === 'http_res_status_503_total') {
+      bucket.s503++;
+      errorStatusCounts.s503++;
+    } else if (obj.metric === 'http_res_status_0_total') {
+      bucket.s0++;
+      errorStatusCounts.s0++;
+    } else if (obj.metric === 'http_res_status_4xx_total') {
+      errorStatusCounts.s4xx++;
+    } else if (obj.metric === 'http_res_status_5xx_other_total') {
+      errorStatusCounts.s5xxOther++;
+    } else if (obj.metric === 'http_error_by_endpoint_total') {
+      const endpoint = obj.data?.tags?.endpoint || 'unknown';
+      endpointErrorCounts.set(endpoint, (endpointErrorCounts.get(endpoint) || 0) + 1);
     }
   }
   if (buckets.size === 0) return null;
   const maxBucket = Math.max(...buckets.keys());
   const rows = [];
   for (let i = 0; i <= maxBucket; i++) {
-    const b = buckets.get(i) ?? { count: 0, fails: 0, durations: [] };
+    const b = buckets.get(i) ?? { count: 0, fails: 0, durations: [], s503: 0, s0: 0 };
     const mins = Math.floor((i * 30) / 60);
     const secs = (i * 30) % 60;
     const elapsed = `${String(mins).padStart(2, '0')}m${String(secs).padStart(2, '0')}s`;
@@ -94,14 +128,18 @@ async function buildTimeline(ndjsonPath) {
     const sorted = b.durations.sort((a, c) => a - c);
     const p50 = sorted.length > 0 ? sorted[Math.floor(sorted.length * 0.50)] : null;
     const p95 = sorted.length > 0 ? sorted[Math.floor(sorted.length * 0.95)] : null;
-    rows.push({ elapsed, count: b.count, fails: b.fails, failRate, p50, p95 });
+    rows.push({ elapsed, count: b.count, fails: b.fails, failRate, p50, p95, s503: b.s503, s0: b.s0 });
   }
-  return rows;
+  const endpointErrors = [...endpointErrorCounts.entries()]
+    .map(([endpoint, count]) => ({ endpoint, count }))
+    .sort((a, b) => b.count - a.count);
+  return { timeline: rows, endpointErrors, errorStatusCounts };
 }
 
 const summary = readJson(path.join(runDir, 'summary.json'));
 const before = readJson(path.join(runDir, 'prometheus-before.json'));
 const after = readJson(path.join(runDir, 'prometheus-after.json'));
+const metadata = readMetadata(path.join(runDir, 'metadata.txt'));
 
 const lines = [];
 lines.push('# Staging capacity report');
@@ -109,6 +147,13 @@ lines.push('');
 lines.push(`- Run directory: \`${runDir}\``);
 lines.push(`- k6 exit code: \`${exitCode}\``);
 lines.push(`- Outcome: ${exitCode === 0 ? 'thresholds held for the selected profile' : 'thresholds were breached or the system began failing under load'}`);
+if (metadata) {
+  lines.push(`- Profile: \`${metadata.profile || 'n/a'}\` / Git SHA: \`${metadata.git_sha || 'n/a'}\``);
+  lines.push(`- Base URL: \`${metadata.base_url || 'n/a'}\``);
+  lines.push(
+    `- Shed enabled: \`${metadata.overload_http_shed_enabled || 'n/a'}\` (lag ms: \`${metadata.overload_lag_shed_ms || 'n/a'}\`), pool queue: \`${metadata.pool_circuit_breaker_queue || 'n/a'}\``,
+  );
+}
 lines.push('');
 lines.push('## k6 summary');
 lines.push('');
@@ -121,9 +166,19 @@ lines.push(`- Conversations p95: ${fmt(metric(summary, 'conversations_req_durati
 lines.push(`- Channels p95: ${fmt(metric(summary, 'channels_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Message post p95: ${fmt(metric(summary, 'message_post_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Auth login p95: ${fmt(metric(summary, 'auth_login_req_duration', 'p(95)'), ' ms')}`);
-lines.push(`- WebSocket success rate: ${fmt((metric(summary, 'ws_connect_success', 'rate') ?? metric(summary, 'ws_connect_success', 'value') ?? 0) * 100, '%')}`);
-lines.push('');
-lines.push('## Prometheus after-run snapshot');
+  lines.push(`- WebSocket success rate: ${fmt((metric(summary, 'ws_connect_success', 'rate') ?? metric(summary, 'ws_connect_success', 'value') ?? 0) * 100, '%')}`);
+  lines.push('');
+  lines.push('## HTTP response shape (k6 counters)');
+  lines.push('');
+  lines.push(
+    'Counts **instrumented responses** (status 0 = timeout / no response; 503 = overload shed, pool circuit, or upstream; 4xx/5xx-other = remaining errors).',
+  );
+  lines.push(`- Status **0**: ${fmt(metric(summary, 'http_res_status_0_total', 'count'))}`);
+  lines.push(`- Status **503**: ${fmt(metric(summary, 'http_res_status_503_total', 'count'))}`);
+  lines.push(`- Status **4xx**: ${fmt(metric(summary, 'http_res_status_4xx_total', 'count'))}`);
+  lines.push(`- Status **5xx (not 503)**: ${fmt(metric(summary, 'http_res_status_5xx_other_total', 'count'))}`);
+  lines.push('');
+  lines.push('## Prometheus after-run snapshot');
 lines.push('');
 lines.push(`- RSS memory: ${fmt(promScalar(after, 'rss_mb'), ' MB')}`);
 lines.push(`- CPU utilisation (post-run ~2 m avg): ${fmt((promScalar(after, 'cpu_seconds_rate') ?? 0) * 100, '%')} — use peak below for accurate burst figure`);
@@ -139,6 +194,8 @@ if (cpuByInstance.length > 1) {
 lines.push(`- Event loop p99 (post-run): ${fmt(promScalar(after, 'eventloop_p99_ms'), ' ms')}`);
 lines.push(`- Event loop p99 peak: ${fmt(promScalar(after, 'eventloop_peak_ms'), ' ms')}`);
 lines.push(`- 5xx rate: ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
+lines.push(`- HTTP overload shed total (cumulative counter): ${fmt(promScalar(after, 'overload_shed_total'))}`);
+lines.push(`- Overload stage max (0–3, post-run instant): ${fmt(promScalar(after, 'overload_stage_max'))}`);
 lines.push(`- PG pool peak-total/min-idle/peak-waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
 lines.push(`- Redis memory: ${fmt(promScalar(after, 'redis_memory_mb'), ' MB')} / connected clients: ${fmt(promScalar(after, 'redis_connected_clients'))}`); 
 
@@ -162,16 +219,41 @@ if (routeP95.length) {
   lines.push('');
 }
 
-const timeline = await buildTimeline(path.join(runDir, 'metrics.ndjson'));
+const ndjsonAnalysis = await analyzeNdjson(path.join(runDir, 'metrics.ndjson'));
+if (ndjsonAnalysis?.endpointErrors?.length) {
+  lines.push('## Top failing endpoints (k6)');
+  lines.push('');
+  for (const item of ndjsonAnalysis.endpointErrors.slice(0, 8)) {
+    lines.push(`- ${item.endpoint}: ${fmt(item.count)} errors`);
+  }
+  lines.push('');
+}
+
+if (ndjsonAnalysis?.errorStatusCounts) {
+  const breakdown = ndjsonAnalysis.errorStatusCounts;
+  const totalErrors = breakdown.s0 + breakdown.s503 + breakdown.s4xx + breakdown.s5xxOther;
+  if (totalErrors > 0) {
+    const pct = (n) => `${((n / totalErrors) * 100).toFixed(1)}%`;
+    lines.push('## Error composition (k6)');
+    lines.push('');
+    lines.push(`- Status 0 (timeout / no response): ${fmt(breakdown.s0)} (${pct(breakdown.s0)})`);
+    lines.push(`- Status 503: ${fmt(breakdown.s503)} (${pct(breakdown.s503)})`);
+    lines.push(`- Status 4xx: ${fmt(breakdown.s4xx)} (${pct(breakdown.s4xx)})`);
+    lines.push(`- Status 5xx (not 503): ${fmt(breakdown.s5xxOther)} (${pct(breakdown.s5xxOther)})`);
+    lines.push('');
+  }
+}
+
+const timeline = ndjsonAnalysis?.timeline;
 if (timeline && timeline.length > 0) {
   lines.push('## Request timeline (30 s buckets)');
   lines.push('');
-  lines.push('| elapsed | reqs | fails | fail% | p50 ms | p95 ms |');
-  lines.push('|---------|------|-------|-------|--------|--------|');
+  lines.push('| elapsed | reqs | fails | fail% | p50 ms | p95 ms | 503 | 0 |');
+  lines.push('|---------|------|-------|-------|--------|--------|-----|---|');
   for (const row of timeline) {
     const mark = row.failRate >= 5 ? ' ⚠' : '';
     lines.push(
-      `| ${row.elapsed} | ${row.count} | ${row.fails} | ${row.failRate.toFixed(1)}%${mark} | ${fmt(row.p50)} | ${fmt(row.p95)} |`,
+      `| ${row.elapsed} | ${row.count} | ${row.fails} | ${row.failRate.toFixed(1)}%${mark} | ${fmt(row.p50)} | ${fmt(row.p95)} | ${fmt(row.s503)} | ${fmt(row.s0)} |`,
     );
   }
   lines.push('');

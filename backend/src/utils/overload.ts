@@ -12,8 +12,8 @@ lag.enable();
  *
  * ~2 GiB RAM / 1 vCPU — enter degradation before RSS crowds out the kernel /
  *   co-located Redis: e.g. OVERLOAD_RSS_WARN_MB=384, OVERLOAD_RSS_HIGH_MB=512,
- *   OVERLOAD_RSS_CRITICAL_MB=768; optionally tighten shedding with
- *   OVERLOAD_LAG_SHED_MS=150.
+ *   OVERLOAD_RSS_CRITICAL_MB=768.  HTTP-level shedding is opt-in
+ *   (OVERLOAD_HTTP_SHED_ENABLED=true); stage-based throttling still applies first.
  *
  * ~8 GiB RAM / 2 vCPU (typical staging) — built-in RSS defaults (900 / 1300 /
  *   1700 MB) match a Node-only process; lower WARN if the API shares the host
@@ -101,12 +101,18 @@ function shouldRestrictNonEssentialWrites() {
 }
 
 /**
- * shouldShedIncomingRequests – returns true when the event loop p99 lag
- * exceeds OVERLOAD_LAG_SHED_MS (default 300 ms).  At this point the server
- * is severely saturated; returning 503 immediately is better than queuing
- * requests for 30+ seconds until k6 / browser timeouts fire.
+ * shouldShedIncomingRequests – when OVERLOAD_HTTP_SHED_ENABLED=true, returns true
+ * if event-loop p99 lag exceeds OVERLOAD_LAG_SHED_MS (default 300 ms).  Responds
+ * with 503 + Retry-After so clients fail fast instead of waiting on the Node
+ * queue until timeouts.
+ *
+ * **Default is off:** the app lets the event loop and PG pool queues absorb
+ * load (higher tail latency, fewer artificial 503s). Enable shedding only on
+ * instances where you prefer fast errors over long waits (e.g. public APIs
+ * behind retries).
  */
 function shouldShedIncomingRequests() {
+  if (process.env.OVERLOAD_HTTP_SHED_ENABLED !== 'true') return false;
   const lagP99Ms = Math.round(lag.percentile(99) / 1e6);
   return lagP99Ms >= getThreshold('OVERLOAD_LAG_SHED_MS', 300);
 }

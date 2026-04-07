@@ -23,6 +23,8 @@ output_file, ssh_host, prom_url = sys.argv[1:4]
 queries = {
     "route_p95_top": 'sort_desc(histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api"}[5m]))))',
     "five_xx_rate": 'sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[5m]))',
+    "overload_shed_total": 'sum(http_overload_shed_total{job="chatapp-api"})',
+    "overload_stage_max": 'max(chatapp_overload_stage{job="chatapp-api"})',
     "rss_mb": 'max(process_resident_memory_bytes{job="chatapp-api"}) / 1024 / 1024',
     # cpu_seconds_rate: instantaneous rate at snapshot time (post-run, reflects cooldown — not peak).
     # cpu_peak_rate: max 1-minute rate seen during the last 12 minutes — captures burst during the test.
