@@ -13,7 +13,9 @@ PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 python3 - "$OUTPUT_FILE" "$SSH_HOST" "$PROM_URL" <<'PY'
+import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -21,6 +23,40 @@ import urllib.parse
 from datetime import datetime, timezone
 
 output_file, ssh_host, prom_url = sys.argv[1:4]
+
+# One new TCP connection per Prometheus query (×2 snapshots per load test) can trigger
+# sshd MaxStartups / fail2ban / rate limits ("Connection reset" during kex). Reuse one
+# connection via OpenSSH multiplexing for all queries in this process.
+_ssh_dir = os.path.expanduser('~/.ssh')
+os.makedirs(_ssh_dir, mode=0o700, exist_ok=True)
+_ssh_sock = os.path.join(
+    _ssh_dir,
+    'cm-chatapp-prom-' + hashlib.sha256(ssh_host.encode()).hexdigest()[:20],
+)
+_ssh_base = [
+    '-T',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'ConnectTimeout=15',
+    '-o',
+    'StrictHostKeyChecking=no',
+    '-o',
+    'ControlMaster=auto',
+    '-o',
+    f'ControlPath={_ssh_sock}',
+    '-o',
+    'ControlPersist=120',
+]
+
+def _ssh_mux_teardown():
+    subprocess.run(
+        ['ssh', *_ssh_base, '-O', 'exit', ssh_host],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+    )
+
 queries = {
     "route_p95_top": 'sort_desc(histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api"}[5m]))))',
     "five_xx_rate": 'sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[5m]))',
@@ -59,7 +95,8 @@ queries = {
 def run_query(name, query, retries=2):
     encoded = urllib.parse.quote(query, safe='')
     cmd = [
-        'ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'StrictHostKeyChecking=no',
+        'ssh',
+        *_ssh_base,
         ssh_host,
         f"curl -fsS --connect-timeout 8 --max-time 25 '{prom_url}/api/v1/query?query={encoded}'",
     ]
@@ -78,8 +115,15 @@ payload = {
     "capturedAt": datetime.now(timezone.utc).isoformat(),
     "sshHost": ssh_host,
     "prometheusUrl": prom_url,
-    "queries": {name: run_query(name, query) for name, query in queries.items()},
+    "queries": {},
 }
+try:
+    for qname, qexpr in queries.items():
+        payload['queries'][qname] = run_query(qname, qexpr)
+        # Tiny gap so multiplexed sessions are not confused with flood traffic on fragile hosts.
+        time.sleep(0.02)
+finally:
+    _ssh_mux_teardown()
 
 with open(output_file, 'w', encoding='utf-8') as fh:
     json.dump(payload, fh, indent=2)
