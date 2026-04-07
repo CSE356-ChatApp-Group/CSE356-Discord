@@ -119,12 +119,11 @@ echo "2b) Installing and configuring PgBouncer..."
 scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:/tmp/pgbouncer-setup.py"
 ssh "$PROD_USER@$PROD_HOST" "
   set -euo pipefail
-  export PGBOUNCER_POOL_SIZE=${_PGB_SIZE}
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
     sudo apt-get install -y pgbouncer
     echo 'PgBouncer installed.'
   fi
-  sudo python3 /tmp/pgbouncer-setup.py
+  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 /tmp/pgbouncer-setup.py
   sudo systemctl enable pgbouncer
   sudo service pgbouncer stop 2>/dev/null || true
   sudo pkill -x pgbouncer 2>/dev/null || true

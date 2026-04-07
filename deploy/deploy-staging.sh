@@ -199,13 +199,13 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   # Pass the pre-computed pool size so pgbouncer-setup.py uses exactly the
   # value derived from CHATAPP_INSTANCES, not the fallback nCPU*40 formula.
-  export PGBOUNCER_POOL_SIZE=${_PGB_SIZE}
+  # sudo strips exported env — pass pool size inline so VM-aware sizing applies.
   # Install PgBouncer if not already present on this host
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
     sudo apt-get install -y pgbouncer
     echo 'PgBouncer installed.'
   fi
-  sudo python3 /tmp/pgbouncer-setup.py
+  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 /tmp/pgbouncer-setup.py
   sudo systemctl enable pgbouncer
   # pgbouncer is a sysv service on Ubuntu 22.04 — use the init.d script for
   # reliable stop/start (handles PID file cleanup correctly).  systemctl restart
