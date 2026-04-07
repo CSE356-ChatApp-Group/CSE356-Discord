@@ -27,7 +27,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Download the CI-built tarball from GitHub Releases so the deploy job can use
+  # artifact_name (no long poll in reusable-vm-deploy).
+  fetch-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download release tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.sha || github.sha }}"
+          echo "Downloading release-${TARGET_SHA} from ${{ github.repository }}"
+          gh release download "release-${TARGET_SHA}" -R "${{ github.repository }}" -p '*.tar.gz' -D .
+          ls -la ./*.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ inputs.sha || github.sha }}
+          path: '*.tar.gz'
+
   deploy-staging:
+    needs: fetch-release
     if: inputs.environment == 'staging'
     uses: ./.github/workflows/reusable-vm-deploy.yml
     secrets: inherit
@@ -37,8 +58,10 @@ jobs:
       host: ${{ vars.STAGING_HOST || '136.114.103.71' }}
       user: ${{ vars.STAGING_USER || 'ssperrottet' }}
       script_path: deploy/deploy-staging.sh
+      artifact_name: release-${{ inputs.sha || github.sha }}
 
   deploy-prod:
+    needs: fetch-release
     if: inputs.environment == 'prod'
     uses: ./.github/workflows/reusable-vm-deploy.yml
     secrets: inherit
@@ -50,3 +73,4 @@ jobs:
       script_path: deploy/deploy-prod.sh
       verify_public_host: true
       auto_confirm: true
+      artifact_name: release-${{ inputs.sha || github.sha }}
