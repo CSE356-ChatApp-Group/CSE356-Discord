@@ -584,9 +584,15 @@ wss.on("connection", async (ws, req) => {
       logger.warn({ err, userId: user.id }, "WS presence setup failed"),
     );
 
-  bootstrapWithRetry(ws, user.id).catch((err) =>
-    logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed"),
-  );
+  bootstrapWithRetry(ws, user.id)
+    .then(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ event: 'ready' }));
+      }
+    })
+    .catch((err) =>
+      logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed"),
+    );
 });
 
 // ── Client message dispatch ────────────────────────────────────────────────────
