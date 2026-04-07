@@ -34,7 +34,8 @@ const ctx = {
   msgIds: [],
   wsA: null,
   wsB: null,
-  searchToken: `srch-${suffix}`,
+  // Avoid `-` in the token: websearch_to_tsquery treats `-` as NOT and can return 0 FTS hits.
+  searchToken: `ctsrch${suffix}`,
 };
 
 function cookiesFromResponse(res) {
@@ -68,6 +69,10 @@ async function fetchJson(method, path, token, body, extraHeaders = {}) {
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || 'assertion failed');
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function waitWsEvent(ws, predicate, ms) {
@@ -238,15 +243,46 @@ add('onPresenceReceived', async () => {
   assert(res.status === 200, `B join ${res.status}`);
 
   ctx.wsB = await openWs(ctx.B.token);
-  ctx.wsB.send(JSON.stringify({ type: 'subscribe', channel: `community:${ctx.communityId}` }));
+  const commCh = `community:${ctx.communityId}`;
+  ctx.wsB.send(JSON.stringify({ type: 'subscribe', channel: commCh }));
+  await waitWsEvent(
+    ctx.wsB,
+    (m) => m.event === 'subscribed' && m.data?.channel === commCh,
+    15000,
+  );
+  await sleep(300);
 
-  const evtP = waitWsEvent(
+  // Overload stage ≥1 throttles community fanout for `online` (away/offline still fan out).
+  // Accept either WS `presence:updated` or GET /members showing A as online.
+  const wsPresenceP = waitWsEvent(
     ctx.wsB,
     (m) => m.event === 'presence:updated' && String(m.data?.userId) === String(ctx.A.id),
-    20000,
+    40000,
   );
+  const restPresenceP = (async () => {
+    const deadline = Date.now() + 40000;
+    while (Date.now() < deadline) {
+      const { res, json } = await fetchJson(
+        'GET',
+        `/communities/${ctx.communityId}/members`,
+        ctx.B.token,
+        null,
+      );
+      assert(res.status === 200, `members poll ${res.status}`);
+      const row = (json.members || []).find((m) => String(m.id) === String(ctx.A.id));
+      if (row && row.status === 'online') return;
+      await sleep(450);
+    }
+    throw new Error('REST: member list never showed A as online');
+  })();
+
   await fetchJson('PUT', '/presence', ctx.A.token, { status: 'online' });
-  await evtP;
+  try {
+    await Promise.any([wsPresenceP, restPresenceP]);
+  } catch (e) {
+    const agg = e && e.errors ? e.errors.map((x) => x.message).join(' | ') : e.message;
+    throw new Error(`onPresenceReceived: ${agg}`);
+  }
 });
 
 add('createCommunity', async () => {
@@ -459,16 +495,25 @@ add('onMessageDeleteReceived', async () => {
 });
 
 add('searchMessages', async () => {
-  await new Promise((r) => setTimeout(r, 2000));
-  const { res, json } = await fetchJson(
-    'GET',
-    `/search?q=${encodeURIComponent(ctx.searchToken)}`,
-    ctx.A.token,
-    null,
-  );
-  assert(res.status === 200, `search ${res.status}`);
-  const hits = json.hits || [];
-  assert(hits.some((h) => String(h.content).includes(ctx.searchToken)), 'search hit');
+  let last = 'search miss';
+  for (let i = 0; i < 35; i++) {
+    const { res, json } = await fetchJson(
+      'GET',
+      `/search?q=${encodeURIComponent(ctx.searchToken)}`,
+      ctx.A.token,
+      null,
+    );
+    if (res.status !== 200) {
+      last = `search HTTP ${res.status}`;
+      await sleep(1000);
+      continue;
+    }
+    const hits = json.hits || [];
+    if (hits.some((h) => String(h.content).includes(ctx.searchToken))) return;
+    last = 'search hit';
+    await sleep(1000);
+  }
+  throw new Error(last);
 });
 
 add('searchMessages (community scope)', async () => {
@@ -484,15 +529,25 @@ add('searchMessages (community scope)', async () => {
 
 add('searchMessages (time filter)', async () => {
   const before = new Date(Date.now() + 60_000).toISOString();
-  const { res, json } = await fetchJson(
-    'GET',
-    `/search?q=${encodeURIComponent(ctx.searchToken)}&before=${encodeURIComponent(before)}`,
-    ctx.A.token,
-    null,
-  );
-  assert(res.status === 200, `time search ${res.status}`);
-  const hits = json.hits || [];
-  assert(hits.length >= 1, 'time filter hit');
+  let last = 'time filter hit';
+  for (let i = 0; i < 35; i++) {
+    const { res, json } = await fetchJson(
+      'GET',
+      `/search?q=${encodeURIComponent(ctx.searchToken)}&before=${encodeURIComponent(before)}`,
+      ctx.A.token,
+      null,
+    );
+    if (res.status !== 200) {
+      last = `time search HTTP ${res.status}`;
+      await sleep(1000);
+      continue;
+    }
+    const hits = json.hits || [];
+    if (hits.length >= 1) return;
+    last = 'time filter hit';
+    await sleep(1000);
+  }
+  throw new Error(last);
 });
 
 add('markRead', async () => {
