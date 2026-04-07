@@ -332,31 +332,33 @@ function deliverPubsubMessage(channel, message) {
     recipientCount,
   );
 
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+    // non-JSON payload — deliver raw string below
+  }
+
   // Keep this at debug level to avoid log floods during high presence churn.
-  if (channelType === "user" && recipientCount > 0) {
-    try {
-      const payload = JSON.parse(message);
-      logger.debug({
-        event: "presence.fanout.delivered",
-        channel,
-        recipientCount,
-        payload,
-      });
-    } catch {
-      // non-JSON message – skip detailed log
-    }
+  if (channelType === "user" && recipientCount > 0 && parsed !== null) {
+    logger.debug({
+      event: "presence.fanout.delivered",
+      channel,
+      recipientCount,
+      payload: parsed,
+    });
   }
 
   if (!clients || recipientCount === 0) return;
 
   let outbound = message;
-  try {
-    const parsed = JSON.parse(message);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      outbound = JSON.stringify({ ...parsed, channel });
-    }
-  } catch {
-    // Keep original payload if it is not valid JSON.
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    parsed !== null &&
+    !Array.isArray(parsed)
+  ) {
+    outbound = JSON.stringify({ ...parsed, channel });
   }
 
   clients.forEach((ws) => {
