@@ -14,6 +14,24 @@ SHED_ENABLED="${OVERLOAD_HTTP_SHED_ENABLED:-unset}"
 SHED_LAG_MS="${OVERLOAD_LAG_SHED_MS:-unset}"
 POOL_QUEUE="${POOL_CIRCUIT_BREAKER_QUEUE:-unset}"
 
+# Optional: fill metadata from staging /opt/chatapp/shared/.env (needs SSH). Default off
+# so local runs without keys are not delayed. Enable: FETCH_STAGING_REMOTE_ENV=1
+if [[ "${FETCH_STAGING_REMOTE_ENV:-0}" == "1" ]]; then
+  _remote_env="$(
+    ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no "$SSH_HOST" \
+      "grep -E '^(OVERLOAD_HTTP_SHED_ENABLED|OVERLOAD_LAG_SHED_MS|POOL_CIRCUIT_BREAKER_QUEUE)=' /opt/chatapp/shared/.env 2>/dev/null" \
+      || true
+  )"
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    case "$line" in
+      OVERLOAD_HTTP_SHED_ENABLED=*) SHED_ENABLED="${line#*=}" ;;
+      OVERLOAD_LAG_SHED_MS=*) SHED_LAG_MS="${line#*=}" ;;
+      POOL_CIRCUIT_BREAKER_QUEUE=*) POOL_QUEUE="${line#*=}" ;;
+    esac
+  done <<< "${_remote_env}"
+fi
+
 mkdir -p "$RUN_DIR"
 RUN_START_EPOCH="$(date -u +%s)"
 

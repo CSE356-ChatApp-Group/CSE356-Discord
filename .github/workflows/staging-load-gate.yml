@@ -1,0 +1,68 @@
+name: Staging load SLO gate
+
+# Weekly k6 `slo` profile against staging — fails if optimization_* KPI or latency thresholds breach
+# (see load-tests/staging-capacity.js). Set secret LOADTEST_PASSWORD for staging load-test accounts.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 4 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: staging-load-gate
+  cancel-in-progress: false
+
+jobs:
+  k6-slo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BASE_URL: ${{ vars.STAGING_LOAD_BASE_URL || format('http://{0}/api/v1', vars.STAGING_HOST || '136.114.103.71') }}
+      WS_URL: ${{ vars.STAGING_LOAD_WS_URL || format('ws://{0}/ws', vars.STAGING_HOST || '136.114.103.71') }}
+      K6_IMAGE: grafana/k6:0.49.0
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require LOADTEST_PASSWORD on scheduled runs
+        if: github.event_name == 'schedule'
+        env:
+          LOADTEST_PASSWORD: ${{ secrets.LOADTEST_PASSWORD }}
+        run: |
+          if [ -z "$LOADTEST_PASSWORD" ]; then
+            echo '::error::Repository secret LOADTEST_PASSWORD is not set — weekly k6 slo gate skipped (configure secret or use workflow_dispatch only).'
+            exit 1
+          fi
+
+      - name: Pull k6 image
+        run: docker pull "$K6_IMAGE"
+
+      - name: Run k6 slo profile
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e BASE_URL="$BASE_URL" \
+            -e WS_URL="$WS_URL" \
+            -e LOAD_PROFILE=slo \
+            -e LOADTEST_PASSWORD="${LOADTEST_PASSWORD:-LoadTest!12345}" \
+            "$K6_IMAGE" run \
+            --summary-export "/work/k6-slo-summary.json" \
+            /work/load-tests/staging-capacity.js
+        env:
+          LOADTEST_PASSWORD: ${{ secrets.LOADTEST_PASSWORD }}
+
+      - name: Upload k6 summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: k6-slo-summary-${{ github.run_id }}
+          path: k6-slo-summary.json
+          if-no-files-found: ignore
+          retention-days: 14

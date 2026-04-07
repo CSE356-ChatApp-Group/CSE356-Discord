@@ -30,8 +30,7 @@ receivers:
           **Severity:** {{ with .CommonLabels.severity }}{{ . }}{{ else }}unknown{{ end }}
           **Job:** {{ with .CommonLabels.job }}{{ . }}{{ else }}chatapp-api{{ end }}
           {{ range .Alerts }}
-          • {{ with .Annotations.summary }}{{ . }}{{ else }}{{ with .Annotations.description }}{{ . }}{{ else }}No summary provided.{{ end }}{{ end }}
-          {{ with .Annotations.description }}  {{ . }}{{ end }}
+          • {{ if .Annotations.description }}{{ .Annotations.description }}{{ else }}{{ .Annotations.summary }}{{ end }}
           {{ end }}
 
   - name: discord-critical
@@ -47,8 +46,7 @@ receivers:
           **Severity:** {{ with .CommonLabels.severity }}{{ . }}{{ else }}critical{{ end }}
           **Job:** {{ with .CommonLabels.job }}{{ . }}{{ else }}chatapp-api{{ end }}
           {{ range .Alerts }}
-          • {{ with .Annotations.summary }}{{ . }}{{ else }}{{ with .Annotations.description }}{{ . }}{{ else }}No summary provided.{{ end }}{{ end }}
-          {{ with .Annotations.description }}  {{ . }}{{ end }}
+          • {{ if .Annotations.description }}{{ .Annotations.description }}{{ else }}{{ .Annotations.summary }}{{ end }}
           {{ end }}
 
 inhibit_rules:

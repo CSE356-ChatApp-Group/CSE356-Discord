@@ -25,6 +25,9 @@ jobs:
       E2E_BASE_URL: ${{ vars.STAGING_E2E_BASE_URL || format('http://{0}', vars.STAGING_HOST || '136.114.103.71') }}
       E2E_SKIP_WEBSERVER: "1"
       CI: "true"
+      API_CONTRACT_BASE_URL: ${{ format('http://{0}/api/v1', vars.STAGING_HOST || '136.114.103.71') }}
+      API_CONTRACT_WS_URL: ${{ format('ws://{0}/ws', vars.STAGING_HOST || '136.114.103.71') }}
+      API_CONTRACT_SSO_SKIP: ${{ vars.API_CONTRACT_SSO_SKIP }}
 
     steps:
       - uses: actions/checkout@v5
@@ -43,6 +46,9 @@ jobs:
 
       - name: Run staging E2E against deployed staging
         run: npm run e2e:staging:ci --workspace=frontend
+
+      - name: API contract harness (41 checks)
+        run: npm run api-contract --workspace=backend
 
       - name: Upload Playwright report
         if: always()

@@ -30,6 +30,15 @@ jobs:
           bash -n deploy/preflight-check.sh
           bash -n deploy/deploy-staging.sh
           bash -n deploy/deploy-prod.sh
+          node --check deploy/candidate-ws-smoke.cjs
+          node --check backend/scripts/api-contract-harness.cjs
+
+      - name: Validate Prometheus alert rules
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$GITHUB_WORKSPACE/infrastructure/monitoring:/rules:ro" \
+            prom/prometheus:v2.53.1 \
+            check rules /rules/alerts.yml
 
   backend:
     runs-on: ubuntu-latest
@@ -208,3 +217,22 @@ jobs:
             frontend/playwright-report
             frontend/test-results
           retention-days: 7
+
+  api-contract-staging:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs:
+      - deploy-staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_CONTRACT_BASE_URL: ${{ format('http://{0}/api/v1', vars.STAGING_HOST || '136.114.103.71') }}
+      API_CONTRACT_WS_URL: ${{ format('ws://{0}/ws', vars.STAGING_HOST || '136.114.103.71') }}
+      API_CONTRACT_SSO_SKIP: ${{ vars.API_CONTRACT_SSO_SKIP }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run api-contract --workspace=backend

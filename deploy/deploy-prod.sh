@@ -23,13 +23,35 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 # nginx load-balances two ports like staging.
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
 _REMOTE_NCPU=$(ssh "${PROD_USER}@${PROD_HOST}" 'nproc --all' 2>/dev/null || echo 2)
-# Real PgBouncer backends: grow with prod VM CPUs (no manual pool size edits).
-_PGB_SIZE=$(python3 -c "inst=int('${CHATAPP_INSTANCES}'); n=int('${_REMOTE_NCPU}'); print(max(50, min(200, n * 45, 40 + inst * 50)))")
-PG_POOL_MAX_PER_INSTANCE=$(python3 -c "inst=max(1,int('${CHATAPP_INSTANCES}')); p=int('${_PGB_SIZE}'); print(max(25, min(120, (p * 5) // (inst * 2))))")
-POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "pmi=int('${PG_POOL_MAX_PER_INSTANCE}'); inst=max(1,int('${CHATAPP_INSTANCES}')); print(max(48, min(700, pmi * 4 + inst * 60)))")
-PG_MAX_CONNECTIONS=$(python3 -c "b=int('${_PGB_SIZE}'); print(max(100, min(250, b + 45)))")
-BCRYPT_MAX_CONCURRENT=$(python3 -c "n=int('${_REMOTE_NCPU}'); print(min(24, max(6, n * 3)))")
-FANOUT_QUEUE_CONCURRENCY=$(python3 -c "n=int('${_REMOTE_NCPU}'); print(min(8, max(2, (n + 1) // 2)))")
+# PgBouncer pool + Node pool math matches deploy-staging.sh (same caps, different host).
+_PGB_SIZE=$(python3 -c "
+ncpu = int('${_REMOTE_NCPU}')
+inst = int('${CHATAPP_INSTANCES}')
+x = max(60, min(320, ncpu * 50, 80 + inst * 45))
+print(x)
+")
+PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
+p = int('${_PGB_SIZE}')
+inst = max(1, int('${CHATAPP_INSTANCES}'))
+print(max(25, min(140, (p * 5) // (inst * 2))))
+")
+POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
+pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
+inst = max(1, int('${CHATAPP_INSTANCES}'))
+print(max(64, min(900, pmi * 4 + inst * 80)))
+")
+PG_MAX_CONNECTIONS=$(python3 -c "
+b = int('${_PGB_SIZE}')
+print(max(120, min(450, b + 60)))
+")
+BCRYPT_MAX_CONCURRENT=$(python3 -c "
+n = int('${_REMOTE_NCPU}')
+print(min(32, max(8, n * 4)))
+")
+FANOUT_QUEUE_CONCURRENCY=$(python3 -c "
+n = int('${_REMOTE_NCPU}')
+print(min(12, max(2, (n + 1) // 2 + 1)))
+")
 UV_THREADPOOL_PER_INSTANCE=$(python3 -c "print(max(8, 16 // max(1, ${CHATAPP_INSTANCES})))")
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
 # Formula: min(1500, max(RAM_MB * 12%, 192)) — same as deploy-staging.sh.
@@ -159,10 +181,17 @@ ssh "$PROD_USER@$PROD_HOST" "
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
     -c \"ALTER SYSTEM SET max_connections        = \${PG_MAX_CONNECTIONS};\" \\
     2>&1 | grep -v 'change directory' || true
-  sudo systemctl restart postgresql
-  sleep 3
+  sudo -u postgres psql -qAt -c \"SELECT pg_reload_conf();\" > /dev/null || true
+  PENDING=\$(sudo -u postgres psql -qAt -c \"SELECT EXISTS (SELECT 1 FROM pg_settings WHERE pending_restart)\")
+  if [ \"\$PENDING\" = \"t\" ]; then
+    echo 'PostgreSQL: pending_restart after ALTER SYSTEM — restarting postmaster once.'
+    sudo systemctl restart postgresql
+    sleep 3
+  else
+    echo 'PostgreSQL: no pending_restart — skipped full cluster restart (reload only).'
+  fi
   sudo systemctl is-active postgresql \
-    || { echo 'ERROR: PostgreSQL failed to start after tuning'; exit 1; }
+    || { echo 'ERROR: PostgreSQL is not active after tuning'; exit 1; }
   sudo -u postgres psql chatapp_prod -qAt \
     -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\" \
     2>&1 | grep -v 'change directory' || true
@@ -192,7 +221,7 @@ echo "✓ Artifact ready locally"
 # 4. Copy to production server
 echo "4. Copying to production..."
 scp "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
-scp "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "$PROD_USER@$PROD_HOST:/tmp/"
+scp "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "${SCRIPT_DIR}/candidate-ws-smoke.cjs" "$PROD_USER@$PROD_HOST:/tmp/"
 rm "$DOWNLOAD_PATH"
 echo "✓ Copied to production"
 
@@ -321,6 +350,20 @@ ssh "$PROD_USER@$PROD_HOST" "/tmp/smoke-test.sh $NEW_PORT http://127.0.0.1:$NEW_
 }
 echo "✓ Smoke tests passed"
 
+echo "8b. Candidate WebSocket message round-trip..."
+ssh "$PROD_USER@$PROD_HOST" "
+  set -euo pipefail
+  RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
+  export API_CONTRACT_BASE_URL=http://127.0.0.1:$NEW_PORT/api/v1
+  export API_CONTRACT_WS_URL=ws://127.0.0.1:$NEW_PORT/ws
+  cd \"\$RELEASE_PATH/backend\" && node /tmp/candidate-ws-smoke.cjs
+" || {
+  echo "ERROR: Candidate WS smoke failed. Stopping candidate."
+  ssh "$PROD_USER@$PROD_HOST" "sudo systemctl stop chatapp@${NEW_PORT} || true"
+  exit 1
+}
+echo "✓ Candidate WS smoke passed"
+
 # 9. Switch Nginx
 echo "9. Switching Nginx to candidate..."
 ssh "$PROD_USER@$PROD_HOST" "
@@ -409,6 +452,27 @@ ssh "$PROD_USER@$PROD_HOST" "
     echo 'WARN: prometheus-host.yml not found, skipping Prometheus update'
   fi
 " || echo "⚠ Prometheus target update failed (non-fatal)"
+
+echo "10.65. Sync alert rules + Alertmanager (Discord capacity alerts)..."
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_HOST:/tmp/alerts.yml.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_HOST:/tmp/alertmanager.yml.deploy" || true
+ssh "$PROD_USER@$PROD_HOST" "
+  set -euo pipefail
+  if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ]; then
+    sudo mkdir -p /opt/chatapp-monitoring
+  fi
+  if [ -f /tmp/alerts.yml.deploy ]; then
+    sudo cp /tmp/alerts.yml.deploy /opt/chatapp-monitoring/alerts.yml
+    rm -f /tmp/alerts.yml.deploy
+  fi
+  if [ -f /tmp/alertmanager.yml.deploy ]; then
+    sudo cp /tmp/alertmanager.yml.deploy /opt/chatapp-monitoring/alertmanager.yml
+    rm -f /tmp/alertmanager.yml.deploy
+  fi
+  sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1 || true
+  sudo docker restart chatapp-monitoring-alertmanager-1 >/dev/null 2>&1 || true
+" || echo "⚠ Alert sync failed (non-fatal)"
 echo "✓ Monitoring updated"
 
 # 11. Update current symlink

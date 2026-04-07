@@ -267,17 +267,21 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     -c \"ALTER SYSTEM SET pg_stat_statements.track = 'all';\" \
     2>&1 | grep -v 'change directory' || true
 
-  # shared_buffers requires a full restart (postmaster context);
-  # other params take effect after pg_reload_conf().
-  sudo systemctl restart postgresql
-  sleep 2
+  sudo -u postgres psql -qAt -c \"SELECT pg_reload_conf();\" > /dev/null || true
+  PENDING=\$(sudo -u postgres psql -qAt -c \"SELECT EXISTS (SELECT 1 FROM pg_settings WHERE pending_restart)\")
+  if [ \"\$PENDING\" = \"t\" ]; then
+    echo 'PostgreSQL: pending_restart after ALTER SYSTEM — restarting postmaster once.'
+    sudo systemctl restart postgresql
+    sleep 3
+  else
+    echo 'PostgreSQL: no pending_restart — skipped full cluster restart (reload only).'
+  fi
   sudo systemctl is-active postgresql \
-    || { echo 'ERROR: PostgreSQL failed to start after tuning'; exit 1; }
-  # Enable pg_stat_statements extension in the DB (idempotent, needs preload above)
+    || { echo 'ERROR: PostgreSQL is not active after tuning'; exit 1; }
   sudo -u postgres psql chatapp_staging -qAt \
     -c \"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\" \
     2>&1 | grep -v 'change directory' || true
-  echo 'PostgreSQL tuning applied and restarted.'
+  echo 'PostgreSQL tuning applied.'
 "
 
 if [[ -z "$LOCAL_ARTIFACT_PATH" ]] && ! command -v gh >/dev/null 2>&1; then
@@ -298,7 +302,7 @@ fi
 
 echo "2) Copying artifact and verification scripts to staging host..."
 scp "${SOURCE_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
-scp deploy/health-check.sh deploy/smoke-test.sh deploy/pgbouncer-setup.py "${STAGING_USER}@${STAGING_HOST}:/tmp/"
+scp deploy/health-check.sh deploy/smoke-test.sh deploy/candidate-ws-smoke.cjs deploy/pgbouncer-setup.py "${STAGING_USER}@${STAGING_HOST}:/tmp/"
 if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
   rm -f "${DOWNLOADED_ARTIFACT}"
 fi
@@ -406,11 +410,15 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   echo 'Candidate started via systemd (chatapp@${CANDIDATE_PORT})'
 "
 
-echo "6) Running health and smoke checks on candidate..."
+echo "6) Running health, smoke, and candidate WebSocket round-trip on candidate..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   /tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}
   /tmp/smoke-test.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}
+  RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
+  export API_CONTRACT_BASE_URL=http://127.0.0.1:${CANDIDATE_PORT}/api/v1
+  export API_CONTRACT_WS_URL=ws://127.0.0.1:${CANDIDATE_PORT}/ws
+  cd \"\${RELEASE_PATH}/backend\" && node /tmp/candidate-ws-smoke.cjs
 "
 
 echo "7) Switching Nginx upstream from ${LIVE_PORT} to ${CANDIDATE_PORT}..."
@@ -423,14 +431,26 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 CUTOVER_COMPLETED=1
 
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-echo "7a) Prometheus template + Redis exporter (capacity reports need Redis series)..."
+echo "7a) Prometheus + Alertmanager rules + Redis exporter (Discord capacity alerts need current rules)..."
 scp -q "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/prometheus-host.yml.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/alerts.yml.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/alertmanager.yml.deploy" || true
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
-  if [ -f /tmp/prometheus-host.yml.deploy ]; then
+  if [ -f /tmp/prometheus-host.yml.deploy ] || [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
+  fi
+  if [ -f /tmp/prometheus-host.yml.deploy ]; then
     sudo cp /tmp/prometheus-host.yml.deploy /opt/chatapp-monitoring/prometheus-host.yml
     rm -f /tmp/prometheus-host.yml.deploy
+  fi
+  if [ -f /tmp/alerts.yml.deploy ]; then
+    sudo cp /tmp/alerts.yml.deploy /opt/chatapp-monitoring/alerts.yml
+    rm -f /tmp/alerts.yml.deploy
+  fi
+  if [ -f /tmp/alertmanager.yml.deploy ]; then
+    sudo cp /tmp/alertmanager.yml.deploy /opt/chatapp-monitoring/alertmanager.yml
+    rm -f /tmp/alertmanager.yml.deploy
   fi
   if sudo docker inspect chatapp-monitoring-prometheus-1 >/dev/null 2>&1; then
     STATUS=\$(sudo docker inspect -f '{{.State.Running}}' chatapp-monitoring-prometheus-1)
@@ -438,6 +458,9 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1 && echo 'Prometheus restarted (re-rendered scrape config)' || echo 'WARN: Prometheus restart failed'
   else
     echo 'WARN: Prometheus container not found (non-critical)'
+  fi
+  if sudo docker inspect chatapp-monitoring-alertmanager-1 >/dev/null 2>&1; then
+    sudo docker restart chatapp-monitoring-alertmanager-1 >/dev/null 2>&1 && echo 'Alertmanager restarted (Discord templates updated)' || echo 'WARN: Alertmanager restart failed'
   fi
   # redis_exporter on host network — scrapes 127.0.0.1:6379; Prometheus hits :9121
   if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then

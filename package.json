@@ -33,6 +33,7 @@
     "e2e:auth": "npm run e2e:auth --workspace=frontend",
     "e2e:messaging": "npm run e2e:messaging --workspace=frontend",
     "e2e:community": "npm run e2e:community --workspace=frontend",
-    "e2e:dm-invite": "npm run e2e:dm-invite --workspace=frontend"
+    "e2e:dm-invite": "npm run e2e:dm-invite --workspace=frontend",
+    "api-contract": "npm run api-contract --workspace=backend"
   }
 }

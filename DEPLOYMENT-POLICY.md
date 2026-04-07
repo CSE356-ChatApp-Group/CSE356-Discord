@@ -7,8 +7,15 @@
 ## Three-Environment Strategy
 
 ```
-DEV ──commit──> CI ────artifact───> STAGING ──manual──> PROD
-             (build once)           (verify)          (cutover)
+DEV ──PR──> CI (tests+build)
+            │
+ merge ───> main: package artifact ──auto SSH──> STAGING
+            │                                      │
+            ├─ Playwright E2E (@staging)           │
+            ├─ API contract harness (41 checks)   │
+            └─ (scheduled) k6 slo / nightly E2E   │
+                                                   │
+ manual / GitHub "Manual Deploy" workflow ───────> PROD
 ```
 
 1. **Dev** (local): Developers test changes
@@ -27,54 +34,79 @@ A single immutable artifact is built once in CI and deployed to all environments
 
 ### CI (automatic on merge to main)
 
-1. Typecheck + lint + tests pass
-2. Build backend and frontend with locked dependencies
+Workflow: [`.github/workflows/ci-deploy.yml`](.github/workflows/ci-deploy.yml).
+
+1. Validate deploy shell scripts + Node smoke helpers (`node --check`)
+2. Backend + frontend typecheck, unit tests, production builds
 3. Package artifact: `tarball(backend/dist, frontend/dist, migrations, package.json)`
-4. Tag with commit SHA
-5. Store in GitHub Releases
+4. GitHub Release tagged `release-<sha>` with the tarball
+5. **Reusable deploy** job SSHs to staging and runs [`deploy/deploy-staging.sh`](deploy/deploy-staging.sh)
+6. **Playwright** staging E2E (`@staging`) — must pass
+7. **API contract harness** [`backend/scripts/api-contract-harness.cjs`](backend/scripts/api-contract-harness.cjs) — 41 course-aligned checks against staging HTTP+WS (set repo variable `API_CONTRACT_SSO_SKIP=1` if OIDC redirects cannot be reached from Actions)
 
 **No environment-specific builds.** Same artifact for staging and prod.
 
-### Staging Deployment (manual, gated by approver)
+**Scheduled / optional gates:** [`.github/workflows/staging-e2e-nightly.yml`](.github/workflows/staging-e2e-nightly.yml) (Playwright), [`.github/workflows/staging-load-gate.yml`](.github/workflows/staging-load-gate.yml) (weekly k6 `slo` — requires `LOADTEST_PASSWORD` secret for staging load accounts).
+
+### Discord / Alertmanager capacity signals
+
+Prometheus rules live in [`infrastructure/monitoring/alerts.yml`](infrastructure/monitoring/alerts.yml). Alertmanager posts to Discord from [`infrastructure/monitoring/alertmanager.yml`](infrastructure/monitoring/alertmanager.yml).
+
+**Clear “you are near or past capacity” signals:**
+
+- **Postgres pool** — `ChatAppPgPoolPressure` / `ChatAppPgPoolSevereSaturation` / `ChatAppPgPoolMostlyCheckedOut` (queue depth and checkout ratio).
+- **HTTP edge behaviour** — `ChatAppHighHttpAbortRate` (timeouts / disconnects vs completed requests), `ChatAppHttpOverloadShedding` (event-loop lag 503s).
+- **App + host** — existing CPU, memory, event-loop lag, 5xx rate, overload stage ≥2.
+- **Redis** — exporter down, memory near `maxmemory`, elevated client count (requires [`redis_exporter`](https://github.com/oliver006/redis_exporter) and the `redis` job in `prometheus-host.yml`; staging deploy starts it).
+
+After changing rules, copy `alerts.yml` to the monitoring host and restart Prometheus (or redeploy the monitoring stack) so Discord reflects the new definitions.
+
+### Staging Deployment (automatic from CI + optional manual)
+
+Every push to `main` deploys staging via CI. You can also redeploy any release SHA manually:
 
 ```bash
 ./deploy/deploy-staging.sh <sha>
 ```
 
+Or GitHub **Actions → Manual Deploy → staging** ([`.github/workflows/deploy-manual.yml`](.github/workflows/deploy-manual.yml)).
+
 Process:
-1. Download prebuilt artifact
+1. Download prebuilt artifact (CI artifact or GitHub Release)
 2. Unpack on staging VM
 3. Start on candidate port (4001) **without touching traffic**
-4. Health + smoke tests
+4. Health + shell smoke tests + **candidate WebSocket round-trip** ([`deploy/candidate-ws-smoke.cjs`](deploy/candidate-ws-smoke.cjs): register → channel → subscribe → POST message → `message:created` on WS)
 5. If healthy, switch Nginx → new version
-6. Keep old version running
-7. Monitor for 30 seconds
+6. Keep old version running through the monitoring window
+7. Monitor briefly
 
-**If anything fails, old version still runs.** No service disruption.
+**If anything fails, old version still runs.** No application cutover.
 
 Staging validates:
 - Artifact integrity
 - Database migrations
 - Redis connectivity
-- WebSocket startup
+- WebSocket startup + one realtime message delivery on the candidate port
 - Presence aggregation
 - API endpoints
-- Integration behavior
+- Integration behavior (Playwright + API contract in CI)
 
-### Production Deployment (manual, explicit approval required)
+### Production Deployment (manual — never auto on merge)
 
 ```bash
 ./deploy/deploy-prod.sh <sha>
 ```
 
+Or **Actions → Manual Deploy → prod** (passes `GITHUB_ACTIONS=true` so the script skips the interactive `y/N` prompt; use a **GitHub Environment** with required reviewers if you want a human gate in the UI).
+
 Process:
 1. **Staging must have deployed and passed first**
-2. Interactive confirmation prompt (requires human approval)
-3. Database backup (automatic)
+2. Interactive confirmation prompt when run from a laptop (skipped in GitHub Actions)
+3. Database backup (automatic; failures log a warning — consider `DEPLOY_STRICT_BACKUP` if you add it)
 4. Download exact same artifact
 5. Unpack as new release directory
 6. Start on alternate port (4001) **without touching running traffic**
-7. Full health + smoke checks against isolated candidate
+7. Full health + smoke + **candidate WebSocket round-trip** on the new port
 8. Only if healthy → switch Nginx to candidate
 9. Monitor for 60 seconds
 10. Update `current` symlink
@@ -145,7 +177,7 @@ Benefits:
 1. **Same artifact everywhere**: CI builds once. Staging and prod use identical bits.
 2. **No environment-specific code**: All config via `.env` files, not compile-time.
 3. **Staging must match prod exactly**: Same Node version, same dependencies, same structure.
-4. **Staging must validate before prod**: No prod deploy without staging sign-off.
+4. **Staging must validate before prod**: No prod deploy without staging sign-off (CI deploys staging on every `main` push; confirm Playwright + API contract jobs are green before prod).
 5. **Database backups before prod**: Automatic, but verified.
 6. **Rollback must be instant**: Traffic switch is ~5 seconds, process already running.
 7. **No in-place overwrites**: Always new directories + symlink switch.
@@ -154,7 +186,7 @@ Benefits:
 ## Who Can Deploy
 
 - **Staging**: Any developer (automatic post-merge, or manual with same script)
-- **Production**: On-call engineer or team lead (must approve interactively)
+- **Production**: On-call engineer or team lead (approve interactively when using the shell script, or via GitHub Environment protection when using **Manual Deploy**)
 
 Staging is safe to deploy frequently for integration testing.
 Production requires explicit confirmation.
@@ -189,6 +221,10 @@ All rollbacks are manual (explicit confirmation) to prevent thrashing.
 - **Database backup before deploy** (automatic)
 - **Test on staging first** (mandatory)
 - **Never run migrations after cutover** (migrations before traffic switch)
+
+## PostgreSQL tuning during deploy
+
+[`deploy/deploy-staging.sh`](deploy/deploy-staging.sh) and [`deploy/deploy-prod.sh`](deploy/deploy-prod.sh) apply `ALTER SYSTEM` settings, then `pg_reload_conf()`. A **full `postgresql` restart** runs **only** when `pg_settings.pending_restart` is true (e.g. first-time `shared_preload_libraries`, or `max_connections` / `shared_buffers` changes). Routine deploys with unchanged tuning therefore avoid a cluster-wide restart and reduce user-visible DB blips.
 
 ## Example Timeline
 

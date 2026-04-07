@@ -67,14 +67,45 @@ groups:
           summary: ChatApp API CPU saturation is high
           description: API instance {{ $labels.instance }} has used more than 80% of one CPU core for 15 minutes. On production this is a practical scale-up signal.
 
-      - alert: ChatAppPgPoolSaturated
-        expr: max(pg_pool_waiting{job="chatapp-api"}) > 5
+      # Pool queue depth (Node → PgBouncer). Sustained waits mean you are near DB/app
+      # throughput limits — scale vertically, split DB, or reduce per-request DB work.
+      - alert: ChatAppPgPoolPressure
+        expr: max(pg_pool_waiting{job="chatapp-api"}) > 15
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: ChatApp Postgres pool is saturating
-          description: More than 5 requests are waiting for a pg pool client for 10 minutes. This usually means the app tier or database tier needs more headroom.
+          summary: Postgres connection pool queue is building (capacity warning)
+          description: >
+            More than 15 concurrent requests are waiting for a pg pool slot (10m avg).
+            **Capacity signal:** add vCPU/RAM, enlarge PgBouncer/Postgres limits, or split app/DB.
+            Check Grafana/pg_pool_waiting and PG logs for slow queries.
+
+      - alert: ChatAppPgPoolSevereSaturation
+        expr: max(pg_pool_waiting{job="chatapp-api"}) > 100
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Postgres pool severely saturated — expect 503s and timeouts
+          description: >
+            Over 100 waiters for 5m. The app is past comfortable capacity; clients likely see
+            circuit-open 503s, connect timeouts, or status 0. **Act:** scale DB tier or reduce load.
+
+      - alert: ChatAppPgPoolMostlyCheckedOut
+        expr: |
+          max by (instance) (
+            (pg_pool_total{job="chatapp-api"} - pg_pool_idle{job="chatapp-api"})
+            / clamp_min(pg_pool_total{job="chatapp-api"}, 1)
+          ) > 0.92
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Nearly all Postgres pool connections are in use
+          description: >
+            >92% of pool slots are busy for 10m. You are at effective connection capacity even
+            if the wait queue is still small — scale or tune pool/PgBouncer before waiters spike.
 
       - alert: ChatAppOverloadSheddingActive
         expr: max(chatapp_overload_stage{job="chatapp-api"}) >= 2
@@ -125,3 +156,73 @@ groups:
         annotations:
           summary: Host disk space is running low
           description: Less than 15% disk space remains on the root filesystem for 30 minutes.
+
+  # HTTP behaviour under stress — complements raw 5xx% (timeouts often abort before 5xx).
+  - name: chatapp-capacity-edge
+    rules:
+      - alert: ChatAppHighHttpAbortRate
+        expr: |
+          (
+            sum(rate(http_server_requests_aborted_total{job="chatapp-api"}[5m]))
+            /
+            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m])), 0.001)
+          ) > 0.08
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Many HTTP responses abort before completion (timeout / client disconnect)
+          description: >
+            Aborted requests exceed 8% of completed traffic for 10m — often correlates with
+            overload, upstream slowness, or clients giving up. **Capacity / stability signal.**
+
+      - alert: ChatAppHttpOverloadShedding
+        expr: sum(rate(http_overload_shed_total{job="chatapp-api"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Event-loop lag HTTP shedding is firing (503 early rejects)
+          description: >
+            OVERLOAD_HTTP_SHED is rejecting traffic. The Node tier is under CPU/event-loop pressure;
+            scale app vCPU or reduce work per request.
+
+  # Redis (requires redis_exporter job on :9121 — deploy-staging installs it).
+  - name: chatapp-redis
+    rules:
+      - alert: ChatAppRedisExporterDown
+        expr: up{job="redis"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: redis_exporter scrape failing (Redis may still be running)
+          description: >
+            Prometheus cannot reach :9121. Fix the `redis` scrape target or the exporter container.
+            (No alert if the `redis` job is not configured — add it when you run redis_exporter.)
+
+      - alert: ChatAppRedisMemoryNearMax
+        expr: |
+          redis_memory_max_bytes{job="redis"} > 0
+          and
+          (redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"}) > 0.88
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis is close to maxmemory eviction threshold
+          description: >
+            Used memory is >88% of configured maxmemory. Eviction or OOM risk — raise maxmemory,
+            add RAM, or reduce cache TTL / key volume.
+
+      # Absolute threshold — tune for your `maxclients` / workload (exporter label sets vary by version).
+      - alert: ChatAppRedisClientsElevated
+        expr: redis_connected_clients{job="redis"} > 300
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis has many concurrent clients
+          description: >
+            >300 connected clients for 15m. If approaching `maxclients`, new connections may fail;
+            check for pool leaks or raise limits.
