@@ -1055,223 +1055,171 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const msg = hydrateAuthorFromSession(event.data);
         const me = useAuthStore.getState().user;
         const key = msg.channel_id || msg.conversation_id;
-        set(s => ({
-          messages: {
+        set((s) => {
+          const nextMessages = {
             ...s.messages,
             [key]: upsertMessage(s.messages[key], msg),
-          },
-          channels: msg.channel_id
-            ? s.channels.map((channel) => {
-                if (channel.id !== msg.channel_id) return channel;
-                const isActive = s.activeChannel?.id === msg.channel_id;
-                return {
-                  ...channel,
-                  updated_at: msg.created_at || msg.createdAt || channel.updated_at,
-                  updatedAt: msg.created_at || msg.createdAt || channel.updatedAt,
-                  last_message_id: msg.id,
-                  lastMessageId: msg.id,
-                  last_message_author_id: msg.author_id,
-                  lastMessageAuthorId: msg.author_id,
-                  last_message_at: msg.created_at || msg.createdAt || channel.last_message_at,
-                  lastMessageAt: msg.created_at || msg.createdAt || channel.lastMessageAt,
-                  has_new_activity: !isActive,
-                  hasNewActivity: !isActive,
-                  unread_message_count: isActive
-                    ? 0
-                    : (channel.unread_message_count ?? 0) + 1,
-                };
-              })
-            : s.channels,
-          activeChannel:
-            msg.channel_id && s.activeChannel?.id === msg.channel_id
-              ? {
-                  ...s.activeChannel,
-                  updated_at: msg.created_at || msg.createdAt || s.activeChannel.updated_at,
-                  updatedAt: msg.created_at || msg.createdAt || s.activeChannel.updatedAt,
-                  last_message_id: msg.id,
-                  lastMessageId: msg.id,
-                  last_message_author_id: msg.author_id,
-                  lastMessageAuthorId: msg.author_id,
-                  last_message_at: msg.created_at || msg.createdAt || s.activeChannel.last_message_at,
-                  lastMessageAt: msg.created_at || msg.createdAt || s.activeChannel.lastMessageAt,
-                }
-              : s.activeChannel,
-          conversations: msg.conversation_id
-            ? (() => {
-                const next = [...s.conversations];
-                const idx = next.findIndex(c => c.id === msg.conversation_id);
-                if (idx === -1) return next;
-                const updatedAt = msg.created_at || msg.createdAt || new Date().toISOString();
-                const updated = {
-                  ...next[idx],
-                  updated_at: updatedAt,
-                  updatedAt,
-                  last_message_id: msg.id,
-                  lastMessageId: msg.id,
-                  last_message_author_id: msg.author_id,
-                  lastMessageAuthorId: msg.author_id,
-                  last_message_at: updatedAt,
-                  lastMessageAt: updatedAt,
-                };
-                next.splice(idx, 1);
-                next.unshift(updated);
-                return next;
-              })()
-            : s.conversations,
-          activeConv:
-            msg.conversation_id && s.activeConv?.id === msg.conversation_id
-              ? {
-                  ...s.activeConv,
-                  updated_at: msg.created_at || msg.createdAt || s.activeConv.updated_at,
-                  updatedAt: msg.created_at || msg.createdAt || s.activeConv.updatedAt,
-                  last_message_id: msg.id,
-                  lastMessageId: msg.id,
-                  last_message_author_id: msg.author_id,
-                  lastMessageAuthorId: msg.author_id,
-                  last_message_at: msg.created_at || msg.createdAt || s.activeConv.last_message_at,
-                  lastMessageAt: msg.created_at || msg.createdAt || s.activeConv.lastMessageAt,
-                }
-              : s.activeConv,
-          communities: (() => {
-            if (!msg.channel_id) return s.communities;
-            const channelAfterUpdate = (msg.channel_id
-              ? s.channels.map((channel) =>
-                  channel.id === msg.channel_id
-                    ? {
-                        ...channel,
-                        last_message_id: msg.id,
-                        lastMessageId: msg.id,
-                        last_message_author_id: msg.author_id,
-                        lastMessageAuthorId: msg.author_id,
-                        has_new_activity: s.activeChannel?.id !== msg.channel_id,
-                        hasNewActivity: s.activeChannel?.id !== msg.channel_id,
-                      }
-                    : channel
-                )
-              : s.channels);
-            const target = channelAfterUpdate.find((channel) => channel.id === msg.channel_id);
-            const communityId = target?.community_id || target?.communityId;
-            if (!communityId) return s.communities;
-            const unreadCount = countUnreadChannels(channelAfterUpdate, me?.id, s.activeChannel?.id);
-            return s.communities.map((community) =>
-              community.id === communityId
+          };
+
+          let nextChannels = s.channels;
+          let nextActiveChannel = s.activeChannel;
+          let nextCommunities = s.communities;
+          let nextActiveCommunity = s.activeCommunity;
+
+          if (msg.channel_id) {
+            const isViewingChannel = s.activeChannel?.id === msg.channel_id;
+            const markReadInSamePass = Boolean(isViewingChannel && msg.id);
+
+            nextChannels = s.channels.map((channel) => {
+              if (channel.id !== msg.channel_id) return channel;
+              const isActive = s.activeChannel?.id === msg.channel_id;
+              const row = {
+                ...channel,
+                updated_at: msg.created_at || msg.createdAt || channel.updated_at,
+                updatedAt: msg.created_at || msg.createdAt || channel.updatedAt,
+                last_message_id: msg.id,
+                lastMessageId: msg.id,
+                last_message_author_id: msg.author_id,
+                lastMessageAuthorId: msg.author_id,
+                last_message_at: msg.created_at || msg.createdAt || channel.last_message_at,
+                lastMessageAt: msg.created_at || msg.createdAt || channel.lastMessageAt,
+                has_new_activity: !isActive,
+                hasNewActivity: !isActive,
+                unread_message_count: isActive
+                  ? 0
+                  : (channel.unread_message_count ?? 0) + 1,
+              };
+              if (!markReadInSamePass) return row;
+              return {
+                ...row,
+                my_last_read_message_id: msg.id,
+                myLastReadMessageId: msg.id,
+                has_new_activity: false,
+                hasNewActivity: false,
+              };
+            });
+
+            nextActiveChannel =
+              msg.channel_id && s.activeChannel?.id === msg.channel_id
                 ? {
-                    ...community,
-                    unread_channel_count: unreadCount,
-                    unreadChannelCount: unreadCount,
-                    has_unread_channels: unreadCount > 0,
-                    hasUnreadChannels: unreadCount > 0,
-                    has_new_activity: s.activeCommunity?.id !== communityId,
-                    hasNewActivity: s.activeCommunity?.id !== communityId,
-                  }
-                : community
-            );
-          })(),
-          activeCommunity: (() => {
-            if (!msg.channel_id || !s.activeCommunity) return s.activeCommunity;
-            const channelAfterUpdate = (msg.channel_id
-              ? s.channels.map((channel) =>
-                  channel.id === msg.channel_id
-                    ? {
-                        ...channel,
-                        last_message_id: msg.id,
-                        lastMessageId: msg.id,
-                        last_message_author_id: msg.author_id,
-                        lastMessageAuthorId: msg.author_id,
-                        has_new_activity: s.activeChannel?.id !== msg.channel_id,
-                        hasNewActivity: s.activeChannel?.id !== msg.channel_id,
-                      }
-                    : channel
-                )
-              : s.channels);
-            const target = channelAfterUpdate.find((channel) => channel.id === msg.channel_id);
-            const communityId = target?.community_id || target?.communityId;
-            if (!communityId || s.activeCommunity.id !== communityId) return s.activeCommunity;
-            const unreadCount = countUnreadChannels(channelAfterUpdate, me?.id, s.activeChannel?.id);
-            return {
-              ...s.activeCommunity,
-              unread_channel_count: unreadCount,
-              unreadChannelCount: unreadCount,
-              has_unread_channels: unreadCount > 0,
-              hasUnreadChannels: unreadCount > 0,
-              has_new_activity: false,
-              hasNewActivity: false,
-            };
-          })(),
-        }));
-        if (msg.channel_id && store.activeChannel?.id === msg.channel_id && msg.id) {
-          set(s => {
-            const nextChannels = s.channels.map((channel) =>
-              channel.id === msg.channel_id
-                ? {
-                    ...channel,
-                    my_last_read_message_id: msg.id,
-                    myLastReadMessageId: msg.id,
-                  }
-                : channel
-            );
-            const target = nextChannels.find((channel) => channel.id === msg.channel_id);
-            const communityId = target?.community_id || target?.communityId || s.activeCommunity?.id;
-            const unreadCount = countUnreadChannels(nextChannels, me?.id, s.activeChannel?.id);
-            return {
-              channels: nextChannels,
-              activeChannel:
-                s.activeChannel?.id === msg.channel_id
-                  ? {
-                      ...s.activeChannel,
-                      my_last_read_message_id: msg.id,
-                      myLastReadMessageId: msg.id,
-                      has_new_activity: false,
-                      hasNewActivity: false,
-                    }
-                  : s.activeChannel,
-              communities: communityId
-                ? s.communities.map((community) =>
-                    community.id === communityId
+                    ...s.activeChannel,
+                    updated_at: msg.created_at || msg.createdAt || s.activeChannel.updated_at,
+                    updatedAt: msg.created_at || msg.createdAt || s.activeChannel.updatedAt,
+                    last_message_id: msg.id,
+                    lastMessageId: msg.id,
+                    last_message_author_id: msg.author_id,
+                    lastMessageAuthorId: msg.author_id,
+                    last_message_at: msg.created_at || msg.createdAt || s.activeChannel.last_message_at,
+                    lastMessageAt: msg.created_at || msg.createdAt || s.activeChannel.lastMessageAt,
+                    ...(markReadInSamePass && msg.id
                       ? {
-                          ...community,
-                          unread_channel_count: unreadCount,
-                          unreadChannelCount: unreadCount,
-                          has_unread_channels: unreadCount > 0,
-                          hasUnreadChannels: unreadCount > 0,
+                          my_last_read_message_id: msg.id,
+                          myLastReadMessageId: msg.id,
+                          has_new_activity: false,
+                          hasNewActivity: false,
                         }
-                      : community
-                  )
-                : s.communities,
-              activeCommunity:
-                communityId && s.activeCommunity?.id === communityId
+                      : {}),
+                  }
+                : s.activeChannel;
+
+            const targetCh = nextChannels.find((c) => c.id === msg.channel_id);
+            const communityId = targetCh?.community_id || targetCh?.communityId;
+            if (communityId) {
+              const unreadCount = countUnreadChannels(nextChannels, me?.id, s.activeChannel?.id);
+              nextCommunities = s.communities.map((community) =>
+                community.id === communityId
                   ? {
-                      ...s.activeCommunity,
+                      ...community,
                       unread_channel_count: unreadCount,
                       unreadChannelCount: unreadCount,
                       has_unread_channels: unreadCount > 0,
                       hasUnreadChannels: unreadCount > 0,
+                      has_new_activity: s.activeCommunity?.id !== communityId,
+                      hasNewActivity: s.activeCommunity?.id !== communityId,
                     }
-                  : s.activeCommunity,
-            };
-          });
+                  : community
+              );
+              if (s.activeCommunity?.id === communityId) {
+                nextActiveCommunity = {
+                  ...s.activeCommunity,
+                  unread_channel_count: unreadCount,
+                  unreadChannelCount: unreadCount,
+                  has_unread_channels: unreadCount > 0,
+                  hasUnreadChannels: unreadCount > 0,
+                  has_new_activity: false,
+                  hasNewActivity: false,
+                };
+              }
+            }
+          }
+
+          let nextConversations = s.conversations;
+          let nextActiveConv = s.activeConv;
+
+          if (msg.conversation_id) {
+            const next = [...s.conversations];
+            const idx = next.findIndex((c) => c.id === msg.conversation_id);
+            const viewingDm = s.activeConv?.id === msg.conversation_id;
+            if (idx !== -1) {
+              const updatedAt = msg.created_at || msg.createdAt || new Date().toISOString();
+              const updated = {
+                ...next[idx],
+                updated_at: updatedAt,
+                updatedAt,
+                last_message_id: msg.id,
+                lastMessageId: msg.id,
+                last_message_author_id: msg.author_id,
+                lastMessageAuthorId: msg.author_id,
+                last_message_at: updatedAt,
+                lastMessageAt: updatedAt,
+                ...(viewingDm && msg.id
+                  ? {
+                      my_last_read_message_id: msg.id,
+                      myLastReadMessageId: msg.id,
+                    }
+                  : {}),
+              };
+              next.splice(idx, 1);
+              next.unshift(updated);
+              nextConversations = next;
+            }
+            nextActiveConv =
+              msg.conversation_id && s.activeConv?.id === msg.conversation_id
+                ? {
+                    ...s.activeConv,
+                    updated_at: msg.created_at || msg.createdAt || s.activeConv.updated_at,
+                    updatedAt: msg.created_at || msg.createdAt || s.activeConv.updatedAt,
+                    last_message_id: msg.id,
+                    lastMessageId: msg.id,
+                    last_message_author_id: msg.author_id,
+                    lastMessageAuthorId: msg.author_id,
+                    last_message_at: msg.created_at || msg.createdAt || s.activeConv.last_message_at,
+                    lastMessageAt: msg.created_at || msg.createdAt || s.activeConv.lastMessageAt,
+                    ...(viewingDm && msg.id
+                      ? {
+                          my_last_read_message_id: msg.id,
+                          myLastReadMessageId: msg.id,
+                        }
+                      : {}),
+                  }
+                : s.activeConv;
+          }
+
+          return {
+            messages: nextMessages,
+            channels: nextChannels,
+            activeChannel: nextActiveChannel,
+            conversations: nextConversations,
+            activeConv: nextActiveConv,
+            communities: nextCommunities,
+            activeCommunity: nextActiveCommunity,
+          };
+        });
+
+        if (msg.channel_id && store.activeChannel?.id === msg.channel_id && msg.id) {
           markMessageRead(msg.id);
         }
         if (msg.conversation_id && store.activeConv?.id === msg.conversation_id && msg.id) {
-          set(s => ({
-            conversations: s.conversations.map((conv) =>
-              conv.id === msg.conversation_id
-                ? {
-                    ...conv,
-                    my_last_read_message_id: msg.id,
-                    myLastReadMessageId: msg.id,
-                  }
-                : conv
-            ),
-            activeConv:
-              s.activeConv?.id === msg.conversation_id
-                ? {
-                    ...s.activeConv,
-                    my_last_read_message_id: msg.id,
-                    myLastReadMessageId: msg.id,
-                  }
-                : s.activeConv,
-          }));
           markMessageRead(msg.id);
         }
         break;
