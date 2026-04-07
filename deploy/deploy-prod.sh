@@ -430,6 +430,13 @@ ssh "$PROD_USER@$PROD_HOST" "
   echo 'Old instance stopped'"
 echo "✓ Old instance stopped (rollback: re-deploy previous SHA)"
 
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# 10.55. Copy repo Prometheus template so the `redis` scrape job exists; 10.6 sed still
+# rewrites the old live port the same way as before.
+echo "10.55. Syncing prometheus-host.yml from repo (includes redis job)..."
+scp -q "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "$PROD_USER@$PROD_HOST:/tmp/prometheus-host.yml.deploy" || true
+
 # 10.6. Update Prometheus scrape target to the new active port.
 # prometheus-host.yml is the config template for the monitoring stack.
 # We sed-replace the old port, then restart the Prometheus container so its
@@ -437,6 +444,11 @@ echo "✓ Old instance stopped (rollback: re-deploy previous SHA)"
 # (hot-reload via /-/reload requires --web.enable-lifecycle which is not set)
 echo "10.6. Updating Prometheus scrape target to port ${NEW_PORT}..."
 ssh "$PROD_USER@$PROD_HOST" "
+  if [ -f /tmp/prometheus-host.yml.deploy ]; then
+    sudo mkdir -p /opt/chatapp-monitoring
+    sudo cp /tmp/prometheus-host.yml.deploy /opt/chatapp-monitoring/prometheus-host.yml
+    rm -f /tmp/prometheus-host.yml.deploy
+  fi
   PROM_TMPL=/opt/chatapp-monitoring/prometheus-host.yml
   if [ -f \"\$PROM_TMPL\" ]; then
     sudo sed -i \"s/127\\.0\\.0\\.1:${OLD_PORT}/127.0.0.1:${NEW_PORT}/g\" \"\$PROM_TMPL\"
@@ -453,8 +465,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   fi
 " || echo "⚠ Prometheus target update failed (non-fatal)"
 
-echo "10.65. Sync alert rules + Alertmanager (Discord capacity alerts)..."
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+echo "10.65. Sync alert rules + Alertmanager + redis_exporter (Discord / Redis alerts)..."
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_HOST:/tmp/alerts.yml.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_HOST:/tmp/alertmanager.yml.deploy" || true
 ssh "$PROD_USER@$PROD_HOST" "
@@ -472,7 +483,19 @@ ssh "$PROD_USER@$PROD_HOST" "
   fi
   sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1 || true
   sudo docker restart chatapp-monitoring-alertmanager-1 >/dev/null 2>&1 || true
-" || echo "⚠ Alert sync failed (non-fatal)"
+  set -a
+  # shellcheck disable=SC1091
+  source /opt/chatapp/shared/.env 2>/dev/null || true
+  set +a
+  RURL=\"\${REDIS_URL:-redis://127.0.0.1:6379}\"
+  if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
+    sudo docker rm -f redis_exporter 2>/dev/null || true
+  fi
+  sudo docker pull oliver006/redis_exporter:latest >/dev/null
+  sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
+    oliver006/redis_exporter:latest --redis.addr=\"\$RURL\"
+  echo 'redis_exporter started (uses REDIS_URL from /opt/chatapp/shared/.env)'
+" || echo "⚠ Alert/redis_exporter sync failed (non-fatal)"
 echo "✓ Monitoring updated"
 
 # 11. Update current symlink
