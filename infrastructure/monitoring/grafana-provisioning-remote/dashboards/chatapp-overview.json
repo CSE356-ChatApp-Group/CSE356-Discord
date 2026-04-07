@@ -133,6 +133,58 @@
       "targets": [{ "expr": "1000 * max(nodejs_eventloop_lag_p99_seconds{job=\"chatapp-api\"})", "legendFormat": "event loop p99", "refId": "A" }],
       "title": "Event Loop Lag p99 (ms)",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 21 },
+      "id": 8,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [{ "expr": "sum(rate(http_overload_shed_total{job=\"chatapp-api\"}[5m]))", "legendFormat": "shed / s", "refId": "A" }],
+      "title": "Event-loop shed (rate) — early 503 under lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 21 },
+      "id": 9,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [{ "expr": "sum by (route) (rate(auth_rate_limit_hits_total{job=\"chatapp-api\"}[5m]))", "legendFormat": "{{route}}", "refId": "A" }],
+      "title": "Auth rate-limit hits (rate) — login abuse / Login fails",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 21 },
+      "id": 10,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [{ "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route=~\"/api/v1/auth.*\",status_class=\"5xx\"}[5m]))", "legendFormat": "auth 5xx", "refId": "A" }],
+      "title": "Auth routes 5xx (rate) — Login fails",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 27 },
+      "id": 11,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [{ "expr": "sum(rate(side_effect_queue_dropped_total{job=\"chatapp-api\"}[5m])) by (name, reason)", "legendFormat": "{{name}} {{reason}}", "refId": "A" }],
+      "title": "Side-effect queue drops (rate) — delivery pressure",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -145,6 +197,6 @@
   "timezone": "browser",
   "title": "ChatApp Overview",
   "uid": "chatapp-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
