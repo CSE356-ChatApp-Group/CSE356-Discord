@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { useAutoResize } from '../hooks/useAutoResize';
@@ -99,7 +100,6 @@ export default function MessagePane() {
   const inviteDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
 
-  const bottomRef   = useRef(null);
   const inputRef    = useRef(null);
   const scrollRef   = useRef(null);
   const bodyRef     = useRef<HTMLDivElement | null>(null);
@@ -677,6 +677,14 @@ export default function MessagePane() {
     return null;
   }, [msgList]);
 
+  const messageVirtualizer = useVirtualizer({
+    count: msgList.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 92,
+    overscan: 14,
+    getItemKey: (index) => msgList[index]?.id ?? index,
+  });
+
   const searchScope = activeChannel
     ? `#${activeChannel.name}`
     : activeConv?.name
@@ -825,23 +833,46 @@ export default function MessagePane() {
                 <p className={styles.emptyHint}>Be the first to say something.</p>
               </div>
             )}
-            {msgList.map((msg, i) => (
-              <MessageItem
-                key={msg.id}
-                message={msg}
-                prevMessage={msgList[i - 1]}
-                isOwn={msg.author_id === user?.id}
-                showReadReceipt={Boolean(
-                  activeConv
-                    && latestOwnSeen
-                    && latestVisibleMessage
-                    && latestVisibleMessage.author_id === user?.id
-                    && msg.id === latestVisibleMessage.id
-                    && msg.id === latestOwnMessageId
-                )}
-              />
-            ))}
-            <div ref={bottomRef} />
+            {msgList.length > 0 && (
+              <div
+                className={styles.messagesVirtualList}
+                style={{ height: messageVirtualizer.getTotalSize(), flexShrink: 0 }}
+              >
+                {messageVirtualizer.getVirtualItems().map((vi) => {
+                  const msg = msgList[vi.index];
+                  const prevMessage = vi.index > 0 ? msgList[vi.index - 1] : undefined;
+                  return (
+                    <div
+                      key={vi.key}
+                      data-index={vi.index}
+                      ref={messageVirtualizer.measureElement}
+                      className={styles.messageVirtualRow}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${vi.start}px)`,
+                      }}
+                    >
+                      <MessageItem
+                        message={msg}
+                        prevMessage={prevMessage}
+                        isOwn={msg.author_id === user?.id}
+                        showReadReceipt={Boolean(
+                          activeConv
+                            && latestOwnSeen
+                            && latestVisibleMessage
+                            && latestVisibleMessage.author_id === user?.id
+                            && msg.id === latestVisibleMessage.id
+                            && msg.id === latestOwnMessageId
+                        )}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Input */}

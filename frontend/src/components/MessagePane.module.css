@@ -405,6 +405,15 @@
   min-height: 0;
 }
 
+.messagesVirtualList {
+  position: relative;
+  width: 100%;
+}
+
+.messageVirtualRow {
+  box-sizing: border-box;
+}
+
 .loadingMore {
   text-align: center;
   font-size: 12px;
