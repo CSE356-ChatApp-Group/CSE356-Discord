@@ -402,6 +402,12 @@ async function invalidateWsBootstrapCache(userId) {
   await redis.del(wsBootstrapCacheKey(userId));
 }
 
+/**
+ * Lists every community, channel, and DM for Redis SUBSCRIBE on connect — fine at
+ * class scale. If load tests show Redis CPU or pub/sub delivery dominating as
+ * membership grows, revisit with aggregated feeds, lazy subscribe, or
+ * server-side filtering (phase-2).
+ */
 async function listAutoSubscriptionChannels(userId) {
   const cacheKey = wsBootstrapCacheKey(userId);
   const cached = await redis.get(cacheKey).catch(() => null);
