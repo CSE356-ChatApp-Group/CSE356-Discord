@@ -243,7 +243,8 @@ export const options = {
 function baseHttpParams(token, tags = {}, extra = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const params = { headers, tags, ...extra };
+  // k6's transpiler rejects object spread in literals; Object.assign is supported.
+  const params = Object.assign({ headers, tags }, extra);
   if (LOADTEST_HTTP_TIMEOUT_MS) params.timeout = `${LOADTEST_HTTP_TIMEOUT_MS}ms`;
   return params;
 }
