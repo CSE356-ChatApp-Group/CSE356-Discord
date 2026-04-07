@@ -27,6 +27,13 @@
  *   withTransaction(callback)      – acquire client, BEGIN, run callback, COMMIT/ROLLBACK, release
  *   poolStats()                    – snapshot of pool counters (used by health check)
  *   PoolCircuitBreakerError        – error class thrown when circuit is open
+ *
+ * SKU tuning (env):
+ *   1 vCPU — PG_POOL_MAX=10–15 and POOL_CIRCUIT_BREAKER_QUEUE=6–8 usually match
+ *   event-loop throughput; align PgBouncer default_pool_size with the sum of
+ *   max connections across Node processes.
+ *   2 vCPU / staging — defaults (PG_POOL_MAX=25, POOL_CIRCUIT_BREAKER_QUEUE=10)
+ *   are a reasonable starting point before k6 calibration.
  */
 
 'use strict';

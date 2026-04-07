@@ -7,6 +7,21 @@ const { overloadStageGauge } = require('./metrics');
 const lag = monitorEventLoopDelay({ resolution: 20 });
 lag.enable();
 
+/*
+ * SKU tuning (all values are optional env overrides of the defaults below):
+ *
+ * ~2 GiB RAM / 1 vCPU — enter degradation before RSS crowds out the kernel /
+ *   co-located Redis: e.g. OVERLOAD_RSS_WARN_MB=384, OVERLOAD_RSS_HIGH_MB=512,
+ *   OVERLOAD_RSS_CRITICAL_MB=768; optionally tighten shedding with
+ *   OVERLOAD_LAG_SHED_MS=150.
+ *
+ * ~8 GiB RAM / 2 vCPU (typical staging) — built-in RSS defaults (900 / 1300 /
+ *   1700 MB) match a Node-only process; lower WARN if the API shares the host
+ *   with Postgres or other memory-heavy services.
+ *
+ * Validate changes with load-tests/staging-capacity.js on the target instance.
+ */
+
 let lastStage = -1;
 
 function toMb(bytes) {
