@@ -16,6 +16,7 @@ python3 - "$OUTPUT_FILE" "$SSH_HOST" "$PROM_URL" <<'PY'
 import json
 import subprocess
 import sys
+import time
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -46,23 +47,32 @@ queries = {
     "pg_pool_total": 'max_over_time(pg_pool_total{job="chatapp-api"}[10m])',
     "pg_pool_idle": 'min_over_time(pg_pool_idle{job="chatapp-api"}[10m])',
     "pg_pool_waiting": 'max_over_time(pg_pool_waiting{job="chatapp-api"}[10m])',
+    # Fallback if job label or scrape differs on a given host
+    "pg_pool_total_any": 'max(max_over_time(pg_pool_total[10m]))',
+    "pg_pool_idle_any": 'min(min_over_time(pg_pool_idle[10m]))',
+    "pg_pool_waiting_any": 'max(max_over_time(pg_pool_waiting[10m]))',
     # Any redis_exporter job/instance (staging Prometheus may not use job="redis").
     "redis_memory_mb": 'max(max by (job, instance) (redis_memory_used_bytes)) / 1024 / 1024',
     "redis_connected_clients": 'max(max by (job, instance) (redis_connected_clients))',
 }
 
-def run_query(name, query):
+def run_query(name, query, retries=2):
     encoded = urllib.parse.quote(query, safe='')
     cmd = [
         'ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'StrictHostKeyChecking=no',
         ssh_host,
-        f"curl -fsS '{prom_url}/api/v1/query?query={encoded}'",
+        f"curl -fsS --connect-timeout 8 --max-time 25 '{prom_url}/api/v1/query?query={encoded}'",
     ]
-    try:
-        output = subprocess.check_output(cmd, text=True)
-        return json.loads(output)
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "error", "error": str(exc)}
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            output = subprocess.check_output(cmd, text=True)
+            return json.loads(output)
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            if attempt < retries:
+                time.sleep(0.4 * (attempt + 1))
+    return {"status": "error", "error": str(last_err)}
 
 payload = {
     "capturedAt": datetime.now(timezone.utc).isoformat(),

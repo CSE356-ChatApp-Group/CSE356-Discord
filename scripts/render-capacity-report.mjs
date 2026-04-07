@@ -31,6 +31,41 @@ function metric(summary, name, stat) {
   return null;
 }
 
+/** k6 Counter summary uses `count`; omit when zero in some exports. */
+function metricCounter(summary, name) {
+  const v = metric(summary, name, 'count');
+  return typeof v === 'number' ? v : null;
+}
+
+function collectThresholdBreaches(summary) {
+  const out = [];
+  const metrics = summary?.metrics;
+  if (!metrics) return out;
+  for (const [metricName, entry] of Object.entries(metrics)) {
+    if (!entry?.thresholds || typeof entry.thresholds !== 'object') continue;
+    for (const [expr, breached] of Object.entries(entry.thresholds)) {
+      // k6 `summary.json`: **true** = threshold violated, **false** = satisfied
+      // (the key is the expression string, e.g. `p(95)<1500`).
+      if (breached !== true) continue;
+      out.push({ metric: metricName, expr });
+    }
+  }
+  const seen = new Set();
+  return out.filter((b) => {
+    const k = `${b.metric}|${b.expr}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function gatherPrometheusQueryErrors(snapshot) {
+  if (!snapshot?.queries) return [];
+  return Object.entries(snapshot.queries)
+    .filter(([, v]) => v && v.status === 'error')
+    .map(([name, v]) => ({ name, error: v.error || 'unknown' }));
+}
+
 function fmt(value, suffix = '') {
   if (value === null || value === undefined || Number.isNaN(value)) return 'n/a';
   if (typeof value === 'number') {
@@ -51,6 +86,20 @@ function promScalar(snapshot, key, emptyValue = null) {
   const raw = result[0]?.value?.[1];
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : emptyValue;
+}
+
+function promScalarPrefer(snapshot, primaryKey, fallbackKey, emptyValue = null) {
+  let v = promScalar(snapshot, primaryKey, emptyValue);
+  if (v === null || v === emptyValue) {
+    const fb = promScalar(snapshot, fallbackKey, emptyValue);
+    if (fb !== null && fb !== emptyValue) return fb;
+  }
+  return v;
+}
+
+function counterAbsentNote(val) {
+  if (val === null) return ' (counter absent from summary — treated as 0)';
+  return '';
 }
 
 function readMetadata(filePath) {
@@ -208,7 +257,11 @@ lines.push('');
 lines.push('## k6 summary');
 lines.push('');
 lines.push(`- Total requests: ${fmt(metric(summary, 'http_reqs', 'count'))}`);
-lines.push(`- Request failure rate: ${fmt((metric(summary, 'http_req_failed', 'rate') ?? metric(summary, 'http_req_failed', 'value') ?? 0) * 100, '%')}`);
+const httpFailRate =
+  metric(summary, 'http_req_failed', 'rate') ?? metric(summary, 'http_req_failed', 'value');
+lines.push(
+  `- HTTP status failure rate (k6 default; non-2xx/3xx): ${fmt((httpFailRate ?? 0) * 100, '%')}`,
+);
 lines.push(`- Overall p95 latency: ${fmt(metric(summary, 'http_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Overall p99 latency: ${fmt(metric(summary, 'http_req_duration', 'p(99)'), ' ms')}`);
 lines.push(`- Communities p95: ${fmt(metric(summary, 'communities_req_duration', 'p(95)'), ' ms')}`);
@@ -216,20 +269,77 @@ lines.push(`- Conversations p95: ${fmt(metric(summary, 'conversations_req_durati
 lines.push(`- Channels p95: ${fmt(metric(summary, 'channels_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Message post p95: ${fmt(metric(summary, 'message_post_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Auth login p95: ${fmt(metric(summary, 'auth_login_req_duration', 'p(95)'), ' ms')}`);
-lines.push(`- WebSocket success rate: ${fmt((metric(summary, 'ws_connect_success', 'rate') ?? metric(summary, 'ws_connect_success', 'value') ?? 0) * 100, '%')}`);
+lines.push(
+  `- WebSocket success rate: ${fmt((metric(summary, 'ws_connect_success', 'rate') ?? metric(summary, 'ws_connect_success', 'value') ?? 0) * 100, '%')}`,
+);
+const dropped = metric(summary, 'dropped_iterations', 'count');
+const iters = metric(summary, 'iterations', 'count');
+if (typeof dropped === 'number' || typeof iters === 'number') {
+  const dropPct = typeof dropped === 'number' && typeof iters === 'number' && iters + dropped > 0
+    ? ((dropped / (iters + dropped)) * 100).toFixed(1)
+    : null;
+  lines.push(
+    `- Iterations **completed**: ${fmt(iters)} — **dropped** (never started): ${fmt(dropped)}${dropPct !== null ? ` (${dropPct}% of planned iterations)` : ''} — if large, raise **preAllocatedVUs** / **maxVUs** so the arrival-rate executor can keep up`,
+  );
+}
+lines.push(
+  `- Iteration duration p95: ${fmt(metric(summary, 'iteration_duration', 'p(95)'), ' ms')} (full httpMix iteration incl. sleep)`,
+);
+lines.push('');
+const breaches = collectThresholdBreaches(summary);
+if (breaches.length) {
+  lines.push('## k6 threshold breaches');
+  lines.push('');
+  lines.push(
+    'Each row is a threshold that k6 marked as **violated** (`true` in `summary.json`).',
+  );
+  lines.push('');
+  for (const b of breaches) {
+    lines.push(`- \`${b.metric}\`: **${b.expr}**`);
+  }
+  lines.push('');
+}
+lines.push('### How to read this run');
+lines.push('');
+lines.push(
+  '- **Exit code ≠ 0** with **0% HTTP status failures** usually means **p95/p99** or **per-route Trends** breached — not that the server returned no errors.',
+);
+lines.push(
+  '- **Dropped iterations** mean k6 could not spawn work fast enough; the **real** offered load was lower than the scenario target until you add VU headroom.',
+);
 lines.push('');
 lines.push('## HTTP response shape (k6 counters)');
 lines.push('');
 lines.push(
   'Counts **instrumented responses** (status 0 = timeout / no response; 503 = overload shed, pool circuit, or upstream; 4xx/5xx-other = remaining errors).',
 );
-lines.push(`- Status **0**: ${fmt(metric(summary, 'http_res_status_0_total', 'count'))}`);
-lines.push(`- Status **503**: ${fmt(metric(summary, 'http_res_status_503_total', 'count'))}`);
-lines.push(`- Status **4xx**: ${fmt(metric(summary, 'http_res_status_4xx_total', 'count'))}`);
-lines.push(`- Status **5xx (not 503)**: ${fmt(metric(summary, 'http_res_status_5xx_other_total', 'count'))}`);
+const c0 = metricCounter(summary, 'http_res_status_0_total');
+const c503 = metricCounter(summary, 'http_res_status_503_total');
+const c4 = metricCounter(summary, 'http_res_status_4xx_total');
+const c5 = metricCounter(summary, 'http_res_status_5xx_other_total');
+lines.push(`- Status **0**: ${fmt(c0 ?? 0)}${counterAbsentNote(c0)}`);
+lines.push(`- Status **503**: ${fmt(c503 ?? 0)}${counterAbsentNote(c503)}`);
+lines.push(`- Status **4xx**: ${fmt(c4 ?? 0)}`);
+lines.push(`- Status **5xx (not 503)**: ${fmt(c5 ?? 0)}`);
 lines.push('');
 lines.push('## Prometheus after-run snapshot');
 lines.push('');
+
+const promErrAfter = gatherPrometheusQueryErrors(after);
+const promErrBefore = gatherPrometheusQueryErrors(before);
+const promErrs = [...promErrBefore, ...promErrAfter].filter(
+  (e, i, a) => a.findIndex((x) => x.name === e.name && x.error === e.error) === i,
+);
+if (promErrs.length) {
+  lines.push('### Prometheus query errors');
+  lines.push('');
+  lines.push('Remote `query_range` / SSH / curl failed for these — values below may be **n/a**.');
+  lines.push('');
+  for (const e of promErrs.slice(0, 12)) {
+    lines.push(`- **${e.name}**: ${e.error.slice(0, 220)}${e.error.length > 220 ? '…' : ''}`);
+  }
+  lines.push('');
+}
 lines.push(`- RSS memory: ${fmt(promScalar(after, 'rss_mb'), ' MB')}`);
 lines.push(`- CPU utilisation (post-run ~2 m avg): ${fmt((promScalar(after, 'cpu_seconds_rate') ?? 0) * 100, '%')} — use peak below for accurate burst figure`);
 lines.push(`- CPU peak during run (max 1 m rate over 12 m): ${fmt((promScalar(after, 'cpu_peak_rate') ?? 0) * 100, '%')}`);
@@ -259,12 +369,22 @@ const overloadShedBefore = promScalar(before, 'overload_shed_total', 0);
 const overloadShedDelta = (overloadShedAfter ?? 0) - (overloadShedBefore ?? 0);
 lines.push(`- HTTP overload shed total (during run): ${fmt(overloadShedDelta)}`);
 lines.push(`- Overload stage max (0–3, post-run instant): ${fmt(promScalar(after, 'overload_stage_max'))}`);
-lines.push(`- PG pool peak-total/min-idle/peak-waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
+const pgTotal = promScalarPrefer(after, 'pg_pool_total', 'pg_pool_total_any');
+const pgIdle = promScalarPrefer(after, 'pg_pool_idle', 'pg_pool_idle_any');
+const pgWait = promScalarPrefer(after, 'pg_pool_waiting', 'pg_pool_waiting_any');
+lines.push(
+  `- PG pool peak-total / min-idle / peak-waiting: ${fmt(pgTotal)} / ${fmt(pgIdle)} / ${fmt(pgWait)}${promScalar(after, 'pg_pool_total') === null && pgTotal !== null ? ' _(fallback: query without job label)_' : ''}`,
+);
 const redisMb = promScalar(after, 'redis_memory_mb');
 const redisClients = promScalar(after, 'redis_connected_clients');
 lines.push(`- Redis memory: ${fmt(redisMb, ' MB')} / connected clients: ${fmt(redisClients)}`);
 if (redisMb === null && redisClients === null) {
-  lines.push('  - *No Redis exporter series in Prometheus for this scrape (add redis_exporter target or check job labels).*');
+  const redisErr = promErrs.some((e) => e.name.includes('redis'));
+  lines.push(
+    redisErr
+      ? '  - *Redis query failed (see Prometheus query errors above) or no redis_exporter series.*'
+      : '  - *No Redis exporter series in Prometheus for this scrape (add redis_exporter target or check job labels).*',
+  );
 }
 
 const topFiveXxRoutes = promResult(after, 'five_xx_by_route_peak')

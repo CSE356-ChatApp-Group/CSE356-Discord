@@ -56,6 +56,7 @@ docker run --rm \
   -e RUN_ID="$RUN_ID" \
   -e LOADTEST_PASSWORD="${LOADTEST_PASSWORD:-LoadTest!12345}" \
   -e MESSAGE_SIZE="${MESSAGE_SIZE:-96}" \
+  -e LOADTEST_HTTP_TIMEOUT_MS="${LOADTEST_HTTP_TIMEOUT_MS:-}" \
   "$K6_IMAGE" run \
     --summary-export "/work/artifacts/load-tests/$RUN_ID/summary.json" \
     --out "json=/work/artifacts/load-tests/$RUN_ID/metrics.ndjson" \

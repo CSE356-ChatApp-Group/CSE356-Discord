@@ -34,6 +34,8 @@ const WS_URL = (__ENV.WS_URL || BASE_URL.replace(/^http/, 'ws').replace(/\/api\/
 const RUN_ID = __ENV.RUN_ID || `capacity-${Date.now()}`;
 const PASSWORD = __ENV.LOADTEST_PASSWORD || 'LoadTest!12345';
 const MESSAGE_SIZE = Number(__ENV.MESSAGE_SIZE || 96);
+/** Optional: e.g. 45s — requests slower than this become status 0 (surfaces timeouts in reports). */
+const LOADTEST_HTTP_TIMEOUT_MS = __ENV.LOADTEST_HTTP_TIMEOUT_MS || '';
 const checksRate = new Rate('capacity_checks');
 const wsConnectRate = new Rate('ws_connect_success');
 const communitiesDuration = new Trend('communities_req_duration', true);
@@ -108,8 +110,8 @@ const PROFILES = {
       { target: 500, duration: '1m' },
       { target: 0,   duration: '30s' },
     ],
-    preAllocatedVUs: 100,
-    maxVUs: 600,
+    preAllocatedVUs: 220,
+    maxVUs: 900,
     wsVUs: 60,
     wsDuration: '6m30s',
   },
@@ -122,8 +124,10 @@ const PROFILES = {
       { target: 500, duration: '2m' },
       { target: 0, duration: '45s' },
     ],
-    preAllocatedVUs: 100,
-    maxVUs: 600,
+    // High preAllocated/max so ramping-arrival-rate does not drop iterations once
+    // the target rate exceeds what few warm VUs can schedule (see dropped_iterations in report).
+    preAllocatedVUs: 220,
+    maxVUs: 900,
     wsVUs: 60,
     wsDuration: '10m',
   },
@@ -210,12 +214,23 @@ export const options = {
   },
 };
 
-function jsonParams(token, tags = {}, keepBody = false) {
+function baseHttpParams(token, tags = {}, extra = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const params = { headers, tags };
+  const params = { headers, tags, ...extra };
+  if (LOADTEST_HTTP_TIMEOUT_MS) params.timeout = `${LOADTEST_HTTP_TIMEOUT_MS}ms`;
+  return params;
+}
+
+function jsonParams(token, tags = {}, keepBody = false) {
+  const params = baseHttpParams(token, tags);
   if (keepBody) params.responseType = 'text';
   return params;
+}
+
+/** GET helpers use the same timeout as POST (list endpoints were bypassing jsonParams). */
+function getAuthParams(token, tags) {
+  return baseHttpParams(token, tags);
 }
 
 function safeJson(res) {
@@ -391,7 +406,7 @@ function randomContent(label) {
 }
 
 function listCommunities(token) {
-  const res = http.get(`${BASE_URL}/communities`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'communities_list' } });
+  const res = http.get(`${BASE_URL}/communities`, getAuthParams(token, { endpoint: 'communities_list' }));
   recordHttpStatus(res, 'communities_list');
   communitiesDuration.add(res.timings.duration);
   const ok = check(res, { 'communities list 200': (r) => r.status === 200 });
@@ -399,7 +414,7 @@ function listCommunities(token) {
 }
 
 function listConversations(token) {
-  const res = http.get(`${BASE_URL}/conversations`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'conversations_list' } });
+  const res = http.get(`${BASE_URL}/conversations`, getAuthParams(token, { endpoint: 'conversations_list' }));
   recordHttpStatus(res, 'conversations_list');
   conversationsDuration.add(res.timings.duration);
   const ok = check(res, { 'conversations list 200': (r) => r.status === 200 });
@@ -407,7 +422,7 @@ function listConversations(token) {
 }
 
 function listMessages(token, channelId) {
-  const res = http.get(`${BASE_URL}/messages?channelId=${channelId}`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'messages_list_channel' } });
+  const res = http.get(`${BASE_URL}/messages?channelId=${channelId}`, getAuthParams(token, { endpoint: 'messages_list_channel' }));
   recordHttpStatus(res, 'messages_list_channel');
   channelListDuration.add(res.timings.duration);
   const ok = check(res, { 'channel message list 200': (r) => r.status === 200 });
@@ -415,7 +430,7 @@ function listMessages(token, channelId) {
 }
 
 function listChannels(token, communityId) {
-  const res = http.get(`${BASE_URL}/channels?communityId=${communityId}`, { headers: { Authorization: `Bearer ${token}` }, tags: { endpoint: 'channels_list' } });
+  const res = http.get(`${BASE_URL}/channels?communityId=${communityId}`, getAuthParams(token, { endpoint: 'channels_list' }));
   recordHttpStatus(res, 'channels_list');
   channelsDuration.add(res.timings.duration);
   const ok = check(res, { 'channels list 200': (r) => r.status === 200 });
@@ -496,7 +511,7 @@ export function teardown(data) {
   const delRes = http.del(
     `${BASE_URL}/communities/${data.communityId}`,
     null,
-    { headers: { Authorization: `Bearer ${data.ownerToken}` } },
+    getAuthParams(data.ownerToken, { endpoint: 'communities_delete' }),
   );
   recordHttpStatus(delRes, 'communities_delete');
 }
