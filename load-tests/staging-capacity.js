@@ -278,11 +278,14 @@ function safeJson(res) {
 
 function uniqueUser(label) {
   const suffix = `${RUN_ID}-${label}`.toLowerCase().replace(/[^a-z0-9-]/g, '');
-  // Use only the last 8 chars of RUN_ID so the varying label part isn't truncated.
-  const runShort = RUN_ID.replace(/[^a-z0-9]/gi, '').slice(-8).toLowerCase();
-  const labelSlug = label.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  // Usernames must stay <=32 chars (API validation).  Do **not** use only the
+  // last 8 alnum chars of RUN_ID — for profile "break-fast" that becomes
+  // "breakfast" on every run, so register returns 409 and login-by-new-email 401s.
+  const runKey = RUN_ID.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
+  const labelSlug = label.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 10);
+  const username = `lt-${runKey}-${labelSlug}`.slice(0, 30);
   return {
-    username: `lt-${runShort}-${labelSlug}`.slice(0, 30),
+    username,
     email: `lt-${suffix}@example.com`,
     password: PASSWORD,
   };
@@ -302,9 +305,11 @@ function registerOrLogin(label) {
   }
 
   const startedAt = Date.now();
+  // Passport local strategy accepts username in the `email` JSON field.
+  // After a 409 register (username reused), login-by-email would miss the DB row.
   const loginRes = http.post(
     `${BASE_URL}/auth/login`,
-    JSON.stringify({ email: creds.email, password: creds.password }),
+    JSON.stringify({ email: creds.username, password: creds.password }),
     jsonParams(null, { endpoint: 'auth_login' }, true),
   );
   recordHttpStatus(loginRes, 'auth_login');
@@ -327,7 +332,7 @@ function registerOrLogin(label) {
 }
 
 // Parallel register+login for a list of credential objects.
-// Returns [{token, userId, email}] in the same order as credsList.
+// Returns [{token, userId, email, username}] in the same order as credsList.
 function batchCreateUsers(credsList) {
   // Batch register — 409 (already exists) is fine for idempotent reruns.
   const registerResponses = http.batch(
@@ -343,7 +348,7 @@ function batchCreateUsers(credsList) {
     credsList.map((creds) => ({
       method: 'POST',
       url: `${BASE_URL}/auth/login`,
-      body: JSON.stringify({ email: creds.email, password: creds.password }),
+      body: JSON.stringify({ email: creds.username, password: creds.password }),
       params: jsonParams(null, { endpoint: 'auth_login' }, true),
     })),
   );
@@ -351,9 +356,14 @@ function batchCreateUsers(credsList) {
   return loginResponses.map((res, i) => {
     const body = safeJson(res);
     if (!body || !body.accessToken) {
-      throw new Error(`batch user login failed for ${credsList[i].email}: ${res.status} ${res.body}`);
+      throw new Error(`batch user login failed for ${credsList[i].username}: ${res.status} ${res.body}`);
     }
-    return { token: body.accessToken, userId: body.user.id, email: credsList[i].email };
+    return {
+      token: body.accessToken,
+      userId: body.user.id,
+      email: credsList[i].email,
+      username: credsList[i].username,
+    };
   });
 }
 
@@ -498,10 +508,10 @@ function sendConversationMessage(token, conversationId) {
   checksRate.add(ok);
 }
 
-function reauthenticate(email) {
+function reauthenticate(loginId) {
   const res = http.post(
     `${BASE_URL}/auth/login`,
-    JSON.stringify({ email, password: PASSWORD }),
+    JSON.stringify({ email: loginId, password: PASSWORD }),
     jsonParams(null, { endpoint: 'auth_login' }),
   );
   recordHttpStatus(res, 'auth_login');
@@ -535,7 +545,7 @@ export function httpMix(data) {
     sendConversationMessage(data.peerToken, data.conversationId);
   } else {
     const vuIdx = (exec.vu.idInTest - 1) % data.wsPeers.length;
-    reauthenticate(data.wsPeers[vuIdx].email);
+    reauthenticate(data.wsPeers[vuIdx].username);
   }
 
   sleep(Math.random() * 0.35);
