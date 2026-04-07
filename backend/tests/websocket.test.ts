@@ -178,6 +178,119 @@ describe('DM realtime delivery', () => {
   });
 });
 
+// ── Bootstrap ready signal ────────────────────────────────────────────────────
+//
+// These tests validate the server-side half of the bootstrap-race fix
+// independently of the connectWebSocket() helper.  If someone removes the
+// { event: "ready" } emission from bootstrapWithRetry, these tests fail
+// deterministically — no helper change can mask the regression.
+
+describe('Bootstrap ready event', () => {
+  it('sends { event: "ready" } after bootstrap and before any channel message', async () => {
+    const user = await createAuthenticatedUser('wsreadyuser');
+
+    // Use raw WebSocket (NOT connectWebSocket) to observe the exact frame order.
+    const ws = await new Promise<any>((resolve, reject) => {
+      const { WebSocket } = require('ws');
+      const sock = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(user.accessToken)}`);
+      const timer = setTimeout(() => { sock.terminate(); reject(new Error('connect timeout')); }, 3000);
+      sock.once('open', () => { clearTimeout(timer); resolve(sock); });
+      sock.once('error', (err: Error) => { clearTimeout(timer); reject(err); });
+    });
+
+    try {
+      // The very first batch of frames from the server must include `ready`
+      // before any meaningful delay elapses.  We do NOT send any message first.
+      const readyEvent = await new Promise<any>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Timed out waiting for ready event')), 3000);
+        const onMessage = (raw: any) => {
+          let parsed: any;
+          try { parsed = JSON.parse(raw.toString()); } catch { return; }
+          if (parsed?.event === 'ready') {
+            clearTimeout(timer);
+            ws.off('message', onMessage);
+            resolve(parsed);
+          }
+        };
+        ws.on('message', onMessage);
+      });
+
+      expect(readyEvent.event).toBe('ready');
+    } finally {
+      await closeWebSocket(ws);
+    }
+  });
+
+  it('sends ready after subscribing to all community channels (message arrives post-ready)', async () => {
+    const owner  = await createAuthenticatedUser('wsreadyowner');
+    const member = await createAuthenticatedUser('wsreadymember');
+
+    const slug = `ws-ready-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'ready-signal test' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .send({});
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `ready-ch-${uniqueSuffix()}`, isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    // Use a raw socket to control exactly when we start listening.
+    const { WebSocket } = require('ws');
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(member.accessToken)}`);
+
+    const frames: any[] = [];
+    ws.on('message', (raw: any) => {
+      try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+    });
+
+    // Wait for ready on the raw socket.
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for ready')), 3000);
+      const check = () => {
+        if (frames.some((f) => f.event === 'ready')) { clearTimeout(timer); resolve(); }
+        else ws.once('message', check);
+      };
+      ws.once('open', check);
+    });
+
+    try {
+      // Now post a message — bootstrap is confirmed done, channel sub is active.
+      const msgPromise = waitForWsEvent(
+        ws,
+        (e) => e.event === 'message:created' && e.data?.channel_id === channelId,
+      );
+
+      const sendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'post-ready delivery check' });
+      expect(sendRes.status).toBe(201);
+
+      const evt = await msgPromise;
+      expect(evt.data.content).toBe('post-ready delivery check');
+
+      // Verify ready arrived before the message:created event in the frame log.
+      const readyIdx   = frames.findIndex((f) => f.event === 'ready');
+      const msgIdx     = frames.findIndex((f) => f.event === 'message:created' && f.data?.channel_id === channelId);
+      expect(readyIdx).toBeGreaterThanOrEqual(0);
+      expect(msgIdx).toBeGreaterThan(readyIdx);
+    } finally {
+      await closeWebSocket(ws);
+    }
+  });
+});
+
 // ── Channel auto-subscribe (bootstrap) ───────────────────────────────────────
 
 describe('Channel bootstrap subscriptions', () => {
