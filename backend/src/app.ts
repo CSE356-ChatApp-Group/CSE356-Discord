@@ -31,13 +31,14 @@ const usersRouter        = require('./auth/usersRouter');
 
 const app = express();
 app.set('trust proxy', 1);
-const { register, httpRequestsTotal, httpRequestDurationMs } = require('./utils/metrics');
+const { register, httpRequestsTotal, httpRequestDurationMs, httpOverloadShedTotal } = require('./utils/metrics');
 
 // Fail fast when the event loop is severely backed up (see overload.shouldShedIncomingRequests).
 app.use((req, res, next) => {
   const pathOnly = (req.path || '').split('?')[0];
   if (pathOnly === '/health' || pathOnly === '/metrics') return next();
   if (overload.shouldShedIncomingRequests()) {
+    httpOverloadShedTotal.inc();
     res.set('Retry-After', '1');
     return res.status(503).json({ error: 'Server busy, please retry' });
   }

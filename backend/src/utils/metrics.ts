@@ -23,6 +23,12 @@ const httpRequestDurationMs = new client.Histogram({
   buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
 });
 
+/** Incremented when middleware rejects a request due to event-loop lag (overload shed). */
+const httpOverloadShedTotal = new client.Counter({
+  name: 'http_overload_shed_total',
+  help: 'HTTP requests rejected early by event-loop lag shedding (503 before route handlers)',
+});
+
 // ── Presence fanout ────────────────────────────────────────────────────────────
 
 /**
@@ -141,6 +147,7 @@ module.exports = {
   register: client.register,
   httpRequestsTotal,
   httpRequestDurationMs,
+  httpOverloadShedTotal,
   presenceFanoutTotal,
   fanoutRecipientsHistogram,
   sideEffectQueueDepth,
