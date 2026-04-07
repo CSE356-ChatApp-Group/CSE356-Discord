@@ -274,6 +274,17 @@ lines.push(
 );
 const dropped = metric(summary, 'dropped_iterations', 'count');
 const iters = metric(summary, 'iterations', 'count');
+const iterRateFromMetric = metric(summary, 'iterations', 'rate');
+const wallMs = summary?.state?.testRunDurationMs;
+const iterRateAvg =
+  typeof iterRateFromMetric === 'number' && Number.isFinite(iterRateFromMetric)
+    ? iterRateFromMetric
+    : typeof wallMs === 'number' &&
+        wallMs > 0 &&
+        typeof iters === 'number' &&
+        Number.isFinite(iters)
+      ? iters / (wallMs / 1000)
+      : null;
 if (typeof dropped === 'number' || typeof iters === 'number') {
   const dropPct = typeof dropped === 'number' && typeof iters === 'number' && iters + dropped > 0
     ? ((dropped / (iters + dropped)) * 100).toFixed(1)
@@ -281,6 +292,9 @@ if (typeof dropped === 'number' || typeof iters === 'number') {
   lines.push(
     `- Iterations **completed**: ${fmt(iters)} — **dropped** (never started): ${fmt(dropped)}${dropPct !== null ? ` (${dropPct}% of planned iterations)` : ''} — if large, raise **preAllocatedVUs** / **maxVUs** so the arrival-rate executor can keep up`,
   );
+  if (iterRateAvg !== null) {
+    lines.push(`- Achieved iteration throughput (avg over test): ${fmt(iterRateAvg, ' iter/s')}`);
+  }
   if (dropPct !== null && parseFloat(dropPct) >= 10) {
     const iterP95 = metric(summary, 'iteration_duration', 'p(95)');
     lines.push(

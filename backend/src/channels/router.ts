@@ -71,7 +71,9 @@ async function bustChannelListCache(communityId) {
 }
 
 /** Same idea as communities/messages list: load tests pin many VUs to one reader user. */
-const CHANNELS_LIST_CACHE_TTL_SECS = 30;
+const _channelsListTtl = parseInt(process.env.CHANNELS_LIST_CACHE_TTL_SECS || '60', 10);
+const CHANNELS_LIST_CACHE_TTL_SECS =
+  Number.isFinite(_channelsListTtl) && _channelsListTtl > 0 ? _channelsListTtl : 60;
 const channelsListInflight = new Map();
 
 // ── List ───────────────────────────────────────────────────────────────────────

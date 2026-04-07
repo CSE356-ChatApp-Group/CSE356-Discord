@@ -128,7 +128,7 @@ const PROFILES = {
       { target: 500, duration: '1m' },
       { target: 0,   duration: '30s' },
     ],
-    preAllocatedVUs: 380,
+    preAllocatedVUs: 480,
     maxVUs: 3200,
     wsVUs: 60,
     wsDuration: '6m30s',
@@ -145,7 +145,7 @@ const PROFILES = {
     ],
     // High preAllocated/max so ramping-arrival-rate does not drop iterations once
     // the target rate exceeds what few warm VUs can schedule (see dropped_iterations in report).
-    preAllocatedVUs: 380,
+    preAllocatedVUs: 480,
     maxVUs: 3200,
     wsVUs: 60,
     wsDuration: '10m',

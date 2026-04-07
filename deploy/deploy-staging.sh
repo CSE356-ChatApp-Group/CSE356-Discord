@@ -34,7 +34,9 @@ fi
 _PGB_SIZE=$(python3 -c "
 ncpu = int('${_REMOTE_NPROC}')
 inst = int('${CHATAPP_INSTANCES}')
-x = max(60, min(320, ncpu * 45, 80 + inst * 40))
+# Slightly higher ncpu multiplier (×50 vs ×45) improves PG backend headroom on
+# 2–4 vCPU VMs where break tests were pool-bound at ~90 real connections.
+x = max(60, min(320, ncpu * 50, 80 + inst * 45))
 print(x)
 ")
 
@@ -321,11 +323,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # PG_POOL_MAX: Node→PgBouncer virtual connections per instance.  With 2
-  # instances × 50 = 100 total Node connections against pgbouncer
-  # default_pool_size=80 real PG backends (1.25:1 ratio).  Raising this above
-  # 50 causes PgBouncer to become the bottleneck before the Node-level circuit
-  # breaker can fire, producing slow timeout failures instead of fast 503s.
+  # PG_POOL_MAX: Node→PgBouncer virtual connections per instance (see
+  # PG_POOL_MAX_PER_INSTANCE in deploy header). Totals scale with CHATAPP_INSTANCES
+  # and PGBOUNCER_POOL_SIZE; the circuit breaker sheds before PgBouncer queues
+  # unbounded work.
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -348,6 +349,13 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
     || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Fail fast with 503 when event-loop lag spikes (avoids long PG pool waits + status 0).
+  sudo grep -q '^OVERLOAD_HTTP_SHED_ENABLED=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^OVERLOAD_HTTP_SHED_ENABLED=.*/OVERLOAD_HTTP_SHED_ENABLED=true/' /opt/chatapp/shared/.env \
+    || echo 'OVERLOAD_HTTP_SHED_ENABLED=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^OVERLOAD_LAG_SHED_MS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^OVERLOAD_LAG_SHED_MS=.*/OVERLOAD_LAG_SHED_MS=200/' /opt/chatapp/shared/.env \
+    || echo 'OVERLOAD_LAG_SHED_MS=200' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer interferes.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
@@ -414,17 +422,32 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 CUTOVER_COMPLETED=1
 
-echo "7a) Prometheus scrape config check (staging always runs both 4000+4001)..."
-# Staging runs CHATAPP_INSTANCES>=2 so both ports are always in the Prometheus
-# config — no port substitution needed. Just verify the container is healthy.
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+echo "7a) Prometheus template + Redis exporter (capacity reports need Redis series)..."
+scp -q "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/prometheus-host.yml.deploy" || true
 ssh "${STAGING_USER}@${STAGING_HOST}" "
+  set -euo pipefail
+  if [ -f /tmp/prometheus-host.yml.deploy ]; then
+    sudo mkdir -p /opt/chatapp-monitoring
+    sudo cp /tmp/prometheus-host.yml.deploy /opt/chatapp-monitoring/prometheus-host.yml
+    rm -f /tmp/prometheus-host.yml.deploy
+  fi
   if sudo docker inspect chatapp-monitoring-prometheus-1 >/dev/null 2>&1; then
     STATUS=\$(sudo docker inspect -f '{{.State.Running}}' chatapp-monitoring-prometheus-1)
     echo \"Prometheus container running=\$STATUS\"
+    sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1 && echo 'Prometheus restarted (re-rendered scrape config)' || echo 'WARN: Prometheus restart failed'
   else
     echo 'WARN: Prometheus container not found (non-critical)'
   fi
-" || echo "Warning: Prometheus check failed (non-critical)" >&2
+  # redis_exporter on host network — scrapes 127.0.0.1:6379; Prometheus hits :9121
+  if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
+    sudo docker rm -f redis_exporter 2>/dev/null || true
+  fi
+  sudo docker pull oliver006/redis_exporter:latest >/dev/null
+  sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
+    oliver006/redis_exporter:latest --redis.addr=redis://127.0.0.1:6379
+  echo 'redis_exporter started (host network, :9121/metrics)'
+" || echo "Warning: Prometheus/redis_exporter step failed (non-critical)" >&2
 
 # ── Step 7b: companion instance (dual-worker mode) ───────────────────────────
 # When CHATAPP_INSTANCES>=2, the deploy was a blue-green cutover: nginx now

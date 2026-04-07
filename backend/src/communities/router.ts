@@ -42,7 +42,9 @@ async function loadMembership(req, res, next) {
   next();
 }
 
-const COMMUNITIES_CACHE_TTL_SECS = 30;
+const _communitiesTtl = parseInt(process.env.COMMUNITIES_LIST_CACHE_TTL_SECS || '45', 10);
+const COMMUNITIES_CACHE_TTL_SECS =
+  Number.isFinite(_communitiesTtl) && _communitiesTtl > 0 ? _communitiesTtl : 45;
 function communitiesCacheKey(userId) { return `communities:list:${userId}`; }
 
 const MEMBERS_CACHE_TTL_SECS = 30;
