@@ -77,7 +77,8 @@ async function analyzeNdjson(ndjsonPath) {
   if (!fs.existsSync(ndjsonPath)) return null;
   let startTime = null;
   const buckets = new Map();
-  const endpointErrorCounts = new Map();
+  const endpointErrorCounts = new Map(); // endpoint -> total errors (all groups)
+  const endpointErrorCountsByGroup = new Map(); // endpoint|group -> count
   const errorStatusCounts = { s0: 0, s503: 0, s4xx: 0, s5xxOther: 0 };
   const getBucket = (idx) => {
     if (!buckets.has(idx)) {
@@ -113,7 +114,19 @@ async function analyzeNdjson(ndjsonPath) {
       errorStatusCounts.s5xxOther++;
     } else if (obj.metric === 'http_error_by_endpoint_total') {
       const endpoint = obj.data?.tags?.endpoint || 'unknown';
+      const status = obj.data?.tags?.status || '';
+      const statusClass = obj.data?.tags?.status_class || '';
+      let group = 'other';
+      if (status === '0' || statusClass === '0xx') group = 'timeouts';
+      else if (status === '503') group = '503';
+      else if (statusClass === '4xx') group = '4xx';
+      else if (statusClass === '5xx') group = '5xx-other';
+
       endpointErrorCounts.set(endpoint, (endpointErrorCounts.get(endpoint) || 0) + 1);
+      endpointErrorCountsByGroup.set(
+        `${endpoint}|${group}`,
+        (endpointErrorCountsByGroup.get(`${endpoint}|${group}`) || 0) + 1,
+      );
     }
   }
   if (buckets.size === 0) return null;
@@ -133,7 +146,13 @@ async function analyzeNdjson(ndjsonPath) {
   const endpointErrors = [...endpointErrorCounts.entries()]
     .map(([endpoint, count]) => ({ endpoint, count }))
     .sort((a, b) => b.count - a.count);
-  return { timeline: rows, endpointErrors, errorStatusCounts };
+  const endpointGroupErrors = [...endpointErrorCountsByGroup.entries()]
+    .map(([key, count]) => {
+      const [endpoint, group] = key.split('|');
+      return { endpoint, group, count };
+    })
+    .sort((a, b) => b.count - a.count);
+  return { timeline: rows, endpointErrors, endpointGroupErrors, errorStatusCounts };
 }
 
 const summary = readJson(path.join(runDir, 'summary.json'));
@@ -194,7 +213,11 @@ if (cpuByInstance.length > 1) {
 lines.push(`- Event loop p99 (post-run): ${fmt(promScalar(after, 'eventloop_p99_ms'), ' ms')}`);
 lines.push(`- Event loop p99 peak: ${fmt(promScalar(after, 'eventloop_peak_ms'), ' ms')}`);
 lines.push(`- 5xx rate: ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
-lines.push(`- HTTP overload shed total (cumulative counter): ${fmt(promScalar(after, 'overload_shed_total'))}`);
+
+const overloadShedAfter = promScalar(after, 'overload_shed_total', 0);
+const overloadShedBefore = promScalar(before, 'overload_shed_total', 0);
+const overloadShedDelta = (overloadShedAfter ?? 0) - (overloadShedBefore ?? 0);
+lines.push(`- HTTP overload shed total (during run): ${fmt(overloadShedDelta)}`);
 lines.push(`- Overload stage max (0–3, post-run instant): ${fmt(promScalar(after, 'overload_stage_max'))}`);
 lines.push(`- PG pool peak-total/min-idle/peak-waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
 lines.push(`- Redis memory: ${fmt(promScalar(after, 'redis_memory_mb'), ' MB')} / connected clients: ${fmt(promScalar(after, 'redis_connected_clients'))}`); 
@@ -227,6 +250,29 @@ if (ndjsonAnalysis?.endpointErrors?.length) {
     lines.push(`- ${item.endpoint}: ${fmt(item.count)} errors`);
   }
   lines.push('');
+}
+
+if (ndjsonAnalysis?.endpointGroupErrors?.length) {
+  const byGroup = (group) => ndjsonAnalysis.endpointGroupErrors
+    .filter((x) => x.group === group)
+    .slice(0, 6)
+    .map((x) => `${x.endpoint}: ${fmt(x.count)} errors`);
+
+  const timeoutsTop = byGroup('timeouts');
+  if (timeoutsTop.length) {
+    lines.push('## Top timeout/no-response endpoints (k6 status 0)');
+    lines.push('');
+    for (const line of timeoutsTop) lines.push(`- ${line}`);
+    lines.push('');
+  }
+
+  const fiveXxTop = byGroup('5xx-other');
+  if (fiveXxTop.length) {
+    lines.push('## Top internal 5xx endpoints (k6 status 5xx-other)');
+    lines.push('');
+    for (const line of fiveXxTop) lines.push(`- ${line}`);
+    lines.push('');
+  }
 }
 
 if (ndjsonAnalysis?.errorStatusCounts) {

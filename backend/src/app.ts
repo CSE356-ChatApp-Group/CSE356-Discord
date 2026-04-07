@@ -186,10 +186,20 @@ app.use((req, res) => {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, _next) => {
   const { poolStats } = require('./db/pool');
-  // Circuit breaker open or pg-pool checkout timeout → 503, not a server bug
+  // Circuit breaker open or pg-pool checkout timeout / saturation → 503.
+  // The pg PoolTimeoutError message varies by pg version and by whether we
+  // timed out on connect vs waiting for an available client, so we use
+  // a broader matcher instead of a single string.
+  const message = (err && typeof err.message === 'string') ? err.message : '';
   const isPoolBusy =
     err.code === 'POOL_CIRCUIT_OPEN' ||
-    err.message?.includes('timeout exceeded when trying to connect');
+    err.name === 'PoolTimeoutError' ||
+    /timeout exceeded/i.test(message) && /(connect|client|connection|waiting)/i.test(message) ||
+    /remaining connection slots/i.test(message) ||
+    /too many clients/i.test(message) ||
+    err.message?.toLowerCase?.().includes('waiting for a client') ||
+    /canceling statement due to statement timeout/i.test(message) ||
+    err.code === '57014'; // query_canceled
   const status = isPoolBusy ? 503 : (err.status || err.statusCode || 500);
   const requestId = req.id;
   logger.error({ err, url: req.url, requestId, status, pool: poolStats() }, 'Unhandled error');
