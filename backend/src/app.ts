@@ -15,6 +15,7 @@ const pinoHttp     = require('pino-http');
 const passport     = require('passport');
 
 const logger = require('./utils/logger');
+const overload = require('./utils/overload');
 require('./auth/passport');          // register passport strategies
 
 // ── Route modules ─────────────────────────────────────────────────────────────
@@ -31,6 +32,17 @@ const usersRouter        = require('./auth/usersRouter');
 const app = express();
 app.set('trust proxy', 1);
 const { register, httpRequestsTotal, httpRequestDurationMs } = require('./utils/metrics');
+
+// Fail fast when the event loop is severely backed up (see overload.shouldShedIncomingRequests).
+app.use((req, res, next) => {
+  const pathOnly = (req.path || '').split('?')[0];
+  if (pathOnly === '/health' || pathOnly === '/metrics') return next();
+  if (overload.shouldShedIncomingRequests()) {
+    res.set('Retry-After', '1');
+    return res.status(503).json({ error: 'Server busy, please retry' });
+  }
+  next();
+});
 
 function isQuietPath(path = '') {
   return path === '/health' || path === '/metrics';
