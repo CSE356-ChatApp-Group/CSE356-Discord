@@ -23,6 +23,29 @@
  *                  │  API Node 1 │       │  API Node 2 │
  *                  │  WS clients │       │  WS clients │
  *                  └─────────────┘       └─────────────┘
+ *
+ * Phase 2 (heavier fan-out) — engineering note
+ * --------------------------------------------
+ * Today each browser subscribes to many Redis channels (per DM, per community
+ * channel, per user inbox). Under large guilds + many open DMs, pub/sub fan-in
+ * and per-socket delivery become the bottleneck before Postgres.
+ *
+ * Planned mitigations (not all implemented here):
+ *   • Collapse subscriptions: e.g. one “bootstrap” stream per user plus targeted
+ *     refetches instead of N parallel channel topics.
+ *   • Aggregate presence/notifications server-side before WS push.
+ *   • Prefer server-initiated delta sync when backpressure fires instead of
+ *     unbounded frame queues.
+ *
+ * SLO / UX stance for backpressure (current implementation):
+ *   • **Drop** (buffer > WS_BACKPRESSURE_DROP_BYTES): best-effort — client may
+ *     miss an ephemeral frame; acceptable for presence-style traffic if clients
+ *     reconcile via REST or a periodic sync.
+ *   • **Kill** (buffer > WS_BACKPRESSURE_KILL_BYTES): connection closed — client
+ *     must reconnect; target **≥ 99%** session success over a steady profile with
+ *     documented headroom (see load-tests `slo` profile).
+ *   • Documented expectation: after a kill, full state is recoverable via HTTP
+ *     bootstrap + selective resubscribe; not silent data loss for committed writes.
  */
 
 "use strict";

@@ -4,6 +4,11 @@ import { check, sleep } from 'k6';
 import exec from 'k6/execution';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
+/**
+ * Load profiles: default `break` finds the failure envelope; `slo` holds a fixed
+ * arrival rate for steady-state SLO measurement (pair with metadata.txt git SHA).
+ */
+
 /** Classify HTTP responses so reports can separate timeouts vs 503 (shed / pool) vs other errors. */
 const httpResStatus0 = new Counter('http_res_status_0_total');
 const httpResStatus503 = new Counter('http_res_status_503_total');
@@ -122,9 +127,28 @@ const PROFILES = {
     wsVUs: 60,
     wsDuration: '10m',
   },
+  /**
+   * Steady-state SLO probe: fixed HTTP arrival rate (not a ramp-to-break curve).
+   * Use scripts/run-staging-capacity.sh slo — metadata.txt records git SHA + env placeholders.
+   */
+  slo: {
+    arrivalMode: 'constant',
+    constantRate: 28,
+    timeUnit: '1s',
+    constantDuration: '6m',
+    preAllocatedVUs: 80,
+    maxVUs: 240,
+    wsVUs: 40,
+    wsDuration: '6m30s',
+    maxFailureRate: 0.01,
+    httpP95Ms: 2000,
+    httpP99Ms: 5500,
+  },
 };
 
 const profile = PROFILES[__ENV.LOAD_PROFILE || 'break'] || PROFILES.break;
+
+const useConstantArrival = profile.arrivalMode === 'constant';
 
 // Number of distinct user accounts used for read operations (GET /communities,
 // GET /conversations, GET /messages, GET /channels). Spreads reads across N real
@@ -133,24 +157,34 @@ const profile = PROFILES[__ENV.LOAD_PROFILE || 'break'] || PROFILES.break;
 // Scale with maxVUs so each reader is shared by at most ~6 VUs at break load.
 const NUM_READER_POOL = Math.max(20, Math.ceil(profile.maxVUs / 6));
 
-export const options = {
-  discardResponseBodies: true,
-  thresholds: {
-    http_req_failed: ['rate<0.05'],
-    // p(99) instead of max: the max metric is a single-request outlier (GC pause,
-    // cold start) and causes spurious threshold breaches that mask real data.
-    http_req_duration: ['p(95)<1500', 'p(99)<5000'],
-    capacity_checks: ['rate>0.95'],
-    ws_connect_success: ['rate>0.95'],
-    communities_req_duration: ['p(95)<1200'],
-    conversations_req_duration: ['p(95)<1000'],
-    channel_messages_req_duration: ['p(95)<1200'],
-    channels_req_duration: ['p(95)<1200'],
-    message_post_req_duration: ['p(95)<1500'],
-    auth_login_req_duration: ['p(95)<2000'],
-  },
-  scenarios: {
-    http_mix: {
+const httpThresholds = {
+  http_req_failed: [`rate<${profile.maxFailureRate != null ? profile.maxFailureRate : 0.05}`],
+  http_req_duration: [
+    `p(95)<${profile.httpP95Ms != null ? profile.httpP95Ms : 1500}`,
+    `p(99)<${profile.httpP99Ms != null ? profile.httpP99Ms : 5000}`,
+  ],
+  capacity_checks: ['rate>0.95'],
+  ws_connect_success: ['rate>0.95'],
+  communities_req_duration: [`p(95)<${profile.communitiesP95Ms != null ? profile.communitiesP95Ms : 1200}`],
+  conversations_req_duration: [`p(95)<${profile.conversationsP95Ms != null ? profile.conversationsP95Ms : 1000}`],
+  channel_messages_req_duration: [`p(95)<${profile.channelMessagesP95Ms != null ? profile.channelMessagesP95Ms : 1200}`],
+  channels_req_duration: [`p(95)<${profile.channelsP95Ms != null ? profile.channelsP95Ms : 1200}`],
+  message_post_req_duration: [`p(95)<${profile.messagePostP95Ms != null ? profile.messagePostP95Ms : 1500}`],
+  auth_login_req_duration: [`p(95)<${profile.authLoginP95Ms != null ? profile.authLoginP95Ms : 2000}`],
+};
+
+const httpMixScenario = useConstantArrival
+  ? {
+      executor: 'constant-arrival-rate',
+      exec: 'httpMix',
+      rate: profile.constantRate,
+      timeUnit: profile.timeUnit || '1s',
+      duration: profile.constantDuration,
+      preAllocatedVUs: profile.preAllocatedVUs,
+      maxVUs: profile.maxVUs,
+      gracefulStop: '30s',
+    }
+  : {
       executor: 'ramping-arrival-rate',
       exec: 'httpMix',
       startRate: 1,
@@ -159,7 +193,13 @@ export const options = {
       maxVUs: profile.maxVUs,
       stages: profile.httpStages,
       gracefulStop: '30s',
-    },
+    };
+
+export const options = {
+  discardResponseBodies: true,
+  thresholds: httpThresholds,
+  scenarios: {
+    http_mix: httpMixScenario,
     websocket_presence: {
       executor: 'constant-vus',
       exec: 'presenceSocketStorm',

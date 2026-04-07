@@ -10,6 +10,7 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
@@ -123,6 +124,61 @@ async function loadMessageTarget(messageId) {
     [messageId]
   );
   return rows[0] || null;
+}
+
+async function repointChannelLastMessage(channelId) {
+  const { rowCount } = await query(
+    `WITH lm AS (
+       SELECT id, author_id, created_at
+       FROM messages
+       WHERE channel_id = $1 AND deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1
+     )
+     UPDATE channels ch
+     SET last_message_id = lm.id,
+         last_message_author_id = lm.author_id,
+         last_message_at = lm.created_at
+     FROM lm
+     WHERE ch.id = $1`,
+    [channelId]
+  );
+  if (!rowCount) {
+    await query(
+      `UPDATE channels
+       SET last_message_id = NULL, last_message_author_id = NULL, last_message_at = NULL
+       WHERE id = $1`,
+      [channelId]
+    );
+  }
+}
+
+async function repointConversationLastMessage(conversationId) {
+  const { rowCount } = await query(
+    `WITH lm AS (
+       SELECT id, author_id, created_at
+       FROM messages
+       WHERE conversation_id = $1 AND deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1
+     )
+     UPDATE conversations conv
+     SET last_message_id = lm.id,
+         last_message_author_id = lm.author_id,
+         last_message_at = lm.created_at,
+         updated_at = NOW()
+     FROM lm
+     WHERE conv.id = $1`,
+    [conversationId]
+  );
+  if (!rowCount) {
+    await query(
+      `UPDATE conversations
+       SET last_message_id = NULL, last_message_author_id = NULL, last_message_at = NULL
+       WHERE id = $1`,
+      [conversationId]
+    );
+  }
 }
 
 // ── Helpers ── message cache ─────────────────────────────────────────────────
@@ -371,6 +427,8 @@ router.post('/',
   body('attachments.*.height').optional().isInt({ min: 1 }),
   async (req, res, next) => {
     if (!validate(req, res)) return;
+    let idemRedisKey: string | null = null;
+    let idemLease = false;
     try {
       const { content, channelId, conversationId, threadId } = req.body;
       const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
@@ -398,6 +456,46 @@ router.post('/',
         return res.status(400).json({ error: 'attachments must include storageKey, filename, contentType, and sizeBytes' });
       }
 
+      const rawIdem = req.get('idempotency-key') || req.get('Idempotency-Key');
+      if (rawIdem && typeof rawIdem === 'string') {
+        const trimmed = rawIdem.trim();
+        if (trimmed.length > 0 && trimmed.length <= 200) {
+          idemRedisKey = `msg:idem:${req.user.id}:${crypto.createHash('sha256').update(trimmed, 'utf8').digest('hex')}`;
+          try {
+            const existing = await redis.get(idemRedisKey);
+            if (existing) {
+              let parsed: any;
+              try { parsed = JSON.parse(existing); } catch { parsed = null; }
+              if (parsed?.messageId) {
+                const cachedMsg = await loadHydratedMessageById(parsed.messageId);
+                if (cachedMsg) return res.status(201).json({ message: cachedMsg });
+              }
+            }
+            const gotLease = await redis.set(idemRedisKey, JSON.stringify({ pending: true }), 'EX', 120, 'NX');
+            if (gotLease !== 'OK') {
+              for (let i = 0; i < 50; i++) {
+                await new Promise((r) => setTimeout(r, 100));
+                const again = await redis.get(idemRedisKey);
+                if (!again) break;
+                let p2: any;
+                try { p2 = JSON.parse(again); } catch { break; }
+                if (p2?.messageId) {
+                  const msg2 = await loadHydratedMessageById(p2.messageId);
+                  if (msg2) return res.status(201).json({ message: msg2 });
+                }
+                if (!p2?.pending) break;
+              }
+              res.set('Retry-After', '1');
+              return res.status(409).json({ error: 'Duplicate request in flight', requestId: req.id });
+            }
+            idemLease = true;
+          } catch {
+            idemRedisKey = null;
+            idemLease = false;
+          }
+        }
+      }
+
       // Access-check + INSERT + partial hydrate in a single CTE round-trip.
       // Holds the pool connection for 3 queries (BEGIN, CTE, COMMIT) instead
       // of the prior 5 (access-check, BEGIN, INSERT, COMMIT, hydrated-SELECT),
@@ -416,6 +514,16 @@ router.post('/',
                INSERT INTO messages (conversation_id, author_id, content, thread_id)
                SELECT $1, $2, $3, $4 FROM access
                RETURNING *
+             ), conv_last AS (
+               UPDATE conversations conv
+               SET last_message_id = ins.id,
+                   last_message_author_id = ins.author_id,
+                   last_message_at = ins.created_at,
+                   updated_at = NOW()
+               FROM ins
+               WHERE conv.id = ins.conversation_id
+                 AND (conv.last_message_at IS NULL OR ins.created_at >= conv.last_message_at)
+               RETURNING conv.id
              )
              SELECT
                (SELECT COUNT(*) FROM access)::int             AS has_access,
@@ -443,6 +551,15 @@ router.post('/',
                INSERT INTO messages (channel_id, author_id, content, thread_id)
                SELECT $1, $2, $3, $4 FROM access
                RETURNING *
+             ), ch_last AS (
+               UPDATE channels ch
+               SET last_message_id = ins.id,
+                   last_message_author_id = ins.author_id,
+                   last_message_at = ins.created_at
+               FROM ins
+               WHERE ch.id = ins.channel_id
+                 AND (ch.last_message_at IS NULL OR ins.created_at >= ch.last_message_at)
+               RETURNING ch.id
              )
              SELECT
                (SELECT COUNT(*) FROM access)::int             AS has_access,
@@ -531,8 +648,15 @@ router.post('/',
         });
       }
 
+      if (idemRedisKey && idemLease) {
+        redis.set(idemRedisKey, JSON.stringify({ messageId: message.id }), 'EX', 86400).catch(() => {});
+      }
+
       res.status(201).json({ message });
     } catch (err: any) {
+      if (idemRedisKey && idemLease) {
+        redis.del(idemRedisKey).catch(() => {});
+      }
       if (err.statusCode === 403) {
         return res.status(403).json({ error: err.message });
       }
@@ -636,8 +760,12 @@ router.delete('/:id',
       sideEffects.deleteAttachmentObjects(attachmentKeys);
       // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
       if (message.channel_id) {
+        await repointChannelLastMessage(message.channel_id);
         redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
         redis.del(channelMsgCacheKey(message.channel_id)).catch(() => {});
+      }
+      if (message.conversation_id) {
+        await repointConversationLastMessage(message.conversation_id);
       }
       if (message.conversation_id) {
         await publishConversationEvent(message.conversation_id, 'message:deleted', { id: message.id });

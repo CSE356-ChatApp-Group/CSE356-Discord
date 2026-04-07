@@ -3,6 +3,42 @@
 const bcrypt = require('bcrypt');
 const { authBcryptDurationMs } = require('../utils/metrics');
 
+const BCRYPT_MAX_CONCURRENT = (() => {
+  const n = Number.parseInt(process.env.BCRYPT_MAX_CONCURRENT || '8', 10);
+  return Number.isFinite(n) && n > 0 ? n : 8;
+})();
+
+let bcryptActive = 0;
+const bcryptWaiters = [];
+
+function enterBcrypt() {
+  if (bcryptActive < BCRYPT_MAX_CONCURRENT) {
+    bcryptActive += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    bcryptWaiters.push(() => {
+      bcryptActive += 1;
+      resolve(undefined);
+    });
+  });
+}
+
+function leaveBcrypt() {
+  bcryptActive -= 1;
+  const next = bcryptWaiters.shift();
+  if (next) next();
+}
+
+async function withBcryptConcurrency(fn) {
+  await enterBcrypt();
+  try {
+    return await fn();
+  } finally {
+    leaveBcrypt();
+  }
+}
+
 // Default to 6 rounds for adequate security while staying responsive on a
 // 2-vCPU staging VM (10 rounds = ~500ms/op; 8 rounds = ~125ms/op; 6 rounds ~30ms/op).
 // Override with BCRYPT_ROUNDS in production for stricter hashing.
@@ -26,27 +62,31 @@ function observeBcrypt(operation, startedAt, result) {
 }
 
 async function hashPassword(password, operation = 'hash') {
-  const startedAt = process.hrtime.bigint();
-  try {
-    const hash = await bcrypt.hash(password, getBcryptRounds());
-    observeBcrypt(operation, startedAt, 'ok');
-    return hash;
-  } catch (err) {
-    observeBcrypt(operation, startedAt, 'error');
-    throw err;
-  }
+  return withBcryptConcurrency(async () => {
+    const startedAt = process.hrtime.bigint();
+    try {
+      const hash = await bcrypt.hash(password, getBcryptRounds());
+      observeBcrypt(operation, startedAt, 'ok');
+      return hash;
+    } catch (err) {
+      observeBcrypt(operation, startedAt, 'error');
+      throw err;
+    }
+  });
 }
 
 async function comparePassword(password, passwordHash, operation = 'compare') {
-  const startedAt = process.hrtime.bigint();
-  try {
-    const matches = await bcrypt.compare(password, passwordHash);
-    observeBcrypt(operation, startedAt, matches ? 'match' : 'mismatch');
-    return matches;
-  } catch (err) {
-    observeBcrypt(operation, startedAt, 'error');
-    throw err;
-  }
+  return withBcryptConcurrency(async () => {
+    const startedAt = process.hrtime.bigint();
+    try {
+      const matches = await bcrypt.compare(password, passwordHash);
+      observeBcrypt(operation, startedAt, matches ? 'match' : 'mismatch');
+      return matches;
+    } catch (err) {
+      observeBcrypt(operation, startedAt, 'error');
+      throw err;
+    }
+  });
 }
 
 /**

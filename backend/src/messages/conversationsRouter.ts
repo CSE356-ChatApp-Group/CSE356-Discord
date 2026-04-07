@@ -182,9 +182,9 @@ router.get('/', async (req, res, next) => {
   const promise: Promise<{ conversations: any[] }> = (async () => {
     const { rows } = await query(
       `SELECT c.*,
-              lm.id AS last_message_id,
-              lm.author_id AS last_message_author_id,
-              lm.created_at AS last_message_at,
+              COALESCE(m_denorm.id, lm.id) AS last_message_id,
+              COALESCE(m_denorm.author_id, lm.author_id) AS last_message_author_id,
+              COALESCE(m_denorm.created_at, lm.created_at) AS last_message_at,
               my_rs.last_read_message_id AS my_last_read_message_id,
               my_rs.last_read_at AS my_last_read_at,
               (array_agg(other_rs.last_read_message_id ORDER BY other_rs.last_read_at DESC NULLS LAST)
@@ -199,13 +199,17 @@ router.get('/', async (req, res, next) => {
        JOIN   conversation_participants cp2 ON cp2.conversation_id = c.id
                                             AND cp2.left_at IS NULL
        JOIN   users u ON u.id = cp2.user_id
+       LEFT JOIN messages m_denorm
+         ON m_denorm.id = c.last_message_id
+        AND m_denorm.conversation_id = c.id
+        AND m_denorm.deleted_at IS NULL
        LEFT JOIN LATERAL (
          SELECT m.id, m.author_id, m.created_at
          FROM messages m
          WHERE m.conversation_id = c.id AND m.deleted_at IS NULL
          ORDER BY m.created_at DESC
          LIMIT 1
-       ) lm ON TRUE
+       ) lm ON m_denorm.id IS NULL
        LEFT JOIN read_states my_rs
               ON my_rs.conversation_id = c.id
              AND my_rs.user_id = $1
@@ -213,9 +217,10 @@ router.get('/', async (req, res, next) => {
               ON other_rs.conversation_id = c.id
              AND other_rs.user_id = cp2.user_id
              AND cp2.user_id <> $1
-       GROUP  BY c.id, lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at
+       GROUP  BY c.id, m_denorm.id, m_denorm.author_id, m_denorm.created_at,
+                 lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at
       HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
-       ORDER  BY COALESCE(lm.created_at, c.updated_at) DESC`,
+       ORDER  BY COALESCE(m_denorm.created_at, lm.created_at, c.updated_at) DESC`,
       [req.user.id]
     );
     const payload = { conversations: rows };

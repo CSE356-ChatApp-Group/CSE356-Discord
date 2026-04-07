@@ -31,7 +31,7 @@ const usersRouter        = require('./auth/usersRouter');
 
 const app = express();
 app.set('trust proxy', 1);
-const { register, httpRequestsTotal, httpRequestDurationMs, httpOverloadShedTotal } = require('./utils/metrics');
+const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal } = require('./utils/metrics');
 
 // Optional fail-fast when event-loop lag is extreme (OVERLOAD_HTTP_SHED_ENABLED=true).
 app.use((req, res, next) => {
@@ -126,7 +126,9 @@ app.use(pinoHttp({
 }));
 app.use((req, res, next) => {
   const start = process.hrtime.bigint();
+  let finished = false;
   res.on('finish', () => {
+    finished = true;
     const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
     const labels = {
       method: req.method,
@@ -135,6 +137,10 @@ app.use((req, res, next) => {
     };
     httpRequestsTotal.inc(labels);
     httpRequestDurationMs.observe(labels, durationMs);
+  });
+  res.on('close', () => {
+    if (finished || res.writableEnded) return;
+    httpRequestsAbortedTotal.inc({ method: req.method, route: classifyRoute(req) });
   });
   next();
 });

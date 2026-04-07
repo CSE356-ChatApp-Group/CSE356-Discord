@@ -19,6 +19,7 @@
     "load:staging:quick": "./scripts/run-staging-capacity.sh quick",
     "load:staging:peak": "./scripts/run-staging-capacity.sh peak",
     "load:staging:break": "./scripts/run-staging-capacity.sh break",
+    "load:staging:slo": "./scripts/run-staging-capacity.sh slo",
     "e2e:install": "npm run e2e:install --workspace=frontend",
     "e2e": "npm run e2e --workspace=frontend",
     "e2e:ci": "npm run e2e:ci --workspace=frontend",

@@ -196,7 +196,9 @@ lines.push(`- Run directory: \`${runDir}\``);
 lines.push(`- k6 exit code: \`${exitCode}\``);
 lines.push(`- Outcome: ${exitCode === 0 ? 'thresholds held for the selected profile' : 'thresholds were breached or the system began failing under load'}`);
 if (metadata) {
-  lines.push(`- Profile: \`${metadata.profile || 'n/a'}\` / Git SHA: \`${metadata.git_sha || 'n/a'}\``);
+  lines.push(
+    `- Profile: \`${metadata.profile || 'n/a'}\` / Git SHA: \`${metadata.git_sha || 'n/a'}\`${metadata.git_sha_full ? ` (full \`${metadata.git_sha_full}\`)` : ''}`,
+  );
   lines.push(`- Base URL: \`${metadata.base_url || 'n/a'}\``);
   lines.push(
     `- Shed enabled: \`${metadata.overload_http_shed_enabled || 'n/a'}\` (lag ms: \`${metadata.overload_lag_shed_ms || 'n/a'}\`), pool queue: \`${metadata.pool_circuit_breaker_queue || 'n/a'}\``,
@@ -214,19 +216,19 @@ lines.push(`- Conversations p95: ${fmt(metric(summary, 'conversations_req_durati
 lines.push(`- Channels p95: ${fmt(metric(summary, 'channels_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Message post p95: ${fmt(metric(summary, 'message_post_req_duration', 'p(95)'), ' ms')}`);
 lines.push(`- Auth login p95: ${fmt(metric(summary, 'auth_login_req_duration', 'p(95)'), ' ms')}`);
-  lines.push(`- WebSocket success rate: ${fmt((metric(summary, 'ws_connect_success', 'rate') ?? metric(summary, 'ws_connect_success', 'value') ?? 0) * 100, '%')}`);
-  lines.push('');
-  lines.push('## HTTP response shape (k6 counters)');
-  lines.push('');
-  lines.push(
-    'Counts **instrumented responses** (status 0 = timeout / no response; 503 = overload shed, pool circuit, or upstream; 4xx/5xx-other = remaining errors).',
-  );
-  lines.push(`- Status **0**: ${fmt(metric(summary, 'http_res_status_0_total', 'count'))}`);
-  lines.push(`- Status **503**: ${fmt(metric(summary, 'http_res_status_503_total', 'count'))}`);
-  lines.push(`- Status **4xx**: ${fmt(metric(summary, 'http_res_status_4xx_total', 'count'))}`);
-  lines.push(`- Status **5xx (not 503)**: ${fmt(metric(summary, 'http_res_status_5xx_other_total', 'count'))}`);
-  lines.push('');
-  lines.push('## Prometheus after-run snapshot');
+lines.push(`- WebSocket success rate: ${fmt((metric(summary, 'ws_connect_success', 'rate') ?? metric(summary, 'ws_connect_success', 'value') ?? 0) * 100, '%')}`);
+lines.push('');
+lines.push('## HTTP response shape (k6 counters)');
+lines.push('');
+lines.push(
+  'Counts **instrumented responses** (status 0 = timeout / no response; 503 = overload shed, pool circuit, or upstream; 4xx/5xx-other = remaining errors).',
+);
+lines.push(`- Status **0**: ${fmt(metric(summary, 'http_res_status_0_total', 'count'))}`);
+lines.push(`- Status **503**: ${fmt(metric(summary, 'http_res_status_503_total', 'count'))}`);
+lines.push(`- Status **4xx**: ${fmt(metric(summary, 'http_res_status_4xx_total', 'count'))}`);
+lines.push(`- Status **5xx (not 503)**: ${fmt(metric(summary, 'http_res_status_5xx_other_total', 'count'))}`);
+lines.push('');
+lines.push('## Prometheus after-run snapshot');
 lines.push('');
 lines.push(`- RSS memory: ${fmt(promScalar(after, 'rss_mb'), ' MB')}`);
 lines.push(`- CPU utilisation (post-run ~2 m avg): ${fmt((promScalar(after, 'cpu_seconds_rate') ?? 0) * 100, '%')} — use peak below for accurate burst figure`);
@@ -243,6 +245,14 @@ lines.push(`- Event loop p99 (post-run): ${fmt(promScalar(after, 'eventloop_p99_
 lines.push(`- Event loop p99 peak: ${fmt(promScalar(after, 'eventloop_peak_ms'), ' ms')}`);
 lines.push(`- 5xx rate (post-run instant): ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
 lines.push(`- 5xx rate peak during run: ${fmt(promScalar(after, 'five_xx_peak_rate', 0), ' req/s')}`);
+const fiveXxInc = promScalar(after, 'five_xx_increase_15m', null);
+const abortInc = promScalar(after, 'http_aborted_increase_15m', null);
+if (fiveXxInc !== null) {
+  lines.push(`- **5xx completed count (∆15m window)** — use when peak rate is 0 after cooldown: ${fmt(fiveXxInc)}`);
+}
+if (abortInc !== null) {
+  lines.push(`- **HTTP aborted (∆15m)** (connection closed before response finished; correlates with k6 status 0): ${fmt(abortInc)}`);
+}
 
 const overloadShedAfter = promScalar(after, 'overload_shed_total', 0);
 const overloadShedBefore = promScalar(before, 'overload_shed_total', 0);
@@ -250,7 +260,12 @@ const overloadShedDelta = (overloadShedAfter ?? 0) - (overloadShedBefore ?? 0);
 lines.push(`- HTTP overload shed total (during run): ${fmt(overloadShedDelta)}`);
 lines.push(`- Overload stage max (0–3, post-run instant): ${fmt(promScalar(after, 'overload_stage_max'))}`);
 lines.push(`- PG pool peak-total/min-idle/peak-waiting: ${fmt(promScalar(after, 'pg_pool_total'))} / ${fmt(promScalar(after, 'pg_pool_idle'))} / ${fmt(promScalar(after, 'pg_pool_waiting'))}`);
-lines.push(`- Redis memory: ${fmt(promScalar(after, 'redis_memory_mb'), ' MB')} / connected clients: ${fmt(promScalar(after, 'redis_connected_clients'))}`); 
+const redisMb = promScalar(after, 'redis_memory_mb');
+const redisClients = promScalar(after, 'redis_connected_clients');
+lines.push(`- Redis memory: ${fmt(redisMb, ' MB')} / connected clients: ${fmt(redisClients)}`);
+if (redisMb === null && redisClients === null) {
+  lines.push('  - *No Redis exporter series in Prometheus for this scrape (add redis_exporter target or check job labels).*');
+}
 
 const topFiveXxRoutes = promResult(after, 'five_xx_by_route_peak')
   .map((item) => ({ route: item.metric?.route || 'unknown', value: Number(item.value?.[1]) }))
@@ -259,6 +274,28 @@ if (topFiveXxRoutes.length) {
   lines.push('### Top 5xx routes during run (peak req/s)');
   for (const item of topFiveXxRoutes.slice(0, 8)) {
     lines.push(`- ${item.route}: ${fmt(item.value, ' req/s')}`);
+  }
+  lines.push('');
+}
+
+const topFiveXxIncreaseRoutes = promResult(after, 'five_xx_increase_by_route_15m')
+  .map((item) => ({ route: item.metric?.route || 'unknown', value: Number(item.value?.[1]) }))
+  .filter((item) => Number.isFinite(item.value) && item.value > 0);
+if (topFiveXxIncreaseRoutes.length) {
+  lines.push('### Top 5xx routes (∆15m completed count)');
+  for (const item of topFiveXxIncreaseRoutes.slice(0, 8)) {
+    lines.push(`- ${item.route}: ${fmt(item.value)}`);
+  }
+  lines.push('');
+}
+
+const topAbortedRoutes = promResult(after, 'http_aborted_increase_by_route_15m')
+  .map((item) => ({ route: item.metric?.route || 'unknown', value: Number(item.value?.[1]) }))
+  .filter((item) => Number.isFinite(item.value) && item.value > 0);
+if (topAbortedRoutes.length) {
+  lines.push('### Top aborted routes (∆15m)');
+  for (const item of topAbortedRoutes.slice(0, 8)) {
+    lines.push(`- ${item.route}: ${fmt(item.value)}`);
   }
   lines.push('');
 }

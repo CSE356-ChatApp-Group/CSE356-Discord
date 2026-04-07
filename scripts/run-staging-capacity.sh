@@ -63,6 +63,12 @@ docker run --rm \
 K6_EXIT=$?
 set -e
 
+{
+  echo "k6_exit=$K6_EXIT"
+  echo "git_sha_full=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} >> "$RUN_DIR/metadata.txt"
+
 echo "[3/4] Capturing post-run Prometheus snapshot..."
 if ! "$ROOT_DIR/scripts/collect-staging-capacity.sh" "$RUN_DIR/prometheus-after.json" "$SSH_HOST"; then
   echo "Warning: post-run snapshot failed" >&2

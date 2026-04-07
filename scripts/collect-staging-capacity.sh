@@ -25,6 +25,11 @@ queries = {
     "five_xx_rate": 'sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[5m]))',
     "five_xx_peak_rate": 'max_over_time(sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[1m]))[12m:30s])',
     "five_xx_by_route_peak": 'sort_desc(max_over_time(sum by (route) (rate(http_server_requests_total{job="chatapp-api",status_class="5xx"}[1m]))[12m:30s]))',
+    # Cumulative counters over a window — survives post-burst instant queries where rate()≈0.
+    "five_xx_increase_15m": 'sum(increase(http_server_requests_total{job="chatapp-api",status_class="5xx"}[15m]))',
+    "five_xx_increase_by_route_15m": 'sort_desc(topk(12, sum by (route) (increase(http_server_requests_total{job="chatapp-api",status_class="5xx"}[15m]))))',
+    "http_aborted_increase_15m": 'sum(increase(http_server_requests_aborted_total{job="chatapp-api"}[15m]))',
+    "http_aborted_increase_by_route_15m": 'sort_desc(topk(12, sum by (route) (increase(http_server_requests_aborted_total{job="chatapp-api"}[15m]))))',
     "overload_shed_total": 'sum(http_overload_shed_total{job="chatapp-api"})',
     "overload_stage_max": 'max(chatapp_overload_stage{job="chatapp-api"})',
     "rss_mb": 'max(process_resident_memory_bytes{job="chatapp-api"}) / 1024 / 1024',
@@ -41,8 +46,9 @@ queries = {
     "pg_pool_total": 'max_over_time(pg_pool_total{job="chatapp-api"}[10m])',
     "pg_pool_idle": 'min_over_time(pg_pool_idle{job="chatapp-api"}[10m])',
     "pg_pool_waiting": 'max_over_time(pg_pool_waiting{job="chatapp-api"}[10m])',
-    "redis_memory_mb": 'redis_memory_used_bytes / 1024 / 1024',
-    "redis_connected_clients": 'redis_connected_clients',
+    # Any redis_exporter job/instance (staging Prometheus may not use job="redis").
+    "redis_memory_mb": 'max(max by (job, instance) (redis_memory_used_bytes)) / 1024 / 1024',
+    "redis_connected_clients": 'max(max by (job, instance) (redis_connected_clients))',
 }
 
 def run_query(name, query):
