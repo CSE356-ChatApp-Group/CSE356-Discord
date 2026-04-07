@@ -6,6 +6,15 @@ import { Avatar } from './CommunitySidebar';
 import styles from './MessageItem.module.css';
 
 const attachmentUrlCache = new Map<string, string>();
+const ATTACHMENT_URL_CACHE_MAX = 200;
+
+function rememberAttachmentUrl(id: string, url: string) {
+  if (attachmentUrlCache.size >= ATTACHMENT_URL_CACHE_MAX) {
+    const oldest = attachmentUrlCache.keys().next().value;
+    if (oldest !== undefined) attachmentUrlCache.delete(oldest);
+  }
+  attachmentUrlCache.set(id, url);
+}
 
 /** Groups consecutive messages from the same author within 5 minutes */
 function isGrouped(msg, prev) {
@@ -32,7 +41,7 @@ const AttachmentImage = memo(function AttachmentImage({ attachment }: { attachme
     api.get(`/attachments/${attachment.id}`)
       .then((data) => {
         if (cancelled || !data?.url) return;
-        attachmentUrlCache.set(attachment.id, data.url);
+        rememberAttachmentUrl(attachment.id, data.url);
         setSrc(data.url);
       })
       .catch(() => {});
@@ -55,7 +64,8 @@ const AttachmentImage = memo(function AttachmentImage({ attachment }: { attachme
 });
 
 function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false }) {
-  const { editMessage, deleteMessage } = useChatStore();
+  const editMessage = useChatStore((s) => s.editMessage);
+  const deleteMessage = useChatStore((s) => s.deleteMessage);
   const grouped = isGrouped(msg, prevMessage);
   const shouldShowReadReceipt = showReadReceipt && !msg.deleted_at;
   const isSystemMessage = msg.type === 'system';

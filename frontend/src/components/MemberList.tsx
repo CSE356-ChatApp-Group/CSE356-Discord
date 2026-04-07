@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { PRESENCE_STATUSES, useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { Avatar } from './CommunitySidebar';
@@ -12,7 +13,15 @@ const STATUS_LABEL: Record<(typeof PRESENCE_STATUSES)[number], string> = {
 };
 
 export default function MemberList() {
-  const { members, activeConv, presence, awayMessages, hydratePresenceForUsers } = useChatStore();
+  const { members, activeConv, presence, awayMessages, hydratePresenceForUsers } = useChatStore(
+    useShallow((s) => ({
+      members: s.members,
+      activeConv: s.activeConv,
+      presence: s.presence,
+      awayMessages: s.awayMessages,
+      hydratePresenceForUsers: s.hydratePresenceForUsers,
+    })),
+  );
   const currentUser = useAuthStore(s => s.user);
 
   const isDm = !!activeConv;
