@@ -39,6 +39,10 @@ echo "Base URL: $BASE_URL"
 echo "WS URL:   $WS_URL"
 echo "Artifacts: $RUN_DIR"
 echo
+echo "KPI regression gate:  npm run load:staging:slo   (optimization_* counters + fixed rate)"
+echo "Fast iteration:      npm run load:staging:tune"
+echo "Stress envelope:     npm run load:staging:break / load:staging:break-fast"
+echo
 
 echo "[1/4] Capturing baseline Prometheus snapshot..."
 if ! "$ROOT_DIR/scripts/collect-staging-capacity.sh" "$RUN_DIR/prometheus-before.json" "$SSH_HOST"; then

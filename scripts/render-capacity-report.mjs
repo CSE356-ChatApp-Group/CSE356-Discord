@@ -286,6 +286,43 @@ lines.push(
   `- Iteration duration p95: ${fmt(metric(summary, 'iteration_duration', 'p(95)'), ' ms')} (full httpMix iteration incl. sleep)`,
 );
 lines.push('');
+lines.push('## Optimization KPIs (k6 `optimization_*` counters)');
+lines.push('');
+lines.push('| KPI | Value | Source |');
+lines.push('|-----|-------|--------|');
+lines.push(
+  `| **Peak rate** (HTTP) | ${fmt(metric(summary, 'http_reqs', 'rate'), ' req/s')} | \`http_reqs\` rate |`,
+);
+lines.push(
+  `| **Peak VUs** (scheduler) | ${fmt(metric(summary, 'vus', 'max'))} | \`vus.max\` |`,
+);
+lines.push(
+  `| **WS sessions** (completed) | ${fmt(metric(summary, 'ws_sessions', 'count'))} | \`ws_sessions.count\` |`,
+);
+const loginFail = metricCounter(summary, 'optimization_login_fail_total');
+const postFail = metricCounter(summary, 'optimization_message_post_fail_total');
+const wsFail = metricCounter(summary, 'optimization_ws_handshake_fail_total');
+const outageCnt = metricCounter(summary, 'optimization_http_outage_total');
+lines.push(
+  `| **Login fails** | ${fmt(loginFail ?? 0)} | failed \`auth login 200\` check in \`httpMix\` |`,
+);
+lines.push(
+  `| **Delivery fails** (message POST) | ${fmt(postFail ?? 0)} | failed 201 check on channel/DM post |`,
+);
+lines.push(
+  `| **WS handshake fails** | ${fmt(wsFail ?? 0)} | no HTTP 101 on \`/ws\` |`,
+);
+lines.push(
+  `| **HTTP outage signals** | ${fmt(outageCnt ?? 0)} | responses with status **0** or **≥500** |`,
+);
+lines.push('');
+lines.push(
+  '_**Peak connections** — target concurrent WS load is profile `wsVUs`; HTTP parallelism is capped by `maxVUs` in `load-tests/staging-capacity.js`. Compare `vus.max` and `ws_sessions` run-over-run._',
+);
+lines.push(
+  '_Real-time message **fan-out** to other clients is not asserted in this script; extend WS scenarios to subscribe to a channel and await `message:created` if you need end-to-end delivery proof._',
+);
+lines.push('');
 const breaches = collectThresholdBreaches(summary);
 if (breaches.length) {
   lines.push('## k6 threshold breaches');

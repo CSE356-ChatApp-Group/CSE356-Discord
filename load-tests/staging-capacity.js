@@ -7,6 +7,13 @@ import { Counter, Rate, Trend } from 'k6/metrics';
 /**
  * Load profiles: default `break` finds the failure envelope; `slo` holds a fixed
  * arrival rate for steady-state SLO measurement (pair with metadata.txt git SHA).
+ *
+ * **Which run to verify optimization KPIs**
+ * - **slo** — Fixed arrival rate + KPI counter thresholds (login / message post / WS handshake / outage). Run after substantive changes.
+ * - **tune** — ~3m fast feedback (latency + dropped iterations) while iterating.
+ * - **break-fast** / **break** — Stress envelope; expect latency breaches; still read `optimization_*` in `summary.json`.
+ * - **smoke** — Post-deploy sanity.
+ * Peak connections ≈ configured `wsVUs` (WS) + HTTP `maxVUs` ceiling; see `summary.json` → `vus.max`, `ws_sessions`.
  */
 
 /** Classify HTTP responses so reports can separate timeouts vs 503 (shed / pool) vs other errors. */
@@ -16,9 +23,17 @@ const httpResStatus4xx = new Counter('http_res_status_4xx_total');
 const httpResStatus5xxOther = new Counter('http_res_status_5xx_other_total');
 const httpErrorByEndpoint = new Counter('http_error_by_endpoint_total');
 
+/** KPI roll-ups (map to scorecard: login fails, delivery/post fails, WS handshake fails, HTTP outage). */
+const optimizationLoginFailTotal = new Counter('optimization_login_fail_total');
+const optimizationMessagePostFailTotal = new Counter('optimization_message_post_fail_total');
+const optimizationWsHandshakeFailTotal = new Counter('optimization_ws_handshake_fail_total');
+/** Timeouts (0) or any 5xx — user-visible degradation. */
+const optimizationHttpOutageTotal = new Counter('optimization_http_outage_total');
+
 function recordHttpStatus(res, endpoint = 'unknown') {
   if (!res) return;
   const s = res.status;
+  if (s === 0 || s >= 500) optimizationHttpOutageTotal.add(1);
   if (s === 0) httpResStatus0.add(1);
   else if (s === 503) httpResStatus503.add(1);
   else if (s >= 400 && s < 500) httpResStatus4xx.add(1);
@@ -117,6 +132,7 @@ const PROFILES = {
   },
   break: {
     httpStages: [
+      { target: 20, duration: '30s' }, // cache warmup (aligned with break-fast for comparable runs)
       { target: 25, duration: '1m' },
       { target: 75, duration: '2m' },
       { target: 150, duration: '2m' },
@@ -139,14 +155,21 @@ const PROFILES = {
     arrivalMode: 'constant',
     constantRate: 28,
     timeUnit: '1s',
-    constantDuration: '6m',
-    preAllocatedVUs: 80,
-    maxVUs: 240,
+    constantDuration: '8m',
+    preAllocatedVUs: 120,
+    maxVUs: 280,
     wsVUs: 40,
-    wsDuration: '6m30s',
+    wsDuration: '8m30s',
     maxFailureRate: 0.01,
     httpP95Ms: 2000,
     httpP99Ms: 5500,
+    /** Tight KPI gates for steady-state verification (~8m @ 28 iter/s). */
+    optimizationKpiThresholds: {
+      optimization_login_fail_total: ['count<8'],
+      optimization_message_post_fail_total: ['count<15'],
+      optimization_ws_handshake_fail_total: ['count<6'],
+      optimization_http_outage_total: ['count<80'],
+    },
   },
 };
 
@@ -176,6 +199,9 @@ const httpThresholds = {
   message_post_req_duration: [`p(95)<${profile.messagePostP95Ms != null ? profile.messagePostP95Ms : 1500}`],
   auth_login_req_duration: [`p(95)<${profile.authLoginP95Ms != null ? profile.authLoginP95Ms : 2000}`],
 };
+if (profile.optimizationKpiThresholds) {
+  Object.assign(httpThresholds, profile.optimizationKpiThresholds);
+}
 
 const httpMixScenario = useConstantArrival
   ? {
@@ -446,6 +472,7 @@ function sendChannelMessage(token, channelId) {
   recordHttpStatus(res, 'messages_post_channel');
   messagePostDuration.add(res.timings.duration);
   const ok = check(res, { 'channel message post 201': (r) => r.status === 201 });
+  if (!ok) optimizationMessagePostFailTotal.add(1);
   checksRate.add(ok);
 }
 
@@ -458,6 +485,7 @@ function sendConversationMessage(token, conversationId) {
   recordHttpStatus(res, 'messages_post_conversation');
   messagePostDuration.add(res.timings.duration);
   const ok = check(res, { 'conversation message post 201': (r) => r.status === 201 });
+  if (!ok) optimizationMessagePostFailTotal.add(1);
   checksRate.add(ok);
 }
 
@@ -470,6 +498,7 @@ function reauthenticate(email) {
   recordHttpStatus(res, 'auth_login');
   authLoginDuration.add(res.timings.duration);
   const ok = check(res, { 'auth login 200': (r) => r.status === 200 });
+  if (!ok) optimizationLoginFailTotal.add(1);
   checksRate.add(ok);
 }
 
@@ -544,6 +573,7 @@ export function presenceSocketStorm(data) {
   const ok = check(response, {
     'websocket upgraded': (res) => res && res.status === 101,
   });
+  if (!ok) optimizationWsHandshakeFailTotal.add(1);
   wsConnectRate.add(ok);
   checksRate.add(ok);
 
