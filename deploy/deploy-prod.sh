@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MONITOR_SECONDS="${MONITOR_SECONDS:-30}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
+NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-16384}"
 
 # Number of Node.js HTTP workers (systemd chatapp@ ports).  Default 1; set 2 when
 # nginx load-balances two ports like staging.
@@ -384,10 +385,10 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo nginx -t >/dev/null
   sudo systemctl reload nginx
   # Raise kernel TCP backlog so burst connection ramps don't drop SYN packets.
-  sudo sysctl -w net.ipv4.tcp_max_syn_backlog=4096 >/dev/null
-  sudo sysctl -w net.core.somaxconn=4096 >/dev/null
+  sudo sysctl -w net.ipv4.tcp_max_syn_backlog=${NGINX_WORKER_CONNECTIONS} >/dev/null
+  sudo sysctl -w net.core.somaxconn=${NGINX_WORKER_CONNECTIONS} >/dev/null
   # Raise nginx worker_connections and FD limit (Ubuntu defaults: 768 connections, 1024 nofile).
-  sudo sed -i 's/worker_connections [0-9]*/worker_connections 4096/' /etc/nginx/nginx.conf
+  sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' /etc/nginx/nginx.conf
   sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' /etc/nginx/nginx.conf
   # worker_rlimit_nofile lets nginx workers raise their own nofile limit (bypasses OS default 1024).
   sudo grep -q 'worker_rlimit_nofile' /etc/nginx/nginx.conf \

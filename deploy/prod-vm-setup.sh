@@ -26,6 +26,17 @@ fi
 NODE_VERSION=$(node --version)
 echo "✓ Node.js $NODE_VERSION"
 
+# 2b. Raise nginx + kernel connection headroom (defaults are too low for grading bursts).
+echo "2b. Tuning nginx/kernel connection limits..."
+if ! grep -q '^worker_rlimit_nofile' /etc/nginx/nginx.conf; then
+  sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' /etc/nginx/nginx.conf
+fi
+sudo sed -i 's/worker_connections [0-9]*/worker_connections 16384/' /etc/nginx/nginx.conf
+sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' /etc/nginx/nginx.conf
+sudo sysctl -w net.core.somaxconn=16384 >/dev/null
+sudo sysctl -w net.ipv4.tcp_max_syn_backlog=16384 >/dev/null
+echo "✓ Connection limits tuned"
+
 # 3. Configure Nginx for candidate-port cutover
 echo "3. Configuring Nginx..."
 sudo tee /etc/nginx/sites-available/chatapp > /dev/null <<'EOF'

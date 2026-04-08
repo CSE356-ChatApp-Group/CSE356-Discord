@@ -342,14 +342,16 @@ router.post('/register',
       const hash = await hashPassword(password, 'register_hash');
       const { rows } = await query(
         `INSERT INTO users (email, username, password_hash, display_name)
-         VALUES ($1,$2,$3,$4) RETURNING *`,
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT DO NOTHING
+         RETURNING *`,
         [normalizedEmail, username, hash, displayName || username]
       );
-      res.status(201).json(issueTokens(res, rows[0]));
-    } catch (err) {
-      if (err.code === '23505') {
+      if (!rows.length) {
         return res.status(409).json({ error: 'Email or username already taken' });
       }
+      res.status(201).json(issueTokens(res, rows[0]));
+    } catch (err) {
       next(err);
     }
   }
