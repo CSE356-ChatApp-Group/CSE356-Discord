@@ -344,6 +344,71 @@ describe('Channel bootstrap subscriptions', () => {
     }
   });
 
+  it('does not deliver channel read:updated to other channel members', async () => {
+    const owner = await createAuthenticatedUser('wsreadprivowner');
+    const member = await createAuthenticatedUser('wsreadprivmember');
+
+    const slug = `ws-read-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'channel read privacy' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .send({});
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `read-priv-${uniqueSuffix()}`, isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const ownerSocket = await connectWebSocket(port, owner.accessToken);
+    const memberSocket = await connectWebSocket(port, member.accessToken);
+
+    try {
+      const msgRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'read cursor target' });
+      expect(msgRes.status).toBe(201);
+      const messageId = msgRes.body.message.id;
+
+      const memberReadPromise = waitForWsEvent(
+        memberSocket,
+        (e) =>
+          e.event === 'read:updated'
+          && e.data?.channelId === channelId
+          && e.data?.lastReadMessageId === messageId,
+      );
+
+      const ownerSeesNoRead = waitForNoWsEvent(
+        ownerSocket,
+        (e) =>
+          e.event === 'read:updated'
+          && e.data?.channelId === channelId
+          && e.data?.lastReadMessageId === messageId,
+        1500,
+      );
+
+      const readRes = await request(app)
+        .put(`/api/v1/messages/${messageId}/read`)
+        .set('Authorization', `Bearer ${member.accessToken}`);
+
+      expect(readRes.status).toBe(200);
+      await memberReadPromise;
+      await ownerSeesNoRead;
+    } finally {
+      await closeWebSocket(ownerSocket);
+      await closeWebSocket(memberSocket);
+    }
+  });
+
   it('rejects manual websocket subscribe to private channel when user is not invited', async () => {
     const owner = await createAuthenticatedUser('wsprivowner');
     const communityMember = await createAuthenticatedUser('wsprivmember');

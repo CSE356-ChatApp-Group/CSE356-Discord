@@ -301,6 +301,43 @@ Verifies:
    - `deploy-prod.sh` automatically backs up before deploy
    - Keep backups for at least 24 hours
 
+### Post-deploy schema verification
+
+After a deploy that includes **long-running migrations** (for example `009_channel_last_message_denorm.sql`), confirm the database is in a good state before considering the release healthy:
+
+```bash
+# From any host with psql and network access to Postgres:
+DATABASE_URL='postgres://user:pass@host:5432/dbname' ./deploy/verify-schema.sh
+```
+
+The script checks that:
+
+- `009_channel_last_message_denorm.sql` is recorded in `schema_migrations`
+- `channels` has `last_message_id`, `last_message_author_id`, and `last_message_at`
+
+**If a previous deploy failed mid-migration**, do not assume re-running `node dist/db/migrate.js` is safe. Inspect `schema_migrations`, the `channels` columns, and Postgres logs; finish or roll back DDL under a maintenance window if needed.
+
+Manual spot checks (optional):
+
+```sql
+SELECT filename FROM schema_migrations WHERE filename LIKE '009%';
+SELECT column_name FROM information_schema.columns
+ WHERE table_schema = 'public' AND table_name = 'channels'
+   AND column_name LIKE 'last_message%';
+```
+
+### Capacity: nginx, file descriptors, and swap under load
+
+Grading and load tests open many **HTTP + WebSocket** connections on a small VM. If you see **timeouts, status 0, or upstream failures** before CPU maxes out, check:
+
+1. **Nginx `worker_connections`** (in `/etc/nginx/nginx.conf` inside the `events { }` block). The repo’s [`infrastructure/nginx/nginx.conf`](../infrastructure/nginx/nginx.conf) uses **4096**; default distro configs are often **768** and can bottleneck WebSocket fan-in. After editing, `sudo nginx -t && sudo systemctl reload nginx`.
+
+2. **`LimitNOFILE`** for the Node process: the systemd template [`deploy/chatapp-template.service`](./chatapp-template.service) sets **65535** — ensure production units match.
+
+3. **Swap thrash**: sustained **swap in/out** (not just “some swap used”) hurts latency. If `vmstat` shows high `si`/`so` during tests, add RAM or reduce colocated services; application-level pagination only helps when clients use smaller pages.
+
+4. **Access logs**: keep **JWTs out of nginx access logs** (do not log the `Authorization` header).
+
 ### During Deploy
 
 - Old and new versions coexist briefly

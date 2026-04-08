@@ -24,6 +24,15 @@ const logger           = require('../utils/logger');
 const router = express.Router();
 router.use(authenticate);
 
+const _idemPendingTtl = parseInt(process.env.MSG_IDEM_PENDING_TTL_SECS || '120', 10);
+/** Lease TTL for in-flight POST /messages idempotency (seconds). */
+const MSG_IDEM_PENDING_TTL_SECS =
+  Number.isFinite(_idemPendingTtl) && _idemPendingTtl > 0 ? _idemPendingTtl : 120;
+const _idemSuccessTtl = parseInt(process.env.MSG_IDEM_SUCCESS_TTL_SECS || '86400', 10);
+/** How long to remember a successful idempotent POST /messages (seconds). */
+const MSG_IDEM_SUCCESS_TTL_SECS =
+  Number.isFinite(_idemSuccessTtl) && _idemSuccessTtl > 0 ? _idemSuccessTtl : 86400;
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function validate(req, res) {
@@ -471,7 +480,13 @@ router.post('/',
                 if (cachedMsg) return res.status(201).json({ message: cachedMsg });
               }
             }
-            const gotLease = await redis.set(idemRedisKey, JSON.stringify({ pending: true }), 'EX', 120, 'NX');
+            const gotLease = await redis.set(
+              idemRedisKey,
+              JSON.stringify({ pending: true }),
+              'EX',
+              MSG_IDEM_PENDING_TTL_SECS,
+              'NX',
+            );
             if (gotLease !== 'OK') {
               for (let i = 0; i < 50; i++) {
                 await new Promise((r) => setTimeout(r, 100));
@@ -490,6 +505,7 @@ router.post('/',
             }
             idemLease = true;
           } catch {
+            // Redis unavailable: proceed without deduplication (fail open) so messaging stays up.
             idemRedisKey = null;
             idemLease = false;
           }
@@ -651,7 +667,14 @@ router.post('/',
       }
 
       if (idemRedisKey && idemLease) {
-        redis.set(idemRedisKey, JSON.stringify({ messageId: message.id }), 'EX', 86400).catch(() => {});
+        redis
+          .set(
+            idemRedisKey,
+            JSON.stringify({ messageId: message.id }),
+            'EX',
+            MSG_IDEM_SUCCESS_TTL_SECS,
+          )
+          .catch(() => {});
       }
 
       res.status(201).json({ message });
@@ -822,7 +845,10 @@ router.put('/:id/read',
       if (conversation_id) {
         await publishConversationEvent(conversation_id, 'read:updated', payload);
       } else {
-        sideEffects.publishMessageEvent(targetKey(channel_id, conversation_id), 'read:updated', payload);
+        // Channel read cursors are private: fan out only to the reader's user topic
+        // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
+        // which would leak other members' read positions to WebSocket clients.
+        sideEffects.publishMessageEvent(`user:${req.user.id}`, 'read:updated', payload);
       }
 
       // Reset the user's unread watermark in Redis to the current channel message count

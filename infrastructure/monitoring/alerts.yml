@@ -143,6 +143,24 @@ groups:
           summary: Host memory pressure is high
           description: Less than 15% of system memory is available on {{ $labels.instance }} for 10 minutes. Prod is close to needing a larger VM.
 
+      # Swap I/O: sustained page swap in/out usually means RAM pressure beyond "low MemAvailable"
+      # — latency spikes and grading timeouts often follow. Requires node_exporter node_vmstat_*.
+      - alert: ChatAppHostSwapIoHigh
+        expr: |
+          (
+            rate(node_vmstat_pswpin{job="node"}[5m])
+            + rate(node_vmstat_pswpout{job="node"}[5m])
+          ) > 200
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host swap I/O is elevated
+          description: >
+            Combined swap in+out rate is above 200 pages/sec for 10m on {{ $labels.instance }}.
+            The VM is likely thrashing — add RAM, reduce colocated workloads, or investigate memory leaks.
+            Tune the threshold for your page size and workload if noisy.
+
       - alert: ChatAppDiskSpaceLow
         expr: |
           (

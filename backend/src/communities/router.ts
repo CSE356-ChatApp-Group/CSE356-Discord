@@ -1,7 +1,7 @@
 /**
  * Communities routes
  *
- * GET    /api/v1/communities                    – list public + joined
+ * GET    /api/v1/communities                    – list public + joined (optional ?limit=&after= for paging)
  * POST   /api/v1/communities                    – create
  * GET    /api/v1/communities/:id                – get details
  * DELETE /api/v1/communities/:id                – delete (owner only)
@@ -14,6 +14,7 @@
 'use strict';
 
 const express = require('express');
+const { validate: uuidValidate } = require('uuid');
 const { body, param, validationResult } = require('express-validator');
 
 const { query, getClient } = require('../db/pool');
@@ -54,29 +55,9 @@ function membersCacheKey(communityId) { return `community:${communityId}:members
 // All concurrent requests for the same key share one DB query in flight.
 const communitiesInflight: Map<string, Promise<{ communities: any[] }>> = new Map();
 
-// ── List ───────────────────────────────────────────────────────────────────────
-router.get('/', async (req, res, next) => {
-  const cacheKey = communitiesCacheKey(req.user.id);
-  try {
-    const cached = await redis.get(cacheKey);
-    if (cached) return res.json(JSON.parse(cached));
-  } catch {
-    // cache miss – fall through to DB
-  }
-
-  // Singleflight: if a DB query is already in-flight for this key, wait for it
-  // rather than spawning a second concurrent query (thundering-herd defence).
-  if (communitiesInflight.has(cacheKey)) {
-    try {
-      return res.json(await communitiesInflight.get(cacheKey));
-    } catch (err) {
-      return next(err);
-    }
-  }
-
-  const promise: Promise<{ communities: any[] }> = (async () => {
-    const { rows } = await query(
-      `WITH visible_communities AS (
+/** Shared list body (full list + keyset pages use the same SELECT list). */
+const COMMUNITIES_LIST_CORE = `
+       WITH visible_communities AS (
          SELECT c.*, cm.role AS my_role
          FROM communities c
          LEFT JOIN community_members cm
@@ -137,9 +118,97 @@ router.get('/', async (req, res, next) => {
               (COALESCE(uc.unread_channel_count, 0) > 0) AS has_unread_channels
        FROM visible_communities vc
        LEFT JOIN member_counts mc ON mc.community_id = vc.id
-       LEFT JOIN unread_counts uc ON uc.community_id = vc.id
-       ORDER BY vc.name`,
-      [req.user.id]
+       LEFT JOIN unread_counts uc ON uc.community_id = vc.id`;
+
+function parseCommunitiesPageQuery(req) {
+  const rawL = req.query.limit;
+  const rawA = req.query.after;
+  let limit = null;
+  if (rawL !== undefined && String(rawL).length) {
+    const n = parseInt(String(rawL), 10);
+    if (!Number.isFinite(n) || n < 1 || n > 100) {
+      return { error: 'limit must be an integer from 1 to 100' };
+    }
+    limit = n;
+  }
+  let after = null;
+  if (rawA !== undefined && String(rawA).length) {
+    const s = String(rawA).trim();
+    if (!uuidValidate(s)) return { error: 'after must be a UUID' };
+    after = s;
+  }
+  if (after && !limit) return { error: 'after requires limit' };
+  return { limit, after };
+}
+
+// ── List ───────────────────────────────────────────────────────────────────────
+router.get('/', async (req, res, next) => {
+  const page = parseCommunitiesPageQuery(req);
+  if (page.error) return res.status(400).json({ error: page.error });
+
+  if (page.limit) {
+    try {
+      let cursorName = null;
+      let cursorId = null;
+      if (page.after) {
+        const { rows: curRows } = await query(
+          `WITH visible_communities AS (
+             SELECT c.id, c.name
+             FROM communities c
+             LEFT JOIN community_members cm
+               ON cm.community_id = c.id AND cm.user_id = $1
+             WHERE c.is_public = TRUE OR cm.user_id IS NOT NULL
+           )
+           SELECT name, id FROM visible_communities WHERE id = $2`,
+          [req.user.id, page.after],
+        );
+        if (!curRows.length) return res.status(400).json({ error: 'Invalid after cursor' });
+        cursorName = curRows[0].name;
+        cursorId = curRows[0].id;
+      }
+
+      const fetchLimit = page.limit + 1;
+      const { rows } = await query(
+        `${COMMUNITIES_LIST_CORE}
+       WHERE (($2::text IS NULL AND $3::uuid IS NULL) OR (vc.name, vc.id) > ($2::text, $3::uuid))
+       ORDER BY vc.name, vc.id
+       LIMIT $4`,
+        [req.user.id, cursorName, cursorId, fetchLimit],
+      );
+
+      const hasMore = rows.length > page.limit;
+      const slice = hasMore ? rows.slice(0, page.limit) : rows;
+      const body: any = { communities: slice };
+      if (hasMore) body.nextAfter = slice[slice.length - 1].id;
+      return res.json(body);
+    } catch (err) {
+      return next(err);
+    }
+  }
+
+  const cacheKey = communitiesCacheKey(req.user.id);
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) return res.json(JSON.parse(cached));
+  } catch {
+    // cache miss – fall through to DB
+  }
+
+  // Singleflight: if a DB query is already in-flight for this key, wait for it
+  // rather than spawning a second concurrent query (thundering-herd defence).
+  if (communitiesInflight.has(cacheKey)) {
+    try {
+      return res.json(await communitiesInflight.get(cacheKey));
+    } catch (err) {
+      return next(err);
+    }
+  }
+
+  const promise: Promise<{ communities: any[] }> = (async () => {
+    const { rows } = await query(
+      `${COMMUNITIES_LIST_CORE}
+       ORDER BY vc.name, vc.id`,
+      [req.user.id],
     );
     const payload = { communities: rows };
     redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
@@ -151,7 +220,9 @@ router.get('/', async (req, res, next) => {
 
   try {
     res.json(await promise);
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ── Create ─────────────────────────────────────────────────────────────────────

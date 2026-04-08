@@ -79,7 +79,7 @@ When something breaks in production, start here:
 - **Remote browser access:**
   - Staging Grafana: `http://136.114.103.71/grafana/`
   - Production Grafana: `https://group-8.cse356.compas.cs.stonybrook.edu/grafana/`
-- **Prometheus alerts:** check `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, `ChatAppEventLoopLagHigh`, `ChatAppCpuSaturationHigh`, `ChatAppPgPoolSaturated`, `ChatAppOverloadSheddingActive`, `ChatAppHostCpuHigh`, `ChatAppHostMemoryPressure`, `ChatAppDiskSpaceLow`, and `ChatAppMinioDown`.
+- **Prometheus alerts:** check `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, `ChatAppEventLoopLagHigh`, `ChatAppHighMemoryUsage`, `ChatAppCpuSaturationHigh`, `ChatAppPgPoolPressure`, `ChatAppOverloadSheddingActive`, `ChatAppHostCpuHigh`, `ChatAppHostMemoryPressure`, `ChatAppHostSwapIoHigh`, `ChatAppDiskSpaceLow`, and `ChatAppMinioDown`.
 
 ### Monitoring quick commands
 
@@ -284,6 +284,14 @@ All protected endpoints require: `Authorization: Bearer <accessToken>`
 | PATCH  | /messages/:id             | Edit own message                   |
 | DELETE | /messages/:id             | Soft-delete own message            |
 | PUT    | /messages/:id/read        | Update read cursor                 |
+
+**POST /messages — retries:** send header `Idempotency-Key: <opaque string>` (≤200 chars, same user). While the key is held in Redis, duplicate posts return the same created message with **201** instead of creating twice. Optional env: `MSG_IDEM_PENDING_TTL_SECS` (in-flight lease, default 120), `MSG_IDEM_SUCCESS_TTL_SECS` (stored result, default 86400). If Redis is unavailable, idempotency is skipped so messaging still works.
+
+### Communities
+
+| Method | Path           | Description |
+|--------|----------------|-------------|
+| GET    | /communities   | All communities visible to the user (default). Optional paging: `?limit=1-100` and `?after=<communityId>` (keyset cursor from the previous page’s last row). |
 
 ### WebSocket Events
 
