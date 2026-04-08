@@ -101,18 +101,16 @@ function shouldRestrictNonEssentialWrites() {
 }
 
 /**
- * shouldShedIncomingRequests – when OVERLOAD_HTTP_SHED_ENABLED=true, returns true
- * if event-loop p99 lag exceeds OVERLOAD_LAG_SHED_MS (default 300 ms).  Responds
- * with 503 + Retry-After so clients fail fast instead of waiting on the Node
- * queue until timeouts.
+ * shouldShedIncomingRequests – **opt-in only** (`OVERLOAD_HTTP_SHED_ENABLED=true`).
+ * When enabled, returns true if event-loop p99 lag exceeds OVERLOAD_LAG_SHED_MS
+ * (default 250 ms). Responds with 503 + Retry-After.
  *
- * **Default is off:** the app lets the event loop and PG pool queues absorb
- * load (higher tail latency, fewer artificial 503s). Enable shedding only on
- * instances where you prefer fast errors over long waits (e.g. public APIs
- * behind retries).
+ * **Default is off:** without the env var set to `true`, the app absorbs load via
+ * the PG pool and event-loop queue (higher tail latency, fewer artificial 503s).
+ * Staging deploy sets shedding on explicitly; prod leaves it off unless you opt in.
  */
 function shouldShedIncomingRequests() {
-  if (process.env.OVERLOAD_HTTP_SHED_ENABLED === 'false') return false;
+  if (process.env.OVERLOAD_HTTP_SHED_ENABLED !== 'true') return false;
   const lagP99Ms = Math.round(lag.percentile(99) / 1e6);
   return lagP99Ms >= getThreshold('OVERLOAD_LAG_SHED_MS', 250);
 }

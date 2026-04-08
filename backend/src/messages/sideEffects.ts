@@ -81,7 +81,9 @@ function enqueue(name, fn) {
     sideEffectQueueDroppedTotal.inc({ queue: queueName, name, reason: 'queue_full' });
     logger.warn(
       { sideEffect: name, queue: queueName, queueDepth: queue.length, maxQueueDepth: maxDepth },
-      'Dropping non-essential async side-effect due to queue pressure'
+      queueName === 'fanout:critical'
+        ? 'Dropping fanout:critical side-effect (WS delivery may be missed for this event)'
+        : 'Dropping async side-effect due to queue pressure'
     );
     return false;
   }
