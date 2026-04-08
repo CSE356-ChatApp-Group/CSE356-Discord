@@ -92,8 +92,15 @@ let shuttingDown = false;
 // subscribe message.  Keys are `${userId}:${channel}`.  A 30 s TTL is safe
 // because membership changes (join/leave/delete) explicitly call
 // invalidateWsAclCache() before the client is notified.
+//
+// Bursty clients (e.g. automation that spams subscribe) are handled by (1)
+// warming this cache from the same list used for auto-bootstrap, and (2)
+// coalescing concurrent isAllowedChannel calls for the same key so only one
+// DB query runs per cache miss.
 const ACL_CACHE_TTL_MS = 30_000;
 const aclCache: Map<string, { allowed: boolean; expiresAt: number }> = new Map();
+/** In-flight ACL lookups — shared waiters get the same Promise (thundering herd guard). */
+const aclCheckInFlight: Map<string, Promise<boolean>> = new Map();
 const rawAclCacheMaxEntries = Number(process.env.WS_ACL_CACHE_MAX_ENTRIES || 20_000);
 const ACL_CACHE_MAX_ENTRIES =
   Number.isFinite(rawAclCacheMaxEntries) && rawAclCacheMaxEntries > 0
@@ -107,6 +114,22 @@ const WS_BOOTSTRAP_BATCH_SIZE =
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
+}
+
+function storeAclCacheEntry(userId: string, channel: string, allowed: boolean) {
+  const key = aclCacheKey(userId, channel);
+  if (aclCache.size >= ACL_CACHE_MAX_ENTRIES) {
+    const oldestKey = aclCache.keys().next().value;
+    if (oldestKey) aclCache.delete(oldestKey);
+  }
+  aclCache.set(key, { allowed, expiresAt: Date.now() + ACL_CACHE_TTL_MS });
+}
+
+/** Mark channels as allowed — same membership projection as listAutoSubscriptionChannels. */
+function warmWsAclCacheFromChannelList(userId: string, channels: string[]) {
+  for (const channel of channels) {
+    storeAclCacheEntry(userId, channel, true);
+  }
 }
 
 function invalidateWsAclCache(userId: string, channel: string) {
@@ -495,6 +518,7 @@ async function listAutoSubscriptionChannels(userId) {
 
 async function bootstrapUserSubscriptions(ws, userId) {
   const channels = await listAutoSubscriptionChannels(userId);
+  warmWsAclCacheFromChannelList(userId, channels);
   for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
     const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
     await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
@@ -745,13 +769,21 @@ async function isAllowedChannel(user, channel) {
   const cached = aclCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.allowed;
 
-  const allowed = await _isAllowedChannelDb(user, channel);
-  if (aclCache.size >= ACL_CACHE_MAX_ENTRIES) {
-    const oldestKey = aclCache.keys().next().value;
-    if (oldestKey) aclCache.delete(oldestKey);
-  }
-  aclCache.set(cacheKey, { allowed, expiresAt: Date.now() + ACL_CACHE_TTL_MS });
-  return allowed;
+  const pending = aclCheckInFlight.get(cacheKey);
+  if (pending) return pending;
+
+  const done = (async () => {
+    try {
+      const allowed = await _isAllowedChannelDb(user, channel);
+      storeAclCacheEntry(user.id, channel, allowed);
+      return allowed;
+    } finally {
+      aclCheckInFlight.delete(cacheKey);
+    }
+  })();
+
+  aclCheckInFlight.set(cacheKey, done);
+  return done;
 }
 
 async function _isAllowedChannelDb(user, channel) {

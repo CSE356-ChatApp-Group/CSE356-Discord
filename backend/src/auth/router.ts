@@ -317,6 +317,10 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
       if (linked.rows.length) {
         return { user: linked.rows[0] };
       }
+      const detail = typeof err.detail === 'string' ? err.detail : '';
+      if (/users_username_key|users_email/i.test(detail) || err.constraint === 'users_username_key' || err.constraint === 'users_email_key') {
+        return { error: 'Username or email already in use' };
+      }
       return { error: 'OAuth account already linked' };
     }
     throw err;
@@ -351,7 +355,10 @@ router.post('/register',
         return res.status(409).json({ error: 'Email or username already taken' });
       }
       res.status(201).json(issueTokens(res, rows[0]));
-    } catch (err) {
+    } catch (err: any) {
+      if (err && err.code === '23505') {
+        return res.status(409).json({ error: 'Email or username already taken' });
+      }
       next(err);
     }
   }

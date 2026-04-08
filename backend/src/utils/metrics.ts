@@ -115,6 +115,13 @@ const authRateLimitHitsTotal = new client.Counter({
   labelNames: ['route'],
 });
 
+/** POST /messages rejected after access check (channel private / not a DM participant). */
+const messagePostAccessDeniedTotal = new client.Counter({
+  name: 'message_post_access_denied_total',
+  help: 'Message create rejected with 403 after target access check',
+  labelNames: ['reason'],
+});
+
 // ── PG pool health ─────────────────────────────────────────────────────────────
 
 const pgPoolTotal = new client.Gauge({
@@ -166,5 +173,6 @@ module.exports = {
   overloadStageGauge,
   authBcryptDurationMs,
   authRateLimitHitsTotal,
+  messagePostAccessDeniedTotal,
   startPgPoolMetrics,
 };

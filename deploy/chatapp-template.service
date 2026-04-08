@@ -3,6 +3,11 @@ Description=ChatApp Node.js (port %i)
 # Bring app up only after local dependencies are online.
 # PgBouncer readiness races caused startup failures (ECONNREFUSED :6432) and
 # systemd start-limit lockouts under reboot/load events.
+#
+# Wants= vs Requires=: Wants starts dependents in parallel and does not stop the
+# app if pgbouncer.service fails (useful when ops temporarily fixes the pooler).
+# Requires= would stop/restart this unit when pgbouncer stops — stricter ordering
+# for production if you prefer hard coupling (add Requires=pgbouncer.service).
 Wants=postgresql.service redis.service pgbouncer.service
 After=network.target postgresql.service redis.service pgbouncer.service
 StartLimitIntervalSec=180

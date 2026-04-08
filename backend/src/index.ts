@@ -23,6 +23,62 @@ const PORT = process.env.PORT || 3000;
 let server;
 let shuttingDown = false;
 
+function startupMaxWaitMs() {
+  const raw = process.env.STARTUP_DEPENDENCY_MAX_WAIT_MS;
+  const parsed = parseInt(raw || '', 10);
+  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  return 60_000;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Retry DB + Redis probes so a brief PgBouncer gap (e.g. restart) does not
+ * exit(1) and take every chatapp@ instance out of nginx's upstream set.
+ */
+async function waitForDependencies() {
+  const deadline = Date.now() + startupMaxWaitMs();
+  let attempt = 0;
+
+  for (;;) {
+    attempt += 1;
+    try {
+      await dbQuery('SELECT 1');
+      logger.info({ attempt, pool: poolStats() }, 'Postgres connected');
+      break;
+    } catch (err) {
+      if (Date.now() >= deadline) {
+        throw err;
+      }
+      const wait = Math.min(5000, 250 * Math.pow(2, Math.min(attempt, 4)));
+      logger.warn(
+        { err, attempt, retryInMs: wait, pool: poolStats() },
+        'Postgres not ready at startup; retrying',
+      );
+      await sleep(wait);
+    }
+  }
+
+  attempt = 0;
+  for (;;) {
+    attempt += 1;
+    try {
+      await redis.ping();
+      logger.info({ attempt }, 'Redis connected');
+      return;
+    } catch (err) {
+      if (Date.now() >= deadline) {
+        throw err;
+      }
+      const wait = Math.min(5000, 250 * Math.pow(2, Math.min(attempt, 4)));
+      logger.warn({ err, attempt, retryInMs: wait }, 'Redis not ready at startup; retrying');
+      await sleep(wait);
+    }
+  }
+}
+
 async function shutdown(signal, err = null) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -57,15 +113,9 @@ async function shutdown(signal, err = null) {
 }
 
 async function start() {
-  // Verify DB connectivity before accepting traffic.  Uses the circuit-broken
-  // wrapper so any misconfiguration surfaces clearly at boot time.
-  await dbQuery('SELECT 1');
-  logger.info({ pool: poolStats() }, 'Postgres connected');
+  await waitForDependencies();
 
   startPgPoolMetrics(pool);
-
-  await redis.ping();
-  logger.info('Redis connected');
 
   server = http.createServer(app);
 

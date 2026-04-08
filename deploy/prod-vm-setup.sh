@@ -41,7 +41,8 @@ echo "✓ Connection limits tuned"
 echo "3. Configuring Nginx..."
 sudo tee /etc/nginx/sites-available/chatapp > /dev/null <<'EOF'
 upstream app {
-  server localhost:4000;
+  # max_fails=0: never drain the upstream on 502/503 bursts (avoids no live upstreams).
+  server localhost:4000 max_fails=0;
   keepalive 32;
 }
 

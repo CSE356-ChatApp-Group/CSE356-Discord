@@ -16,6 +16,7 @@ const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
 const { query, getClient, withTransaction } = require('../db/pool');
+const { messagePostAccessDeniedTotal } = require('../utils/metrics');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
 const overload         = require('../utils/overload');
@@ -558,6 +559,9 @@ router.post('/',
       if (!channelId && !conversationId) {
         return res.status(400).json({ error: 'channelId or conversationId required' });
       }
+      if (channelId && conversationId) {
+        return res.status(400).json({ error: 'Specify only one of channelId or conversationId' });
+      }
       if (!content?.trim() && attachments.length === 0) {
         return res.status(400).json({ error: 'content or at least one attachment is required' });
       }
@@ -629,8 +633,6 @@ router.post('/',
       // Holds the pool connection for 3 queries (BEGIN, CTE, COMMIT) instead
       // of the prior 5 (access-check, BEGIN, INSERT, COMMIT, hydrated-SELECT),
       // cutting connection hold time ~40% and improving throughput under contention.
-      // Prefer channel when both are set — matches GET /messages (channelId branch first) and
-      // avoids 403 when clients send stale conversationId alongside the active channel.
       let communityId: string | null = null;
       const baseMessage = await withTransaction(async (client) => {
         let rows: any[];
@@ -710,6 +712,7 @@ router.post('/',
         if (!row?.has_access) {
           const err: any = new Error(channelId ? 'Access denied' : 'Not a participant');
           err.statusCode = 403;
+          err.messagePostDenyReason = channelId ? 'channel_access' : 'conversation_participant';
           throw err;
         }
 
@@ -796,6 +799,14 @@ router.post('/',
         redis.del(idemRedisKey).catch(() => {});
       }
       if (err.statusCode === 403) {
+        const reason = err.messagePostDenyReason;
+        if (reason === 'channel_access' || reason === 'conversation_participant') {
+          messagePostAccessDeniedTotal.inc({ reason });
+          logger.warn(
+            { requestId: req.id, reason, target: req.body.channelId ? 'channel' : 'conversation' },
+            'POST /messages access denied',
+          );
+        }
         return res.status(403).json({ error: err.message });
       }
       next(err);

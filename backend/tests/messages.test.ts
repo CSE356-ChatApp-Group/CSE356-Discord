@@ -126,6 +126,20 @@ describe('Message hydration payloads', () => {
     channelId = channelRes.body.channel.id;
   });
 
+  it('rejects message create when both channelId and conversationId are set', async () => {
+    const res = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        channelId,
+        conversationId: '00000000-0000-4000-8000-000000000001',
+        content: 'both targets',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/only one of channelId or conversationId/i);
+  });
+
   it('returns hydrated author and attachments on message create', async () => {
     const res = await request(app)
       .post('/api/v1/messages')

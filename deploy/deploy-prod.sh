@@ -95,6 +95,7 @@ rollback_cutover() {
     TMP_SITE=\$(mktemp)
     sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
     sudo sed -i -E \"s/(127\\\\.0\\\\.0\\\\.1|localhost):${NEW_PORT}/localhost:${OLD_PORT}/g\" \"\$TMP_SITE\"
+    sudo sed -i -E '/max_fails/!s/^([[:space:]]*server[[:space:]]+(127\\.0\\.0\\.1|localhost):[0-9]+);/\\1 max_fails=0;/' \"\$TMP_SITE\"
     sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
     rm -f \"\$TMP_SITE\"
     sudo nginx -t >/dev/null
@@ -177,6 +178,22 @@ ssh "$PROD_USER@$PROD_HOST" "
   fi
   sudo systemctl is-active pgbouncer \
     || { echo 'ERROR: pgbouncer failed to start'; sudo journalctl -u pgbouncer --no-pager -n 20; exit 1; }
+  # systemctl active can race before the pooler accepts TCP — same check as chatapp ExecStartPre.
+  wait_tcp() {
+    local host=\"\$1\" port=\"\$2\" label=\"\$3\" max=\"\${4:-90}\"
+    local n=0
+    while [ \"\$n\" -lt \"\$max\" ]; do
+      if { echo > /dev/tcp/\${host}/\${port}; } >/dev/null 2>&1; then
+        echo \"\${label} accepting connections on \${host}:\${port}\"
+        return 0
+      fi
+      sleep 1
+      n=\$((n+1))
+    done
+    echo \"ERROR: \${label} not reachable at \${host}:\${port} after \${max}s\"
+    return 1
+  }
+  wait_tcp 127.0.0.1 6432 PgBouncer 90
   echo 'PgBouncer running on 127.0.0.1:6432 in transaction-pooling mode.'
 "
 echo "✓ PgBouncer configured"
@@ -227,6 +244,24 @@ ssh "$PROD_USER@$PROD_HOST" "
     2>&1 | grep -v 'change directory' || true
   sudo -u postgres psql -qAt -c \"SELECT pg_reload_conf();\" > /dev/null || true
   echo 'PostgreSQL tuning applied.'
+  # After a postmaster bounce, PgBouncer may need a moment before 6432 serves queries again.
+  if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then
+    wait_tcp() {
+      local host=\"\$1\" port=\"\$2\" label=\"\$3\" max=\"\${4:-120}\"
+      local n=0
+      while [ \"\$n\" -lt \"\$max\" ]; do
+        if { echo > /dev/tcp/\${host}/\${port}; } >/dev/null 2>&1; then
+          echo \"\${label} accepting connections on \${host}:\${port} (post-PostgreSQL)\"
+          return 0
+        fi
+        sleep 1
+        n=\$((n+1))
+      done
+      echo \"ERROR: \${label} not reachable at \${host}:\${port} after \${max}s\"
+      return 1
+    }
+    wait_tcp 127.0.0.1 6432 PgBouncer 120
+  fi
 "
 echo "✓ PostgreSQL tuned"
 
@@ -414,6 +449,8 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo grep -q 'keepalive_requests' \"\$TMP_SITE\" \
     || sudo sed -i '/keepalive 512/a\\  keepalive_requests 100000;\n  keepalive_timeout 75s;' \"\$TMP_SITE\"
   sudo sed -i 's/keepalive_requests [0-9]*/keepalive_requests 100000/' \"\$TMP_SITE\"
+  # Staging parity: never mark Node upstreams \"down\" after transient 503s (prevents death spiral).
+  sudo sed -i -E '/max_fails/!s/^([[:space:]]*server[[:space:]]+(127\\.0\\.0\\.1|localhost):[0-9]+);/\\1 max_fails=0;/' \"\$TMP_SITE\"
   sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
   rm -f \"\$TMP_SITE\"
   sudo nginx -t >/dev/null
