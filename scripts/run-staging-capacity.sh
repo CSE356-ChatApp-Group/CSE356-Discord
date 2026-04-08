@@ -116,6 +116,14 @@ else
   echo "Warning: report generation failed" >&2
 fi
 
+if [[ "$PROFILE" == "slo" ]]; then
+  echo
+  echo "[gate] Validating SLO go-live gates..."
+  if ! node "$ROOT_DIR/scripts/validate-capacity-gates.mjs" "$RUN_DIR" "$PROFILE"; then
+    K6_EXIT=1
+  fi
+fi
+
 echo
 echo "Artifacts saved to $RUN_DIR"
 echo "k6 exit code: $K6_EXIT"

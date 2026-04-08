@@ -7,6 +7,14 @@ const BCRYPT_MAX_CONCURRENT = (() => {
   const n = Number.parseInt(process.env.BCRYPT_MAX_CONCURRENT || '8', 10);
   return Number.isFinite(n) && n > 0 ? n : 8;
 })();
+const BCRYPT_MAX_WAITERS = (() => {
+  const n = Number.parseInt(process.env.BCRYPT_MAX_WAITERS || '200', 10);
+  return Number.isFinite(n) && n > 0 ? n : 200;
+})();
+const BCRYPT_QUEUE_WAIT_TIMEOUT_MS = (() => {
+  const n = Number.parseInt(process.env.BCRYPT_QUEUE_WAIT_TIMEOUT_MS || '2000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 2000;
+})();
 
 let bcryptActive = 0;
 const bcryptWaiters = [];
@@ -16,11 +24,25 @@ function enterBcrypt() {
     bcryptActive += 1;
     return Promise.resolve();
   }
-  return new Promise((resolve) => {
-    bcryptWaiters.push(() => {
+  if (bcryptWaiters.length >= BCRYPT_MAX_WAITERS) {
+    const err: any = new Error('bcrypt queue saturated');
+    err.code = 'BCRYPT_QUEUE_SATURATED';
+    return Promise.reject(err);
+  }
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      const idx = bcryptWaiters.indexOf(onReady);
+      if (idx >= 0) bcryptWaiters.splice(idx, 1);
+      const err: any = new Error('bcrypt queue wait timeout');
+      err.code = 'BCRYPT_QUEUE_TIMEOUT';
+      reject(err);
+    }, BCRYPT_QUEUE_WAIT_TIMEOUT_MS);
+    const onReady = () => {
+      clearTimeout(timeout);
       bcryptActive += 1;
       resolve(undefined);
-    });
+    };
+    bcryptWaiters.push(onReady);
   });
 }
 

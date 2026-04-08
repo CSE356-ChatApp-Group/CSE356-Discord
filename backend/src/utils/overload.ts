@@ -112,9 +112,9 @@ function shouldRestrictNonEssentialWrites() {
  * behind retries).
  */
 function shouldShedIncomingRequests() {
-  if (process.env.OVERLOAD_HTTP_SHED_ENABLED !== 'true') return false;
+  if (process.env.OVERLOAD_HTTP_SHED_ENABLED === 'false') return false;
   const lagP99Ms = Math.round(lag.percentile(99) / 1e6);
-  return lagP99Ms >= getThreshold('OVERLOAD_LAG_SHED_MS', 300);
+  return lagP99Ms >= getThreshold('OVERLOAD_LAG_SHED_MS', 250);
 }
 
 function historyLimit(baseLimit) {

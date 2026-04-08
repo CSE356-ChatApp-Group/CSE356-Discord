@@ -21,6 +21,11 @@ const rawFanoutConcurrency = Number(process.env.FANOUT_QUEUE_CONCURRENCY || 4);
 const FANOUT_QUEUE_CONCURRENCY = Number.isFinite(rawFanoutConcurrency) && rawFanoutConcurrency > 0
   ? Math.floor(rawFanoutConcurrency)
   : 4;
+const rawCriticalMaxDepth = Number(process.env.FANOUT_CRITICAL_MAX_DEPTH || 5000);
+const FANOUT_CRITICAL_MAX_DEPTH =
+  Number.isFinite(rawCriticalMaxDepth) && rawCriticalMaxDepth > 0
+    ? Math.floor(rawCriticalMaxDepth)
+    : 5000;
 const activeWorkers: Record<string, number> = {
   'fanout:critical': 0,
   'fanout:background': 0,
@@ -46,8 +51,8 @@ function queueConfig(queueName) {
   // concurrently).  Higher concurrency reduces queue build-up under burst load.
   return {
     concurrency: FANOUT_QUEUE_CONCURRENCY,
-    maxDepth: Number.POSITIVE_INFINITY,
-    dropOnOverflow: false,
+    maxDepth: FANOUT_CRITICAL_MAX_DEPTH,
+    dropOnOverflow: true,
   };
 }
 

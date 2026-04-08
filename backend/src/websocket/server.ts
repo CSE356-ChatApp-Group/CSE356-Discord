@@ -94,6 +94,16 @@ let shuttingDown = false;
 // invalidateWsAclCache() before the client is notified.
 const ACL_CACHE_TTL_MS = 30_000;
 const aclCache: Map<string, { allowed: boolean; expiresAt: number }> = new Map();
+const rawAclCacheMaxEntries = Number(process.env.WS_ACL_CACHE_MAX_ENTRIES || 20_000);
+const ACL_CACHE_MAX_ENTRIES =
+  Number.isFinite(rawAclCacheMaxEntries) && rawAclCacheMaxEntries > 0
+    ? Math.floor(rawAclCacheMaxEntries)
+    : 20_000;
+const rawBootstrapBatchSize = Number(process.env.WS_BOOTSTRAP_BATCH_SIZE || 50);
+const WS_BOOTSTRAP_BATCH_SIZE =
+  Number.isFinite(rawBootstrapBatchSize) && rawBootstrapBatchSize > 0
+    ? Math.floor(rawBootstrapBatchSize)
+    : 50;
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -485,9 +495,11 @@ async function listAutoSubscriptionChannels(userId) {
 
 async function bootstrapUserSubscriptions(ws, userId) {
   const channels = await listAutoSubscriptionChannels(userId);
-  await Promise.allSettled(
-    channels.map((channel) => subscribeClient(ws, channel)),
-  );
+  for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
+    const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
+    await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
+    if (ws.readyState !== WebSocket.OPEN) return;
+  }
 }
 
 // Retry bootstrap on pool circuit-breaker fires (transient under burst load).
@@ -734,6 +746,10 @@ async function isAllowedChannel(user, channel) {
   if (cached && cached.expiresAt > Date.now()) return cached.allowed;
 
   const allowed = await _isAllowedChannelDb(user, channel);
+  if (aclCache.size >= ACL_CACHE_MAX_ENTRIES) {
+    const oldestKey = aclCache.keys().next().value;
+    if (oldestKey) aclCache.delete(oldestKey);
+  }
   aclCache.set(cacheKey, { allowed, expiresAt: Date.now() + ACL_CACHE_TTL_MS });
   return allowed;
 }

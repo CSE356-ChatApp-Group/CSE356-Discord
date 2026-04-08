@@ -859,17 +859,6 @@ router.put('/:id/read',
           const currentCount = await redis.get(countKey);
           if (currentCount !== null) {
             await redis.set(readKey, currentCount);
-          } else {
-            // Channel counter not yet in Redis; initialize both
-            const { rows: cntRows } = await query(
-              `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
-              [channel_id]
-            );
-            const total = cntRows[0]?.cnt ?? 0;
-            const pipeline = redis.pipeline();
-            pipeline.set(countKey, total, 'NX');
-            pipeline.set(readKey, total);
-            await pipeline.exec();
           }
         } catch (err) {
           logger.warn({ err, channel_id }, 'Failed to reset user:last_read_count in Redis');

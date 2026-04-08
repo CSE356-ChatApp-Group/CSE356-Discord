@@ -18,6 +18,10 @@ Environment=PORT=%i
 # WorkingDirectory is overridden per-deploy via drop-in:
 #   /etc/systemd/system/chatapp@PORT.service.d/release.conf
 WorkingDirectory=/opt/chatapp/current/backend
+# Block startup until local dependencies are reachable, so app units don't
+# flap into start-limit lockout during PgBouncer/Redis races.
+ExecStartPre=/usr/bin/bash -lc 'for i in {1..30}; do (echo > /dev/tcp/127.0.0.1/6432) >/dev/null 2>&1 && break; sleep 1; done; (echo > /dev/tcp/127.0.0.1/6432) >/dev/null 2>&1'
+ExecStartPre=/usr/bin/bash -lc 'for i in {1..30}; do (echo > /dev/tcp/127.0.0.1/6379) >/dev/null 2>&1 && break; sleep 1; done; (echo > /dev/tcp/127.0.0.1/6379) >/dev/null 2>&1'
 ExecStart=/usr/bin/node dist/index.js
 Restart=on-failure
 RestartSec=5

@@ -180,34 +180,16 @@ router.get('/',
             }
 
             if (missingChannels.length > 0) {
-              const channelIds   = missingChannels.map(ch => ch.id);
-              const lastReadAts  = missingChannels.map(ch => ch.my_last_read_at || null);
-
-              const { rows: countRows } = await query(
-                `SELECT
-                   refs.channel_id::text,
-                   COUNT(*) FILTER (WHERE m.deleted_at IS NULL)                                                     AS total_count,
-                   COUNT(*) FILTER (WHERE m.deleted_at IS NULL
-                                      AND (refs.last_read_at IS NULL OR m.created_at <= refs.last_read_at)) AS read_count
-                 FROM (SELECT unnest($1::uuid[]) AS channel_id,
-                              unnest($2::timestamptz[]) AS last_read_at) AS refs
-                 LEFT JOIN messages m ON m.channel_id = refs.channel_id
-                 GROUP BY refs.channel_id`,
-                [channelIds, lastReadAts]
-              );
-
-              const countMap = new Map<string, { total: number; read: number }>(
-                countRows.map(r => [r.channel_id, { total: parseInt(r.total_count, 10), read: parseInt(r.read_count, 10) }])
-              );
-
-              const initPipeline = redis.pipeline();
+              // Avoid cold COUNT(*) fallback in this hot path. When Redis counters
+              // are missing, infer an unread indicator from denormalized last-read
+              // metadata and let async write paths repopulate exact counters.
               for (const ch of missingChannels) {
-                const counts = countMap.get(ch.id) || { total: 0, read: 0 };
-                initPipeline.set(`channel:msg_count:${ch.id}`, counts.total, 'NX');
-                initPipeline.set(`user:last_read_count:${ch.id}:${userId}`, counts.read, 'NX');
-                ch.unread_message_count = Math.max(0, counts.total - counts.read);
+                const hasUnread =
+                  Boolean(ch.last_message_id) &&
+                  ch.last_message_id !== ch.my_last_read_message_id &&
+                  ch.last_message_author_id !== userId;
+                ch.unread_message_count = hasUnread ? 1 : 0;
               }
-              await initPipeline.exec();
             }
           } catch (err) {
             logger.warn({ err }, 'Failed to fetch unread counts from Redis; defaulting to 0');

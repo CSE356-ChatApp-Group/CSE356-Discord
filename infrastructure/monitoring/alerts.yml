@@ -270,6 +270,43 @@ groups:
             p95 queue delay for `fanout:critical` exceeds 1.5s for 10m. This is an early warning that
             burst traffic is outpacing side-effect processing and WS/event freshness is degrading.
 
+      - alert: ChatAppDeliveryFailsWarning
+        expr: |
+          (
+            sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages.*",status_class="5xx"}[5m]))
+            /
+            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages.*"}[5m])), 1)
+          ) > 0.03
+          or sum(rate(side_effect_job_duration_ms_count{job="chatapp-api",queue="fanout:critical",status="error"}[5m])) > 1
+          or sum(rate(side_effect_queue_dropped_total{job="chatapp-api",queue=~"fanout:critical|fanout:background"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Delivery failures are elevated
+          description: >
+            Message-route 5xx rate, critical fanout job errors, or dropped side-effect jobs are sustained.
+            Delivery may be delayed or failing for users. Investigate API saturation, Redis fanout health,
+            and side-effect queue pressure.
+
+      - alert: ChatAppDeliveryFailsFastBurn
+        expr: |
+          (
+            sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages.*",status_class="5xx"}[2m]))
+            /
+            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages.*"}[2m])), 1)
+          ) > 0.08
+          or sum(rate(side_effect_job_duration_ms_count{job="chatapp-api",queue="fanout:critical",status="error"}[2m])) > 5
+          or sum(rate(side_effect_queue_dropped_total{job="chatapp-api",queue="fanout:critical"}[2m])) > 0.2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Fast-burn delivery failures detected
+          description: >
+            Rapid degradation in delivery path: message-route 5xx burn, fanout critical job failures,
+            or dropped critical side-effect jobs in a short window. This should page immediately.
+
   # Redis (requires redis_exporter job on :9121 — deploy-staging installs it).
   - name: chatapp-redis
     rules:

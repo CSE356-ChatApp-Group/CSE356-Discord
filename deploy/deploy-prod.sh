@@ -19,6 +19,8 @@ MONITOR_SECONDS="${MONITOR_SECONDS:-30}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-16384}"
+ALLOW_DB_RESTART="${ALLOW_DB_RESTART:-false}"
+RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
 
 # Number of Node.js HTTP workers (systemd chatapp@ ports).  Default 1; set 2 when
 # nginx load-balances two ports like staging.
@@ -86,6 +88,21 @@ fi
 echo "Current live port: $OLD_PORT"
 echo "Candidate port: $NEW_PORT"
 
+rollback_cutover() {
+  echo "↩ Rolling back nginx upstream ${NEW_PORT} -> ${OLD_PORT}..."
+  ssh "$PROD_USER@$PROD_HOST" "
+    set -euo pipefail
+    TMP_SITE=\$(mktemp)
+    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    sudo sed -i -E \"s/(127\\\\.0\\\\.0\\\\.1|localhost):${NEW_PORT}/localhost:${OLD_PORT}/g\" \"\$TMP_SITE\"
+    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    rm -f \"\$TMP_SITE\"
+    sudo nginx -t >/dev/null
+    sudo systemctl reload nginx
+    sudo systemctl start chatapp@${OLD_PORT} 2>/dev/null || true
+  "
+}
+
 echo ""
 echo "⚠️  This will deploy to PRODUCTION. Verify staging is working first."
 echo ""
@@ -148,11 +165,16 @@ ssh "$PROD_USER@$PROD_HOST" "
   fi
   sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 /tmp/pgbouncer-setup.py
   sudo systemctl enable pgbouncer
-  sudo service pgbouncer stop 2>/dev/null || true
-  sudo pkill -x pgbouncer 2>/dev/null || true
-  sleep 1
-  sudo service pgbouncer start
-  sleep 1
+  if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then
+    sudo service pgbouncer stop 2>/dev/null || true
+    sudo pkill -x pgbouncer 2>/dev/null || true
+    sleep 1
+    sudo service pgbouncer start
+    sleep 1
+  else
+    # Normal deploy path: avoid bouncing pooler during live traffic.
+    sudo systemctl is-active pgbouncer >/dev/null 2>&1 || sudo service pgbouncer start
+  fi
   sudo systemctl is-active pgbouncer \
     || { echo 'ERROR: pgbouncer failed to start'; sudo journalctl -u pgbouncer --no-pager -n 20; exit 1; }
   echo 'PgBouncer running on 127.0.0.1:6432 in transaction-pooling mode.'
@@ -185,11 +207,15 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo -u postgres psql -qAt -c \"SELECT pg_reload_conf();\" > /dev/null || true
   PENDING=\$(sudo -u postgres psql -qAt -c \"SELECT EXISTS (SELECT 1 FROM pg_settings WHERE pending_restart)\")
   if [ \"\$PENDING\" = \"t\" ]; then
-    echo 'PostgreSQL: pending_restart after ALTER SYSTEM — restarting postmaster once.'
-    sudo systemctl restart postgresql
-    sleep 3
+    if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then
+      echo 'PostgreSQL: pending_restart and ALLOW_DB_RESTART=true — restarting postmaster once.'
+      sudo systemctl restart postgresql
+      sleep 3
+    else
+      echo 'PostgreSQL: pending_restart detected but restart skipped (ALLOW_DB_RESTART=false).'
+    fi
   else
-    echo 'PostgreSQL: no pending_restart — skipped full cluster restart (reload only).'
+    echo 'PostgreSQL: no pending_restart — reload only.'
   fi
   sudo systemctl is-active postgresql \
     || { echo 'ERROR: PostgreSQL is not active after tuning'; exit 1; }
@@ -372,27 +398,35 @@ echo "9. Switching Nginx to candidate..."
 ssh "$PROD_USER@$PROD_HOST" "
   set -e
   
-  # Update Nginx upstream
-  sudo sed -i -E \"s/(127\\\\.0\\\\.0\\\\.1|localhost):$OLD_PORT/localhost:$NEW_PORT/g\" /etc/nginx/sites-available/chatapp
+  # Render nginx config atomically, then swap in one operation.
+  TMP_SITE=\$(mktemp)
+  sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+  sudo sed -i -E \"s/(127\\\\.0\\\\.0\\\\.1|localhost):$OLD_PORT/localhost:$NEW_PORT/g\" \"\$TMP_SITE\"
   # Ensure listen backlog is high enough for burst connection ramps.
-  sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' /etc/nginx/sites-available/chatapp
-  sudo sed -i 's/listen \[::\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' /etc/nginx/sites-available/chatapp
+  sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' \"\$TMP_SITE\"
+  sudo sed -i 's/listen \[::\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' \"\$TMP_SITE\"
   # Increase upstream keepalive pool so peak load reuses connections instead of opening new ones.
-  sudo sed -i 's/keepalive [0-9]*/keepalive 512/' /etc/nginx/sites-available/chatapp
-  sudo grep -q 'keepalive_requests' /etc/nginx/sites-available/chatapp \
-    || sudo sed -i '/keepalive 512/a\\  keepalive_requests 100000;\n  keepalive_timeout 75s;' /etc/nginx/sites-available/chatapp
-  sudo sed -i 's/keepalive_requests [0-9]*/keepalive_requests 100000/' /etc/nginx/sites-available/chatapp
+  sudo sed -i 's/keepalive [0-9]*/keepalive 512/' \"\$TMP_SITE\"
+  sudo grep -q 'keepalive_requests' \"\$TMP_SITE\" \
+    || sudo sed -i '/keepalive 512/a\\  keepalive_requests 100000;\n  keepalive_timeout 75s;' \"\$TMP_SITE\"
+  sudo sed -i 's/keepalive_requests [0-9]*/keepalive_requests 100000/' \"\$TMP_SITE\"
+  sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+  rm -f \"\$TMP_SITE\"
   sudo nginx -t >/dev/null
   sudo systemctl reload nginx
   # Raise kernel TCP backlog so burst connection ramps don't drop SYN packets.
   sudo sysctl -w net.ipv4.tcp_max_syn_backlog=${NGINX_WORKER_CONNECTIONS} >/dev/null
   sudo sysctl -w net.core.somaxconn=${NGINX_WORKER_CONNECTIONS} >/dev/null
   # Raise nginx worker_connections and FD limit (Ubuntu defaults: 768 connections, 1024 nofile).
-  sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' /etc/nginx/nginx.conf
-  sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' /etc/nginx/nginx.conf
+  TMP_MAIN=\$(mktemp)
+  sudo cp /etc/nginx/nginx.conf \"\$TMP_MAIN\"
+  sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' \"\$TMP_MAIN\"
+  sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' \"\$TMP_MAIN\"
   # worker_rlimit_nofile lets nginx workers raise their own nofile limit (bypasses OS default 1024).
-  sudo grep -q 'worker_rlimit_nofile' /etc/nginx/nginx.conf \
-    || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' /etc/nginx/nginx.conf
+  sudo grep -q 'worker_rlimit_nofile' \"\$TMP_MAIN\" \
+    || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' \"\$TMP_MAIN\"
+  sudo install -m 644 \"\$TMP_MAIN\" /etc/nginx/nginx.conf
+  rm -f \"\$TMP_MAIN\"
   sudo nginx -t && sudo systemctl reload nginx
   
   echo 'Nginx upstream switched from port $OLD_PORT to $NEW_PORT'
@@ -411,14 +445,21 @@ if [ "$MONITOR_CHECKS" -lt 1 ]; then
 fi
 
 echo "10. Monitoring for ${MONITOR_SECONDS} seconds..."
+MONITOR_FAILS=0
 for i in $(seq 1 "$MONITOR_CHECKS"); do
   sleep 5
   if ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
     echo "  ✓ Check $i/$MONITOR_CHECKS passed"
   else
-    echo "  ⚠ Check $i/$MONITOR_CHECKS: health check failed"
+    echo "  ✗ Check $i/$MONITOR_CHECKS: health check failed"
+    MONITOR_FAILS=$((MONITOR_FAILS + 1))
   fi
 done
+if [ "$MONITOR_FAILS" -gt 0 ]; then
+  echo "ERROR: Candidate failed ${MONITOR_FAILS}/${MONITOR_CHECKS} monitor checks after cutover."
+  rollback_cutover
+  exit 1
+fi
 echo "✓ Monitoring window complete"
 
 # 10.5. Stop old port to reclaim memory.
@@ -426,12 +467,16 @@ echo "✓ Monitoring window complete"
 # through the monitoring window for emergency rollback, but afterwards its RAM
 # (~125 MB) is more valuable than instant-rollback convenience on a 2 GB VM.
 # To roll back after this point: re-run this script with the previous SHA.
-echo "10.5. Stopping old instance on port ${OLD_PORT} to reclaim RAM..."
-ssh "$PROD_USER@$PROD_HOST" "
-  sudo systemctl stop chatapp@${OLD_PORT} 2>/dev/null || true
-  sudo systemctl disable chatapp@${OLD_PORT} 2>/dev/null || true
-  echo 'Old instance stopped'"
-echo "✓ Old instance stopped (rollback: re-deploy previous SHA)"
+if [ "${RECLAIM_OLD_PORT}" = "true" ]; then
+  echo "10.5. Stopping old instance on port ${OLD_PORT} to reclaim RAM..."
+  ssh "$PROD_USER@$PROD_HOST" "
+    sudo systemctl stop chatapp@${OLD_PORT} 2>/dev/null || true
+    sudo systemctl disable chatapp@${OLD_PORT} 2>/dev/null || true
+    echo 'Old instance stopped'"
+  echo "✓ Old instance stopped (rollback now requires re-deploy)"
+else
+  echo "10.5. Keeping old instance on port ${OLD_PORT} for fast rollback safety."
+fi
 
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -538,7 +583,9 @@ echo "12. Final verification..."
 if ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
   echo "✓ Production deployment SUCCESSFUL"
 else
-  echo "⚠ WARNING: Final check failed. Manual inspection recommended."
+  echo "ERROR: Final health check failed after cutover."
+  rollback_cutover
+  exit 1
 fi
 
 # 13. Cleanup older releases/backups to control disk usage on small VMs.

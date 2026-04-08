@@ -199,6 +199,8 @@ app.use((err, req, res, _next) => {
   const message = (err && typeof err.message === 'string') ? err.message : '';
   const isPoolBusy =
     err.code === 'POOL_CIRCUIT_OPEN' ||
+    err.code === 'BCRYPT_QUEUE_SATURATED' ||
+    err.code === 'BCRYPT_QUEUE_TIMEOUT' ||
     err.name === 'PoolTimeoutError' ||
     /timeout exceeded/i.test(message) && /(connect|client|connection|waiting)/i.test(message) ||
     /remaining connection slots/i.test(message) ||
