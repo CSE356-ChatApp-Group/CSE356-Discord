@@ -6,8 +6,6 @@ const { spawnSync } = require('node:child_process');
 
 const PG_CONTAINER = 'chatapp-test-postgres';
 const REDIS_CONTAINER = 'chatapp-test-redis';
-const PG_PORT = process.env.TEST_PG_PORT || '55432';
-const REDIS_PORT = process.env.TEST_REDIS_PORT || '56379';
 const jestArgs = process.argv.slice(2);
 const isCiEnvironment = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 
@@ -76,39 +74,88 @@ function waitFor(command, args, timeoutMs, intervalMs, label) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+/**
+ * Host port Docker bound for an exposed container port (works with `docker run -P`).
+ */
+function getDockerPublishPort(container, internalPort) {
+  const r = spawnSync('docker', ['port', container, `${internalPort}/tcp`], {
+    encoding: 'utf8',
+  });
+  if (r.status !== 0) {
+    throw new Error(
+      `docker port failed for ${container} ${internalPort}: ${r.stderr || r.stdout || r.error}`,
+    );
+  }
+  const first = r.stdout.trim().split('\n')[0];
+  const m = first.match(/:(\d+)\s*$/);
+  if (!m) throw new Error(`Could not parse host port from: ${JSON.stringify(first)}`);
+  return m[1];
+}
+
+/**
+ * @returns {{ pgPort: string, redisPort: string }}
+ */
 function startContainers() {
   removeContainer(PG_CONTAINER);
   removeContainer(REDIS_CONTAINER);
 
-  let code = run('docker', [
-    'run', '-d',
-    '--name', PG_CONTAINER,
-    '-e', 'POSTGRES_DB=chatapp_test',
-    '-e', 'POSTGRES_USER=chatapp',
-    '-e', 'POSTGRES_PASSWORD=test',
-    '-p', `${PG_PORT}:5432`,
-    'postgres:16-alpine',
-  ]);
+  const envPg = process.env.TEST_PG_PORT;
+  const envRedis = process.env.TEST_REDIS_PORT;
+  // GitHub-hosted runners sometimes have fixed ports (55432/56379) still bound from a
+  // leaked process or overlapping job — publish random ports via -P and read mappings.
+  const useDynamicHostPorts = isCiEnvironment && !envPg && !envRedis;
+
+  const pgRunArgs = useDynamicHostPorts
+    ? [
+      'run', '-d',
+      '--name', PG_CONTAINER,
+      '-P',
+      '-e', 'POSTGRES_DB=chatapp_test',
+      '-e', 'POSTGRES_USER=chatapp',
+      '-e', 'POSTGRES_PASSWORD=test',
+      'postgres:16-alpine',
+    ]
+    : [
+      'run', '-d',
+      '--name', PG_CONTAINER,
+      '-e', 'POSTGRES_DB=chatapp_test',
+      '-e', 'POSTGRES_USER=chatapp',
+      '-e', 'POSTGRES_PASSWORD=test',
+      '-p', `${envPg || '55432'}:5432`,
+      'postgres:16-alpine',
+    ];
+
+  let code = run('docker', pgRunArgs);
   if (code !== 0) process.exit(code);
 
-  code = run('docker', [
-    'run', '-d',
-    '--name', REDIS_CONTAINER,
-    '-p', `${REDIS_PORT}:6379`,
-    'redis:7-alpine',
-  ]);
+  const redisRunArgs = useDynamicHostPorts
+    ? ['run', '-d', '--name', REDIS_CONTAINER, '-P', 'redis:7-alpine']
+    : ['run', '-d', '--name', REDIS_CONTAINER, '-p', `${envRedis || '56379'}:6379`, 'redis:7-alpine'];
+
+  code = run('docker', redisRunArgs);
   if (code !== 0) process.exit(code);
 
   waitFor('docker', ['exec', PG_CONTAINER, 'pg_isready', '-U', 'chatapp', '-d', 'chatapp_test'], 45_000, 1_000, 'Postgres');
   waitFor('docker', ['exec', REDIS_CONTAINER, 'redis-cli', 'ping'], 20_000, 1_000, 'Redis');
+
+  if (useDynamicHostPorts) {
+    return {
+      pgPort: getDockerPublishPort(PG_CONTAINER, '5432'),
+      redisPort: getDockerPublishPort(REDIS_CONTAINER, '6379'),
+    };
+  }
+  return {
+    pgPort: envPg || '55432',
+    redisPort: envRedis || '56379',
+  };
 }
 
-function runLocalTests() {
+function runLocalTests({ pgPort, redisPort }) {
   const env = {
     ...process.env,
     NODE_ENV: 'test',
-    DATABASE_URL: process.env.DATABASE_URL || `postgres://chatapp:test@127.0.0.1:${PG_PORT}/chatapp_test`,
-    REDIS_URL: process.env.REDIS_URL || `redis://127.0.0.1:${REDIS_PORT}`,
+    DATABASE_URL: process.env.DATABASE_URL || `postgres://chatapp:test@127.0.0.1:${pgPort}/chatapp_test`,
+    REDIS_URL: process.env.REDIS_URL || `redis://127.0.0.1:${redisPort}`,
     JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || 'test-secret',
     JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || 'test-refresh',
     DISABLE_SEARCH_INIT: process.env.DISABLE_SEARCH_INIT || 'true',
@@ -143,8 +190,8 @@ try {
   }
 
   assertDockerAvailable();
-  startContainers();
-  exitCode = runLocalTests();
+  const ports = startContainers();
+  exitCode = runLocalTests(ports);
 } catch (err) {
   console.error(err.message || err);
   exitCode = 1;
