@@ -11,7 +11,8 @@
     "migrate": "tsx src/db/migrate.ts",
     "test": "node scripts/test-runner.cjs",
     "test:raw": "jest",
-    "api-contract": "node scripts/api-contract-harness.cjs"
+    "api-contract": "node scripts/api-contract-harness.cjs",
+    "api-contract:local": "API_CONTRACT_BASE_URL=http://127.0.0.1:3000/api/v1 API_CONTRACT_WS_URL=ws://127.0.0.1:3000/ws API_CONTRACT_SSO_SKIP=1 node scripts/api-contract-harness.cjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",

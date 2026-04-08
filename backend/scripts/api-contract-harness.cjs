@@ -7,6 +7,11 @@
  *   API_CONTRACT_BASE_URL  — e.g. http://host/api/v1
  *   API_CONTRACT_WS_URL    — e.g. ws://host/ws
  *   API_CONTRACT_SSO_SKIP  — if "1", skip OIDC redirect checks (local dev without Keycloak)
+ *
+ * Local loop (fast feedback vs CI):
+ *   1. Postgres + Redis up, migrate, `npm run dev` (or `start`) in backend.
+ *   2. `npm run api-contract:local` — hits http://127.0.0.1:3000 with SSO skipped.
+ *   Staging parity: pass API_CONTRACT_* env vars and omit SSO skip if OIDC should be exercised.
  */
 'use strict';
 
@@ -20,6 +25,8 @@ const ORIGIN = BASE.replace(/\/api\/v1\/?$/, '');
 
 const suffix = crypto.randomBytes(6).toString('hex');
 const PASSWORD = 'ContractTest!234';
+/** Content of ctx.msgIds[0] after editMessage; use `_` not `-` so websearch_to_tsquery does not treat `-` as NOT. */
+const editedChannelSearchMark = `edited_${suffix.slice(0, 6)}`;
 
 /** @type {{ A: any, B: any, C: any, communityId: string, publicChannelId: string, privateChannelId: string, dm1v1: string, dmGroup: string, msgIds: string[], wsA: import('ws'), wsB: import('ws'), searchToken: string }} */
 const ctx = {
@@ -466,7 +473,7 @@ add('getMessages (pagination)', async () => {
 });
 
 add('editMessage', async () => {
-  const newContent = `edited-${suffix.slice(0, 6)}`;
+  const newContent = editedChannelSearchMark;
   const editSeen = waitWsEvent(
     ctx.wsB,
     (m) => m.event === 'message:updated' && String(m.data?.id) === ctx.msgIds[0],
@@ -526,12 +533,13 @@ add('onMessageDeleteReceived', async () => {
 add('searchMessages', async () => {
   // Scope to our channel: unscoped search is global newest-first with a small limit, so on
   // shared staging other traffic can push this message off the first page.
+  // Query editedChannelSearchMark: editMessage rewrites msgIds[0] so ctx.searchToken no longer appears.
   const scope = `&channelId=${encodeURIComponent(ctx.publicChannelId)}`;
   let last = 'search miss';
   for (let i = 0; i < 45; i++) {
     const { res, json } = await fetchJson(
       'GET',
-      `/search?q=${encodeURIComponent(ctx.searchToken)}${scope}`,
+      `/search?q=${encodeURIComponent(editedChannelSearchMark)}${scope}`,
       ctx.A.token,
       null,
     );
@@ -541,7 +549,7 @@ add('searchMessages', async () => {
       continue;
     }
     const hits = json.hits || [];
-    if (hits.some((h) => h.id === ctx.msgIds[0] || String(h.content || '').includes(ctx.searchToken))) {
+    if (hits.some((h) => h.id === ctx.msgIds[0] || String(h.content || '').includes(editedChannelSearchMark))) {
       return;
     }
     last = 'no hit in channel scope';
@@ -569,7 +577,7 @@ add('searchMessages (time filter)', async () => {
   for (let i = 0; i < 45; i++) {
     const { res, json } = await fetchJson(
       'GET',
-      `/search?q=${encodeURIComponent(ctx.searchToken)}&before=${encodeURIComponent(before)}${scope}`,
+      `/search?q=${encodeURIComponent(editedChannelSearchMark)}&before=${encodeURIComponent(before)}${scope}`,
       ctx.A.token,
       null,
     );
