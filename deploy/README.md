@@ -153,8 +153,8 @@ list_releases
 # Check health
 curl http://136.114.103.71/health
 
-# Tail logs
-sudo journalctl -u chatapp -f
+# Tail logs (systemd template is `chatapp@PORT`, usually 4000 + 4001)
+sudo journalctl -u 'chatapp@*' -f
 ```
 
 ### Rollback Staging
@@ -346,18 +346,39 @@ Grading and load tests open many **HTTP + WebSocket** connections on a small VM.
 
 ## Observability
 
-### Logs
+### Where application logs go
+
+- The Node process runs under **systemd** units `chatapp@4000` and `chatapp@4001` (see [`deploy/chatapp-template.service`](./chatapp-template.service): `StandardOutput=journal`, `StandardError=journal`, `SyslogIdentifier=chatapp-%i`).
+- Logging is **Pino** (`backend/src/utils/logger.ts`). In production, default **`LOG_LEVEL=info`** (overridable in `/opt/chatapp/shared/.env`).
+- **HTTP request logging** (`pino-http` in `backend/src/app.ts`): successful, fast requests are logged at **`silent`** in production (so the journal is not flooded). You **will** still see:
+  - **`warn`**: HTTP **4xx**, or responses slower than **~1s**
+  - **`error`**: HTTP **5xx**, or thrown errors before the response finishes
+  - Any `logger.warn` / `logger.error` from the app
+
+So: **yes, you see app-level problems in journald**—mostly as `warning` and `error` priorities, not as noise from every 200 OK.
+
+### Logs (production)
 
 ```bash
-# SSH to production
-ssh ssperrottet@136.114.103.71
+ssh ubuntu@130.245.136.44
 
-# View recent logs
-sudo tail -100 /var/log/chatapp-candidate.log
-sudo journalctl -u chatapp -n 200 | less
+# Live tail (both workers)
+sudo journalctl -u 'chatapp@*' -f
 
-# Monitor in real-time
-sudo journalctl -u chatapp -f
+# Recent warnings + errors only (good default when debugging)
+sudo journalctl -u 'chatapp@*' --since '1 hour ago' -p warning --no-pager | less
+
+# One-shot snapshot from your laptop (requires SSH key)
+./scripts/prod-observe.sh
+# Optional: SINCE='24 hours ago' ./scripts/prod-observe.sh
+```
+
+**Nginx** (upstream dead, timeouts) — always check alongside the app:
+
+```bash
+sudo tail -n 50 /var/log/nginx/error.log
+sudo grep '\[error\]' /var/log/nginx/error.log | tail -n 20
+# If logrotate ran, also check /var/log/nginx/error.log.1
 ```
 
 ### Health Monitoring
@@ -489,7 +510,7 @@ No rebuild happens for staging/prod deploys — use the exact CI artifact.
 
 For deployment issues, check logs:
 - **CI logs**: GitHub Actions → Workflow runs
-- **Staging logs**: SSH to staging, `journalctl -u chatapp -f` or `/var/log/*`
-- **Prod logs**: SSH to `ssperrottet@136.114.103.71`, same
+- **Staging logs**: SSH to staging, `sudo journalctl -u 'chatapp@*' -f` and nginx under `/var/log/nginx/`
+- **Prod logs**: SSH to `ubuntu@130.245.136.44`, then `sudo journalctl -u 'chatapp@*' …` (see **Observability** above) or run `./scripts/prod-observe.sh`
 
 For architectural questions, refer to the main [README.md](../README.md).
