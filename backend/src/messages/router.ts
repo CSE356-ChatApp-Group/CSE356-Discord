@@ -77,7 +77,9 @@ async function ensureChannelAccess(channelId, userId) {
   return rows.length > 0;
 }
 
-async function ensureMessageAccess({ channelId, conversationId }, userId) {
+async function ensureMessageAccess(target, userId) {
+  const channelId = target?.channelId ?? target?.channel_id ?? null;
+  const conversationId = target?.conversationId ?? target?.conversation_id ?? null;
   if (conversationId) return ensureActiveConversationParticipant(conversationId, userId);
   if (channelId) return ensureChannelAccess(channelId, userId);
   return false;
