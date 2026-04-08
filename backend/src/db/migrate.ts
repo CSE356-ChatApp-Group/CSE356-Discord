@@ -50,6 +50,9 @@ async function migrate() {
       console.log(`[apply] ${file}`);
 
       await client.query('BEGIN');
+      // Deploy sets ALTER ROLE ... statement_timeout='15s' (prod hardening). DDL/DML
+      // backfills (e.g. 009_channel_last_message_denorm) can legitimately exceed that.
+      await client.query("SET LOCAL statement_timeout = 0");
       await client.query(sql);
       await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
       await client.query('COMMIT');
