@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Course-aligned API contract suite (41 checks) — REST + WebSocket behaviors the grader harness exercises.
+ * Course-aligned API contract suite — REST + WebSocket behaviors the grader harness exercises.
  * Run against staging/prod base URL (HTTP + WS).
  *
  * Env:
@@ -76,6 +76,7 @@ function sleep(ms) {
 }
 
 function waitWsEvent(ws, predicate, ms) {
+  assert(ws != null, 'waitWsEvent: WebSocket is null');
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
       ws.removeListener('message', onMsg);
@@ -144,7 +145,9 @@ add('logout', async () => {
     password: ctx.A.password,
   });
   assert(r2.status === 200, `re-login after logout ${r2.status}`);
+  assert(json.accessToken, 're-login accessToken');
   ctx.A.token = json.accessToken;
+  if (json.user?.id) ctx.A.id = json.user.id;
 });
 
 add('loginSSO', async () => {
@@ -159,6 +162,20 @@ add('loginSSO (2nd account)', async () => {
   if (SKIP_SSO) return;
   const res = await fetch(`${ORIGIN}/api/v1/auth/course`, { method: 'GET', redirect: 'manual' });
   assert(res.status === 302 || res.status === 307, `SSO 2 ${res.status}`);
+});
+
+// OIDC start probes use unauthenticated GETs; some stacks / fetch stacks can leave the
+// contract runner without a usable Bearer. Re-establish password session before authed routes.
+add('reauth after SSO probes', async () => {
+  if (SKIP_SSO) return;
+  const { res, json } = await fetchJson('POST', '/auth/login', null, {
+    email: ctx.A.email,
+    password: ctx.A.password,
+  });
+  assert(res.status === 200, `reauth after SSO ${res.status}`);
+  assert(json.accessToken, 'reauth after SSO accessToken');
+  ctx.A.token = json.accessToken;
+  if (json.user?.id) ctx.A.id = json.user.id;
 });
 
 add('setDisplayName', async () => {
@@ -336,6 +353,7 @@ add('getChannelsInCommunity', async () => {
 });
 
 add('createDM (1:1)', async () => {
+  assert(ctx.B?.id, 'user B id (onPresenceReceived must succeed)');
   const { res, json } = await fetchJson('POST', '/conversations', ctx.A.token, {
     participantIds: [ctx.B.id],
   });
@@ -364,6 +382,7 @@ add('createDM (group)', async () => {
     id: jc.user?.id,
   };
 
+  assert(ctx.wsB, 'wsB required (onPresenceReceived must succeed)');
   const inviteP = waitWsEvent(
     ctx.wsB,
     (m) =>
