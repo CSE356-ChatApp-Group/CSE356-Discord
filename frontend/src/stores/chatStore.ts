@@ -22,6 +22,14 @@ type SearchFilters = {
   after: string;
   before: string;
 };
+const MESSAGE_CONTEXT_SIDE_LIMIT = 25;
+const MESSAGE_PAGE_LIMIT = 50;
+
+type MessagePaginationState = {
+  hasOlder: boolean;
+  hasNewer: boolean;
+};
+
 type ChatState = {
   communities: Entity[];
   activeCommunity: Entity | null;
@@ -30,12 +38,14 @@ type ChatState = {
   conversations: Entity[];
   activeConv: Entity | null;
   messages: Record<string, Entity[]>;
+  messagePagination: Record<string, MessagePaginationState>;
   presence: Record<string, PresenceStatus>;
   awayMessages: Record<string, string | null>;
   members: Entity[];
   searchResults: Entity[] | null;
   searchQuery: string;
   searchFilters: SearchFilters;
+  jumpTargetMessageId: string | null;
   fetchCommunities: () => Promise<Entity[]>;
   createCommunity: (slug: string, name: string, description: string) => Promise<Entity>;
   deleteCommunity: (communityId: string) => Promise<void>;
@@ -54,7 +64,7 @@ type ChatState = {
   inviteToConversation: (conversationId: string, participants: string[]) => Promise<Entity | null>;
   leaveConversation: (conversationId: string) => Promise<void>;
   renameGroupDm: (conversationId: string, name: string) => Promise<void>;
-  fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string }) => Promise<Entity[]>;
+  fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string; after?: string }) => Promise<Entity[]>;
   sendMessage: (content: string | SendMessageInput) => Promise<void>;
   editMessage: (id: string, content: string) => Promise<void>;
   deleteMessage: (id: string) => Promise<void>;
@@ -62,6 +72,8 @@ type ChatState = {
   hydratePresenceForUsers: (userIds: string[]) => Promise<void>;
   setPresence: (userId: string, status: PresenceStatus, awayMessage?: string | null) => void;
   search: (q: string, filters?: Partial<SearchFilters>) => Promise<void>;
+  jumpToSearchResult: (hit: Entity) => Promise<void>;
+  clearJumpTargetMessage: () => void;
   setSearchFilters: (filters: Partial<SearchFilters>) => void;
   resetSearchFilters: () => void;
   clearSearch: () => void;
@@ -128,6 +140,12 @@ function upsertMessage(messages, incoming) {
   const next = [...list];
   next[index] = { ...next[index], ...incoming };
   return next;
+}
+
+function removeKeyedState<T>(state: Record<string, T>, removedIds: Set<string>) {
+  return Object.fromEntries(
+    Object.entries(state || {}).filter(([key]) => !removedIds.has(key))
+  ) as Record<string, T>;
 }
 
 function hydrateAuthorFromSession(message: Entity) {
@@ -200,9 +218,8 @@ function removeCommunityState(state: ChatState, communityId: string) {
     .filter((channel) => (channel.community_id || channel.communityId) === communityId)
     .map((channel) => channel.id);
   const removedSet = new Set(removedChannelIds);
-  const nextMessages = Object.fromEntries(
-    Object.entries(state.messages).filter(([key]) => !removedSet.has(key))
-  );
+  const nextMessages = removeKeyedState(state.messages, removedSet);
+  const nextMessagePagination = removeKeyedState(state.messagePagination, removedSet);
   const isActiveCommunity = state.activeCommunity?.id === communityId;
   const activeChannelRemoved = state.activeChannel?.id ? removedSet.has(state.activeChannel.id) : false;
 
@@ -213,6 +230,7 @@ function removeCommunityState(state: ChatState, communityId: string) {
     activeChannel: isActiveCommunity || activeChannelRemoved ? null : state.activeChannel,
     members: isActiveCommunity ? [] : state.members,
     messages: nextMessages,
+    messagePagination: nextMessagePagination,
   };
 }
 
@@ -334,12 +352,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   conversations:   [],
   activeConv:      null,
   messages:        {},   // { [channelId|convId]: Message[] }
+  messagePagination: {},
   presence:        {},   // { [userId]: 'online'|'idle'|'away'|'offline' }
   awayMessages:    {},   // { [userId]: away message }
   members:         [],   // members of activeCommunity
   searchResults:   null,
   searchQuery:     '',
   searchFilters:   DEFAULT_SEARCH_FILTERS,
+  jumpTargetMessageId: null,
 
   reset() {
     set({
@@ -350,12 +370,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       conversations:   [],
       activeConv:      null,
       messages:        {},
+      messagePagination: {},
       presence:        {},
       awayMessages:    {},
       members:         [],
       searchResults:   null,
       searchQuery:     '',
       searchFilters:   DEFAULT_SEARCH_FILTERS,
+      jumpTargetMessageId: null,
     });
   },
 
@@ -578,11 +600,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     await api.delete(`/channels/${channelId}`);
     set(s => {
       const { [channelId]: _removed, ...nextMessages } = s.messages;
+      const { [channelId]: _removedPagination, ...nextMessagePagination } = s.messagePagination;
       const isActive = s.activeChannel?.id === channelId;
       return {
         channels: s.channels.filter((channel) => channel.id !== channelId),
         activeChannel: isActive ? null : s.activeChannel,
         messages: nextMessages,
+        messagePagination: nextMessagePagination,
       };
     });
   },
@@ -852,13 +876,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   // ── Messages ──────────────────────────────────────────────────────────────
-  async fetchMessages({ channelId, conversationId, before }: { channelId?: string; conversationId?: string; before?: string } = {}) {
+  async fetchMessages({ channelId, conversationId, before, after }: { channelId?: string; conversationId?: string; before?: string; after?: string } = {}) {
     const key = channelId || conversationId;
+    if (before && after) {
+      throw new Error('Cannot page before and after at the same time');
+    }
     const qs  = new URLSearchParams();
     if (channelId) qs.set('channelId', channelId);
     else if (conversationId) qs.set('conversationId', conversationId);
     if (before)         qs.set('before',         before);
-    qs.set('limit', '50');
+    if (after)          qs.set('after',          after);
+    qs.set('limit', String(MESSAGE_PAGE_LIMIT));
 
     const { messages } = await api.get(`/messages?${qs}`);
     set(s => ({
@@ -866,7 +894,26 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         ...s.messages,
         [key]: before
           ? dedupeMessages([...messages, ...(s.messages[key] || [])])
-          : dedupeMessages(messages),
+          : after
+            ? dedupeMessages([...(s.messages[key] || []), ...messages])
+            : dedupeMessages(messages),
+      },
+      messagePagination: {
+        ...s.messagePagination,
+        [key]: before
+          ? {
+              ...(s.messagePagination[key] || { hasOlder: false, hasNewer: false }),
+              hasOlder: messages.length === MESSAGE_PAGE_LIMIT,
+            }
+          : after
+            ? {
+                ...(s.messagePagination[key] || { hasOlder: false, hasNewer: false }),
+                hasNewer: messages.length === MESSAGE_PAGE_LIMIT,
+              }
+            : {
+                hasOlder: messages.length === MESSAGE_PAGE_LIMIT,
+                hasNewer: false,
+              },
       },
     }));
     return messages;
@@ -1035,6 +1082,104 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     set({ searchResults: results.hits || [] });
   },
 
+  async jumpToSearchResult(hit: Entity) {
+    if (!hit?.id) return;
+
+    const context = await api.get(`/messages/context/${hit.id}?limit=${MESSAGE_CONTEXT_SIDE_LIMIT}`);
+    const channelId = context.channelId || hit.channelId || hit.channel_id || null;
+    const conversationId = context.conversationId || hit.conversationId || hit.conversation_id || null;
+    const targetMessageId = context.targetMessageId || hit.id;
+    const messages = dedupeMessages(Array.isArray(context.messages) ? context.messages : []);
+
+    if (conversationId) {
+      const currentState = get();
+      const existingConversation = currentState.conversations.find((conversation) => conversation.id === conversationId)
+        || (currentState.activeConv?.id === conversationId ? currentState.activeConv : null);
+      const nextConversation = existingConversation || {
+        id: conversationId,
+        name: hit.conversationName || hit.conversation_name || currentState.activeConv?.name || 'Conversation',
+        participants: currentState.activeConv?.id === conversationId ? currentState.activeConv?.participants : [],
+      };
+
+      wsManager.subscribe(`conversation:${conversationId}`, get()._handleWsEvent);
+      set((s) => ({
+      activeConv: nextConversation,
+      activeChannel: null,
+      messages: {
+        ...s.messages,
+        [conversationId]: messages,
+      },
+      messagePagination: {
+        ...s.messagePagination,
+        [conversationId]: {
+          hasOlder: Boolean(context.hasOlder),
+          hasNewer: Boolean(context.hasNewer),
+        },
+      },
+      jumpTargetMessageId: targetMessageId,
+      conversations: s.conversations.some((conversation) => conversation.id === conversationId)
+          ? s.conversations.map((conversation) =>
+              conversation.id === conversationId
+                ? {
+                    ...conversation,
+                    ...nextConversation,
+                    participants: nextConversation.participants || conversation.participants,
+                  }
+                : conversation
+            )
+          : [nextConversation, ...s.conversations],
+      }));
+      return;
+    }
+
+    if (!channelId) return;
+
+    const currentState = get();
+    const communityId = context.communityId || hit.communityId || hit.community_id || null;
+    const nextCommunity = communityId
+      ? currentState.communities.find((community) => community.id === communityId) || currentState.activeCommunity
+      : currentState.activeCommunity;
+    const existingChannel = currentState.channels.find((channel) => channel.id === channelId)
+      || (currentState.activeChannel?.id === channelId ? currentState.activeChannel : null);
+    const nextChannel = existingChannel || {
+      id: channelId,
+      name: hit.channelName || hit.channel_name || currentState.activeChannel?.name || 'channel',
+      community_id: communityId || nextCommunity?.id || null,
+      communityId: communityId || nextCommunity?.id || null,
+    };
+
+    wsManager.subscribe(`channel:${channelId}`, get()._handleWsEvent);
+    set((s) => ({
+      activeCommunity: nextCommunity || s.activeCommunity,
+      activeChannel: {
+        ...nextChannel,
+        has_new_activity: false,
+        hasNewActivity: false,
+      },
+      activeConv: null,
+      messages: {
+        ...s.messages,
+        [channelId]: messages,
+      },
+      messagePagination: {
+        ...s.messagePagination,
+        [channelId]: {
+          hasOlder: Boolean(context.hasOlder),
+          hasNewer: Boolean(context.hasNewer),
+        },
+      },
+      jumpTargetMessageId: targetMessageId,
+      channels: patchChannelRowById(s.channels, channelId, {
+        has_new_activity: false,
+        hasNewActivity: false,
+      }),
+    }));
+  },
+
+  clearJumpTargetMessage() {
+    set({ jumpTargetMessageId: null });
+  },
+
   setSearchFilters(filters: Partial<SearchFilters>) {
     set((s) => ({
       searchFilters: {
@@ -1053,16 +1198,20 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   // ── WebSocket event handler ───────────────────────────────────────────────
   _handleWsEvent(event: any) {
     // Note: this is called as a standalone fn, not as a method, so use get()
-    const store = useChatStore.getState();
+      const store = useChatStore.getState();
     switch (event.event) {
       case 'message:created': {
         const msg = hydrateAuthorFromSession(event.data);
         const me = useAuthStore.getState().user;
         const key = msg.channel_id || msg.conversation_id;
         set((s) => {
+          const paginationState = s.messagePagination[key];
+          const shouldAppendToLoadedHistory = !paginationState?.hasNewer;
           const nextMessages = {
             ...s.messages,
-            [key]: upsertMessage(s.messages[key], msg),
+            [key]: shouldAppendToLoadedHistory
+              ? upsertMessage(s.messages[key], msg)
+              : (s.messages[key] || []),
           };
 
           let nextChannels = s.channels;

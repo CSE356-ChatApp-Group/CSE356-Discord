@@ -34,9 +34,11 @@ describe('SearchBar filters', () => {
           ],
         },
         members: [],
+        messagePagination: {},
         searchResults: [],
         searchQuery: 'hello',
         searchFilters: { author: '', after: '', before: '' },
+        jumpTargetMessageId: null,
       } as any);
     });
   });
@@ -46,9 +48,11 @@ describe('SearchBar filters', () => {
       useChatStore.setState({
         activeConv: null,
         members: [],
+        messagePagination: {},
         searchResults: null,
         searchQuery: '',
         searchFilters: { author: '', after: '', before: '' },
+        jumpTargetMessageId: null,
       } as any);
     });
   });

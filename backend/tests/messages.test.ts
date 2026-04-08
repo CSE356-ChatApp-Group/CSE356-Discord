@@ -239,3 +239,79 @@ describe('Hard delete contract', () => {
     expect(secondDelete.status).toBe(404);
   });
 });
+
+describe('Message context window', () => {
+  let ownerToken: string;
+  let outsiderToken: string;
+  let channelId: string;
+  let messageIds: string[] = [];
+
+  beforeAll(async () => {
+    const owner = await createAuthenticatedUser('contextowner');
+    ownerToken = owner.accessToken;
+
+    const outsider = await createAuthenticatedUser('contextoutsider');
+    outsiderToken = outsider.accessToken;
+
+    const slug = `context-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ slug, name: slug, description: 'message context community' });
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({
+        communityId,
+        name: `context-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: true,
+        description: 'message context channel',
+      });
+    channelId = channelRes.body.channel.id;
+
+    messageIds = [];
+    for (let index = 0; index < 5; index += 1) {
+      const createRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ channelId, content: `context message ${index}` });
+      messageIds.push(createRes.body.message.id);
+    }
+  });
+
+  it('returns a bounded chronological window around the target message', async () => {
+    const targetId = messageIds[2];
+
+    const res = await request(app)
+      .get(`/api/v1/messages/context/${targetId}`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .query({ limit: 2 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.targetMessageId).toBe(targetId);
+    expect(res.body.channelId).toBe(channelId);
+    expect(res.body.messages.map((message: any) => message.id)).toEqual(messageIds);
+    expect(res.body.messages[2].id).toBe(targetId);
+  });
+
+  it('pages newer history after an anchor message in chronological order', async () => {
+    const res = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .query({ channelId, after: messageIds[2], limit: 2 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.messages.map((message: any) => message.id)).toEqual([messageIds[3], messageIds[4]]);
+  });
+
+  it('returns 403 when the requester cannot access the target message', async () => {
+    const res = await request(app)
+      .get(`/api/v1/messages/context/${messageIds[2]}`)
+      .set('Authorization', `Bearer ${outsiderToken}`)
+      .query({ limit: 2 });
+
+    expect(res.status).toBe(403);
+  });
+});

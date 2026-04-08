@@ -206,12 +206,23 @@
 }
 
 .hit {
+  display: block;
+  width: 100%;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: transparent;
+  text-align: left;
   transition: background .1s;
   cursor: pointer;
 }
 .hit:hover { background: color-mix(in srgb, var(--bg-2) 76%, var(--accent-subtle)); }
+.hit:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
 .hit:last-child { border-bottom: none; }
 
 .hitMeta {

@@ -3,7 +3,13 @@ import { useChatStore } from '../stores/chatStore';
 import { formatDistanceToNow } from 'date-fns';
 import styles from './SearchBar.module.css';
 
-export default function SearchBar({ currentQuery }: { currentQuery: string }) {
+export default function SearchBar({
+  currentQuery,
+  onResultSelect,
+}: {
+  currentQuery: string;
+  onResultSelect?: () => void;
+}) {
   const {
     searchResults,
     searchFilters,
@@ -11,8 +17,10 @@ export default function SearchBar({ currentQuery }: { currentQuery: string }) {
     resetSearchFilters,
     clearSearch,
     search,
+    jumpToSearchResult,
   } = useChatStore();
   const [showFilters, setShowFilters] = useState(false);
+  const [jumpingMessageId, setJumpingMessageId] = useState<string | null>(null);
 
   function escapeHtml(value) {
     return value
@@ -78,6 +86,19 @@ export default function SearchBar({ currentQuery }: { currentQuery: string }) {
   function submitSearch() {
     if (!canSubmit || invalidRange) return;
     void search(currentQuery, searchFilters);
+  }
+
+  async function handleHitClick(hit) {
+    if (!hit?.id || jumpingMessageId) return;
+    setJumpingMessageId(hit.id);
+    try {
+      await jumpToSearchResult(hit);
+      onResultSelect?.();
+    } catch (err) {
+      console.error('Failed to jump to search result', err);
+    } finally {
+      setJumpingMessageId((current) => (current === hit.id ? null : current));
+    }
   }
 
   return (
@@ -175,7 +196,14 @@ export default function SearchBar({ currentQuery }: { currentQuery: string }) {
           <p className={styles.none}>No results found.</p>
         ) : (
           searchResults.map(hit => (
-            <div key={hit.id} className={styles.hit} data-testid={`search-hit-${hit.id}`}>
+            <button
+              key={hit.id}
+              type="button"
+              className={styles.hit}
+              data-testid={`search-hit-${hit.id}`}
+              onClick={() => void handleHitClick(hit)}
+              disabled={Boolean(jumpingMessageId)}
+            >
               <div className={styles.hitMeta}>
                 <span className={styles.hitAuthor}>{displayAuthor(hit)}</span>
                 <span className={styles.hitTime}>
@@ -188,7 +216,7 @@ export default function SearchBar({ currentQuery }: { currentQuery: string }) {
                   __html: highlightedContent(hit, currentQuery),
                 }}
               />
-            </div>
+            </button>
           ))
         )}
       </div>

@@ -63,7 +63,13 @@ const AttachmentImage = memo(function AttachmentImage({ attachment }: { attachme
   );
 });
 
-function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false }) {
+function MessageItem({
+  message: msg,
+  prevMessage,
+  isOwn,
+  showReadReceipt = false,
+  isJumpTarget = false,
+}) {
   const editMessage = useChatStore((s) => s.editMessage);
   const deleteMessage = useChatStore((s) => s.deleteMessage);
   const grouped = isGrouped(msg, prevMessage);
@@ -93,7 +99,7 @@ function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false
   if (isSystemMessage) {
     return (
       <div
-        className={`${styles.row} ${styles.systemMessage}`}
+        className={`${styles.row} ${styles.systemMessage} ${isJumpTarget ? styles.jumpTarget : ''}`}
         data-testid={`message-item-${msg.id}`}
         data-message-id={msg.id}
       >
@@ -106,7 +112,7 @@ function MessageItem({ message: msg, prevMessage, isOwn, showReadReceipt = false
 
   return (
     <div
-      className={`${styles.row} ${grouped ? styles.grouped : ''} fade-in`}
+      className={`${styles.row} ${grouped ? styles.grouped : ''} ${isJumpTarget ? styles.jumpTarget : ''} fade-in`}
       data-testid={`message-item-${msg.id}`}
       data-message-id={msg.id}
       onMouseEnter={() => setHover(true)}

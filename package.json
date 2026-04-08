@@ -36,5 +36,8 @@
     "e2e:dm-invite": "npm run e2e:dm-invite --workspace=frontend",
     "api-contract": "npm run api-contract --workspace=backend",
     "api-contract:local": "npm run api-contract:local --workspace=backend"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.13.23"
   }
 }

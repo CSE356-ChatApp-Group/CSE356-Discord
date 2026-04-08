@@ -35,9 +35,11 @@ afterEach(() => {
     activeConv: null,
     members: [],
     messages: {},
+    messagePagination: {},
     searchResults: null,
     searchQuery: '',
     searchFilters: { author: '', after: '', before: '' },
+    jumpTargetMessageId: null,
   } as any);
 });
 
@@ -659,6 +661,7 @@ describe('resetChatStore / expireSession data isolation', () => {
       communities:  [{ id: 'comm-a', name: 'User A community' }],
       activeConv:   { id: 'dm-a' },
       messages:     { 'dm-a': [{ id: 'm-1', content: 'secret message' }] },
+      messagePagination: { 'dm-a': { hasOlder: false, hasNewer: true } },
       members:      [{ id: 'user-a' }],
     } as any);
 
@@ -669,6 +672,7 @@ describe('resetChatStore / expireSession data isolation', () => {
     expect(s.communities).toEqual([]);
     expect(s.activeConv).toBeNull();
     expect(s.messages).toEqual({});
+    expect(s.messagePagination).toEqual({});
     expect(s.members).toEqual([]);
   });
 });
@@ -769,5 +773,86 @@ describe('search filters', () => {
 
     expect(apiGet).not.toHaveBeenCalled();
     expect(useChatStore.getState().searchResults).toEqual([]);
+  });
+
+  it('loads only the clicked result context and stores the jump target', async () => {
+    apiGet.mockResolvedValue({
+      targetMessageId: 'msg-2',
+      channelId: 'ch-2',
+      messages: [
+        { id: 'msg-1', content: 'before' },
+        { id: 'msg-2', content: 'target' },
+        { id: 'msg-3', content: 'after' },
+      ],
+    });
+
+    useChatStore.setState({
+      communities: [{ id: 'comm-1', name: 'One' }],
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [
+        { id: 'ch-1', community_id: 'comm-1', name: 'general' },
+        { id: 'ch-2', community_id: 'comm-1', name: 'random' },
+      ],
+      activeChannel: { id: 'ch-1', community_id: 'comm-1', name: 'general' },
+      messages: {
+        'ch-1': [{ id: 'existing-message', content: 'hello' }],
+      },
+    } as any);
+
+    await useChatStore.getState().jumpToSearchResult({
+      id: 'msg-2',
+      channelId: 'ch-2',
+      channelName: 'random',
+      communityId: 'comm-1',
+    });
+
+    const state = useChatStore.getState();
+    expect(apiGet).toHaveBeenCalledTimes(1);
+    expect(apiGet).toHaveBeenCalledWith('/messages/context/msg-2?limit=25');
+    expect(state.activeChannel?.id).toBe('ch-2');
+    expect(state.activeConv).toBeNull();
+    expect(state.messages['ch-2'].map((message: any) => message.id)).toEqual(['msg-1', 'msg-2', 'msg-3']);
+    expect(state.messagePagination['ch-2']).toEqual({ hasOlder: false, hasNewer: false });
+    expect(state.jumpTargetMessageId).toBe('msg-2');
+  });
+
+  it('pages newer history from an anchored result without replacing the existing window', async () => {
+    apiGet.mockResolvedValueOnce({
+      targetMessageId: 'msg-2',
+      channelId: 'ch-2',
+      hasOlder: true,
+      hasNewer: true,
+      messages: [
+        { id: 'msg-1', content: 'before' },
+        { id: 'msg-2', content: 'target' },
+        { id: 'msg-3', content: 'after' },
+      ],
+    });
+    apiGet.mockResolvedValueOnce({
+      messages: [
+        { id: 'msg-4', content: 'next' },
+        { id: 'msg-5', content: 'newest' },
+      ],
+    });
+
+    useChatStore.setState({
+      channels: [{ id: 'ch-2', community_id: 'comm-1', name: 'random' }],
+    } as any);
+
+    await useChatStore.getState().jumpToSearchResult({
+      id: 'msg-2',
+      channelId: 'ch-2',
+      channelName: 'random',
+    });
+
+    await useChatStore.getState().fetchMessages({
+      channelId: 'ch-2',
+      after: 'msg-3',
+    });
+
+    const state = useChatStore.getState();
+    expect(apiGet).toHaveBeenNthCalledWith(2, '/messages?channelId=ch-2&after=msg-3&limit=50');
+    expect(state.messages['ch-2'].map((message: any) => message.id)).toEqual(['msg-1', 'msg-2', 'msg-3', 'msg-4', 'msg-5']);
+    expect(state.messagePagination['ch-2']).toEqual({ hasOlder: true, hasNewer: false });
   });
 });

@@ -8,6 +8,15 @@
 
 .row:hover { background: var(--bg-2); }
 
+.jumpTarget {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-1));
+  animation: jumpPulse 2.2s ease;
+}
+
+.jumpTarget:hover {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
+}
+
 .grouped { padding-top: 2px; padding-bottom: 2px; }
 
 .avatarCol {
@@ -209,3 +218,11 @@
   line-height: 1.4;
 }
 
+@keyframes jumpPulse {
+  0% {
+    background: color-mix(in srgb, var(--accent) 28%, var(--bg-1));
+  }
+  100% {
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg-1));
+  }
+}

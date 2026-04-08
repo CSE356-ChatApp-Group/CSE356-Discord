@@ -47,12 +47,15 @@ export default function MessagePane() {
     activeChannel,
     activeConv,
     messages,
+    messagePagination,
     sendMessage,
     fetchMessages,
     search,
     searchResults,
     clearSearch,
     resetSearchFilters,
+    jumpTargetMessageId,
+    clearJumpTargetMessage,
     fetchChannelMembers,
     inviteToChannel,
     inviteToConversation,
@@ -65,12 +68,14 @@ export default function MessagePane() {
   const target   = activeChannel || activeConv;
   const key      = target?.id;
   const msgList  = (messages[key] || []);
+  const paginationState = (key && messagePagination[key]) || { hasOlder: false, hasNewer: false };
 
   const [content, setContent]     = useState('');
   const [sending, setSending]     = useState(false);
   const [loadingMore, setLoadMore] = useState(false);
   const [showSearch, setSearch]   = useState(false);
   const [localQ, setLocalQ]       = useState('');
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [showDmInviteModal, setShowDmInviteModal] = useState(false);
   const [showDmLeaveModal, setShowDmLeaveModal] = useState(false);
   const [showChannelInviteModal, setShowChannelInviteModal] = useState(false);
@@ -105,9 +110,16 @@ export default function MessagePane() {
   const bodyRef     = useRef<HTMLDivElement | null>(null);
   const initialScrollKeyRef = useRef<string | null>(null);
   const prevMsgCountRef = useRef(0);
-  const exhaustedBeforeRef = useRef<string | null>(null);
   const historyRetryAfterRef = useRef(0);
   useAutoResize(inputRef);
+
+  useEffect(() => {
+    if (!highlightedMessageId) return;
+    const timeout = window.setTimeout(() => {
+      setHighlightedMessageId((current) => (current === highlightedMessageId ? null : current));
+    }, 2400);
+    return () => window.clearTimeout(timeout);
+  }, [highlightedMessageId]);
 
   const clearAttachments = useCallback(() => {
     setAttachments((prev) => {
@@ -134,11 +146,17 @@ export default function MessagePane() {
     if (!key) {
       initialScrollKeyRef.current = null;
       prevMsgCountRef.current = 0;
-      exhaustedBeforeRef.current = null;
       historyRetryAfterRef.current = 0;
       return;
     }
     if (!el || msgList.length === 0) return;
+    const pendingJump = Boolean(jumpTargetMessageId && msgList.some((message) => message.id === jumpTargetMessageId));
+
+    if (pendingJump) {
+      initialScrollKeyRef.current = key;
+      prevMsgCountRef.current = msgList.length;
+      return;
+    }
 
     if (initialScrollKeyRef.current !== key) {
       requestAnimationFrame(() => {
@@ -161,7 +179,7 @@ export default function MessagePane() {
     }
 
     prevMsgCountRef.current = msgList.length;
-  }, [key, msgList.length]);
+  }, [key, msgList, jumpTargetMessageId]);
 
   // Reset name editing when conversation changes
   useEffect(() => {
@@ -593,10 +611,9 @@ export default function MessagePane() {
   const handleScroll = useCallback(async () => {
     const el = scrollRef.current;
     if (!el || loadingMore || msgList.length === 0) return;
-    if (el.scrollTop < 80) {
+    if (el.scrollTop < 80 && paginationState.hasOlder) {
       const beforeId = msgList[0]?.id;
       if (!beforeId) return;
-      if (exhaustedBeforeRef.current === beforeId) return;
       if (Date.now() < historyRetryAfterRef.current) return;
 
       setLoadMore(true);
@@ -607,13 +624,7 @@ export default function MessagePane() {
           conversationId: activeConv?.id,
           before:         beforeId,
         });
-
-        if (!older?.length) {
-          exhaustedBeforeRef.current = beforeId;
-          return;
-        }
-
-        exhaustedBeforeRef.current = null;
+        if (!older?.length) return;
         // Restore scroll position after prepend
         requestAnimationFrame(() => {
           el.scrollTop = el.scrollHeight - prevH;
@@ -628,8 +639,33 @@ export default function MessagePane() {
       } finally {
         setLoadMore(false);
       }
+      return;
     }
-  }, [loadingMore, msgList, activeChannel, activeConv]);
+
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 120 && paginationState.hasNewer) {
+      const afterId = msgList[msgList.length - 1]?.id;
+      if (!afterId) return;
+      if (Date.now() < historyRetryAfterRef.current) return;
+
+      setLoadMore(true);
+      try {
+        await fetchMessages({
+          channelId:      activeChannel?.id,
+          conversationId: activeConv?.id,
+          after:          afterId,
+        });
+      } catch (err) {
+        const status = Number(err?.status || 0);
+        if (status === 503) {
+          historyRetryAfterRef.current = Date.now() + 5000;
+        }
+        console.warn('[messages] failed to load newer history', err);
+      } finally {
+        setLoadMore(false);
+      }
+    }
+  }, [loadingMore, msgList, paginationState.hasOlder, paginationState.hasNewer, activeChannel, activeConv, fetchMessages]);
 
   const title = activeChannel
     ? `# ${activeChannel.name}`
@@ -684,6 +720,33 @@ export default function MessagePane() {
     overscan: 14,
     getItemKey: (index) => msgList[index]?.id ?? index,
   });
+
+  useEffect(() => {
+    if (!key || !jumpTargetMessageId || msgList.length === 0) return;
+
+    const index = msgList.findIndex((message) => message.id === jumpTargetMessageId);
+    if (index === -1) return;
+
+    let cancelled = false;
+    requestAnimationFrame(() => {
+      if (cancelled) return;
+      messageVirtualizer.scrollToIndex(index, { align: 'center' });
+
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        const row = scrollRef.current?.querySelector(
+          `[data-message-id="${jumpTargetMessageId}"]`
+        ) as HTMLElement | null;
+        row?.scrollIntoView({ block: 'center' });
+        setHighlightedMessageId(jumpTargetMessageId);
+        clearJumpTargetMessage();
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clearJumpTargetMessage, jumpTargetMessageId, key, messageVirtualizer, msgList]);
 
   const searchScope = activeChannel
     ? `#${activeChannel.name}`
@@ -802,7 +865,7 @@ export default function MessagePane() {
                 >✕</button>
               </form>
               <div className={styles.searchPopout} data-testid="search-popout">
-                <SearchBar currentQuery={localQ} />
+                <SearchBar currentQuery={localQ} onResultSelect={closeSearch} />
               </div>
             </div>
           ) : (
@@ -859,6 +922,7 @@ export default function MessagePane() {
                         message={msg}
                         prevMessage={prevMessage}
                         isOwn={msg.author_id === user?.id}
+                        isJumpTarget={msg.id === highlightedMessageId}
                         showReadReceipt={Boolean(
                           activeConv
                             && latestOwnSeen

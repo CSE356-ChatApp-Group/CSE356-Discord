@@ -2,6 +2,7 @@
  * Messages router
  *
  * GET    /api/v1/messages?channelId=&before=&limit=   – paginated history
+ * GET    /api/v1/messages/context/:messageId          – targeted context window
  * POST   /api/v1/messages                             – create
  * PATCH  /api/v1/messages/:id                         – edit
  * DELETE /api/v1/messages/:id                         – hard-delete
@@ -127,7 +128,7 @@ async function loadHydratedMessageById(messageId) {
 
 async function loadMessageTarget(messageId) {
   const { rows } = await query(
-    `SELECT id, author_id, channel_id, conversation_id
+    `SELECT id, author_id, channel_id, conversation_id, created_at
      FROM messages
      WHERE id = $1 AND deleted_at IS NULL`,
     [messageId]
@@ -192,6 +193,7 @@ async function repointConversationLastMessage(conversationId) {
 
 // ── Helpers ── message cache ─────────────────────────────────────────────────
 const MESSAGES_CACHE_TTL_SECS = 15;
+const DEFAULT_CONTEXT_SIDE_LIMIT = 25;
 function channelMsgCacheKey(channelId) { return `messages:channel:${channelId}`; }
 
 // In-process singleflight: prevents thundering-herd when the channel/conversation
@@ -206,16 +208,20 @@ router.get('/',
   qv('channelId').optional().isUUID(),
   qv('conversationId').optional().isUUID(),
   qv('before').optional().isUUID(),          // cursor-based pagination
+  qv('after').optional().isUUID(),           // forward pagination from an anchor
   qv('limit').optional().isInt({ min: 1, max: 100 }).toInt(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     try {
-      const { channelId, conversationId, before } = req.query;
+      const { channelId, conversationId, before, after } = req.query;
       const requestedLimit = Number(req.query.limit || 50);
       const limit = overload.historyLimit(requestedLimit);
 
       if (!channelId && !conversationId) {
         return res.status(400).json({ error: 'channelId or conversationId required' });
+      }
+      if (before && after) {
+        return res.status(400).json({ error: 'before and after cannot be used together' });
       }
 
       // Serve the most-recent page of a public/member channel from a short-lived
@@ -224,7 +230,7 @@ router.get('/',
       // NOTE: the cache is NOT busted on POST — the 15 s TTL is the invalidation
       // mechanism.  Clients receive new messages via WebSocket events, so
       // stale GET responses are harmless and the DB savings are enormous.
-      if (channelId && !before) {
+      if (channelId && !before && !after) {
         const cacheKey = channelMsgCacheKey(channelId);
         try {
           const cached = await redis.get(cacheKey);
@@ -295,7 +301,7 @@ router.get('/',
       // Conversation messages (non-paginated) — same singleflight+cache pattern as channels.
       // All participants see identical message history so the cache is shared by conversationId.
       // NOTE: cache is NOT busted on POST — WS events deliver new messages in real-time.
-      if (conversationId && !before) {
+      if (conversationId && !before && !after) {
         const cacheKey = `messages:conversation:${conversationId}`;
         try {
           const cached = await redis.get(cacheKey);
@@ -386,6 +392,12 @@ router.get('/',
         targetWhere += ` AND m.created_at < (SELECT created_at FROM messages WHERE id = $${params.length})`;
       }
 
+      const orderDirection = after ? 'ASC' : 'DESC';
+      if (after) {
+        params.push(after);
+        targetWhere += ` AND m.created_at > (SELECT created_at FROM messages WHERE id = $${params.length})`;
+      }
+
       const sql = `
         SELECT m.*,
                CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
@@ -396,7 +408,7 @@ router.get('/',
         WHERE  ${targetWhere} AND m.deleted_at IS NULL
           AND  ${accessWhere}
         GROUP  BY m.id, u.id
-        ORDER  BY m.created_at DESC
+        ORDER  BY m.created_at ${orderDirection}
         LIMIT  $1
       `;
 
@@ -413,8 +425,107 @@ router.get('/',
         if (!accessCheck.rows.length) return res.status(403).json({ error: channelId ? 'Access denied' : 'Not a participant' });
       }
 
-      const body = { messages: rows.reverse() }; // return in chronological order
+      const orderedRows = after ? rows : rows.reverse();
+      const body = { messages: orderedRows };
       res.json(body);
+    } catch (err) { next(err); }
+  }
+);
+
+// ── GET /messages/context/:messageId ────────────────────────────────────────
+router.get('/context/:messageId',
+  param('messageId').isUUID(),
+  qv('limit').optional().isInt({ min: 1, max: 50 }).toInt(),
+  async (req, res, next) => {
+    if (!validate(req, res)) return;
+    try {
+      const messageId = req.params.messageId;
+      const requestedLimit = Number(req.query.limit || DEFAULT_CONTEXT_SIDE_LIMIT);
+      const sideLimit = Number.isFinite(requestedLimit)
+        ? Math.min(Math.max(requestedLimit, 1), 50)
+        : DEFAULT_CONTEXT_SIDE_LIMIT;
+
+      const target = await loadMessageTarget(messageId);
+      if (!target) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+
+      const hasAccess = await ensureMessageAccess(target, req.user.id);
+      if (!hasAccess) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      const scope = target.channel_id
+        ? 'm.channel_id = t.channel_id'
+        : 'm.conversation_id = t.conversation_id';
+
+      const { rows } = await query(
+        `WITH target AS (
+           SELECT id, channel_id, conversation_id, created_at
+           FROM messages
+           WHERE id = $1 AND deleted_at IS NULL
+         ),
+         before_ids AS (
+           SELECT m.id, m.created_at
+           FROM messages m
+           JOIN target t ON ${scope}
+           WHERE m.deleted_at IS NULL
+             AND (
+               m.created_at < t.created_at
+               OR (m.created_at = t.created_at AND m.id < t.id)
+             )
+           ORDER BY m.created_at DESC, m.id DESC
+           LIMIT $2
+         ),
+         after_ids AS (
+           SELECT m.id, m.created_at
+           FROM messages m
+           JOIN target t ON ${scope}
+           WHERE m.deleted_at IS NULL
+             AND (
+               m.created_at > t.created_at
+               OR (m.created_at = t.created_at AND m.id > t.id)
+             )
+           ORDER BY m.created_at ASC, m.id ASC
+           LIMIT $2
+         ),
+         context_ids AS (
+           SELECT id, created_at FROM before_ids
+           UNION ALL
+           SELECT id, created_at FROM target
+           UNION ALL
+           SELECT id, created_at FROM after_ids
+         )
+         SELECT m.*,
+                CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+                COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments,
+                (SELECT COUNT(*) FROM before_ids)::int AS before_count,
+                (SELECT COUNT(*) FROM after_ids)::int AS after_count
+         FROM context_ids ctx
+         JOIN messages m ON m.id = ctx.id
+         LEFT JOIN users u ON u.id = m.author_id
+         LEFT JOIN attachments a ON a.message_id = m.id
+         GROUP BY ctx.created_at, m.id, u.id
+         ORDER BY ctx.created_at ASC, m.id ASC`,
+        [messageId, sideLimit],
+      );
+
+      if (!rows.length) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+
+      const beforeCount = Number(rows[0].before_count || 0);
+      const afterCount = Number(rows[0].after_count || 0);
+      const messages = rows.map(({ before_count, after_count, ...message }) => message);
+
+      res.json({
+        targetMessageId: target.id,
+        channelId: target.channel_id,
+        conversationId: target.conversation_id,
+        hasOlder: beforeCount === sideLimit,
+        hasNewer: afterCount === sideLimit,
+        messages,
+      });
     } catch (err) { next(err); }
   }
 );
