@@ -8,6 +8,7 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const jwt   = require('jsonwebtoken');
 const redis = require('../db/redis');
 
@@ -59,11 +60,19 @@ function clearTokenCaches(token) {
 }
 
 function signAccess(payload) {
-  return jwt.sign(payload, ACCESS_SECRET, { expiresIn: ACCESS_TTL });
+  // Ensure each access token is unique even for same user issued in same second.
+  return jwt.sign(payload, ACCESS_SECRET, {
+    expiresIn: ACCESS_TTL,
+    jwtid: crypto.randomUUID(),
+  });
 }
 
 function signRefresh(payload) {
-  return jwt.sign(payload, REFRESH_SECRET, { expiresIn: REFRESH_TTL });
+  // Keep refresh tokens unique as well; avoids accidental token-string reuse.
+  return jwt.sign(payload, REFRESH_SECRET, {
+    expiresIn: REFRESH_TTL,
+    jwtid: crypto.randomUUID(),
+  });
 }
 
 function verifyAccess(token) {
