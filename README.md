@@ -279,7 +279,8 @@ All protected endpoints require: `Authorization: Bearer <accessToken>`
 
 | Method | Path                      | Description                        |
 |--------|---------------------------|------------------------------------|
-| GET    | /messages                 | Paginated history (cursor-based)   |
+| GET    | /messages                 | Paginated history: `channelId` or `conversationId`; optional `before=<messageId>` (older page), **`after=<messageId>`** (newer page). Do not pass both `before` and `after`. Latest page is Redis-cached when neither cursor is set. |
+| GET    | /messages/context/:messageId | Message window around an id (search “jump”): optional `limit` (per side, 1–50, default 25). Response includes `hasOlder` / `hasNewer` and chronological `messages`. |
 | POST   | /messages                 | Send message                       |
 | PATCH  | /messages/:id             | Edit own message                   |
 | DELETE | /messages/:id             | Soft-delete own message            |
