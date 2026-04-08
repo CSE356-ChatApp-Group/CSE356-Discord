@@ -855,8 +855,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   async fetchMessages({ channelId, conversationId, before }: { channelId?: string; conversationId?: string; before?: string } = {}) {
     const key = channelId || conversationId;
     const qs  = new URLSearchParams();
-    if (channelId)      qs.set('channelId',      channelId);
-    if (conversationId) qs.set('conversationId', conversationId);
+    if (channelId) qs.set('channelId', channelId);
+    else if (conversationId) qs.set('conversationId', conversationId);
     if (before)         qs.set('before',         before);
     qs.set('limit', '50');
 
@@ -925,8 +925,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const body: { content?: string; attachments?: any[]; channelId?: string; conversationId?: string } = {};
     if (trimmedContent) body.content = trimmedContent;
     if (uploadedAttachments.length) body.attachments = uploadedAttachments;
+    // Match server + GET /messages: never send both IDs (avoids ambiguous routing).
     if (activeChannel) body.channelId = activeChannel.id;
-    if (activeConv) body.conversationId = activeConv.id;
+    else if (activeConv) body.conversationId = activeConv.id;
 
     const { message } = await api.post('/messages', body);
     if (message?.id) {

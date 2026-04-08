@@ -500,43 +500,13 @@ router.post('/',
       // Holds the pool connection for 3 queries (BEGIN, CTE, COMMIT) instead
       // of the prior 5 (access-check, BEGIN, INSERT, COMMIT, hydrated-SELECT),
       // cutting connection hold time ~40% and improving throughput under contention.
+      // Prefer channel when both are set — matches GET /messages (channelId branch first) and
+      // avoids 403 when clients send stale conversationId alongside the active channel.
       let communityId: string | null = null;
       const baseMessage = await withTransaction(async (client) => {
         let rows: any[];
 
-        if (conversationId) {
-          ({ rows } = await client.query(
-            `WITH access AS (
-               SELECT 1
-               FROM   conversation_participants
-               WHERE  conversation_id = $1 AND user_id = $2 AND left_at IS NULL
-             ), ins AS (
-               INSERT INTO messages (conversation_id, author_id, content, thread_id)
-               SELECT $1, $2, $3, $4 FROM access
-               RETURNING *
-             ), conv_last AS (
-               UPDATE conversations conv
-               SET last_message_id = ins.id,
-                   last_message_author_id = ins.author_id,
-                   last_message_at = ins.created_at,
-                   updated_at = NOW()
-               FROM ins
-               WHERE conv.id = ins.conversation_id
-                 AND (conv.last_message_at IS NULL OR ins.created_at >= conv.last_message_at)
-               RETURNING conv.id
-             )
-             SELECT
-               (SELECT COUNT(*) FROM access)::int             AS has_access,
-               ins.*,
-               CASE WHEN u.id IS NULL THEN NULL
-                    ELSE row_to_json(u.*) END                 AS author,
-               '[]'::json                                     AS attachments
-             FROM   (VALUES (1)) dummy
-             LEFT   JOIN ins ON TRUE
-             LEFT   JOIN users u ON u.id = ins.author_id`,
-            [conversationId, req.user.id, content?.trim() || null, threadId || null],
-          ));
-        } else {
+        if (channelId) {
           ({ rows } = await client.query(
             `WITH access AS (
                SELECT community_id
@@ -573,11 +543,43 @@ router.post('/',
              LEFT   JOIN users u ON u.id = ins.author_id`,
             [channelId, req.user.id, content?.trim() || null, threadId || null],
           ));
+        } else {
+          ({ rows } = await client.query(
+            `WITH access AS (
+               SELECT 1
+               FROM   conversation_participants
+               WHERE  conversation_id = $1 AND user_id = $2 AND left_at IS NULL
+             ), ins AS (
+               INSERT INTO messages (conversation_id, author_id, content, thread_id)
+               SELECT $1, $2, $3, $4 FROM access
+               RETURNING *
+             ), conv_last AS (
+               UPDATE conversations conv
+               SET last_message_id = ins.id,
+                   last_message_author_id = ins.author_id,
+                   last_message_at = ins.created_at,
+                   updated_at = NOW()
+               FROM ins
+               WHERE conv.id = ins.conversation_id
+                 AND (conv.last_message_at IS NULL OR ins.created_at >= conv.last_message_at)
+               RETURNING conv.id
+             )
+             SELECT
+               (SELECT COUNT(*) FROM access)::int             AS has_access,
+               ins.*,
+               CASE WHEN u.id IS NULL THEN NULL
+                    ELSE row_to_json(u.*) END                 AS author,
+               '[]'::json                                     AS attachments
+             FROM   (VALUES (1)) dummy
+             LEFT   JOIN ins ON TRUE
+             LEFT   JOIN users u ON u.id = ins.author_id`,
+            [conversationId, req.user.id, content?.trim() || null, threadId || null],
+          ));
         }
 
         const row = rows[0];
         if (!row?.has_access) {
-          const err: any = new Error(conversationId ? 'Not a participant' : 'Access denied');
+          const err: any = new Error(channelId ? 'Access denied' : 'Not a participant');
           err.statusCode = 403;
           throw err;
         }
@@ -628,15 +630,15 @@ router.post('/',
       // WebSocket events, so stale GET responses are harmless and the DB savings
       // from keeping the cache warm are significant (see pg_stat_statements).
 
-      if (conversationId) {
-        await publishConversationEvent(conversationId, 'message:created', message);
-      } else {
+      if (channelId) {
         sideEffects.publishMessageEventWithUnread(
           targetKey(channelId, conversationId),
           'message:created',
           message,
           channelId,
         );
+      } else {
+        await publishConversationEvent(conversationId, 'message:created', message);
       }
       if (communityId) {
         sideEffects.publishMessageEvent(`community:${communityId}`, 'community:channel_message', {
