@@ -782,7 +782,6 @@ export default function MessagePane() {
                 renameGroupDm(activeConv.id, draftName).catch(() => {});
                 setEditingName(false);
               }}
-              maxLength={100}
               data-testid="group-dm-name-input"
             />
           ) : (
@@ -997,7 +996,6 @@ export default function MessagePane() {
                 onKeyDown={handleKeyDown}
                 placeholder={attachments.length ? 'Add a caption…' : placeholder}
                 rows={1}
-                maxLength={4000}
                 disabled={sending}
                 data-testid="message-compose-input"
               />

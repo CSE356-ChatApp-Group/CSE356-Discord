@@ -30,14 +30,6 @@ const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLi
 
 const router = express.Router();
 const REFRESH_COOKIE = 'refreshToken';
-const USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{2,31}$/;
-
-function validateUsername(value) {
-  if (typeof value !== 'string' || !USERNAME_PATTERN.test(value)) {
-    throw new Error('username must be 3-32 chars using letters, numbers, hyphens, or underscores');
-  }
-  return true;
-}
 
 function parseBooleanEnv(value) {
   if (typeof value !== 'string') return null;
@@ -259,15 +251,15 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
     // For trusted providers (course OIDC), auto-create the account immediately
     // when we have enough info (email + preferredUsername) to avoid the pending flow.
     if (provider === 'course' && email && preferredUsername) {
-      // Sanitize KC username: allow letters, digits, hyphens, underscores, max 32 chars
-      const sanitized = preferredUsername.replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 32) || null;
-
-      // Check if username already used (conflict resolution: append short suffix)
-      let username = sanitized;
+      // Preserve provider usernames as-is apart from trimming surrounding whitespace.
+      let username = typeof preferredUsername === 'string' ? preferredUsername.trim() : '';
+      if (!username) {
+        username = (email.split('@')[0] || '').trim();
+      }
       if (username) {
         const taken = await client.query('SELECT 1 FROM users WHERE username=$1', [username]);
         if (taken.rows.length) {
-          username = `${sanitized.slice(0, 28)}_${Date.now().toString().slice(-4)}`;
+          username = `${username}-${Date.now().toString().slice(-4)}`;
         }
       }
 
@@ -332,17 +324,17 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
 // ── Register ───────────────────────────────────────────────────────────────────
 router.post('/register',
   registerLimiter,
-  body('email').optional({ nullable: true, checkFalsy: true }).isEmail().normalizeEmail(),
-  body('username').custom(validateUsername),
-  body('password').isLength({ min: 8 }),
-  body('displayName').optional().isLength({ max: 64 }),
+  body('email').optional({ nullable: true, checkFalsy: true }).isString(),
+  body('username').isString().custom((value) => value.trim().length > 0),
+  body('password').isString(),
+  body('displayName').optional().isString(),
   async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
       const { email, username, password, displayName } = req.body;
-      const normalizedEmail = email || null;
+      const normalizedEmail = typeof email === 'string' && email.trim().length ? email.trim() : null;
       const hash = await hashPassword(password, 'register_hash');
       const { rows } = await query(
         `INSERT INTO users (email, username, password_hash, display_name)
@@ -427,10 +419,10 @@ router.get('/session', async (_req, res, next) => {
 
 router.post('/oauth/complete-create',
   registerLimiter,
-  body('pendingToken').isString().isLength({ min: 20 }),
-  body('username').optional().custom(validateUsername),
-  body('displayName').optional().isLength({ min: 1, max: 64 }),
-  body('password').optional().isLength({ min: 8 }),
+  body('pendingToken').isString().custom((value) => value.trim().length > 0),
+  body('username').optional().isString(),
+  body('displayName').optional().isString(),
+  body('password').optional().isString(),
   async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -447,16 +439,15 @@ router.post('/oauth/complete-create',
       return res.status(400).json({ error: 'Email is required to create an account from OAuth sign-in' });
     }
 
-    const generatedUsernameBase = (email.split('@')[0] || `${pending.provider}_user`)
-      .replace(/[^a-zA-Z0-9]/g, '')
-      .slice(0, 24)
+    const generatedUsernameBase = (email.split('@')[0] || `${pending.provider}_user`).trim()
       || `${pending.provider}user`;
 
-    // Prefer the preserved KC username (may contain hyphens), fall back to alphanumeric derived name
-    const rawPreferred = pending.preferredUsername || req.body.username || null;
-    const username = rawPreferred
-      ? rawPreferred.replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 32) || `${generatedUsernameBase}${Date.now().toString().slice(-4)}`.slice(0, 32)
-      : `${generatedUsernameBase}${Date.now().toString().slice(-4)}`.slice(0, 32);
+    const preferredUsername = typeof pending.preferredUsername === 'string' && pending.preferredUsername.trim()
+      ? pending.preferredUsername.trim()
+      : typeof req.body.username === 'string' && req.body.username.trim()
+        ? req.body.username.trim()
+        : null;
+    const username = preferredUsername || `${generatedUsernameBase}-${Date.now().toString().slice(-4)}`;
     const displayName = req.body.displayName || pending.displayName || username;
 
     let client;
@@ -509,9 +500,9 @@ router.post('/oauth/complete-create',
 
 router.post('/oauth/complete-connect',
   passwordConnectLimiter,
-  body('pendingToken').isString().isLength({ min: 20 }),
-  body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 8 }),
+  body('pendingToken').isString().custom((value) => value.trim().length > 0),
+  body('email').isString().custom((value) => value.trim().length > 0),
+  body('password').isString(),
   async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });

@@ -219,9 +219,9 @@ router.get('/',
 // ── Create ─────────────────────────────────────────────────────────────────────
 router.post('/',
   body('communityId').isUUID(),
-  body('name').isString().isLength({ min: 1, max: 100 }),
+  body('name').isString().custom((value) => value.trim().length > 0),
   body('isPrivate').optional().isBoolean(),
-  body('description').optional().isLength({ max: 500 }),
+  body('description').optional().isString(),
   async (req, res, next) => {
     if (!v(req, res)) return;
     let client;
@@ -243,7 +243,7 @@ router.post('/',
       const { rows } = await client.query(
         `INSERT INTO channels (community_id, name, is_private, description, created_by)
          VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [communityId, name.toLowerCase().replace(/\s+/g, '-'), isPrivate, description || null, req.user.id]
+        [communityId, name.trim(), isPrivate, description || null, req.user.id]
       );
       const channel = rows[0];
 
@@ -314,7 +314,7 @@ router.get('/:id/members',
 
 router.post('/:id/members',
   param('id').isUUID(),
-  body('userIds').isArray({ min: 1, max: 50 }),
+  body('userIds').isArray({ min: 1 }),
   body('userIds.*').isUUID(),
   async (req, res, next) => {
     if (!v(req, res)) return;
@@ -408,8 +408,8 @@ router.post('/:id/members',
 // ── Update ─────────────────────────────────────────────────────────────────────
 router.patch('/:id',
   param('id').isUUID(),
-  body('name').optional().isString().isLength({ min: 1, max: 100 }),
-  body('description').optional().isLength({ max: 500 }),
+  body('name').optional().isString().custom((value) => value.trim().length > 0),
+  body('description').optional().isString(),
   async (req, res, next) => {
     if (!v(req, res)) return;
     try {

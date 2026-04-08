@@ -238,9 +238,9 @@ router.get('/', async (req, res, next) => {
 
 // ── Create or get existing 1:1 ─────────────────────────────────────────────────
 router.post('/',
-  body('participantIds').optional().isArray({ min: 1, max: 9 }),
-  body('participants').optional().isArray({ min: 1, max: 9 }),
-  body('name').optional().isLength({ max: 100 }),
+  body('participantIds').optional().isArray({ min: 1 }),
+  body('participants').optional().isArray({ min: 1 }),
+  body('name').optional().isString(),
   async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -356,7 +356,7 @@ router.patch(
   '/:id',
   authenticate,
   param('id').isUUID(),
-  body('name').optional({ nullable: true }).isLength({ max: 100 }),
+  body('name').optional({ nullable: true }).isString(),
   async (req, res, next) => {
     try {
       const errors = validationResult(req);
@@ -407,10 +407,10 @@ router.patch(
 
 const addParticipantsValidators = [
   param('id').isUUID(),
-  body('participantIds').optional().isArray({ min: 1, max: 9 }),
-  body('participants').optional().isArray({ min: 1, max: 9 }),
-  body('participantId').optional().isString().isLength({ min: 1, max: 255 }),
-  body('userId').optional().isString().isLength({ min: 1, max: 255 }),
+  body('participantIds').optional().isArray({ min: 1 }),
+  body('participants').optional().isArray({ min: 1 }),
+  body('participantId').optional().isString(),
+  body('userId').optional().isString(),
 ];
 
 async function addParticipantsHandler(req, res, next) {

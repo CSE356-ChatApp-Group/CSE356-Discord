@@ -97,7 +97,7 @@ function normalizeAwayMessage(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  return trimmed.slice(0, 280);
+  return trimmed;
 }
 
 async function setAwayMessage(userId, message) {

@@ -81,27 +81,6 @@ describe('CommunitySidebar presence badge', () => {
     expect(screen.getByTestId('account-presence-badge')).toHaveAttribute('aria-label', 'Current presence: away');
   });
 
-  it('shows clear feedback when community name/slug is too short', async () => {
-    act(() => {
-      useAuthStore.setState({
-        user: {
-          id: 'user-1',
-          username: 'sam',
-          displayName: 'Sam',
-          email: 'sam@example.com',
-        },
-      } as any);
-    });
-
-    render(<CommunitySidebar />);
-
-    fireEvent.click(screen.getByTestId('community-create-open'));
-    fireEvent.change(screen.getByTestId('community-create-name'), { target: { value: 'a' } });
-    fireEvent.click(screen.getByTestId('community-create-submit'));
-
-    expect(await screen.findByText('Community name/slug must be at least 2 characters.')).toBeInTheDocument();
-  });
-
   it('shows DM unread indicator when there is an unread DM and user is not on DM tab', () => {
     act(() => {
       useAuthStore.setState({

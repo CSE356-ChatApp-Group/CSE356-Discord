@@ -142,6 +142,18 @@ function upsertMessage(messages, incoming) {
   return next;
 }
 
+function shouldFetchLatestMessages(state: Pick<ChatState, 'messages' | 'messagePagination'>, key?: string | null) {
+  if (!key) return true;
+  const loadedMessages = state.messages[key];
+  if (!Array.isArray(loadedMessages) || loadedMessages.length === 0) {
+    return true;
+  }
+
+  const pagination = state.messagePagination[key];
+  if (!pagination) return true;
+  return Boolean(pagination.hasNewer);
+}
+
 function removeKeyedState<T>(state: Record<string, T>, removedIds: Set<string>) {
   return Object.fromEntries(
     Object.entries(state || {}).filter(([key]) => !removedIds.has(key))
@@ -629,7 +641,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         unread_message_count: 0,
       }),
     }));
-    await get().fetchMessages({ channelId: channel.id });
+    if (shouldFetchLatestMessages(get(), channel.id)) {
+      await get().fetchMessages({ channelId: channel.id });
+    }
     // Subscribe to real-time events for this channel
     wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
     // Mark latest message as read
@@ -734,7 +748,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         activeChannel: null,
       };
     });
-    await get().fetchMessages({ conversationId: conversation.id });
+    if (shouldFetchLatestMessages(get(), conversation.id)) {
+      await get().fetchMessages({ conversationId: conversation.id });
+    }
     wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
     const msgs = get().messages[conversation.id];
     if (msgs?.length) {
@@ -768,7 +784,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       activeConv: s.conversations.find((c) => c.id === conv.id) || conv,
       activeChannel: null,
     }));
-    await get().fetchMessages({ conversationId: conv.id });
+    if (shouldFetchLatestMessages(get(), conv.id)) {
+      await get().fetchMessages({ conversationId: conv.id });
+    }
     wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
     const msgs = get().messages[conv.id];
     if (msgs?.length) {

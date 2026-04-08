@@ -21,7 +21,7 @@ export function readPresenceIntent(): PresenceIntentPayload {
 
     const parsed = JSON.parse(raw);
     const status: PresenceIntentStatus = parsed?.status === 'away' ? 'away' : 'online';
-    const awayMessage = typeof parsed?.awayMessage === 'string' ? parsed.awayMessage.slice(0, 280) : '';
+    const awayMessage = typeof parsed?.awayMessage === 'string' ? parsed.awayMessage : '';
     return { status, awayMessage };
   } catch {
     return DEFAULT_INTENT;
@@ -33,7 +33,7 @@ export function writePresenceIntent(status: PresenceIntentStatus, awayMessage: s
 
   const payload: PresenceIntentPayload = {
     status,
-    awayMessage: status === 'away' ? awayMessage.trim().slice(0, 280) : '',
+    awayMessage: status === 'away' ? awayMessage.trim() : '',
   };
 
   window.localStorage.setItem(PRESENCE_INTENT_KEY, JSON.stringify(payload));

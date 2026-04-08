@@ -227,9 +227,9 @@ router.get('/', async (req, res, next) => {
 
 // ── Create ─────────────────────────────────────────────────────────────────────
 router.post('/',
-  body('slug').isSlug().isLength({ min: 2, max: 32 }),
-  body('name').isString().isLength({ min: 1, max: 100 }),
-  body('description').optional().isLength({ max: 500 }),
+  body('slug').isString().custom((value) => value.trim().length > 0),
+  body('name').isString().custom((value) => value.trim().length > 0),
+  body('description').optional().isString(),
   body('isPublic').optional().isBoolean(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
@@ -237,7 +237,10 @@ router.post('/',
     try {
       client = await getClient();
       await client.query('BEGIN');
-      const { slug, name, description, isPublic = true } = req.body;
+      const slug = String(req.body.slug).trim();
+      const name = String(req.body.name).trim();
+      const description = typeof req.body.description === 'string' ? req.body.description : null;
+      const { isPublic = true } = req.body;
       const { rowCount } = await client.query(
         'SELECT 1 FROM communities WHERE owner_id = $1',
         [req.user.id]

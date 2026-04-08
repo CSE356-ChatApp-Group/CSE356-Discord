@@ -23,15 +23,14 @@ const router = express.Router();
 router.use(authenticate);
 
 const MAX_IMAGES_PER_MESSAGE = 4;
-const MAX_SIZE_BYTES = 8 * 1024 * 1024; // 8 MB per image
 
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 // ── Pre-sign ───────────────────────────────────────────────────────────────────
 router.post('/presign',
-  body('filename').isString().isLength({ max: 255 }),
+  body('filename').isString(),
   body('contentType').isIn([...ALLOWED_TYPES]),
-  body('sizeBytes').isInt({ min: 1, max: MAX_SIZE_BYTES }),
+  body('sizeBytes').isInt({ min: 1 }),
   body('messageId').optional().isUUID(),
   async (req, res, next) => {
     const errors = validationResult(req);
@@ -67,8 +66,8 @@ router.post('/presign',
 // ── Record metadata after upload ───────────────────────────────────────────────
 router.post('/',
   body('messageId').isUUID(),
-  body('storageKey').isString().isLength({ max: 512 }),
-  body('filename').isString().isLength({ max: 255 }),
+  body('storageKey').isString(),
+  body('filename').isString(),
   body('contentType').isIn([...ALLOWED_TYPES]),
   body('sizeBytes').isInt({ min: 1 }),
   body('width').optional().isInt(),

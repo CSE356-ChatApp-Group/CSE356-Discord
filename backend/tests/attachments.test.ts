@@ -95,14 +95,6 @@ describe('POST /api/v1/attachments/presign', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 when sizeBytes exceeds 8 MB', async () => {
-    const res = await request(app)
-      .post('/api/v1/attachments/presign')
-      .set('Authorization', `Bearer ${ownerToken}`)
-      .send({ filename: 'big.png', contentType: 'image/png', sizeBytes: 9 * 1024 * 1024 });
-    expect(res.status).toBe(400);
-  });
-
   it('returns uploadUrl and storageKey on valid request', async () => {
     const res = await request(app)
       .post('/api/v1/attachments/presign')

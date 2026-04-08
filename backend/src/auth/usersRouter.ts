@@ -30,7 +30,6 @@ const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp
 // multer in-memory, 5 MB max, images only
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter(_req, file, cb) {
     cb(null, ALLOWED_IMAGE_TYPES.includes(file.mimetype));
   },
@@ -197,9 +196,9 @@ router.get('/me', async (req, res, next) => {
 });
 
 router.patch('/me',
-  body('displayName').optional().isLength({ min: 1, max: 64 }),
-  body('bio').optional().isLength({ max: 500 }),
-  body('password').optional().isLength({ min: 8 }),
+  body('displayName').optional().isString(),
+  body('bio').optional().isString(),
+  body('password').optional().isString(),
   async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });

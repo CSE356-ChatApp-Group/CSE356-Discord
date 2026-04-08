@@ -43,12 +43,12 @@ describe('POST /api/v1/auth/register', () => {
     expect(res.status).toBe(409);
   });
 
-  it('rejects weak passwords', async () => {
+  it('allows short passwords', async () => {
     const res = await request(app)
       .post('/api/v1/auth/register')
       .send({ email: 'other@example.com', username: 'other', password: '123' });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(201);
   });
 
   it('accepts hyphenated usernames and returns conflict on duplicate registration', async () => {
@@ -84,13 +84,13 @@ describe('POST /api/v1/auth/register', () => {
     expect(res.body.user.username).toBe(username);
   });
 
-  it('rejects an invalid email when one is supplied', async () => {
+  it('allows any non-empty email string when one is supplied', async () => {
     const suffix = uniqueSuffix();
     const res = await request(app)
       .post('/api/v1/auth/register')
       .send({ email: 'not-an-email', username: `badmail${suffix}`, password: 'Password1!' });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(201);
   });
 });
 

@@ -537,17 +537,17 @@ router.get('/context/:messageId',
 const ALLOWED_ATTACHMENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_ATTACHMENTS_PER_MESSAGE = 4;
 router.post('/',
-  body('content').optional().isString().isLength({ max: 4000 }),
+  body('content').optional().isString(),
   body('channelId').optional().isUUID(),
   body('conversationId').optional().isUUID(),
   body('threadId').optional().isUUID(),
   body('attachments').optional().isArray({ max: MAX_ATTACHMENTS_PER_MESSAGE }),
-  body('attachments.*.storageKey').optional().isString().isLength({ max: 512 }),
-  body('attachments.*.filename').optional().isString().isLength({ max: 255 }),
+  body('attachments.*.storageKey').optional().isString(),
+  body('attachments.*.filename').optional().isString(),
   body('attachments.*.contentType').optional().custom((value) => ALLOWED_ATTACHMENT_TYPES.has(value)),
-  body('attachments.*.sizeBytes').optional().isInt({ min: 1, max: 8 * 1024 * 1024 }),
-  body('attachments.*.width').optional().isInt({ min: 1 }),
-  body('attachments.*.height').optional().isInt({ min: 1 }),
+  body('attachments.*.sizeBytes').optional().isInt({ min: 1 }),
+  body('attachments.*.width').optional().isInt(),
+  body('attachments.*.height').optional().isInt(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     let idemRedisKey: string | null = null;
@@ -575,7 +575,6 @@ router.post('/',
         || !ALLOWED_ATTACHMENT_TYPES.has(attachment.contentType)
         || !Number.isInteger(Number(attachment.sizeBytes))
         || Number(attachment.sizeBytes) <= 0
-        || Number(attachment.sizeBytes) > 8 * 1024 * 1024
       ));
 
       if (invalidAttachment) {
@@ -817,7 +816,7 @@ router.post('/',
 // ── PATCH /messages/:id ────────────────────────────────────────────────────────
 router.patch('/:id',
   param('id').isUUID(),
-  body('content').isString().isLength({ min: 1, max: 4000 }),
+  body('content').isString(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     if (overload.shouldRestrictNonEssentialWrites()) {

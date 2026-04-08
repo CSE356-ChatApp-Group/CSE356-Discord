@@ -189,7 +189,6 @@ function OAuthCallback() {
                   value={createForm.username}
                   onChange={e => setCreateForm(f => ({ ...f, username: e.target.value }))}
                   placeholder="devuser"
-                  maxLength={32}
                   style={{ width: '100%', marginTop: 4 }}
                   data-testid="oauth-create-username"
                 />
@@ -200,7 +199,6 @@ function OAuthCallback() {
                   value={createForm.displayName}
                   onChange={e => setCreateForm(f => ({ ...f, displayName: e.target.value }))}
                   placeholder="Dev User"
-                  maxLength={64}
                   style={{ width: '100%', marginTop: 4 }}
                   data-testid="oauth-create-display-name"
                 />
@@ -211,8 +209,7 @@ function OAuthCallback() {
                   type="password"
                   value={createForm.password}
                   onChange={e => setCreateForm(f => ({ ...f, password: e.target.value }))}
-                  placeholder="At least 8 characters"
-                  minLength={8}
+                  placeholder="Optional password for direct login later"
                   style={{ width: '100%', marginTop: 4 }}
                   data-testid="oauth-create-password"
                 />
@@ -225,7 +222,7 @@ function OAuthCallback() {
               <label>
                 Existing account email
                 <input
-                  type="email"
+                  type="text"
                   required
                   value={connectForm.email}
                   onChange={e => setConnectForm(f => ({ ...f, email: e.target.value }))}
@@ -238,7 +235,6 @@ function OAuthCallback() {
                 <input
                   type="password"
                   required
-                  minLength={8}
                   value={connectForm.password}
                   onChange={e => setConnectForm(f => ({ ...f, password: e.target.value }))}
                   style={{ width: '100%', marginTop: 4 }}

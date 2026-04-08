@@ -42,27 +42,26 @@ export default function RegisterPage() {
         <form onSubmit={handleSubmit} className={styles.form} data-testid="register-form">
           <label className={styles.label}>
             Email <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span>
-            <input id="register-email" name="email" type="email" value={form.email} onChange={set('email')}
+            <input id="register-email" name="email" type="text" value={form.email} onChange={set('email')}
               className={styles.input} placeholder="you@example.com" autoFocus />
           </label>
 
           <label className={styles.label}>
             Username
             <input id="register-username" name="username" type="text" value={form.username} onChange={set('username')}
-              className={styles.input} placeholder="devuser" required
-              pattern="[a-zA-Z0-9_-]+" title="Letters, numbers, underscores only" minLength={3} maxLength={32} />
+              className={styles.input} placeholder="devuser" required />
           </label>
 
           <label className={styles.label}>
             Display name <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span>
             <input id="register-display-name" name="displayName" type="text" value={form.displayName} onChange={set('displayName')}
-              className={styles.input} placeholder="Dev User" maxLength={64} />
+              className={styles.input} placeholder="Dev User" />
           </label>
 
           <label className={styles.label}>
             Password
             <input id="register-password" name="password" type="password" value={form.password} onChange={set('password')}
-              className={styles.input} placeholder="Min 8 characters" required minLength={8} />
+              className={styles.input} placeholder="Password" required />
           </label>
 
           <button type="submit" className={styles.btn} disabled={loading} data-testid="register-submit">
