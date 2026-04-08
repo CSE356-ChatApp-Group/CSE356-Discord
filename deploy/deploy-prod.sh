@@ -484,8 +484,27 @@ ssh "$PROD_USER@$PROD_HOST" "
     sudo cp /tmp/alertmanager.yml.deploy /opt/chatapp-monitoring/alertmanager.yml
     rm -f /tmp/alertmanager.yml.deploy
   fi
-  sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1 || true
-  sudo docker restart chatapp-monitoring-alertmanager-1 >/dev/null 2>&1 || true
+  # Ensure monitoring containers inherit the same environment as the app host.
+  # Without this, ALERT_ENVIRONMENT can default to local and webhook secret selection breaks.
+  sudo cp /opt/chatapp/shared/.env /opt/chatapp-monitoring/.env
+  sudo sed -i 's/^ALERT_ENVIRONMENT=.*/ALERT_ENVIRONMENT=production/' /opt/chatapp-monitoring/.env
+  if ! grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
+    echo 'ALERT_ENVIRONMENT=production' | sudo tee -a /opt/chatapp-monitoring/.env >/dev/null
+  fi
+  sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d --force-recreate alertmanager prometheus >/dev/null
+  # Fail fast if Discord webhook wiring is broken; silent alert failures are worse than noisy deploys.
+  AM_NAME=\$(sudo docker ps --format '{{.Names}}' | grep 'chatapp-monitoring-alertmanager' | head -n 1 || true)
+  if [ -z \"\$AM_NAME\" ]; then
+    echo 'ERROR: alertmanager container not running after monitoring refresh'
+    exit 1
+  fi
+  WEBHOOK_HEAD=\$(sudo docker exec \"\$AM_NAME\" sh -lc \"head -c 8 /alertmanager/secrets/discord_webhook_url 2>/dev/null || true\")
+  WEBHOOK_BYTES=\$(sudo docker exec \"\$AM_NAME\" sh -lc \"wc -c < /alertmanager/secrets/discord_webhook_url 2>/dev/null || echo 0\")
+  if [ \"\$WEBHOOK_HEAD\" != \"https://\" ] || [ \"\${WEBHOOK_BYTES:-0}\" -lt 32 ]; then
+    echo \"ERROR: Alertmanager webhook secret invalid (head=\$WEBHOOK_HEAD bytes=\$WEBHOOK_BYTES)\"
+    exit 1
+  fi
+  echo 'Alertmanager Discord webhook wiring verified'
   set -a
   # shellcheck disable=SC1091
   source /opt/chatapp/shared/.env 2>/dev/null || true
@@ -498,7 +517,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
     oliver006/redis_exporter:latest --redis.addr=\"\$RURL\"
   echo 'redis_exporter started (uses REDIS_URL from /opt/chatapp/shared/.env)'
-" || echo "⚠ Alert/redis_exporter sync failed (non-fatal)"
+"
 echo "✓ Monitoring updated"
 
 # 11. Update current symlink

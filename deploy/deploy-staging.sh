@@ -456,15 +456,25 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     sudo cp /tmp/alertmanager.yml.deploy /opt/chatapp-monitoring/alertmanager.yml
     rm -f /tmp/alertmanager.yml.deploy
   fi
-  if sudo docker inspect chatapp-monitoring-prometheus-1 >/dev/null 2>&1; then
-    STATUS=\$(sudo docker inspect -f '{{.State.Running}}' chatapp-monitoring-prometheus-1)
-    echo \"Prometheus container running=\$STATUS\"
-    sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1 && echo 'Prometheus restarted (re-rendered scrape config)' || echo 'WARN: Prometheus restart failed'
-  else
-    echo 'WARN: Prometheus container not found (non-critical)'
+  # Keep monitoring env in sync with shared host env so webhook selection uses staging.
+  sudo cp /opt/chatapp/shared/.env /opt/chatapp-monitoring/.env
+  sudo sed -i 's/^ALERT_ENVIRONMENT=.*/ALERT_ENVIRONMENT=staging/' /opt/chatapp-monitoring/.env
+  if ! grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
+    echo 'ALERT_ENVIRONMENT=staging' | sudo tee -a /opt/chatapp-monitoring/.env >/dev/null
   fi
-  if sudo docker inspect chatapp-monitoring-alertmanager-1 >/dev/null 2>&1; then
-    sudo docker restart chatapp-monitoring-alertmanager-1 >/dev/null 2>&1 && echo 'Alertmanager restarted (Discord templates updated)' || echo 'WARN: Alertmanager restart failed'
+  sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d --force-recreate alertmanager prometheus >/dev/null 2>&1 || true
+  # Staging guardrail: warn loudly if Discord webhook wiring is invalid.
+  AM_NAME=\$(sudo docker ps --format '{{.Names}}' | grep 'chatapp-monitoring-alertmanager' | head -n 1 || true)
+  if [ -n \"\$AM_NAME\" ]; then
+    WEBHOOK_HEAD=\$(sudo docker exec \"\$AM_NAME\" sh -lc \"head -c 8 /alertmanager/secrets/discord_webhook_url 2>/dev/null || true\")
+    WEBHOOK_BYTES=\$(sudo docker exec \"\$AM_NAME\" sh -lc \"wc -c < /alertmanager/secrets/discord_webhook_url 2>/dev/null || echo 0\")
+    if [ \"\$WEBHOOK_HEAD\" != \"https://\" ] || [ \"\${WEBHOOK_BYTES:-0}\" -lt 32 ]; then
+      echo \"WARN: Alertmanager webhook secret looks invalid in staging (head=\$WEBHOOK_HEAD bytes=\$WEBHOOK_BYTES)\"
+    else
+      echo 'Alertmanager Discord webhook wiring verified (staging)'
+    fi
+  else
+    echo 'WARN: alertmanager container not running after monitoring refresh'
   fi
   # redis_exporter on host network — scrapes 127.0.0.1:6379; Prometheus hits :9121
   if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then

@@ -369,6 +369,7 @@ Set up alerting:
 - Set `ALERT_ENVIRONMENT=staging` on staging and `ALERT_ENVIRONMENT=production` on prod
 - Put the matching `DISCORD_WEBHOOK_URL_STAGING=...` or `DISCORD_WEBHOOK_URL_PROD=...` in `/opt/chatapp/shared/.env`
 - Redeploy or restart `alertmanager` + `prometheus` so Discord notifications go live
+- `deploy-prod.sh` now validates Alertmanager webhook wiring and fails fast if it is blank/invalid (prevents silent alert loss)
 - Use `http://127.0.0.1:9093` on the monitor host to verify active alerts and silences
 
 ### WebSocket Connections

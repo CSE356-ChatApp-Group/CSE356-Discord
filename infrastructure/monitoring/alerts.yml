@@ -40,6 +40,22 @@ groups:
           summary: ChatApp API p95 latency is high
           description: p95 request latency for route {{ $labels.route }} has exceeded 1000ms for 10 minutes.
 
+      # Fast-burn signal: short-window failures can hurt grading even before 10m alerts fire.
+      - alert: ChatAppFast5xxBurn
+        expr: |
+          sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[2m]))
+            /
+          clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[2m])), 1)
+            > 0.08
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: ChatApp API fast 5xx burn detected
+          description: >
+            5xx ratio exceeded 8% over a 2-minute window. This catches burst failures quickly
+            (before longer warning windows) and should trigger immediate scaling or load shedding action.
+
       - alert: ChatAppEventLoopLagHigh
         expr: nodejs_eventloop_lag_p99_seconds{job="chatapp-api"} > 0.25
         for: 10m
@@ -134,6 +150,28 @@ groups:
           summary: Host CPU usage is high
           description: Host {{ $labels.instance }} has been above 85% CPU for 15 minutes. If latency is rising too, this is a good time to scale up prod.
 
+      - alert: ChatAppHostLoadPerCoreHigh
+        expr: (node_load5{job="node"} / clamp_min(machine_cpu_cores{job="node"}, 1)) > 1.6
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host run queue pressure is high per CPU core
+          description: >
+            5-minute load average per core is above 1.6 for 10m on {{ $labels.instance }}.
+            CPU demand is consistently above scheduling capacity; burst latency will degrade.
+
+      - alert: ChatAppHostIoWaitHigh
+        expr: 100 * avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="iowait"}[5m])) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host I/O wait is high
+          description: >
+            CPU iowait is above 20% for 10m on {{ $labels.instance }}. The node is stalling on disk/network I/O,
+            which often amplifies tail latency under burst traffic.
+
       - alert: ChatAppHostMemoryPressure
         expr: (node_memory_MemAvailable_bytes{job="node"} / node_memory_MemTotal_bytes{job="node"}) < 0.15
         for: 10m
@@ -204,6 +242,33 @@ groups:
           description: >
             OVERLOAD_HTTP_SHED is rejecting traffic. The Node tier is under CPU/event-loop pressure;
             scale app vCPU or reduce work per request.
+
+      - alert: ChatAppCriticalFanoutQueueBacklog
+        expr: max(side_effect_queue_depth{job="chatapp-api",queue="fanout:critical"}) > 3000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Critical fanout queue backlog is growing
+          description: >
+            The `fanout:critical` async queue has over 3000 pending jobs for 10m.
+            Real-time delivery is lagging behind ingress; increase fanout concurrency, reduce fanout work,
+            or scale API workers before user-visible staleness spikes.
+
+      - alert: ChatAppCriticalFanoutQueueDelayHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, queue) (rate(side_effect_queue_delay_ms_bucket{job="chatapp-api",queue="fanout:critical"}[5m]))
+          ) > 1500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Critical fanout queue wait time is high
+          description: >
+            p95 queue delay for `fanout:critical` exceeds 1.5s for 10m. This is an early warning that
+            burst traffic is outpacing side-effect processing and WS/event freshness is degrading.
 
   # Redis (requires redis_exporter job on :9121 — deploy-staging installs it).
   - name: chatapp-redis
