@@ -1,8 +1,12 @@
 [Unit]
 Description=ChatApp Node.js (port %i)
-After=network.target postgresql.service redis.service
-StartLimitIntervalSec=60
-StartLimitBurst=3
+# Bring app up only after local dependencies are online.
+# PgBouncer readiness races caused startup failures (ECONNREFUSED :6432) and
+# systemd start-limit lockouts under reboot/load events.
+Wants=postgresql.service redis.service pgbouncer.service
+After=network.target postgresql.service redis.service pgbouncer.service
+StartLimitIntervalSec=180
+StartLimitBurst=12
 
 [Service]
 Type=simple
