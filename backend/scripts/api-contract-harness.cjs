@@ -417,11 +417,21 @@ add('leaveDM', async () => {
 });
 
 add('sendMessage', async () => {
-  ctx.wsA.send(JSON.stringify({ type: 'subscribe', channel: `channel:${ctx.publicChannelId}` }));
+  const ch = `channel:${ctx.publicChannelId}`;
+  ctx.wsA.send(JSON.stringify({ type: 'subscribe', channel: ch }));
+  await waitWsEvent(
+    ctx.wsA,
+    (m) => m.event === 'subscribed' && m.data?.channel === ch,
+    15000,
+  );
+  // Fanout publishes message:created on a queued worker; under staging load this can lag REST 201.
   const got = waitWsEvent(
     ctx.wsA,
-    (m) => m.event === 'message:created' && String(m.data?.content || '').includes(ctx.searchToken),
-    25000,
+    (m) =>
+      m.event === 'message:created' &&
+      String(m.data?.channel_id || m.data?.channelId || '') === String(ctx.publicChannelId) &&
+      String(m.data?.content || '').includes(ctx.searchToken),
+    60000,
   );
   const { res, json } = await fetchJson('POST', '/messages', ctx.A.token, {
     channelId: ctx.publicChannelId,
@@ -514,11 +524,14 @@ add('onMessageDeleteReceived', async () => {
 });
 
 add('searchMessages', async () => {
+  // Scope to our channel: unscoped search is global newest-first with a small limit, so on
+  // shared staging other traffic can push this message off the first page.
+  const scope = `&channelId=${encodeURIComponent(ctx.publicChannelId)}`;
   let last = 'search miss';
-  for (let i = 0; i < 35; i++) {
+  for (let i = 0; i < 45; i++) {
     const { res, json } = await fetchJson(
       'GET',
-      `/search?q=${encodeURIComponent(ctx.searchToken)}`,
+      `/search?q=${encodeURIComponent(ctx.searchToken)}${scope}`,
       ctx.A.token,
       null,
     );
@@ -528,8 +541,10 @@ add('searchMessages', async () => {
       continue;
     }
     const hits = json.hits || [];
-    if (hits.some((h) => String(h.content).includes(ctx.searchToken))) return;
-    last = 'search hit';
+    if (hits.some((h) => h.id === ctx.msgIds[0] || String(h.content || '').includes(ctx.searchToken))) {
+      return;
+    }
+    last = 'no hit in channel scope';
     await sleep(1000);
   }
   throw new Error(last);
@@ -547,12 +562,14 @@ add('searchMessages (community scope)', async () => {
 });
 
 add('searchMessages (time filter)', async () => {
-  const before = new Date(Date.now() + 60_000).toISOString();
-  let last = 'time filter hit';
-  for (let i = 0; i < 35; i++) {
+  // Large client-side horizon avoids excluding rows when the API host clock is ahead of the runner.
+  const before = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const scope = `&channelId=${encodeURIComponent(ctx.publicChannelId)}`;
+  let last = 'time filter miss';
+  for (let i = 0; i < 45; i++) {
     const { res, json } = await fetchJson(
       'GET',
-      `/search?q=${encodeURIComponent(ctx.searchToken)}&before=${encodeURIComponent(before)}`,
+      `/search?q=${encodeURIComponent(ctx.searchToken)}&before=${encodeURIComponent(before)}${scope}`,
       ctx.A.token,
       null,
     );
@@ -562,8 +579,8 @@ add('searchMessages (time filter)', async () => {
       continue;
     }
     const hits = json.hits || [];
-    if (hits.length >= 1) return;
-    last = 'time filter hit';
+    if (hits.some((h) => h.id === ctx.msgIds[0])) return;
+    last = 'expected message id not in time-filtered channel search';
     await sleep(1000);
   }
   throw new Error(last);
