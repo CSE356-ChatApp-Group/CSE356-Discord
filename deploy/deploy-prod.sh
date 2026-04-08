@@ -69,7 +69,23 @@ echo "  VM vCPUs: ${_REMOTE_NCPU}  workers: ${CHATAPP_INSTANCES}  pgbouncer_pool
 echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: ${POOL_CIRCUIT_BREAKER_QUEUE}"
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
 
-CURRENT_UPSTREAM_PORT=$(ssh "$PROD_USER@$PROD_HOST" "grep -oE '(127\\.0\\.0\\.1|localhost):[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
+# First server port inside `upstream app` only (avoids accidental matches elsewhere and
+# duplicate-line collapse where a naive grep | head picked an arbitrary port).
+CURRENT_UPSTREAM_PORT=$(ssh "$PROD_USER@$PROD_HOST" "python3 <<'PY'
+import re
+from pathlib import Path
+p = Path('/etc/nginx/sites-available/chatapp')
+if not p.is_file():
+    print('')
+    raise SystemExit(0)
+t = p.read_text()
+m = re.search(r'upstream app \\{([^}]+)\\}', t, re.DOTALL)
+if not m:
+    print('')
+    raise SystemExit(0)
+ports = re.findall(r'server\\s+(?:127\\.0\\.0\\.1|localhost):(\\d+)', m.group(1))
+print(ports[0] if ports else '')
+PY" || true)
 if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
   CURRENT_UPSTREAM_PORT="${OLD_PORT}"
 fi
@@ -89,13 +105,33 @@ echo "Current live port: $OLD_PORT"
 echo "Candidate port: $NEW_PORT"
 
 rollback_cutover() {
-  echo "↩ Rolling back nginx upstream ${NEW_PORT} -> ${OLD_PORT}..."
+  echo "↩ Rolling back nginx upstream to prior live port ${OLD_PORT} (single upstream)..."
   ssh "$PROD_USER@$PROD_HOST" "
     set -euo pipefail
+    export ROLLBACK_PORT='${OLD_PORT}'
     TMP_SITE=\$(mktemp)
     sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
-    sudo sed -i -E \"s/(127\\\\.0\\\\.0\\\\.1|localhost):${NEW_PORT}/localhost:${OLD_PORT}/g\" \"\$TMP_SITE\"
-    sudo sed -i -E '/max_fails/!s/^([[:space:]]*server[[:space:]]+(127\\.0\\.0\\.1|localhost):[0-9]+);/\\1 max_fails=0;/' \"\$TMP_SITE\"
+    export TMP_SITE
+    python3 <<'PY'
+import os, re
+cfg_path = os.environ['TMP_SITE']
+old = os.environ['ROLLBACK_PORT']
+keepalive = '''  keepalive 512;
+  keepalive_requests 100000;
+  keepalive_timeout 75s;
+'''
+block = (
+    'upstream app {\\n'
+    f'  server localhost:{old} max_fails=0;\\n'
+    + keepalive
+    + '}'
+)
+text = open(cfg_path).read()
+text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
+if n != 1:
+    raise SystemExit('rollback: upstream app block not replaced (n=%d)' % (n,))
+open(cfg_path, 'w').write(text)
+PY
     sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
     rm -f \"\$TMP_SITE\"
     sudo nginx -t >/dev/null
@@ -433,24 +469,40 @@ ssh "$PROD_USER@$PROD_HOST" "
 echo "✓ Candidate WS smoke passed"
 
 # 9. Switch Nginx
-echo "9. Switching Nginx to candidate..."
+# Rewrite the whole `upstream app { ... }` block instead of globally s/OLD/NEW/g, which
+# collapses dual server lines into duplicate ports (no load balancing + capacity loss).
+echo "9. Switching Nginx to candidate (single-upstream cutover)..."
 ssh "$PROD_USER@$PROD_HOST" "
   set -e
-  
-  # Render nginx config atomically, then swap in one operation.
+  export CHATAPP_INSTANCES='${CHATAPP_INSTANCES}'
+  export NEW_PORT='${NEW_PORT}'
+  export OLD_PORT='${OLD_PORT}'
   TMP_SITE=\$(mktemp)
   sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
-  sudo sed -i -E \"s/(127\\\\.0\\\\.0\\\\.1|localhost):$OLD_PORT/localhost:$NEW_PORT/g\" \"\$TMP_SITE\"
+  export TMP_SITE
+  python3 <<'PY'
+import os, re
+cfg_path = os.environ['TMP_SITE']
+newp = os.environ['NEW_PORT']
+keepalive = '''  keepalive 512;
+  keepalive_requests 100000;
+  keepalive_timeout 75s;
+'''
+block = (
+    'upstream app {\\n'
+    '  server localhost:%s max_fails=0;\\n' % newp
+    + keepalive
+    + '}'
+)
+text = open(cfg_path).read()
+text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
+if n != 1:
+    raise SystemExit('step 9: upstream app block not replaced (n=%d)' % (n,))
+open(cfg_path, 'w').write(text)
+PY
   # Ensure listen backlog is high enough for burst connection ramps.
   sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' \"\$TMP_SITE\"
-  sudo sed -i 's/listen \[::\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' \"\$TMP_SITE\"
-  # Increase upstream keepalive pool so peak load reuses connections instead of opening new ones.
-  sudo sed -i 's/keepalive [0-9]*/keepalive 512/' \"\$TMP_SITE\"
-  sudo grep -q 'keepalive_requests' \"\$TMP_SITE\" \
-    || sudo sed -i '/keepalive 512/a\\  keepalive_requests 100000;\n  keepalive_timeout 75s;' \"\$TMP_SITE\"
-  sudo sed -i 's/keepalive_requests [0-9]*/keepalive_requests 100000/' \"\$TMP_SITE\"
-  # Staging parity: never mark Node upstreams \"down\" after transient 503s (prevents death spiral).
-  sudo sed -i -E '/max_fails/!s/^([[:space:]]*server[[:space:]]+(127\\.0\\.0\\.1|localhost):[0-9]+);/\\1 max_fails=0;/' \"\$TMP_SITE\"
+  sudo sed -i 's/listen \\[::\\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' \"\$TMP_SITE\"
   sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
   rm -f \"\$TMP_SITE\"
   sudo nginx -t >/dev/null
@@ -469,10 +521,78 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo install -m 644 \"\$TMP_MAIN\" /etc/nginx/nginx.conf
   rm -f \"\$TMP_MAIN\"
   sudo nginx -t && sudo systemctl reload nginx
-  
-  echo 'Nginx upstream switched from port $OLD_PORT to $NEW_PORT'
+  echo 'Nginx: traffic -> candidate port '${NEW_PORT}' only'
 "
-echo "✓ Nginx switched to new version"
+echo "✓ Nginx cutover applied"
+
+# 9b–9c. Dual-worker prod: roll the companion to this release, then restore both backends in nginx.
+if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
+  echo "9b. Rolling companion on port ${OLD_PORT} to ${RELEASE_SHA} (dual-worker)..."
+  ssh "$PROD_USER@$PROD_HOST" "
+    set -euo pipefail
+    RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
+    DROPIN_DIR=/etc/systemd/system/chatapp@${OLD_PORT}.service.d
+    sudo mkdir -p \"\$DROPIN_DIR\"
+    printf '[Service]\\nWorkingDirectory=%s/backend\\n' \"\$RELEASE_PATH\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl stop chatapp@${OLD_PORT} 2>/dev/null || true
+    sleep 1
+    sudo systemctl start chatapp@${OLD_PORT}
+    echo 'Companion chatapp@${OLD_PORT} restarted on new release'
+  " || {
+    echo "ERROR: Companion roll to ${RELEASE_SHA} failed."
+    rollback_cutover
+    exit 1
+  }
+  if ! ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh ${OLD_PORT} http://127.0.0.1:${OLD_PORT}"; then
+    echo "ERROR: Health check failed on companion port ${OLD_PORT}."
+    rollback_cutover
+    exit 1
+  fi
+
+  echo "9c. Restoring nginx upstream (least_conn, both workers, max_fails=0)..."
+  ssh "$PROD_USER@$PROD_HOST" "
+    set -euo pipefail
+    export NEW_PORT='${NEW_PORT}'
+    export OLD_PORT='${OLD_PORT}'
+    TMP_SITE=\$(mktemp)
+    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    export TMP_SITE
+    python3 <<'PY'
+import os, re
+cfg_path = os.environ['TMP_SITE']
+newp, oldp = os.environ['NEW_PORT'], os.environ['OLD_PORT']
+keepalive = '''  keepalive 512;
+  keepalive_requests 100000;
+  keepalive_timeout 75s;
+'''
+block = (
+    'upstream app {\\n'
+    '  least_conn;\\n'
+    '  server localhost:%s max_fails=0;\\n' % newp
+    + ('  server localhost:%s max_fails=0;\\n' % oldp)
+    + keepalive
+    + '}'
+)
+text = open(cfg_path).read()
+text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
+if n != 1:
+    raise SystemExit('step 9c: upstream app block not replaced (n=%d)' % (n,))
+open(cfg_path, 'w').write(text)
+PY
+    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    rm -f \"\$TMP_SITE\"
+    sudo nginx -t >/dev/null
+    sudo systemctl reload nginx
+    sudo systemctl enable chatapp@${OLD_PORT} 2>/dev/null || true
+    echo 'Nginx: load-balanced '${NEW_PORT}' + '${OLD_PORT}''
+  " || {
+    echo "ERROR: Dual-upstream nginx rewrite failed."
+    rollback_cutover
+    exit 1
+  }
+  echo "✓ Dual-worker nginx upstream restored"
+fi
 
 # 9.5. Enable new service for auto-start on reboot
 echo "9.5 Enabling candidate service for auto-start on reboot..."
@@ -521,17 +641,15 @@ fi
 
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# 10.55. Copy repo Prometheus template so the `redis` scrape job exists; 10.6 sed still
-# rewrites the old live port the same way as before.
+# 10.55. Copy repo Prometheus template so the `redis` scrape job exists; 10.6 restarts
+# Prometheus to pick up the template (no port rewriting — dual targets stay intact).
 echo "10.55. Syncing prometheus-host.yml from repo (includes redis job)..."
 scp -q "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "$PROD_USER@$PROD_HOST:/tmp/prometheus-host.yml.deploy" || true
 
-# 10.6. Update Prometheus scrape target to the new active port.
-# prometheus-host.yml is the config template for the monitoring stack.
-# We sed-replace the old port, then restart the Prometheus container so its
-# entrypoint re-renders the template to /tmp/prometheus.yml automatically.
-# (hot-reload via /-/reload requires --web.enable-lifecycle which is not set)
-echo "10.6. Updating Prometheus scrape target to port ${NEW_PORT}..."
+# 10.6. Refresh Prometheus host template (scrapes 4000 + 4001).
+# Do **not** global-sed replace ports here: that collapses dual targets to one
+# port when nginx load-balances two Node workers.
+echo "10.6. Refreshing Prometheus scrape config..."
 ssh "$PROD_USER@$PROD_HOST" "
   if [ -f /tmp/prometheus-host.yml.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
@@ -540,12 +658,10 @@ ssh "$PROD_USER@$PROD_HOST" "
   fi
   PROM_TMPL=/opt/chatapp-monitoring/prometheus-host.yml
   if [ -f \"\$PROM_TMPL\" ]; then
-    sudo sed -i \"s/127\\.0\\.0\\.1:${OLD_PORT}/127.0.0.1:${NEW_PORT}/g\" \"\$PROM_TMPL\"
-    echo \"Updated \$PROM_TMPL: ${OLD_PORT} → ${NEW_PORT}\"
     # Restart the container so its entrypoint re-renders the template into
-    # /tmp/prometheus.yml with the correct port and ALERT_ENVIRONMENT substitution.
+    # /tmp/prometheus.yml with ALERT_ENVIRONMENT substitution.
     if sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1; then
-      echo \"Prometheus restarted → scraping port ${NEW_PORT}\"
+      echo 'Prometheus restarted (template unchanged — chatapp-api targets 4000 + 4001)'
     else
       echo 'WARN: Prometheus restart failed (non-fatal)'
     fi

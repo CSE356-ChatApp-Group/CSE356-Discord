@@ -23,8 +23,8 @@ systemctl is-active chatapp@4000 chatapp@4001 2>/dev/null || sudo systemctl is-a
 echo "=== GET /health (localhost:4000) ==="
 curl -fsS -m 5 -H "Host: \${PUBLIC_HOST}" http://127.0.0.1:4000/health | head -c 500 || echo "curl failed"
 echo
-echo "=== GET /health (via nginx :80, edge path) ==="
-curl -fsS -m 5 -H "Host: \${PUBLIC_HOST}" http://127.0.0.1/health | head -c 500 || echo "curl edge failed"
+echo "=== GET /health (via nginx :80, edge path; follow redirects) ==="
+curl -fsSL -m 5 -H "Host: \${PUBLIC_HOST}" http://127.0.0.1/health | head -c 500 || echo "curl edge failed"
 echo
 echo "=== nginx access: recent 502/503 (last ~2000 lines) ==="
 sudo tail -n 2000 /var/log/nginx/access.log 2>/dev/null | grep -E ' (502|503) ' | tail -n 15 || true
