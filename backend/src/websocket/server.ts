@@ -421,6 +421,17 @@ function deliverPubsubMessage(channel, message) {
     outbound = JSON.stringify({ ...parsed, channel });
   }
 
+  const eventName =
+    parsed &&
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    !Array.isArray(parsed)
+      ? String((parsed as any).event || '')
+      : '';
+  const canDropForBackpressure =
+    eventName === 'presence:updated' ||
+    eventName === 'community:channel_message';
+
   clients.forEach((ws) => {
     if (ws.readyState !== WebSocket.OPEN) return;
     const buffered: number = (ws as any).bufferedAmount ?? 0;
@@ -433,10 +444,15 @@ function deliverPubsubMessage(channel, message) {
       ws.terminate();
       return;
     }
-    if (buffered >= WS_BACKPRESSURE_DROP_BYTES) {
+    if (buffered >= WS_BACKPRESSURE_DROP_BYTES && canDropForBackpressure) {
       wsBackpressureEventsTotal.inc({ action: "drop" });
       logger.warn(
-        { event: 'ws.slow_consumer.frame_dropped', userId: (ws as any)._userId, buffered },
+        {
+          event: 'ws.slow_consumer.frame_dropped',
+          userId: (ws as any)._userId,
+          buffered,
+          droppedEvent: eventName || 'unknown',
+        },
         'WS slow consumer: dropping frame due to backpressure',
       );
       return;
