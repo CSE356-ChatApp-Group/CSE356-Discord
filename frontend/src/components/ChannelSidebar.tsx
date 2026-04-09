@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, type Ref } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { api } from '../lib/api';
@@ -20,15 +20,9 @@ export default function ChannelSidebar() {
   const [deleteCommunityBusy, setDeleteCommunityBusy] = useState(false);
   const [channelToDelete, setChannelToDelete] = useState<any | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
-  const activeItemRef = useRef<HTMLButtonElement | null>(null);
-
   const canManage = canManageChannels(activeCommunity);
   const canLeave = canLeaveCommunity(activeCommunity);
   const canDeleteCommunity = isCommunityOwner(activeCommunity);
-
-  useEffect(() => {
-    activeItemRef.current?.scrollIntoView({ block: 'nearest' });
-  }, [activeChannel?.id, activeConv?.id]);
 
   function handleLeaveCommunity() {
     if (!activeCommunity?.id || !canLeave) return;
@@ -150,7 +144,6 @@ export default function ChannelSidebar() {
                 key={ch.id}
                 channel={ch}
                 active={activeChannel?.id === ch.id}
-                itemRef={activeChannel?.id === ch.id ? activeItemRef : undefined}
                 canAccess={canAccess}
                 unreadCount={getChannelUnreadCount(ch, activeChannel?.id === ch.id)}
                 canDelete={canManage}
@@ -185,7 +178,6 @@ export default function ChannelSidebar() {
                 currentUserId={user?.id}
                 unread={isConversationUnread(conv, activeConv?.id === conv.id, user?.id)}
                 active={activeConv?.id === conv.id}
-                itemRef={activeConv?.id === conv.id ? activeItemRef : undefined}
                 onClick={() => selectConversation(conv)}
               />
             ))}
@@ -316,10 +308,9 @@ export default function ChannelSidebar() {
   );
 }
 
-function ChannelRow({ channel, active, unreadCount, canAccess, canDelete, onDelete, onClick, itemRef }: { channel: any, active: boolean, unreadCount: number, canAccess: boolean, canDelete: boolean, onDelete?: () => void, onClick: () => void, itemRef?: Ref<HTMLButtonElement> }) {
+function ChannelRow({ channel, active, unreadCount, canAccess, canDelete, onDelete, onClick }: { channel: any, active: boolean, unreadCount: number, canAccess: boolean, canDelete: boolean, onDelete?: () => void, onClick: () => void }) {
   return (
     <button
-      ref={itemRef}
       className={`${styles.row} ${active ? styles.rowActive : ''} ${canAccess ? '' : styles.rowDisabled}`}
       onClick={onClick}
       data-testid={`channel-item-${channel.id}`}
@@ -404,11 +395,11 @@ function isConversationUnread(conv, active, currentUserId) {
   return myLastReadMessageId !== lastMessageId;
 }
 
-function DmRow({ conv, currentUserId, unread, active, onClick, itemRef }: { conv: any, currentUserId?: string, unread: boolean, active: boolean, onClick: () => void, itemRef?: Ref<HTMLButtonElement> }) {
+function DmRow({ conv, currentUserId, unread, active, onClick }: { conv: any, currentUserId?: string, unread: boolean, active: boolean, onClick: () => void }) {
   const others = (conv.participants || []).filter(p => p.id !== currentUserId);
   const name   = conv.name || others.map(p => p.displayName || p.username).join(', ') || 'Group DM';
   return (
-    <button ref={itemRef} className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open direct conversation ${name}`}>
+    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open direct conversation ${name}`}>
       <span className={styles.dmIcon}>@</span>
       <span className={styles.rowName}>{name}</span>
       {unread && (
