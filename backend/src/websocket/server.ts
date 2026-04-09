@@ -106,11 +106,6 @@ const ACL_CACHE_MAX_ENTRIES =
   Number.isFinite(rawAclCacheMaxEntries) && rawAclCacheMaxEntries > 0
     ? Math.floor(rawAclCacheMaxEntries)
     : 20_000;
-const rawBootstrapBatchSize = Number(process.env.WS_BOOTSTRAP_BATCH_SIZE || 50);
-const WS_BOOTSTRAP_BATCH_SIZE =
-  Number.isFinite(rawBootstrapBatchSize) && rawBootstrapBatchSize > 0
-    ? Math.floor(rawBootstrapBatchSize)
-    : 50;
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -123,13 +118,6 @@ function storeAclCacheEntry(userId: string, channel: string, allowed: boolean) {
     if (oldestKey) aclCache.delete(oldestKey);
   }
   aclCache.set(key, { allowed, expiresAt: Date.now() + ACL_CACHE_TTL_MS });
-}
-
-/** Mark channels as allowed — same membership projection as listAutoSubscriptionChannels. */
-function warmWsAclCacheFromChannelList(userId: string, channels: string[]) {
-  for (const channel of channels) {
-    storeAclCacheEntry(userId, channel, true);
-  }
 }
 
 function invalidateWsAclCache(userId: string, channel: string) {
@@ -443,105 +431,7 @@ redisSub.on("message", (channel, message) => {
   deliverPubsubMessage(channel, message);
 });
 
-const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
-  process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '30',
-  10,
-);
-
-function wsBootstrapCacheKey(userId) {
-  return `ws:bootstrap:${userId}`;
-}
-
-/** Invalidate the cached WS subscription list for a user. Call this whenever
- *  their community membership, channel access, or conversation list changes. */
-async function invalidateWsBootstrapCache(userId) {
-  await redis.del(wsBootstrapCacheKey(userId));
-}
-
-/**
- * Lists every community, channel, and DM for Redis SUBSCRIBE on connect — fine at
- * class scale. If load tests show Redis CPU or pub/sub delivery dominating as
- * membership grows, revisit with aggregated feeds, lazy subscribe, or
- * server-side filtering (phase-2).
- */
-async function listAutoSubscriptionChannels(userId) {
-  const cacheKey = wsBootstrapCacheKey(userId);
-  const cached = await redis.get(cacheKey).catch(() => null);
-  if (cached) {
-    try {
-      return JSON.parse(cached);
-    } catch {
-      await redis.del(cacheKey);
-    }
-  }
-
-  const [conversationRes, communityRes, channelRes] = await Promise.all([
-    query(
-      `SELECT conversation_id::text AS id
-       FROM conversation_participants
-       WHERE user_id = $1 AND left_at IS NULL`,
-      [userId],
-    ),
-    query(
-      `SELECT community_id::text AS id
-       FROM community_members
-       WHERE user_id = $1`,
-      [userId],
-    ),
-    query(
-      `SELECT c.id::text AS id
-       FROM channels c
-       JOIN community_members cm
-         ON cm.community_id = c.community_id
-        AND cm.user_id = $1
-       LEFT JOIN channel_members chm
-         ON chm.channel_id = c.id
-        AND chm.user_id = $1
-       WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
-      [userId],
-    ),
-  ]);
-
-  const channels = [
-    ...conversationRes.rows.map((row) => `conversation:${row.id}`),
-    ...communityRes.rows.map((row) => `community:${row.id}`),
-    ...channelRes.rows.map((row) => `channel:${row.id}`),
-  ];
-
-  // Cache for a short TTL. Invalidated explicitly on membership changes.
-  redis
-    .set(cacheKey, JSON.stringify(channels), 'EX', WS_BOOTSTRAP_CACHE_TTL_SECONDS)
-    .catch(() => {}); // fire-and-forget, non-critical
-
-  return channels;
-}
-
-async function bootstrapUserSubscriptions(ws, userId) {
-  const channels = await listAutoSubscriptionChannels(userId);
-  warmWsAclCacheFromChannelList(userId, channels);
-  for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-    const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-    await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
-    if (ws.readyState !== WebSocket.OPEN) return;
-  }
-}
-
-// Retry bootstrap on pool circuit-breaker fires (transient under burst load).
-// The connection stays open while we wait; if pool drains within ~3.5s the
-// user gets their subscriptions without noticing anything.
-async function bootstrapWithRetry(ws, userId, attempt = 0) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  try {
-    await bootstrapUserSubscriptions(ws, userId);
-  } catch (err) {
-    const isCircuitOpen = err && err.code === 'POOL_CIRCUIT_OPEN';
-    if (isCircuitOpen && attempt < 3) {
-      const delayMs = (attempt + 1) * 600; // 600 ms → 1200 ms → 1800 ms
-      await new Promise((r) => setTimeout(r, delayMs));
-      return bootstrapWithRetry(ws, userId, attempt + 1);
-    }
-    throw err; // non-retryable or exhausted – caller logs
-  }
+async function invalidateWsBootstrapCache(_userId) {
 }
 
 function hasLocalSubscribers(redisChannel) {
@@ -643,14 +533,14 @@ wss.on("connection", async (ws, req) => {
       logger.warn({ err, userId: user.id }, "WS presence setup failed"),
     );
 
-  bootstrapWithRetry(ws, user.id)
+  ws._bootstrapPromise
     .then(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ event: 'ready' }));
       }
     })
     .catch((err) =>
-      logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed"),
+      logger.warn({ err, userId: user.id }, "WS bootstrap failed"),
     );
 });
 

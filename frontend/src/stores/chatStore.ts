@@ -272,6 +272,8 @@ const readCoalesceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let readFlushVisibilityHooked = false;
 
 let wsUserSubscriptionId: string | null = null;
+const wsCommunitySubscriptionIds = new Set<string>();
+let wsActiveChannelId: string | null = null;
 
 function hookReadFlushOnVisibilityHidden() {
   if (readFlushVisibilityHooked || typeof document === 'undefined') return;
@@ -373,9 +375,43 @@ function upsertConversation(conversations: Entity[], conversation: Entity) {
 
 function ensureUserWsSubscription(handler: (event: any) => void) {
   const userId = useAuthStore.getState().user?.id;
-  if (!userId || wsUserSubscriptionId === userId) return;
+  if (!userId) return;
+  if (wsUserSubscriptionId && wsUserSubscriptionId !== userId) {
+    wsManager.unsubscribe(`user:${wsUserSubscriptionId}`, handler);
+    wsUserSubscriptionId = null;
+  }
+  if (wsUserSubscriptionId === userId) return;
   wsManager.subscribe(`user:${userId}`, handler);
   wsUserSubscriptionId = userId;
+}
+
+function syncCommunityWsSubscriptions(communityIds: string[], handler: (event: any) => void) {
+  const nextIds = new Set((communityIds || []).filter(Boolean));
+
+  for (const communityId of [...wsCommunitySubscriptionIds]) {
+    if (nextIds.has(communityId)) continue;
+    wsManager.unsubscribe(`community:${communityId}`, handler);
+    wsCommunitySubscriptionIds.delete(communityId);
+  }
+
+  for (const communityId of nextIds) {
+    if (wsCommunitySubscriptionIds.has(communityId)) continue;
+    wsManager.subscribe(`community:${communityId}`, handler);
+    wsCommunitySubscriptionIds.add(communityId);
+  }
+}
+
+function syncActiveChannelWsSubscription(channelId: string | null, handler: (event: any) => void) {
+  if (wsActiveChannelId && wsActiveChannelId !== channelId) {
+    wsManager.unsubscribe(`channel:${wsActiveChannelId}`, handler);
+    wsActiveChannelId = null;
+  }
+
+  if (!channelId) return;
+  if (wsActiveChannelId === channelId) return;
+
+  wsManager.subscribe(`channel:${channelId}`, handler);
+  wsActiveChannelId = channelId;
 }
 
 function normalizePresenceStatus(value: any): PresenceStatus {
@@ -406,6 +442,7 @@ function resolveSearchAuthorId(authorText: string, members: Entity[], activeConv
 }
 
 export function resetChatStore() {
+  const handler = useChatStore.getState()._handleWsEvent;
   // Cancel any in-flight community fetch so the next user starts fresh.
   communitiesInFlight = null;
   channelsInFlightByCommunity.clear();
@@ -416,7 +453,18 @@ export function resetChatStore() {
   }
   readCoalesceTimers.clear();
   pendingReadByTarget.clear();
+  if (wsUserSubscriptionId) {
+    wsManager.unsubscribe(`user:${wsUserSubscriptionId}`, handler);
+  }
+  for (const communityId of [...wsCommunitySubscriptionIds]) {
+    wsManager.unsubscribe(`community:${communityId}`, handler);
+  }
+  if (wsActiveChannelId) {
+    wsManager.unsubscribe(`channel:${wsActiveChannelId}`, handler);
+  }
   wsUserSubscriptionId = null;
+  wsCommunitySubscriptionIds.clear();
+  wsActiveChannelId = null;
   useChatStore.getState().reset();
 }
 
@@ -487,11 +535,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               : s.activeCommunity)
           : s.activeCommunity,
       }));
-      communities.forEach((community: Entity) => {
-        if (community?.id && community?.my_role) {
-          wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
-        }
-      });
+      syncCommunityWsSubscriptions(
+        communities
+          .filter((community: Entity) => community?.id && community?.my_role)
+          .map((community: Entity) => community.id),
+        get()._handleWsEvent,
+      );
       // If a community was already active (e.g. after login without a page refresh),
       // re-fetch its channels so unread counts are up-to-date from the server.
       const activeCommunityId = get().activeCommunity?.id;
@@ -517,6 +566,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       myRole: community?.myRole || 'owner',
     };
     set(s => ({ communities: [...s.communities, created] }));
+    syncCommunityWsSubscriptions(
+      get().communities
+        .filter((entry: Entity) => entry?.id && entry?.my_role)
+        .map((entry: Entity) => entry.id),
+      get()._handleWsEvent,
+    );
     return created;
   },
 
@@ -524,12 +579,26 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     await api.delete(`/communities/${communityId}`);
     invalidateApiCache('/communities');
     set((s) => removeCommunityState(s, communityId));
+    syncCommunityWsSubscriptions(
+      get().communities
+        .filter((entry: Entity) => entry?.id && entry?.my_role)
+        .map((entry: Entity) => entry.id),
+      get()._handleWsEvent,
+    );
+    syncActiveChannelWsSubscription(get().activeChannel?.id || null, get()._handleWsEvent);
   },
 
   async leaveCommunity(communityId: string) {
     await api.delete(`/communities/${communityId}/leave`);
     invalidateApiCache('/communities');
     set((s) => removeCommunityState(s, communityId));
+    syncCommunityWsSubscriptions(
+      get().communities
+        .filter((entry: Entity) => entry?.id && entry?.my_role)
+        .map((entry: Entity) => entry.id),
+      get()._handleWsEvent,
+    );
+    syncActiveChannelWsSubscription(get().activeChannel?.id || null, get()._handleWsEvent);
   },
 
   async selectCommunity(community: Entity) {
@@ -562,10 +631,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     } else {
       flushAllPendingReadCoalesce();
       set({ activeChannel: null, activeConv: null });
+      syncActiveChannelWsSubscription(null, get()._handleWsEvent);
     }
     await membersPromise;
-    // Subscribe to community-level events
-    wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
   },
 
   // ── Channels ──────────────────────────────────────────────────────────────
@@ -615,12 +683,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 : s.activeChannel)
             : s.activeChannel,
         };
-      });
-      (channels || []).forEach((channel: Entity) => {
-        const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
-        if (channel?.id && canAccess) {
-          wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
-        }
       });
       return channels;
     })();
@@ -688,6 +750,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         messagePagination: nextMessagePagination,
       };
     });
+    syncActiveChannelWsSubscription(get().activeChannel?.id || null, get()._handleWsEvent);
   },
 
   async selectChannel(channel: Entity) {
@@ -719,8 +782,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (shouldFetchLatestMessages(get(), channel.id)) {
       await get().fetchMessages({ channelId: channel.id });
     }
-    // Subscribe to real-time events for this channel
-    wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
+    syncActiveChannelWsSubscription(channel.id, get()._handleWsEvent);
     // Mark latest message as read
     const msgs = get().messages[channel.id];
     if (msgs?.length && loadedHistoryIncludesLatest(get(), channel.id)) {
@@ -779,16 +841,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const me = useAuthStore.getState().user;
     const visibleConversations = (conversations || []).filter((conv: Entity) => isVisibleConversation(conv, me?.id));
     set({ conversations: visibleConversations });
-    visibleConversations.forEach((conv: Entity) => {
-      if (conv?.id) {
-        wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
-      }
-    });
   },
 
   openHome() {
     flushAllPendingReadCoalesce();
     set({ activeCommunity: null, activeChannel: null });
+    syncActiveChannelWsSubscription(null, get()._handleWsEvent);
   },
 
   async openDm(participants: string | string[]) {
@@ -827,7 +885,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (shouldFetchLatestMessages(get(), conversation.id)) {
       await get().fetchMessages({ conversationId: conversation.id });
     }
-    wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
+    syncActiveChannelWsSubscription(null, get()._handleWsEvent);
     const msgs = get().messages[conversation.id];
     if (msgs?.length && loadedHistoryIncludesLatest(get(), conversation.id)) {
       const lastId = msgs[msgs.length - 1].id;
@@ -871,7 +929,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (shouldFetchLatestMessages(get(), conv.id)) {
       await get().fetchMessages({ conversationId: conv.id });
     }
-    wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
+    syncActiveChannelWsSubscription(null, get()._handleWsEvent);
     const msgs = get().messages[conv.id];
     if (msgs?.length && loadedHistoryIncludesLatest(get(), conv.id)) {
       const lastId = msgs[msgs.length - 1].id;
@@ -908,7 +966,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     );
 
     if (conversation?.id) {
-      wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
       const existingEntry = get().conversations.find((c) => c.id === conversation.id);
 
       if (!existingEntry) {
@@ -1219,7 +1276,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         participants: currentState.activeConv?.id === conversationId ? currentState.activeConv?.participants : [],
       };
 
-      wsManager.subscribe(`conversation:${conversationId}`, get()._handleWsEvent);
       set((s) => ({
       activeConv: nextConversation,
       activeChannel: null,
@@ -1247,6 +1303,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             )
           : [nextConversation, ...s.conversations],
       }));
+      syncActiveChannelWsSubscription(null, get()._handleWsEvent);
       return;
     }
 
@@ -1266,7 +1323,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       communityId: communityId || nextCommunity?.id || null,
     };
 
-    wsManager.subscribe(`channel:${channelId}`, get()._handleWsEvent);
+    syncActiveChannelWsSubscription(channelId, get()._handleWsEvent);
     set((s) => ({
       activeCommunity: nextCommunity || s.activeCommunity,
       activeChannel: {
@@ -1347,6 +1404,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             nextChannels = s.channels.map((channel) => {
               if (channel.id !== msg.channel_id) return channel;
               const isActive = s.activeChannel?.id === msg.channel_id;
+              const previousUnreadCount = Number(channel.unread_message_count ?? 0);
+              const isOwnMessage = msg.author_id === me?.id;
               const row = {
                 ...channel,
                 updated_at: msg.created_at || msg.createdAt || channel.updated_at,
@@ -1361,7 +1420,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 hasNewActivity: !isActive,
                 unread_message_count: atLiveTail && isActive
                   ? 0
-                  : (channel.unread_message_count ?? 0) + 1,
+                  : (isOwnMessage ? previousUnreadCount : previousUnreadCount + 1),
               };
               if (!markReadInSamePass) return row;
               return {
@@ -1670,6 +1729,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const { communityId } = event.data || {};
         if (!communityId) break;
         set((s) => removeCommunityState(s, communityId));
+        syncCommunityWsSubscriptions(
+          get().communities
+            .filter((entry: Entity) => entry?.id && entry?.my_role)
+            .map((entry: Entity) => entry.id),
+          store._handleWsEvent,
+        );
+        syncActiveChannelWsSubscription(get().activeChannel?.id || null, store._handleWsEvent);
         break;
       }
       case 'channel:created': {
@@ -1699,8 +1765,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         break;
       }
       case 'community:channel_message': {
-        const { communityId, channelId } = event.data || {};
+        const { communityId, channelId, messageId, authorId, createdAt } = event.data || {};
         if (!communityId || !channelId) break;
+        const me = useAuthStore.getState().user;
 
         set((s) => {
           const chIdx = s.channels.findIndex((c) => c.id === channelId);
@@ -1710,31 +1777,38 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               ? s.channels
               : (() => {
                   const n = [...s.channels];
+                  const previous = n[chIdx];
+                  const isActive = s.activeChannel?.id === channelId;
+                  const previousUnreadCount = Number(previous.unread_message_count ?? 0);
+                  const isOwnMessage = authorId && authorId === me?.id;
                   n[chIdx] = {
-                    ...n[chIdx],
-                    has_new_activity: s.activeChannel?.id !== channelId,
-                    hasNewActivity: s.activeChannel?.id !== channelId,
+                    ...previous,
+                    last_message_id: messageId || previous.last_message_id || previous.lastMessageId,
+                    lastMessageId: messageId || previous.lastMessageId || previous.last_message_id,
+                    last_message_author_id: authorId || previous.last_message_author_id || previous.lastMessageAuthorId,
+                    lastMessageAuthorId: authorId || previous.lastMessageAuthorId || previous.last_message_author_id,
+                    last_message_at: createdAt || previous.last_message_at || previous.lastMessageAt,
+                    lastMessageAt: createdAt || previous.lastMessageAt || previous.last_message_at,
+                    has_new_activity: !isActive,
+                    hasNewActivity: !isActive,
+                    unread_message_count: isActive
+                      ? 0
+                      : (isOwnMessage ? previousUnreadCount : previousUnreadCount + 1),
                   };
                   return n;
                 })();
+          const unreadCount = countUnreadChannels(nextChannels, me?.id, s.activeChannel?.id);
           const nextCommunities =
             coIdx === -1
               ? s.communities
               : (() => {
                   const n = [...s.communities];
-                  const prev = n[coIdx];
                   n[coIdx] = {
-                    ...prev,
-                    has_unread_channels: true,
-                    hasUnreadChannels: true,
-                    unread_channel_count: Math.max(
-                      Number(prev.unread_channel_count ?? prev.unreadChannelCount ?? 0),
-                      1,
-                    ),
-                    unreadChannelCount: Math.max(
-                      Number(prev.unread_channel_count ?? prev.unreadChannelCount ?? 0),
-                      1,
-                    ),
+                    ...n[coIdx],
+                    has_unread_channels: unreadCount > 0,
+                    hasUnreadChannels: unreadCount > 0,
+                    unread_channel_count: unreadCount,
+                    unreadChannelCount: unreadCount,
                     has_new_activity: s.activeCommunity?.id !== communityId,
                     hasNewActivity: s.activeCommunity?.id !== communityId,
                   };
@@ -1747,20 +1821,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               s.activeCommunity?.id === communityId
                 ? {
                     ...s.activeCommunity,
-                    has_unread_channels: true,
-                    hasUnreadChannels: true,
-                    unread_channel_count: Math.max(
-                      Number(
-                        s.activeCommunity.unread_channel_count ?? s.activeCommunity.unreadChannelCount ?? 0,
-                      ),
-                      1,
-                    ),
-                    unreadChannelCount: Math.max(
-                      Number(
-                        s.activeCommunity.unread_channel_count ?? s.activeCommunity.unreadChannelCount ?? 0,
-                      ),
-                      1,
-                    ),
+                    has_unread_channels: unreadCount > 0,
+                    hasUnreadChannels: unreadCount > 0,
+                    unread_channel_count: unreadCount,
+                    unreadChannelCount: unreadCount,
                     has_new_activity: false,
                     hasNewActivity: false,
                   }
@@ -1774,8 +1838,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversation = event.data?.conversation;
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
-
-        wsManager.subscribe(`conversation:${conversationId}`, store._handleWsEvent);
 
         if (!conversation) {
           store.fetchConversations().catch(() => {});
@@ -1815,8 +1877,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversation = event.data?.conversation;
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
-
-        wsManager.subscribe(`conversation:${conversationId}`, store._handleWsEvent);
 
         if (!conversation) {
           store.fetchConversations().catch(() => {});

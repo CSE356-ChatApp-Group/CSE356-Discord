@@ -388,10 +388,14 @@ router.patch(
         const participantIds: string[] = Array.isArray(conv?.participants)
           ? conv.participants.map((p: { id: string }) => p.id)
           : [];
+        const targets = [
+          `conversation:${id}`,
+          ...participantIds.map((participantId) => `user:${participantId}`),
+        ];
 
         await Promise.allSettled([
           publishConversationEvents(
-            [`conversation:${id}`],
+            targets,
             'conversation:updated',
             { conversation: conv, conversationId: id }
           ),
