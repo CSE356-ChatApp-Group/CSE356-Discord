@@ -231,6 +231,39 @@ function isVisibleConversation(conv: Entity, currentUserId?: string) {
   return participants.some((participant: Entity) => participant?.id && participant.id !== currentUserId);
 }
 
+async function refreshConversationsFromServer() {
+  invalidateApiCache('/conversations');
+  await useChatStore.getState().fetchConversations();
+}
+
+async function hydrateConversationById(conversationId: string) {
+  if (!conversationId) return null;
+  const store = useChatStore.getState();
+  ensureUserWsSubscription(store._handleWsEvent);
+  invalidateApiCache('/conversations');
+  invalidateApiCache(`/conversations/${conversationId}`);
+
+  const { conversation } = await api.get(`/conversations/${conversationId}`);
+  const me = useAuthStore.getState().user;
+  if (!conversation || !isVisibleConversation(conversation, me?.id)) {
+    return null;
+  }
+
+  useChatStore.setState((s) => ({
+    conversations: upsertConversation(s.conversations, conversation),
+    activeConv:
+      s.activeConv?.id === conversationId
+        ? {
+            ...s.activeConv,
+            ...conversation,
+            participants: conversation.participants || s.activeConv.participants,
+          }
+        : s.activeConv,
+  }));
+
+  return conversation;
+}
+
 function removeCommunityState(state: ChatState, communityId: string) {
   const removedChannelIds = state.channels
     .filter((channel) => (channel.community_id || channel.communityId) === communityId)
@@ -274,6 +307,12 @@ let readFlushVisibilityHooked = false;
 let wsUserSubscriptionId: string | null = null;
 const wsCommunitySubscriptionIds = new Set<string>();
 let wsActiveChannelId: string | null = null;
+let wsActiveConversationId: string | null = null;
+
+function handleActiveConversationRealtime(event: any) {
+  if (event?.event !== 'presence:updated') return;
+  useChatStore.getState()._handleWsEvent(event);
+}
 
 function hookReadFlushOnVisibilityHidden() {
   if (readFlushVisibilityHooked || typeof document === 'undefined') return;
@@ -414,6 +453,19 @@ function syncActiveChannelWsSubscription(channelId: string | null, handler: (eve
   wsActiveChannelId = channelId;
 }
 
+function syncActiveConversationWsSubscription(conversationId: string | null) {
+  if (wsActiveConversationId && wsActiveConversationId !== conversationId) {
+    wsManager.unsubscribe(`conversation:${wsActiveConversationId}`, handleActiveConversationRealtime);
+    wsActiveConversationId = null;
+  }
+
+  if (!conversationId) return;
+  if (wsActiveConversationId === conversationId) return;
+
+  wsManager.subscribe(`conversation:${conversationId}`, handleActiveConversationRealtime);
+  wsActiveConversationId = conversationId;
+}
+
 function normalizePresenceStatus(value: any): PresenceStatus {
   return VALID_PRESENCE_STATUSES.has(value) ? value : 'offline';
 }
@@ -462,9 +514,13 @@ export function resetChatStore() {
   if (wsActiveChannelId) {
     wsManager.unsubscribe(`channel:${wsActiveChannelId}`, handler);
   }
+  if (wsActiveConversationId) {
+    wsManager.unsubscribe(`conversation:${wsActiveConversationId}`, handleActiveConversationRealtime);
+  }
   wsUserSubscriptionId = null;
   wsCommunitySubscriptionIds.clear();
   wsActiveChannelId = null;
+  wsActiveConversationId = null;
   useChatStore.getState().reset();
 }
 
@@ -586,6 +642,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       get()._handleWsEvent,
     );
     syncActiveChannelWsSubscription(get().activeChannel?.id || null, get()._handleWsEvent);
+    syncActiveConversationWsSubscription(get().activeConv?.id || null);
   },
 
   async leaveCommunity(communityId: string) {
@@ -599,6 +656,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       get()._handleWsEvent,
     );
     syncActiveChannelWsSubscription(get().activeChannel?.id || null, get()._handleWsEvent);
+    syncActiveConversationWsSubscription(get().activeConv?.id || null);
   },
 
   async selectCommunity(community: Entity) {
@@ -632,6 +690,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       flushAllPendingReadCoalesce();
       set({ activeChannel: null, activeConv: null });
       syncActiveChannelWsSubscription(null, get()._handleWsEvent);
+      syncActiveConversationWsSubscription(null);
     }
     await membersPromise;
   },
@@ -751,6 +810,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       };
     });
     syncActiveChannelWsSubscription(get().activeChannel?.id || null, get()._handleWsEvent);
+    syncActiveConversationWsSubscription(get().activeConv?.id || null);
   },
 
   async selectChannel(channel: Entity) {
@@ -783,6 +843,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       await get().fetchMessages({ channelId: channel.id });
     }
     syncActiveChannelWsSubscription(channel.id, get()._handleWsEvent);
+    syncActiveConversationWsSubscription(null);
     // Mark latest message as read
     const msgs = get().messages[channel.id];
     if (msgs?.length && loadedHistoryIncludesLatest(get(), channel.id)) {
@@ -845,8 +906,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   openHome() {
     flushAllPendingReadCoalesce();
-    set({ activeCommunity: null, activeChannel: null });
+    set({ activeCommunity: null, activeChannel: null, activeConv: null });
     syncActiveChannelWsSubscription(null, get()._handleWsEvent);
+    syncActiveConversationWsSubscription(null);
   },
 
   async openDm(participants: string | string[]) {
@@ -865,6 +927,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
 
     const { conversation } = await api.post('/conversations', { participantIds: cleaned });
+    invalidateApiCache('/conversations');
+    invalidateApiCache(`/conversations/${conversation.id}`);
     set(s => {
       const existing = s.conversations.find(c => c.id === conversation.id);
       const activeConv = existing
@@ -886,6 +950,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       await get().fetchMessages({ conversationId: conversation.id });
     }
     syncActiveChannelWsSubscription(null, get()._handleWsEvent);
+    syncActiveConversationWsSubscription(conversation.id);
     const msgs = get().messages[conversation.id];
     if (msgs?.length && loadedHistoryIncludesLatest(get(), conversation.id)) {
       const lastId = msgs[msgs.length - 1].id;
@@ -930,6 +995,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       await get().fetchMessages({ conversationId: conv.id });
     }
     syncActiveChannelWsSubscription(null, get()._handleWsEvent);
+    syncActiveConversationWsSubscription(conv.id);
     const msgs = get().messages[conv.id];
     if (msgs?.length && loadedHistoryIncludesLatest(get(), conv.id)) {
       const lastId = msgs[msgs.length - 1].id;
@@ -964,6 +1030,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       `/conversations/${conversationId}/invite`,
       { participantIds: cleaned }
     );
+    invalidateApiCache('/conversations');
+    if (conversation?.id) invalidateApiCache(`/conversations/${conversation.id}`);
 
     if (conversation?.id) {
       const existingEntry = get().conversations.find((c) => c.id === conversation.id);
@@ -1005,6 +1073,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }
     }
 
+    syncActiveConversationWsSubscription(get().activeConv?.id || null);
+
     return conversation || null;
   },
 
@@ -1012,6 +1082,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     flushPendingReadForTarget(`dm:${conversationId}`);
     try {
       await api.post(`/conversations/${conversationId}/leave`, {});
+      invalidateApiCache('/conversations');
+      invalidateApiCache(`/conversations/${conversationId}`);
     } catch (err: any) {
       const status = Number(err?.status || 0);
       // Treat already-left/not-found as idempotent success for UI smoothness.
@@ -1025,10 +1097,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
       activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
     }));
+    syncActiveConversationWsSubscription(get().activeConv?.id || null);
   },
 
   async renameGroupDm(conversationId: string, name: string) {
     const { conversation } = await api.patch(`/conversations/${conversationId}`, { name: name.trim() || null });
+    invalidateApiCache('/conversations');
+    invalidateApiCache(`/conversations/${conversationId}`);
     set(s => ({
       conversations: s.conversations.map(c => c.id === conversationId ? { ...c, name: conversation.name } : c),
       activeConv: s.activeConv?.id === conversationId ? { ...s.activeConv, name: conversation.name } : s.activeConv,
@@ -1304,6 +1379,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           : [nextConversation, ...s.conversations],
       }));
       syncActiveChannelWsSubscription(null, get()._handleWsEvent);
+      syncActiveConversationWsSubscription(conversationId);
       return;
     }
 
@@ -1324,6 +1400,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     };
 
     syncActiveChannelWsSubscription(channelId, get()._handleWsEvent);
+    syncActiveConversationWsSubscription(null);
     set((s) => ({
       activeCommunity: nextCommunity || s.activeCommunity,
       activeChannel: {
@@ -1575,7 +1652,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           queueMarkMessageRead(msg.id, { conversationId: msg.conversation_id, coalesce: true });
         }
         if (msg.conversation_id && !knowsConversation) {
-          store.fetchConversations().catch(() => {});
+          hydrateConversationById(msg.conversation_id)
+            .catch(() => refreshConversationsFromServer().catch(() => {}));
         }
         break;
       }
@@ -1746,6 +1824,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           store._handleWsEvent,
         );
         syncActiveChannelWsSubscription(get().activeChannel?.id || null, store._handleWsEvent);
+        syncActiveConversationWsSubscription(get().activeConv?.id || null);
         break;
       }
       case 'channel:created': {
@@ -1848,9 +1927,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversation = event.data?.conversation;
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
+        invalidateApiCache('/conversations');
+        invalidateApiCache(`/conversations/${conversationId}`);
 
         if (!conversation) {
-          store.fetchConversations().catch(() => {});
+          hydrateConversationById(conversationId)
+            .catch(() => refreshConversationsFromServer().catch(() => {}));
           break;
         }
 
@@ -1887,9 +1969,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const conversation = event.data?.conversation;
         const conversationId = event.data?.conversationId || conversation?.id;
         if (!conversationId) break;
+        invalidateApiCache('/conversations');
+        invalidateApiCache(`/conversations/${conversationId}`);
 
         if (!conversation) {
-          store.fetchConversations().catch(() => {});
+          hydrateConversationById(conversationId)
+            .catch(() => refreshConversationsFromServer().catch(() => {}));
           break;
         }
 
@@ -1949,6 +2034,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
             activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
           }));
+          syncActiveConversationWsSubscription(get().activeConv?.id || null);
           break;
         }
 
@@ -1981,6 +2067,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 : s.activeConv,
           };
         });
+        syncActiveConversationWsSubscription(get().activeConv?.id || null);
         break;
       }
     }

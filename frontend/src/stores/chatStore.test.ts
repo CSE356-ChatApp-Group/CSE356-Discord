@@ -479,6 +479,53 @@ describe('chatStore websocket author hydration', () => {
     expect(state.conversations[0].id).toBe('conv-1');
   });
 
+  it('hydrates an unknown DM from the exact conversation endpoint on first message', async () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-2',
+        username: 'alex',
+        displayName: 'Alex',
+        email: 'alex@example.com',
+      },
+    });
+
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === '/conversations/conv-new') {
+        return {
+          conversation: {
+            id: 'conv-new',
+            participants: [
+              { id: 'user-1', username: 'sam' },
+              { id: 'user-2', username: 'alex' },
+            ],
+          },
+        };
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    useChatStore.setState({ conversations: [] } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'message:created',
+      data: {
+        id: 'msg-new',
+        conversation_id: 'conv-new',
+        author_id: 'user-1',
+        content: 'first dm',
+        created_at: new Date().toISOString(),
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const state = useChatStore.getState();
+    expect(invalidateApiCache).toHaveBeenCalledWith('/conversations');
+    expect(apiGet).toHaveBeenCalledWith('/conversations/conv-new');
+    expect(state.conversations.some((conv) => conv.id === 'conv-new')).toBe(true);
+  });
+
   it('keeps participant_added conversation in active DM list', () => {
     useAuthStore.setState({
       user: {
