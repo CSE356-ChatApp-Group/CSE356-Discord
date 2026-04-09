@@ -788,7 +788,7 @@ router.post('/',
         await publishConversationEvent(conversationId, 'message:created', message);
       }
       if (communityId) {
-        sideEffects.publishMessageEvent(`community:${communityId}`, 'community:channel_message', {
+        sideEffects.publishBackgroundEvent(`community:${communityId}`, 'community:channel_message', {
           communityId,
           channelId,
           messageId: baseMessage.id,

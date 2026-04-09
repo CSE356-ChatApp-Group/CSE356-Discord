@@ -45,14 +45,14 @@ function queueConfig(queueName) {
       dropOnOverflow: true,
     };
   }
-  // fanout:critical — message and presence delivery.  Concurrency > 1 is safe
+  // fanout:critical — message and read-state delivery. Concurrency > 1 is safe
   // because each publish is an independent Redis call; within-channel ordering
   // is best-effort across the cluster anyway (multiple API nodes publish
   // concurrently).  Higher concurrency reduces queue build-up under burst load.
   return {
     concurrency: FANOUT_QUEUE_CONCURRENCY,
     maxDepth: FANOUT_CRITICAL_MAX_DEPTH,
-    dropOnOverflow: true,
+    dropOnOverflow: false,
   };
 }
 
@@ -140,6 +140,12 @@ function publishMessageEvent(target, event, data) {
   });
 }
 
+function publishBackgroundEvent(target, event, data) {
+  enqueue('fanout:background.publish', async () => {
+    await fanout.publish(target, { event, data });
+  });
+}
+
 /**
  * For channel message:created events only.
  * Increments channel:msg_count:{channelId} in Redis (initializing from DB if needed),
@@ -188,6 +194,7 @@ function getQueueDepth() {
 
 module.exports = {
   publishMessageEvent,
+  publishBackgroundEvent,
   publishMessageEventWithUnread,
   deleteAttachmentObjects,
   getQueueDepth,
