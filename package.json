@@ -25,7 +25,6 @@
     "e2e:install": "npm run e2e:install --workspace=frontend",
     "e2e": "npm run e2e --workspace=frontend",
     "e2e:ci": "npm run e2e:ci --workspace=frontend",
-    "e2e:pr-smoke": "npm run e2e:pr-smoke --workspace=frontend",
     "e2e:full": "npm run e2e:full --workspace=frontend",
     "e2e:full:ci": "npm run e2e:full:ci --workspace=frontend",
     "e2e:staging": "npm run e2e:staging --workspace=frontend",

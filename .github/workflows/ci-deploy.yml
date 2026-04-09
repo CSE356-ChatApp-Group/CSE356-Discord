@@ -148,6 +148,7 @@ jobs:
           tar --exclude=node_modules --exclude=.git --exclude=.env \
             -czf releases/chatapp-${{ github.sha }}.tar.gz \
             backend/dist/ \
+            backend/scripts/run-migrations.cjs \
             backend/package*.json \
             backend/tsconfig.json \
             frontend/dist/ \

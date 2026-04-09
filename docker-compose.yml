@@ -115,6 +115,7 @@ services:
       - ./migrations:/migrations:ro
     environment:
       DATABASE_URL: postgres://chatapp:${POSTGRES_PASSWORD:-chatapp_dev}@postgres:5432/chatapp
+      MIGRATIONS_DIR: /migrations
     depends_on:
       postgres: { condition: service_healthy }
     networks: [chatapp]

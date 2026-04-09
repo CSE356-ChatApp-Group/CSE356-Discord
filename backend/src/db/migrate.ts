@@ -1,72 +1,12 @@
 /**
- * Minimal migration runner.
- * Reads .sql files from /migrations in alphabetical order and applies
- * any that haven't been recorded in the schema_migrations table.
+ * Migration entry for production builds: tsc emits dist/db/migrate.js, which loads
+ * scripts/run-migrations.cjs (same implementation as `npm run migrate`).
  *
- * Usage:  node src/db/migrate.js
+ * Local / CI: use `npm run migrate` → node scripts/run-migrations.cjs (no tsx/esbuild).
  */
 
 'use strict';
 
-require('dotenv').config();
-
 const path = require('path');
-const fs   = require('fs');
-const { pool, getClient } = require('./pool');
 
-const MIGRATIONS_DIR = path.join(__dirname, '../../../migrations');
-
-async function migrate() {
-  const client = await getClient();
-  try {
-    // Ensure tracking table exists
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        filename   TEXT PRIMARY KEY,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-
-    // Advisory lock prevents two concurrent deploy processes from both trying
-    // to apply the same migration.  Lock is automatically released when the
-    // client is released at end of this function.
-    await client.query('SELECT pg_advisory_lock(5432100)');
-
-    const applied = new Set(
-      (await client.query('SELECT filename FROM schema_migrations')).rows.map(r => r.filename)
-    );
-
-    const files = fs.readdirSync(MIGRATIONS_DIR)
-      .filter(f => f.endsWith('.sql') && !f.startsWith('.'))
-      .sort();
-
-    for (const file of files) {
-      if (applied.has(file)) {
-        console.log(`[skip]  ${file}`);
-        continue;
-      }
-
-      const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
-      console.log(`[apply] ${file}`);
-
-      await client.query('BEGIN');
-      // Deploy sets ALTER ROLE ... statement_timeout='15s' (prod hardening). DDL/DML
-      // backfills (e.g. 009_channel_last_message_denorm) can legitimately exceed that.
-      await client.query("SET LOCAL statement_timeout = 0");
-      await client.query(sql);
-      await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
-      await client.query('COMMIT');
-
-      console.log(`[done]  ${file}`);
-    }
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    console.error('Migration failed:', err.message);
-    process.exit(1);
-  } finally {
-    client.release();
-    await pool.end();
-  }
-}
-
-migrate();
+require(path.join(__dirname, '..', '..', 'scripts', 'run-migrations.cjs'));

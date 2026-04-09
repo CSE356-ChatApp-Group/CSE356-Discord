@@ -17,6 +17,6 @@ Living map: **scenario → automated tests → metrics/alerts → owner / N/A**.
 | Load / SLO | Steady-state latency & KPIs | [`load-tests/staging-capacity.js`](../load-tests/staging-capacity.js); [`.github/workflows/staging-load-gate.yml`](../.github/workflows/staging-load-gate.yml) | k6 `optimization_*` counters | See [`docs/SLOS-AND-CHAOS.md`](SLOS-AND-CHAOS.md) |
 | Ops response | On-call actions | N/A | [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) | [`docs/RUNBOOKS.md`](RUNBOOKS.md), [`deploy/STAGING-DRILL-CHECKLIST.md`](../deploy/STAGING-DRILL-CHECKLIST.md) |
 
-**PR vs main:** [`ci-deploy`](../.github/workflows/ci-deploy.yml) runs Jest + Vitest. **Smoke E2E** runs on pull requests via [`pr-e2e-smoke.yml`](../.github/workflows/pr-e2e-smoke.yml) (Docker stack + Playwright `@smoke`). Staging/nightly still run full `@staging` E2E and API contract.
+**CI vs staging:** [`ci-deploy`](../.github/workflows/ci-deploy.yml) runs Jest + Vitest on PRs and `main`. **E2E** runs after deploy to staging (`e2e:staging:ci`) and on [nightly staging](../.github/workflows/staging-e2e-nightly.yml), plus API contract.
 
 **Review:** Update this table when adding features or alerts.
