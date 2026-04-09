@@ -96,4 +96,8 @@ echo "=== journal: errors (5xx / unhandled / systemd) ==="
 sudo journalctl -u 'chatapp@*' --since "\$SINCE" -p err --no-pager -n 20 || true
 echo "=== nginx: last [error] lines ==="
 sudo grep '[[]error[]]' /var/log/nginx/error.log 2>/dev/null | tail -n 8 || true
+echo "=== chatapp-deploy journal (deploy ↔ traffic spike correlation) ==="
+sudo journalctl -t chatapp-deploy --since "\$SINCE" --no-pager -n 15 2>/dev/null || true
+echo "=== Prometheus: message POST + WS signals (localhost:4000/metrics, non-fatal if curl fails) ==="
+curl -fsS -m 4 http://127.0.0.1:4000/metrics 2>/dev/null | grep -E '^(message_post_response_total|ws_connection_result_total|ws_backpressure_events_total|side_effect_queue_dropped_total)' | head -n 40 || true
 EOF

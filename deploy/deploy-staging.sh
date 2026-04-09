@@ -94,6 +94,8 @@ echo "  VM vCPUs: ${_REMOTE_NPROC}  HTTP workers: ${CHATAPP_INSTANCES}  pgbounce
 echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: ${POOL_CIRCUIT_BREAKER_QUEUE}  fanout_conc: ${FANOUT_QUEUE_CONCURRENCY}"
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
 
+ssh "${STAGING_USER}@${STAGING_HOST}" "sudo logger -t chatapp-deploy \"event=start env=staging sha=${RELEASE_SHA} instances=${CHATAPP_INSTANCES}\"" || true
+
 CURRENT_UPSTREAM_PORT=$(ssh "${STAGING_USER}@${STAGING_HOST}" "grep -oE '127\.0\.0\.1:[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
 if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
   CURRENT_UPSTREAM_PORT="${LIVE_PORT}"
@@ -591,6 +593,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 
 trap - ERR
+
+ssh "${STAGING_USER}@${STAGING_HOST}" "sudo logger -t chatapp-deploy \"event=complete env=staging sha=${RELEASE_SHA} candidate_port=${CANDIDATE_PORT} live_port=${LIVE_PORT}\"" || true
 
 echo ""
 echo "Staging deployment successful."

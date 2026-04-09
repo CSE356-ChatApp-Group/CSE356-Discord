@@ -31,7 +31,7 @@ const usersRouter        = require('./auth/usersRouter');
 
 const app = express();
 app.set('trust proxy', 1);
-const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal } = require('./utils/metrics');
+const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal } = require('./utils/metrics');
 
 // Optional fail-fast when event-loop lag is extreme (OVERLOAD_HTTP_SHED_ENABLED=true).
 app.use((req, res, next) => {
@@ -58,6 +58,11 @@ function classifyRoute(req) {
   const rawPath = (req.originalUrl || req.url || '').split('?')[0];
   if (!rawPath) return 'unknown';
   if (isQuietPath(rawPath)) return rawPath;
+  // JWT and body-parser failures run before Express sets `req.route` — keep stable templates
+  // so Prometheus/Grafana see /api/v1/messages (not "unmatched") for 401/403/early errors.
+  if (rawPath === '/api/v1/messages' || rawPath.startsWith('/api/v1/messages/')) {
+    return '/api/v1/messages';
+  }
   return 'unmatched';
 }
 
@@ -137,6 +142,12 @@ app.use((req, res, next) => {
     };
     httpRequestsTotal.inc(labels);
     httpRequestDurationMs.observe(labels, durationMs);
+    if (req.method === 'POST') {
+      const p = (req.originalUrl || req.url || '').split('?')[0];
+      if (p === '/api/v1/messages' || p === '/api/v1/messages/') {
+        messagePostResponseTotal.inc({ status_code: String(res.statusCode) });
+      }
+    }
   });
   res.on('close', () => {
     if (finished || res.writableEnded) return;

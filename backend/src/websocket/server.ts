@@ -59,7 +59,11 @@ const { query } = require("../db/pool");
 const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
-const { fanoutRecipientsHistogram } = require("../utils/metrics");
+const {
+  fanoutRecipientsHistogram,
+  wsConnectionResultTotal,
+  wsBackpressureEventsTotal,
+} = require("../utils/metrics");
 const { tracer, context, trace } = require("../utils/tracer");
 
 const wss = new WebSocketServer({ noServer: true });
@@ -421,6 +425,7 @@ function deliverPubsubMessage(channel, message) {
     if (ws.readyState !== WebSocket.OPEN) return;
     const buffered: number = (ws as any).bufferedAmount ?? 0;
     if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
+      wsBackpressureEventsTotal.inc({ action: "kill" });
       logger.warn(
         { event: 'ws.slow_consumer.killed', userId: (ws as any)._userId, buffered },
         'WS slow consumer: terminating connection due to excessive backpressure',
@@ -429,7 +434,8 @@ function deliverPubsubMessage(channel, message) {
       return;
     }
     if (buffered >= WS_BACKPRESSURE_DROP_BYTES) {
-      logger.debug(
+      wsBackpressureEventsTotal.inc({ action: "drop" });
+      logger.warn(
         { event: 'ws.slow_consumer.frame_dropped', userId: (ws as any)._userId, buffered },
         'WS slow consumer: dropping frame due to backpressure',
       );
@@ -586,10 +592,12 @@ wss.on("connection", async (ws, req) => {
       user = await authenticateAccessToken(token);
     }
   } catch {
+    wsConnectionResultTotal.inc({ result: "unauthorized" });
     ws.close(4001, "Unauthorized");
     return;
   }
 
+  wsConnectionResultTotal.inc({ result: "accepted" });
   logger.info({ userId: user.id }, "WS connected");
   ws._subscriptions = new Set();
   ws._userId = user.id;
@@ -604,6 +612,7 @@ wss.on("connection", async (ws, req) => {
       ws._bootstrapReady = true;
     })
     .catch((err) => {
+      wsConnectionResultTotal.inc({ result: "user_subscribe_failed" });
       logger.warn({ err, userId: user.id }, "WS user-channel subscribe failed");
       ws.close(1011, "Subscription failed");
     });
@@ -649,9 +658,10 @@ wss.on("connection", async (ws, req) => {
         ws.send(JSON.stringify({ event: 'ready' }));
       }
     })
-    .catch((err) =>
-      logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed"),
-    );
+    .catch((err) => {
+      wsConnectionResultTotal.inc({ result: "bootstrap_failed" });
+      logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed");
+    });
 });
 
 // ── Client message dispatch ────────────────────────────────────────────────────

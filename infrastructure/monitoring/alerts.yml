@@ -295,13 +295,56 @@ groups:
             p95 queue delay for `fanout:critical` exceeds 1.5s for 10m. This is an early warning that
             burst traffic is outpacing side-effect processing and WS/event freshness is degrading.
 
+      - alert: ChatAppMessagePost401RateHigh
+        expr: |
+          (
+            sum(rate(message_post_response_total{job="chatapp-api",status_code="401"}[5m]))
+            /
+            clamp_min(sum(rate(message_post_response_total{job="chatapp-api"}[5m])), 0.01)
+          ) > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: POST /api/v1/messages returns many 401 (JWT / auth)
+          description: >
+            More than 2% of message creates return 401 for 10m. Typical causes: expired access tokens,
+            missing Bearer usage on the grader, or clock skew. Correlate with deploy markers `journalctl -t chatapp-deploy`.
+
+      - alert: ChatAppWsUnauthorizedBurst
+        expr: sum(rate(ws_connection_result_total{job="chatapp-api",result="unauthorized"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: WebSocket upgrades failing auth at an elevated rate
+          description: >
+            WS connections are rejected after upgrade (bad/missing token). Graders lose realtime delivery until reconnect/login.
+            Check JWT TTL, token query param on /ws, and nginx proxy to the correct upstream port.
+
+      - alert: ChatAppWsBackpressure
+        expr: sum(rate(ws_backpressure_events_total{job="chatapp-api"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: WebSocket backpressure (dropped frames or killed slow consumers)
+          description: >
+            Slow WS clients are hitting DROP/KILL thresholds — realtime events may be missed for those sockets.
+            Check client read loops, `WS_BACKPRESSURE_*` env, or CPU/event-loop saturation.
+
       - alert: ChatAppDeliveryFailsWarning
         expr: |
           (
-            sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages.*",status_class="5xx"}[5m]))
+            sum(rate(http_server_requests_total{job="chatapp-api",route="/api/v1/messages",status_class="5xx"}[5m]))
             /
-            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages.*"}[5m])), 1)
+            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route="/api/v1/messages"}[5m])), 1)
           ) > 0.03
+          or (
+            sum(rate(message_post_response_total{job="chatapp-api",status_code="401"}[5m]))
+            /
+            clamp_min(sum(rate(message_post_response_total{job="chatapp-api"}[5m])), 0.01)
+          ) > 0.05
           or sum(rate(side_effect_job_duration_ms_count{job="chatapp-api",queue="fanout:critical",status="error"}[5m])) > 1
           or sum(rate(side_effect_queue_dropped_total{job="chatapp-api",queue=~"fanout:critical|fanout:background"}[5m])) > 0
         for: 10m
@@ -317,10 +360,15 @@ groups:
       - alert: ChatAppDeliveryFailsFastBurn
         expr: |
           (
-            sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages.*",status_class="5xx"}[2m]))
+            sum(rate(http_server_requests_total{job="chatapp-api",route="/api/v1/messages",status_class="5xx"}[2m]))
             /
-            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages.*"}[2m])), 1)
+            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route="/api/v1/messages"}[2m])), 1)
           ) > 0.08
+          or (
+            sum(rate(message_post_response_total{job="chatapp-api",status_code="401"}[2m]))
+            /
+            clamp_min(sum(rate(message_post_response_total{job="chatapp-api"}[2m])), 0.01)
+          ) > 0.12
           or sum(rate(side_effect_job_duration_ms_count{job="chatapp-api",queue="fanout:critical",status="error"}[2m])) > 5
           or sum(rate(side_effect_queue_dropped_total{job="chatapp-api",queue="fanout:critical"}[2m])) > 0.2
         for: 2m

@@ -112,6 +112,8 @@ fi
 echo "Current live port: $OLD_PORT"
 echo "Candidate port: $NEW_PORT"
 
+ssh "$PROD_USER@$PROD_HOST" "sudo logger -t chatapp-deploy \"event=start sha=${RELEASE_SHA} old_port=${OLD_PORT} new_port=${NEW_PORT} instances=${CHATAPP_INSTANCES}\"" || true
+
 rollback_cutover() {
   echo "↩ Rolling back nginx upstream to prior live port ${OLD_PORT} (single upstream)..."
   ssh "$PROD_USER@$PROD_HOST" "
@@ -853,6 +855,8 @@ if ssh "$PROD_USER@$PROD_HOST" "
 else
   echo "⚠ WARNING: Cleanup skipped due to transient SSH failure."
 fi
+
+ssh "$PROD_USER@$PROD_HOST" "sudo logger -t chatapp-deploy \"event=complete sha=${RELEASE_SHA} candidate_port=${NEW_PORT} companion_port=${OLD_PORT} instances=${CHATAPP_INSTANCES}\"" || true
 
 echo ""
 echo "=== Deployment Complete ==="

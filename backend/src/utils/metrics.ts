@@ -122,6 +122,27 @@ const messagePostAccessDeniedTotal = new client.Counter({
   labelNames: ['reason'],
 });
 
+/** POST /api/v1/messages only — exact HTTP status (correlates with grader sendMessage failures). */
+const messagePostResponseTotal = new client.Counter({
+  name: 'message_post_response_total',
+  help: 'POST /api/v1/messages responses by HTTP status code',
+  labelNames: ['status_code'],
+});
+
+/** WebSocket connection outcomes (upgrade + auth + bootstrap failures). */
+const wsConnectionResultTotal = new client.Counter({
+  name: 'ws_connection_result_total',
+  help: 'WebSocket outcomes after upgrade (auth failures, subscribe failures, etc.)',
+  labelNames: ['result'],
+});
+
+/** Frames skipped or sockets killed due to WS send backpressure (slow consumers). */
+const wsBackpressureEventsTotal = new client.Counter({
+  name: 'ws_backpressure_events_total',
+  help: 'WebSocket backpressure events (dropped frames or terminated slow consumers)',
+  labelNames: ['action'],
+});
+
 // ── PG pool health ─────────────────────────────────────────────────────────────
 
 const pgPoolTotal = new client.Gauge({
@@ -174,5 +195,8 @@ module.exports = {
   authBcryptDurationMs,
   authRateLimitHitsTotal,
   messagePostAccessDeniedTotal,
+  messagePostResponseTotal,
+  wsConnectionResultTotal,
+  wsBackpressureEventsTotal,
   startPgPoolMetrics,
 };
