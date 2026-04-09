@@ -79,8 +79,6 @@ export function connectWebSocket(port: number, token: string): Promise<any> {
     }, 3000);
 
     ws.once('open', () => {
-      // Wait for the server to send { event: "ready" } after bootstrap
-      // completes so the test can rely on all channel subscriptions being active.
       const onMessage = (raw: any) => {
         let parsed: any;
         try { parsed = JSON.parse(raw.toString()); } catch { return; }

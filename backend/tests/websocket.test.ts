@@ -1,7 +1,7 @@
 /**
  * WebSocket realtime delivery integration tests.
  *
- * Covers: DM message fanout, channel auto-subscribe, subscribe-on-open race,
+ * Covers: DM message fanout, channel subscribe flow, subscribe-on-open race,
  * multi-socket fanout, unsubscribe isolation, rapid resubscribe, reconnect,
  * and repeated-delivery soak checks.
  */
@@ -221,7 +221,7 @@ describe('Bootstrap ready event', () => {
     }
   });
 
-  it('sends ready after subscribing to all community channels (message arrives post-ready)', async () => {
+  it('sends ready before a manual channel subscribe can deliver messages', async () => {
     const owner  = await createAuthenticatedUser('wsreadyowner');
     const member = await createAuthenticatedUser('wsreadymember');
 
@@ -265,7 +265,12 @@ describe('Bootstrap ready event', () => {
     });
 
     try {
-      // Now post a message — bootstrap is confirmed done, channel sub is active.
+      ws.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      await waitForWsEvent(
+        ws,
+        (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+      );
+
       const msgPromise = waitForWsEvent(
         ws,
         (e) => e.event === 'message:created' && e.data?.channel_id === channelId,
@@ -282,19 +287,21 @@ describe('Bootstrap ready event', () => {
 
       // Verify ready arrived before the message:created event in the frame log.
       const readyIdx   = frames.findIndex((f) => f.event === 'ready');
+      const subIdx     = frames.findIndex((f) => f.event === 'subscribed' && f.data?.channel === `channel:${channelId}`);
       const msgIdx     = frames.findIndex((f) => f.event === 'message:created' && f.data?.channel_id === channelId);
       expect(readyIdx).toBeGreaterThanOrEqual(0);
-      expect(msgIdx).toBeGreaterThan(readyIdx);
+      expect(subIdx).toBeGreaterThan(readyIdx);
+      expect(msgIdx).toBeGreaterThan(subIdx);
     } finally {
       await closeWebSocket(ws);
     }
   });
 });
 
-// ── Channel auto-subscribe (bootstrap) ───────────────────────────────────────
+// ── Channel subscriptions ────────────────────────────────────────────────────
 
-describe('Channel bootstrap subscriptions', () => {
-  it('delivers channel messages without manual websocket subscribe', async () => {
+describe('Channel subscriptions', () => {
+  it('delivers channel messages after manual websocket subscribe', async () => {
     const owner = await createAuthenticatedUser('wsautosubowner');
     const member = await createAuthenticatedUser('wsautosubmember');
 
@@ -314,11 +321,11 @@ describe('Channel bootstrap subscriptions', () => {
 
     expect(joinRes.status).toBe(200);
 
-    const channelName = `auto-sub-${uniqueSuffix()}`;
+    const channelName = `manual-sub-${uniqueSuffix()}`;
     const channelRes = await request(app)
       .post('/api/v1/channels')
       .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ communityId, name: channelName, isPrivate: false, description: 'auto-sub channel' });
+      .send({ communityId, name: channelName, isPrivate: false, description: 'manual subscribe channel' });
 
     expect(channelRes.status).toBe(201);
     const channelId = channelRes.body.channel.id;
@@ -326,6 +333,12 @@ describe('Channel bootstrap subscriptions', () => {
     const memberSocket = await connectWebSocket(port, member.accessToken);
 
     try {
+      memberSocket.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      await waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+      );
+
       const createdEventPromise = waitForWsEvent(
         memberSocket,
         (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
@@ -334,11 +347,11 @@ describe('Channel bootstrap subscriptions', () => {
       const sendRes = await request(app)
         .post('/api/v1/messages')
         .set('Authorization', `Bearer ${owner.accessToken}`)
-        .send({ channelId, content: 'channel ws auto-sub check' });
+        .send({ channelId, content: 'channel ws manual-sub check' });
 
       expect(sendRes.status).toBe(201);
       const event = await createdEventPromise;
-      expect(event.data.content).toBe('channel ws auto-sub check');
+      expect(event.data.content).toBe('channel ws manual-sub check');
     } finally {
       await closeWebSocket(memberSocket);
     }
@@ -771,7 +784,20 @@ describe('Unsubscribe isolation', () => {
     const socketB = await connectWebSocket(port, member.accessToken);
 
     try {
-      // Confirm bootstrap delivery to both sockets first.
+      socketA.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      socketB.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      await Promise.all([
+        waitForWsEvent(
+          socketA,
+          (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+        ),
+        waitForWsEvent(
+          socketB,
+          (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+        ),
+      ]);
+
+      // Confirm delivery to both subscribed sockets first.
       const bootstrapEventPromiseA = waitForWsEvent(
         socketA,
         (event) =>
@@ -867,7 +893,13 @@ describe('Unsubscribe isolation', () => {
     const memberSocket = await connectWebSocket(port, member.accessToken);
 
     try {
-      // Bootstrap: confirm initial delivery.
+      memberSocket.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      await waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+      );
+
+      // Confirm initial delivery.
       const bootstrapEventPromise = waitForWsEvent(
         memberSocket,
         (event) =>
