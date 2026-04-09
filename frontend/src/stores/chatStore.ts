@@ -801,6 +801,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   // ── Conversations (DMs) ───────────────────────────────────────────────────
   async fetchConversations() {
     ensureUserWsSubscription(get()._handleWsEvent);
+    invalidateApiCache('/conversations');
     const { conversations } = await api.get('/conversations');
     const me = useAuthStore.getState().user;
     const visibleConversations = (conversations || []).filter((conv: Entity) => isVisibleConversation(conv, me?.id));

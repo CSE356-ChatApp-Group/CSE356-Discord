@@ -506,6 +506,8 @@ async function addParticipantsHandler(req, res, next) {
     }
 
     if (joinedGroupMessages.length > 0) {
+      // System messages bypass POST /messages and its cache bust; align with GET latest page.
+      redis.del(`messages:conversation:${req.params.id}`).catch(() => {});
       const targets = [
         `conversation:${req.params.id}`,
         ...activeParticipantIds.map((uid) => `user:${uid}`),
@@ -608,7 +610,14 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       presenceService.invalidatePresenceFanoutTargets(req.user.id),
       invalidateWsBootstrapCache(req.user.id),
     ]);
+    // DM latest-page cache: leave adds a system row or deletes the thread; POST /messages is not used.
+    redis.del(`messages:conversation:${req.params.id}`).catch(() => {});
     redis.del(conversationsCacheKey(req.user.id)).catch(() => {});
+    if (!shouldDelete && activeParticipantIds.length > 0) {
+      Promise.allSettled(
+        activeParticipantIds.map((uid) => redis.del(conversationsCacheKey(uid))),
+      ).catch(() => {});
+    }
 
     // Broadcast system message if group DM and not deleted
     if (leftGroupMessage) {

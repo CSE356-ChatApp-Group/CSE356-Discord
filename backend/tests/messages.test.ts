@@ -452,3 +452,75 @@ describe('GET /messages latest-page cache vs DELETE', () => {
     expect(ids).toContain(m1Id);
   });
 });
+
+describe('GET /messages latest-page cache vs group DM system rows', () => {
+  it('includes join system message immediately after invite (cache bust)', async () => {
+    const a = await createAuthenticatedUser('grpsysinvitea');
+    const b = await createAuthenticatedUser('grpsysinviteb');
+    const c = await createAuthenticatedUser('grpsysinvited');
+    const d = await createAuthenticatedUser('grpsysinvitebase');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.user.id, d.user.id] });
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const warm = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(warm.status).toBe(200);
+
+    const inviteRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/invite`)
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [c.user.id] });
+    expect(inviteRes.status).toBe(200);
+
+    const after = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(after.status).toBe(200);
+    expect(
+      after.body.messages.some(
+        (m: { type?: string; content?: string }) =>
+          m.type === 'system' && /joined the group/i.test(m.content || ''),
+      ),
+    ).toBe(true);
+  });
+
+  it('includes leave system message immediately after member leaves (cache bust)', async () => {
+    const a = await createAuthenticatedUser('grpsysleavea');
+    const b = await createAuthenticatedUser('grpsysleaveb');
+    const d = await createAuthenticatedUser('grpsysleaved');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.user.id, d.user.id] });
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const warm = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(warm.status).toBe(200);
+
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${d.accessToken}`);
+    expect(leaveRes.status).toBe(200);
+
+    const after = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(after.status).toBe(200);
+    expect(
+      after.body.messages.some(
+        (m: { type?: string; content?: string }) =>
+          m.type === 'system' && /left the group/i.test(m.content || ''),
+      ),
+    ).toBe(true);
+  });
+});
