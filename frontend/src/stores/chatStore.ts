@@ -1379,6 +1379,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const msg = hydrateAuthorFromSession(event.data);
         const me = useAuthStore.getState().user;
         const key = msg.channel_id || msg.conversation_id;
+        const knowsConversation =
+          !msg.conversation_id
+            ? true
+            : Boolean(
+                store.activeConv?.id === msg.conversation_id
+                || store.conversations.some((conversation) => conversation.id === msg.conversation_id),
+              );
         set((s) => {
           const paginationState = s.messagePagination[key];
           const shouldAppendToLoadedHistory = !paginationState?.hasNewer;
@@ -1566,6 +1573,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           && loadedHistoryIncludesLatest(st, msg.conversation_id)
         ) {
           queueMarkMessageRead(msg.id, { conversationId: msg.conversation_id, coalesce: true });
+        }
+        if (msg.conversation_id && !knowsConversation) {
+          store.fetchConversations().catch(() => {});
         }
         break;
       }
