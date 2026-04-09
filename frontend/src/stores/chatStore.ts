@@ -154,6 +154,12 @@ function shouldFetchLatestMessages(state: Pick<ChatState, 'messages' | 'messageP
   return Boolean(pagination.hasNewer);
 }
 
+/** Only mark read / advance my_last_read when the loaded history includes the channel tail (no newer pages). */
+function loadedHistoryIncludesLatest(state: Pick<ChatState, 'messagePagination'>, key?: string | null) {
+  if (!key) return false;
+  return !state.messagePagination[key]?.hasNewer;
+}
+
 function removeKeyedState<T>(state: Record<string, T>, removedIds: Set<string>) {
   return Object.fromEntries(
     Object.entries(state || {}).filter(([key]) => !removedIds.has(key))
@@ -246,8 +252,6 @@ function removeCommunityState(state: ChatState, communityId: string) {
   };
 }
 
-let unreadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-let lastUnreadRefreshAt = 0;
 let communitiesInFlight: Promise<Entity[]> | null = null;
 const channelsInFlightByCommunity = new Map<string, Promise<Entity[]>>();
 let channelsFetchTokenCounter = 0;
@@ -255,9 +259,103 @@ const latestChannelsFetchTokenByCommunity = new Map<string, number>();
 const readMarkInFlight = new Set<string>();
 const readMarkRecent = new Map<string, number>();
 
+/** Suppress duplicate PUTs for the same message id in a short window. */
 const READ_MARK_RECENT_MS = 2000;
-const UNREAD_REFRESH_MIN_MS = 1200;
+/** Coalesce live-tail read updates into one PUT per target per interval. */
+const READ_COALESCE_MS = (() => {
+  const raw = Number(import.meta.env.VITE_READ_COALESCE_MS);
+  return Number.isFinite(raw) && raw > 200 ? Math.floor(raw) : 2500;
+})();
+
+const pendingReadByTarget = new Map<string, string>();
+const readCoalesceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let readFlushVisibilityHooked = false;
+
 let wsUserSubscriptionId: string | null = null;
+
+function hookReadFlushOnVisibilityHidden() {
+  if (readFlushVisibilityHooked || typeof document === 'undefined') return;
+  readFlushVisibilityHooked = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      flushAllPendingReadCoalesce();
+    }
+  });
+}
+
+function flushPendingReadForTarget(target: string) {
+  const existingTimer = readCoalesceTimers.get(target);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    readCoalesceTimers.delete(target);
+  }
+  const messageId = pendingReadByTarget.get(target);
+  if (!messageId) return;
+  pendingReadByTarget.delete(target);
+  emitMessageReadNow(messageId);
+}
+
+function flushAllPendingReadCoalesce() {
+  const targets = new Set([...pendingReadByTarget.keys(), ...readCoalesceTimers.keys()]);
+  for (const target of targets) {
+    flushPendingReadForTarget(target);
+  }
+}
+
+/**
+ * @param coalesce When true, batch rapid updates (live message stream). When false, flush immediately (navigation).
+ */
+function queueMarkMessageRead(
+  messageId: string | undefined | null,
+  opts: { channelId?: string | null; conversationId?: string | null; coalesce?: boolean },
+) {
+  hookReadFlushOnVisibilityHidden();
+  if (!messageId) return;
+  const target =
+    opts.channelId != null && opts.channelId !== ''
+      ? `ch:${opts.channelId}`
+      : opts.conversationId != null && opts.conversationId !== ''
+        ? `dm:${opts.conversationId}`
+        : null;
+  if (!target) return;
+
+  pendingReadByTarget.set(target, messageId);
+
+  const existingTimer = readCoalesceTimers.get(target);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  if (opts.coalesce) {
+    readCoalesceTimers.set(
+      target,
+      setTimeout(() => flushPendingReadForTarget(target), READ_COALESCE_MS),
+    );
+  } else {
+    flushPendingReadForTarget(target);
+  }
+}
+
+function emitMessageReadNow(messageId?: string | null) {
+  if (!messageId) return;
+  const now = Date.now();
+  const lastSentAt = readMarkRecent.get(messageId) || 0;
+  if (readMarkInFlight.has(messageId) || now - lastSentAt < READ_MARK_RECENT_MS) {
+    return;
+  }
+
+  readMarkRecent.set(messageId, now);
+  readMarkInFlight.add(messageId);
+  api.put(`/messages/${messageId}/read`)
+    .catch(() => {})
+    .finally(() => {
+      readMarkInFlight.delete(messageId);
+      if (readMarkRecent.size > 500) {
+        const cutoff = Date.now() - READ_MARK_RECENT_MS;
+        for (const [id, ts] of readMarkRecent) {
+          if (ts < cutoff) readMarkRecent.delete(id);
+        }
+      }
+    });
+}
 
 function upsertConversation(conversations: Entity[], conversation: Entity) {
   const existing = conversations.find((conv) => conv.id === conversation.id);
@@ -307,50 +405,17 @@ function resolveSearchAuthorId(authorText: string, members: Entity[], activeConv
   return exactUsername?.id || '';
 }
 
-function scheduleUnreadRefresh(run: () => void) {
-  if (unreadRefreshTimer) return;
-  const now = Date.now();
-  const wait = Math.max(400, UNREAD_REFRESH_MIN_MS - (now - lastUnreadRefreshAt));
-  unreadRefreshTimer = setTimeout(() => {
-    unreadRefreshTimer = null;
-    lastUnreadRefreshAt = Date.now();
-    run();
-  }, wait);
-}
-
-function markMessageRead(messageId?: string | null) {
-  if (!messageId) return;
-  const now = Date.now();
-  const lastSentAt = readMarkRecent.get(messageId) || 0;
-  if (readMarkInFlight.has(messageId) || now - lastSentAt < READ_MARK_RECENT_MS) {
-    return;
-  }
-
-  readMarkRecent.set(messageId, now);
-  readMarkInFlight.add(messageId);
-  api.put(`/messages/${messageId}/read`)
-    .catch(() => {})
-    .finally(() => {
-      readMarkInFlight.delete(messageId);
-      if (readMarkRecent.size > 500) {
-        const cutoff = Date.now() - READ_MARK_RECENT_MS;
-        for (const [id, ts] of readMarkRecent) {
-          if (ts < cutoff) readMarkRecent.delete(id);
-        }
-      }
-    });
-}
-
 export function resetChatStore() {
   // Cancel any in-flight community fetch so the next user starts fresh.
   communitiesInFlight = null;
   channelsInFlightByCommunity.clear();
   readMarkInFlight.clear();
   readMarkRecent.clear();
-  if (unreadRefreshTimer) {
-    clearTimeout(unreadRefreshTimer);
-    unreadRefreshTimer = null;
+  for (const t of readCoalesceTimers.values()) {
+    clearTimeout(t);
   }
+  readCoalesceTimers.clear();
+  pendingReadByTarget.clear();
   wsUserSubscriptionId = null;
   useChatStore.getState().reset();
 }
@@ -495,6 +560,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (firstAccessible) {
       await get().selectChannel(firstAccessible);
     } else {
+      flushAllPendingReadCoalesce();
       set({ activeChannel: null, activeConv: null });
     }
     await membersPromise;
@@ -609,6 +675,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async deleteChannel(channelId: string) {
+    flushPendingReadForTarget(`ch:${channelId}`);
     await api.delete(`/channels/${channelId}`);
     set(s => {
       const { [channelId]: _removed, ...nextMessages } = s.messages;
@@ -626,6 +693,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   async selectChannel(channel: Entity) {
     const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
     if (!canAccess) return;
+
+    const prev = get();
+    if (prev.activeConv?.id) {
+      flushPendingReadForTarget(`dm:${prev.activeConv.id}`);
+    }
+    if (prev.activeChannel?.id && prev.activeChannel.id !== channel.id) {
+      flushPendingReadForTarget(`ch:${prev.activeChannel.id}`);
+    }
 
     set(s => ({
       activeChannel: {
@@ -648,7 +723,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     wsManager.subscribe(`channel:${channel.id}`, get()._handleWsEvent);
     // Mark latest message as read
     const msgs = get().messages[channel.id];
-    if (msgs?.length) {
+    if (msgs?.length && loadedHistoryIncludesLatest(get(), channel.id)) {
       const me = useAuthStore.getState().user;
       const lastId = msgs[msgs.length - 1].id;
       set(s => {
@@ -693,15 +768,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               : s.activeCommunity,
         };
       });
-      markMessageRead(lastId);
-      scheduleUnreadRefresh(() => {
-        const s = useChatStore.getState();
-        s.fetchCommunities().catch(() => {});
-        const communityId = channel.community_id || channel.communityId || s.activeCommunity?.id;
-        if (communityId) {
-          s.fetchChannels(communityId).catch(() => {});
-        }
-      });
+      queueMarkMessageRead(lastId, { channelId: channel.id, coalesce: false });
     }
   },
 
@@ -720,6 +787,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   openHome() {
+    flushAllPendingReadCoalesce();
     set({ activeCommunity: null, activeChannel: null });
   },
 
@@ -728,6 +796,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const cleaned = [...new Set((list || []).map((value) => value?.trim?.() || '').filter(Boolean))];
     if (!cleaned.length) {
       throw new Error('Select at least one participant');
+    }
+
+    const beforeOpen = get();
+    if (beforeOpen.activeChannel?.id) {
+      flushPendingReadForTarget(`ch:${beforeOpen.activeChannel.id}`);
+    }
+    if (beforeOpen.activeConv?.id) {
+      flushPendingReadForTarget(`dm:${beforeOpen.activeConv.id}`);
     }
 
     const { conversation } = await api.post('/conversations', { participantIds: cleaned });
@@ -753,7 +829,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
     wsManager.subscribe(`conversation:${conversation.id}`, get()._handleWsEvent);
     const msgs = get().messages[conversation.id];
-    if (msgs?.length) {
+    if (msgs?.length && loadedHistoryIncludesLatest(get(), conversation.id)) {
       const lastId = msgs[msgs.length - 1].id;
       set(s => ({
         conversations: s.conversations.map((conv) =>
@@ -774,12 +850,20 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }
             : s.activeConv,
       }));
-      markMessageRead(lastId);
+      queueMarkMessageRead(lastId, { conversationId: conversation.id, coalesce: false });
     }
     return conversation;
   },
 
   async selectConversation(conv: Entity) {
+    const preNav = get();
+    if (preNav.activeChannel?.id) {
+      flushPendingReadForTarget(`ch:${preNav.activeChannel.id}`);
+    }
+    if (preNav.activeConv?.id && preNav.activeConv.id !== conv.id) {
+      flushPendingReadForTarget(`dm:${preNav.activeConv.id}`);
+    }
+
     set(s => ({
       activeConv: s.conversations.find((c) => c.id === conv.id) || conv,
       activeChannel: null,
@@ -789,7 +873,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
     wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
     const msgs = get().messages[conv.id];
-    if (msgs?.length) {
+    if (msgs?.length && loadedHistoryIncludesLatest(get(), conv.id)) {
       const lastId = msgs[msgs.length - 1].id;
       set(s => ({
         conversations: s.conversations.map((c) =>
@@ -810,7 +894,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
               }
             : s.activeConv,
       }));
-      markMessageRead(lastId);
+      queueMarkMessageRead(lastId, { conversationId: conv.id, coalesce: false });
     }
   },
 
@@ -868,6 +952,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async leaveConversation(conversationId: string) {
+    flushPendingReadForTarget(`dm:${conversationId}`);
     try {
       await api.post(`/conversations/${conversationId}/leave`, {});
     } catch (err: any) {
@@ -1005,7 +1090,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           },
         }));
       }
-      markMessageRead(message.id);
+      const st = get();
+      if (key && loadedHistoryIncludesLatest(st, key)) {
+        queueMarkMessageRead(message.id, {
+          channelId: message.channel_id || message.channelId || activeChannel?.id,
+          conversationId: message.conversation_id || message.conversationId || activeConv?.id,
+          coalesce: true,
+        });
+      }
     }
   },
 
@@ -1102,6 +1194,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   async jumpToSearchResult(hit: Entity) {
     if (!hit?.id) return;
+
+    const jumpNav = get();
+    if (jumpNav.activeChannel?.id) {
+      flushPendingReadForTarget(`ch:${jumpNav.activeChannel.id}`);
+    }
+    if (jumpNav.activeConv?.id) {
+      flushPendingReadForTarget(`dm:${jumpNav.activeConv.id}`);
+    }
 
     const context = await api.get(`/messages/context/${hit.id}?limit=${MESSAGE_CONTEXT_SIDE_LIMIT}`);
     const channelId = context.channelId || hit.channelId || hit.channel_id || null;
@@ -1239,7 +1339,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
           if (msg.channel_id) {
             const isViewingChannel = s.activeChannel?.id === msg.channel_id;
-            const markReadInSamePass = Boolean(isViewingChannel && msg.id);
+            const atLiveTail = Boolean(
+              isViewingChannel && msg.id && !paginationState?.hasNewer,
+            );
+            const markReadInSamePass = atLiveTail;
 
             nextChannels = s.channels.map((channel) => {
               if (channel.id !== msg.channel_id) return channel;
@@ -1256,7 +1359,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 lastMessageAt: msg.created_at || msg.createdAt || channel.lastMessageAt,
                 has_new_activity: !isActive,
                 hasNewActivity: !isActive,
-                unread_message_count: isActive
+                unread_message_count: atLiveTail && isActive
                   ? 0
                   : (channel.unread_message_count ?? 0) + 1,
               };
@@ -1331,6 +1434,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             const next = [...s.conversations];
             const idx = next.findIndex((c) => c.id === msg.conversation_id);
             const viewingDm = s.activeConv?.id === msg.conversation_id;
+            const dmAtLiveTail = Boolean(viewingDm && msg.id && !paginationState?.hasNewer);
             if (idx !== -1) {
               const updatedAt = msg.created_at || msg.createdAt || new Date().toISOString();
               const updated = {
@@ -1343,7 +1447,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 lastMessageAuthorId: msg.author_id,
                 last_message_at: updatedAt,
                 lastMessageAt: updatedAt,
-                ...(viewingDm && msg.id
+                ...(dmAtLiveTail
                   ? {
                       my_last_read_message_id: msg.id,
                       myLastReadMessageId: msg.id,
@@ -1366,7 +1470,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                     lastMessageAuthorId: msg.author_id,
                     last_message_at: msg.created_at || msg.createdAt || s.activeConv.last_message_at,
                     lastMessageAt: msg.created_at || msg.createdAt || s.activeConv.lastMessageAt,
-                    ...(viewingDm && msg.id
+                    ...(dmAtLiveTail
                       ? {
                           my_last_read_message_id: msg.id,
                           myLastReadMessageId: msg.id,
@@ -1387,11 +1491,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           };
         });
 
-        if (msg.channel_id && store.activeChannel?.id === msg.channel_id && msg.id) {
-          markMessageRead(msg.id);
+        const st = get();
+        if (
+          msg.channel_id
+          && st.activeChannel?.id === msg.channel_id
+          && msg.id
+          && loadedHistoryIncludesLatest(st, msg.channel_id)
+        ) {
+          queueMarkMessageRead(msg.id, { channelId: msg.channel_id, coalesce: true });
         }
-        if (msg.conversation_id && store.activeConv?.id === msg.conversation_id && msg.id) {
-          markMessageRead(msg.id);
+        if (
+          msg.conversation_id
+          && st.activeConv?.id === msg.conversation_id
+          && msg.id
+          && loadedHistoryIncludesLatest(st, msg.conversation_id)
+        ) {
+          queueMarkMessageRead(msg.id, { conversationId: msg.conversation_id, coalesce: true });
         }
         break;
       }
@@ -1436,6 +1551,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         if (!userId || (!conversationId && !channelId)) break;
         const me = useAuthStore.getState().user;
         if (channelId && me?.id === userId) {
+          const pre = get().channels.find((c) => c.id === channelId);
+          const preCommunityId = channelCommunityId(pre || {});
+          if (preCommunityId) {
+            invalidateApiCache(`/channels?communityId=${preCommunityId}`);
+          }
           set((s) => {
             const rowPatch = {
               my_last_read_message_id: lastReadMessageId,

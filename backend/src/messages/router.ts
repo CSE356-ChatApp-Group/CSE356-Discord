@@ -102,14 +102,21 @@ async function getConversationFanoutTargets(conversationId) {
 
 async function publishConversationEvent(conversationId, event, data) {
   const targets = await getConversationFanoutTargets(conversationId);
-  const uniqueTargets = [...new Set(targets)];
+  let uniqueTargets = [...new Set(targets)];
+  // read:updated does not change last_message ordering; WS carries receipt fields.
+  // Avoid N× redis DELs on every mark-read (hot path).
+  const bustConversationListCache = event !== 'read:updated';
+  // Bootstrap already subscribes user:<id> for every participant; publishing on
+  // conversation: as well duplicates delivery and doubles fanout work.
+  if (event === 'read:updated') {
+    uniqueTargets = uniqueTargets.filter((t) => t.startsWith('user:'));
+  }
   uniqueTargets.forEach((target) => {
     sideEffects.publishMessageEvent(target, event, data);
   });
+  if (!bustConversationListCache) return;
   // Bust each participant's GET /conversations cache so last_message_at and
   // sort order reflect the new event immediately on the next REST request.
-  // User IDs are already present in targets as 'user:<id>' entries — no extra
-  // DB query needed.
   const userIds = uniqueTargets.filter((t) => t.startsWith('user:')).map((t) => t.slice(5));
   Promise.allSettled(userIds.map((uid) => redis.del(`conversations:list:${uid}`))).catch(() => {});
 }
@@ -131,9 +138,15 @@ async function loadHydratedMessageById(messageId) {
 
 async function loadMessageTarget(messageId) {
   const { rows } = await query(
-    `SELECT id, author_id, channel_id, conversation_id, created_at
-     FROM messages
-     WHERE id = $1 AND deleted_at IS NULL`,
+    `SELECT m.id,
+            m.author_id,
+            m.channel_id,
+            m.conversation_id,
+            m.created_at,
+            ch.community_id
+     FROM messages m
+     LEFT JOIN channels ch ON ch.id = m.channel_id
+     WHERE m.id = $1 AND m.deleted_at IS NULL`,
     [messageId]
   );
   return rows[0] || null;
@@ -948,21 +961,85 @@ router.put('/:id/read',
       }
 
       const { channel_id, conversation_id } = target;
+      const uid = req.user.id;
+      const messageId = req.params.id;
+
+      const { rows: existingRows } = await query(
+        `SELECT last_read_message_id
+         FROM read_states
+         WHERE user_id = $1
+           AND channel_id IS NOT DISTINCT FROM $2
+           AND conversation_id IS NOT DISTINCT FROM $3`,
+        [uid, channel_id, conversation_id]
+      );
+      if (existingRows[0]?.last_read_message_id === messageId) {
+        return res.json({ success: true });
+      }
+
       const { rows: upsertRows } = await query(
         `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
          VALUES ($1,$2,$3,$4,NOW())
          ON CONFLICT (user_id, COALESCE(channel_id, conversation_id))
-         DO UPDATE SET last_read_message_id=$4, last_read_at=NOW()
-         RETURNING last_read_at`,
-        [req.user.id, channel_id, conversation_id, req.params.id]
+         DO UPDATE SET
+           last_read_message_id = CASE
+             WHEN read_states.last_read_message_id IS NULL THEN EXCLUDED.last_read_message_id
+             WHEN (
+               SELECT m.created_at
+               FROM messages m
+               WHERE m.id = EXCLUDED.last_read_message_id AND m.deleted_at IS NULL
+             ) >= COALESCE(
+               (
+                 SELECT m2.created_at
+                 FROM messages m2
+                 WHERE m2.id = read_states.last_read_message_id AND m2.deleted_at IS NULL
+               ),
+               '-infinity'::timestamptz
+             )
+             THEN EXCLUDED.last_read_message_id
+             ELSE read_states.last_read_message_id
+           END,
+           last_read_at = CASE
+             WHEN read_states.last_read_message_id IS NULL THEN NOW()
+             WHEN (
+               SELECT m.created_at
+               FROM messages m
+               WHERE m.id = EXCLUDED.last_read_message_id AND m.deleted_at IS NULL
+             ) >= COALESCE(
+               (
+                 SELECT m2.created_at
+                 FROM messages m2
+                 WHERE m2.id = read_states.last_read_message_id AND m2.deleted_at IS NULL
+               ),
+               '-infinity'::timestamptz
+             )
+             AND EXCLUDED.last_read_message_id IS DISTINCT FROM read_states.last_read_message_id
+             THEN NOW()
+             ELSE read_states.last_read_at
+           END
+         RETURNING last_read_message_id, last_read_at`,
+        [uid, channel_id, conversation_id, messageId]
       );
 
+      const applied = upsertRows[0];
+      const advancedTo = applied?.last_read_message_id;
+      const didAdvanceCursor =
+        advancedTo != null && String(advancedTo) === String(messageId);
+
+      if (!didAdvanceCursor) {
+        return res.json({ success: true });
+      }
+
+      const communityIdForCache = target.community_id;
+      if (channel_id && communityIdForCache) {
+        redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
+      }
+
       const payload = {
-        userId: req.user.id,
+        userId: uid,
         channelId: channel_id,
         conversationId: conversation_id,
-        lastReadMessageId: req.params.id,
-        lastReadAt: upsertRows[0]?.last_read_at || new Date().toISOString(),
+        lastReadMessageId: messageId,
+        lastReadAt: applied?.last_read_at || new Date().toISOString(),
       };
 
       if (conversation_id) {
@@ -971,14 +1048,14 @@ router.put('/:id/read',
         // Channel read cursors are private: fan out only to the reader's user topic
         // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
         // which would leak other members' read positions to WebSocket clients.
-        sideEffects.publishMessageEvent(`user:${req.user.id}`, 'read:updated', payload);
+        sideEffects.publishMessageEvent(`user:${uid}`, 'read:updated', payload);
       }
 
       // Reset the user's unread watermark in Redis to the current channel message count
       if (channel_id) {
         try {
           const countKey = `channel:msg_count:${channel_id}`;
-          const readKey  = `user:last_read_count:${channel_id}:${req.user.id}`;
+          const readKey  = `user:last_read_count:${channel_id}:${uid}`;
           const currentCount = await redis.get(countKey);
           if (currentCount !== null) {
             await redis.set(readKey, currentCount);
