@@ -329,3 +329,126 @@ describe('Message context window', () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('GET /messages latest-page cache vs POST', () => {
+  it('channel latest GET includes a message immediately after POST (cache bust)', async () => {
+    const owner = await createAuthenticatedUser('cachebustch');
+    const token = owner.accessToken;
+
+    const slug = `cachebust-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ slug, name: slug, description: 'cache bust channel' });
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        communityId,
+        name: `cacheb-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: false,
+        description: 'cache bust',
+      });
+    const channelId = channelRes.body.channel.id;
+
+    const warm = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(warm.status).toBe(200);
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ channelId, content: ' right after warm cache ' });
+    expect(postRes.status).toBe(201);
+    const newId = postRes.body.message.id;
+
+    const after = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(after.status).toBe(200);
+    const ids = (after.body.messages || []).map((m: { id: string }) => m.id);
+    expect(ids).toContain(newId);
+  });
+
+  it('conversation latest GET includes a message immediately after POST (cache bust)', async () => {
+    const a = await createAuthenticatedUser('cachebusta');
+    const b = await createAuthenticatedUser('cachebustb');
+
+    const openRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.user.id] });
+    expect(openRes.status).toBe(201);
+    const conversationId = openRes.body.conversation.id;
+
+    const warmB = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(warmB.status).toBe(200);
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ conversationId, content: 'dm cache bust from a' });
+    expect(postRes.status).toBe(201);
+    const newId = postRes.body.message.id;
+
+    const afterB = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(afterB.status).toBe(200);
+    const ids = (afterB.body.messages || []).map((m: { id: string }) => m.id);
+    expect(ids).toContain(newId);
+  });
+});
+
+describe('GET /messages latest-page cache vs DELETE', () => {
+  it('conversation latest GET omits a deleted message immediately (cache bust)', async () => {
+    const a = await createAuthenticatedUser('delcachea');
+    const b = await createAuthenticatedUser('delcacheb');
+
+    const openRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.user.id] });
+    expect(openRes.status).toBe(201);
+    const conversationId = openRes.body.conversation.id;
+
+    const m1Res = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ conversationId, content: 'dm first' });
+    expect(m1Res.status).toBe(201);
+    const m1Id = m1Res.body.message.id;
+
+    const m2Res = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ conversationId, content: 'dm to delete' });
+    expect(m2Res.status).toBe(201);
+    const m2Id = m2Res.body.message.id;
+
+    const warmB = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(warmB.status).toBe(200);
+    const warmIds = (warmB.body.messages || []).map((m: { id: string }) => m.id);
+    expect(warmIds).toContain(m2Id);
+
+    const delRes = await request(app)
+      .delete(`/api/v1/messages/${m2Id}`)
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(delRes.status).toBe(200);
+
+    const afterB = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(afterB.status).toBe(200);
+    const ids = (afterB.body.messages || []).map((m: { id: string }) => m.id);
+    expect(ids).not.toContain(m2Id);
+    expect(ids).toContain(m1Id);
+  });
+});

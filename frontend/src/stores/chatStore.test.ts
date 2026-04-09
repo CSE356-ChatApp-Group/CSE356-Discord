@@ -855,4 +855,40 @@ describe('search filters', () => {
     expect(state.messages['ch-2'].map((message: any) => message.id)).toEqual(['msg-1', 'msg-2', 'msg-3', 'msg-4', 'msg-5']);
     expect(state.messagePagination['ch-2']).toEqual({ hasOlder: true, hasNewer: false });
   });
+
+  it('merge initial fetch with in-memory messages from WS so opening a DM does not drop newer rows', async () => {
+    apiGet.mockResolvedValue({
+      messages: [
+        { id: 'm-old', content: 'from api', created_at: '2026-01-01T00:00:00.000Z' },
+      ],
+    });
+
+    useAuthStore.setState({
+      user: { id: 'user-a', username: 'a', displayName: 'A', email: 'a@test' },
+    } as any);
+
+    useChatStore.setState({
+      conversations: [{ id: 'conv-1', name: 'B', participants: [{ id: 'user-b' }] }],
+      messages: {
+        'conv-1': [
+          {
+            id: 'm-ws',
+            content: 'from websocket first',
+            created_at: '2026-01-01T00:00:02.000Z',
+            conversation_id: 'conv-1',
+            author_id: 'user-b',
+          },
+        ],
+      },
+      messagePagination: {},
+    } as any);
+
+    await useChatStore.getState().fetchMessages({ conversationId: 'conv-1' });
+
+    expect(invalidateApiCache).toHaveBeenCalledWith('/messages?');
+
+    const list = useChatStore.getState().messages['conv-1'];
+    expect(list.map((m: any) => m.id)).toEqual(['m-old', 'm-ws']);
+    expect(list.find((m: any) => m.id === 'm-ws')?.content).toBe('from websocket first');
+  });
 });

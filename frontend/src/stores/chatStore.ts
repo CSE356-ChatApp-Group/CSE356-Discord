@@ -100,6 +100,32 @@ function dedupeMessages(messages: Entity[]) {
   return deduped;
 }
 
+/** Merge WS-hydrated rows with the latest GET page so opening a thread does not discard newer in-memory messages. */
+function mergeLatestPageWithExisting(local: Entity[] | undefined, server: Entity[]): Entity[] {
+  const map = new Map<string, Entity>();
+  for (const message of local || []) {
+    if (message?.id) map.set(String(message.id), message);
+  }
+  for (const message of server || []) {
+    if (!message?.id) continue;
+    const id = String(message.id);
+    const prev = map.get(id);
+    map.set(id, prev ? { ...prev, ...message } : message);
+  }
+  return sortMessagesChronologically(Array.from(map.values()));
+}
+
+function sortMessagesChronologically(messages: Entity[]): Entity[] {
+  return [...messages].sort((a, b) => {
+    const ta = new Date(a.created_at || a.createdAt || 0).getTime();
+    const tb = new Date(b.created_at || b.createdAt || 0).getTime();
+    const na = Number.isFinite(ta) ? ta : 0;
+    const nb = Number.isFinite(tb) ? tb : 0;
+    if (na !== nb) return na - nb;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+}
+
 function channelCommunityId(channel: Entity) {
   return channel?.community_id || channel?.communityId || null;
 }
@@ -991,6 +1017,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (after)          qs.set('after',          after);
     qs.set('limit', String(MESSAGE_PAGE_LIMIT));
 
+    if (!before && !after) {
+      invalidateApiCache('/messages?');
+    }
+
     const { messages } = await api.get(`/messages?${qs}`);
     set(s => ({
       messages: {
@@ -999,7 +1029,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           ? dedupeMessages([...messages, ...(s.messages[key] || [])])
           : after
             ? dedupeMessages([...(s.messages[key] || []), ...messages])
-            : dedupeMessages(messages),
+            : mergeLatestPageWithExisting(s.messages[key], messages),
       },
       messagePagination: {
         ...s.messagePagination,

@@ -242,10 +242,9 @@ router.get('/',
 
       // Serve the most-recent page of a public/member channel from a short-lived
       // Redis cache.  All users in a channel see the same messages, so a single
-      // shared key is correct.  Pagination (before=) and DMs are not cached.
-      // NOTE: the cache is NOT busted on POST — the 15 s TTL is the invalidation
-      // mechanism.  Clients receive new messages via WebSocket events, so
-      // stale GET responses are harmless and the DB savings are enormous.
+      // shared key is correct. Pagination (before=) bypasses this cache. POST busts
+      // the key so the latest page stays consistent with new writes; TTL remains
+      // a backstop for edits/deletes from other paths.
       if (channelId && !before && !after) {
         const cacheKey = channelMsgCacheKey(channelId);
         try {
@@ -316,7 +315,7 @@ router.get('/',
 
       // Conversation messages (non-paginated) — same singleflight+cache pattern as channels.
       // All participants see identical message history so the cache is shared by conversationId.
-      // NOTE: cache is NOT busted on POST — WS events deliver new messages in real-time.
+      // POST busts this key; WS still carries realtime delivery.
       if (conversationId && !before && !after) {
         const cacheKey = `messages:conversation:${conversationId}`;
         try {
@@ -769,10 +768,14 @@ router.post('/',
         ? (await loadHydratedMessageById(baseMessage.id) ?? baseMessage)
         : baseMessage;
 
-      // Do NOT bust the channel message cache on write — the 15 s TTL is the
-      // sole invalidation mechanism.  Clients learn about new messages via
-      // WebSocket events, so stale GET responses are harmless and the DB savings
-      // from keeping the cache warm are significant (see pg_stat_statements).
+      // Bust the shared Redis cache for the latest page so a follow-up GET /messages
+      // (e.g. opening a DM) returns rows that include this write. Realtime still
+      // uses WebSocket; this fixes stale first-page HTTP reads within the old TTL.
+      if (channelId) {
+        redis.del(channelMsgCacheKey(channelId)).catch(() => {});
+      } else if (conversationId) {
+        redis.del(`messages:conversation:${conversationId}`).catch(() => {});
+      }
 
       if (channelId) {
         sideEffects.publishMessageEventWithUnread(
@@ -927,6 +930,7 @@ router.delete('/:id',
       }
       if (message.conversation_id) {
         await repointConversationLastMessage(message.conversation_id);
+        redis.del(`messages:conversation:${message.conversation_id}`).catch(() => {});
       }
       if (message.conversation_id) {
         await publishConversationEvent(message.conversation_id, 'message:deleted', { id: message.id });

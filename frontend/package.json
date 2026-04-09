@@ -22,6 +22,7 @@
     "e2e:messaging": "playwright test e2e/messaging.spec.ts",
     "e2e:community": "playwright test e2e/community.spec.ts",
     "e2e:dm-invite": "playwright test e2e/dm-invite-multi-client.spec.ts",
+    "e2e:dm-first-open": "playwright test e2e/dm-first-open-after-send.spec.ts",
     "e2e:headed": "playwright test --headed",
     "e2e:ui": "playwright test --ui"
   },
