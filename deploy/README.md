@@ -253,6 +253,26 @@ Run load on **staging** first (same `CHATAPP_INSTANCES` shape as prod when possi
 
 Promote pool / `FANOUT_QUEUE_CONCURRENCY` / `OVERLOAD_*` changes to prod only after staging artifacts look acceptable.
 
+### Scaling up (8 vCPU) or moving Postgres off-box
+
+**Vertical scale (recommended first step)**  
+1. Resize the production VM to **8 vCPU** (and **≥16 GiB RAM** if the platform allows — you still run **PostgreSQL + PgBouncer + two Node workers + nginx + Redis** on one host).  
+2. Run a normal prod deploy (`CHATAPP_INSTANCES=2`). [`deploy-prod.sh`](./deploy-prod.sh) probes **`nproc`** and **`MemTotal`** on the VM and recomputes **PgBouncer `default_pool_size`**, **`PG_POOL_MAX` per instance**, **`max_connections`**, **`FANOUT_QUEUE_CONCURRENCY`**, **`BCRYPT_MAX_CONCURRENT`**, heap caps, etc. You do **not** hand-edit pool sizes for a larger SKU unless you are doing something special.  
+3. If PostgreSQL needs a restart to apply a higher `max_connections`, either set **`ALLOW_DB_RESTART=true`** for that one deploy (see script header / postgres tuning block) or restart Postgres once after deploy when maintenance allows.
+
+**Why this matters:** older sizing used a term that **capped** the PgBouncer pool at **170** for any **two-worker** host with **≥4 vCPU**, so **going from 4→8 vCPU did not increase DB backend headroom**. The current formula scales **`ncpu * 50`** (plus a small multi-worker bump), up to **320** real backends — e.g. **8 vCPU / 2 workers** → **320** pool, **~170** virtual clients per Node cap (see deploy log line at start of run).
+
+**Horizontal DB (managed Postgres)**  
+Useful when the **database** is the bottleneck or you want RAM/IO isolated from Node:
+
+- Create a **managed** instance (same region as the app VM if possible).  
+- Set **`DATABASE_URL`** in `/opt/chatapp/shared/.env` to the provider connection string. For TLS, append **`?sslmode=require`** (or your provider’s required params) so `node-pg` negotiates SSL.  
+- Re-run deploy (or at least the **PgBouncer** step in `deploy-prod.sh`): [`pgbouncer-setup.py`](./pgbouncer-setup.py) builds the `[databases]` stanza from the parsed host/port so PgBouncer on the **app VM** still **pools** to the remote Postgres (transaction mode).  
+- **Security groups / firewall**: allow **outbound 5432** (or provider port) from the app VM to the DB; restrict DB ingress to that VM’s IP.  
+- Ensure the DB **tier connection limit** is **≥** the deploy-time **`max_connections`** target (upper hundreds after scale-up — check the deploy banner line `pg_max_conn=...`).
+
+**Not covered in-repo:** running **extra Node HTTP workers** beyond **4000+4001** (third port) would need **nginx + systemd + CI** changes; ask course staff before doing that.
+
 ### Immediate Rollback
 
 If issues are detected after cutover, **`rollback_cutover`** inside `deploy-prod.sh` points nginx at the prior live port (single upstream). For a manual emergency fix, **do not** use a blind `sed` swapping ports (it breaks dual-upstream). Prefer re-running `./deploy/deploy-prod.sh <previous-sha>` or restoring `upstream app` to two healthy `server` lines and `sudo nginx -t && sudo systemctl reload nginx`.

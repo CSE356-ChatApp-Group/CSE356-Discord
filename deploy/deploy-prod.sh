@@ -27,16 +27,24 @@ RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
 _REMOTE_NCPU=$(ssh "${PROD_USER}@${PROD_HOST}" 'nproc --all' 2>/dev/null || echo 2)
 # PgBouncer pool + Node pool math matches deploy-staging.sh (same caps, different host).
+# Scale default_pool_size with **host vCPU** so 8 vCPU (etc.) actually gets more real PG
+# backends than 4 vCPU. Older `min(..., 80 + inst*45)` pinned the pool at 170 for any
+# 2-worker host with ≥4 cores — resizing the VM did nothing for DB capacity.
 _PGB_SIZE=$(python3 -c "
 ncpu = int('${_REMOTE_NCPU}')
 inst = int('${CHATAPP_INSTANCES}')
-x = max(60, min(320, ncpu * 50, 80 + inst * 45))
+cpu_part = ncpu * 50
+extra = max(0, inst - 1) * 30
+x = max(60, min(320, cpu_part + extra))
 print(x)
 ")
 PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
 p = int('${_PGB_SIZE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-print(max(25, min(140, (p * 5) // (inst * 2))))
+ncpu = int('${_REMOTE_NCPU}')
+# Allow larger per-process pools on big VMs (still bounded vs PgBouncer pool).
+pool_cap = min(180, 90 + ncpu * 10)
+print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 ")
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')

@@ -35,9 +35,9 @@ fi
 _PGB_SIZE=$(python3 -c "
 ncpu = int('${_REMOTE_NPROC}')
 inst = int('${CHATAPP_INSTANCES}')
-# Slightly higher ncpu multiplier (×50 vs ×45) improves PG backend headroom on
-# 2–4 vCPU VMs where break tests were pool-bound at ~90 real connections.
-x = max(60, min(320, ncpu * 50, 80 + inst * 45))
+cpu_part = ncpu * 50
+extra = max(0, inst - 1) * 30
+x = max(60, min(320, cpu_part + extra))
 print(x)
 ")
 
@@ -45,7 +45,9 @@ print(x)
 PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
 p = int('${_PGB_SIZE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-print(max(25, min(140, (p * 5) // (inst * 2))))
+ncpu = int('${_REMOTE_NPROC}')
+pool_cap = min(180, 90 + ncpu * 10)
+print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 ")
 
 # Circuit queue + Postgres max_connections (deploy writes these — no manual vars).
