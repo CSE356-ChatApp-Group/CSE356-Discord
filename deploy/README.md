@@ -212,7 +212,7 @@ Production uses immutable release directories:
 CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <commit-sha>
 ```
 
-`deploy-prod.sh` rewrites the whole `upstream app { ... }` block (no fragile global `sed` on ports), runs **9b/9c** when `CHATAPP_INSTANCES>=2` to roll the companion worker and restore **both** backends with `least_conn` and `max_fails=0`.
+`deploy-prod.sh` rewrites the whole `upstream app { ... }` block (no fragile global `sed` on ports). When **`CHATAPP_INSTANCES>=2`**, step **9** only applies **listen backlog / `nginx.conf` / sysctl** tuning and **does not** collapse nginx to the candidate port — traffic stays split across **both** workers while the companion is rolled (**9b**), then **9c** rewrites `upstream app` to `least_conn` + both ports + `max_fails=0`. That avoids the previous **single-backend capacity cliff** (fewer deploy-time **502**s under load). It implies **one rollout window** where **old and new code** may both serve traffic; keep DB migrations and API responses **backward compatible** across that window.
 
 **GitHub Actions:** manual prod deploy passes `chatapp_instances` (default **2** via `CHATAPP_INSTANCES_PROD` repo variable or literal `2` in `deploy-manual.yml`). Set repo variable `CHATAPP_INSTANCES_PROD` to `1` only if you intentionally run a single worker.
 
@@ -224,7 +224,7 @@ This:
 5. Unpacks candidate release
 6. Starts on alternate port (4001) **without touching running traffic**
 7. Runs health checks + smoke tests against candidate
-8. **Only if healthy**, switches Nginx to new version
+8. **Only if healthy**, updates Nginx: **single-worker** → traffic to candidate only; **dual-worker** → keep both upstreams, tune only, then roll companion and refresh upstream block
 9. Monitors for 60 seconds
 10. Updates `current` symlink
 11. Keeps old version running on original port for instant rollback

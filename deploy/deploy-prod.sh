@@ -468,19 +468,47 @@ ssh "$PROD_USER@$PROD_HOST" "
 }
 echo "✓ Candidate WS smoke passed"
 
-# 9. Switch Nginx
-# Rewrite the whole `upstream app { ... }` block instead of globally s/OLD/NEW/g, which
-# collapses dual server lines into duplicate ports (no load balancing + capacity loss).
-echo "9. Switching Nginx to candidate (single-upstream cutover)..."
-ssh "$PROD_USER@$PROD_HOST" "
-  set -e
-  export CHATAPP_INSTANCES='${CHATAPP_INSTANCES}'
-  export NEW_PORT='${NEW_PORT}'
-  export OLD_PORT='${OLD_PORT}'
-  TMP_SITE=\$(mktemp)
-  sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
-  export TMP_SITE
-  python3 <<'PY'
+# 9. Nginx + kernel tuning / cutover
+# Dual-worker (CHATAPP_INSTANCES>=2): keep both upstreams while candidate already runs the new
+# release on NEW_PORT — avoids halving capacity during companion roll (9b). Requires migrations
+# and API to be backward-compatible between old and new for one rollout window.
+# Single-worker: point nginx at NEW_PORT only, then tune (original behavior).
+if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
+  echo "9. Dual-worker: nginx/kernel tuning only (upstream unchanged — both ports stay live)..."
+  ssh "$PROD_USER@$PROD_HOST" "
+    set -euo pipefail
+    TMP_SITE=\$(mktemp)
+    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' \"\$TMP_SITE\"
+    sudo sed -i 's/listen \\[::\\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' \"\$TMP_SITE\"
+    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    rm -f \"\$TMP_SITE\"
+    sudo sysctl -w net.ipv4.tcp_max_syn_backlog=${NGINX_WORKER_CONNECTIONS} >/dev/null
+    sudo sysctl -w net.core.somaxconn=${NGINX_WORKER_CONNECTIONS} >/dev/null
+    TMP_MAIN=\$(mktemp)
+    sudo cp /etc/nginx/nginx.conf \"\$TMP_MAIN\"
+    sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' \"\$TMP_MAIN\"
+    sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' \"\$TMP_MAIN\"
+    sudo grep -q 'worker_rlimit_nofile' \"\$TMP_MAIN\" \
+      || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' \"\$TMP_MAIN\"
+    sudo install -m 644 \"\$TMP_MAIN\" /etc/nginx/nginx.conf
+    rm -f \"\$TMP_MAIN\"
+    sudo nginx -t && sudo systemctl reload nginx
+    echo 'Nginx: still load-balanced; candidate on '${NEW_PORT}' shares traffic with '${OLD_PORT}''
+  "
+  echo "✓ Nginx tuned (dual upstream preserved)"
+else
+  # Rewrite the whole `upstream app { ... }` block instead of globally s/OLD/NEW/g, which
+  # collapses dual server lines into duplicate ports (no load balancing + capacity loss).
+  echo "9. Switching Nginx to candidate (single-upstream cutover)..."
+  ssh "$PROD_USER@$PROD_HOST" "
+    set -e
+    export NEW_PORT='${NEW_PORT}'
+    export OLD_PORT='${OLD_PORT}'
+    TMP_SITE=\$(mktemp)
+    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    export TMP_SITE
+    python3 <<'PY'
 import os, re
 cfg_path = os.environ['TMP_SITE']
 newp = os.environ['NEW_PORT']
@@ -500,30 +528,27 @@ if n != 1:
     raise SystemExit('step 9: upstream app block not replaced (n=%d)' % (n,))
 open(cfg_path, 'w').write(text)
 PY
-  # Ensure listen backlog is high enough for burst connection ramps.
-  sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' \"\$TMP_SITE\"
-  sudo sed -i 's/listen \\[::\\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' \"\$TMP_SITE\"
-  sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
-  rm -f \"\$TMP_SITE\"
-  sudo nginx -t >/dev/null
-  sudo systemctl reload nginx
-  # Raise kernel TCP backlog so burst connection ramps don't drop SYN packets.
-  sudo sysctl -w net.ipv4.tcp_max_syn_backlog=${NGINX_WORKER_CONNECTIONS} >/dev/null
-  sudo sysctl -w net.core.somaxconn=${NGINX_WORKER_CONNECTIONS} >/dev/null
-  # Raise nginx worker_connections and FD limit (Ubuntu defaults: 768 connections, 1024 nofile).
-  TMP_MAIN=\$(mktemp)
-  sudo cp /etc/nginx/nginx.conf \"\$TMP_MAIN\"
-  sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' \"\$TMP_MAIN\"
-  sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' \"\$TMP_MAIN\"
-  # worker_rlimit_nofile lets nginx workers raise their own nofile limit (bypasses OS default 1024).
-  sudo grep -q 'worker_rlimit_nofile' \"\$TMP_MAIN\" \
-    || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' \"\$TMP_MAIN\"
-  sudo install -m 644 \"\$TMP_MAIN\" /etc/nginx/nginx.conf
-  rm -f \"\$TMP_MAIN\"
-  sudo nginx -t && sudo systemctl reload nginx
-  echo 'Nginx: traffic -> candidate port '${NEW_PORT}' only'
-"
-echo "✓ Nginx cutover applied"
+    sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' \"\$TMP_SITE\"
+    sudo sed -i 's/listen \\[::\\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' \"\$TMP_SITE\"
+    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    rm -f \"\$TMP_SITE\"
+    sudo nginx -t >/dev/null
+    sudo systemctl reload nginx
+    sudo sysctl -w net.ipv4.tcp_max_syn_backlog=${NGINX_WORKER_CONNECTIONS} >/dev/null
+    sudo sysctl -w net.core.somaxconn=${NGINX_WORKER_CONNECTIONS} >/dev/null
+    TMP_MAIN=\$(mktemp)
+    sudo cp /etc/nginx/nginx.conf \"\$TMP_MAIN\"
+    sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' \"\$TMP_MAIN\"
+    sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' \"\$TMP_MAIN\"
+    sudo grep -q 'worker_rlimit_nofile' \"\$TMP_MAIN\" \
+      || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' \"\$TMP_MAIN\"
+    sudo install -m 644 \"\$TMP_MAIN\" /etc/nginx/nginx.conf
+    rm -f \"\$TMP_MAIN\"
+    sudo nginx -t && sudo systemctl reload nginx
+    echo 'Nginx: traffic -> candidate port '${NEW_PORT}' only'
+  "
+  echo "✓ Nginx cutover applied"
+fi
 
 # 9b–9c. Dual-worker prod: roll the companion to this release, then restore both backends in nginx.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
