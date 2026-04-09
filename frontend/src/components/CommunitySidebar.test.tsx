@@ -164,10 +164,48 @@ describe('CommunitySidebar presence badge', () => {
     });
   });
 
-  it('does not offer OAuth linking buttons in the account modal', async () => {
+  it('offers OAuth link buttons only for providers that are not yet linked', async () => {
     apiGet.mockImplementation((path: string) => {
       if (path === '/auth/oauth/linked') {
         return Promise.resolve({ providers: ['google'], hasPassword: true });
+      }
+      if (path === '/users/me') {
+        return Promise.resolve({
+          user: {
+            id: 'user-1',
+            username: 'sam',
+            displayName: 'Sam',
+            email: 'sam@example.com',
+          },
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    act(() => {
+      useAuthStore.setState({
+        user: {
+          id: 'user-1',
+          username: 'sam',
+          displayName: 'Sam',
+          email: 'sam@example.com',
+        },
+      } as any);
+    });
+
+    render(<CommunitySidebar />);
+    fireEvent.click(screen.getByTestId('account-open'));
+    expect(await screen.findByTestId('account-logout')).toBeInTheDocument();
+
+    expect(screen.queryByTestId('account-link-google')).not.toBeInTheDocument();
+    expect(screen.getByTestId('account-link-github')).toBeInTheDocument();
+    expect(screen.getByTestId('account-link-course')).toBeInTheDocument();
+  });
+
+  it('hides OAuth link buttons when all supported providers are linked', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/auth/oauth/linked') {
+        return Promise.resolve({ providers: ['google', 'github', 'course'], hasPassword: true });
       }
       if (path === '/users/me') {
         return Promise.resolve({

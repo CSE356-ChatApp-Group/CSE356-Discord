@@ -6,7 +6,8 @@
  *   local    – username/password with bcrypt
  *   google   – OAuth 2.0 via Google
  *   github   – OAuth 2.0 via GitHub
- *   oidc     – OpenID Connect (class instructor platform)
+ *
+ * Course OIDC uses the discovery-based /auth/course routes in router.ts (not Passport).
  */
 
 'use strict';
@@ -175,22 +176,3 @@ if (process.env.GITHUB_CLIENT_ID) {
   }));
 }
 
-// ── OIDC (Class Instructor Platform) ────────────────────────────────────────────
-if (process.env.OIDC_CLIENT_ID) {
-  const OpenIDConnectStrategy = require('passport-openidconnect').Strategy;
-  passport.use(new OpenIDConnectStrategy({
-    issuer: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth',
-    authorizationURL: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/protocol/openid-connect/auth',
-    tokenURL: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/protocol/openid-connect/token',
-    userInfoURL: 'https://infra-auth.cse356.compas.cs.stonybrook.edu/realms/oauth/protocol/openid-connect/userinfo',
-    clientID: process.env.OIDC_CLIENT_ID,
-    clientSecret: process.env.OIDC_CLIENT_SECRET,
-    callbackURL: process.env.OIDC_CALLBACK_URL || '/api/v1/auth/oidc/callback',
-    scope: ['openid', 'profile', 'email'],
-  }, async (issuer, profile, done) => {
-    // OIDC profile structure is standardized
-    const email = profile.emails?.[0]?.value || profile._json?.email;
-    const displayName = profile.displayName || profile._json?.name || profile.username;
-    await processOAuthLogin('oidc', profile.id, email, displayName, undefined, done);
-  }));
-}

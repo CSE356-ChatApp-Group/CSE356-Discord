@@ -54,6 +54,16 @@ export function setToken(t: string | null) {
 
 export function getToken() { return _accessToken; }
 
+/** Turn a path returned by the API (e.g. `/api/v1/auth/google?linkToken=…`) into a full URL for `window.location`. */
+export function resolveApiAbsolutePath(path: string): string {
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  const base = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '');
+  if (base.startsWith('http://') || base.startsWith('https://')) {
+    return new URL(path, `${new URL(base).origin}/`).href;
+  }
+  return `${window.location.origin}${path}`;
+}
+
 export function invalidateApiCache(pathPrefix?: string) {
   if (!pathPrefix) {
     _inFlightGets.clear();

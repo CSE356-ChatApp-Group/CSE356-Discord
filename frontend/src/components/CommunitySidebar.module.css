@@ -325,6 +325,13 @@
   cursor: not-allowed;
 }
 
+.oauthLinkRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .logoutBtn {
   border: 1px solid var(--border-light);
   background: var(--bg-2);

@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
-import { api } from '../lib/api';
+import { api, resolveApiAbsolutePath } from '../lib/api';
 import { wsManager } from '../lib/ws';
 import { readPresenceIntent, writePresenceIntent } from '../lib/presenceIntent';
 import Modal from './Modal';
 import styles from './CommunitySidebar.module.css';
+
+const OAUTH_LINK_TARGETS = [
+  { id: 'google', label: 'Google' },
+  { id: 'github', label: 'GitHub' },
+  { id: 'course', label: 'Course OAuth' },
+] as const;
 
 export default function CommunitySidebar() {
   const {
@@ -27,6 +33,8 @@ export default function CommunitySidebar() {
   const [showJoin, setShowJoin] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
   const [hasPassword, setHasPassword] = useState(false);
+  const [linkedProviders, setLinkedProviders] = useState<string[]>([]);
+  const [linkBusyProvider, setLinkBusyProvider] = useState<string | null>(null);
   const [accountError, setAccountError] = useState('');
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ newPassword: '', confirmPassword: '' });
@@ -50,6 +58,7 @@ export default function CommunitySidebar() {
     presenceUserEditedRef.current = false;
     setShowAccount(true);
     setAccountError('');
+    setLinkBusyProvider(null);
     try {
       const [linkedData, me] = await Promise.all([
         api.get('/auth/oauth/linked').catch(() => null),
@@ -57,6 +66,7 @@ export default function CommunitySidebar() {
       ]);
       if (accountRequestIdRef.current !== requestId) return;
       setHasPassword(Boolean(linkedData?.hasPassword));
+      setLinkedProviders(Array.isArray(linkedData?.providers) ? linkedData.providers : []);
       // Only hydrate the form if the user hasn't already changed the select.
       // On a loaded server the Promise.all can resolve after selectOption('away')
       // has been called, and we must not silently revert their choice.
@@ -73,6 +83,7 @@ export default function CommunitySidebar() {
       if (accountRequestIdRef.current !== requestId) return;
       setAccountError(e?.message || 'Could not load account details');
       setHasPassword(false);
+      setLinkedProviders([]);
       if (!presenceUserEditedRef.current) {
         setPresenceStatus('online');
         setAwayMessage('');
@@ -114,6 +125,22 @@ export default function CommunitySidebar() {
       setAccountError(e?.message || 'Could not update presence');
     } finally {
       setPresenceBusy(false);
+    }
+  }
+
+  async function startOAuthLink(provider: typeof OAUTH_LINK_TARGETS[number]['id']) {
+    setAccountError('');
+    setLinkBusyProvider(provider);
+    try {
+      const data = await api.post('/auth/oauth/link-intent', { provider });
+      const authUrl = typeof data?.authUrl === 'string' ? data.authUrl : '';
+      if (!authUrl) {
+        throw new Error('Server did not return an OAuth URL');
+      }
+      window.location.href = resolveApiAbsolutePath(authUrl);
+    } catch (e: any) {
+      setLinkBusyProvider(null);
+      setAccountError(e?.message || 'Could not start OAuth link');
     }
   }
 
@@ -371,9 +398,31 @@ export default function CommunitySidebar() {
               {passwordMsg && <p className={styles.passwordMsg}>{passwordMsg}</p>}
             </div>
 
-            <p className={styles.accountMuted}>
-              If you sign in with OAuth for the first time, the app will prompt you then to create or link your chat account.
-            </p>
+            <div>
+              <p className={styles.accountSectionTitle}>OAuth sign-in</p>
+              <p className={styles.accountMuted}>
+                Linked: {linkedProviders.length ? linkedProviders.join(', ') : 'none'}
+              </p>
+              <div className={styles.oauthLinkRow}>
+                {OAUTH_LINK_TARGETS.map(({ id, label }) =>
+                  linkedProviders.includes(id) ? null : (
+                    <button
+                      key={id}
+                      type="button"
+                      className={styles.linkBtn}
+                      disabled={linkBusyProvider !== null}
+                      data-testid={`account-link-${id}`}
+                      onClick={() => startOAuthLink(id)}
+                    >
+                      {linkBusyProvider === id ? 'Redirecting…' : `Link ${label}`}
+                    </button>
+                  )
+                )}
+              </div>
+              <p className={styles.accountMuted}>
+                First-time OAuth sign-in asks whether to create a new chat account or connect an existing one. You can add more providers here.
+              </p>
+            </div>
 
             {accountError && <p className={styles.err} role="alert" data-testid="account-error">{accountError}</p>}
 

@@ -1,7 +1,7 @@
 /**
  * JWT helpers – sign and verify access tokens.
  *
- * Access tokens are short-lived (15 min default).
+ * Access tokens are short-lived (JWT_ACCESS_TTL, default 8h).
  * Refresh tokens are longer-lived (7 days) and stored as httpOnly cookies.
  * A deny-list in Redis handles logout before expiry.
  */

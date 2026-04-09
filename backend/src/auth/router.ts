@@ -248,46 +248,8 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
       return { user: target.rows[0] };
     }
 
-    // For trusted providers (course OIDC), auto-create the account immediately
-    // when we have enough info (email + preferredUsername) to avoid the pending flow.
-    if (provider === 'course' && email && preferredUsername) {
-      // Preserve provider usernames as-is apart from trimming surrounding whitespace.
-      let username = typeof preferredUsername === 'string' ? preferredUsername.trim() : '';
-      if (!username) {
-        username = (email.split('@')[0] || '').trim();
-      }
-      if (username) {
-        const taken = await client.query('SELECT 1 FROM users WHERE username=$1', [username]);
-        if (taken.rows.length) {
-          username = `${username}-${Date.now().toString().slice(-4)}`;
-        }
-      }
-
-      if (username) {
-        const existingEmail = await client.query('SELECT u.* FROM users WHERE email=$1', [email]);
-        if (existingEmail.rows.length) {
-          // Email already registered — link this provider to existing account
-          const user = existingEmail.rows[0];
-          await client.query(
-            'INSERT INTO oauth_accounts (user_id, provider, provider_id, email) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING',
-            [user.id, provider, providerId, email]
-          );
-          await client.query('COMMIT');
-          return { user };
-        }
-
-        const { rows: [newUser] } = await client.query(
-          `INSERT INTO users (email, username, display_name) VALUES ($1,$2,$3) RETURNING *`,
-          [email, username, displayName || username]
-        );
-        await client.query(
-          'INSERT INTO oauth_accounts (user_id, provider, provider_id, email) VALUES ($1,$2,$3,$4)',
-          [newUser.id, provider, providerId, email]
-        );
-        await client.query('COMMIT');
-        return { user: newUser };
-      }
-    }
+    // All first-time OAuth sign-ins (including course OIDC) use the pending flow so users
+    // explicitly choose create-new vs connect-existing with credentials.
 
     const pendingToken = signOAuthPending({
       provider,
