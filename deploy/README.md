@@ -207,8 +207,14 @@ Production uses immutable release directories:
 **Warning: This deploys to production. Ensure staging passed all checks first.**
 
 ```bash
-./deploy/deploy-prod.sh <commit-sha>
+# Default is one Node worker (CHATAPP_INSTANCES=1). For production with **both**
+# systemd units `chatapp@4000` and `chatapp@4001` and nginx load-balancing, set:
+CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <commit-sha>
 ```
+
+`deploy-prod.sh` rewrites the whole `upstream app { ... }` block (no fragile global `sed` on ports), runs **9b/9c** when `CHATAPP_INSTANCES>=2` to roll the companion worker and restore **both** backends with `least_conn` and `max_fails=0`.
+
+**GitHub Actions:** manual prod deploy passes `chatapp_instances` (default **2** via `CHATAPP_INSTANCES_PROD` repo variable or literal `2` in `deploy-manual.yml`). Set repo variable `CHATAPP_INSTANCES_PROD` to `1` only if you intentionally run a single worker.
 
 This:
 1. Confirms you want to deploy to production (interactive prompt)
@@ -223,17 +229,33 @@ This:
 10. Updates `current` symlink
 11. Keeps old version running on original port for instant rollback
 
-### Immediate Rollback
+### Production nginx audit (dual upstream)
 
-If issues are detected after cutover:
+After any hand-edited nginx config or if you see `no live upstreams` in `error.log`:
 
 ```bash
-# Revert Nginx traffic immediately (takes ~5 seconds)
-ssh ubuntu@130.245.136.44 "
-  sudo sed -i 's/localhost:4001/localhost:4000/' /etc/nginx/sites-available/chatapp
-  sudo systemctl reload nginx
-"
+./scripts/prod-nginx-audit.sh
 ```
+
+This fails if **both** `chatapp@4000` and `chatapp@4001` are active but `upstream app` does not list **both** ports (a common mis-cutover symptom).
+
+### Capacity gate before tuning prod
+
+Run load on **staging** first (same `CHATAPP_INSTANCES` shape as prod when possible):
+
+```bash
+# Steady SLO probe (~8m) — see optimization_* thresholds in staging-capacity.js
+./scripts/run-staging-capacity.sh slo
+
+# Stress envelope (expect threshold breaches; read optimization_* and failure mix)
+./scripts/run-staging-capacity.sh break
+```
+
+Promote pool / `FANOUT_QUEUE_CONCURRENCY` / `OVERLOAD_*` changes to prod only after staging artifacts look acceptable.
+
+### Immediate Rollback
+
+If issues are detected after cutover, **`rollback_cutover`** inside `deploy-prod.sh` points nginx at the prior live port (single upstream). For a manual emergency fix, **do not** use a blind `sed` swapping ports (it breaks dual-upstream). Prefer re-running `./deploy/deploy-prod.sh <previous-sha>` or restoring `upstream app` to two healthy `server` lines and `sudo nginx -t && sudo systemctl reload nginx`.
 
 Old process is still running and will resume handling traffic.
 
@@ -330,7 +352,7 @@ SELECT column_name FROM information_schema.columns
 
 Grading and load tests open many **HTTP + WebSocket** connections on a small VM. If you see **timeouts, status 0, or upstream failures** before CPU maxes out, check:
 
-1. **Nginx `worker_connections`** (in `/etc/nginx/nginx.conf` inside the `events { }` block). The repo’s [`infrastructure/nginx/nginx.conf`](../infrastructure/nginx/nginx.conf) uses **4096**; default distro configs are often **768** and can bottleneck WebSocket fan-in. After editing, `sudo nginx -t && sudo systemctl reload nginx`.
+1. **Nginx `worker_connections`** (in `/etc/nginx/nginx.conf` inside the `events { }` block). The repo’s [`infrastructure/nginx/nginx.conf`](../infrastructure/nginx/nginx.conf) uses **16384** (aligned with `deploy-prod.sh` / `prod-vm-setup.sh`); default distro configs are often **768** and can bottleneck WebSocket fan-in. **`deploy-prod.sh` rewrites this on deploy**; if you still see `worker_connections are not enough` in `error.log`, raise `NGINX_WORKER_CONNECTIONS` for that run. After manual edits, `sudo nginx -t && sudo systemctl reload nginx`.
 
 2. **`LimitNOFILE`** for the Node process: the systemd template [`deploy/chatapp-template.service`](./chatapp-template.service) sets **65535** — ensure production units match.
 
@@ -381,6 +403,15 @@ sudo grep '\[error\]' /var/log/nginx/error.log | tail -n 20
 # If logrotate ran, also check /var/log/nginx/error.log.1
 ```
 
+**Correlate a dashboard spike with logs** (access uses `DD/Mon/YYYY`, errors use `YYYY/MM/DD`; VM clock is usually UTC):
+
+```bash
+# Example: Apr 8 grader window 19:00–22:00 on the server clock
+./scripts/prod-log-correlate.sh '08/Apr/2026' '2026/04/08' 19 22
+```
+
+If the UI is **US/Eastern**, shift hours (e.g. 20:00 EDT ≈ next calendar day 00:00 UTC).
+
 ### Health Monitoring
 
 Set up alerting:
@@ -417,6 +448,19 @@ Create `/opt/chatapp/shared/.env` on production VM:
 - Point to production Redis
 - Use production secrets
 - Set `NODE_ENV=production`
+
+**Small VM (~2 GiB RAM) overload tuning** (optional; see `backend/src/utils/overload.ts`):
+- Example: `OVERLOAD_RSS_WARN_MB=384`, `OVERLOAD_RSS_HIGH_MB=512`, `OVERLOAD_RSS_CRITICAL_MB=768`
+- Enter HTTP shedding only if needed: `OVERLOAD_HTTP_SHED_ENABLED=true` (prefer fixing pool/CPU first)
+- After edits: `sudo systemctl restart 'chatapp@*'`
+
+**Fanout:** `FANOUT_QUEUE_CONCURRENCY` is written by `deploy-prod.sh` from VM shape; raise only after staging load tests show headroom.
+
+### Course grader: “delivery fails” vs HTTP 403
+
+Automated graders often count **`POST /api/v1/messages` without `201`** as a delivery failure. Your API returns **`403`** when the user may not post to that **private channel** or **conversation** (`Access denied` / `Not a participant`). That is **authorization**, not network or WebSocket failure. Under heavy grader traffic, **201 and 403 can each be ~half** of message POSTs if the harness mixes allowed and forbidden cases—or if clients post before join completes. Use `./scripts/prod-observe.sh` (POST /messages status breakdown) and `./scripts/prod-log-correlate.sh` for an hour-bucketed split.
+
+**Ask your instructor explicitly:** does the leaderboard treat **expected `403`** on `POST /messages` as a *delivery fail*, or only **5xx / timeouts / missed WebSocket delivery**?
 
 Both environments are identical in structure but differ in:
 - Database credentials
@@ -487,6 +531,8 @@ ssh ssperrottet@136.114.103.71 "sudo systemctl reload nginx"
 - [ ] Verify presence reads/writes working
 
 ## Checklist: After Production Deploy
+
+- [ ] `./scripts/prod-nginx-audit.sh` passes (dual workers ⇒ both `:4000` and `:4001` in `upstream app`)
 
 - [ ] Confirm all metrics normal
 - [ ] No unusual error spikes

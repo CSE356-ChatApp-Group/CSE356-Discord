@@ -74,3 +74,5 @@ jobs:
       verify_public_host: true
       auto_confirm: true
       artifact_name: release-${{ inputs.sha || github.sha }}
+      # Dual workers on prod (chatapp@4000 + @4001): nginx must list both; deploy-prod runs 9b/9c when >=2.
+      chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '2' }}

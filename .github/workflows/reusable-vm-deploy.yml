@@ -38,6 +38,11 @@ on:
         required: false
         default: false
         type: boolean
+      chatapp_instances:
+        description: Node HTTP worker count (deploy-prod CHATAPP_INSTANCES); use 2 when nginx load-balances chatapp@4000 and @4001
+        required: false
+        default: ''
+        type: string
     secrets:
       DEPLOY_SSH_KEY:
         required: true
@@ -159,13 +164,18 @@ jobs:
           DEPLOY_HOST: ${{ inputs.host }}
           DEPLOY_USER: ${{ inputs.user }}
           LOCAL_ARTIFACT_PATH: ${{ steps.artifact.outputs.local_path }}
+          CHATAPP_INSTANCES_INPUT: ${{ inputs.chatapp_instances }}
         run: |
           set -euo pipefail
+          EXTRA_ENV=()
+          if [[ -n "${CHATAPP_INSTANCES_INPUT}" ]]; then
+            EXTRA_ENV+=("CHATAPP_INSTANCES=${CHATAPP_INSTANCES_INPUT}")
+          fi
           if [[ "${{ inputs.auto_confirm }}" == "true" ]]; then
-            printf 'y\n' | LOCAL_ARTIFACT_PATH="$LOCAL_ARTIFACT_PATH" STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
+            printf 'y\n' | env "${EXTRA_ENV[@]}" LOCAL_ARTIFACT_PATH="$LOCAL_ARTIFACT_PATH" STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
               "./${{ inputs.script_path }}" "$TARGET_SHA"
           else
-            LOCAL_ARTIFACT_PATH="$LOCAL_ARTIFACT_PATH" STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
+            env "${EXTRA_ENV[@]}" LOCAL_ARTIFACT_PATH="$LOCAL_ARTIFACT_PATH" STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
               "./${{ inputs.script_path }}" "$TARGET_SHA"
           fi
 

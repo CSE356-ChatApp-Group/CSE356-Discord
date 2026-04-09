@@ -13,6 +13,31 @@ groups:
             Check https://group-8.cse356.compas.cs.stonybrook.edu/health (prod)
             or http://136.114.103.71/health (staging).
             On the host: systemctl status 'chatapp@*'; journalctl -u 'chatapp@*' -n 50.
+            Nginx may log "no live upstreams" if every Node backend is down or upstream `app` is misconfigured.
+
+      # Faster page than ChatAppApiDown — catches brief total outages before the 5m window.
+      - alert: ChatAppApiDownFast
+        expr: sum(up{job="chatapp-api"}) < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: ChatApp API unreachable for 2 minutes
+          description: >
+            All scraped chatapp-api targets are down. Check systemd units, PgBouncer, and
+            `sudo grep 'no live upstreams' /var/log/nginx/error.log | tail`.
+
+      # Node process.startTime changes on each restart — sustained flapping risks nginx "no live upstreams".
+      - alert: ChatAppProcessRestartFlapping
+        expr: changes(process_start_time_seconds{job="chatapp-api"}[15m]) >= 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp API process restarted multiple times recently
+          description: >
+            Instance {{ $labels.instance }} reported at least two start-time changes in 15m (crash loop or deploy churn).
+            Check journalctl -u 'chatapp@*' and database readiness at boot.
 
       - alert: ChatAppHigh5xxRate
         expr: |
