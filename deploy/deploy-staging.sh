@@ -347,6 +347,13 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
     || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Keep access tokens valid across long load windows to reduce auth churn-driven 401s.
+  sudo grep -q '^JWT_ACCESS_TTL=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^JWT_ACCESS_TTL=.*/JWT_ACCESS_TTL=8h/' /opt/chatapp/shared/.env \
+    || echo 'JWT_ACCESS_TTL=8h' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^JWT_REFRESH_TTL=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^JWT_REFRESH_TTL=.*/JWT_REFRESH_TTL=7d/' /opt/chatapp/shared/.env \
+    || echo 'JWT_REFRESH_TTL=7d' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY: 1 per instance on staging — with
   # CHATAPP_INSTANCES>=2 that means up to 2 total indexing jobs in flight
   # across the cluster, which matches the 2-CPU budget without over-subscribing.

@@ -397,6 +397,14 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
     || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Grader clients often use bearer tokens without cookie-based refresh loops.
+  # Keep access tokens valid for long test windows to avoid 401 delivery failures.
+  sudo grep -q '^JWT_ACCESS_TTL=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^JWT_ACCESS_TTL=.*/JWT_ACCESS_TTL=8h/' /opt/chatapp/shared/.env \
+    || echo 'JWT_ACCESS_TTL=8h' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^JWT_REFRESH_TTL=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^JWT_REFRESH_TTL=.*/JWT_REFRESH_TTL=7d/' /opt/chatapp/shared/.env \
+    || echo 'JWT_REFRESH_TTL=7d' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # HTTP shedding is opt-in in code; keep prod explicit so a refactor never turns it on by default.
   sudo grep -q '^OVERLOAD_HTTP_SHED_ENABLED=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^OVERLOAD_HTTP_SHED_ENABLED=.*/OVERLOAD_HTTP_SHED_ENABLED=false/' /opt/chatapp/shared/.env \

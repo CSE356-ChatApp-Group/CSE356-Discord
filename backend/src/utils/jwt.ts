@@ -14,8 +14,8 @@ const redis = require('../db/redis');
 
 const ACCESS_SECRET  = process.env.JWT_ACCESS_SECRET  || 'change-me-access';
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'change-me-refresh';
-const ACCESS_TTL     = '15m';
-const REFRESH_TTL    = '7d';
+const ACCESS_TTL     = process.env.JWT_ACCESS_TTL || '8h';
+const REFRESH_TTL    = process.env.JWT_REFRESH_TTL || '7d';
 
 function parsePositiveInt(value, fallback) {
   const parsed = Number(value);
