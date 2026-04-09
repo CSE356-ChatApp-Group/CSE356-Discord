@@ -190,6 +190,61 @@ async function searchFts(q: string, opts: Record<string, any>): Promise<any> {
 }
 
 /**
+ * Single round-trip: same semantics as searchFts then searchTrigram when the FTS page
+ * is empty (including offset past FTS matches). Cuts pool/RTT latency on the fallback path.
+ */
+async function searchFtsPageOrTrigramOneRoundTrip(q: string, opts: Record<string, any>): Promise<any> {
+  const params: any[] = [q];
+  const filters = buildFilters(params, opts);
+  const limit = Number(opts.limit) || 20;
+  const offset = Number(opts.offset) || 0;
+  const ilikePh = p(params, `%${q}%`);
+  const limitFts = p(params, limit);
+  const offsetFts = p(params, offset);
+  const limitTri = p(params, limit);
+  const offsetTri = p(params, offset);
+
+  const sql = `
+    WITH fts_hits AS (
+      SELECT ${SELECT_COLS},
+        ts_headline(
+          'english',
+          coalesce(m.content, ''),
+          websearch_to_tsquery('english', $1),
+          'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
+        ) AS highlight,
+        ts_rank(m.content_tsv, websearch_to_tsquery('english', $1)) AS _rank
+      ${FROM_CLAUSE}
+      WHERE m.deleted_at IS NULL
+        AND m.content_tsv @@ websearch_to_tsquery('english', $1)
+        ${filters}
+      ORDER BY m.created_at DESC
+      LIMIT ${limitFts} OFFSET ${offsetFts}
+    )
+    (SELECT * FROM fts_hits)
+    UNION ALL
+    (
+      SELECT ${SELECT_COLS},
+        NULL::text AS highlight,
+        0::double precision AS _rank
+      ${FROM_CLAUSE}
+      WHERE m.deleted_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM fts_hits)
+        AND m.content ILIKE ${ilikePh}
+        ${filters}
+      ORDER BY m.created_at DESC
+      LIMIT ${limitTri} OFFSET ${offsetTri}
+    )`;
+
+  const { rows } = await query(sql, params);
+  const processed = rows.map((row) => {
+    if (row.highlight != null) return row;
+    return { ...row, highlight: highlightIlike(row.content, q) };
+  });
+  return buildResult(processed, q, offset, limit);
+}
+
+/**
  * Fallback: ILIKE via the existing pg_trgm GIN index.
  * Activates when FTS returns 0 results — handles partial/infix queries
  * ("hel" matching "hello") and queries whose lexemes are all stop words.
@@ -252,16 +307,21 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   }
 
   try {
-    const fts = await searchFts(q, opts);
-    if (fts.hits.length > 0) return fts;
-    return await searchTrigram(q, opts);
+    return await searchFtsPageOrTrigramOneRoundTrip(q, opts);
   } catch (err) {
-    logger.warn({ err }, 'FTS search failed, falling back to trigram');
+    logger.warn({ err }, 'Combined FTS/trigram search failed; using sequential FTS then trigram');
     try {
+      const fts = await searchFts(q, opts);
+      if (fts.hits.length > 0) return fts;
       return await searchTrigram(q, opts);
-    } catch (fallbackErr) {
-      logger.error({ err: fallbackErr }, 'Trigram fallback also failed');
-      throw fallbackErr;
+    } catch (seqErr) {
+      logger.warn({ err: seqErr }, 'Sequential FTS search failed, falling back to trigram');
+      try {
+        return await searchTrigram(q, opts);
+      } catch (fallbackErr) {
+        logger.error({ err: fallbackErr }, 'Trigram fallback also failed');
+        throw fallbackErr;
+      }
     }
   }
 }

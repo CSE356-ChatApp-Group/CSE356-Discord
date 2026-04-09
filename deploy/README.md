@@ -353,12 +353,13 @@ SELECT column_name FROM information_schema.columns
 Grading and load tests open many **HTTP + WebSocket** connections on a small VM. If you see **timeouts, status 0, or upstream failures** before CPU maxes out, check:
 
 1. **Nginx `worker_connections`** (in `/etc/nginx/nginx.conf` inside the `events { }` block). The repo’s [`infrastructure/nginx/nginx.conf`](../infrastructure/nginx/nginx.conf) uses **16384** (aligned with `deploy-prod.sh` / `prod-vm-setup.sh`); default distro configs are often **768** and can bottleneck WebSocket fan-in. **`deploy-prod.sh` rewrites this on deploy**; if you still see `worker_connections are not enough` in `error.log`, raise `NGINX_WORKER_CONNECTIONS` for that run. After manual edits, `sudo nginx -t && sudo systemctl reload nginx`.
+2. **Search proxy read timeout**: `location /api/` uses **30s** read timeout; slow-but-successful searches were getting **502** from nginx. **`deploy-prod.sh` step 9.05** inserts `location ^~ /api/v1/search` with **90s** (`proxy_read_timeout` / `proxy_send_timeout`) when missing. Templates in [`deploy/prod-vm-setup.sh`](./prod-vm-setup.sh) and [`deploy/nginx/staging.conf`](./nginx/staging.conf) include the same block.
 
-2. **`LimitNOFILE`** for the Node process: the systemd template [`deploy/chatapp-template.service`](./chatapp-template.service) sets **65535** — ensure production units match.
+3. **`LimitNOFILE`** for the Node process: the systemd template [`deploy/chatapp-template.service`](./chatapp-template.service) sets **65535** — ensure production units match.
 
-3. **Swap thrash**: sustained **swap in/out** (not just “some swap used”) hurts latency. If `vmstat` shows high `si`/`so` during tests, add RAM or reduce colocated services; application-level pagination only helps when clients use smaller pages.
+4. **Swap thrash**: sustained **swap in/out** (not just “some swap used”) hurts latency. If `vmstat` shows high `si`/`so` during tests, add RAM or reduce colocated services; application-level pagination only helps when clients use smaller pages.
 
-4. **Access logs**: keep **JWTs out of nginx access logs** (do not log the `Authorization` header).
+5. **Access logs**: keep **JWTs out of nginx access logs** (do not log the `Authorization` header).
 
 ### During Deploy
 
