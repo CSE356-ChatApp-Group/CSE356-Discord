@@ -14,6 +14,7 @@ groups:
             or http://136.114.103.71/health (staging).
             On the host: systemctl status 'chatapp@*'; journalctl -u 'chatapp@*' -n 50.
             Nginx may log "no live upstreams" if every Node backend is down or upstream `app` is misconfigured.
+            Runbook: docs/RUNBOOKS.md (repo root).
 
       # Faster page than ChatAppApiDown — catches brief total outages before the 5m window.
       - alert: ChatAppApiDownFast

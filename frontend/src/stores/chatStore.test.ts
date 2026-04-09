@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { resetChatStore } from './chatStore';
+import { resetChatStore, useChatStore } from './chatStore';
 
 const { apiDelete, apiGet, apiPost, invalidateApiCache } = vi.hoisted(() => ({
   apiDelete: vi.fn(),
@@ -21,26 +21,28 @@ vi.mock('../lib/api', () => ({
 }));
 
 import { useAuthStore } from './authStore';
-import { useChatStore } from './chatStore';
 
 afterEach(() => {
   vi.clearAllMocks();
   useAuthStore.setState({ user: null });
-  useChatStore.setState({
-    communities: [],
-    activeCommunity: null,
-    channels: [],
-    activeChannel: null,
-    conversations: [],
-    activeConv: null,
-    members: [],
-    messages: {},
-    messagePagination: {},
-    searchResults: null,
-    searchQuery: '',
-    searchFilters: { author: '', after: '', before: '' },
-    jumpTargetMessageId: null,
-  } as any);
+  resetChatStore();
+});
+
+describe('list fetch cache bust', () => {
+  it('invalidates /communities before fetchCommunities', async () => {
+    apiGet.mockResolvedValue({ communities: [] });
+    useAuthStore.setState({ user: { id: 'u1', username: 'a', displayName: 'A', email: 'a@test' } } as any);
+    await useChatStore.getState().fetchCommunities();
+    expect(invalidateApiCache).toHaveBeenCalledWith('/communities');
+    expect(apiGet).toHaveBeenCalledWith('/communities');
+  });
+
+  it('invalidates per-community channels query before fetchChannels', async () => {
+    apiGet.mockResolvedValue({ channels: [] });
+    await useChatStore.getState().fetchChannels('comm-99');
+    expect(invalidateApiCache).toHaveBeenCalledWith('/channels?communityId=comm-99');
+    expect(apiGet).toHaveBeenCalledWith('/channels?communityId=comm-99');
+  });
 });
 
 describe('chatStore quick actions', () => {
@@ -92,6 +94,7 @@ describe('chatStore quick actions', () => {
     const members = await useChatStore.getState().inviteToChannel('ch-1', ['user-2']);
 
     expect(apiPost).toHaveBeenCalledWith('/channels/ch-1/members', { userIds: ['user-2'] });
+    expect(invalidateApiCache).toHaveBeenCalledWith('/channels?communityId=comm-1');
     expect(apiGet).toHaveBeenCalledWith('/channels?communityId=comm-1');
     expect(members).toEqual([{ id: 'user-2', username: 'alex' }]);
   });

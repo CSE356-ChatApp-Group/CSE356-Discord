@@ -15,6 +15,92 @@ afterAll(async () => {
 
 // ── Overload protection ───────────────────────────────────────────────────────
 
+describe('POST /messages idempotency', () => {
+  it('returns the same message id when retrying with the same Idempotency-Key', async () => {
+    const owner = await createAuthenticatedUser('idemretry');
+    const slug = `idem-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'idempotency' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `idem-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const idemKey = `idem-${uniqueSuffix()}`;
+    const body = { channelId, content: 'idempotent body' };
+    const r1 = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .set('Idempotency-Key', idemKey)
+      .send(body);
+    expect(r1.status).toBe(201);
+    const id1 = r1.body.message.id;
+
+    const r2 = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .set('Idempotency-Key', idemKey)
+      .send(body);
+    expect(r2.status).toBe(201);
+    expect(r2.body.message.id).toBe(id1);
+  });
+
+  it('concurrent POSTs with the same Idempotency-Key resolve to one message', async () => {
+    const owner = await createAuthenticatedUser('idemconc');
+    const slug = `idemc-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'idempotency concurrent' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `idemc-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const idemKey = `idem-conc-${uniqueSuffix()}`;
+    const body = { channelId, content: 'concurrent idempotent' };
+    const [a, b] = await Promise.all([
+      request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .set('Idempotency-Key', idemKey)
+        .send(body),
+      request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .set('Idempotency-Key', idemKey)
+        .send(body),
+    ]);
+
+    expect([a.status, b.status].every((s) => s === 201 || s === 409)).toBe(true);
+    expect(a.status === 201 || b.status === 201).toBe(true);
+    const okBodies = [a, b].filter((r) => r.status === 201);
+    const msgIds = okBodies.map((r) => r.body.message.id);
+    expect(new Set(msgIds).size).toBe(1);
+
+    const list = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=30`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(list.status).toBe(200);
+    const withBody = (list.body.messages || []).filter(
+      (m: { content?: string }) => m.content === 'concurrent idempotent',
+    );
+    expect(withBody.length).toBe(1);
+  });
+});
+
 describe('Overload behavior', () => {
   let token: string;
   let channelId: string;

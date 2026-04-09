@@ -132,6 +132,41 @@ describe('DM realtime delivery', () => {
     }
   });
 
+  it('delivers DM message:created after explicit conversation topic subscribe', async () => {
+    const sender = await createAuthenticatedUser('dmlatesubsend');
+    const recipient = await createAuthenticatedUser('dmlatesubrec');
+    const recipientSocket = await connectWebSocket(port, recipient.accessToken);
+
+    try {
+      const convRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ participantIds: [recipient.user.id] });
+      expect(convRes.status).toBe(201);
+      const conversationId = convRes.body.conversation.id;
+
+      recipientSocket.send(JSON.stringify({ type: 'subscribe', channel: `conversation:${conversationId}` }));
+      await new Promise((r) => setTimeout(r, 200));
+
+      const createdP = waitForWsEvent(
+        recipientSocket,
+        (e) =>
+          e.event === 'message:created' &&
+          String(e.data?.conversation_id || e.data?.conversationId || '') === String(conversationId),
+      );
+
+      const postRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ conversationId, content: 'late subscribe dm' });
+      expect(postRes.status).toBe(201);
+      const ev = await createdP;
+      expect(ev.data.content).toBe('late subscribe dm');
+    } finally {
+      await closeWebSocket(recipientSocket);
+    }
+  });
+
   it('fans out message:deleted to all active sockets for the same recipient', async () => {
     const sender = await createAuthenticatedUser('dmdeletesender');
     const recipient = await createAuthenticatedUser('dmdeleterecipient');

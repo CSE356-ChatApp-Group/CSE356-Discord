@@ -472,6 +472,19 @@ add('getMessages (pagination)', async () => {
   assert(Array.isArray(json.messages), 'messages');
 });
 
+add('postMessageIdempotent', async () => {
+  const idemKey = `contract-idem-${suffix}`;
+  const body = { channelId: ctx.publicChannelId, content: `idem-${suffix.slice(0, 8)}` };
+  const headers = { 'Idempotency-Key': idemKey };
+  let { res, json } = await fetchJson('POST', '/messages', ctx.A.token, body, headers);
+  assert(res.status === 201, `idem first ${res.status}`);
+  const id1 = json.message?.id;
+  assert(id1, 'idem message id');
+  ({ res, json } = await fetchJson('POST', '/messages', ctx.A.token, body, headers));
+  assert(res.status === 201, `idem second ${res.status}`);
+  assert(json.message?.id === id1, 'retry returns same message id');
+});
+
 add('editMessage', async () => {
   const newContent = editedChannelSearchMark;
   const editSeen = waitWsEvent(

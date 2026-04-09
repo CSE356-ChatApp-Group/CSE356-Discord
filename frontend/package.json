@@ -12,6 +12,7 @@
     "e2e:install": "playwright install chromium",
     "e2e": "playwright test --grep @smoke",
     "e2e:ci": "playwright test --grep @smoke --reporter=list",
+    "e2e:pr-smoke": "playwright test --grep @smoke --reporter=list",
     "e2e:full": "playwright test --grep @full --grep-invert @heavy-auth",
     "e2e:full:ci": "playwright test --grep @full --grep-invert @heavy-auth --reporter=list",
     "e2e:staging": "playwright test --grep @staging --workers=1 --retries=0",

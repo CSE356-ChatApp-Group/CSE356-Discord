@@ -490,6 +490,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (communitiesInFlight) return communitiesInFlight;
 
     communitiesInFlight = (async () => {
+      invalidateApiCache('/communities');
       const { communities } = await api.get('/communities');
       set(s => ({
         communities: communities.map((community: Entity) => {
@@ -604,6 +605,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     latestChannelsFetchTokenByCommunity.set(communityId, requestToken);
 
     const inFlight = (async () => {
+      invalidateApiCache(`/channels?communityId=${communityId}`);
       const { channels } = await api.get(`/channels?communityId=${communityId}`);
       if (latestChannelsFetchTokenByCommunity.get(communityId) !== requestToken) {
         return channels;

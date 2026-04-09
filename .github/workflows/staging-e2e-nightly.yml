@@ -47,7 +47,7 @@ jobs:
       - name: Run staging E2E against deployed staging
         run: npm run e2e:staging:ci --workspace=frontend
 
-      - name: API contract harness (41 checks)
+      - name: API contract harness
         run: npm run api-contract --workspace=backend
 
       - name: Upload Playwright report
