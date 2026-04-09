@@ -603,8 +603,8 @@ wss.on("connection", async (ws, req) => {
   ws._userId = user.id;
   ws._connectionId = randomUUID();
   ws._bootstrapReady = false;
-  ws._presenceStatus = "online";
-  ws._lastActivityAt = Date.now();
+  ws._presenceStatus = "idle";
+  ws._lastActivityAt = 0;
   ws._awayMessage = null;
 
   ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
@@ -643,9 +643,9 @@ wss.on("connection", async (ws, req) => {
     refreshConnectionTtls(user.id, ws._connectionId).catch(() => {});
   });
 
-  upsertConnectionState(user.id, ws._connectionId, "online")
+  ws._presenceInitPromise = upsertConnectionState(user.id, ws._connectionId, "idle")
     .then(async () => {
-      await refreshConnectionTtls(user.id, ws._connectionId, { active: true });
+      await refreshConnectionTtls(user.id, ws._connectionId, { active: false });
       await recomputeUserPresence(user.id);
     })
     .catch((err) =>
@@ -668,6 +668,9 @@ wss.on("connection", async (ws, req) => {
 async function handleClientMessage(ws, user, msg) {
   if (ws._bootstrapPromise) {
     await ws._bootstrapPromise;
+  }
+  if (ws._presenceInitPromise) {
+    await ws._presenceInitPromise;
   }
   if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) {
     return;

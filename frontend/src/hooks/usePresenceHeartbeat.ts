@@ -14,6 +14,7 @@ export function usePresenceHeartbeat() {
 
     function sendPresenceFromIntent() {
       const intent = readPresenceIntent();
+      if (intent.status !== 'away') return;
       wsManager.send({
         type: 'presence',
         status: intent.status,
@@ -36,7 +37,6 @@ export function usePresenceHeartbeat() {
 
     function syncPresenceOnConnect() {
       sendPresenceFromIntent();
-      sendActivity(true);
     }
 
     syncPresenceOnConnect();

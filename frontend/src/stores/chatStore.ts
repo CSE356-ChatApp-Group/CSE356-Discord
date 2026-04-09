@@ -284,6 +284,8 @@ let channelsFetchTokenCounter = 0;
 const latestChannelsFetchTokenByCommunity = new Map<string, number>();
 const readMarkInFlight = new Set<string>();
 const readMarkRecent = new Map<string, number>();
+const presenceFreshness = new Map<string, number>();
+let presenceFreshnessSeq = 0;
 
 /** Suppress duplicate PUTs for the same message id in a short window. */
 const READ_MARK_RECENT_MS = 2000;
@@ -437,6 +439,8 @@ export function resetChatStore() {
   channelsInFlightByCommunity.clear();
   readMarkInFlight.clear();
   readMarkRecent.clear();
+  presenceFreshness.clear();
+  presenceFreshnessSeq = 0;
   for (const t of readCoalesceTimers.values()) {
     clearTimeout(t);
   }
@@ -465,6 +469,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   jumpTargetMessageId: null,
 
   reset() {
+    presenceFreshness.clear();
+    presenceFreshnessSeq = 0;
     set({
       communities:     [],
       activeCommunity: null,
@@ -1155,6 +1161,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const ids = Array.from(new Set((userIds || []).map((id) => String(id || '')).filter(Boolean)));
     if (!ids.length) return;
 
+    const requestedAt = ++presenceFreshnessSeq;
     const qs = encodeURIComponent(ids.join(','));
     const data = await api.get(`/presence?userIds=${qs}`);
     const presenceMap = data?.presence || {};
@@ -1165,9 +1172,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const nextAwayMessages = { ...s.awayMessages };
 
       ids.forEach((id) => {
+        if ((presenceFreshness.get(id) || 0) >= requestedAt) {
+          return;
+        }
         const status = normalizePresenceStatus(presenceMap[id]);
         nextPresence[id] = status;
         nextAwayMessages[id] = status === 'away' ? (awayMap[id] ?? null) : null;
+        presenceFreshness.set(id, requestedAt);
       });
 
       return {
@@ -1179,6 +1190,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   // ── Presence ──────────────────────────────────────────────────────────────
   setPresence(userId: string, status: PresenceStatus, awayMessage: string | null = null) {
+    presenceFreshness.set(userId, ++presenceFreshnessSeq);
     set(s => ({
       presence: { ...s.presence, [userId]: normalizePresenceStatus(status) },
       awayMessages: {

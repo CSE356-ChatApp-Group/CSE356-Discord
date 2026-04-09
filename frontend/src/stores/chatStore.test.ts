@@ -82,6 +82,30 @@ describe('chatStore quick actions', () => {
     expect(state.messages['other-thread']).toBeDefined();
   });
 
+  it('does not let stale presence hydration overwrite a newer realtime update', async () => {
+    let resolvePresence: ((value: any) => void) | null = null;
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/presence?userIds=')) {
+        return new Promise((resolve) => {
+          resolvePresence = resolve;
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    const hydratePromise = useChatStore.getState().hydratePresenceForUsers(['user-2']);
+    useChatStore.getState().setPresence('user-2', 'online');
+
+    resolvePresence?.({
+      presence: { 'user-2': 'offline' },
+      awayMessages: {},
+    });
+
+    await hydratePromise;
+
+    expect(useChatStore.getState().presence['user-2']).toBe('online');
+  });
+
   it('inviteToChannel posts invited users and refreshes active community channels', async () => {
     apiPost.mockResolvedValue({ members: [{ id: 'user-2', username: 'alex' }] });
     apiGet.mockResolvedValue({ channels: [] });

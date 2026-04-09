@@ -25,6 +25,19 @@ vi.mock('../lib/ws', () => ({
   },
 }));
 
+vi.mock('../lib/api', () => ({
+  api: {
+    get: vi.fn(),
+    post: vi.fn(),
+    postForm: vi.fn(),
+    patch: vi.fn(),
+    put: vi.fn(),
+    delete: vi.fn(),
+  },
+  setToken: vi.fn(),
+  getToken: vi.fn(() => null),
+}));
+
 import { usePresenceHeartbeat } from './usePresenceHeartbeat';
 import { useAuthStore } from '../stores/authStore';
 
@@ -36,6 +49,16 @@ function Harness() {
 describe('usePresenceHeartbeat', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const storage = new Map<string, string>();
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => { storage.set(key, String(value)); },
+        removeItem: (key: string) => { storage.delete(key); },
+        clear: () => { storage.clear(); },
+      },
+    });
     window.localStorage.clear();
     act(() => {
       useAuthStore.setState({ user: { id: 'user-1', username: 'sam', email: 'sam@example.com' } } as any);
@@ -72,14 +95,19 @@ describe('usePresenceHeartbeat', () => {
     expect(awayPresenceCalls).toHaveLength(2);
   });
 
-  it('sends an immediate activity heartbeat for normal online presence so users do not appear idle on connect', () => {
+  it('does not treat websocket connect or reconnect as activity for normal online presence', () => {
     render(<Harness />);
 
-    expect(sendMock).toHaveBeenCalledWith({
-      type: 'presence',
-      status: 'online',
-      awayMessage: null,
-    });
+    expect(onOpenMock).toHaveBeenCalledTimes(1);
+    expect(sendMock.mock.calls.filter(([payload]) => payload?.type === 'presence')).toHaveLength(0);
+    expect(sendMock.mock.calls.filter(([payload]) => payload?.type === 'activity')).toHaveLength(0);
+
+    fireEvent.pointerDown(window);
     expect(sendMock).toHaveBeenCalledWith({ type: 'activity' });
+
+    act(() => {
+      invokeOpen();
+    });
+    expect(sendMock.mock.calls.filter(([payload]) => payload?.type === 'activity')).toHaveLength(1);
   });
 });
