@@ -331,7 +331,7 @@ describe('chatStore quick actions', () => {
 
   it('refreshes channels when a private-channel membership update arrives for the active community', () => {
     const fetchChannels = vi.fn().mockResolvedValue([]);
-    const subscribeSpy = vi.spyOn(wsManager, 'subscribe').mockReturnValue(() => {});
+    const subscribeSpy = vi.spyOn(wsManager, 'subscribe').mockReturnValue(() => false);
     useChatStore.setState({
       activeCommunity: { id: 'comm-1', name: 'One' },
       fetchChannels,
@@ -348,7 +348,7 @@ describe('chatStore quick actions', () => {
   });
 
   it('subscribes to channel WS on membership update even when that community is not active', () => {
-    const subscribeSpy = vi.spyOn(wsManager, 'subscribe').mockReturnValue(() => {});
+    const subscribeSpy = vi.spyOn(wsManager, 'subscribe').mockReturnValue(() => false);
     useChatStore.setState({
       activeCommunity: { id: 'comm-other', name: 'Other' },
       fetchChannels: vi.fn(),
