@@ -352,6 +352,33 @@ ssh "$PROD_USER@$PROD_HOST" "
   source /opt/chatapp/shared/.env
   set +a
   node \$RELEASE_PATH/backend/dist/db/migrate.js
+
+  # Fail fast if migrations did not create core tables (wrong DB, broken artifact, etc.).
+  cd \$RELEASE_PATH/backend
+  node -e \"
+const { Client } = require('pg');
+(async () => {
+  const url = process.env.DATABASE_URL;
+  if (!url) { console.error('Post-migrate check: DATABASE_URL missing'); process.exit(1); }
+  const c = new Client({ connectionString: url });
+  await c.connect();
+  const { rows } = await c.query(
+    \\\"SELECT to_regclass('public.messages') AS m, to_regclass('public.read_states') AS r, \\\" +
+    \\\"to_regclass('public.channels') AS ch, to_regclass('public.schema_migrations') AS sm\\\"
+  );
+  await c.end();
+  const miss = [];
+  if (!rows[0].m) miss.push('messages');
+  if (!rows[0].r) miss.push('read_states');
+  if (!rows[0].ch) miss.push('channels');
+  if (!rows[0].sm) miss.push('schema_migrations');
+  if (miss.length) {
+    console.error('Post-migrate schema check failed — missing: ' + miss.join(', '));
+    process.exit(1);
+  }
+  console.log('Post-migrate schema OK');
+})().catch((e) => { console.error(e); process.exit(1); });
+\"
   
   # Frontend is pre-built, but verify
   if [ ! -d \$RELEASE_PATH/frontend/dist ]; then
@@ -487,9 +514,10 @@ ssh "$PROD_USER@$PROD_HOST" "
 echo "✓ Candidate WS smoke passed"
 
 # 9. Nginx + kernel tuning / cutover
-# Dual-worker (CHATAPP_INSTANCES>=2): keep both upstreams while candidate already runs the new
-# release on NEW_PORT — avoids halving capacity during companion roll (9b). Requires migrations
-# and API to be backward-compatible between old and new for one rollout window.
+# Dual-worker (CHATAPP_INSTANCES>=2): keep both upstreams while candidate warms up, then step 9a
+# pins traffic to NEW_PORT only before the companion stop/restart (9b) so nginx never targets a
+# socket that is down mid-roll. Step 9c restores least_conn across both ports. Requires migrations
+# and API to be backward-compatible between old and new for the shared-traffic window before 9a.
 # Single-worker: point nginx at NEW_PORT only, then tune (original behavior).
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
   echo "9. Dual-worker: nginx/kernel tuning only (upstream unchanged — both ports stay live)..."
@@ -622,6 +650,45 @@ echo "✓ Nginx search route OK"
 
 # 9b–9c. Dual-worker prod: roll the companion to this release, then restore both backends in nginx.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
+  echo "9a. Pinning nginx to candidate (${NEW_PORT}) before companion restart..."
+  ssh "$PROD_USER@$PROD_HOST" "
+    set -euo pipefail
+    export NEW_PORT='${NEW_PORT}'
+    TMP_SITE=\$(mktemp)
+    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    export TMP_SITE
+    python3 <<'PY'
+import os, re
+cfg_path = os.environ['TMP_SITE']
+newp = os.environ['NEW_PORT']
+keepalive = '''  keepalive 512;
+  keepalive_requests 100000;
+  keepalive_timeout 75s;
+'''
+block = (
+    'upstream app {\\n'
+    '  server localhost:%s max_fails=0;\\n' % newp
+    + keepalive
+    + '}'
+)
+text = open(cfg_path).read()
+text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
+if n != 1:
+    raise SystemExit('step 9a: upstream app block not replaced (n=%d)' % (n,))
+open(cfg_path, 'w').write(text)
+PY
+    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    rm -f \"\$TMP_SITE\"
+    sudo nginx -t >/dev/null
+    sudo systemctl reload nginx
+    echo 'Nginx: candidate-only upstream before companion roll'
+  " || {
+    echo "ERROR: Nginx pin to candidate (9a) failed."
+    rollback_cutover
+    exit 1
+  }
+  echo "✓ Nginx pinned to candidate"
+
   echo "9b. Rolling companion on port ${OLD_PORT} to ${RELEASE_SHA} (dual-worker)..."
   ssh "$PROD_USER@$PROD_HOST" "
     set -euo pipefail
@@ -645,7 +712,7 @@ if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
     exit 1
   fi
 
-  echo "9c. Restoring nginx upstream (least_conn, both workers, max_fails=0)..."
+  echo "9c. Restoring nginx upstream (least_conn, both workers; passive health on upstream)..."
   ssh "$PROD_USER@$PROD_HOST" "
     set -euo pipefail
     export NEW_PORT='${NEW_PORT}'
@@ -661,11 +728,12 @@ keepalive = '''  keepalive 512;
   keepalive_requests 100000;
   keepalive_timeout 75s;
 '''
+srv = '  server localhost:%s max_fails=2 fail_timeout=10s;\\n'
 block = (
     'upstream app {\\n'
     '  least_conn;\\n'
-    '  server localhost:%s max_fails=0;\\n' % newp
-    + ('  server localhost:%s max_fails=0;\\n' % oldp)
+    + (srv % newp)
+    + (srv % oldp)
     + keepalive
     + '}'
 )
