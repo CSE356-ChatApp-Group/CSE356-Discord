@@ -1369,12 +1369,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const key = msg.channel_id || msg.conversation_id;
         set((s) => {
           const paginationState = s.messagePagination[key];
-          const shouldAppendToLoadedHistory = !paginationState?.hasNewer;
+          const existing = s.messages[key] || [];
           const nextMessages = {
             ...s.messages,
-            [key]: shouldAppendToLoadedHistory
-              ? upsertMessage(s.messages[key], msg)
-              : (s.messages[key] || []),
+            [key]: sortMessagesChronologically(upsertMessage(existing, msg)),
           };
 
           let nextChannels = s.channels;

@@ -467,6 +467,60 @@ describe('chatStore websocket author hydration', () => {
     expect(stored.author).toBeUndefined();
   });
 
+  it('still merges message:created when hasNewer is true so the newest row appears in state', () => {
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'sam',
+        displayName: 'Sam',
+        email: 'sam@example.com',
+      },
+    } as any);
+
+    useChatStore.setState({
+      activeChannel: { id: 'channel-1', name: 'general' },
+      channels: [
+        {
+          id: 'channel-1',
+          name: 'general',
+          unread_message_count: 0,
+          my_last_read_message_id: 'msg-old',
+        },
+      ],
+      messages: {
+        'channel-1': [
+          {
+            id: 'msg-old',
+            channel_id: 'channel-1',
+            author_id: 'user-2',
+            content: 'older window',
+            created_at: '2026-01-01T12:00:00.000Z',
+          },
+        ],
+      },
+      messagePagination: {
+        'channel-1': { hasOlder: true, hasNewer: true },
+      },
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'message:created',
+      data: {
+        id: 'msg-live',
+        channel_id: 'channel-1',
+        author_id: 'user-2',
+        content: 'arrived while paging newer',
+        created_at: '2026-01-01T13:00:00.000Z',
+      },
+    });
+
+    const list = useChatStore.getState().messages['channel-1'];
+    expect(list.map((m: any) => m.id)).toEqual(['msg-old', 'msg-live']);
+    const ch = useChatStore.getState().channels.find((c: any) => c.id === 'channel-1');
+    expect(ch?.unread_message_count).toBe(1);
+    expect(ch?.my_last_read_message_id).toBe('msg-old');
+  });
+
   it('hydrates author for current-user message:updated events missing author', () => {
     useAuthStore.setState({
       user: {
