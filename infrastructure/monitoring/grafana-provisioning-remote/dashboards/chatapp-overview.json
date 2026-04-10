@@ -185,6 +185,19 @@
       "targets": [{ "expr": "sum(rate(side_effect_queue_dropped_total{job=\"chatapp-api\"}[5m])) by (name, reason)", "legendFormat": "{{name}} {{reason}}", "refId": "A" }],
       "title": "Side-effect queue drops (rate) — delivery pressure",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 32 },
+      "id": 12,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [{ "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m]))", "legendFormat": "5xx / s", "refId": "A" }],
+      "title": "5xx absolute rate (req/s) — use with ChatApp5xxAbsoluteRate alert",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

@@ -66,21 +66,50 @@ groups:
           summary: ChatApp API p95 latency is high
           description: p95 request latency for route {{ $labels.route }} has exceeded 1000ms for 10 minutes.
 
+      - alert: ChatAppSevereP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",route!="/metrics"}[5m]))
+          ) > 5000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: ChatApp API p95 latency is severely elevated
+          description: >
+            p95 for route {{ $labels.route }} exceeded 5000ms for 5 minutes — user-visible slowness
+            or overload. Correlate with Postgres pool, fanout queue depth, and event-loop lag.
+
       # Fast-burn signal: short-window failures can hurt grading even before 10m alerts fire.
       - alert: ChatAppFast5xxBurn
         expr: |
           sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[2m]))
             /
           clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[2m])), 1)
-            > 0.08
+            > 0.06
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: ChatApp API fast 5xx burn detected
           description: >
-            5xx ratio exceeded 8% over a 2-minute window. This catches burst failures quickly
-            (before longer warning windows) and should trigger immediate scaling or load shedding action.
+            5xx ratio exceeded 6% over a 2-minute window. Catches burst failures before the 10m
+            warning; tune if deploy cutovers produce false positives.
+
+      # Ratio-based rules miss "errors drowned in success" (e.g. heavy grader traffic + steady 500s).
+      - alert: ChatApp5xxAbsoluteRate
+        expr: |
+          sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[5m])) > 0.25
+        for: 4m
+        labels:
+          severity: warning
+        annotations:
+          summary: ChatApp sustained 5xx request rate
+          description: >
+            At least ~0.25 completed 5xx responses per second (5m rate) for 4 minutes.
+            Fires even when 5xx share is below 5% of total traffic. Check deploy logs, DB 42P01,
+            and route-specific rates.
 
       - alert: ChatAppEventLoopLagHigh
         expr: nodejs_eventloop_lag_p99_seconds{job="chatapp-api"} > 0.25

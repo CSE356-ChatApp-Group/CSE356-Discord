@@ -22,10 +22,35 @@ Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastr
 2. Identify route from metrics label `route` on histograms or access logs.
 3. If shedder active, scale capacity or reduce client burst (rate limits).
 
+## ChatApp5xxAbsoluteRate
+
+Fires when **completed** 5xx responses stay above ~0.25/s (5m rate) for 4 minutes — catches steady errors even when **ratio** to all traffic is below 5% (e.g. heavy grader load).
+
+1. Same triage as **ChatAppHigh5xxRate**; check Grafana **5xx absolute rate (req/s)** panel.
+2. Postgres `42P01` / missing relations → deploy or `DATABASE_URL` mismatch, not “overload” alone.
+
+## ChatAppSevereP95Latency
+
+**Critical** — p95 above 5s for 5 minutes on a route. Discord routes to `@here` via `discord-critical`.
+
+1. Inspect `pg_pool_waiting`, fanout queue depth, event-loop lag on the same dashboard.
+2. Compare with nginx/upstream timeouts if clients see 502/504 without Node metrics moving.
+
 ## ChatAppHighP95Latency
 
 1. Check hot routes; inspect DB slow queries and Redis latency.
 2. Compare with k6 `slo` summary from the same week.
+
+## Discord did not notify but the app looked unhealthy
+
+Prometheus must **fire** an alert; Alertmanager must **deliver** it. Common gaps:
+
+1. **`for:` duration** — e.g. **ChatAppHigh5xxRate** needs more than **5%** 5xx for **10 minutes**; brief deploy spikes may never qualify. **ChatAppFast5xxBurn** uses a **2m** window (threshold **6%** ratio).
+2. **Metric blind spots** — rules use **`job="chatapp-api"`** and **completed** HTTP responses. Nginx-only **502/504**, scrape outages, or errors not recorded on `http_server_requests_total` will not trigger these alerts.
+3. **Alertmanager** — confirm the running config matches [`infrastructure/monitoring/alertmanager.yml`](../infrastructure/monitoring/alertmanager.yml), webhook secret is mounted, and no **Silences** cover `alertname=~"ChatApp.*"`.
+4. **Grafana `sum(ALERTS{...})`** is a **count** of firing alert series — if a panel shows **“%”** on the axis, fix the panel unit (should be **none** or **short**), or you will misread the graph.
+
+**Verify in Prometheus:** paste the `expr` from `ChatAppFast5xxBurn` / `ChatApp5xxAbsoluteRate` into **Graph** for the incident time range and check whether the line crossed the threshold for the full **`for`** window.
 
 ## ChatAppEventLoopLagHigh
 
