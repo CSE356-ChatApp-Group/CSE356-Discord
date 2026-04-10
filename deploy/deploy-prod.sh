@@ -853,7 +853,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   # Without this, ALERT_ENVIRONMENT can default to local and webhook secret selection breaks.
   sudo cp /opt/chatapp/shared/.env /opt/chatapp-monitoring/.env
   sudo sed -i 's/^ALERT_ENVIRONMENT=.*/ALERT_ENVIRONMENT=production/' /opt/chatapp-monitoring/.env
-  if ! grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
+  if ! sudo grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
     echo 'ALERT_ENVIRONMENT=production' | sudo tee -a /opt/chatapp-monitoring/.env >/dev/null
   fi
   sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d --force-recreate alertmanager prometheus >/dev/null

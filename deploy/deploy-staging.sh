@@ -470,7 +470,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   # Keep monitoring env in sync with shared host env so webhook selection uses staging.
   sudo cp /opt/chatapp/shared/.env /opt/chatapp-monitoring/.env
   sudo sed -i 's/^ALERT_ENVIRONMENT=.*/ALERT_ENVIRONMENT=staging/' /opt/chatapp-monitoring/.env
-  if ! grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
+  if ! sudo grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
     echo 'ALERT_ENVIRONMENT=staging' | sudo tee -a /opt/chatapp-monitoring/.env >/dev/null
   fi
   sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d --force-recreate alertmanager prometheus >/dev/null 2>&1 || true
