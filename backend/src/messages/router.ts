@@ -19,6 +19,7 @@ const { query, getClient, withTransaction } = require('../db/pool');
 const { messagePostAccessDeniedTotal } = require('../utils/metrics');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
+const fanout           = require('../websocket/fanout');
 const overload         = require('../utils/overload');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
@@ -119,6 +120,39 @@ async function publishConversationEvent(conversationId, event, data) {
   // sort order reflect the new event immediately on the next REST request.
   const userIds = uniqueTargets.filter((t) => t.startsWith('user:')).map((t) => t.slice(5));
   Promise.allSettled(userIds.map((uid) => redis.del(`conversations:list:${uid}`))).catch(() => {});
+}
+
+async function publishConversationEventNow(conversationId, event, data) {
+  const targets = await getConversationFanoutTargets(conversationId);
+  let uniqueTargets = [...new Set(targets)];
+
+  if (event === 'read:updated') {
+    uniqueTargets = uniqueTargets.filter((target) => target.startsWith('user:'));
+  }
+
+  await Promise.allSettled(
+    uniqueTargets.map((target) => fanout.publish(target, { event, data })),
+  );
+
+  if (event === 'read:updated') return;
+  const userIds = uniqueTargets
+    .filter((target) => target.startsWith('user:'))
+    .map((target) => target.slice(5));
+  Promise.allSettled(userIds.map((uid) => redis.del(`conversations:list:${uid}`))).catch(() => {});
+}
+
+async function incrementChannelMessageCount(channelId) {
+  const countKey = `channel:msg_count:${channelId}`;
+  const exists = await redis.exists(countKey);
+  if (!exists) {
+    const { rows } = await query(
+      `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
+      [channelId]
+    );
+    const total = rows[0]?.cnt ?? 0;
+    await redis.set(countKey, total, 'NX');
+  }
+  await redis.incr(countKey);
 }
 
 async function loadHydratedMessageById(messageId) {
@@ -782,14 +816,17 @@ router.post('/',
       }
 
       if (channelId) {
-        sideEffects.publishMessageEventWithUnread(
+        try {
+          await incrementChannelMessageCount(channelId);
+        } catch (err) {
+          logger.warn({ err, channelId }, 'Failed to increment channel:msg_count before realtime publish');
+        }
+        await fanout.publish(
           targetKey(channelId, conversationId),
-          'message:created',
-          message,
-          channelId,
+          { event: 'message:created', data: message },
         );
       } else {
-        await publishConversationEvent(conversationId, 'message:created', message);
+        await publishConversationEventNow(conversationId, 'message:created', message);
       }
       if (communityId) {
         sideEffects.publishBackgroundEvent(`community:${communityId}`, 'community:channel_message', {
