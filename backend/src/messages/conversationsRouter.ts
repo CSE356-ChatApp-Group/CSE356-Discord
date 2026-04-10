@@ -506,8 +506,13 @@ async function addParticipantsHandler(req, res, next) {
     }
 
     if (joinedGroupMessages.length > 0) {
-      // System messages bypass POST /messages and its cache bust; align with GET latest page.
-      redis.del(`messages:conversation:${req.params.id}`).catch(() => {});
+      // System messages bypass POST /messages and its cache bust; await DEL so a tight
+      // invite→GET poll cannot read stale first-page JSON (same guarantee as POST /messages).
+      try {
+        await redis.del(`messages:conversation:${req.params.id}`);
+      } catch {
+        /* non-fatal: TTL backstop if Redis errors */
+      }
       const targets = [
         `conversation:${req.params.id}`,
         ...activeParticipantIds.map((uid) => `user:${uid}`),
@@ -611,12 +616,20 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       invalidateWsBootstrapCache(req.user.id),
     ]);
     // DM latest-page cache: leave adds a system row or deletes the thread; POST /messages is not used.
-    redis.del(`messages:conversation:${req.params.id}`).catch(() => {});
-    redis.del(conversationsCacheKey(req.user.id)).catch(() => {});
+    try {
+      await redis.del(`messages:conversation:${req.params.id}`);
+    } catch {
+      /* non-fatal */
+    }
+    try {
+      await redis.del(conversationsCacheKey(req.user.id));
+    } catch {
+      /* non-fatal */
+    }
     if (!shouldDelete && activeParticipantIds.length > 0) {
-      Promise.allSettled(
+      await Promise.allSettled(
         activeParticipantIds.map((uid) => redis.del(conversationsCacheKey(uid))),
-      ).catch(() => {});
+      );
     }
 
     // Broadcast system message if group DM and not deleted

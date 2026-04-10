@@ -930,11 +930,19 @@ router.delete('/:id',
       if (message.channel_id) {
         await repointChannelLastMessage(message.channel_id);
         redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
-        redis.del(channelMsgCacheKey(message.channel_id)).catch(() => {});
+        try {
+          await redis.del(channelMsgCacheKey(message.channel_id));
+        } catch {
+          /* non-fatal: TTL backstop if Redis errors */
+        }
       }
       if (message.conversation_id) {
         await repointConversationLastMessage(message.conversation_id);
-        redis.del(`messages:conversation:${message.conversation_id}`).catch(() => {});
+        try {
+          await redis.del(`messages:conversation:${message.conversation_id}`);
+        } catch {
+          /* non-fatal: TTL backstop if Redis errors */
+        }
       }
       if (message.conversation_id) {
         await publishConversationEvent(message.conversation_id, 'message:deleted', { id: message.id });

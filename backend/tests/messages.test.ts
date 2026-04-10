@@ -563,6 +563,13 @@ describe('GET /messages latest-page cache vs DELETE', () => {
     const warmIds = (warmB.body.messages || []).map((m: { id: string }) => m.id);
     expect(warmIds).toContain(m2Id);
 
+    await redis.set(
+      `messages:conversation:${conversationId}`,
+      JSON.stringify(warmB.body),
+      'EX',
+      60,
+    );
+
     const delRes = await request(app)
       .delete(`/api/v1/messages/${m2Id}`)
       .set('Authorization', `Bearer ${a.accessToken}`);
@@ -573,6 +580,69 @@ describe('GET /messages latest-page cache vs DELETE', () => {
       .set('Authorization', `Bearer ${b.accessToken}`);
     expect(afterB.status).toBe(200);
     const ids = (afterB.body.messages || []).map((m: { id: string }) => m.id);
+    expect(ids).not.toContain(m2Id);
+    expect(ids).toContain(m1Id);
+  });
+});
+
+describe('GET /messages latest-page cache vs DELETE (channel)', () => {
+  it('channel latest GET omits a deleted message immediately even with stale Redis seed', async () => {
+    const owner = await createAuthenticatedUser('chandelcache');
+    const slug = `chandel-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'channel delete cache' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        communityId,
+        name: `chandel-ch-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: false,
+      });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const m1Res = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'ch first' });
+    expect(m1Res.status).toBe(201);
+    const m1Id = m1Res.body.message.id;
+
+    const m2Res = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'ch delete me' });
+    expect(m2Res.status).toBe(201);
+    const m2Id = m2Res.body.message.id;
+
+    const warm = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(warm.status).toBe(200);
+
+    await redis.set(
+      `messages:channel:${channelId}`,
+      JSON.stringify(warm.body),
+      'EX',
+      60,
+    );
+
+    const delRes = await request(app)
+      .delete(`/api/v1/messages/${m2Id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(delRes.status).toBe(200);
+
+    const after = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(after.status).toBe(200);
+    const ids = (after.body.messages || []).map((m: { id: string }) => m.id);
     expect(ids).not.toContain(m2Id);
     expect(ids).toContain(m1Id);
   });
@@ -596,6 +666,14 @@ describe('GET /messages latest-page cache vs group DM system rows', () => {
       .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
       .set('Authorization', `Bearer ${a.accessToken}`);
     expect(warm.status).toBe(200);
+
+    // Stale first-page cache must not win over a follow-up GET after invite (grader-style race).
+    await redis.set(
+      `messages:conversation:${conversationId}`,
+      JSON.stringify(warm.body),
+      'EX',
+      60,
+    );
 
     const inviteRes = await request(app)
       .post(`/api/v1/conversations/${conversationId}/invite`)
@@ -631,6 +709,13 @@ describe('GET /messages latest-page cache vs group DM system rows', () => {
       .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
       .set('Authorization', `Bearer ${b.accessToken}`);
     expect(warm.status).toBe(200);
+
+    await redis.set(
+      `messages:conversation:${conversationId}`,
+      JSON.stringify(warm.body),
+      'EX',
+      60,
+    );
 
     const leaveRes = await request(app)
       .post(`/api/v1/conversations/${conversationId}/leave`)
