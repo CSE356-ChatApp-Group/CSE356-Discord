@@ -70,6 +70,26 @@ If realtime is broken but REST is healthy:
 2. Run [`deploy/candidate-ws-smoke.cjs`](../deploy/candidate-ws-smoke.cjs) against candidate URL if available.
 3. Inspect fanout queue metrics and logs in [`backend/src/messages/sideEffects.ts`](../backend/src/messages/sideEffects.ts) paths.
 
+## Grader-oriented delivery checks
+
+Automated graders (browser clients) should treat **HTTP as the source of truth** for whether a message exists, not the DOM immediately after `POST /messages` returns.
+
+1. **Preferred:** After a successful write (`201`), call **`GET /messages?channelId=…` or `GET /messages?conversationId=…`** and assert the new message id or content appears on the first page. The API awaits Redis eviction of the first-page cache before responding on create/update/delete and on group invite/leave system rows; the web client also skips its short in-memory GET cache for `/messages` paths (see [`frontend/src/lib/api.ts`](../frontend/src/lib/api.ts)).
+2. **If checking the UI only:** Allow a **short wait** (for example one animation frame or tens of milliseconds) after `201` before asserting. Realtime delivery goes through an in-process fanout queue and Redis pub/sub, so **WS-only checks with zero delay can flake** even when the server is healthy.
+3. **Do not** rely solely on WebSocket delivery for grading unless you accept occasional false negatives under normal load.
+
+## Metrics during grader or load-test runs
+
+When investigating **delivery fails**, **peak rate**, or tail latency under many concurrent browser sessions, correlate with:
+
+| Metric | What it indicates |
+|--------|-------------------|
+| `side_effect_queue_depth{job="chatapp-api",queue="fanout:critical"}` | Backlog of Redis publish jobs for message/read fanout; sustained growth means realtime lag. |
+| `side_effect_queue_delay_ms` (histogram) | Time from enqueue to running the fanout job; high p95 means delayed WS delivery after writes. |
+| `ws_backpressure_events_total{job="chatapp-api"}` | Server dropped a frame or closed a socket because the client could not drain the WS buffer fast enough. |
+
+Related alerts: [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) (for example critical fanout backlog and delivery degradation rules).
+
 ## After mitigation
 
 Update the incident log, trigger a **staging drill** ([`deploy/STAGING-DRILL-CHECKLIST.md`](../deploy/STAGING-DRILL-CHECKLIST.md)), and open a follow-up if the root cause is uncaught by tests (see [`docs/VERIFICATION-RISK-REGISTER.md`](VERIFICATION-RISK-REGISTER.md)).
