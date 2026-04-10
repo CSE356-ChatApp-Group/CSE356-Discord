@@ -198,6 +198,226 @@
       "targets": [{ "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m]))", "legendFormat": "5xx / s", "refId": "A" }],
       "title": "5xx absolute rate (req/s) — use with ChatApp5xxAbsoluteRate alert",
       "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 2, "w": 24, "x": 0, "y": 37 },
+      "id": 13,
+      "options": {
+        "content": "**Grader / delivery debugging** — WebSocket backpressure (dropped frames / killed sockets), message POST outcomes, async fanout queue health (read receipts & non-inline events), Postgres pool wait, and `/api/v1/messages` HTTP. Correlate spikes with grader \"delivery fails\".",
+        "mode": "markdown"
+      },
+      "title": "",
+      "transparent": true,
+      "type": "text"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 39 },
+      "id": 14,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (action, instance) (rate(ws_backpressure_events_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{action}} {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "WS backpressure (rate) — drop vs kill slow consumers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 39 },
+      "id": 15,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(ws_connection_result_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "WebSocket outcomes (rate) — accepted vs rejected",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 45 },
+      "id": 16,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (status_code) (rate(message_post_response_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "HTTP {{status_code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "POST /api/v1/messages responses (rate) by status — grader send failures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 45 },
+      "id": 17,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(message_post_access_denied_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "POST /messages 403 after access check (rate) by reason",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 52 },
+      "id": 18,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "max(side_effect_queue_depth{job=\"chatapp-api\",queue=\"fanout:critical\"}) by (instance)",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "fanout:critical queue depth (max per instance)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 52 },
+      "id": 19,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(side_effect_queue_delay_ms_bucket{job=\"chatapp-api\",queue=\"fanout:critical\"}[5m])))",
+          "legendFormat": "p95 wait",
+          "refId": "A"
+        }
+      ],
+      "title": "fanout:critical queue wait p95 (ms) — delayed read:updated WS",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 52 },
+      "id": 20,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (name) (rate(side_effect_job_duration_ms_count{job=\"chatapp-api\",queue=\"fanout:critical\",status=\"error\"}[5m]))",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "fanout:critical job errors (rate) by job name",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 58 },
+      "id": 21,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "max(pg_pool_waiting{job=\"chatapp-api\"}) by (instance)",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Postgres pool waiting (max per instance) — 503 / timeouts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 58 },
+      "id": 22,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (method, status_class) (rate(http_server_requests_total{job=\"chatapp-api\",route=\"/api/v1/messages\"}[5m]))",
+          "legendFormat": "{{method}} {{status_class}}",
+          "refId": "A"
+        }
+      ],
+      "title": "/api/v1/messages HTTP (rate) by method + status class — GET vs POST failures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 64 },
+      "id": 23,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "max(chatapp_overload_stage{job=\"chatapp-api\"}) by (instance)",
+          "legendFormat": "stage {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Overload stage (0–3) — search/write restrictions",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 64 },
+      "id": 24,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route=\"/api/v1/messages\"}[5m]))",
+          "legendFormat": "aborted / s",
+          "refId": "A"
+        }
+      ],
+      "title": "/api/v1/messages client-aborted requests (rate) — grader timeout / navigate away",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -210,6 +430,6 @@
   "timezone": "browser",
   "title": "ChatApp Overview",
   "uid": "chatapp-overview",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

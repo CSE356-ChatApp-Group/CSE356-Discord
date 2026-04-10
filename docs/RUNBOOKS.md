@@ -90,6 +90,8 @@ When investigating **delivery fails**, **peak rate**, or tail latency under many
 
 Related alerts: [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) (for example critical fanout backlog and delivery degradation rules).
 
+Grafana **ChatApp Overview** ([`infrastructure/monitoring/grafana-provisioning/dashboards/chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning/dashboards/chatapp-overview.json)) includes a **Grader / delivery debugging** section: WebSocket backpressure, `message_post_response_total`, fanout queue depth/delay, pool waiting, `/api/v1/messages` HTTP mix, overload stage, and client-aborted requests.
+
 **Before release / after delivery changes:** run `cd backend && npm test` (full suite). For a staging grader-style load, compare **POST `/messages` p95/p99** (synchronous fanout adds latency) with **`ws_backpressure_events_total`** and fanout queue depth above.
 
 ## After mitigation
