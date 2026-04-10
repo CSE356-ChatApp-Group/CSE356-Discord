@@ -178,6 +178,23 @@ function startPgPoolMetrics(pool) {
   }, 500).unref();
 }
 
+/**
+ * prom-client omits labeled counters from /metrics until the first observation.
+ * Prime 0 increments so Prometheus/Grafana always have these series (flat 0 until real events).
+ */
+(function primeSparseLabeledCounters() {
+  try {
+    wsBackpressureEventsTotal.inc({ action: 'drop' }, 0);
+    wsBackpressureEventsTotal.inc({ action: 'kill' }, 0);
+    messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
+    messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
+    httpRequestsAbortedTotal.inc({ method: 'GET', route: '/api/v1/messages' }, 0);
+    httpRequestsAbortedTotal.inc({ method: 'POST', route: '/api/v1/messages' }, 0);
+  } catch {
+    /* ignore during unusual test setups */
+  }
+})();
+
 module.exports = {
   register: client.register,
   httpRequestsTotal,
