@@ -23,6 +23,15 @@ const fanout           = require('../websocket/fanout');
 const overload         = require('../utils/overload');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
+const {
+  channelMsgCacheKey,
+  conversationMsgCacheKey,
+  channelMsgCacheEpochKey,
+  conversationMsgCacheEpochKey,
+  readMessageCacheEpoch,
+  bustChannelMessagesCache,
+  bustConversationMessagesCache,
+} = require('./messageCacheBust');
 
 const router = express.Router();
 router.use(authenticate);
@@ -244,7 +253,6 @@ async function repointConversationLastMessage(conversationId) {
 // ── Helpers ── message cache ─────────────────────────────────────────────────
 const MESSAGES_CACHE_TTL_SECS = 15;
 const DEFAULT_CONTEXT_SIDE_LIMIT = 25;
-function channelMsgCacheKey(channelId) { return `messages:channel:${channelId}`; }
 
 // In-process singleflight: prevents thundering-herd when the channel/conversation
 // message cache expires.  All concurrent requests for the same key share one DB
@@ -297,6 +305,8 @@ router.get('/',
         }
 
         const promise: Promise<{ messages: any[] }> = (async () => {
+          const epochKey = channelMsgCacheEpochKey(channelId);
+          const epochBefore = await readMessageCacheEpoch(redis, epochKey);
           const params: any[] = [limit, req.user.id, channelId];
           const sql = `
             SELECT m.*,
@@ -329,7 +339,10 @@ router.get('/',
             }
           }
           const body = { messages: rows.reverse() };
-          redis.set(cacheKey, JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
+          const epochAfter = await readMessageCacheEpoch(redis, epochKey);
+          if (epochBefore === epochAfter) {
+            redis.set(cacheKey, JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
+          }
           return body;
         })();
 
@@ -351,7 +364,7 @@ router.get('/',
       // All participants see identical message history so the cache is shared by conversationId.
       // POST busts this key; WS still carries realtime delivery.
       if (conversationId && !before && !after) {
-        const cacheKey = `messages:conversation:${conversationId}`;
+        const cacheKey = conversationMsgCacheKey(conversationId);
         try {
           const cached = await redis.get(cacheKey);
           if (cached) return res.json(JSON.parse(cached));
@@ -366,6 +379,8 @@ router.get('/',
         }
 
         const promise: Promise<{ messages: any[] }> = (async () => {
+          const epochKey = conversationMsgCacheEpochKey(conversationId);
+          const epochBefore = await readMessageCacheEpoch(redis, epochKey);
           const { rows } = await query(`
             SELECT m.*,
                    CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
@@ -394,7 +409,10 @@ router.get('/',
             }
           }
           const body = { messages: rows.reverse() };
-          redis.set(cacheKey, JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
+          const epochAfter = await readMessageCacheEpoch(redis, epochKey);
+          if (epochBefore === epochAfter) {
+            redis.set(cacheKey, JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
+          }
           return body;
         })();
 
@@ -807,9 +825,9 @@ router.post('/',
       // client cannot GET stale JSON between commit and eviction (grader polling).
       try {
         if (channelId) {
-          await redis.del(channelMsgCacheKey(channelId));
+          await bustChannelMessagesCache(redis, channelId);
         } else if (conversationId) {
-          await redis.del(`messages:conversation:${conversationId}`);
+          await bustConversationMessagesCache(redis, conversationId);
         }
       } catch {
         /* non-fatal: TTL backstop if Redis errors */
@@ -907,10 +925,10 @@ router.patch('/:id',
       // Bust the Redis message cache synchronously (awaited) so that a GET
       // issued immediately after this PATCH returns the updated content.
       if (baseMessage.channel_id) {
-        await redis.del(channelMsgCacheKey(baseMessage.channel_id));
+        await bustChannelMessagesCache(redis, baseMessage.channel_id);
       }
       if (baseMessage.conversation_id) {
-        await redis.del(`messages:conversation:${baseMessage.conversation_id}`);
+        await bustConversationMessagesCache(redis, baseMessage.conversation_id);
         await publishConversationEventNow(
           baseMessage.conversation_id,
           'message:updated',
@@ -975,7 +993,7 @@ router.delete('/:id',
         await repointChannelLastMessage(message.channel_id);
         redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
         try {
-          await redis.del(channelMsgCacheKey(message.channel_id));
+          await bustChannelMessagesCache(redis, message.channel_id);
         } catch {
           /* non-fatal: TTL backstop if Redis errors */
         }
@@ -983,7 +1001,7 @@ router.delete('/:id',
       if (message.conversation_id) {
         await repointConversationLastMessage(message.conversation_id);
         try {
-          await redis.del(`messages:conversation:${message.conversation_id}`);
+          await bustConversationMessagesCache(redis, message.conversation_id);
         } catch {
           /* non-fatal: TTL backstop if Redis errors */
         }

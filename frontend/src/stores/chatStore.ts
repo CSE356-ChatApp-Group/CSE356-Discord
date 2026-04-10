@@ -1122,10 +1122,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (message?.id) {
       const key = message.channel_id || message.channelId || message.conversation_id || message.conversationId;
       if (key) {
+        const hydrated = hydrateAuthorFromSession(message);
         set((s) => ({
           messages: {
             ...s.messages,
-            [key]: upsertMessage(s.messages[key], message),
+            [key]: sortMessagesChronologically(upsertMessage(s.messages[key], hydrated)),
           },
         }));
       }
@@ -1141,11 +1142,28 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async editMessage(id: string, content: string) {
-    await api.patch(`/messages/${id}`, { content });
+    const { message } = await api.patch(`/messages/${id}`, { content });
+    if (!message?.id) return;
+    const msg = hydrateAuthorFromSession(message);
+    const key = msg.channel_id || msg.conversation_id;
+    if (!key) return;
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [key]: (s.messages[key] || []).map((m) => (m.id === msg.id ? { ...m, ...msg } : m)),
+      },
+    }));
   },
 
   async deleteMessage(id: string) {
     await api.delete(`/messages/${id}`);
+    set((s) => {
+      const messages: Record<string, Entity[]> = {};
+      for (const [k, msgs] of Object.entries(s.messages)) {
+        messages[k] = msgs.filter((m) => m.id !== id);
+      }
+      return { messages };
+    });
   },
 
   // ── Members ───────────────────────────────────────────────────────────────

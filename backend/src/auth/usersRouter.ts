@@ -208,7 +208,12 @@ router.patch('/me',
       if (req.body.bio !== undefined) updates.bio = req.body.bio;
       if (req.body.password) updates.password_hash = await hashPassword(req.body.password, 'user_update_hash');
 
-      if (!Object.keys(updates).length) return res.status(400).json({ error: 'Nothing to update' });
+      if (!Object.keys(updates).length) {
+        const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
+        if (!rows.length) return res.status(404).json({ error: 'Not found' });
+        const { status, awayMessage } = await presenceService.getPresenceDetails(req.user.id);
+        return res.json({ user: { ...rows[0], status, away_message: awayMessage } });
+      }
 
       const setClauses = Object.keys(updates).map((k, i) => `${k}=$${i + 2}`).join(', ');
       const { rows } = await query(

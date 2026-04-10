@@ -171,15 +171,21 @@ export default function MessagePane() {
     if (countIncreased) {
       const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       const nearBottom = distanceFromBottom < 120;
-      if (nearBottom) {
+      const atLoadedLiveTail = !paginationState.hasNewer;
+      const tailSlopPx = 420;
+      const likelyFollowingLive =
+        nearBottom || (atLoadedLiveTail && distanceFromBottom < tailSlopPx);
+      if (likelyFollowingLive) {
         requestAnimationFrame(() => {
-          el.scrollTop = el.scrollHeight;
+          requestAnimationFrame(() => {
+            el.scrollTop = el.scrollHeight;
+          });
         });
       }
     }
 
     prevMsgCountRef.current = msgList.length;
-  }, [key, msgList, jumpTargetMessageId]);
+  }, [key, msgList, jumpTargetMessageId, paginationState.hasNewer]);
 
   // Reset name editing when conversation changes
   useEffect(() => {

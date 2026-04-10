@@ -16,6 +16,7 @@ const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
 const presenceService  = require('../presence/service');
 const { invalidateWsBootstrapCache } = require('../websocket/server');
+const { bustConversationMessagesCache } = require('./messageCacheBust');
 
 const router = express.Router();
 router.use(authenticate);
@@ -509,7 +510,7 @@ async function addParticipantsHandler(req, res, next) {
       // System messages bypass POST /messages and its cache bust; await DEL so a tight
       // invite→GET poll cannot read stale first-page JSON (same guarantee as POST /messages).
       try {
-        await redis.del(`messages:conversation:${req.params.id}`);
+        await bustConversationMessagesCache(redis, req.params.id);
       } catch {
         /* non-fatal: TTL backstop if Redis errors */
       }
@@ -617,7 +618,7 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     ]);
     // DM latest-page cache: leave adds a system row or deletes the thread; POST /messages is not used.
     try {
-      await redis.del(`messages:conversation:${req.params.id}`);
+      await bustConversationMessagesCache(redis, req.params.id);
     } catch {
       /* non-fatal */
     }

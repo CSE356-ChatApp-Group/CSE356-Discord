@@ -20,6 +20,8 @@ function getWebSocketBaseUrl() {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 }
 
+const MAX_PENDING_WS_OUTBOUND = 256;
+
 class WsManager {
   private _ws: WebSocket | null;
   private _listeners: Map<string, Set<(event: any) => void>>;
@@ -27,6 +29,8 @@ class WsManager {
   private _openListeners: Set<() => void>;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null;
   private _intentionalClose: boolean;
+  /** Frames queued while readyState === CONNECTING (subscribe must not be dropped). */
+  private _pendingOutbound: string[];
 
   constructor() {
     this._ws         = null;
@@ -35,6 +39,7 @@ class WsManager {
     this._openListeners = new Set();
     this._reconnectTimer  = null;
     this._intentionalClose = false;
+    this._pendingOutbound = [];
   }
 
   connect(options: { allowAnonymous?: boolean } = {}) {
@@ -53,6 +58,7 @@ class WsManager {
 
     this._ws.onopen = () => {
       console.debug('[WS] connected');
+      this._flushPendingOutbound();
       this._openListeners.forEach((fn) => fn());
       // Re-subscribe to all watched channels after reconnect
       for (const ch of this._listeners.keys()) {
@@ -76,6 +82,7 @@ class WsManager {
     };
 
     this._ws.onclose = (event) => {
+      this._pendingOutbound = [];
       if (event.code === 4001) {
         this.disconnect();
         window.dispatchEvent(new CustomEvent('chatapp:session-expired'));
@@ -93,14 +100,32 @@ class WsManager {
 
   disconnect() {
     this._intentionalClose = true;
+    this._pendingOutbound = [];
     clearTimeout(this._reconnectTimer);
     this._ws?.close();
     this._ws = null;
   }
 
+  private _flushPendingOutbound() {
+    const ws = this._ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN || this._pendingOutbound.length === 0) return;
+    for (const payload of this._pendingOutbound) {
+      ws.send(payload);
+    }
+    this._pendingOutbound = [];
+  }
+
   send(msg: Record<string, any>) {
+    const payload = JSON.stringify(msg);
     if (this._ws?.readyState === WebSocket.OPEN) {
-      this._ws.send(JSON.stringify(msg));
+      this._ws.send(payload);
+      return;
+    }
+    if (this._ws?.readyState === WebSocket.CONNECTING) {
+      if (this._pendingOutbound.length >= MAX_PENDING_WS_OUTBOUND) {
+        this._pendingOutbound.splice(0, this._pendingOutbound.length - MAX_PENDING_WS_OUTBOUND + 1);
+      }
+      this._pendingOutbound.push(payload);
     }
   }
 
