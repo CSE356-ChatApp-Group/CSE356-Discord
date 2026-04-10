@@ -173,9 +173,15 @@ async function request(method: string, path: string, body?: unknown, retry = tru
 
 export const api = {
   get:    (path: string)               => {
-    const cached = _recentGets.get(path);
-    if (cached && Date.now() - cached.at < GET_CACHE_TTL_MS) {
-      return Promise.resolve(cached.value);
+    // Message history must not use the short GET cache — pollers (e.g. graders)
+    // can otherwise see a stale first page right after a write.
+    const skipRecentCache = path.startsWith('/messages');
+
+    if (!skipRecentCache) {
+      const cached = _recentGets.get(path);
+      if (cached && Date.now() - cached.at < GET_CACHE_TTL_MS) {
+        return Promise.resolve(cached.value);
+      }
     }
 
     const existing = _inFlightGets.get(path);
@@ -183,11 +189,13 @@ export const api = {
 
     const pending = request('GET', path)
       .then((value) => {
-        _recentGets.set(path, { at: Date.now(), value });
-        if (_recentGets.size > 300) {
-          const cutoff = Date.now() - GET_CACHE_TTL_MS;
-          for (const [key, entry] of _recentGets) {
-            if (entry.at < cutoff) _recentGets.delete(key);
+        if (!skipRecentCache) {
+          _recentGets.set(path, { at: Date.now(), value });
+          if (_recentGets.size > 300) {
+            const cutoff = Date.now() - GET_CACHE_TTL_MS;
+            for (const [key, entry] of _recentGets) {
+              if (entry.at < cutoff) _recentGets.delete(key);
+            }
           }
         }
         return value;

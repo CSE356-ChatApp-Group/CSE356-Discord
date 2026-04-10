@@ -16,7 +16,7 @@ const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('../messages/sideEffects');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
-const { invalidateWsAclCache } = require('../websocket/server');
+const { invalidateWsAclCache, invalidateWsBootstrapCache } = require('../websocket/server');
 
 const router = express.Router();
 router.use(authenticate);
@@ -378,7 +378,7 @@ router.post('/:id/members',
       await client.query('COMMIT');
       client.release();
 
-      insertedRows.forEach(({ user_id }) => {
+      for (const { user_id } of insertedRows) {
         sideEffects.publishMessageEvent(`user:${user_id}`, 'channel:membership_updated', {
           channelId: req.params.id,
           communityId: channel.community_id,
@@ -388,7 +388,9 @@ router.post('/:id/members',
         redis.del(`channels:list:${channel.community_id}:${user_id}`).catch(() => {});
         // Expire the WS ACL cache so subsequent subscribe attempts are checked fresh.
         invalidateWsAclCache(user_id, `channel:${req.params.id}`);
-      });
+        // Rebuild auto-subscribe list on reconnect; otherwise ws:bootstrap cache can omit channel:N.
+        invalidateWsBootstrapCache(user_id).catch(() => {});
+      }
 
       res.json({ members, addedUserIds: insertedRows.map((row) => row.user_id) });
     } catch (err) {

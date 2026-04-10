@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { wsManager } from '../lib/ws';
 import { resetChatStore, useChatStore } from './chatStore';
 
 const { apiDelete, apiGet, apiPost, invalidateApiCache } = vi.hoisted(() => ({
@@ -330,6 +331,7 @@ describe('chatStore quick actions', () => {
 
   it('refreshes channels when a private-channel membership update arrives for the active community', () => {
     const fetchChannels = vi.fn().mockResolvedValue([]);
+    const subscribeSpy = vi.spyOn(wsManager, 'subscribe').mockReturnValue(() => {});
     useChatStore.setState({
       activeCommunity: { id: 'comm-1', name: 'One' },
       fetchChannels,
@@ -340,7 +342,26 @@ describe('chatStore quick actions', () => {
       data: { communityId: 'comm-1', channelId: 'ch-1' },
     });
 
+    expect(subscribeSpy).toHaveBeenCalledWith('channel:ch-1', expect.any(Function));
     expect(fetchChannels).toHaveBeenCalledWith('comm-1');
+    subscribeSpy.mockRestore();
+  });
+
+  it('subscribes to channel WS on membership update even when that community is not active', () => {
+    const subscribeSpy = vi.spyOn(wsManager, 'subscribe').mockReturnValue(() => {});
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-other', name: 'Other' },
+      fetchChannels: vi.fn(),
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'channel:membership_updated',
+      data: { communityId: 'comm-1', channelId: 'ch-99' },
+    });
+
+    expect(subscribeSpy).toHaveBeenCalledWith('channel:ch-99', expect.any(Function));
+    expect(useChatStore.getState().fetchChannels).not.toHaveBeenCalled();
+    subscribeSpy.mockRestore();
   });
 
   it('deleteChannel removes channel, active selection, and cached message thread', async () => {

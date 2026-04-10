@@ -3,7 +3,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app, wsServer, pool, redis, closeRedisConnections } from './runtime';
 
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
 
@@ -98,6 +98,45 @@ describe('POST /messages idempotency', () => {
       (m: { content?: string }) => m.content === 'concurrent idempotent',
     );
     expect(withBody.length).toBe(1);
+  });
+});
+
+describe('GET /messages first-page cache vs POST', () => {
+  it('does not serve stale Redis first-page cache after POST /messages', async () => {
+    const owner = await createAuthenticatedUser('cachebust');
+    const slug = `cachebust-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'cache bust' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `cb-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const cacheKey = `messages:channel:${channelId}`;
+    await redis.set(cacheKey, JSON.stringify({ messages: [] }), 'EX', 15);
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'after stale seed' });
+
+    expect(postRes.status).toBe(201);
+    const messageId = postRes.body.message.id;
+
+    const getRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=30`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(getRes.status).toBe(200);
+    const ids = (getRes.body.messages || []).map((m: { id: string }) => m.id);
+    expect(ids).toContain(messageId);
   });
 });
 

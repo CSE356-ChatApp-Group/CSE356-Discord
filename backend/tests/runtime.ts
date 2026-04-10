@@ -13,4 +13,5 @@ export const request: any = cjsRequire('supertest');
 export const app: any = cjsRequire('../src/app');
 export const wsServer: any = cjsRequire('../src/websocket/server');
 export const pool: any = cjsRequire('../src/db/pool').pool;
+export const redis: any = cjsRequire('../src/db/redis');
 export const closeRedisConnections: any = cjsRequire('../src/db/redis').closeRedisConnections;

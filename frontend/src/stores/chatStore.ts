@@ -1736,7 +1736,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         break;
       }
       case 'channel:membership_updated': {
-        const { communityId } = event.data || {};
+        const { communityId, channelId } = event.data || {};
+        if (channelId) {
+          wsManager.subscribe(`channel:${channelId}`, get()._handleWsEvent);
+        }
         if (communityId && store.activeCommunity?.id === communityId) {
           invalidateApiCache(`/channels?communityId=${communityId}`);
           store.fetchChannels(communityId).catch(() => {});
