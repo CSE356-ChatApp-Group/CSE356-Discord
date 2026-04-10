@@ -1,10 +1,8 @@
 'use strict';
 
 const fanout = require('../websocket/fanout');
-const overload = require('../utils/overload');
 const logger = require('../utils/logger');
 const redis = require('../db/redis');
-const { query } = require('../db/pool');
 const {
   sideEffectQueueDepth,
   sideEffectQueueActiveWorkers,
@@ -147,35 +145,6 @@ function publishBackgroundEvent(target, event, data) {
 }
 
 /**
- * For channel message:created events only.
- * Increments channel:msg_count:{channelId} in Redis (initializing from DB if needed),
- * then publishes the WS event. Order guarantees Redis is updated before any client
- * receives the message, so a page reload after the event always sees the correct count.
- */
-function publishMessageEventWithUnread(target, event, data, channelId) {
-  enqueue('fanout.publish+unread.incr', async () => {
-    try {
-      // Ensure channel:msg_count is initialized before INCR
-      const countKey = `channel:msg_count:${channelId}`;
-      const exists = await redis.exists(countKey);
-      if (!exists) {
-        const { rows } = await query(
-          `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
-          [channelId]
-        );
-        const total = rows[0]?.cnt ?? 0;
-        // Only SET if still missing (avoid race); use SET NX
-        await redis.set(countKey, total, 'NX');
-      }
-      await redis.incr(countKey);
-    } catch (err) {
-      logger.warn({ err, channelId }, 'Failed to increment channel:msg_count in Redis');
-    }
-    await fanout.publish(target, { event, data });
-  });
-}
-
-/**
  * Queue best-effort S3 object deletion for attachment storage keys that were
  * collected before the message DB row was hard-deleted (ON DELETE CASCADE
  * removes the attachment rows immediately, so they must be captured first).
@@ -195,7 +164,6 @@ function getQueueDepth() {
 module.exports = {
   publishMessageEvent,
   publishBackgroundEvent,
-  publishMessageEventWithUnread,
   deleteAttachmentObjects,
   getQueueDepth,
 };

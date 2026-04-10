@@ -75,7 +75,7 @@ If realtime is broken but REST is healthy:
 Automated graders (browser clients) should treat **HTTP as the source of truth** for whether a message exists, not the DOM immediately after `POST /messages` returns.
 
 1. **Preferred:** After a successful write (`201`), call **`GET /messages?channelId=…` or `GET /messages?conversationId=…`** and assert the new message id or content appears on the first page. The API awaits Redis eviction of the first-page cache before responding on create/update/delete and on group invite/leave system rows; the web client also skips its short in-memory GET cache for `/messages` paths (see [`frontend/src/lib/api.ts`](../frontend/src/lib/api.ts)).
-2. **If checking the UI only:** Allow a **short wait** (for example one animation frame or tens of milliseconds) after `201` before asserting. Realtime delivery goes through an in-process fanout queue and Redis pub/sub, so **WS-only checks with zero delay can flake** even when the server is healthy.
+2. **If checking the UI only:** For **`POST /messages`** (`message:created`) and for **`PATCH` / `DELETE` on a message**, the server **awaits `fanout.publish`** before returning, so the UI can update immediately after success on those routes. **`read:updated`** and some other paths may still use the in-process fanout queue — for those, a **short wait** or **GET** assertion is safer than WS-only zero-wait.
 3. **Do not** rely solely on WebSocket delivery for grading unless you accept occasional false negatives under normal load.
 
 ## Metrics during grader or load-test runs
@@ -89,6 +89,8 @@ When investigating **delivery fails**, **peak rate**, or tail latency under many
 | `ws_backpressure_events_total{job="chatapp-api"}` | Server dropped a frame or closed a socket because the client could not drain the WS buffer fast enough. |
 
 Related alerts: [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) (for example critical fanout backlog and delivery degradation rules).
+
+**Before release / after delivery changes:** run `cd backend && npm test` (full suite). For a staging grader-style load, compare **POST `/messages` p95/p99** (synchronous fanout adds latency) with **`ws_backpressure_events_total`** and fanout queue depth above.
 
 ## After mitigation
 

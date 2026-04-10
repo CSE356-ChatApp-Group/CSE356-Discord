@@ -911,10 +911,17 @@ router.patch('/:id',
       }
       if (baseMessage.conversation_id) {
         await redis.del(`messages:conversation:${baseMessage.conversation_id}`);
-        await publishConversationEvent(baseMessage.conversation_id, 'message:updated', message || baseMessage);
+        await publishConversationEventNow(
+          baseMessage.conversation_id,
+          'message:updated',
+          message || baseMessage,
+        );
       } else {
         const key = targetKey(baseMessage.channel_id, baseMessage.conversation_id);
-        sideEffects.publishMessageEvent(key, 'message:updated', message || baseMessage);
+        await fanout.publish(key, {
+          event: 'message:updated',
+          data: message || baseMessage,
+        });
       }
 
       res.json({ message: message || baseMessage });
@@ -982,10 +989,13 @@ router.delete('/:id',
         }
       }
       if (message.conversation_id) {
-        await publishConversationEvent(message.conversation_id, 'message:deleted', { id: message.id });
+        await publishConversationEventNow(message.conversation_id, 'message:deleted', { id: message.id });
       } else {
         const key = targetKey(message.channel_id, message.conversation_id);
-        sideEffects.publishMessageEvent(key, 'message:deleted', { id: message.id });
+        await fanout.publish(key, {
+          event: 'message:deleted',
+          data: { id: message.id },
+        });
       }
 
       res.json({ success: true });
