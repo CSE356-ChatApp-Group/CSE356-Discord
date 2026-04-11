@@ -14,6 +14,12 @@ import { Counter, Rate, Trend } from 'k6/metrics';
  * - **break-fast** / **break** — Stress envelope; expect latency breaches; still read `optimization_*` in `summary.json`.
  * - **smoke** — Post-deploy sanity.
  * Peak connections ≈ configured `wsVUs` (WS) + HTTP `maxVUs` ceiling; see `summary.json` → `vus.max`, `ws_sessions`.
+ *
+ * **Grading-shaped delivery (optional)** — `ws_message_delivery` scenario approximates
+ * instructor “receive within 15s of send” using WS: HTTP 201 on POST /messages, then
+ * time until `message:created` on the same channel subscription. Enabled for `slo`
+ * (constant-arrival profile) or when `LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1`. Metrics:
+ * `message_ws_delivery_after_post_ms`, `optimization_ws_message_delivery_miss_total`.
  */
 
 /** Classify HTTP responses so reports can separate timeouts vs 503 (shed / pool) vs other errors. */
@@ -29,6 +35,10 @@ const optimizationMessagePostFailTotal = new Counter('optimization_message_post_
 const optimizationWsHandshakeFailTotal = new Counter('optimization_ws_handshake_fail_total');
 /** Timeouts (0) or any 5xx — user-visible degradation. */
 const optimizationHttpOutageTotal = new Counter('optimization_http_outage_total');
+/** WS: ms from successful POST /messages to first matching `message:created` frame. */
+const messageWsDeliveryAfterPostMs = new Trend('message_ws_delivery_after_post_ms', true);
+/** WS probe: no matching frame within SLA or HTTP post / upgrade failure. */
+const optimizationWsMessageDeliveryMissTotal = new Counter('optimization_ws_message_delivery_miss_total');
 
 function recordHttpStatus(res, endpoint = 'unknown') {
   if (!res) return;
@@ -172,6 +182,7 @@ const PROFILES = {
       optimization_message_post_fail_total: ['count<15'],
       optimization_ws_handshake_fail_total: ['count<6'],
       optimization_http_outage_total: ['count<80'],
+      optimization_ws_message_delivery_miss_total: ['count<5'],
     },
   },
 };
@@ -211,6 +222,14 @@ if (profile.optimizationKpiThresholds) {
   Object.assign(httpThresholds, profile.optimizationKpiThresholds);
 }
 
+const wsMessageDeliveryProbeEnabled =
+  __ENV.LOADTEST_WS_MESSAGE_DELIVERY_PROBE === '1' ||
+  __ENV.LOADTEST_WS_MESSAGE_DELIVERY_PROBE === 'true' ||
+  profile.arrivalMode === 'constant';
+
+const wsMessageDeliveryScenarioDuration =
+  profile.constantDuration || profile.wsDuration || '2m';
+
 const httpMixScenario = useConstantArrival
   ? {
       executor: 'constant-arrival-rate',
@@ -233,19 +252,31 @@ const httpMixScenario = useConstantArrival
       gracefulStop: '30s',
     };
 
+const scenarioTable = {
+  http_mix: httpMixScenario,
+  websocket_presence: {
+    executor: 'constant-vus',
+    exec: 'presenceSocketStorm',
+    vus: profile.wsVUs,
+    duration: profile.wsDuration,
+    gracefulStop: '10s',
+  },
+};
+
+if (wsMessageDeliveryProbeEnabled) {
+  scenarioTable.ws_message_delivery = {
+    executor: 'constant-vus',
+    exec: 'channelMessageDeliveryProbe',
+    vus: 1,
+    duration: wsMessageDeliveryScenarioDuration,
+    gracefulStop: '25s',
+  };
+}
+
 export const options = {
   discardResponseBodies: true,
   thresholds: httpThresholds,
-  scenarios: {
-    http_mix: httpMixScenario,
-    websocket_presence: {
-      executor: 'constant-vus',
-      exec: 'presenceSocketStorm',
-      vus: profile.wsVUs,
-      duration: profile.wsDuration,
-      gracefulStop: '10s',
-    },
-  },
+  scenarios: scenarioTable,
 };
 
 function baseHttpParams(token, tags = {}, extra = {}) {
@@ -562,6 +593,92 @@ export function teardown(data) {
     getAuthParams(data.ownerToken, { endpoint: 'communities_delete' }),
   );
   recordHttpStatus(delRes, 'communities_delete');
+}
+
+/** One WS client subscribes to the capacity channel, POSTs a message, measures realtime delivery. */
+export function channelMessageDeliveryProbe(data) {
+  if (!data || !data.ownerToken || !data.channelId) {
+    sleep(1);
+    return;
+  }
+
+  const token = data.ownerToken;
+  const channelId = data.channelId;
+  const url = `${WS_URL}?token=${encodeURIComponent(token)}`;
+  const content = `deliver-probe-${RUN_ID}-${exec.vu.idInTest}-${Date.now()}`;
+
+  let postT0 = 0;
+  let deliveredWithinSla = false;
+  let finished = false;
+
+  const response = ws.connect(
+    url,
+    { tags: { endpoint: 'ws_message_delivery_probe' } },
+    (socket) => {
+      socket.on('open', () => {
+        socket.send(
+          JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }),
+        );
+      });
+
+      socket.on('message', (raw) => {
+        if (finished) return;
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.event !== 'message:created' || !msg.data) return;
+          if (msg.data.content !== content) return;
+          if (postT0 <= 0) return;
+          const ms = Date.now() - postT0;
+          finished = true;
+          if (ms <= 15_000) {
+            messageWsDeliveryAfterPostMs.add(ms);
+            deliveredWithinSla = true;
+          } else {
+            optimizationWsMessageDeliveryMissTotal.add(1);
+          }
+          socket.close();
+        } catch (_err) {
+          /* ignore */
+        }
+      });
+
+      socket.setTimeout(() => {
+        if (finished) return;
+        const res = http.post(
+          `${BASE_URL}/messages`,
+          JSON.stringify({ channelId, content }),
+          jsonParams(token, { endpoint: 'messages_post_ws_probe' }),
+        );
+        recordHttpStatus(res, 'messages_post_ws_probe');
+        if (res.status !== 201) {
+          optimizationWsMessageDeliveryMissTotal.add(1);
+          finished = true;
+          socket.close();
+          return;
+        }
+        postT0 = Date.now();
+      }, 1200);
+
+      socket.setTimeout(() => {
+        if (finished) return;
+        finished = true;
+        if (postT0 <= 0) {
+          optimizationWsMessageDeliveryMissTotal.add(1);
+        } else if (!deliveredWithinSla) {
+          optimizationWsMessageDeliveryMissTotal.add(1);
+        }
+        socket.close();
+      }, 20_000);
+    },
+  );
+
+  const ok = check(response, {
+    'ws message delivery probe upgraded': (r) => r && r.status === 101,
+  });
+  checksRate.add(ok);
+  if (!ok) optimizationWsMessageDeliveryMissTotal.add(1);
+
+  sleep(2);
 }
 
 export function presenceSocketStorm(data) {

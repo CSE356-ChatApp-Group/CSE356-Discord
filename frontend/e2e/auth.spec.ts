@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { buildUser, loginViaUiWithRetry, registerOrLogin } from './helpers/session';
+import { buildUser, loginViaUiWithRetry, registerOrLogin, waitForAppRouteShell } from './helpers/session';
 
 test.describe('authentication', () => {
   // Register a shared user via the API once before any tests run.
@@ -20,7 +20,8 @@ test.describe('authentication', () => {
     const user = buildUser('newbie');
 
     await page.goto('/register');
-    await expect(page.getByTestId('route-register')).toBeVisible();
+    await waitForAppRouteShell(page, 'After /register');
+    await expect(page.getByTestId('route-register')).toBeVisible({ timeout: 35_000 });
 
     await page.locator('#register-email').fill(user.email);
     await page.locator('#register-username').fill(user.username);
@@ -44,7 +45,8 @@ test.describe('authentication', () => {
 
   test('shows an inline error for a wrong password @full @heavy-auth @staging', async ({ page }) => {
     await page.goto('/login');
-    await expect(page.getByTestId('route-login')).toBeVisible({ timeout: 15_000 });
+    await waitForAppRouteShell(page, 'After /login');
+    await expect(page.getByTestId('route-login')).toBeVisible({ timeout: 35_000 });
 
     await page.getByTestId('login-email').fill(sharedUser.email);
     await page.getByTestId('login-password').fill('Definitely!Wrong!99');

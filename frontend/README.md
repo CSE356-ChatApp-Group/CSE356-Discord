@@ -15,11 +15,16 @@ Barebones React + Vite SPA for testing the ChatApp MVP API.
 
 ### Option A — with Docker Compose (recommended)
 ```bash
-# From repo root — starts everything including the frontend dev server
+# From repo root — API, nginx (:80), MinIO, DB, etc.
 docker compose up -d
 
-# Frontend available at:
-open http://localhost:5173
+# Production build served by nginx on :80 (same topology as staging).
+cd frontend && npm run build
+
+# App + API on one origin:
+open http://127.0.0.1/
+
+# Optional: Vite dev server (hot reload) still on :5173 — not used by Playwright.
 ```
 
 ### Option B — standalone
@@ -30,8 +35,12 @@ npm run dev
 # → http://localhost:5173
 ```
 
-The Vite dev server proxies `/api/*` and `/ws` to `http://localhost` (Nginx),
+The Vite dev server proxies `/api/*` and `/ws` to `http://127.0.0.1` (nginx),
 so no CORS issues and no env config needed.
+
+**Playwright E2E** targets **`http://127.0.0.1`** (nginx + `frontend/dist`), matching staging.
+Run `docker compose up -d`, then `npm run build` in `frontend`; `npm run e2e:full` runs the build step for you.
+Override with `E2E_BASE_URL` only for a remote environment (e.g. staging VM).
 
 ## File map
 
@@ -139,5 +148,5 @@ cd frontend
 npm run build          # outputs to frontend/dist/
 ```
 
-Serve `dist/` as static files from Nginx. Uncomment the static `location /` block
-in `infrastructure/nginx/nginx.conf` and point it at the built files.
+Docker Compose mounts `frontend/dist` into nginx (`/usr/share/nginx/html`); see
+`infrastructure/nginx/nginx.conf` (staging-aligned `location /` and `/assets/`).

@@ -143,6 +143,16 @@ const wsBackpressureEventsTotal = new client.Counter({
   labelNames: ['action'],
 });
 
+/**
+ * Redis PUBLISH failures from realtime fanout (correlate with DM/channel delivery
+ * gaps when HTTP 201 still returned before hardening, or with infra issues).
+ */
+const redisFanoutPublishFailuresTotal = new client.Counter({
+  name: 'redis_fanout_publish_failures_total',
+  help: 'Failed Redis PUBLISH calls for WebSocket fanout',
+  labelNames: ['channel_prefix'],
+});
+
 // ── PG pool health ─────────────────────────────────────────────────────────────
 
 const pgPoolTotal = new client.Gauge({
@@ -186,6 +196,11 @@ function startPgPoolMetrics(pool) {
   try {
     wsBackpressureEventsTotal.inc({ action: 'drop' }, 0);
     wsBackpressureEventsTotal.inc({ action: 'kill' }, 0);
+    redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'channel' }, 0);
+    redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'conversation' }, 0);
+    redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'user' }, 0);
+    redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'community' }, 0);
+    redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'unknown' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
     httpRequestsAbortedTotal.inc({ method: 'GET', route: '/api/v1/messages' }, 0);
@@ -215,5 +230,6 @@ module.exports = {
   messagePostResponseTotal,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
+  redisFanoutPublishFailuresTotal,
   startPgPoolMetrics,
 };

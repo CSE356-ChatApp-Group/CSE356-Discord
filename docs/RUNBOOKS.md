@@ -72,6 +72,8 @@ If realtime is broken but REST is healthy:
 
 ## Grader-oriented delivery checks
 
+**Course definitions** (15s per listener, outage windows): [`GRADING-DELIVERY-SEMANTICS.md`](GRADING-DELIVERY-SEMANTICS.md).
+
 Automated graders (browser clients) should treat **HTTP as the source of truth** for whether a message exists, not the DOM immediately after `POST /messages` returns.
 
 1. **Preferred:** After a successful write (`201`), call **`GET /messages?channelId=…` or `GET /messages?conversationId=…`** and assert the new message id or content appears on the first page. The API awaits Redis eviction of the first-page cache before responding on create/update/delete and on group invite/leave system rows; the web client also skips its short in-memory GET cache for `/messages` paths (see [`frontend/src/lib/api.ts`](../frontend/src/lib/api.ts)).

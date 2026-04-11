@@ -17,13 +17,15 @@ const fanout           = require('../websocket/fanout');
 const presenceService  = require('../presence/service');
 const { invalidateWsBootstrapCache } = require('../websocket/server');
 const { bustConversationMessagesCache } = require('./messageCacheBust');
+const { wrapFanoutPayload } = require('./realtimePayload');
 
 const router = express.Router();
 router.use(authenticate);
 
 function publishConversationEvents(targets, event, data) {
   const uniqueTargets = [...new Set(targets.filter(Boolean))];
-  return Promise.allSettled(uniqueTargets.map((target) => fanout.publish(target, { event, data })));
+  const payload = wrapFanoutPayload(event, data);
+  return Promise.allSettled(uniqueTargets.map((target) => fanout.publish(target, payload)));
 }
 
 async function publishConversationInviteNotifications(targets, data) {

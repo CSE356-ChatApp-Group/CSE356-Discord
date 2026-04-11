@@ -301,6 +301,13 @@ let readFlushVisibilityHooked = false;
 
 let wsUserSubscriptionId: string | null = null;
 
+/** After logout we skip one WS `open` so the fresh session does not double-fetch messages. */
+let skipMessageRefetchOnNextWsOpen = true;
+
+/** Throttle GET /messages after server WS bootstrap (`event: ready`) to heal missed realtime frames. */
+const WS_SERVER_READY_REFETCH_MS = 1800;
+let lastWsServerReadyRefetchAt = 0;
+
 function hookReadFlushOnVisibilityHidden() {
   if (readFlushVisibilityHooked || typeof document === 'undefined') return;
   readFlushVisibilityHooked = true;
@@ -447,6 +454,8 @@ export function resetChatStore() {
   readCoalesceTimers.clear();
   pendingReadByTarget.clear();
   wsUserSubscriptionId = null;
+  skipMessageRefetchOnNextWsOpen = true;
+  lastWsServerReadyRefetchAt = 0;
   useChatStore.getState().reset();
 }
 
@@ -1980,3 +1989,28 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 }));
+
+wsManager.onOpen(() => {
+  if (skipMessageRefetchOnNextWsOpen) {
+    skipMessageRefetchOnNextWsOpen = false;
+    return;
+  }
+  const { activeChannel, activeConv, fetchMessages } = useChatStore.getState();
+  if (activeChannel?.id) {
+    void fetchMessages({ channelId: activeChannel.id });
+  } else if (activeConv?.id) {
+    void fetchMessages({ conversationId: activeConv.id });
+  }
+});
+
+wsManager.onServerReady(() => {
+  const now = Date.now();
+  if (now - lastWsServerReadyRefetchAt < WS_SERVER_READY_REFETCH_MS) return;
+  lastWsServerReadyRefetchAt = now;
+  const { activeChannel, activeConv, fetchMessages } = useChatStore.getState();
+  if (activeChannel?.id) {
+    void fetchMessages({ channelId: activeChannel.id });
+  } else if (activeConv?.id) {
+    void fetchMessages({ conversationId: activeConv.id });
+  }
+});

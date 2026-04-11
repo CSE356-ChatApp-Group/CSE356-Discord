@@ -4,13 +4,14 @@ const { defineConfig, devices } = require('@playwright/test');
 const frontendDir = path.join(__dirname, 'frontend');
 
 /**
- * Run from monorepo root so APIRequestContext gets baseURL, e.g.
- * E2E_SKIP_WEBSERVER=1 E2E_BASE_URL=http://127.0.0.1:5173 npx playwright test -c playwright.config.cjs e2e/dm-realtime-delivery.spec.ts
- * From frontend/, use the default frontend/playwright.config.ts.
+ * Run from monorepo root (same baseURL as staging: nginx :80 + built SPA).
+ * Example: npx playwright test -c playwright.config.cjs e2e/dm-realtime-delivery.spec.ts
+ * Remote: E2E_BASE_URL=http://your-staging-host npx playwright test -c playwright.config.cjs …
  */
 module.exports = defineConfig({
   testDir: path.join(frontendDir, 'e2e'),
   outputDir: path.join(frontendDir, 'test-results'),
+  globalSetup: path.join(frontendDir, 'e2e/global-setup.ts'),
 
   timeout: 60_000,
   globalTimeout: process.env.CI ? 10 * 60_000 : 0,
@@ -25,7 +26,7 @@ module.exports = defineConfig({
     : [['list'], ['html', { open: 'never', outputFolder: path.join(frontendDir, 'playwright-report') }]],
 
   use: {
-    baseURL: process.env.E2E_BASE_URL || 'http://localhost:5173',
+    baseURL: process.env.E2E_BASE_URL || 'http://127.0.0.1',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -43,16 +44,4 @@ module.exports = defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-
-  webServer: process.env.E2E_SKIP_WEBSERVER
-    ? undefined
-    : {
-        command: 'npm run dev -- --host 127.0.0.1 --port 5173',
-        cwd: frontendDir,
-        url: 'http://127.0.0.1:5173',
-        reuseExistingServer: true,
-        stdout: 'pipe',
-        stderr: 'pipe',
-        timeout: 180_000,
-      },
 });

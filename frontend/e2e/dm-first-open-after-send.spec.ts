@@ -43,7 +43,7 @@ test.describe('DM first open after sender posts', () => {
 
       await waitForSidebar(pageA);
       await expect
-        .poll(async () => pageA.getByTestId(`dm-item-${conversationId}`).count(), { timeout: 20_000 })
+        .poll(async () => pageA.getByTestId(`dm-item-${conversationId}`).count(), { timeout: 15_000 })
         .toBe(1);
 
       await bootstrapPageWithToken(pageB, tokenB);
@@ -64,7 +64,7 @@ test.describe('DM first open after sender posts', () => {
 
       await expect(
         pageA.locator('[data-message-id]').filter({ hasText: messageContent }),
-      ).toBeVisible({ timeout: 20_000 });
+      ).toBeVisible({ timeout: 15_000 });
     } finally {
       await ctxA.close();
       await ctxB.close();

@@ -1,11 +1,11 @@
 'use strict';
 
 /**
- * Shared S3/MinIO client and helpers used by the attachments router and
+ * Shared S3/MinIO clients and helpers for the attachments router and
  * the message side-effects queue (cleanup on message delete).
  *
- * Extracted here so both consumers share one S3Client instance and so
- * circular-import issues between messages/ and attachments/ are avoided.
+ * `s3` is for operational calls (DeleteObjects, server-side uploads).
+ * `s3Presign` is for getSignedUrl only so presigned Host matches nginx → MinIO.
  */
 
 const { URL } = require('url');
@@ -74,6 +74,30 @@ const PUBLIC_ENDPOINT   = parseEndpoint(process.env.S3_ENDPOINT);
 const INTERNAL_ENDPOINT = parseEndpoint(resolveInternalEndpoint());
 
 /**
+ * Host:port used in SigV4 for presigned URLs when S3 is behind nginx (/minio/…).
+ * Nginx must forward this exact Host to MinIO (see deploy/nginx/staging.conf).
+ * Operational traffic may still use S3_INTERNAL_ENDPOINT (e.g. http://minio:9000 in Docker);
+ * getSignedUrl does not open a socket, so this can differ from the operational endpoint.
+ *
+ * When S3_ENDPOINT has **no** path prefix (direct MinIO from the browser/tests), the client
+ * PUTs to that exact origin. SigV4 includes Host — signing with S3_INTERNAL_ENDPOINT while
+ * rewriting the URL to S3_ENDPOINT (e.g. sign :9000, client uses :19009) causes
+ * SignatureDoesNotMatch on MinIO.
+ */
+function resolvePresignSignerEndpoint() {
+  const pub = parseEndpoint(process.env.S3_ENDPOINT);
+  if (pub?.pathname) {
+    return normalizeEndpoint(process.env.S3_PRESIGN_SIGNING_ENDPOINT || 'http://127.0.0.1:9000');
+  }
+  if (pub) {
+    return normalizeEndpoint(pub.href);
+  }
+  return resolveInternalEndpoint();
+}
+
+const PRESIGN_SIGNER_ENDPOINT = parseEndpoint(resolvePresignSignerEndpoint());
+
+/**
  * Rewrites an internally-signed URL so that the host/path matches what
  * the client should use.  This is a no-op when PUBLIC and INTERNAL
  * endpoints are the same (real AWS S3) or when neither is configured.
@@ -82,15 +106,71 @@ function toClientFacingUrl(urlString) {
   if (!PUBLIC_ENDPOINT || !INTERNAL_ENDPOINT) return urlString;
   if (PUBLIC_ENDPOINT.href === INTERNAL_ENDPOINT.href) return urlString;
 
+  // Presigned URLs only sign `host` (see X-Amz-SignedHeaders). Never rewrite origin
+  // host:port here for "direct" S3_ENDPOINT values (no /minio/ prefix): that would point
+  // the browser at a different Host than the signature (e.g. sign :9000, URL says :19009
+  // → SignatureDoesNotMatch). resolvePresignSignerEndpoint() must already use S3_ENDPOINT
+  // for those cases.
+  if (!PUBLIC_ENDPOINT.pathname) {
+    return urlString;
+  }
+
   const signed = new URL(urlString);
-  const suffixPath = stripBasePath(signed.pathname, INTERNAL_ENDPOINT.pathname);
+  // Strip using presign signer path (signer is 127.0.0.1:9000 while INTERNAL may be minio:9000).
+  const signerPath = PRESIGN_SIGNER_ENDPOINT?.pathname || '';
+  const suffixPath = stripBasePath(signed.pathname, signerPath);
   const clientUrl = new URL(PUBLIC_ENDPOINT.origin);
   clientUrl.pathname = joinPath(PUBLIC_ENDPOINT.pathname, suffixPath);
   clientUrl.search = signed.search;
   return clientUrl.toString();
 }
 
-// ── S3 client ─────────────────────────────────────────────────────────────────
+/**
+ * Direct S3_ENDPOINT (no /minio/ path): clients PUT to that exact host:port. SigV4 only signs `host`,
+ * so the presigned URL must use the same host as PRESIGN_SIGNER_ENDPOINT. Otherwise MinIO returns
+ * SignatureDoesNotMatch and looks like a "signing bug".
+ */
+function assertDirectPresignedUrlMatchesSigner(uploadUrlString) {
+  if (PUBLIC_ENDPOINT?.pathname) return;
+  if (!PRESIGN_SIGNER_ENDPOINT) return;
+  let upload;
+  let signer;
+  try {
+    upload = new URL(uploadUrlString);
+    signer = new URL(PRESIGN_SIGNER_ENDPOINT.href);
+  } catch {
+    return;
+  }
+  if (upload.host !== signer.host) {
+    const err = new Error(
+      `Presigned URL host "${upload.host}" does not match signing endpoint "${signer.host}". ` +
+        'Set S3_ENDPOINT to the same origin used for PUT (e.g. http://127.0.0.1:19009 if that is your published MinIO port).',
+    );
+    (err as any).statusCode = 500;
+    throw err;
+  }
+}
+
+/** Trim — Docker / .env often introduce trailing newlines; MinIO then returns SignatureDoesNotMatch. */
+function s3AccessKeyId() {
+  const v = process.env.S3_ACCESS_KEY;
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+function s3SecretAccessKey() {
+  const v = process.env.S3_SECRET_KEY;
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+const s3Credentials = s3AccessKeyId()
+  ? {
+      accessKeyId: s3AccessKeyId(),
+      secretAccessKey: s3SecretAccessKey(),
+    }
+  : undefined; // falls back to IAM role in EC2/ECS
+
+// ── S3 clients ───────────────────────────────────────────────────────────────
+// Operational: DeleteObjects, server-side uploads (avatars), etc.
 
 const s3 = new S3Client({
   region: REGION,
@@ -103,10 +183,18 @@ const s3 = new S3Client({
   // Setting 'WHEN_REQUIRED' restores the pre-v3.600 behaviour where checksums
   // are omitted unless the service explicitly requires them.
   requestChecksumCalculation: 'WHEN_REQUIRED' as any,
-  credentials: process.env.S3_ACCESS_KEY ? {
-    accessKeyId:     process.env.S3_ACCESS_KEY,
-    secretAccessKey: process.env.S3_SECRET_KEY,
-  } : undefined, // falls back to IAM role in EC2/ECS
+  credentials: s3Credentials,
+});
+
+// Presigned GET/PUT URLs only (no TCP at sign time; Host must match nginx → MinIO).
+const s3Presign = new S3Client({
+  region: REGION,
+  endpoint: PRESIGN_SIGNER_ENDPOINT?.href,
+  forcePathStyle: !!PRESIGN_SIGNER_ENDPOINT,
+  requestChecksumCalculation: 'WHEN_REQUIRED' as any,
+  // Keep response validation aligned; avoids env-based defaults overriding presign behavior.
+  responseChecksumValidation: 'WHEN_REQUIRED' as any,
+  credentials: s3Credentials,
 });
 
 // ── Bulk delete ───────────────────────────────────────────────────────────────
@@ -133,4 +221,11 @@ async function deleteStorageKeys(keys: string[]) {
   }
 }
 
-module.exports = { s3, BUCKET, toClientFacingUrl, deleteStorageKeys };
+module.exports = {
+  s3,
+  s3Presign,
+  BUCKET,
+  toClientFacingUrl,
+  assertDirectPresignedUrlMatchesSigner,
+  deleteStorageKeys,
+};

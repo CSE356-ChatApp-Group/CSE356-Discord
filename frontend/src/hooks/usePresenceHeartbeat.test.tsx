@@ -22,6 +22,7 @@ vi.mock('../lib/ws', () => ({
   wsManager: {
     send: sendMock,
     onOpen: onOpenMock,
+    onServerReady: vi.fn(() => vi.fn()),
   },
 }));
 

@@ -10,6 +10,8 @@ This document describes the staged deployment pipeline for ChatApp:
 > - Staging: `http://136.114.103.71`
 > - Production: `http://130.245.136.44`
 
+**Environment variables:** see [docs/env.md](../docs/env.md) for every API tunable and a **production shared `.env` audit** checklist (`/opt/chatapp/shared/.env` on the host).
+
 ## Architecture Overview
 
 ```
@@ -478,6 +480,8 @@ Create `/opt/chatapp/shared/.env` on production VM:
 **Fanout:** `FANOUT_QUEUE_CONCURRENCY` is written by `deploy-prod.sh` from VM shape; raise only after staging load tests show headroom.
 
 ### Course grader: “delivery fails” vs HTTP 403
+
+**Throughput / delivery SLA (15s per listener, outage rollup):** see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md) — maps the forum definition to WebSocket vs HTTP and lists common non-bug patterns.
 
 Automated graders often count **`POST /api/v1/messages` without `201`** as a delivery failure. Your API returns **`403`** when the user may not post to that **private channel** or **conversation** (`Access denied` / `Not a participant`). That is **authorization**, not network or WebSocket failure. Under heavy grader traffic, **201 and 403 can each be ~half** of message POSTs if the harness mixes allowed and forbidden cases—or if clients post before join completes. Use `./scripts/prod-observe.sh` (POST /messages status breakdown) and `./scripts/prod-log-correlate.sh` for an hour-bucketed split.
 

@@ -42,6 +42,8 @@ describe('POST /messages idempotency', () => {
       .send(body);
     expect(r1.status).toBe(201);
     const id1 = r1.body.message.id;
+    expect(r1.body.realtimeFanoutComplete).toBe(true);
+    expect(typeof r1.body.realtimePublishedAt).toBe('string');
 
     const r2 = await request(app)
       .post('/api/v1/messages')
@@ -50,6 +52,8 @@ describe('POST /messages idempotency', () => {
       .send(body);
     expect(r2.status).toBe(201);
     expect(r2.body.message.id).toBe(id1);
+    expect(r2.body.realtimeFanoutComplete).toBe(true);
+    expect(typeof r2.body.realtimePublishedAt).toBe('string');
   });
 
   it('concurrent POSTs with the same Idempotency-Key resolve to one message', async () => {
@@ -376,6 +380,37 @@ describe('Hard delete contract', () => {
       .delete(`/api/v1/messages/${messageId}`)
       .set('Authorization', `Bearer ${token}`);
     expect(secondDelete.status).toBe(404);
+  });
+
+  it('deletes a thread parent without 500 when replies exist (thread_id cleared on FK)', async () => {
+    const parentRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ channelId, content: `thread-root-${uniqueSuffix()}` });
+    expect(parentRes.status).toBe(201);
+    const parentId = parentRes.body.message.id;
+
+    const replyRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        channelId,
+        content: `thread-reply-${uniqueSuffix()}`,
+        threadId: parentId,
+      });
+    expect(replyRes.status).toBe(201);
+    const replyId = replyRes.body.message.id;
+
+    const delParent = await request(app)
+      .delete(`/api/v1/messages/${parentId}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(delParent.status).toBe(200);
+
+    const replyRow = await pool.query('SELECT thread_id FROM messages WHERE id = $1', [replyId]);
+    expect(replyRow.rows[0].thread_id).toBeNull();
+
+    const parentRow = await pool.query('SELECT id FROM messages WHERE id = $1', [parentId]);
+    expect(parentRow.rows).toHaveLength(0);
   });
 });
 

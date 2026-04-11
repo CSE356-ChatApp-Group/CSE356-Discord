@@ -1,4 +1,21 @@
-import { expect, type APIRequestContext } from '@playwright/test';
+import { expect, type APIRequestContext, type APIResponse } from '@playwright/test';
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' } as const;
+
+/** POST JSON with explicit Content-Type and string body (reliable through nginx + Playwright). */
+export async function apiPostJson(
+  request: APIRequestContext,
+  path: string,
+  body: Record<string, unknown>,
+  options?: { headers?: Record<string, string>; timeout?: number },
+): Promise<APIResponse> {
+  const headers = { ...(options?.headers ?? {}), ...JSON_HEADERS };
+  return request.post(path, {
+    headers,
+    data: JSON.stringify(body),
+    timeout: options?.timeout ?? 10_000,
+  });
+}
 
 /**
  * Creates a direct (non-invite) conversation between the authenticated user
@@ -12,8 +29,8 @@ export async function createDirectConversation(
   request: APIRequestContext,
   participantUsername: string,
 ): Promise<string> {
-  const res = await request.post('/api/v1/conversations', {
-    data: { participantIds: [participantUsername] },
+  const res = await apiPostJson(request, '/api/v1/conversations', {
+    participantIds: [participantUsername],
   });
   expect(res.ok(), `createDirectConversation failed (${res.status()})`).toBeTruthy();
   const body = await res.json();
@@ -30,9 +47,7 @@ export async function createCommunity(
   name: string,
   slug: string,
 ): Promise<string> {
-  const res = await request.post('/api/v1/communities', {
-    data: { name, slug, isPublic: true },
-  });
+  const res = await apiPostJson(request, '/api/v1/communities', { name, slug, isPublic: true });
   expect(res.ok(), `createCommunity failed (${res.status()})`).toBeTruthy();
   const body = await res.json();
   const id: string | undefined = body?.community?.id;
@@ -48,8 +63,10 @@ export async function createChannel(
   communityId: string,
   name: string,
 ): Promise<string> {
-  const res = await request.post('/api/v1/channels', {
-    data: { communityId, name, isPrivate: false },
+  const res = await apiPostJson(request, '/api/v1/channels', {
+    communityId,
+    name,
+    isPrivate: false,
   });
   expect(res.ok(), `createChannel failed (${res.status()})`).toBeTruthy();
   const body = await res.json();

@@ -8,6 +8,7 @@
 
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { buildUser, bootstrapPageWithToken, ensureAuthenticated, registerOrLogin } from './helpers/session';
+import { putPresignedObject } from './helpers/presignedPut';
 
 // Minimal 67-byte 1×1 white PNG — enough to satisfy image/png content-type.
 const TINY_PNG_B64 =
@@ -82,10 +83,11 @@ test.describe('attachment upload and access', () => {
 
   // ── 1. Full presign → upload → record → download flow ────────────────────
   test('presign → PUT → record → signed download URL @smoke @full @staging', async () => {
+    const png = tinyPngBuffer();
     // Step 1: get presigned PUT URL
     const presignRes = await aliceCtx.request.post('/api/v1/attachments/presign', {
       headers: { Authorization: `Bearer ${aliceToken}` },
-      data: { filename: 'test.png', contentType: 'image/png', sizeBytes: tinyPngBuffer().length },
+      data: { filename: 'test.png', contentType: 'image/png', sizeBytes: png.length },
     });
     expect(presignRes.status(), 'presign should return 200').toBe(200);
 
@@ -95,14 +97,14 @@ test.describe('attachment upload and access', () => {
     expect(storageKey).toMatch(/^uploads\//);
     expect(storageKey).toMatch(/\.png$/);
 
-    // Step 2: upload the file directly to MinIO via the presigned URL.
-    // The URL passes through nginx (/minio/ prefix) to MinIO — this validates
-    // the full nginx proxy + MinIO presigned-URL round-trip.
-    const uploadRes = await aliceCtx.request.put(uploadUrl, {
-      data: tinyPngBuffer(),
-      headers: { 'Content-Type': 'image/png' },
-    });
-    expect(uploadRes.status(), `PUT to MinIO: expected 200, got ${uploadRes.status()}`).toBe(200);
+    // Step 2: upload directly to MinIO. Avoid global `fetch` (undici): it can trigger
+    // proxy/tunnel or chunked encoding that breaks SigV4 against local MinIO.
+    const putRes = await putPresignedObject(uploadUrl, png, 'image/png');
+    const putErrBody = putRes.statusCode === 200 ? '' : putRes.body;
+    expect(
+      putRes.statusCode,
+      `PUT to MinIO: expected 200, got ${putRes.statusCode} url=${uploadUrl.slice(0, 120)}… body=${putErrBody.slice(0, 500)}`,
+    ).toBe(200);
 
     // Step 3: record the attachment metadata.
     const recordRes = await aliceCtx.request.post('/api/v1/attachments', {
@@ -112,7 +114,7 @@ test.describe('attachment upload and access', () => {
         storageKey,
         filename: 'test.png',
         contentType: 'image/png',
-        sizeBytes: tinyPngBuffer().length,
+        sizeBytes: png.length,
         width: 1,
         height: 1,
       },

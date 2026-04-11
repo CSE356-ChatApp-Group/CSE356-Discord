@@ -85,7 +85,7 @@ test.describe('channel messaging — edit and delete', () => {
     const msgId = await msgLocator.getAttribute('data-message-id');
 
     const messageItem = page.getByTestId(`message-item-${msgId}`);
-    await messageItem.hover();
+    await messageItem.hover({ force: true });
     await messageItem.getByRole('button', { name: /edit message/i }).click();
 
     const editInput = messageItem.locator('textarea');
@@ -111,7 +111,7 @@ test.describe('channel messaging — edit and delete', () => {
     page.once('dialog', (d) => d.accept());
 
     const messageItem = page.getByTestId(`message-item-${msgId}`);
-    await messageItem.hover();
+    await messageItem.hover({ force: true });
     await messageItem.getByRole('button', { name: /delete message/i }).click();
 
     await expect.poll(
@@ -188,7 +188,82 @@ test.describe('channel real-time delivery', () => {
         // B should see the message appear without any reload.
         await expect(
           pageB.locator('[data-message-id]').filter({ hasText: messageContent }),
-        ).toBeVisible({ timeout: 20_000 });
+        ).toBeVisible({ timeout: 15_000 });
+      } finally {
+        await ctxA.close();
+        await ctxB.close();
+      }
+    },
+  );
+
+  test(
+    'sender sees their own API-sent message when the channel is open @full @staging @heavy-auth',
+    async ({ browser }) => {
+      const userA = buildUser('rtSender');
+      const userB = buildUser('rtPeer');
+
+      const ctxA = await browser.newContext();
+      const ctxB = await browser.newContext();
+
+      try {
+        const pageA = await ctxA.newPage();
+        const pageB = await ctxB.newPage();
+
+        const suffix = Date.now().toString(36);
+
+        const tokenA = await registerOrLogin(ctxA.request, userA);
+        const tokenB = await registerOrLogin(ctxB.request, userB);
+
+        const commRes = await ctxA.request.post('/api/v1/communities', {
+          headers: { Authorization: `Bearer ${tokenA}` },
+          data: { name: `RT sender E2E ${suffix}`, slug: `rtsend${suffix}` },
+        });
+        expect(commRes.ok(), `create community: ${commRes.status()}`).toBeTruthy();
+        const communityId: string = (await commRes.json()).community.id;
+
+        const chanRes = await ctxA.request.post('/api/v1/channels', {
+          headers: { Authorization: `Bearer ${tokenA}` },
+          data: { communityId, name: 'realtime-sender-chan', isPrivate: false },
+        });
+        expect(chanRes.ok(), `create channel: ${chanRes.status()}`).toBeTruthy();
+        const channelId: string = (await chanRes.json()).channel.id;
+
+        const joinRes = await ctxB.request.post(`/api/v1/communities/${communityId}/join`, {
+          headers: { Authorization: `Bearer ${tokenB}` },
+        });
+        expect(joinRes.ok(), `B join community: ${joinRes.status()}`).toBeTruthy();
+
+        await Promise.all([
+          bootstrapPageWithToken(pageA, tokenA),
+          bootstrapPageWithToken(pageB, tokenB),
+        ]);
+
+        async function openChannelFor(p: Page) {
+          await p.getByTestId(`community-item-${communityId}`).click();
+          await expect(p.getByTestId(`channel-item-${channelId}`)).toBeVisible({
+            timeout: 15_000,
+          });
+          await p.getByTestId(`channel-item-${channelId}`).click();
+          await expect(p.getByTestId('message-pane')).toBeVisible({ timeout: 10_000 });
+        }
+
+        await Promise.all([openChannelFor(pageA), openChannelFor(pageB)]);
+
+        const messageContent = `RT sender self ${Date.now()}`;
+        const msgRes = await ctxA.request.post('/api/v1/messages', {
+          headers: { Authorization: `Bearer ${tokenA}` },
+          data: { channelId, content: messageContent },
+        });
+        expect(msgRes.ok(), `send message: ${msgRes.status()}`).toBeTruthy();
+
+        const msgLocator = pageA.locator('[data-message-id]').filter({
+          hasText: messageContent,
+        });
+        await expect(msgLocator).toBeVisible({ timeout: 15_000 });
+
+        await expect(
+          pageB.locator('[data-message-id]').filter({ hasText: messageContent }),
+        ).toBeVisible({ timeout: 15_000 });
       } finally {
         await ctxA.close();
         await ctxB.close();
@@ -274,7 +349,7 @@ test.describe('private channel real-time delivery', () => {
 
         await expect(
           pageB.locator('[data-message-id]').filter({ hasText: messageContent }),
-        ).toBeVisible({ timeout: 20_000 });
+        ).toBeVisible({ timeout: 15_000 });
       } finally {
         await ctxA.close();
         await ctxB.close();

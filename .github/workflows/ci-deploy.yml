@@ -202,7 +202,6 @@ jobs:
     timeout-minutes: 20
     env:
       E2E_BASE_URL: ${{ format('http://{0}', vars.STAGING_HOST || '136.114.103.71') }}
-      E2E_SKIP_WEBSERVER: "1"
       CI: "true"
     steps:
       - uses: actions/checkout@v5
@@ -212,7 +211,7 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run e2e:staging:ci --workspace=frontend
+      - run: npm run e2e:staging:ci
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v7
@@ -240,4 +239,4 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      - run: npm run api-contract --workspace=backend
+      - run: npm run api-contract

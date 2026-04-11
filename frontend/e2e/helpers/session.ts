@@ -1,11 +1,48 @@
 import { expect, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
 
+import { apiPostJson } from './api';
+
+/** Waits until any shell marker is visible (comma CSS OR would match multiple nodes → strict-mode failure). */
+async function waitForAnyShellByTestId(
+  page: Page,
+  testIds: readonly string[],
+  message: string,
+  timeout: number,
+) {
+  await expect
+    .poll(
+      async () => {
+        for (const id of testIds) {
+          if (await page.getByTestId(id).isVisible().catch(() => false)) {
+            return id;
+          }
+        }
+        return null;
+      },
+      { message, timeout },
+    )
+    .not.toBeNull();
+}
+
 export type TestUser = {
   username: string;
   displayName: string;
   email: string;
   password: string;
 };
+
+/** Fails fast if #root is missing; then waits for any known app shell (routes or global loader). */
+export async function waitForAppRouteShell(page: Page, context: string) {
+  await expect(page.locator('#root'), `${context}: missing #root (wrong host or not the SPA index)`).toBeAttached({
+    timeout: 8_000,
+  });
+  await waitForAnyShellByTestId(
+    page,
+    ['route-login', 'route-chat', 'route-register', 'app-loader', 'route-oauth-callback'],
+    `${context}: React did not render (check failed script / console)`,
+    22_000,
+  );
+}
 
 const AUTH_RETRY_ATTEMPTS = 2;
 const AUTH_RETRY_DELAY_MS = 400;
@@ -38,16 +75,14 @@ export function buildUser(prefix: string): TestUser {
 
 export async function registerOrLogin(request: APIRequestContext, user: TestUser) {
   let lastStatus = 0;
+  let lastHint = '';
   for (let attempt = 1; attempt <= AUTH_RETRY_ATTEMPTS; attempt += 1) {
     await waitForAuthSlot();
-    const register = await request.post('/api/v1/auth/register', {
-      data: {
-        username: user.username,
-        displayName: user.displayName,
-        email: user.email,
-        password: user.password,
-      },
-      timeout: 10_000,
+    const register = await apiPostJson(request, '/api/v1/auth/register', {
+      username: user.username,
+      displayName: user.displayName,
+      email: user.email,
+      password: user.password,
     });
 
     const registerStatus = register.status();
@@ -57,14 +92,12 @@ export async function registerOrLogin(request: APIRequestContext, user: TestUser
       if (token) return token as string;
     }
     lastStatus = registerStatus;
+    lastHint = (await register.text().catch(() => '')).slice(0, 800);
 
     await waitForAuthSlot();
-    const login = await request.post('/api/v1/auth/login', {
-      data: {
-        email: user.email,
-        password: user.password,
-      },
-      timeout: 10_000,
+    const login = await apiPostJson(request, '/api/v1/auth/login', {
+      email: user.email,
+      password: user.password,
     });
 
     const loginStatus = login.status();
@@ -74,6 +107,7 @@ export async function registerOrLogin(request: APIRequestContext, user: TestUser
       if (token) return token as string;
     }
     lastStatus = loginStatus;
+    lastHint = (await login.text().catch(() => '')).slice(0, 800);
 
     const transientRateLimit =
       registerStatus === 429 ||
@@ -88,7 +122,10 @@ export async function registerOrLogin(request: APIRequestContext, user: TestUser
     break;
   }
 
-  expect(false, `register/login failed for ${user.username}, last status ${lastStatus}`).toBeTruthy();
+  expect(
+    false,
+    `register/login failed for ${user.username}, last HTTP ${lastStatus}. Body: ${lastHint || '(empty)'}`,
+  ).toBeTruthy();
   return '';
 }
 
@@ -127,15 +164,28 @@ export async function bootstrapPageWithToken(page: Page, token: string) {
   const BOOTSTRAP_ATTEMPTS = 2;
   for (let attempt = 1; attempt <= BOOTSTRAP_ATTEMPTS; attempt++) {
     await page.goto(`/oauth-callback?token=${encodeURIComponent(token)}`);
+    // Include route-login: a bad or rejected token redirects to /login before chat mounts.
+    // Loader + oauth-callback can both be visible; a single OR-selector hits strict mode.
+    await waitForAnyShellByTestId(
+      page,
+      ['route-chat', 'app-loader', 'route-oauth-callback', 'route-login'],
+      'OAuth bootstrap: nothing rendered (wrong baseURL or JS error)',
+      15_000,
+    );
     const chatRoute = page.getByTestId('route-chat');
     const ok = await chatRoute.isVisible({ timeout: 10_000 }).catch(() => false);
     if (ok) return;
+    const onLogin = await page.getByTestId('route-login').isVisible({ timeout: 2_000 }).catch(() => false);
+    if (onLogin) break;
     if (attempt < BOOTSTRAP_ATTEMPTS) {
       await new Promise((r) => setTimeout(r, 1_200 * attempt));
     }
   }
   // Final assert to produce a clear failure message if still not visible.
-  await expect(page.getByTestId('route-chat')).toBeVisible();
+  await expect(
+    page.getByTestId('route-chat'),
+    'OAuth token bootstrap did not reach chat — check /api and auth init',
+  ).toBeVisible({ timeout: 15_000 });
 }
 
 export async function loginViaUiWithRetry(page: Page, user: TestUser) {
@@ -156,10 +206,15 @@ export async function loginViaUiWithRetry(page: Page, user: TestUser) {
       }
     }
     await page.waitForLoadState('domcontentloaded');
+    await waitForAppRouteShell(page, 'After /login');
 
-    await expect(
-      page.locator('[data-testid="route-login"], [data-testid="route-chat"]'),
-    ).toBeVisible({ timeout: 20_000 });
+    // On /login, RedirectIfAuthenticated shows app-loader (no route-login) until auth init finishes.
+    await waitForAnyShellByTestId(
+      page,
+      ['route-login', 'route-chat'],
+      'Stuck on app-loader — /api proxy or auth init (/auth/refresh, /users/me) failing or slow',
+      35_000,
+    );
 
     const alreadyLoggedIn = await page.getByTestId('route-chat').isVisible({ timeout: 1_000 }).catch(() => false);
     if (alreadyLoggedIn) return;
@@ -222,17 +277,14 @@ export async function createGroupAndInvite(
   invitedParticipant: string,
   accessToken?: string,
 ) {
-  const headers = accessToken
-    ? { Authorization: `Bearer ${accessToken}` }
-    : undefined;
+  const extra = accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined;
 
-  const created = await request.post('/api/v1/conversations', {
-    data: {
-      participantIds: initialParticipants,
-    },
-    headers,
-    timeout: 10_000,
-  });
+  const created = await apiPostJson(
+    request,
+    '/api/v1/conversations',
+    { participantIds: initialParticipants },
+    { headers: extra, timeout: 10_000 },
+  );
 
   const createdBody = await created.json().catch(() => ({}));
   expect(
@@ -242,13 +294,12 @@ export async function createGroupAndInvite(
   const conversationId = createdBody?.conversation?.id;
   expect(Boolean(conversationId), 'conversation id missing').toBeTruthy();
 
-  const invited = await request.post(`/api/v1/conversations/${conversationId}/invite`, {
-    data: {
-      participantIds: [invitedParticipant],
-    },
-    headers,
-    timeout: 10_000,
-  });
+  const invited = await apiPostJson(
+    request,
+    `/api/v1/conversations/${conversationId}/invite`,
+    { participantIds: [invitedParticipant] },
+    { headers: extra, timeout: 10_000 },
+  );
 
   const inviteBody = await invited.json().catch(() => ({}));
   expect(

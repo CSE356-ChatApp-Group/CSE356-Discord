@@ -32,6 +32,11 @@ const {
   bustChannelMessagesCache,
   bustConversationMessagesCache,
 } = require('./messageCacheBust');
+const {
+  messageFanoutEnvelope,
+  wrapFanoutPayload,
+  fanoutPublishedAt,
+} = require('./realtimePayload');
 
 const router = express.Router();
 router.use(authenticate);
@@ -58,6 +63,14 @@ function targetKey(channelId, conversationId) {
   if (channelId)      return `channel:${channelId}`;
   if (conversationId) return `conversation:${conversationId}`;
   throw new Error('No target');
+}
+
+/** Message row `created_at` as ISO string (idempotent POST replays). */
+function messageCreatedAtIso(row) {
+  const t = row?.created_at ?? row?.createdAt;
+  if (t instanceof Date) return t.toISOString();
+  if (typeof t === 'string') return new Date(t).toISOString();
+  return new Date().toISOString();
 }
 
 async function ensureActiveConversationParticipant(conversationId, userId) {
@@ -110,27 +123,6 @@ async function getConversationFanoutTargets(conversationId) {
   ];
 }
 
-async function publishConversationEvent(conversationId, event, data) {
-  const targets = await getConversationFanoutTargets(conversationId);
-  let uniqueTargets = [...new Set(targets)];
-  // read:updated does not change last_message ordering; WS carries receipt fields.
-  // Avoid N× redis DELs on every mark-read (hot path).
-  const bustConversationListCache = event !== 'read:updated';
-  // Bootstrap already subscribes user:<id> for every participant; publishing on
-  // conversation: as well duplicates delivery and doubles fanout work.
-  if (event === 'read:updated') {
-    uniqueTargets = uniqueTargets.filter((t) => t.startsWith('user:'));
-  }
-  uniqueTargets.forEach((target) => {
-    sideEffects.publishMessageEvent(target, event, data);
-  });
-  if (!bustConversationListCache) return;
-  // Bust each participant's GET /conversations cache so last_message_at and
-  // sort order reflect the new event immediately on the next REST request.
-  const userIds = uniqueTargets.filter((t) => t.startsWith('user:')).map((t) => t.slice(5));
-  Promise.allSettled(userIds.map((uid) => redis.del(`conversations:list:${uid}`))).catch(() => {});
-}
-
 async function publishConversationEventNow(conversationId, event, data) {
   const targets = await getConversationFanoutTargets(conversationId);
   let uniqueTargets = [...new Set(targets)];
@@ -139,15 +131,19 @@ async function publishConversationEventNow(conversationId, event, data) {
     uniqueTargets = uniqueTargets.filter((target) => target.startsWith('user:'));
   }
 
-  await Promise.allSettled(
-    uniqueTargets.map((target) => fanout.publish(target, { event, data })),
-  );
+  // Any partial Redis failure must not return HTTP success while a participant
+  // misses message:* / read — mirrors single-target await for channel posts.
+  const payload = wrapFanoutPayload(event, data);
+  await Promise.all(uniqueTargets.map((target) => fanout.publish(target, payload)));
 
-  if (event === 'read:updated') return;
+  if (event === 'read:updated') return undefined;
+
   const userIds = uniqueTargets
     .filter((target) => target.startsWith('user:'))
     .map((target) => target.slice(5));
   Promise.allSettled(userIds.map((uid) => redis.del(`conversations:list:${uid}`))).catch(() => {});
+
+  return fanoutPublishedAt(payload);
 }
 
 async function incrementChannelMessageCount(channelId) {
@@ -657,7 +653,13 @@ router.post('/',
               try { parsed = JSON.parse(existing); } catch { parsed = null; }
               if (parsed?.messageId) {
                 const cachedMsg = await loadHydratedMessageById(parsed.messageId);
-                if (cachedMsg) return res.status(201).json({ message: cachedMsg });
+                if (cachedMsg) {
+                  return res.status(201).json({
+                    message: cachedMsg,
+                    realtimeFanoutComplete: true,
+                    realtimePublishedAt: messageCreatedAtIso(cachedMsg),
+                  });
+                }
               }
             }
             const gotLease = await redis.set(
@@ -676,7 +678,13 @@ router.post('/',
                 try { p2 = JSON.parse(again); } catch { break; }
                 if (p2?.messageId) {
                   const msg2 = await loadHydratedMessageById(p2.messageId);
-                  if (msg2) return res.status(201).json({ message: msg2 });
+                  if (msg2) {
+                    return res.status(201).json({
+                      message: msg2,
+                      realtimeFanoutComplete: true,
+                      realtimePublishedAt: messageCreatedAtIso(msg2),
+                    });
+                  }
                 }
                 if (!p2?.pending) break;
               }
@@ -833,18 +841,25 @@ router.post('/',
         /* non-fatal: TTL backstop if Redis errors */
       }
 
+      let realtimePublishedAtForHttp;
       if (channelId) {
         try {
           await incrementChannelMessageCount(channelId);
         } catch (err) {
           logger.warn({ err, channelId }, 'Failed to increment channel:msg_count before realtime publish');
         }
-        await fanout.publish(
-          targetKey(channelId, conversationId),
-          { event: 'message:created', data: message },
-        );
+        const createdEnvelope = messageFanoutEnvelope('message:created', message);
+        await fanout.publish(targetKey(channelId, conversationId), createdEnvelope);
+        realtimePublishedAtForHttp = createdEnvelope.publishedAt;
       } else {
-        await publishConversationEventNow(conversationId, 'message:created', message);
+        realtimePublishedAtForHttp = await publishConversationEventNow(
+          conversationId,
+          'message:created',
+          message,
+        );
+      }
+      if (!realtimePublishedAtForHttp) {
+        realtimePublishedAtForHttp = new Date().toISOString();
       }
       if (communityId) {
         sideEffects.publishBackgroundEvent(`community:${communityId}`, 'community:channel_message', {
@@ -867,7 +882,11 @@ router.post('/',
           .catch(() => {});
       }
 
-      res.status(201).json({ message });
+      res.status(201).json({
+        message,
+        realtimeFanoutComplete: true,
+        realtimePublishedAt: realtimePublishedAtForHttp,
+      });
     } catch (err: any) {
       if (idemRedisKey && idemLease) {
         redis.del(idemRedisKey).catch(() => {});
@@ -936,10 +955,10 @@ router.patch('/:id',
         );
       } else {
         const key = targetKey(baseMessage.channel_id, baseMessage.conversation_id);
-        await fanout.publish(key, {
-          event: 'message:updated',
-          data: message || baseMessage,
-        });
+        await fanout.publish(
+          key,
+          messageFanoutEnvelope('message:updated', message || baseMessage),
+        );
       }
 
       res.json({ message: message || baseMessage });
@@ -1010,10 +1029,10 @@ router.delete('/:id',
         await publishConversationEventNow(message.conversation_id, 'message:deleted', { id: message.id });
       } else {
         const key = targetKey(message.channel_id, message.conversation_id);
-        await fanout.publish(key, {
-          event: 'message:deleted',
-          data: { id: message.id },
-        });
+        await fanout.publish(
+          key,
+          messageFanoutEnvelope('message:deleted', { id: message.id }),
+        );
       }
 
       res.json({ success: true });

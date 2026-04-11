@@ -62,7 +62,7 @@ test.describe('DM real-time delivery', () => {
 
       await expect(
         pageA.locator('[data-message-id]').filter({ hasText: messageContent }),
-      ).toBeVisible({ timeout: 20_000 });
+      ).toBeVisible({ timeout: 15_000 });
     } finally {
       await ctxA.close();
       await ctxB.close();
@@ -130,8 +130,8 @@ test.describe('group DM real-time delivery', () => {
 
       const row = (p: typeof pageA) =>
         p.locator('[data-message-id]').filter({ hasText: messageContent });
-      await expect(row(pageA)).toBeVisible({ timeout: 20_000 });
-      await expect(row(pageB)).toBeVisible({ timeout: 20_000 });
+      await expect(row(pageA)).toBeVisible({ timeout: 15_000 });
+      await expect(row(pageB)).toBeVisible({ timeout: 15_000 });
     } finally {
       await ctxA.close();
       await ctxB.close();

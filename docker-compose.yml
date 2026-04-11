@@ -26,6 +26,15 @@ volumes:
   loki_data:
   tempo_data:
   alertmanager_data:
+  # Isolated from macOS host node_modules; if Vite returns HTTP 500, remove this volume and recreate:
+  #   docker compose down && docker volume rm "$(docker volume ls -q | grep frontend_node_modules)"
+  #   docker compose up -d
+  frontend_node_modules:
+  # Shared by api + migrate; same pattern as frontend_node_modules.
+  # If the API returns 400/500 on POST with errors like "Cannot find module '../encodings'" (iconv-lite)
+  # or npm ls shows missing direct deps, clear and reinstall:
+  #   docker compose exec -u root api sh -c 'cd /app && rm -rf node_modules/* && npm ci' && docker compose restart api
+  backend_node_modules:
 
 services:
   # ── Node 1 · Database ─────────────────────────────────────────────────────────
@@ -63,11 +72,11 @@ services:
   api:
     image: node:20-alpine
     working_dir: /app
-    command: sh -c "npm install && npm run dev"
+    command: sh -c "npm ci && npm run dev"
     volumes:
       - ./backend:/app
       - ./migrations:/migrations
-      - /app/node_modules
+      - backend_node_modules:/app/node_modules
     restart: unless-stopped
     environment:
       NODE_ENV: development
@@ -80,9 +89,14 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change_me_refresh}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      # High defaults for local E2E churn (many parallel workers hit register/login).
+      AUTH_REGISTER_RATE_LIMIT_MAX: ${AUTH_REGISTER_RATE_LIMIT_MAX:-500}
+      AUTH_LOGIN_RATE_LIMIT_MAX: ${AUTH_LOGIN_RATE_LIMIT_MAX:-500}
       # S3 / MinIO
       # PUBLIC endpoint is what clients (and tests) use — routed via nginx.
       # INTERNAL endpoint is what the API signs with inside Docker.
+      # If you point S3_ENDPOINT at a host-mapped MinIO port (e.g. :19009), use that same origin for
+      # presigned PUTs and keep S3_ACCESS_KEY / S3_SECRET_KEY identical to that MinIO’s root creds.
       S3_ENDPOINT: http://localhost/minio
       S3_INTERNAL_ENDPOINT: http://minio:9000
       S3_BUCKET: ${S3_BUCKET:-chatapp-attachments}
@@ -98,6 +112,18 @@ services:
       migrate: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 180s
     networks: [chatapp]
     labels:
       - "prometheus.scrape=true"
@@ -108,10 +134,10 @@ services:
   migrate:
     image: node:20-alpine
     working_dir: /app
-    command: sh -c "npm install && npm run migrate"
+    command: sh -c "npm ci && npm run migrate"
     volumes:
       - ./backend:/app
-      - /app/node_modules
+      - backend_node_modules:/app/node_modules
       - ./migrations:/migrations:ro
     environment:
       DATABASE_URL: postgres://chatapp:${POSTGRES_PASSWORD:-chatapp_dev}@postgres:5432/chatapp
@@ -131,7 +157,10 @@ services:
     volumes:
       - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
-    depends_on: [api]
+      # Staging-parity SPA: run `npm run build` in ./frontend before/up; same origin as /api and /ws.
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      api: { condition: service_healthy }
     networks: [chatapp]
 
   # ── S3-compatible object storage (MinIO) ──────────────────────────────────────
@@ -145,6 +174,7 @@ services:
     volumes:
       - minio_data:/data
     ports:
+      - "9000:9000" # S3 API (presigned uploads from host-run API / curl)
       - "9001:9001" # Web console (dev only)
     networks: [chatapp]
 
@@ -165,10 +195,10 @@ services:
   frontend:
     image: node:20-alpine
     working_dir: /app
-    command: sh -c "npm install && npm run dev -- --host"
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0 --port 5173"
     volumes:
       - ./frontend:/app
-      - /app/node_modules
+      - frontend_node_modules:/app/node_modules
     ports:
       - "5173:5173"
     environment:
@@ -177,7 +207,10 @@ services:
       API_PROXY_TARGET: "http://nginx"
       WS_PROXY_TARGET: "ws://nginx"
     networks: [chatapp]
-    depends_on: [api]
+    # Nginx starts only after api is healthy; wait for nginx so /api proxy is not 502 during npm install.
+    depends_on:
+      nginx: { condition: service_started }
+      api: { condition: service_healthy }
 
   # ── Node 4 · Monitoring ───────────────────────────────────────────────────────
   prometheus:

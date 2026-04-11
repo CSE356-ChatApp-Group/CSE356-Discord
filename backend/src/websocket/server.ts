@@ -40,7 +40,9 @@
  * SLO / UX stance for backpressure (current implementation):
  *   • **Drop** (buffer > WS_BACKPRESSURE_DROP_BYTES): best-effort — client may
  *     miss an ephemeral frame; acceptable for presence-style traffic if clients
- *     reconcile via REST or a periodic sync.
+ *     reconcile via REST or a periodic sync. **Not applied** to `message:*` Redis
+ *     payloads so committed chat events are not silently skipped while the socket
+ *     stays below the kill threshold.
  *   • **Kill** (buffer > WS_BACKPRESSURE_KILL_BYTES): connection closed — client
  *     must reconnect; target **≥ 99%** session success over a steady profile with
  *     documented headroom (see load-tests `slo` profile).
@@ -71,7 +73,8 @@ const IDLE_TTL_SECONDS = 60;
 const CONNECTION_ALIVE_TTL_SECONDS = 120;
 const PRESENCE_SWEEPER_MS = 15_000;
 // Backpressure thresholds for slow WS consumers.
-// DROP: skip this frame if the client's write buffer exceeds 64 KB.
+// DROP: skip this frame if the client's write buffer exceeds 64 KB (except
+//   message:* fanout frames — those still send until KILL to avoid silent loss).
 //   ~130 typical frames. A client this far behind is already visibly lagging;
 //   dropping one frame is better than growing the server-side buffer further.
 // KILL: terminate the connection at 2 MB. The client cannot keep up at all;
@@ -412,12 +415,21 @@ function deliverPubsubMessage(channel, message) {
   if (!clients || recipientCount === 0) return;
 
   let outbound = message;
+  let skipDropForBackpressure = false;
+  let payloadEventName: string | undefined;
   if (
     parsed &&
     typeof parsed === "object" &&
     parsed !== null &&
     !Array.isArray(parsed)
   ) {
+    const ev = (parsed as { event?: unknown }).event;
+    if (typeof ev === "string") {
+      payloadEventName = ev;
+      if (ev.startsWith("message:")) {
+        skipDropForBackpressure = true;
+      }
+    }
     outbound = JSON.stringify({ ...parsed, channel });
   }
 
@@ -427,17 +439,34 @@ function deliverPubsubMessage(channel, message) {
     if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
       wsBackpressureEventsTotal.inc({ action: "kill" });
       logger.warn(
-        { event: 'ws.slow_consumer.killed', userId: (ws as any)._userId, buffered },
-        'WS slow consumer: terminating connection due to excessive backpressure',
+        {
+          event: "ws.slow_consumer.killed",
+          userId: (ws as any)._userId,
+          buffered,
+          redisChannel: channel,
+          payloadEvent: payloadEventName,
+          gradingNote: "correlate_with_failed_deliveries",
+        },
+        "WS slow consumer: terminating connection due to excessive backpressure",
       );
       ws.terminate();
       return;
     }
-    if (buffered >= WS_BACKPRESSURE_DROP_BYTES) {
+    if (
+      !skipDropForBackpressure &&
+      buffered >= WS_BACKPRESSURE_DROP_BYTES
+    ) {
       wsBackpressureEventsTotal.inc({ action: "drop" });
       logger.warn(
-        { event: 'ws.slow_consumer.frame_dropped', userId: (ws as any)._userId, buffered },
-        'WS slow consumer: dropping frame due to backpressure',
+        {
+          event: "ws.slow_consumer.frame_dropped",
+          userId: (ws as any)._userId,
+          buffered,
+          redisChannel: channel,
+          payloadEvent: payloadEventName,
+          gradingNote: "correlate_with_failed_deliveries",
+        },
+        "WS slow consumer: dropping frame due to backpressure",
       );
       return;
     }

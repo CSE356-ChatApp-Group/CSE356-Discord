@@ -17,7 +17,12 @@ const { body, param, validationResult } = require('express-validator');
 const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const overload = require('../utils/overload');
-const { s3, BUCKET, toClientFacingUrl } = require('./storage');
+const {
+  s3Presign,
+  BUCKET,
+  toClientFacingUrl,
+  assertDirectPresignedUrlMatchesSigner,
+} = require('./storage');
 
 const router = express.Router();
 router.use(authenticate);
@@ -25,6 +30,10 @@ router.use(authenticate);
 const MAX_IMAGES_PER_MESSAGE = 4;
 
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+// Some Node / Express stacks end up with Content-Length on the SDK request while presigning; if SigV4
+// signs it, the client PUT (different length) fails with MinIO SignatureDoesNotMatch.
+const PRESIGN_UNSIGNABLE_HEADERS = new Set(['content-length']);
 
 // ── Pre-sign ───────────────────────────────────────────────────────────────────
 router.post('/presign',
@@ -48,18 +57,30 @@ router.post('/presign',
       const ext = filename.split('.').pop().toLowerCase();
       const key = `uploads/${req.user.id}/${uuidv4()}.${ext}`;
 
+      // No Metadata: presigned PUT would require matching x-amz-meta-* headers (403 otherwise).
+      // Omit ContentLength: SigV4 binds content-length; Node fetch / some proxies send a length
+      // MinIO rejects with 403. sizeBytes is still validated here; browsers’ fetch(File) work either way.
       const cmd = new PutObjectCommand({
-        Bucket:        BUCKET,
-        Key:           key,
-        ContentType:   contentType,
-        ContentLength: sizeBytes,
-        Metadata: { uploaderId: req.user.id },
+        Bucket:      BUCKET,
+        Key:         key,
+        ContentType: contentType,
       });
 
-      const url = toClientFacingUrl(await getSignedUrl(s3, cmd, { expiresIn: 300 }));
+      const url = toClientFacingUrl(
+        await getSignedUrl(s3Presign, cmd, {
+          expiresIn: 300,
+          unsignableHeaders: PRESIGN_UNSIGNABLE_HEADERS,
+        }),
+      );
+      assertDirectPresignedUrlMatchesSigner(url);
 
       res.json({ uploadUrl: url, storageKey: key });
-    } catch (err) { next(err); }
+    } catch (err) {
+      if (err && err.statusCode === 500 && err.message) {
+        return res.status(500).json({ error: err.message });
+      }
+      next(err);
+    }
   }
 );
 
@@ -151,10 +172,21 @@ router.get('/:id',
       // Strip join-only columns from the client response
       const { channel_id, conversation_id, ...clientAttachment } = attachment;
       const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: attachment.storage_key });
-      const url = toClientFacingUrl(await getSignedUrl(s3, cmd, { expiresIn: 3600 }));
+      const url = toClientFacingUrl(
+        await getSignedUrl(s3Presign, cmd, {
+          expiresIn: 3600,
+          unsignableHeaders: PRESIGN_UNSIGNABLE_HEADERS,
+        }),
+      );
+      assertDirectPresignedUrlMatchesSigner(url);
 
       res.json({ attachment: clientAttachment, url });
-    } catch (err) { next(err); }
+    } catch (err) {
+      if (err && err.statusCode === 500 && err.message) {
+        return res.status(500).json({ error: err.message });
+      }
+      next(err);
+    }
   }
 );
 
