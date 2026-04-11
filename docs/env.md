@@ -14,9 +14,11 @@ On the production host, inspect `/opt/chatapp/shared/.env` (used by systemd `cha
 2. **`AUTH_REGISTER_RATE_LIMIT_MAX`**, **`AUTH_LOGIN_RATE_LIMIT_MAX`**, **`AUTH_CONNECT_RATE_LIMIT_MAX`** — only set if you intentionally override [defaults in `backend/src/auth/router.ts`](../backend/src/auth/router.ts) (register 20 / 10 min, login 60 / 1 min, connect 30 / 5 min). Absent vars use those defaults.
 3. **Window overrides** (`AUTH_*_RATE_LIMIT_WINDOW_MS`) — same as above; omit unless tuning.
 4. **`OVERLOAD_HTTP_SHED_ENABLED`** — `deploy-prod.sh` sets this to `false`. Production should **not** copy staging values (`true` + low `OVERLOAD_LAG_SHED_MS`) unless you deliberately want HTTP 503 shedding under event-loop lag.
-5. **`AUTH_BYPASS`** — should **not** be `true` when grading real authentication behavior (use `false` for real-user prod).
+5. **`AUTH_BYPASS`** — should **not** be `true` when grading real authentication behavior (use `false` for real-user prod). **`deploy-prod.sh`** forces **`AUTH_BYPASS=false`** and **`NODE_ENV=production`** on every deploy.
+6. **`NODE_ENV`** — should be **`production`** on the API host; **`deploy-prod.sh`** enforces it.
+7. **`OVERLOAD_LAG_SHED_MS`** — **`deploy-prod.sh`** sets **`250`** (matches code default when HTTP shedding is enabled). **`OVERLOAD_HTTP_SHED_ENABLED`** remains **`false`** on prod unless you opt in.
 
-**Repository audit (no server access):** `DISABLE_RATE_LIMITS` and `AUTH_*_RATE_LIMIT_*` do not appear in deploy scripts. [`docker-compose.yml`](../docker-compose.yml) sets high register/login limits (500) **only** for the local `api` service to support parallel E2E; production does not use that compose stack as-is.
+**Repository audit (no server access):** `DISABLE_RATE_LIMITS` and `AUTH_*_RATE_LIMIT_*` do not appear in deploy scripts (set manually on grading-only hosts if desired). [`docker-compose.yml`](../docker-compose.yml) sets high register/login limits (500) **only** for the local `api` service to support parallel E2E; production does not use that compose stack as-is. Channel **`message:created`** per-user Redis fanout is **on by default in code**; compose and [`deploy/deploy-staging.sh`](../deploy/deploy-staging.sh) / [`deploy/deploy-prod.sh`](../deploy/deploy-prod.sh) **re-apply on every deploy** **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, and **`WS_BOOTSTRAP_BATCH_SIZE=120`**, plus prod-only **`NODE_ENV=production`**, **`AUTH_BYPASS=false`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`**, and **`OVERLOAD_LAG_SHED_MS=250`** (see script block in `deploy-prod.sh`).
 
 ## Backend API (`backend/src`) — optional tunables
 
@@ -75,7 +77,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
 | `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS` | WS tuning |
-| `CHANNEL_MESSAGE_USER_FANOUT`, `CHANNEL_MESSAGE_USER_FANOUT_MAX` | When `1`/`true`, also publish `message:created` to `user:<id>` for each channel-visible member (dedupe by message id on clients; caps publishes) |
+| `CHANNEL_MESSAGE_USER_FANOUT`, `CHANNEL_MESSAGE_USER_FANOUT_MAX` | **Default on:** also publish channel `message:created` to each visible member’s `user:<id>` (set `0`/`false` to disable). Cap members (default **5000**, max **10000**); clients dedupe by message id. |
 | **Observability** | |
 | `OTEL_ENABLED` | Set `false` to disable tracing |
 | `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio (production default 0.1) |

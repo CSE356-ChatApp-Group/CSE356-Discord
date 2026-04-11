@@ -479,6 +479,8 @@ Create `/opt/chatapp/shared/.env` on production VM:
 
 **Fanout:** `FANOUT_QUEUE_CONCURRENCY` is written by `deploy-prod.sh` from VM shape; raise only after staging load tests show headroom.
 
+**Channel `message:created`:** the app **defaults to** duplicate Redis publish to each member’s **`user:<id>`** (see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md)). **`deploy-staging.sh`** and **`deploy-prod.sh`** both re-apply recommended **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, and **`WS_BOOTSTRAP_BATCH_SIZE=120`** on every deploy so shared `.env` cannot drift. To **permanently** turn off user-topic fanout (e.g. Redis-bound tiny host), edit or remove those lines in **`deploy-prod.sh`** / **`deploy-staging.sh`** — editing only `/opt/chatapp/shared/.env` is overwritten on the next deploy.
+
 ### Course grader: “delivery fails” vs HTTP 403
 
 **Throughput / delivery SLA (15s per listener, outage rollup):** see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md) — maps the forum definition to WebSocket vs HTTP and lists common non-bug patterns.

@@ -438,6 +438,17 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo grep -q '^OVERLOAD_HTTP_SHED_ENABLED=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^OVERLOAD_HTTP_SHED_ENABLED=.*/OVERLOAD_HTTP_SHED_ENABLED=false/' /opt/chatapp/shared/.env \
     || echo 'OVERLOAD_HTTP_SHED_ENABLED=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # If shedding is ever enabled, use the code default (250 ms) — not staging's aggressive 200 ms.
+  sudo grep -q '^OVERLOAD_LAG_SHED_MS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^OVERLOAD_LAG_SHED_MS=.*/OVERLOAD_LAG_SHED_MS=250/' /opt/chatapp/shared/.env \
+    || echo 'OVERLOAD_LAG_SHED_MS=250' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Runtime mode + auth safety (never leave dev bypass on after a mistaken .env copy).
+  sudo grep -q '^NODE_ENV=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^NODE_ENV=.*/NODE_ENV=production/' /opt/chatapp/shared/.env \
+    || echo 'NODE_ENV=production' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^AUTH_BYPASS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^AUTH_BYPASS=.*/AUTH_BYPASS=false/' /opt/chatapp/shared/.env \
+    || echo 'AUTH_BYPASS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY: 1 on the 1-CPU prod VM so async
   # search-indexing side effects don't compete with request handling.
   sudo grep -q '^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
@@ -449,6 +460,18 @@ ssh "$PROD_USER@$PROD_HOST" "
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
     || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Grading-shaped realtime: re-apply on every deploy (same as deploy-staging.sh) so shared
+  # .env cannot drift after manual edits. Set CHANNEL_MESSAGE_USER_FANOUT=0 in .env only if
+  # you deliberately disable user-topic duplicate publish on a tiny host.
+  sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT=.*/CHANNEL_MESSAGE_USER_FANOUT=true/' /opt/chatapp/shared/.env \
+    || echo 'CHANNEL_MESSAGE_USER_FANOUT=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MAX=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MAX=.*/CHANNEL_MESSAGE_USER_FANOUT_MAX=10000/' /opt/chatapp/shared/.env \
+    || echo 'CHANNEL_MESSAGE_USER_FANOUT_MAX=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^WS_BOOTSTRAP_BATCH_SIZE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^WS_BOOTSTRAP_BATCH_SIZE=.*/WS_BOOTSTRAP_BATCH_SIZE=120/' /opt/chatapp/shared/.env \
+    || echo 'WS_BOOTSTRAP_BATCH_SIZE=120' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer fires.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
