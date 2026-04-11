@@ -114,11 +114,11 @@ const ACL_CACHE_MAX_ENTRIES =
   Number.isFinite(rawAclCacheMaxEntries) && rawAclCacheMaxEntries > 0
     ? Math.floor(rawAclCacheMaxEntries)
     : 20_000;
-const rawBootstrapBatchSize = Number(process.env.WS_BOOTSTRAP_BATCH_SIZE || 50);
+const rawBootstrapBatchSize = Number(process.env.WS_BOOTSTRAP_BATCH_SIZE || 96);
 const WS_BOOTSTRAP_BATCH_SIZE =
   Number.isFinite(rawBootstrapBatchSize) && rawBootstrapBatchSize > 0
     ? Math.floor(rawBootstrapBatchSize)
-    : 50;
+    : 96;
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -436,6 +436,26 @@ function deliverPubsubMessage(channel, message) {
 
   clients.forEach((ws) => {
     if (ws.readyState !== WebSocket.OPEN) return;
+    if (
+      channel.startsWith("user:")
+      && parsed
+      && typeof parsed === "object"
+      && !Array.isArray(parsed)
+    ) {
+      const ev = (parsed as { event?: unknown }).event;
+      if (typeof ev === "string" && ev.startsWith("message:")) {
+        const data = (parsed as { data?: { channel_id?: string; channelId?: string } }).data;
+        const chId = data?.channel_id || data?.channelId;
+        if (
+          chId
+          && (ws as { _explicitChannelUnsub?: Set<string> })._explicitChannelUnsub?.has(
+            `channel:${chId}`,
+          )
+        ) {
+          return;
+        }
+      }
+    }
     const buffered: number = (ws as any).bufferedAmount ?? 0;
     if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
       wsBackpressureEventsTotal.inc({ action: "kill" });
@@ -641,6 +661,8 @@ wss.on("connection", async (ws, req) => {
   wsConnectionResultTotal.inc({ result: "accepted" });
   logger.info({ userId: user.id }, "WS connected");
   ws._subscriptions = new Set();
+  /** `channel:<uuid>` topics the client explicitly { type: "unsubscribe" }'d — skip duplicate `user:<me>` message:* for those. */
+  ws._explicitChannelUnsub = new Set();
   ws._userId = user.id;
   ws._connectionId = randomUUID();
   ws._bootstrapReady = false;
@@ -900,11 +922,17 @@ async function subscribeClient(ws, redisChannel) {
   }
   channelClients.get(redisChannel).add(ws);
   ws._subscriptions.add(redisChannel);
+  if (redisChannel.startsWith("channel:")) {
+    ws._explicitChannelUnsub?.delete(redisChannel);
+  }
 }
 
 async function unsubscribeClient(ws, redisChannel) {
   channelClients.get(redisChannel)?.delete(ws);
   ws._subscriptions.delete(redisChannel);
+  if (redisChannel.startsWith("channel:")) {
+    ws._explicitChannelUnsub?.add(redisChannel);
+  }
 
   if ((channelClients.get(redisChannel)?.size || 0) === 0) {
     channelClients.delete(redisChannel);

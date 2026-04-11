@@ -1,5 +1,5 @@
 /**
- * Optional per-user Redis fanout for channel message:created (CHANNEL_MESSAGE_USER_FANOUT).
+ * Per-user Redis fanout for channel message:created (default on; opt out with CHANNEL_MESSAGE_USER_FANOUT=0).
  */
 
 jest.mock('../src/db/pool', () => ({
@@ -41,14 +41,14 @@ describe('channelRealtimeFanout', () => {
   });
 
   it('publishChannelMessageCreated publishes only channel when fanout disabled', async () => {
-    delete process.env.CHANNEL_MESSAGE_USER_FANOUT;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT = '0';
     await publishChannelMessageCreated('c1', { event: 'message:created', data: {} });
     expect(fanout.publish).toHaveBeenCalledTimes(1);
     expect(fanout.publish).toHaveBeenCalledWith('channel:c1', expect.any(Object));
   });
 
-  it('publishChannelMessageCreated publishes channel plus user targets when enabled', async () => {
-    process.env.CHANNEL_MESSAGE_USER_FANOUT = '1';
+  it('publishChannelMessageCreated publishes channel plus user targets when fanout is default on', async () => {
+    delete process.env.CHANNEL_MESSAGE_USER_FANOUT;
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
     expect(fanout.publish).toHaveBeenCalledTimes(3);

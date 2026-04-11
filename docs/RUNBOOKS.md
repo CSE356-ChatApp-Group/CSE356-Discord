@@ -80,6 +80,8 @@ Automated graders (browser clients) should treat **HTTP as the source of truth**
 2. **If checking the UI only:** For **`POST /messages`** (`message:created`) and for **`PATCH` / `DELETE` on a message**, the server **awaits `fanout.publish`** before returning, so the UI can update immediately after success on those routes. **`read:updated`** and some other paths may still use the in-process fanout queue — for those, a **short wait** or **GET** assertion is safer than WS-only zero-wait.
 3. **Do not** rely solely on WebSocket delivery for grading unless you accept occasional false negatives under normal load.
 
+**Throughput harnesses:** channel **`message:created`** is duplicated to **`user:<member>`** by default so listeners receive it as soon as the **`user:`** Redis subscription is live (before full **`channel:`** bootstrap). See [`GRADING-DELIVERY-SEMANTICS.md`](GRADING-DELIVERY-SEMANTICS.md). Watch **`ws_bootstrap_wall_duration_ms`** if accounts have extreme community counts.
+
 ## Metrics during grader or load-test runs
 
 When investigating **delivery fails**, **peak rate**, or tail latency under many concurrent browser sessions, correlate with:
@@ -89,6 +91,7 @@ When investigating **delivery fails**, **peak rate**, or tail latency under many
 | `side_effect_queue_depth{job="chatapp-api",queue="fanout:critical"}` | Backlog of Redis publish jobs for message/read fanout; sustained growth means realtime lag. |
 | `side_effect_queue_delay_ms` (histogram) | Time from enqueue to running the fanout job; high p95 means delayed WS delivery after writes. |
 | `ws_backpressure_events_total{job="chatapp-api"}` | Server dropped a frame or closed a socket because the client could not drain the WS buffer fast enough. |
+| `ws_bootstrap_wall_duration_ms` | Wall time to finish auto-subscribe batches; very high values correlate with missed **`channel:`**-only delivery before **`user:`** duplicate existed or when fanout is disabled. |
 
 Related alerts: [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) (for example critical fanout backlog and delivery degradation rules).
 

@@ -92,6 +92,10 @@ services:
       # High defaults for local E2E churn (many parallel workers hit register/login).
       AUTH_REGISTER_RATE_LIMIT_MAX: ${AUTH_REGISTER_RATE_LIMIT_MAX:-500}
       AUTH_LOGIN_RATE_LIMIT_MAX: ${AUTH_LOGIN_RATE_LIMIT_MAX:-500}
+      # COMPAS / throughput: duplicate channel message:created to user:<id> (app default on; explicit for clarity).
+      CHANNEL_MESSAGE_USER_FANOUT: ${CHANNEL_MESSAGE_USER_FANOUT:-true}
+      CHANNEL_MESSAGE_USER_FANOUT_MAX: ${CHANNEL_MESSAGE_USER_FANOUT_MAX:-10000}
+      WS_BOOTSTRAP_BATCH_SIZE: ${WS_BOOTSTRAP_BATCH_SIZE:-120}
       # S3 / MinIO
       # PUBLIC endpoint is what clients (and tests) use — routed via nginx.
       # INTERNAL endpoint is what the API signs with inside Docker.

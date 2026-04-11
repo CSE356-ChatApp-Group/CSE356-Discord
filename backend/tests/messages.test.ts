@@ -144,6 +144,157 @@ describe('GET /messages first-page cache vs POST', () => {
   });
 });
 
+describe('GET /messages channel id as conversationId (generated-client compatibility)', () => {
+  it('returns channel history when only conversationId= is set to the channel UUID', async () => {
+    const owner = await createAuthenticatedUser('convparamchan');
+    const slug = `cpc-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'conv param channel' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `cpc-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'msg-via-conversationId-query' });
+    expect(postRes.status).toBe(201);
+    const messageId = postRes.body.message.id;
+
+    const getRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${channelId}&limit=30`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(getRes.status).toBe(200);
+    const ids = (getRes.body.messages || []).map((m: { id: string }) => m.id);
+    expect(ids).toContain(messageId);
+  });
+
+  it('matches channelId pagination when only conversationId= names the channel', async () => {
+    const owner = await createAuthenticatedUser('convparampage');
+    const slug = `cpp-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'conv param page' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `cpp-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const msgIds: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const postRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: `page-${i}-${uniqueSuffix()}` });
+      expect(postRes.status).toBe(201);
+      msgIds.push(postRes.body.message.id);
+    }
+    const [id1, id2, id3] = msgIds;
+
+    const viaConv = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .query({ conversationId: channelId, before: id3, limit: 10 });
+    const viaChan = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .query({ channelId, before: id3, limit: 10 });
+
+    expect(viaConv.status).toBe(200);
+    expect(viaChan.status).toBe(200);
+    const convPage = (viaConv.body.messages || []).map((m: { id: string }) => m.id);
+    const chanPage = (viaChan.body.messages || []).map((m: { id: string }) => m.id);
+    expect(convPage).toEqual(chanPage);
+    expect(convPage).toContain(id1);
+    expect(convPage).toContain(id2);
+  });
+
+  it('lets a private-channel member load history with conversationId= only', async () => {
+    const owner = await createAuthenticatedUser('convparamprivown');
+    const member = await createAuthenticatedUser('convparamprivmem');
+    const slug = `cppriv-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'priv conv param' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(joinRes.status).toBe(200);
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `priv-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: true });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const addRes = await request(app)
+      .post(`/api/v1/channels/${channelId}/members`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ userIds: [member.user.id] });
+    expect(addRes.status).toBe(200);
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'private-via-conversationId-query' });
+    expect(postRes.status).toBe(201);
+    const messageId = postRes.body.message.id;
+
+    const getRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${channelId}&limit=30`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+
+    expect(getRes.status).toBe(200);
+    const ids = (getRes.body.messages || []).map((m: { id: string }) => m.id);
+    expect(ids).toContain(messageId);
+  });
+
+  it('returns 403 when conversationId is a private channel UUID and user is not a member', async () => {
+    const owner = await createAuthenticatedUser('convparam403own');
+    const stranger = await createAuthenticatedUser('convparam403str');
+    const slug = `cp403-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: '403 conv param' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `priv403-${uniqueSuffix()}`.slice(0, 32), isPrivate: true });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const getRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${channelId}&limit=30`)
+      .set('Authorization', `Bearer ${stranger.accessToken}`);
+
+    expect(getRes.status).toBe(403);
+  });
+});
+
 describe('Overload behavior', () => {
   let token: string;
   let channelId: string;

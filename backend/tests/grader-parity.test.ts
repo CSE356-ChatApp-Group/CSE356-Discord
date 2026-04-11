@@ -416,4 +416,37 @@ describe('Grader parity: messaging, search, and read state', () => {
       // Closed by afterEach cleanup.
     }
   });
+
+  it('loads channel history when the client sends only conversationId=<channelUuid>', async () => {
+    const user = await createAuthenticatedUser('graderchanconv');
+    const slug = `grcc-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ slug, name: slug, description: 'grader channel conv param' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ communityId, name: `grcc-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const sendRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .send({ channelId, content: `chan-grader-${uniqueSuffix()}` });
+    expect(sendRes.status).toBe(201);
+    const messageId = sendRes.body.message.id;
+
+    const historyRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${user.accessToken}`)
+      .query({ conversationId: channelId, limit: 30 });
+
+    expect(historyRes.status).toBe(200);
+    expect(historyRes.body.messages.some((m: any) => m.id === messageId)).toBe(true);
+  });
 });

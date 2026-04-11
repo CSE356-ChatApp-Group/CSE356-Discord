@@ -3,7 +3,9 @@
  *
  * GET /api/v1/search?q=&communityId=&channelId=&conversationId=&authorId=&after=&before=&limit=&offset=
  *
- * Exactly one scope param is expected: communityId, channelId, or conversationId.
+ * Scope: communityId, channelId, and/or conversationId (see handler: when
+ * channelId === conversationId, only conversation scope is used — matches
+ * COMPAS generated client searchMessages URL).
  * Omitting all three falls back to an access-filtered cross-scope search.
  */
 
@@ -20,7 +22,16 @@ router.use(authenticate);
 
 router.get('/', async (req, res, next) => {
   try {
-    const { q, communityId, channelId, conversationId, authorId, after, before, limit, offset } = req.query;
+    let { q, communityId, channelId, conversationId, authorId, after, before, limit, offset } = req.query;
+    // COMPAS generated client sends `channelId=<id>&conversationId=<id>` with the same UUID
+    // for DM/conversation-scoped search; we must not treat that id as a channel first.
+    if (
+      channelId
+      && conversationId
+      && String(channelId) === String(conversationId)
+    ) {
+      channelId = undefined;
+    }
     if (overload.shouldRejectSearchRequests()) {
       return res.status(503).json({ error: 'Search temporarily unavailable under high load' });
     }

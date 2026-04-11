@@ -328,3 +328,31 @@ describe('Search – trigram fallback', () => {
     expect(res.body.hits[0].content).toContain(base);
   });
 });
+
+describe('Search – COMPAS duplicate scope query', () => {
+  it('treats channelId=conversationId (same UUID) as conversation-scoped search', async () => {
+    const a = await createAuthenticatedUser('srchcompasa');
+    const b = await createAuthenticatedUser('srchcompasb');
+    const convRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.username] });
+    expect(convRes.status).toBe(201);
+    const convId = convRes.body.conversation.id as string;
+    const marker = `compasdupscope${uniqueSuffix()}`;
+    const msgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ conversationId: convId, content: marker });
+    expect(msgRes.status).toBe(201);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent(marker)}&channelId=${convId}&conversationId=${convId}`,
+      )
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(res.status).toBe(200);
+    expect((res.body.hits || []).length).toBeGreaterThan(0);
+    expect(res.body.hits[0].content).toContain(marker);
+  });
+});

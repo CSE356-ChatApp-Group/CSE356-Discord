@@ -1,7 +1,9 @@
 /**
  * Messages router
  *
- * GET    /api/v1/messages?channelId=&before=&limit=   – paginated history
+ * GET    /api/v1/messages?channelId|conversationId=&before=&limit= – history
+ *        (course clients may send only conversationId= for channel UUIDs; we
+ *        resolve to channel when the UUID is an accessible channel.)
  * GET    /api/v1/messages/context/:messageId          – targeted context window
  * POST   /api/v1/messages                             – create
  * PATCH  /api/v1/messages/:id                         – edit
@@ -125,6 +127,30 @@ async function ensureMessageAccess(target, userId) {
   return false;
 }
 
+/**
+ * Course harness / generated client compatibility: some clients call
+ * `GET /messages?conversationId=<uuid>` for **channel** history (same param name
+ * as DMs). When `channelId` is absent, treat the UUID as a channel id if the
+ * user can access that channel; otherwise keep conversation semantics.
+ */
+async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
+  const { rows } = await query(
+    `SELECT c.id::text AS id
+     FROM channels c
+     WHERE c.id = $1::uuid
+       AND (
+         c.is_private = FALSE
+         OR EXISTS (
+           SELECT 1 FROM channel_members cm
+           WHERE cm.channel_id = c.id AND cm.user_id = $2::uuid
+         )
+       )
+     LIMIT 1`,
+    [uuid, userId],
+  );
+  return rows[0]?.id ?? null;
+}
+
 async function getConversationFanoutTargets(conversationId) {
   const { rows } = await query(
     `SELECT user_id::text AS user_id
@@ -228,7 +254,9 @@ router.get('/',
   async (req, res, next) => {
     if (!validate(req, res)) return;
     try {
-      const { channelId, conversationId, before, after } = req.query;
+      let channelId = req.query.channelId;
+      let conversationId = req.query.conversationId;
+      const { before, after } = req.query;
       const requestedLimit = Number(req.query.limit || 50);
       const limit = overload.historyLimit(requestedLimit);
 
@@ -237,6 +265,14 @@ router.get('/',
       }
       if (before && after) {
         return res.status(400).json({ error: 'before and after cannot be used together' });
+      }
+
+      if (!channelId && conversationId) {
+        const asChannel = await channelIdIfOnlyConversationQueryParam(conversationId, req.user.id);
+        if (asChannel) {
+          channelId = asChannel;
+          conversationId = undefined;
+        }
       }
 
       // Serve the most-recent page of a public/member channel from a short-lived
