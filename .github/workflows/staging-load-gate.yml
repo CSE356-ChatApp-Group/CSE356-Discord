@@ -51,6 +51,7 @@ jobs:
             -e BASE_URL="$BASE_URL" \
             -e WS_URL="$WS_URL" \
             -e LOAD_PROFILE=slo \
+            -e LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1 \
             -e LOADTEST_PASSWORD="${LOADTEST_PASSWORD:-LoadTest!12345}" \
             "$K6_IMAGE" run \
             --summary-export "/work/k6-slo-summary.json" \

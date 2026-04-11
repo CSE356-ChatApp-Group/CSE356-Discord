@@ -1,5 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const parsedGlobalMs = Number(process.env.E2E_GLOBAL_TIMEOUT_MS || '');
+const globalTimeoutMs =
+  Number.isFinite(parsedGlobalMs) && parsedGlobalMs > 0
+    ? parsedGlobalMs
+    : process.env.CI
+      ? 10 * 60_000
+      : 0;
+
 export default defineConfig({
   testDir: './e2e',
   outputDir: 'test-results',
@@ -7,8 +15,9 @@ export default defineConfig({
 
   // Per-test timeout (generous for CI cold starts).
   timeout: 60_000,
-  // Timeout for beforeAll / afterAll hooks shared across tests.
-  globalTimeout: process.env.CI ? 10 * 60_000 : 0,
+  // Whole-run cap (all tests + hooks). Staging @staging/@heavy-auth exceeds 10m — set
+  // E2E_GLOBAL_TIMEOUT_MS in CI (e.g. 2100000 = 35m). See package.json e2e:delivery / workflows.
+  globalTimeout: globalTimeoutMs,
 
   fullyParallel: false,
   forbidOnly: !!process.env.CI,

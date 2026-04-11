@@ -199,9 +199,10 @@ jobs:
     needs:
       - deploy-staging
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       E2E_BASE_URL: ${{ format('http://{0}', vars.STAGING_HOST || '136.114.103.71') }}
+      E2E_GLOBAL_TIMEOUT_MS: '2100000'
       CI: "true"
     steps:
       - uses: actions/checkout@v5
