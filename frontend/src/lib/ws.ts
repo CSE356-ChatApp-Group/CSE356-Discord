@@ -4,6 +4,10 @@
  * Single persistent connection.  Consumers subscribe to channel keys
  * and receive deserialized event objects.
  *
+ * Gap-fill: `chatStore` refetches the active channel/DM on WS `open`, server
+ * `ready`, and (throttled) when the browser tab becomes visible again so missed
+ * `message:*` frames while disconnected or backgrounded are reconciled via GET.
+ *
  * Usage:
  *   wsManager.connect(token)
  *   const unsub = wsManager.subscribe('channel:<id>', (event) => { … })

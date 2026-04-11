@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, invalidateApiCache } from '../lib/api';
+import { api, getToken, invalidateApiCache } from '../lib/api';
 import { wsManager } from '../lib/ws';
 import { useAuthStore } from './authStore';
 
@@ -307,6 +307,10 @@ let skipMessageRefetchOnNextWsOpen = true;
 /** Throttle GET /messages after server WS bootstrap (`event: ready`) to heal missed realtime frames. */
 const WS_SERVER_READY_REFETCH_MS = 1800;
 let lastWsServerReadyRefetchAt = 0;
+
+/** When returning to a visible tab, refetch the active pane (missed WS while backgrounded). */
+const TAB_VISIBLE_MESSAGE_REFETCH_COOLDOWN_MS = 3000;
+let lastTabVisibleMessageRefetchAt = 0;
 
 function hookReadFlushOnVisibilityHidden() {
   if (readFlushVisibilityHooked || typeof document === 'undefined') return;
@@ -2014,3 +2018,19 @@ wsManager.onServerReady(() => {
     void fetchMessages({ conversationId: activeConv.id });
   }
 });
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (!getToken()) return;
+    const now = Date.now();
+    if (now - lastTabVisibleMessageRefetchAt < TAB_VISIBLE_MESSAGE_REFETCH_COOLDOWN_MS) return;
+    lastTabVisibleMessageRefetchAt = now;
+    const { activeChannel, activeConv, fetchMessages } = useChatStore.getState();
+    if (activeChannel?.id) {
+      void fetchMessages({ channelId: activeChannel.id });
+    } else if (activeConv?.id) {
+      void fetchMessages({ conversationId: activeConv.id });
+    }
+  });
+}
