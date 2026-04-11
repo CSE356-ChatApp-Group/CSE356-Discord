@@ -37,6 +37,10 @@ const {
   wrapFanoutPayload,
   fanoutPublishedAt,
 } = require('./realtimePayload');
+const {
+  repointChannelLastMessage,
+  repointConversationLastMessage,
+} = require('./repointLastMessage');
 
 const router = express.Router();
 router.use(authenticate);
@@ -189,61 +193,6 @@ async function loadMessageTarget(messageId) {
     [messageId]
   );
   return rows[0] || null;
-}
-
-async function repointChannelLastMessage(channelId) {
-  const { rowCount } = await query(
-    `WITH lm AS (
-       SELECT id, author_id, created_at
-       FROM messages
-       WHERE channel_id = $1 AND deleted_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT 1
-     )
-     UPDATE channels ch
-     SET last_message_id = lm.id,
-         last_message_author_id = lm.author_id,
-         last_message_at = lm.created_at
-     FROM lm
-     WHERE ch.id = $1`,
-    [channelId]
-  );
-  if (!rowCount) {
-    await query(
-      `UPDATE channels
-       SET last_message_id = NULL, last_message_author_id = NULL, last_message_at = NULL
-       WHERE id = $1`,
-      [channelId]
-    );
-  }
-}
-
-async function repointConversationLastMessage(conversationId) {
-  const { rowCount } = await query(
-    `WITH lm AS (
-       SELECT id, author_id, created_at
-       FROM messages
-       WHERE conversation_id = $1 AND deleted_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT 1
-     )
-     UPDATE conversations conv
-     SET last_message_id = lm.id,
-         last_message_author_id = lm.author_id,
-         last_message_at = lm.created_at,
-         updated_at = NOW()
-     FROM lm
-     WHERE conv.id = $1`,
-    [conversationId]
-  );
-  if (!rowCount) {
-    await query(
-      `UPDATE conversations
-       SET last_message_id = NULL, last_message_author_id = NULL, last_message_at = NULL
-       WHERE id = $1`,
-      [conversationId]
-    );
-  }
 }
 
 // ── Helpers ── message cache ─────────────────────────────────────────────────

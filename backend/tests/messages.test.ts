@@ -412,6 +412,28 @@ describe('Hard delete contract', () => {
     const parentRow = await pool.query('SELECT id FROM messages WHERE id = $1', [parentId]);
     expect(parentRow.rows).toHaveLength(0);
   });
+
+  it('concurrent hard-deletes in the same channel all succeed (last_message repoint race)', async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      const createRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ channelId, content: `conc-del-${i}-${uniqueSuffix()}` });
+      expect(createRes.status).toBe(201);
+      ids.push(createRes.body.message.id);
+    }
+
+    const deletes = await Promise.all(
+      ids.map((messageId) =>
+        request(app)
+          .delete(`/api/v1/messages/${messageId}`)
+          .set('Authorization', `Bearer ${token}`),
+      ),
+    );
+
+    expect(deletes.every((r) => r.status === 200)).toBe(true);
+  });
 });
 
 describe('Message context window', () => {

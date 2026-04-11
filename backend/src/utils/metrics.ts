@@ -153,6 +153,13 @@ const redisFanoutPublishFailuresTotal = new client.Counter({
   labelNames: ['channel_prefix'],
 });
 
+/** Concurrent hard-deletes caused FK violation on last_message_id; cleared and retried. */
+const messageLastMessageRepointFkRetryTotal = new client.Counter({
+  name: 'message_last_message_repoint_fk_retry_total',
+  help: 'Last-message repoint hit channels_last_message_id_fkey / conversations FK race and retried after clearing pointers',
+  labelNames: ['scope'],
+});
+
 // ── PG pool health ─────────────────────────────────────────────────────────────
 
 const pgPoolTotal = new client.Gauge({
@@ -201,6 +208,8 @@ function startPgPoolMetrics(pool) {
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'user' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'community' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'unknown' }, 0);
+    messageLastMessageRepointFkRetryTotal.inc({ scope: 'channel' }, 0);
+    messageLastMessageRepointFkRetryTotal.inc({ scope: 'conversation' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
     httpRequestsAbortedTotal.inc({ method: 'GET', route: '/api/v1/messages' }, 0);
@@ -231,5 +240,6 @@ module.exports = {
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
   redisFanoutPublishFailuresTotal,
+  messageLastMessageRepointFkRetryTotal,
   startPgPoolMetrics,
 };
