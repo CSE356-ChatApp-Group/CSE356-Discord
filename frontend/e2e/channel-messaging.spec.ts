@@ -196,3 +196,89 @@ test.describe('channel real-time delivery', () => {
     },
   );
 });
+
+test.describe('private channel real-time delivery', () => {
+  test.describe.configure({ mode: 'serial', timeout: 120_000 });
+
+  test(
+    "message from owner appears for invited member without reload @full @staging @heavy-auth",
+    async ({ browser }) => {
+      const userA = buildUser('privRtA');
+      const userB = buildUser('privRtB');
+
+      const ctxA = await browser.newContext();
+      const ctxB = await browser.newContext();
+
+      try {
+        const pageA = await ctxA.newPage();
+        const pageB = await ctxB.newPage();
+
+        const suffix = Date.now().toString(36);
+
+        const tokenA = await registerOrLogin(ctxA.request, userA);
+        const tokenB = await registerOrLogin(ctxB.request, userB);
+
+        const meB = await ctxB.request.get('/api/v1/users/me', {
+          headers: { Authorization: `Bearer ${tokenB}` },
+        });
+        expect(meB.ok(), `users/me: ${meB.status()}`).toBeTruthy();
+        const userBId: string = (await meB.json()).user?.id;
+        expect(Boolean(userBId), 'user B id').toBeTruthy();
+
+        const commRes = await ctxA.request.post('/api/v1/communities', {
+          headers: { Authorization: `Bearer ${tokenA}` },
+          data: { name: `PrivRT E2E ${suffix}`, slug: `privrt${suffix}` },
+        });
+        expect(commRes.ok(), `create community: ${commRes.status()}`).toBeTruthy();
+        const communityId: string = (await commRes.json()).community.id;
+
+        const chanRes = await ctxA.request.post('/api/v1/channels', {
+          headers: { Authorization: `Bearer ${tokenA}` },
+          data: { communityId, name: 'priv-realtime-chan', isPrivate: true },
+        });
+        expect(chanRes.ok(), `create private channel: ${chanRes.status()}`).toBeTruthy();
+        const channelId: string = (await chanRes.json()).channel.id;
+
+        const joinRes = await ctxB.request.post(`/api/v1/communities/${communityId}/join`, {
+          headers: { Authorization: `Bearer ${tokenB}` },
+        });
+        expect(joinRes.ok(), `B join community: ${joinRes.status()}`).toBeTruthy();
+
+        const addRes = await ctxA.request.post(`/api/v1/channels/${channelId}/members`, {
+          headers: { Authorization: `Bearer ${tokenA}` },
+          data: { userIds: [userBId] },
+        });
+        expect(addRes.ok(), `add B to private channel: ${addRes.status()}`).toBeTruthy();
+
+        await Promise.all([
+          bootstrapPageWithToken(pageA, tokenA),
+          bootstrapPageWithToken(pageB, tokenB),
+        ]);
+
+        await pageA.getByTestId(`community-item-${communityId}`).click();
+        await expect(pageA.getByTestId(`channel-item-${channelId}`)).toBeVisible({ timeout: 20_000 });
+        await pageA.getByTestId(`channel-item-${channelId}`).click();
+        await expect(pageA.getByTestId('message-pane')).toBeVisible({ timeout: 15_000 });
+
+        await pageB.getByTestId(`community-item-${communityId}`).click();
+        await expect(pageB.getByTestId(`channel-item-${channelId}`)).toBeVisible({ timeout: 20_000 });
+        await pageB.getByTestId(`channel-item-${channelId}`).click();
+        await expect(pageB.getByTestId('message-pane')).toBeVisible({ timeout: 15_000 });
+
+        const messageContent = `priv-RT ${Date.now()}`;
+        const msgRes = await ctxA.request.post('/api/v1/messages', {
+          headers: { Authorization: `Bearer ${tokenA}` },
+          data: { channelId, content: messageContent },
+        });
+        expect(msgRes.ok(), `send message: ${msgRes.status()}`).toBeTruthy();
+
+        await expect(
+          pageB.locator('[data-message-id]').filter({ hasText: messageContent }),
+        ).toBeVisible({ timeout: 20_000 });
+      } finally {
+        await ctxA.close();
+        await ctxB.close();
+      }
+    },
+  );
+});
