@@ -3,25 +3,33 @@
  * cannot repopulate JSON after another request has busted the cache (same or
  * another API instance).
  */
-'use strict';
 
-function channelMsgCacheKey(channelId) {
+type RedisLike = {
+  get(key: string): Promise<string | null>;
+  del(...keys: string[]): Promise<unknown>;
+  incr(key: string): Promise<number>;
+};
+
+export function channelMsgCacheKey(channelId: string): string {
   return `messages:channel:${channelId}`;
 }
 
-function conversationMsgCacheKey(conversationId) {
+export function conversationMsgCacheKey(conversationId: string): string {
   return `messages:conversation:${conversationId}`;
 }
 
-function channelMsgCacheEpochKey(channelId) {
+export function channelMsgCacheEpochKey(channelId: string): string {
   return `messages:channel:${channelId}:cacheEpoch`;
 }
 
-function conversationMsgCacheEpochKey(conversationId) {
+export function conversationMsgCacheEpochKey(conversationId: string): string {
   return `messages:conversation:${conversationId}:cacheEpoch`;
 }
 
-async function readMessageCacheEpoch(redis, epochKey) {
+export async function readMessageCacheEpoch(
+  redis: RedisLike,
+  epochKey: string
+): Promise<number> {
   try {
     const v = await redis.get(epochKey);
     const n = Number(v);
@@ -31,7 +39,10 @@ async function readMessageCacheEpoch(redis, epochKey) {
   }
 }
 
-async function bustChannelMessagesCache(redis, channelId) {
+export async function bustChannelMessagesCache(
+  redis: RedisLike,
+  channelId: string | undefined
+): Promise<void> {
   if (!channelId) return;
   try {
     await redis.del(channelMsgCacheKey(channelId));
@@ -45,7 +56,10 @@ async function bustChannelMessagesCache(redis, channelId) {
   }
 }
 
-async function bustConversationMessagesCache(redis, conversationId) {
+export async function bustConversationMessagesCache(
+  redis: RedisLike,
+  conversationId: string | undefined
+): Promise<void> {
   if (!conversationId) return;
   try {
     await redis.del(conversationMsgCacheKey(conversationId));
@@ -58,13 +72,3 @@ async function bustConversationMessagesCache(redis, conversationId) {
     /* non-fatal */
   }
 }
-
-module.exports = {
-  channelMsgCacheKey,
-  conversationMsgCacheKey,
-  channelMsgCacheEpochKey,
-  conversationMsgCacheEpochKey,
-  readMessageCacheEpoch,
-  bustChannelMessagesCache,
-  bustConversationMessagesCache,
-};
