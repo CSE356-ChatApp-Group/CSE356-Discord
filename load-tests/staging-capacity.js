@@ -20,6 +20,11 @@ import { Counter, Rate, Trend } from 'k6/metrics';
  * time until `message:created` on the same channel subscription. Enabled for `slo`
  * (constant-arrival profile) or when `LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1`. Metrics:
  * `message_ws_delivery_after_post_ms`, `optimization_ws_message_delivery_miss_total`.
+ *
+ * **Multi-listener (N members must all see the event)** — k6’s single-VU probe does not
+ * model “every listener counts separately.” For that, run backend integration:
+ * `describe('Channel message multi-listener delivery')` in `backend/tests/websocket.test.ts`
+ * (CI) or extend Playwright `delivery-fanout.spec.ts` against staging.
  */
 
 /** Classify HTTP responses so reports can separate timeouts vs 503 (shed / pool) vs other errors. */

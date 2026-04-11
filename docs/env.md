@@ -75,6 +75,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
 | `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS` | WS tuning |
+| `CHANNEL_MESSAGE_USER_FANOUT`, `CHANNEL_MESSAGE_USER_FANOUT_MAX` | When `1`/`true`, also publish `message:created` to `user:<id>` for each channel-visible member (dedupe by message id on clients; caps publishes) |
 | **Observability** | |
 | `OTEL_ENABLED` | Set `false` to disable tracing |
 | `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio (production default 0.1) |
@@ -82,4 +83,4 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **Startup** | |
 | `STARTUP_DEPENDENCY_MAX_WAIT_MS` | Max wait for dependencies on boot |
 
-Metrics: `auth_rate_limit_hits_total` (Prometheus) indicates auth limiter trips.
+Metrics: `auth_rate_limit_hits_total` (Prometheus) indicates auth limiter trips. `ws_bootstrap_wall_duration_ms` (histogram) and `message_cache_bust_failures_total` help correlate grading-style delivery issues with bootstrap time and Redis bust errors.

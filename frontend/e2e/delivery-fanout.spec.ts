@@ -141,6 +141,69 @@ test.describe('channel delivery fanout (grader-shaped)', () => {
   );
 
   test(
+    'author plus six peers all see channel message within 15s @full @staging @heavy-auth',
+    async ({ browser }) => {
+      test.setTimeout(360_000);
+      const labels = ['nf7a', 'nf7b', 'nf7c', 'nf7d', 'nf7e', 'nf7f', 'nf7g'] as const;
+      const users = labels.map((l) => buildUser(l));
+      const contexts = await Promise.all(labels.map(() => browser.newContext()));
+
+      try {
+        const pages = await Promise.all(contexts.map((ctx) => ctx.newPage()));
+        const suffix = Date.now().toString(36);
+        const tokens: string[] = [];
+        for (let i = 0; i < labels.length; i += 1) {
+          tokens.push(await registerOrLogin(contexts[i].request, users[i]));
+        }
+
+        const commRes = await contexts[0].request.post('/api/v1/communities', {
+          headers: { Authorization: `Bearer ${tokens[0]}` },
+          data: { name: `Fanout7 ${suffix}`, slug: `nf7${suffix}`.slice(0, 24) },
+        });
+        expect(commRes.ok(), `create community: ${commRes.status()}`).toBeTruthy();
+        const communityId: string = (await commRes.json()).community.id;
+
+        const chanRes = await contexts[0].request.post('/api/v1/channels', {
+          headers: { Authorization: `Bearer ${tokens[0]}` },
+          data: { communityId, name: 'nf7-chan', isPrivate: false },
+        });
+        expect(chanRes.ok(), `create channel: ${chanRes.status()}`).toBeTruthy();
+        const channelId: string = (await chanRes.json()).channel.id;
+
+        for (let i = 1; i < tokens.length; i += 1) {
+          const joinRes = await contexts[i].request.post(`/api/v1/communities/${communityId}/join`, {
+            headers: { Authorization: `Bearer ${tokens[i]}` },
+          });
+          expect(joinRes.ok(), `join ${i}: ${joinRes.status()}`).toBeTruthy();
+        }
+
+        await Promise.all(
+          pages.map((p, i) => bootstrapPageWithToken(p, tokens[i])),
+        );
+        await Promise.all(
+          pages.map((p) => openPublicChannel(p, communityId, channelId)),
+        );
+
+        const messageContent = `fanout7 ${Date.now()}`;
+        const msgRes = await contexts[0].request.post('/api/v1/messages', {
+          headers: { Authorization: `Bearer ${tokens[0]}` },
+          data: { channelId, content: messageContent },
+        });
+        expect(msgRes.ok(), `send message: ${msgRes.status()}`).toBeTruthy();
+
+        const row = (p: Page) =>
+          p.locator('[data-message-id]').filter({ hasText: messageContent });
+
+        await Promise.all(
+          pages.map((p) => expect(row(p)).toBeVisible({ timeout: GRADING_DELIVERY_MS })),
+        );
+      } finally {
+        await Promise.all(contexts.map((c) => c.close()));
+      }
+    },
+  );
+
+  test(
     'rapid burst of 10 channel messages: receiver sees all rows within 15s of last send @full @staging @heavy-auth',
     async ({ browser }) => {
       const userA = buildUser('burstA');

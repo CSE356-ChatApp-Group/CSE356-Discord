@@ -160,6 +160,20 @@ const messageLastMessageRepointFkRetryTotal = new client.Counter({
   labelNames: ['scope'],
 });
 
+/** Wall-clock time for WS auto-subscribe bootstrap (list + batched subscribe, incl. retries). */
+const wsBootstrapWallDurationMs = new client.Histogram({
+  name: 'ws_bootstrap_wall_duration_ms',
+  help: 'Milliseconds from WS connection start until auto-subscribe bootstrap completes successfully',
+  buckets: [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 30000],
+});
+
+/** Redis message-list first-page bust failed after POST/PATCH/DELETE (TTL backstop applies). */
+const messageCacheBustFailuresTotal = new client.Counter({
+  name: 'message_cache_bust_failures_total',
+  help: 'GET /messages first-page cache bust threw (Redis DEL/INCR)',
+  labelNames: ['target'],
+});
+
 // ── PG pool health ─────────────────────────────────────────────────────────────
 
 const pgPoolTotal = new client.Gauge({
@@ -210,6 +224,8 @@ function startPgPoolMetrics(pool) {
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'unknown' }, 0);
     messageLastMessageRepointFkRetryTotal.inc({ scope: 'channel' }, 0);
     messageLastMessageRepointFkRetryTotal.inc({ scope: 'conversation' }, 0);
+    messageCacheBustFailuresTotal.inc({ target: 'channel' }, 0);
+    messageCacheBustFailuresTotal.inc({ target: 'conversation' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
     httpRequestsAbortedTotal.inc({ method: 'GET', route: '/api/v1/messages' }, 0);
@@ -241,5 +257,7 @@ module.exports = {
   wsBackpressureEventsTotal,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,
+  wsBootstrapWallDurationMs,
+  messageCacheBustFailuresTotal,
   startPgPoolMetrics,
 };

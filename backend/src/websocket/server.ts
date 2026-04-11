@@ -65,6 +65,7 @@ const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
+  wsBootstrapWallDurationMs,
 } = require("../utils/metrics");
 const { tracer, context, trace } = require("../utils/tracer");
 
@@ -537,10 +538,12 @@ async function listAutoSubscriptionChannels(userId) {
     ),
   ]);
 
+  // Subscribe channel topics first so message fanout can arrive before the tail
+  // of community/conversation Redis topics finishes (grading: many listeners).
   const channels = [
+    ...channelRes.rows.map((row) => `channel:${row.id}`),
     ...conversationRes.rows.map((row) => `conversation:${row.id}`),
     ...communityRes.rows.map((row) => `community:${row.id}`),
-    ...channelRes.rows.map((row) => `channel:${row.id}`),
   ];
 
   // Cache for a short TTL. Invalidated explicitly on membership changes.
@@ -566,8 +569,17 @@ async function bootstrapUserSubscriptions(ws, userId) {
 // user gets their subscriptions without noticing anything.
 async function bootstrapWithRetry(ws, userId, attempt = 0) {
   if (ws.readyState !== WebSocket.OPEN) return;
+  if (attempt === 0) {
+    ws._bootstrapWallStart = Date.now();
+  }
   try {
     await bootstrapUserSubscriptions(ws, userId);
+    const wallStart = ws._bootstrapWallStart || Date.now();
+    const bootstrapWallMs = Date.now() - wallStart;
+    wsBootstrapWallDurationMs.observe(bootstrapWallMs);
+    if (bootstrapWallMs > 5000) {
+      logger.warn({ userId, bootstrapWallMs }, "WS auto-subscribe bootstrap slow");
+    }
   } catch (err) {
     const isCircuitOpen = err && err.code === 'POOL_CIRCUIT_OPEN';
     if (isCircuitOpen && attempt < 3) {

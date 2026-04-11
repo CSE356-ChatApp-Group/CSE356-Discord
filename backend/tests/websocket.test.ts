@@ -1078,3 +1078,80 @@ describe('WebSocket reliability', () => {
     }
   }, 60_000);
 });
+
+describe('Channel message multi-listener delivery (grader-shaped)', () => {
+  it(
+    'message:created reaches every community member WebSocket within 15s',
+    async () => {
+      const suffix = uniqueSuffix();
+      const author = await createAuthenticatedUser(`mlauthor${suffix}`);
+      const listeners = await Promise.all(
+        [1, 2, 3, 4, 5, 6].map((i) => createAuthenticatedUser(`mllisten${i}${suffix}`)),
+      );
+
+      const commRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${author.accessToken}`)
+        .send({
+          name: `ML ${suffix}`,
+          slug: `mlcom${suffix}`.slice(0, 32),
+          description: 'multi-listener',
+        });
+      expect(commRes.status).toBe(201);
+      const communityId = commRes.body.community.id;
+
+      const chanRes = await request(app)
+        .post('/api/v1/channels')
+        .set('Authorization', `Bearer ${author.accessToken}`)
+        .send({
+          communityId,
+          name: `ml-ch-${suffix}`.slice(0, 32),
+          isPrivate: false,
+        });
+      expect(chanRes.status).toBe(201);
+      const channelId = chanRes.body.channel.id;
+
+      for (const u of listeners) {
+        const joinRes = await request(app)
+          .post(`/api/v1/communities/${communityId}/join`)
+          .set('Authorization', `Bearer ${u.accessToken}`)
+          .send({});
+        expect([200, 201]).toContain(joinRes.status);
+      }
+
+      const readyOpts = { readyTimeoutMs: 20_000 };
+      const authorSocket = await connectWebSocket(port, author.accessToken, readyOpts);
+      const listenerSockets = await Promise.all(
+        listeners.map((u) => connectWebSocket(port, u.accessToken, readyOpts)),
+      );
+
+      try {
+        const content = `ml-msg-${suffix}`;
+        const pred = (event: any) =>
+          event.event === 'message:created'
+          && event.data?.channel_id === channelId
+          && event.data?.content === content;
+
+        const waiters = [authorSocket, ...listenerSockets].map((sock) =>
+          waitForWsEvent(sock, pred, 15_000),
+        );
+
+        const postRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${author.accessToken}`)
+          .send({ channelId, content });
+
+        expect(postRes.status).toBe(201);
+        const messageId = postRes.body.message.id;
+        const events = await Promise.all(waiters);
+        for (const ev of events) {
+          expect(ev.data.id).toBe(messageId);
+        }
+      } finally {
+        await closeWebSocket(authorSocket);
+        await Promise.all(listenerSockets.map((s) => closeWebSocket(s)));
+      }
+    },
+    90_000,
+  );
+});

@@ -70,13 +70,18 @@ export async function createAuthenticatedUser(prefix: string, opts: { withEmail?
 
 // ── WebSocket helpers ─────────────────────────────────────────────────────────
 
-export function connectWebSocket(port: number, token: string): Promise<any> {
+export function connectWebSocket(
+  port: number,
+  token: string,
+  opts?: { readyTimeoutMs?: number },
+): Promise<any> {
+  const readyTimeoutMs = opts?.readyTimeoutMs ?? 3000;
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`);
     const timer = setTimeout(() => {
       ws.terminate();
       reject(new Error('Timed out connecting websocket'));
-    }, 3000);
+    }, readyTimeoutMs);
 
     ws.once('open', () => {
       // Wait for the server to send { event: "ready" } after bootstrap

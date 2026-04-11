@@ -16,7 +16,7 @@ const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
 const { query, getClient, withTransaction } = require('../db/pool');
-const { messagePostAccessDeniedTotal } = require('../utils/metrics');
+const { messagePostAccessDeniedTotal, messageCacheBustFailuresTotal } = require('../utils/metrics');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
 const fanout           = require('../websocket/fanout');
@@ -41,6 +41,7 @@ const {
   repointChannelLastMessage,
   repointConversationLastMessage,
 } = require('./repointLastMessage');
+const { publishChannelMessageCreated } = require('./channelRealtimeFanout');
 
 const router = express.Router();
 router.use(authenticate);
@@ -60,6 +61,17 @@ function validate(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) { res.status(400).json({ errors: errors.array() }); return false; }
   return true;
+}
+
+async function bustMessagesCacheSafe(opts: { channelId?: string; conversationId?: string }) {
+  const { channelId, conversationId } = opts;
+  try {
+    if (channelId) await bustChannelMessagesCache(redis, channelId);
+    else if (conversationId) await bustConversationMessagesCache(redis, conversationId);
+  } catch (err) {
+    messageCacheBustFailuresTotal.inc({ target: channelId ? 'channel' : 'conversation' });
+    logger.warn({ err, channelId, conversationId }, 'message list cache bust failed');
+  }
 }
 
 /** Build the Redis pub/sub channel key for a message target */
@@ -780,15 +792,7 @@ router.post('/',
       // Bust the shared Redis cache for the latest page so a follow-up GET /messages
       // (e.g. opening a DM) returns rows that include this write. Await DEL so a
       // client cannot GET stale JSON between commit and eviction (grader polling).
-      try {
-        if (channelId) {
-          await bustChannelMessagesCache(redis, channelId);
-        } else if (conversationId) {
-          await bustConversationMessagesCache(redis, conversationId);
-        }
-      } catch {
-        /* non-fatal: TTL backstop if Redis errors */
-      }
+      await bustMessagesCacheSafe({ channelId, conversationId });
 
       let realtimePublishedAtForHttp;
       if (channelId) {
@@ -798,7 +802,7 @@ router.post('/',
           logger.warn({ err, channelId }, 'Failed to increment channel:msg_count before realtime publish');
         }
         const createdEnvelope = messageFanoutEnvelope('message:created', message);
-        await fanout.publish(targetKey(channelId, conversationId), createdEnvelope);
+        await publishChannelMessageCreated(channelId, createdEnvelope);
         realtimePublishedAtForHttp = createdEnvelope.publishedAt;
       } else {
         realtimePublishedAtForHttp = await publishConversationEventNow(
@@ -890,13 +894,12 @@ router.patch('/:id',
 
       const baseMessage = rows[0];
       const message = await loadHydratedMessageById(baseMessage.id);
-      // Bust the Redis message cache synchronously (awaited) so that a GET
-      // issued immediately after this PATCH returns the updated content.
+      // Bust the Redis message cache so a GET immediately after returns updated content.
       if (baseMessage.channel_id) {
-        await bustChannelMessagesCache(redis, baseMessage.channel_id);
+        await bustMessagesCacheSafe({ channelId: baseMessage.channel_id });
       }
       if (baseMessage.conversation_id) {
-        await bustConversationMessagesCache(redis, baseMessage.conversation_id);
+        await bustMessagesCacheSafe({ conversationId: baseMessage.conversation_id });
         await publishConversationEventNow(
           baseMessage.conversation_id,
           'message:updated',
@@ -960,19 +963,11 @@ router.delete('/:id',
       if (message.channel_id) {
         await repointChannelLastMessage(message.channel_id);
         redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
-        try {
-          await bustChannelMessagesCache(redis, message.channel_id);
-        } catch {
-          /* non-fatal: TTL backstop if Redis errors */
-        }
+        await bustMessagesCacheSafe({ channelId: message.channel_id });
       }
       if (message.conversation_id) {
         await repointConversationLastMessage(message.conversation_id);
-        try {
-          await bustConversationMessagesCache(redis, message.conversation_id);
-        } catch {
-          /* non-fatal: TTL backstop if Redis errors */
-        }
+        await bustMessagesCacheSafe({ conversationId: message.conversation_id });
       }
       if (message.conversation_id) {
         await publishConversationEventNow(message.conversation_id, 'message:deleted', { id: message.id });
