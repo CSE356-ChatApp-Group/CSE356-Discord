@@ -366,9 +366,9 @@ groups:
       - alert: ChatAppDeliveryFailsWarning
         expr: |
           (
-            sum(rate(http_server_requests_total{job="chatapp-api",route="/api/v1/messages",status_class="5xx"}[5m]))
+            sum(rate(http_server_requests_total{job="chatapp-api",route=~"^/api/v1/messages/?$",status_class="5xx"}[5m]))
             /
-            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route="/api/v1/messages"}[5m])), 1)
+            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route=~"^/api/v1/messages/?$"}[5m])), 1)
           ) > 0.03
           or (
             sum(rate(message_post_response_total{job="chatapp-api",status_code="401"}[5m]))
@@ -390,9 +390,9 @@ groups:
       - alert: ChatAppDeliveryFailsFastBurn
         expr: |
           (
-            sum(rate(http_server_requests_total{job="chatapp-api",route="/api/v1/messages",status_class="5xx"}[2m]))
+            sum(rate(http_server_requests_total{job="chatapp-api",route=~"^/api/v1/messages/?$",status_class="5xx"}[2m]))
             /
-            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route="/api/v1/messages"}[2m])), 1)
+            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route=~"^/api/v1/messages/?$"}[2m])), 1)
           ) > 0.08
           or (
             sum(rate(message_post_response_total{job="chatapp-api",status_code="401"}[2m]))

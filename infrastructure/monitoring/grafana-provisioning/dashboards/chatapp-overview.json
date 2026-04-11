@@ -522,7 +522,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (method, status_class) (rate(http_server_requests_total{job=\"chatapp-api\",route=\"/api/v1/messages\"}[5m]))",
+          "expr": "sum by (method, status_class) (rate(http_server_requests_total{job=\"chatapp-api\",route=~\"^/api/v1/messages/?$\"}[5m]))",
           "legendFormat": "{{method}} {{status_class}}",
           "refId": "A"
         }
@@ -560,7 +560,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route=\"/api/v1/messages\"}[5m]))",
+          "expr": "sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route=~\"^/api/v1/messages/?$\"}[5m]))",
           "legendFormat": "aborted / s",
           "refId": "A"
         }

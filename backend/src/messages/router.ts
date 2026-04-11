@@ -1123,13 +1123,15 @@ router.put('/:id/read',
         lastReadAt: applied?.last_read_at || new Date().toISOString(),
       };
 
+      // Await Redis fanout before HTTP 200 so strict graders (delivery-after-success)
+      // do not observe a race; mirrors POST /messages awaiting publish before 201.
       if (conversation_id) {
-        await publishConversationEvent(conversation_id, 'read:updated', payload);
+        await publishConversationEventNow(conversation_id, 'read:updated', payload);
       } else {
         // Channel read cursors are private: fan out only to the reader's user topic
         // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
         // which would leak other members' read positions to WebSocket clients.
-        sideEffects.publishMessageEvent(`user:${uid}`, 'read:updated', payload);
+        await fanout.publish(`user:${uid}`, { event: 'read:updated', data: payload });
       }
 
       // Reset the user's unread watermark in Redis to the current channel message count

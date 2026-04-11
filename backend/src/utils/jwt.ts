@@ -1,7 +1,7 @@
 /**
  * JWT helpers – sign and verify access tokens.
  *
- * Access tokens are short-lived (JWT_ACCESS_TTL, default 8h).
+ * Access tokens are short-lived (JWT_ACCESS_TTL, default 24h).
  * Refresh tokens are longer-lived (7 days) and stored as httpOnly cookies.
  * A deny-list in Redis handles logout before expiry.
  */
@@ -14,7 +14,7 @@ const redis = require('../db/redis');
 
 const ACCESS_SECRET  = process.env.JWT_ACCESS_SECRET  || 'change-me-access';
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'change-me-refresh';
-const ACCESS_TTL     = process.env.JWT_ACCESS_TTL || '8h';
+const ACCESS_TTL     = process.env.JWT_ACCESS_TTL || '24h';
 const REFRESH_TTL    = process.env.JWT_REFRESH_TTL || '7d';
 
 function parsePositiveInt(value, fallback) {

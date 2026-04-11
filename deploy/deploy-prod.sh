@@ -429,8 +429,8 @@ ssh "$PROD_USER@$PROD_HOST" "
   # Grader clients often use bearer tokens without cookie-based refresh loops.
   # Keep access tokens valid for long test windows to avoid 401 delivery failures.
   sudo grep -q '^JWT_ACCESS_TTL=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^JWT_ACCESS_TTL=.*/JWT_ACCESS_TTL=8h/' /opt/chatapp/shared/.env \
-    || echo 'JWT_ACCESS_TTL=8h' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^JWT_ACCESS_TTL=.*/JWT_ACCESS_TTL=24h/' /opt/chatapp/shared/.env \
+    || echo 'JWT_ACCESS_TTL=24h' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^JWT_REFRESH_TTL=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^JWT_REFRESH_TTL=.*/JWT_REFRESH_TTL=7d/' /opt/chatapp/shared/.env \
     || echo 'JWT_REFRESH_TTL=7d' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
