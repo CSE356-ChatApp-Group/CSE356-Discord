@@ -342,12 +342,12 @@ describe('chatStore quick actions', () => {
       data: { communityId: 'comm-1', channelId: 'ch-1' },
     });
 
-    expect(subscribeSpy).toHaveBeenCalledWith('channel:ch-1', expect.any(Function));
     expect(fetchChannels).toHaveBeenCalledWith('comm-1');
+    expect(subscribeSpy).not.toHaveBeenCalled();
     subscribeSpy.mockRestore();
   });
 
-  it('subscribes to channel WS on membership update even when that community is not active', () => {
+  it('does not subscribe or refresh when a membership update arrives for an inactive community', () => {
     const subscribeSpy = vi.spyOn(wsManager, 'subscribe').mockReturnValue(() => false);
     useChatStore.setState({
       activeCommunity: { id: 'comm-other', name: 'Other' },
@@ -359,7 +359,7 @@ describe('chatStore quick actions', () => {
       data: { communityId: 'comm-1', channelId: 'ch-99' },
     });
 
-    expect(subscribeSpy).toHaveBeenCalledWith('channel:ch-99', expect.any(Function));
+    expect(subscribeSpy).not.toHaveBeenCalled();
     expect(useChatStore.getState().fetchChannels).not.toHaveBeenCalled();
     subscribeSpy.mockRestore();
   });

@@ -1,7 +1,7 @@
 /**
  * WebSocket realtime delivery integration tests.
  *
- * Covers: DM message fanout, channel auto-subscribe, subscribe-on-open race,
+ * Covers: DM message fanout, channel subscribe flow, subscribe-on-open race,
  * multi-socket fanout, unsubscribe isolation, rapid resubscribe, reconnect,
  * and repeated-delivery soak checks.
  */
@@ -256,7 +256,7 @@ describe('Bootstrap ready event', () => {
     }
   });
 
-  it('sends ready after subscribing to all community channels (message arrives post-ready)', async () => {
+  it('sends ready before explicit community channel subscribe and delivery', async () => {
     const owner  = await createAuthenticatedUser('wsreadyowner');
     const member = await createAuthenticatedUser('wsreadymember');
 
@@ -300,7 +300,13 @@ describe('Bootstrap ready event', () => {
     });
 
     try {
-      // Now post a message — bootstrap is confirmed done, channel sub is active.
+      ws.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      await waitForWsEvent(
+        ws,
+        (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+      );
+
+      // Now post a message after ready + explicit subscribe.
       const msgPromise = waitForWsEvent(
         ws,
         (e) => e.event === 'message:created' && e.data?.channel_id === channelId,
@@ -326,10 +332,10 @@ describe('Bootstrap ready event', () => {
   });
 });
 
-// ── Channel auto-subscribe (bootstrap) ───────────────────────────────────────
+// ── Channel manual subscribe delivery ───────────────────────────────────────
 
-describe('Channel bootstrap subscriptions', () => {
-  it('delivers channel messages without manual websocket subscribe', async () => {
+describe('Channel subscriptions', () => {
+  it('delivers channel messages after manual websocket subscribe', async () => {
     const owner = await createAuthenticatedUser('wsautosubowner');
     const member = await createAuthenticatedUser('wsautosubmember');
 
@@ -361,6 +367,12 @@ describe('Channel bootstrap subscriptions', () => {
     const memberSocket = await connectWebSocket(port, member.accessToken);
 
     try {
+      memberSocket.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      await waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+      );
+
       const createdEventPromise = waitForWsEvent(
         memberSocket,
         (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
@@ -806,7 +818,20 @@ describe('Unsubscribe isolation', () => {
     const socketB = await connectWebSocket(port, member.accessToken);
 
     try {
-      // Confirm bootstrap delivery to both sockets first.
+      socketA.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      socketB.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      await Promise.all([
+        waitForWsEvent(
+          socketA,
+          (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+        ),
+        waitForWsEvent(
+          socketB,
+          (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+        ),
+      ]);
+
+      // Confirm delivery to both sockets first.
       const bootstrapEventPromiseA = waitForWsEvent(
         socketA,
         (event) =>
@@ -902,7 +927,13 @@ describe('Unsubscribe isolation', () => {
     const memberSocket = await connectWebSocket(port, member.accessToken);
 
     try {
-      // Bootstrap: confirm initial delivery.
+      memberSocket.send(JSON.stringify({ type: 'subscribe', channel: `channel:${channelId}` }));
+      await waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'subscribed' && event.data?.channel === `channel:${channelId}`,
+      );
+
+      // Confirm initial delivery.
       const bootstrapEventPromise = waitForWsEvent(
         memberSocket,
         (event) =>

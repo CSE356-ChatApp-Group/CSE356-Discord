@@ -847,12 +847,15 @@ router.post('/',
         await publishConversationEventNow(conversationId, 'message:created', message);
       }
       if (communityId) {
-        sideEffects.publishBackgroundEvent(`community:${communityId}`, 'community:channel_message', {
+        await fanout.publish(`community:${communityId}`, {
+          event: 'community:channel_message',
+          data: {
           communityId,
           channelId,
           messageId: baseMessage.id,
           authorId: baseMessage.author_id,
           createdAt: baseMessage.created_at,
+          },
         });
       }
 

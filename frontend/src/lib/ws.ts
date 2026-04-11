@@ -132,10 +132,21 @@ class WsManager {
   /** Subscribe to events for a specific Redis channel key */
   subscribe(channel: string, fn: (event: any) => void) {
     if (!this._listeners.has(channel)) this._listeners.set(channel, new Set());
-    this._listeners.get(channel).add(fn);
-    // Tell server to subscribe this process if not already
-    this.send({ type: 'subscribe', channel });
-    return () => this._listeners.get(channel)?.delete(fn);
+    const listeners = this._listeners.get(channel)!;
+    const shouldSubscribe = listeners.size === 0;
+    listeners.add(fn);
+    if (shouldSubscribe) {
+      this.send({ type: 'subscribe', channel });
+    }
+    return () => {
+      const current = this._listeners.get(channel);
+      if (!current) return;
+      current.delete(fn);
+      if (current.size === 0) {
+        this._listeners.delete(channel);
+        this.send({ type: 'unsubscribe', channel });
+      }
+    };
   }
 
   /** Subscribe to ALL events (useful for global notification handling) */

@@ -424,21 +424,43 @@ function deliverPubsubMessage(channel, message) {
   clients.forEach((ws) => {
     if (ws.readyState !== WebSocket.OPEN) return;
     const buffered: number = (ws as any).bufferedAmount ?? 0;
+    const eventName =
+      parsed &&
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+        ? (parsed as any).event
+        : null;
+    const canDropForBackpressure =
+      eventName === "presence:updated" ||
+      eventName === "community:channel_message";
+
+    if (canDropForBackpressure && buffered >= WS_BACKPRESSURE_DROP_BYTES) {
+      wsBackpressureEventsTotal.inc({ action: "drop" });
+      logger.warn(
+        {
+          event: 'ws.slow_consumer.frame_dropped',
+          userId: (ws as any)._userId,
+          buffered,
+          messageEvent: eventName,
+        },
+        'WS slow consumer: dropping low-priority frame due to backpressure',
+      );
+      return;
+    }
+
     if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
       wsBackpressureEventsTotal.inc({ action: "kill" });
       logger.warn(
-        { event: 'ws.slow_consumer.killed', userId: (ws as any)._userId, buffered },
+        {
+          event: 'ws.slow_consumer.killed',
+          userId: (ws as any)._userId,
+          buffered,
+          messageEvent: eventName,
+        },
         'WS slow consumer: terminating connection due to excessive backpressure',
       );
       ws.terminate();
-      return;
-    }
-    if (buffered >= WS_BACKPRESSURE_DROP_BYTES) {
-      wsBackpressureEventsTotal.inc({ action: "drop" });
-      logger.warn(
-        { event: 'ws.slow_consumer.frame_dropped', userId: (ws as any)._userId, buffered },
-        'WS slow consumer: dropping frame due to backpressure',
-      );
       return;
     }
     ws.send(outbound);
@@ -461,7 +483,7 @@ function wsBootstrapCacheKey(userId) {
 /** Invalidate the cached WS subscription list for a user. Call this whenever
  *  their community membership, channel access, or conversation list changes. */
 async function invalidateWsBootstrapCache(userId) {
-  await redis.del(wsBootstrapCacheKey(userId));
+  return;
 }
 
 /**
@@ -523,31 +545,14 @@ async function listAutoSubscriptionChannels(userId) {
 }
 
 async function bootstrapUserSubscriptions(ws, userId) {
-  const channels = await listAutoSubscriptionChannels(userId);
-  warmWsAclCacheFromChannelList(userId, channels);
-  for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-    const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-    await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
-    if (ws.readyState !== WebSocket.OPEN) return;
-  }
+  return;
 }
 
 // Retry bootstrap on pool circuit-breaker fires (transient under burst load).
 // The connection stays open while we wait; if pool drains within ~3.5s the
 // user gets their subscriptions without noticing anything.
 async function bootstrapWithRetry(ws, userId, attempt = 0) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  try {
-    await bootstrapUserSubscriptions(ws, userId);
-  } catch (err) {
-    const isCircuitOpen = err && err.code === 'POOL_CIRCUIT_OPEN';
-    if (isCircuitOpen && attempt < 3) {
-      const delayMs = (attempt + 1) * 600; // 600 ms → 1200 ms → 1800 ms
-      await new Promise((r) => setTimeout(r, delayMs));
-      return bootstrapWithRetry(ws, userId, attempt + 1);
-    }
-    throw err; // non-retryable or exhausted – caller logs
-  }
+  return;
 }
 
 function hasLocalSubscribers(redisChannel) {
@@ -652,16 +657,14 @@ wss.on("connection", async (ws, req) => {
       logger.warn({ err, userId: user.id }, "WS presence setup failed"),
     );
 
-  bootstrapWithRetry(ws, user.id)
-    .then(() => {
+  Promise.allSettled([ws._bootstrapPromise, ws._presenceInitPromise]).then(
+    ([bootstrapResult]) => {
+      if (bootstrapResult?.status !== "fulfilled") return;
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ event: 'ready' }));
       }
-    })
-    .catch((err) => {
-      wsConnectionResultTotal.inc({ result: "bootstrap_failed" });
-      logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed");
-    });
+    },
+  );
 });
 
 // ── Client message dispatch ────────────────────────────────────────────────────
