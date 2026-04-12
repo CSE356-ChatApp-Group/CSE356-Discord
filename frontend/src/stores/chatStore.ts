@@ -1824,7 +1824,21 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       case 'channel:updated': {
         const channel = event.data || {};
         const communityId = channel.community_id || channel.communityId;
-        if (!communityId) break;
+        const channelId = channel.id;
+        if (!communityId || !channelId) break;
+        set((s) => ({
+          channels: upsertChannel(s.channels, {
+            ...(s.channels.find((existing) => existing.id === channelId) || {}),
+            ...channel,
+          }),
+          activeChannel:
+            s.activeChannel?.id === channelId
+              ? {
+                  ...s.activeChannel,
+                  ...channel,
+                }
+              : s.activeChannel,
+        }));
         if (store.activeCommunity?.id === communityId) {
           invalidateApiCache(`/channels?communityId=${communityId}`);
           store.fetchChannels(communityId).catch(() => {});

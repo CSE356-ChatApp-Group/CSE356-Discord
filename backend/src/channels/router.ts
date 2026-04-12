@@ -16,6 +16,7 @@ const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('../messages/sideEffects');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
+const fanout           = require('../websocket/fanout');
 const {
   invalidateWsAclCache,
   invalidateWsBootstrapCache,
@@ -85,6 +86,13 @@ async function ensurePrivateChannelManagers(channelId, communityId, client) {
      FROM unnest($2::text[]) AS manager(user_id)
      ON CONFLICT (channel_id, user_id) DO NOTHING`,
     [channelId, rows.map((row) => row.user_id)]
+  );
+}
+
+async function publishChannelLifecycleEvent(userIds, event, data) {
+  const uniqueUserIds = [...new Set((userIds || []).filter(Boolean))];
+  await Promise.allSettled(
+    uniqueUserIds.map((userId) => fanout.publish(`user:${userId}`, { event, data }))
   );
 }
 
@@ -300,7 +308,7 @@ router.post('/',
       await Promise.allSettled(
         affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId))
       );
-      sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:created', channel);
+      await publishChannelLifecycleEvent(affectedUserIds, 'channel:created', channel);
       bustChannelListCache(communityId).catch(() => {});
       res.status(201).json({ channel });
     } catch (err) {
@@ -519,7 +527,7 @@ router.patch('/:id',
         ...affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId)),
       ]);
       await evictUnauthorizedChannelSubscribers(updatedChannel.id);
-      sideEffects.publishMessageEvent(`community:${updatedChannel.community_id}`, 'channel:updated', updatedChannel);
+      await publishChannelLifecycleEvent(affectedUserIds, 'channel:updated', updatedChannel);
       bustChannelListCache(updatedChannel.community_id).catch(() => {});
       res.json({ channel: updatedChannel });
     } catch (err) {
@@ -557,7 +565,7 @@ router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
         affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId))
       );
       await evictUnauthorizedChannelSubscribers(rows[0].id);
-      sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:deleted', {
+      await publishChannelLifecycleEvent(affectedUserIds, 'channel:deleted', {
         id: rows[0].id,
         community_id: communityId,
       });
