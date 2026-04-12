@@ -326,10 +326,10 @@ describe('Bootstrap ready event', () => {
   });
 });
 
-// ── Channel auto-subscribe (bootstrap) ───────────────────────────────────────
+// ── Channel realtime delivery ────────────────────────────────────────────────
 
-describe('Channel bootstrap subscriptions', () => {
-  it('delivers channel messages without manual websocket subscribe', async () => {
+describe('Channel realtime delivery', () => {
+  it('delivers channel messages to community members without manual websocket subscribe', async () => {
     const owner = await createAuthenticatedUser('wsautosubowner');
     const member = await createAuthenticatedUser('wsautosubmember');
 
@@ -768,7 +768,7 @@ describe('Multi-socket fanout', () => {
 // ── Unsubscribe isolation ─────────────────────────────────────────────────────
 
 describe('Unsubscribe isolation', () => {
-  it('stops delivery to an unsubscribed channel socket without affecting other sockets', async () => {
+  it('channel unsubscribe does not block user-scoped community delivery to that socket', async () => {
     const owner = await createAuthenticatedUser('wsunsubowner');
     const member = await createAuthenticatedUser('wsunsubmember');
 
@@ -830,19 +830,21 @@ describe('Unsubscribe isolation', () => {
       expect(bootstrapSendRes.status).toBe(201);
       await Promise.all([bootstrapEventPromiseA, bootstrapEventPromiseB]);
 
-      // Unsubscribe socketA then confirm only socketB receives subsequent messages.
+      // Unsubscribe socketA from the explicit channel topic. Channel messages are
+      // still delivered on each member's user topic, so both sockets should
+      // continue receiving the created event.
       socketA.send(JSON.stringify({ type: 'unsubscribe', channel: `channel:${channelId}` }));
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const recipientEventPromise = waitForWsEvent(
-        socketB,
+      const recipientEventPromiseA = waitForWsEvent(
+        socketA,
         (event) =>
           event.event === 'message:created' &&
           event.data?.channel_id === channelId &&
           event.data?.content === 'unsubscribe isolation check',
       );
-      const noEventPromise = waitForNoWsEvent(
-        socketA,
+      const recipientEventPromiseB = waitForWsEvent(
+        socketB,
         (event) =>
           event.event === 'message:created' &&
           event.data?.channel_id === channelId &&
@@ -856,9 +858,14 @@ describe('Unsubscribe isolation', () => {
 
       expect(sendRes.status).toBe(201);
 
-      const recipientEvent = await recipientEventPromise;
-      expect(recipientEvent.data.content).toBe('unsubscribe isolation check');
-      await noEventPromise;
+      const [recipientEventA, recipientEventB] = await Promise.all([
+        recipientEventPromiseA,
+        recipientEventPromiseB,
+      ]);
+      expect(recipientEventA.data.content).toBe('unsubscribe isolation check');
+      expect(recipientEventB.data.content).toBe('unsubscribe isolation check');
+      expect(recipientEventA.channel).toBe(`user:${member.user.id}`);
+      expect(recipientEventB.channel).toBe(`user:${member.user.id}`);
     } finally {
       await closeWebSocket(socketA);
       await closeWebSocket(socketB);
@@ -954,7 +961,7 @@ describe('Unsubscribe isolation', () => {
           event.event === 'message:created' &&
           event.data?.channel_id === channelId &&
           event.data?.content === 'rapid resubscribe target' &&
-          event.data?.id !== createdEvent.data.id,
+          event.data?.id === createdEvent.data.id,
         1000,
       );
     } finally {

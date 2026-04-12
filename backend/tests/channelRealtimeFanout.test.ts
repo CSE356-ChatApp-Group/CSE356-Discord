@@ -1,5 +1,5 @@
 /**
- * Per-user Redis fanout for channel message:created (default on; opt out with CHANNEL_MESSAGE_USER_FANOUT=0).
+ * Channel message:created fanout targets every visible member's user topic.
  */
 
 jest.mock('../src/db/pool', () => ({
@@ -19,15 +19,12 @@ const {
   publishChannelMessageCreated,
   getChannelUserFanoutTargetKeys,
 } = require('../src/messages/channelRealtimeFanout') as {
-  publishChannelMessageCreated: (channelId: string, env: Record<string, unknown>) => Promise<void>;
+  publishChannelMessageCreated: (channelId: string, envelope: Record<string, unknown>) => Promise<void>;
   getChannelUserFanoutTargetKeys: (channelId: string) => Promise<string[]>;
 };
 
 describe('channelRealtimeFanout', () => {
-  const prevFanout = process.env.CHANNEL_MESSAGE_USER_FANOUT;
-
   afterEach(() => {
-    process.env.CHANNEL_MESSAGE_USER_FANOUT = prevFanout;
     query.mockReset();
     fanout.publish.mockReset();
   });
@@ -40,20 +37,11 @@ describe('channelRealtimeFanout', () => {
     expect(keys).toEqual(['user:u1', 'user:u2']);
   });
 
-  it('publishChannelMessageCreated publishes only channel when fanout disabled', async () => {
-    process.env.CHANNEL_MESSAGE_USER_FANOUT = '0';
-    await publishChannelMessageCreated('c1', { event: 'message:created', data: {} });
-    expect(fanout.publish).toHaveBeenCalledTimes(1);
-    expect(fanout.publish).toHaveBeenCalledWith('channel:c1', expect.any(Object));
-  });
-
-  it('publishChannelMessageCreated publishes channel plus user targets when fanout is default on', async () => {
-    delete process.env.CHANNEL_MESSAGE_USER_FANOUT;
+  it('publishChannelMessageCreated publishes to all visible member user targets', async () => {
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
-    expect(fanout.publish).toHaveBeenCalledTimes(3);
+    expect(fanout.publish).toHaveBeenCalledTimes(2);
     expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
-      'channel:c1',
       'user:a',
       'user:b',
     ]);

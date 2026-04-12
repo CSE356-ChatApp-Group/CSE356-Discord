@@ -77,7 +77,6 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
 | `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS` | WS tuning |
-| `CHANNEL_MESSAGE_USER_FANOUT`, `CHANNEL_MESSAGE_USER_FANOUT_MAX` | **Default on:** also publish channel `message:created` to each visible member’s `user:<id>` (set `0`/`false` to disable). Cap members (default **5000**, max **10000**); clients dedupe by message id. |
 | **Observability** | |
 | `OTEL_ENABLED` | Set `false` to disable tracing |
 | `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio (production default 0.1) |
