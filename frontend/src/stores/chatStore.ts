@@ -50,12 +50,14 @@ type ChatState = {
   createCommunity: (slug: string, name: string, description: string) => Promise<Entity>;
   deleteCommunity: (communityId: string) => Promise<void>;
   leaveCommunity: (communityId: string) => Promise<void>;
+  updateCommunityMemberRole: (communityId: string, userId: string, role: 'member' | 'admin') => Promise<void>;
   selectCommunity: (community: Entity) => Promise<void>;
   fetchChannels: (communityId: string) => Promise<Entity[]>;
   fetchChannelMembers: (channelId: string) => Promise<Entity[]>;
   createChannel: (communityId: string, name: string, isPrivate?: boolean, description?: string) => Promise<Entity>;
   inviteToChannel: (channelId: string, userIds: string[]) => Promise<Entity[]>;
   deleteChannel: (channelId: string) => Promise<void>;
+  updateChannel: (channelId: string, updates: { name?: string; description?: string; isPrivate?: boolean }) => Promise<Entity>;
   selectChannel: (channel: Entity) => Promise<void>;
   fetchConversations: () => Promise<void>;
   openHome: () => void;
@@ -128,6 +130,10 @@ function sortMessagesChronologically(messages: Entity[]): Entity[] {
 
 function channelCommunityId(channel: Entity) {
   return channel?.community_id || channel?.communityId || null;
+}
+
+function canAccessChannel(channel: Entity | null | undefined) {
+  return Boolean(channel && (channel?.can_access ?? channel?.canAccess ?? !channel?.is_private));
 }
 
 function upsertChannel(channels: Entity[], incoming: Entity) {
@@ -578,6 +584,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     set((s) => removeCommunityState(s, communityId));
   },
 
+  async updateCommunityMemberRole(communityId: string, userId: string, role: 'member' | 'admin') {
+    await api.patch(`/communities/${communityId}/members/${userId}`, { role });
+    if (get().activeCommunity?.id === communityId) {
+      await get().fetchMembers(communityId);
+    }
+    if (useAuthStore.getState().user?.id === userId) {
+      await get().fetchCommunities();
+    }
+  },
+
   async selectCommunity(community: Entity) {
     const selectedCommunity =
       get().communities.find((existing) => existing.id === community.id) || community;
@@ -632,7 +648,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         return channels;
       }
       set(s => {
+        const activeChannelInCommunity =
+          s.activeChannel && channelCommunityId(s.activeChannel) === communityId;
         const mergedChannels = preserveRecentLocalChannels(channels || [], s.channels, communityId);
+        const refreshedActiveChannel = activeChannelInCommunity
+          ? mergedChannels.find((ch: Entity) => ch.id === s.activeChannel?.id) || null
+          : null;
+        const nextActiveChannel = activeChannelInCommunity
+          ? (canAccessChannel(refreshedActiveChannel)
+              ? {
+                  ...refreshedActiveChannel,
+                  has_new_activity: false,
+                  hasNewActivity: false,
+                  unread_message_count: 0,
+                }
+              : null)
+          : s.activeChannel;
         return {
           channels: mergedChannels.map((channel: Entity) => {
             const previous = s.channels.find((ch: Entity) => ch.id === channel.id);
@@ -653,16 +684,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   unread_message_count: unreadCount,
                 };
           }),
-          activeChannel: s.activeChannel
-            ? (mergedChannels.find((ch: Entity) => ch.id === s.activeChannel?.id)
-                ? {
-                    ...(mergedChannels.find((ch: Entity) => ch.id === s.activeChannel?.id) as Entity),
-                    has_new_activity: false,
-                    hasNewActivity: false,
-                    unread_message_count: 0,
-                  }
-                : s.activeChannel)
-            : s.activeChannel,
+          activeChannel: nextActiveChannel,
         };
       });
       (channels || []).forEach((channel: Entity) => {
@@ -737,6 +759,27 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         messagePagination: nextMessagePagination,
       };
     });
+  },
+
+  async updateChannel(channelId: string, updates: { name?: string; description?: string; isPrivate?: boolean }) {
+    const body: Record<string, unknown> = {};
+    if (typeof updates.name === 'string') body.name = updates.name;
+    if (typeof updates.description === 'string') body.description = updates.description;
+    if (typeof updates.isPrivate === 'boolean') body.isPrivate = updates.isPrivate;
+
+    const { channel } = await api.patch(`/channels/${channelId}`, body);
+    const communityId = channel?.community_id || channel?.communityId || get().activeCommunity?.id;
+    if (communityId) {
+      invalidateApiCache(`/channels?communityId=${communityId}`);
+      await get().fetchChannels(communityId);
+    }
+    if (channel?.id) {
+      set((s) => ({
+        channels: upsertChannel(s.channels, channel),
+        activeChannel: s.activeChannel?.id === channel.id ? { ...s.activeChannel, ...channel } : s.activeChannel,
+      }));
+    }
+    return channel;
   },
 
   async selectChannel(channel: Entity) {
@@ -1734,6 +1777,18 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         });
         break;
       }
+      case 'community:role_updated': {
+        const { communityId, userId } = event.data || {};
+        if (!communityId || !userId) break;
+        if (store.activeCommunity?.id === communityId) {
+          store.fetchMembers(communityId).catch(() => {});
+        }
+        if (useAuthStore.getState().user?.id === userId) {
+          invalidateApiCache('/communities');
+          store.fetchCommunities().catch(() => {});
+        }
+        break;
+      }
       case 'community:member_joined':
       case 'community:member_left': {
         const { communityId } = event.data;
@@ -1763,6 +1818,36 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             invalidateApiCache(`/channels?communityId=${communityId}`);
             store.fetchChannels(communityId).catch(() => {});
           }, 400);
+        }
+        break;
+      }
+      case 'channel:updated': {
+        const channel = event.data || {};
+        const communityId = channel.community_id || channel.communityId;
+        if (!communityId) break;
+        if (store.activeCommunity?.id === communityId) {
+          invalidateApiCache(`/channels?communityId=${communityId}`);
+          store.fetchChannels(communityId).catch(() => {});
+        }
+        break;
+      }
+      case 'channel:deleted': {
+        const channelId = event.data?.id;
+        const communityId = event.data?.community_id || event.data?.communityId;
+        if (!channelId) break;
+        set((s) => {
+          const { [channelId]: _removed, ...nextMessages } = s.messages;
+          const { [channelId]: _removedPagination, ...nextPagination } = s.messagePagination;
+          return {
+            channels: s.channels.filter((channel) => channel.id !== channelId),
+            activeChannel: s.activeChannel?.id === channelId ? null : s.activeChannel,
+            messages: nextMessages,
+            messagePagination: nextPagination,
+          };
+        });
+        if (communityId && store.activeCommunity?.id === communityId) {
+          invalidateApiCache(`/channels?communityId=${communityId}`);
+          store.fetchChannels(communityId).catch(() => {});
         }
         break;
       }

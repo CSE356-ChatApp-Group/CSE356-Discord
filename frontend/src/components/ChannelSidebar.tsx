@@ -360,7 +360,7 @@ function ChannelRow({ channel, active, unreadCount, canAccess, canDelete, onDele
 
 function canManageChannels(community) {
   const role = community?.my_role || community?.myRole;
-  return role === 'owner' || role === 'admin' || role === 'moderator';
+  return role === 'owner' || role === 'admin';
 }
 
 function canLeaveCommunity(community) {

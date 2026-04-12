@@ -61,6 +61,7 @@ export default function MessagePane() {
     inviteToConversation,
     leaveConversation,
     renameGroupDm,
+    updateChannel,
     members,
   } = useChatStore();
   const user = useAuthStore(s => s.user);
@@ -91,6 +92,7 @@ export default function MessagePane() {
   const [draftName, setDraftName] = useState('');
   const [channelInviteBusy, setChannelInviteBusy] = useState(false);
   const [channelInviteLoading, setChannelInviteLoading] = useState(false);
+  const [channelVisibilityBusy, setChannelVisibilityBusy] = useState(false);
   const [dmActionErr, setDmActionErr] = useState('');
   const [channelInviteErr, setChannelInviteErr] = useState('');
   const [attachmentError, setAttachmentError] = useState('');
@@ -247,8 +249,11 @@ export default function MessagePane() {
       .slice(0, 20);
   }, [activeChannel, channelInviteQuery, existingPrivateChannelMemberIds, members]);
 
+  const canManageChannelSettings = Boolean(
+    activeChannel && ['owner', 'admin'].includes(activeCommunity?.my_role || activeCommunity?.myRole)
+  );
   const canManagePrivateChannel = Boolean(
-    activeChannel?.is_private && ['owner', 'admin', 'moderator'].includes(activeCommunity?.my_role || activeCommunity?.myRole)
+    activeChannel?.is_private && canManageChannelSettings
   );
 
   // Focus search input and clean up when search panel toggles
@@ -489,6 +494,18 @@ export default function MessagePane() {
       setPrivateChannelMembers([]);
     } finally {
       setChannelInviteLoading(false);
+    }
+  }
+
+  async function handleToggleChannelVisibility() {
+    if (!activeChannel?.id || !canManageChannelSettings || channelVisibilityBusy) return;
+    setChannelVisibilityBusy(true);
+    try {
+      await updateChannel(activeChannel.id, {
+        isPrivate: !(activeChannel?.is_private ?? activeChannel?.isPrivate),
+      });
+    } finally {
+      setChannelVisibilityBusy(false);
     }
   }
 
@@ -837,6 +854,21 @@ export default function MessagePane() {
                 </>
               )}
             </>
+          )}
+          {activeChannel && canManageChannelSettings && (
+            <button
+              type="button"
+              className={styles.dmActionBtn}
+              onClick={() => { void handleToggleChannelVisibility(); }}
+              disabled={channelVisibilityBusy}
+              data-testid="channel-visibility-toggle"
+            >
+              {channelVisibilityBusy
+                ? 'Saving…'
+                : (activeChannel.is_private ?? activeChannel.isPrivate)
+                  ? 'Make public'
+                  : 'Make private'}
+            </button>
           )}
           {activeChannel?.is_private && canManagePrivateChannel && (
             <button

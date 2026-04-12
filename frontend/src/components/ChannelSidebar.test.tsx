@@ -4,6 +4,17 @@ import ChannelSidebar from './ChannelSidebar';
 import { useAuthStore } from '../stores/authStore';
 import { useChatStore } from '../stores/chatStore';
 
+vi.hoisted(() => {
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    },
+    configurable: true,
+  });
+});
+
 describe('ChannelSidebar destructive actions', () => {
   const deleteChannel = vi.fn();
   const deleteCommunity = vi.fn();
@@ -28,7 +39,7 @@ describe('ChannelSidebar destructive actions', () => {
       } as any);
 
       useChatStore.setState({
-        activeCommunity: { id: 'comm-1', name: 'Workspace', my_role: 'moderator' },
+        activeCommunity: { id: 'comm-1', name: 'Workspace', my_role: 'admin' },
         channels: [
           { id: 'ch-1', name: 'general', is_private: false },
         ],

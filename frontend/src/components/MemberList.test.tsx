@@ -82,3 +82,60 @@ describe('MemberList DM presence', () => {
   });
 });
 
+describe('MemberList community role management', () => {
+  const updateCommunityMemberRole = vi.fn();
+
+  beforeEach(() => {
+    updateCommunityMemberRole.mockReset();
+    updateCommunityMemberRole.mockResolvedValue(undefined);
+
+    act(() => {
+      useAuthStore.setState({
+        user: {
+          id: 'user-1',
+          username: 'owner',
+          displayName: 'Owner',
+          email: 'owner@example.com',
+        },
+      } as any);
+
+      useChatStore.setState({
+        activeConv: null,
+        activeCommunity: { id: 'community-1', my_role: 'owner' },
+        members: [
+          { id: 'user-1', username: 'owner', role: 'owner' },
+          { id: 'user-2', username: 'alex', role: 'member' },
+        ],
+        presence: {
+          'user-1': 'online',
+          'user-2': 'online',
+        },
+        awayMessages: {},
+        updateCommunityMemberRole,
+      } as any);
+    });
+  });
+
+  afterEach(() => {
+    act(() => {
+      useAuthStore.setState({ user: null } as any);
+      useChatStore.setState({
+        activeCommunity: null,
+        activeConv: null,
+        members: [],
+        presence: {},
+        awayMessages: {},
+      } as any);
+    });
+  });
+
+  it('lets the owner promote a member to admin', async () => {
+    render(<MemberList />);
+
+    await act(async () => {
+      screen.getByTestId('member-role-toggle-user-2').click();
+    });
+
+    expect(updateCommunityMemberRole).toHaveBeenCalledWith('community-1', 'user-2', 'admin');
+  });
+});

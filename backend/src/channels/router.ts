@@ -16,7 +16,11 @@ const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('../messages/sideEffects');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
-const { invalidateWsAclCache, invalidateWsBootstrapCache } = require('../websocket/server');
+const {
+  invalidateWsAclCache,
+  invalidateWsBootstrapCache,
+  evictUnauthorizedChannelSubscribers,
+} = require('../websocket/server');
 
 const router = express.Router();
 router.use(authenticate);
@@ -49,7 +53,39 @@ async function loadChannelContext(channelId, userId) {
 }
 
 function canManagePrivateMembership(role) {
-  return ['owner', 'admin', 'moderator'].includes(role);
+  return ['owner', 'admin'].includes(role);
+}
+
+function canManageChannels(role) {
+  return ['owner', 'admin'].includes(role);
+}
+
+async function listCommunityUserIds(communityId, client = { query }) {
+  const { rows } = await client.query(
+    'SELECT user_id::text AS user_id FROM community_members WHERE community_id = $1',
+    [communityId]
+  );
+  return rows.map((row) => row.user_id);
+}
+
+async function ensurePrivateChannelManagers(channelId, communityId, client) {
+  const { rows } = await client.query(
+    `SELECT user_id::text AS user_id
+     FROM community_members
+     WHERE community_id = $1
+       AND role IN ('owner', 'admin')`,
+    [communityId]
+  );
+
+  if (!rows.length) return;
+
+  await client.query(
+    `INSERT INTO channel_members (channel_id, user_id)
+     SELECT $1, manager.user_id::uuid
+     FROM unnest($2::text[]) AS manager(user_id)
+     ON CONFLICT (channel_id, user_id) DO NOTHING`,
+    [channelId, rows.map((row) => row.user_id)]
+  );
 }
 
 /**
@@ -229,12 +265,12 @@ router.post('/',
       client = await getClient();
       const { communityId, name, isPrivate = false, description } = req.body;
 
-      // Verify caller is admin+ in the community
+      // Verify caller is owner/admin in the community
       const { rows: [m] } = await client.query(
         `SELECT role FROM community_members WHERE community_id=$1 AND user_id=$2`,
         [communityId, req.user.id]
       );
-      if (!m || !['owner','admin','moderator'].includes(m.role)) {
+      if (!m || !canManageChannels(m.role)) {
         client.release();
         return res.status(403).json({ error: 'Insufficient permissions' });
       }
@@ -254,10 +290,16 @@ router.post('/',
            ON CONFLICT (channel_id, user_id) DO NOTHING`,
           [channel.id, req.user.id]
         );
+        await ensurePrivateChannelManagers(channel.id, communityId, client);
       }
 
       await client.query('COMMIT');
       client.release();
+      client = null;
+      const affectedUserIds = await listCommunityUserIds(communityId);
+      await Promise.allSettled(
+        affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId))
+      );
       sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:created', channel);
       bustChannelListCache(communityId).catch(() => {});
       res.status(201).json({ channel });
@@ -266,7 +308,6 @@ router.post('/',
         try {
           await client.query('ROLLBACK');
         } catch {
-          // Ignore rollback failures and surface original error.
         }
         client.release();
       }
@@ -411,19 +452,87 @@ router.post('/:id/members',
 router.patch('/:id',
   param('id').isUUID(),
   body('name').optional().isString().custom((value) => value.trim().length > 0),
+  body('isPrivate').optional().isBoolean(),
   body('description').optional().isString(),
   async (req, res, next) => {
     if (!v(req, res)) return;
+    let client;
     try {
-      const { rows } = await query(
-        `UPDATE channels SET name=COALESCE($1,name), description=COALESCE($2,description), updated_at=NOW()
-         WHERE id=$3 RETURNING *`,
-        [req.body.name || null, req.body.description ?? null, req.params.id]
+      client = await getClient();
+      const channel = await loadChannelContext(req.params.id, req.user.id);
+      if (!channel) {
+        client.release();
+        client = null;
+        return res.status(404).json({ error: 'Channel not found' });
+      }
+      if (!channel.community_role || !canManageChannels(channel.community_role)) {
+        client.release();
+        client = null;
+        return res.status(403).json({ error: 'Insufficient permissions' });
+      }
+
+      await client.query('BEGIN');
+      const updates = [];
+      const params = [];
+
+      if (Object.prototype.hasOwnProperty.call(req.body, 'name')) {
+        params.push(String(req.body.name).trim());
+        updates.push(`name = $${params.length}`);
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body, 'description')) {
+        params.push(req.body.description ?? null);
+        updates.push(`description = $${params.length}`);
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body, 'isPrivate')) {
+        params.push(Boolean(req.body.isPrivate));
+        updates.push(`is_private = $${params.length}`);
+      }
+
+      if (!updates.length) {
+        await client.query('ROLLBACK');
+        client.release();
+        client = null;
+        return res.status(400).json({ error: 'No changes provided' });
+      }
+
+      params.push(req.params.id);
+      const { rows } = await client.query(
+        `UPDATE channels
+         SET ${updates.join(', ')}, updated_at = NOW()
+         WHERE id = $${params.length}
+         RETURNING *`,
+        params
       );
-      if (!rows.length) return res.status(404).json({ error: 'Not found' });
-      bustChannelListCache(rows[0].community_id).catch(() => {});
-      res.json({ channel: rows[0] });
-    } catch (err) { next(err); }
+      const updatedChannel = rows[0];
+
+      if (updatedChannel?.is_private) {
+        await ensurePrivateChannelManagers(updatedChannel.id, updatedChannel.community_id, client);
+      }
+
+      await client.query('COMMIT');
+      client.release();
+      client = null;
+
+      const affectedUserIds = await listCommunityUserIds(updatedChannel.community_id);
+      await Promise.allSettled([
+        ...affectedUserIds.map((userId) => invalidateWsAclCache(userId, `channel:${updatedChannel.id}`)),
+        ...affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId)),
+      ]);
+      await evictUnauthorizedChannelSubscribers(updatedChannel.id);
+      sideEffects.publishMessageEvent(`community:${updatedChannel.community_id}`, 'channel:updated', updatedChannel);
+      bustChannelListCache(updatedChannel.community_id).catch(() => {});
+      res.json({ channel: updatedChannel });
+    } catch (err) {
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore rollback failures and surface original error.
+        }
+        client.release();
+      }
+      next(err);
+    }
   }
 );
 
@@ -431,11 +540,29 @@ router.patch('/:id',
 router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
   if (!v(req, res)) return;
   try {
+    const channel = await loadChannelContext(req.params.id, req.user.id);
+    if (!channel) return res.status(404).json({ error: 'Channel not found' });
+    if (!channel.community_role || !canManageChannels(channel.community_role)) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
     const { rows } = await query(
-      'DELETE FROM channels WHERE id=$1 RETURNING community_id',
+      'DELETE FROM channels WHERE id=$1 RETURNING id, community_id',
       [req.params.id]
     );
-    if (rows.length) bustChannelListCache(rows[0].community_id).catch(() => {});
+    if (rows.length) {
+      const communityId = rows[0].community_id;
+      const affectedUserIds = await listCommunityUserIds(communityId);
+      await Promise.allSettled(
+        affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId))
+      );
+      await evictUnauthorizedChannelSubscribers(rows[0].id);
+      sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:deleted', {
+        id: rows[0].id,
+        community_id: communityId,
+      });
+      bustChannelListCache(communityId).catch(() => {});
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });

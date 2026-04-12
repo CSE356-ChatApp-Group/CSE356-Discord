@@ -144,6 +144,32 @@ function invalidateWsAclCache(userId: string, channel: string) {
   aclCache.delete(aclCacheKey(userId, channel));
 }
 
+async function evictUnauthorizedChannelSubscribers(channelId) {
+  const redisChannel = `channel:${channelId}`;
+  const clients = Array.from(channelClients.get(redisChannel) || []) as any[];
+  if (!clients.length) return;
+
+  await Promise.allSettled(
+    clients.map(async (ws) => {
+      const userId = ws?._userId;
+      if (!userId) return;
+      const allowed = await isAllowedChannel({ id: userId }, redisChannel);
+      if (allowed) return;
+      await unsubscribeClient(ws, redisChannel);
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({
+            event: "unsubscribed",
+            data: { channel: redisChannel },
+          }));
+        } catch {
+          // Ignore send errors while pruning stale subscribers.
+        }
+      }
+    }),
+  );
+}
+
 // Evict expired entries periodically to prevent unbounded growth.
 setInterval(() => {
   const now = Date.now();
@@ -1017,4 +1043,11 @@ function shutdown() {
   });
 }
 
-module.exports = { handleUpgrade, wss, shutdown, invalidateWsBootstrapCache, invalidateWsAclCache };
+module.exports = {
+  handleUpgrade,
+  wss,
+  shutdown,
+  invalidateWsBootstrapCache,
+  invalidateWsAclCache,
+  evictUnauthorizedChannelSubscribers,
+};

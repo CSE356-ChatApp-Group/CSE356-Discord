@@ -82,6 +82,7 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+  flex: 1;
 }
 
 .name {
@@ -120,4 +121,26 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.roleAction {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  transition: background .12s, border-color .12s, color .12s;
+}
+
+.roleAction:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.roleAction:disabled {
+  opacity: 0.6;
 }
