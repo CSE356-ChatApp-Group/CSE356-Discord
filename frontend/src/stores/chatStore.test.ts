@@ -485,6 +485,55 @@ describe('chatStore quick actions', () => {
     expect(state.activeChannel).toBeNull();
     expect(fetchChannels).toHaveBeenCalledWith('comm-1');
   });
+
+  it('drops stale cached history when access flips and refetches on reopen', async () => {
+    const fetchChannels = vi.fn().mockResolvedValue([]);
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/messages?channelId=ch-1&limit=50') {
+        return Promise.resolve({ messages: [] });
+      }
+      throw new Error(`Unexpected GET ${path}`);
+    });
+
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [
+        { id: 'ch-1', community_id: 'comm-1', name: 'general', is_private: true, can_access: false },
+      ],
+      activeChannel: null,
+      messages: {
+        'ch-1': [{ id: 'm-stale', channel_id: 'ch-1', content: 'stale' }],
+      },
+      messagePagination: {
+        'ch-1': { hasOlder: false, hasNewer: false },
+      },
+      fetchChannels,
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'channel:updated',
+      data: {
+        id: 'ch-1',
+        community_id: 'comm-1',
+        name: 'general',
+        is_private: false,
+        can_access: true,
+      },
+    });
+
+    expect(useChatStore.getState().messages['ch-1']).toBeUndefined();
+    expect(useChatStore.getState().messagePagination['ch-1']).toBeUndefined();
+
+    await useChatStore.getState().selectChannel({
+      id: 'ch-1',
+      community_id: 'comm-1',
+      name: 'general',
+      is_private: false,
+      can_access: true,
+    } as any);
+
+    expect(apiGet).toHaveBeenCalledWith('/messages?channelId=ch-1&limit=50');
+  });
 });
 
 describe('chatStore websocket author hydration', () => {

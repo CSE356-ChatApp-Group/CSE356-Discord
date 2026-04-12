@@ -1827,21 +1827,41 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const channelId = channel.id;
         if (!communityId || !channelId) break;
         const explicitAccess = channel.can_access ?? channel.canAccess;
-        set((s) => ({
-          channels: upsertChannel(s.channels, {
-            ...(s.channels.find((existing) => existing.id === channelId) || {}),
-            ...channel,
-          }),
-          activeChannel:
-            s.activeChannel?.id === channelId
-              ? (explicitAccess === false
-                  ? null
-                  : {
-                      ...s.activeChannel,
-                      ...channel,
-                    })
-              : s.activeChannel,
-        }));
+        set((s) => {
+          const previousChannel = s.channels.find((existing) => existing.id === channelId);
+          const previousAccess =
+            previousChannel?.can_access
+            ?? previousChannel?.canAccess
+            ?? (!previousChannel?.is_private);
+          const accessChanged = explicitAccess !== undefined && previousAccess !== explicitAccess;
+
+          let nextMessages = s.messages;
+          let nextPagination = s.messagePagination;
+          if (accessChanged) {
+            const { [channelId]: _removedMessages, ...restMessages } = s.messages;
+            const { [channelId]: _removedPagination, ...restPagination } = s.messagePagination;
+            nextMessages = restMessages;
+            nextPagination = restPagination;
+          }
+
+          return {
+            channels: upsertChannel(s.channels, {
+              ...(previousChannel || {}),
+              ...channel,
+            }),
+            activeChannel:
+              s.activeChannel?.id === channelId
+                ? (explicitAccess === false
+                    ? null
+                    : {
+                        ...s.activeChannel,
+                        ...channel,
+                      })
+                : s.activeChannel,
+            messages: nextMessages,
+            messagePagination: nextPagination,
+          };
+        });
         if (store.activeCommunity?.id === communityId) {
           invalidateApiCache(`/channels?communityId=${communityId}`);
           store.fetchChannels(communityId).catch(() => {});
