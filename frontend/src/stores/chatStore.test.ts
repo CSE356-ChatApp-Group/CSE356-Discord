@@ -432,6 +432,59 @@ describe('chatStore quick actions', () => {
     expect(state.messages['ch-1']).toBeUndefined();
     expect(state.messages['ch-2']).toBeDefined();
   });
+
+  it('applies channel:updated immediately and refetches the active community channel list', () => {
+    const fetchChannels = vi.fn().mockResolvedValue([]);
+
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [
+        { id: 'ch-1', community_id: 'comm-1', name: 'general', is_private: false },
+      ],
+      activeChannel: { id: 'ch-1', community_id: 'comm-1', name: 'general', is_private: false },
+      fetchChannels,
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'channel:updated',
+      data: { id: 'ch-1', community_id: 'comm-1', name: 'general', is_private: true },
+    });
+
+    const state = useChatStore.getState();
+    expect(state.channels.find((channel) => channel.id === 'ch-1')?.is_private).toBe(true);
+    expect(state.activeChannel?.is_private).toBe(true);
+    expect(invalidateApiCache).toHaveBeenCalledWith('/channels?communityId=comm-1');
+    expect(fetchChannels).toHaveBeenCalledWith('comm-1');
+  });
+
+  it('clears the active channel immediately when channel:updated says access was lost', () => {
+    const fetchChannels = vi.fn().mockResolvedValue([]);
+
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [
+        { id: 'ch-1', community_id: 'comm-1', name: 'general', is_private: false, can_access: true },
+      ],
+      activeChannel: { id: 'ch-1', community_id: 'comm-1', name: 'general', is_private: false, can_access: true },
+      fetchChannels,
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'channel:updated',
+      data: {
+        id: 'ch-1',
+        community_id: 'comm-1',
+        name: 'general',
+        is_private: true,
+        can_access: false,
+      },
+    });
+
+    const state = useChatStore.getState();
+    expect(state.channels.find((channel) => channel.id === 'ch-1')?.can_access).toBe(false);
+    expect(state.activeChannel).toBeNull();
+    expect(fetchChannels).toHaveBeenCalledWith('comm-1');
+  });
 });
 
 describe('chatStore websocket author hydration', () => {

@@ -16,6 +16,7 @@ const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('../messages/sideEffects');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
+const fanout           = require('../websocket/fanout');
 const {
   invalidateWsAclCache,
   invalidateWsBootstrapCache,
@@ -85,6 +86,50 @@ async function ensurePrivateChannelManagers(channelId, communityId, client) {
      FROM unnest($2::text[]) AS manager(user_id)
      ON CONFLICT (channel_id, user_id) DO NOTHING`,
     [channelId, rows.map((row) => row.user_id)]
+  );
+}
+
+async function listChannelLifecycleAudience(communityId, channelId, client = { query }) {
+  const { rows } = await client.query(
+    `SELECT cm.user_id::text AS user_id,
+            (c.is_private = FALSE
+             OR EXISTS (
+               SELECT 1
+               FROM channel_members chm
+               WHERE chm.channel_id = c.id
+                 AND chm.user_id = cm.user_id
+             )) AS can_access
+     FROM community_members cm
+     JOIN channels c
+       ON c.community_id = cm.community_id
+      AND c.id = $2
+     WHERE cm.community_id = $1`,
+    [communityId, channelId]
+  );
+  return rows;
+}
+
+async function publishChannelLifecycleEvent(communityId, event, data) {
+  if (event === 'channel:deleted') {
+    const userIds = await listCommunityUserIds(communityId);
+    await Promise.allSettled(
+      userIds.map((userId) => fanout.publish(`user:${userId}`, { event, data }))
+    );
+    return;
+  }
+
+  const audience = await listChannelLifecycleAudience(communityId, data.id);
+  await Promise.allSettled(
+    audience.map((entry) =>
+      fanout.publish(`user:${entry.user_id}`, {
+        event,
+        data: {
+          ...data,
+          can_access: Boolean(entry.can_access),
+          canAccess: Boolean(entry.can_access),
+        },
+      })
+    )
   );
 }
 
@@ -300,7 +345,7 @@ router.post('/',
       await Promise.allSettled(
         affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId))
       );
-      sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:created', channel);
+      await publishChannelLifecycleEvent(communityId, 'channel:created', channel);
       bustChannelListCache(communityId).catch(() => {});
       res.status(201).json({ channel });
     } catch (err) {
@@ -519,7 +564,7 @@ router.patch('/:id',
         ...affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId)),
       ]);
       await evictUnauthorizedChannelSubscribers(updatedChannel.id);
-      sideEffects.publishMessageEvent(`community:${updatedChannel.community_id}`, 'channel:updated', updatedChannel);
+      await publishChannelLifecycleEvent(updatedChannel.community_id, 'channel:updated', updatedChannel);
       bustChannelListCache(updatedChannel.community_id).catch(() => {});
       res.json({ channel: updatedChannel });
     } catch (err) {
@@ -557,7 +602,7 @@ router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
         affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId))
       );
       await evictUnauthorizedChannelSubscribers(rows[0].id);
-      sideEffects.publishMessageEvent(`community:${communityId}`, 'channel:deleted', {
+      await publishChannelLifecycleEvent(communityId, 'channel:deleted', {
         id: rows[0].id,
         community_id: communityId,
       });
