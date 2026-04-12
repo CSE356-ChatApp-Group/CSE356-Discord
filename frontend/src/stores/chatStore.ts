@@ -579,14 +579,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async selectCommunity(community: Entity) {
+    const selectedCommunity =
+      get().communities.find((existing) => existing.id === community.id) || community;
     set(s => ({
       activeCommunity: {
-        ...community,
+        ...selectedCommunity,
         has_new_activity: false,
         hasNewActivity: false,
       },
       communities: s.communities.map((c) =>
-        c.id === community.id
+        c.id === selectedCommunity.id
           ? {
               ...c,
               has_new_activity: false,
@@ -595,8 +597,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           : c
       ),
     }));
-    const channelsPromise = get().fetchChannels(community.id);
-    const membersPromise = get().fetchMembers(community.id);
+    const channelsPromise = get().fetchChannels(selectedCommunity.id);
+    const membersPromise = get().fetchMembers(selectedCommunity.id);
     const channels = await channelsPromise;
     // Auto-select the first accessible channel as soon as channel data is ready.
     const firstAccessible = channels.find(ch => {
@@ -611,7 +613,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
     await membersPromise;
     // Subscribe to community-level events
-    wsManager.subscribe(`community:${community.id}`, get()._handleWsEvent);
+    wsManager.subscribe(`community:${selectedCommunity.id}`, get()._handleWsEvent);
   },
 
   // ── Channels ──────────────────────────────────────────────────────────────

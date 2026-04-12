@@ -219,6 +219,50 @@ describe('chatStore quick actions', () => {
     expect(useChatStore.getState().members).toEqual([{ id: 'user-1' }]);
   });
 
+  it('selectCommunity prefers the fresh stored community row over a stale passed object', async () => {
+    let resolveMembers: ((value: { members: { id: string }[] }) => void) | undefined;
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/channels?communityId=comm-1') {
+        return Promise.resolve({
+          channels: [
+            { id: 'ch-1', community_id: 'comm-1', name: 'general', can_access: true },
+          ],
+        });
+      }
+
+      if (path === '/communities/comm-1/members') {
+        return new Promise((resolve) => {
+          resolveMembers = resolve;
+        });
+      }
+
+      if (path === '/messages?channelId=ch-1&limit=50') {
+        return Promise.resolve({ messages: [] });
+      }
+      if (path.startsWith('/presence?userIds=')) {
+        return Promise.resolve({ presence: { 'user-1': 'offline' }, awayMessages: {} });
+      }
+
+      throw new Error(`Unexpected GET ${path}`);
+    });
+
+    useChatStore.setState({
+      communities: [{ id: 'comm-1', name: 'One', my_role: 'member', myRole: 'member' }],
+    } as any);
+
+    const selectPromise = useChatStore.getState().selectCommunity({ id: 'comm-1', name: 'One' } as any);
+
+    resolveMembers?.({ members: [{ id: 'user-1' }] });
+    await selectPromise;
+
+    expect(useChatStore.getState().activeCommunity).toMatchObject({
+      id: 'comm-1',
+      my_role: 'member',
+      myRole: 'member',
+    });
+  });
+
   it('selectCommunity keeps the current target visible until the replacement channel is ready', async () => {
     let resolveMembers: ((value: { members: { id: string }[] }) => void) | undefined;
 
