@@ -70,7 +70,7 @@ describe('repointLastMessage', () => {
     incSpy.mockRestore();
   });
 
-  it('repointChannelLastMessage rethrows after repeated 23503', async () => {
+  it('repointChannelLastMessage clears pointers when 23503 persists after all retries (no throw)', async () => {
     mockedQuery.mockRejectedValueOnce(fkErr);
     mockedQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] });
     mockedQuery.mockRejectedValueOnce(fkErr);
@@ -78,9 +78,13 @@ describe('repointLastMessage', () => {
     mockedQuery.mockRejectedValueOnce(fkErr);
     mockedQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] });
     mockedQuery.mockRejectedValueOnce(fkErr);
+    mockedQuery.mockResolvedValueOnce({ rowCount: 1, rows: [] });
 
-    await expect(repointChannelLastMessage('chan-1')).rejects.toMatchObject({ code: '23503' });
-    expect(mockedQuery).toHaveBeenCalledTimes(7);
+    await repointChannelLastMessage('chan-1');
+
+    expect(mockedQuery).toHaveBeenCalledTimes(8);
+    const lastSql = String(mockedQuery.mock.calls[7][0]);
+    expect(lastSql).toContain('last_message_id = NULL');
   });
 
   it('repointConversationLastMessage retries after 23503 and increments metric', async () => {

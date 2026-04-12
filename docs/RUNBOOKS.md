@@ -119,6 +119,17 @@ COMPAS **outage** bands are often **short**. Repo-wide HTTP **5xx%** panels can 
 
 4. Hour-granular nginx only: [`scripts/prod-log-correlate.sh`](../scripts/prod-log-correlate.sh) (POST `/messages` mix per clock hour).
 
+### Example (prod `group-8`, 2026-04-12) — evidence already pulled
+
+If Grafana shows **traffic drop ~14:35** and **p95 + event-loop spike ~15:55** (axis in **US/Eastern**), these **UTC** journal facts align:
+
+- **`last -x reboot` / `shutdown`:** **18:27–18:28 UTC** — full VM stop/boot (**~14:27–14:28 EDT**).
+- **`journalctl -u postgresql`:** **18:57:30–18:57:35 UTC** — PostgreSQL **restart** (**~14:57 EDT**); same minute as **`no live upstreams`** in **`/var/log/nginx/error.log`**.
+- **Third band (~15:45–15:55 EDT → 19:45–19:55 UTC):** **no reboot**; **`journalctl` lines from `pgbouncer` (`stats:`)** show **`wait`** in the **multi‑second** range per minute bucket and **`xacts/s`** collapsing (e.g. **~1.1k/s → ~142/s** at **19:50 UTC**). **`grep` of nginx `error.log` for `19:4x` / `19:5x` returned 0** `[error]` lines in that prefix — not the same signature as the **14:57** upstream outage.
+- **App logs in that window:** **`23503`** on **`channels_last_message_id_fkey`** from **`repointChannelLastMessage`** (logged at **error** before mitigation). Repo fix: **`repointLastMessage`** now **nulls `last_message_*` and returns** after exhausted FK retries so **`DELETE /messages` does not 500 after the row is already gone**.
+
+**Repeatable snapshot on the VM:** `scripts/prod-capacity-snapshot.sh` (see repo; also validated in CI `bash -n`).
+
 ## After mitigation
 
 Update the incident log, trigger a **staging drill** ([`deploy/STAGING-DRILL-CHECKLIST.md`](../deploy/STAGING-DRILL-CHECKLIST.md)), and open a follow-up if the root cause is uncaught by tests (see [`docs/VERIFICATION-RISK-REGISTER.md`](VERIFICATION-RISK-REGISTER.md)).

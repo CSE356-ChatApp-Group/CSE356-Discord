@@ -65,8 +65,16 @@ async function repointChannelLastMessage(channelId: string) {
       }
       return;
     } catch (err: any) {
-      if (err?.code !== '23503' || attempt >= 3) throw err;
+      if (err?.code !== '23503') throw err;
       messageLastMessageRepointFkRetryTotal.inc({ scope: 'channel' });
+      if (attempt >= 3) {
+        logger.warn(
+          { channelId, attempt, detail: err.detail },
+          'repointChannelLastMessage: FK persists after retries; nulling last_message (delete already committed)',
+        );
+        await clearChannelLastMessagePointers(channelId);
+        return;
+      }
       logger.warn(
         { channelId, attempt, detail: err.detail },
         'repointChannelLastMessage: FK race, clearing last_message pointers and retrying',
@@ -85,8 +93,16 @@ async function repointConversationLastMessage(conversationId: string) {
       }
       return;
     } catch (err: any) {
-      if (err?.code !== '23503' || attempt >= 3) throw err;
+      if (err?.code !== '23503') throw err;
       messageLastMessageRepointFkRetryTotal.inc({ scope: 'conversation' });
+      if (attempt >= 3) {
+        logger.warn(
+          { conversationId, attempt, detail: err.detail },
+          'repointConversationLastMessage: FK persists after retries; nulling last_message (delete already committed)',
+        );
+        await clearConversationLastMessagePointers(conversationId);
+        return;
+      }
       logger.warn(
         { conversationId, attempt, detail: err.detail },
         'repointConversationLastMessage: FK race, clearing last_message pointers and retrying',

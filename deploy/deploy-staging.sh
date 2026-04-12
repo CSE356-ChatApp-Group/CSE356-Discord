@@ -37,7 +37,7 @@ ncpu = int('${_REMOTE_NPROC}')
 inst = int('${CHATAPP_INSTANCES}')
 cpu_part = ncpu * 50
 extra = max(0, inst - 1) * 30
-x = max(60, min(320, cpu_part + extra))
+x = max(60, min(400, cpu_part + extra))
 print(x)
 ")
 
@@ -46,7 +46,7 @@ PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
 p = int('${_PGB_SIZE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
 ncpu = int('${_REMOTE_NPROC}')
-pool_cap = min(180, 90 + ncpu * 10)
+pool_cap = min(240, 70 + ncpu * 20)
 print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 ")
 
@@ -58,7 +58,7 @@ print(max(64, min(900, pmi * 4 + inst * 80)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
-print(max(120, min(450, b + 60)))
+print(max(150, min(500, b + 100)))
 ")
 
 # Parallel fanout workers per instance — cheap headroom on larger CPUs.

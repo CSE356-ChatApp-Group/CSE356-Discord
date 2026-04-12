@@ -35,15 +35,16 @@ ncpu = int('${_REMOTE_NCPU}')
 inst = int('${CHATAPP_INSTANCES}')
 cpu_part = ncpu * 50
 extra = max(0, inst - 1) * 30
-x = max(60, min(320, cpu_part + extra))
+# Cap raised from 320 → 400 so 8 vCPU+ hosts get more real PG backends after resize.
+x = max(60, min(400, cpu_part + extra))
 print(x)
 ")
 PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
 p = int('${_PGB_SIZE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
 ncpu = int('${_REMOTE_NCPU}')
-# Allow larger per-process pools on big VMs (still bounded vs PgBouncer pool).
-pool_cap = min(180, 90 + ncpu * 10)
+# Per-process virtual pool to PgBouncer; scales with vCPU (was capped at 170 @ 8 cores).
+pool_cap = min(240, 70 + ncpu * 20)
 print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 ")
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
@@ -53,7 +54,8 @@ print(max(64, min(900, pmi * 4 + inst * 80)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
-print(max(120, min(450, b + 60)))
+# Headroom above PgBouncer default_pool_size for admin, stats, and burst.
+print(max(150, min(500, b + 100)))
 ")
 BCRYPT_MAX_CONCURRENT=$(python3 -c "
 n = int('${_REMOTE_NCPU}')
