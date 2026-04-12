@@ -212,6 +212,13 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     sudo apt-get install -y pgbouncer
     echo 'PgBouncer installed.'
   fi
+  # /var/run is tmpfs; pgbouncer.ini uses pidfile under /var/run/pgbouncer — recreate after reboot.
+  sudo mkdir -p /var/run/pgbouncer
+  sudo chown postgres:postgres /var/run/pgbouncer
+  sudo tee /etc/tmpfiles.d/pgbouncer-chatapp.conf >/dev/null <<'TMPFILES'
+d /var/run/pgbouncer 0755 postgres postgres -
+TMPFILES
+  sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgbouncer-chatapp.conf 2>/dev/null || true
   sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 /tmp/pgbouncer-setup.py
   sudo systemctl enable pgbouncer
   # pgbouncer is a sysv service on Ubuntu 22.04 — use the init.d script for

@@ -5,6 +5,8 @@ import exec from 'k6/execution';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
 /**
+ * k6’s embedded Babel does not support numeric separators (e.g. `15_000`); use `15000`.
+ *
  * Load profiles: default `break` finds the failure envelope; `slo` holds a fixed
  * arrival rate for steady-state SLO measurement (pair with metadata.txt git SHA).
  *
@@ -635,7 +637,7 @@ export function channelMessageDeliveryProbe(data) {
           if (postT0 <= 0) return;
           const ms = Date.now() - postT0;
           finished = true;
-          if (ms <= 15_000) {
+          if (ms <= 15000) {
             messageWsDeliveryAfterPostMs.add(ms);
             deliveredWithinSla = true;
           } else {
@@ -673,7 +675,7 @@ export function channelMessageDeliveryProbe(data) {
           optimizationWsMessageDeliveryMissTotal.add(1);
         }
         socket.close();
-      }, 20_000);
+      }, 20000);
     },
   );
 
