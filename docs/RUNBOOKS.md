@@ -99,6 +99,26 @@ Grafana **ChatApp Overview** ([`infrastructure/monitoring/grafana-provisioning/d
 
 **Before release / after delivery changes:** run `cd backend && npm test` (full suite). For a staging grader-style load, compare **POST `/messages` p95/p99** (synchronous fanout adds latency) with **`ws_backpressure_events_total`** and fanout queue depth above.
 
+## Harness outage — correlate a specific time window (minute-level)
+
+COMPAS **outage** bands are often **short**. Repo-wide HTTP **5xx%** panels can stay flat while the harness reports **failed deliveries** (WS SLA), so triage needs **logs + journals** on the exact minutes.
+
+1. Read start/end **UTC** from the harness chart (x-axis).
+2. From a machine with SSH to prod:
+
+   ```bash
+   ./scripts/prod-harness-window.sh '2026-04-12 05:14:00' '2026-04-12 05:22:00'
+   ./scripts/prod-harness-window.sh '2026-04-12 05:53:00' '2026-04-12 06:03:00'
+   ```
+
+   Optional: widen padding around deploys: `PADDING_MIN=3 ./scripts/prod-harness-window.sh '...' '...'`
+
+   The script prints **`chatapp-deploy`** events, **`chatapp@` journal** (warning+), **nginx error.log** lines (upstream reset/refused/timeout), and an **access.log** status histogram for both a **padded** window and your **strict** harness interval (scans the last **ACCESS_TAIL_LINES** lines of access.log — increase if the window is old).
+
+3. **Grafana / Prometheus** for the same UTC range: zoom the dashboard to the outage; check **event-loop lag p99**, **p95 latency**, **WS accepted rate**, **`http_server_requests_aborted_total`** (if panel exists), **fanout queue wait p95**. Harness failures without **5xx** usually show as **lag + aborts + reconnects**, not **ChatAppHigh5xxRate**.
+
+4. Hour-granular nginx only: [`scripts/prod-log-correlate.sh`](../scripts/prod-log-correlate.sh) (POST `/messages` mix per clock hour).
+
 ## After mitigation
 
 Update the incident log, trigger a **staging drill** ([`deploy/STAGING-DRILL-CHECKLIST.md`](../deploy/STAGING-DRILL-CHECKLIST.md)), and open a follow-up if the root cause is uncaught by tests (see [`docs/VERIFICATION-RISK-REGISTER.md`](VERIFICATION-RISK-REGISTER.md)).
