@@ -768,7 +768,7 @@ describe('Multi-socket fanout', () => {
 // ── Unsubscribe isolation ─────────────────────────────────────────────────────
 
 describe('Unsubscribe isolation', () => {
-  it('channel unsubscribe does not block user-scoped community delivery to that socket', async () => {
+  it('stops delivery to an unsubscribed channel socket without affecting other sockets for the same user', async () => {
     const owner = await createAuthenticatedUser('wsunsubowner');
     const member = await createAuthenticatedUser('wsunsubmember');
 
@@ -836,15 +836,15 @@ describe('Unsubscribe isolation', () => {
       socketA.send(JSON.stringify({ type: 'unsubscribe', channel: `channel:${channelId}` }));
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const recipientEventPromiseA = waitForWsEvent(
-        socketA,
+      const recipientEventPromise = waitForWsEvent(
+        socketB,
         (event) =>
           event.event === 'message:created' &&
           event.data?.channel_id === channelId &&
           event.data?.content === 'unsubscribe isolation check',
       );
-      const recipientEventPromiseB = waitForWsEvent(
-        socketB,
+      const noEventPromise = waitForNoWsEvent(
+        socketA,
         (event) =>
           event.event === 'message:created' &&
           event.data?.channel_id === channelId &&
@@ -858,14 +858,10 @@ describe('Unsubscribe isolation', () => {
 
       expect(sendRes.status).toBe(201);
 
-      const [recipientEventA, recipientEventB] = await Promise.all([
-        recipientEventPromiseA,
-        recipientEventPromiseB,
-      ]);
-      expect(recipientEventA.data.content).toBe('unsubscribe isolation check');
-      expect(recipientEventB.data.content).toBe('unsubscribe isolation check');
-      expect(recipientEventA.channel).toBe(`user:${member.user.id}`);
-      expect(recipientEventB.channel).toBe(`user:${member.user.id}`);
+      const recipientEvent = await recipientEventPromise;
+      expect(recipientEvent.data.content).toBe('unsubscribe isolation check');
+      expect(recipientEvent.channel).toBe(`user:${member.user.id}`);
+      await noEventPromise;
     } finally {
       await closeWebSocket(socketA);
       await closeWebSocket(socketB);
