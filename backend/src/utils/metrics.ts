@@ -189,6 +189,22 @@ const pgPoolWaiting = new client.Gauge({
   help: 'Number of requests waiting for a pg pool client (queue depth)',
 });
 
+/** Immediate rejects when checkout queue hits POOL_CIRCUIT_BREAKER_QUEUE (scale DB vs app). */
+const pgPoolCircuitBreakerRejectsTotal = new client.Counter({
+  name: 'pg_pool_circuit_breaker_rejects_total',
+  help: 'Requests rejected because the pg pool waiting queue exceeded the circuit breaker threshold',
+});
+
+/**
+ * Errors from pool.query after checkout (timeouts, refused, etc.).
+ * Use this with pg_pool_waiting and circuit_breaker_rejects to see whether bursts are DB path vs JS.
+ */
+const pgPoolOperationErrorsTotal = new client.Counter({
+  name: 'pg_pool_operation_errors_total',
+  help: 'Errors from pg pool operations, by coarse reason',
+  labelNames: ['operation', 'reason'],
+});
+
 // ── Overload stage ───────────────────────────────────────────────────────────
 
 /**
@@ -202,10 +218,34 @@ const overloadStageGauge = new client.Gauge({
 
 /** Call once after pool is created to start sampling every 500ms */
 function startPgPoolMetrics(pool) {
+  const logger = require('./logger');
+  const circuitMax = parseInt(process.env.POOL_CIRCUIT_BREAKER_QUEUE || '32', 10);
+  const highWatermark = Math.max(8, Math.floor(circuitMax * 0.25));
+  let queueElevatedLogged = false;
+
   setInterval(() => {
+    const waiting = pool.waitingCount;
     pgPoolTotal.set(pool.totalCount);
     pgPoolIdle.set(pool.idleCount);
-    pgPoolWaiting.set(pool.waitingCount);
+    pgPoolWaiting.set(waiting);
+
+    if (waiting >= highWatermark) {
+      if (!queueElevatedLogged) {
+        queueElevatedLogged = true;
+        logger.warn(
+          {
+            poolWaiting: waiting,
+            highWatermark,
+            circuitMax,
+            port: process.env.PORT,
+            msg: 'pg pool checkout queue elevated — correlate with pg_pool_operation_errors_total and PgBouncer SHOW POOLS',
+          },
+          'pg_pool_queue_elevated',
+        );
+      }
+    } else if (waiting <= Math.max(1, Math.floor(highWatermark / 2))) {
+      queueElevatedLogged = false;
+    }
   }, 500).unref();
 }
 
@@ -230,6 +270,10 @@ function startPgPoolMetrics(pool) {
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
     httpRequestsAbortedTotal.inc({ method: 'GET', route: '/api/v1/messages' }, 0);
     httpRequestsAbortedTotal.inc({ method: 'POST', route: '/api/v1/messages' }, 0);
+    pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'acquire_timeout' }, 0);
+    pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'connection' }, 0);
+    pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'shutdown' }, 0);
+    pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'other' }, 0);
   } catch {
     /* ignore during unusual test setups */
   }
@@ -260,4 +304,6 @@ module.exports = {
   wsBootstrapWallDurationMs,
   messageCacheBustFailuresTotal,
   startPgPoolMetrics,
+  pgPoolCircuitBreakerRejectsTotal,
+  pgPoolOperationErrorsTotal,
 };

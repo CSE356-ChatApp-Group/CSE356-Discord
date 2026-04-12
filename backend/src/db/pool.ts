@@ -41,6 +41,21 @@
 
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
+const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal } = require('../utils/metrics');
+
+function classifyPgQueryError(err) {
+  const code = err && err.code;
+  const msg = String((err && err.message) || '');
+  if (
+    code === 'ETIMEDOUT' ||
+    (/timeout/i.test(msg) && (/connect/i.test(msg) || /acquiring/i.test(msg)))
+  ) {
+    return 'acquire_timeout';
+  }
+  if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'ENOTFOUND') return 'connection';
+  if (code === '57P01' || code === '57P03') return 'shutdown';
+  return 'other';
+}
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -130,6 +145,7 @@ class PoolCircuitBreakerError extends Error {
 
 function checkCircuitBreaker(operation) {
   if (pool.waitingCount >= CIRCUIT_BREAKER_QUEUE) {
+    pgPoolCircuitBreakerRejectsTotal.inc();
     logger.warn({ pool: poolStats(), operation }, 'pg-pool circuit breaker open: rejected');
     throw new PoolCircuitBreakerError();
   }
@@ -149,7 +165,12 @@ async function query(sql, params) {
     return result;
   } catch (err) {
     const durationMs = Date.now() - start;
-    logger.error({ err, durationMs, sql: truncateSql(sql), pool: poolStats() }, 'pg: query error');
+    const reason = classifyPgQueryError(err);
+    pgPoolOperationErrorsTotal.inc({ operation: 'query', reason });
+    logger.error(
+      { err, durationMs, sql: truncateSql(sql), pool: poolStats(), pgErrorReason: reason },
+      'pg: query error',
+    );
     throw err;
   }
 }
