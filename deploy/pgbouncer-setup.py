@@ -50,7 +50,28 @@ pg_db   = r.path.lstrip('/')
 # the real PostgreSQL port (5432) for the backend stanza — never loop back.
 pg_backend_port = 5432 if pg_port == 6432 else pg_port
 
+# If .env already targets PgBouncer, urlparse host is loopback — recover real PG host
+# from the existing ini so re-runs of this script do not write host=127.0.0.1.
+if str(pg_port) == '6432' and pg_host in ('127.0.0.1', 'localhost', '::1'):
+    try:
+        existing = open('/etc/pgbouncer/pgbouncer.ini', encoding='utf-8').read()
+        mh = re.search(r'^\s*\S+\s*=\s*host=(\S+)\s+port=(\d+)', existing, re.MULTILINE)
+        if mh:
+            pg_host, pg_backend_port = mh.group(1), int(mh.group(2))
+            print(f'Recovered PgBouncer backend from ini: {pg_host}:{pg_backend_port}')
+    except OSError:
+        pass
+
 print(f'Parsed DATABASE_URL: user={pg_user} host={pg_host}:{pg_port} db={pg_db}')
+
+
+def _pgbouncer_conn_value(val: str) -> str:
+    """Quote values that contain = or whitespace — otherwise password=foo= breaks parsing."""
+    if val == '':
+        return "''"
+    if re.search(r'[\s=]', val) or "'" in val:
+        return "'" + val.replace("'", "''") + "'"
+    return val
 
 # ── PgBouncer pool sizing ───────────────────────────────────────────────────────
 # Target: 2.5:1 virtual-to-real connection ratio (validated against load tests).
@@ -74,7 +95,7 @@ print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} (PGBOUNCE
 # ── Write pgbouncer.ini ─────────────────────────────────────────────────────────
 ini = f"""\
 [databases]
-{pg_db} = host={pg_host} port={pg_backend_port} dbname={pg_db} user={pg_user} password={pg_pass}
+{pg_db} = host={pg_host} port={pg_backend_port} dbname={_pgbouncer_conn_value(pg_db)} user={_pgbouncer_conn_value(pg_user)} password={_pgbouncer_conn_value(pg_pass)}
 
 [pgbouncer]
 listen_addr = 127.0.0.1
