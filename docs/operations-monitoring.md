@@ -64,6 +64,12 @@ sum by (route) (rate(http_server_requests_total{job="chatapp-api"}[5m]))
 max(chatapp_overload_stage{job="chatapp-api"})
 ```
 
+## Auth login/register stampede
+
+Per-credential rate limits use **IP + username/email** as the Redis key. A harness that logs in as **many different synthetic users from one or a few IPs** effectively gets **one bucket per user**, so aggregate traffic can reach **hundreds of req/s** and saturate bcrypt + the event loop (Grafana: `route=/api/v1/auth/login`, `nodejs_eventloop_lag_p99` up, nginx **504**).
+
+Mitigation in code: **global per-IP** limiters (`login_global_ip`, `register_global_ip`) and tunables **`AUTH_LOGIN_GLOBAL_PER_IP_*`**, **`AUTH_REGISTER_GLOBAL_PER_IP_*`** (see [`env.md`](env.md)). **`DISABLE_RATE_LIMITS=true`** disables them (grading-only).
+
 ## Synthetic probe (host alert)
 
 `chatapp_synthetic_probe_success` comes from [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) via node_exporter textfile — see `RUNBOOKS.md` (ChatAppSyntheticProbeFailed).

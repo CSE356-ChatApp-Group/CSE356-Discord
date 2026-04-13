@@ -89,10 +89,14 @@ function issueTokens(res, user) {
   return { accessToken, user: serializeAuthUser(user) };
 }
 
-function buildAuthKey(req, route) {
+function buildClientIp(req) {
   const forwardedFor = req.headers['x-forwarded-for'];
   const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-  const clientIp = (firstForwarded ? firstForwarded.split(',')[0] : req.ip || req.socket?.remoteAddress || 'unknown').trim();
+  return (firstForwarded ? firstForwarded.split(',')[0] : req.ip || req.socket?.remoteAddress || 'unknown').trim();
+}
+
+function buildAuthKey(req, route) {
+  const clientIp = buildClientIp(req);
   const credential = typeof req.body?.email === 'string'
     ? req.body.email.trim().toLowerCase()
     : typeof req.body?.username === 'string'
@@ -125,6 +129,36 @@ function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
   });
 }
 
+/**
+ * Per-client-IP cap across all credentials. Load harnesses often use a unique
+ * username per virtual user; per-credential limits do not damp that stampede.
+ */
+function buildAuthIpLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
+  if (process.env.DISABLE_RATE_LIMITS === 'true') {
+    return (_req, _res, next) => next();
+  }
+  // Jest creates hundreds of distinct users from one synthetic client IP; keep per-credential limits only.
+  if (process.env.NODE_ENV === 'test') {
+    return (_req, _res, next) => next();
+  }
+  return rateLimit({
+    windowMs: parsePositiveIntEnv(process.env[windowEnv], windowMs),
+    limit: parsePositiveIntEnv(process.env[limitEnv], limit),
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `${route}:${buildClientIp(req)}`,
+    store: new RedisStore({
+      sendCommand: (...args) => redis.call(...args),
+      prefix: `rl:${route}-global-ip:`,
+    }),
+    message: { error: 'Too many auth attempts from this network. Please wait and try again.' },
+    handler: (_req, res, _next, options) => {
+      authRateLimitHitsTotal.inc({ route });
+      res.status(options.statusCode).json(options.message);
+    },
+  });
+}
+
 const registerLimiter = buildAuthLimiter('register', {
   limit: 20,
   windowMs: 10 * 60 * 1000,
@@ -137,6 +171,20 @@ const loginLimiter = buildAuthLimiter('login', {
   windowMs: 60 * 1000,
   limitEnv: 'AUTH_LOGIN_RATE_LIMIT_MAX',
   windowEnv: 'AUTH_LOGIN_RATE_LIMIT_WINDOW_MS',
+});
+
+const loginGlobalIpLimiter = buildAuthIpLimiter('login_global_ip', {
+  limit: 480,
+  windowMs: 60 * 1000,
+  limitEnv: 'AUTH_LOGIN_GLOBAL_PER_IP_MAX',
+  windowEnv: 'AUTH_LOGIN_GLOBAL_PER_IP_WINDOW_MS',
+});
+
+const registerGlobalIpLimiter = buildAuthIpLimiter('register_global_ip', {
+  limit: 120,
+  windowMs: 10 * 60 * 1000,
+  limitEnv: 'AUTH_REGISTER_GLOBAL_PER_IP_MAX',
+  windowEnv: 'AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS',
 });
 
 const passwordConnectLimiter = buildAuthLimiter('oauth-connect', {
@@ -285,6 +333,7 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
 
 // ── Register ───────────────────────────────────────────────────────────────────
 router.post('/register',
+  registerGlobalIpLimiter,
   registerLimiter,
   body('email').optional({ nullable: true, checkFalsy: true }).isString(),
   body('username').isString().custom((value) => value.trim().length > 0),
@@ -319,7 +368,7 @@ router.post('/register',
 );
 
 // ── Local Login ────────────────────────────────────────────────────────────────
-router.post('/login', loginLimiter, (req, res, next) => {
+router.post('/login', loginGlobalIpLimiter, loginLimiter, (req, res, next) => {
   passport.authenticate('local', { session: false }, (err, user, info) => {
     if (err)   return next(err);
     if (!user) return res.status(401).json({ error: info?.message || 'Invalid credentials' });
@@ -380,6 +429,7 @@ router.get('/session', async (_req, res, next) => {
 });
 
 router.post('/oauth/complete-create',
+  registerGlobalIpLimiter,
   registerLimiter,
   body('pendingToken').isString().custom((value) => value.trim().length > 0),
   body('username').optional().isString(),

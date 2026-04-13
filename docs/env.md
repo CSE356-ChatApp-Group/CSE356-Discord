@@ -13,7 +13,7 @@ If the VM is **only** hit by course autograders (no general public) and you do n
 On the production host, inspect `/opt/chatapp/shared/.env` (used by systemd `chatapp@` units). **SSH access is required; this checklist is not runnable from CI.**
 
 1. **`DISABLE_RATE_LIMITS`** should **not** be `true` when the app faces untrusted traffic. If set, auth route rate limiting is disabled (register, login, oauth-connect) and the optional RUM limiter is disabled. **Grading-only hosts are an exception** — see above.
-2. **`AUTH_REGISTER_RATE_LIMIT_MAX`**, **`AUTH_LOGIN_RATE_LIMIT_MAX`**, **`AUTH_CONNECT_RATE_LIMIT_MAX`** — only set if you intentionally override [defaults in `backend/src/auth/router.ts`](../backend/src/auth/router.ts) (register 20 / 10 min, login 60 / 1 min, connect 30 / 5 min). Absent vars use those defaults.
+2. **`AUTH_REGISTER_RATE_LIMIT_MAX`**, **`AUTH_LOGIN_RATE_LIMIT_MAX`**, **`AUTH_CONNECT_RATE_LIMIT_MAX`** — only set if you intentionally override [defaults in `backend/src/auth/router.ts`](../backend/src/auth/router.ts) (register 20 / 10 min, login 60 / 1 min, connect 30 / 5 min). Absent vars use those defaults. **`AUTH_LOGIN_GLOBAL_PER_IP_MAX`** / **`AUTH_REGISTER_GLOBAL_PER_IP_MAX`** cap **all** login/register attempts from one client IP (stops harness stampede with unique usernames); raise on large shared NATs if needed.
 3. **Window overrides** (`AUTH_*_RATE_LIMIT_WINDOW_MS`) — same as above; omit unless tuning.
 4. **`OVERLOAD_HTTP_SHED_ENABLED`** — `deploy-prod.sh` sets this to `false`. Production should **not** copy staging values (`true` + low `OVERLOAD_LAG_SHED_MS`) unless you deliberately want HTTP 503 shedding under event-loop lag.
 5. **`AUTH_BYPASS`** — should **not** be `true` when grading real authentication behavior (use `false` for real-user prod). **`deploy-prod.sh`** forces **`AUTH_BYPASS=false`** and **`NODE_ENV=production`** on every deploy.
@@ -46,8 +46,10 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `AUTH_BYPASS` | `true` enables dev bypass (never in prod) |
 | `AUTH_BYPASS_USER_ID`, `AUTH_BYPASS_USER_EMAIL`, `AUTH_BYPASS_USER_USERNAME`, `AUTH_BYPASS_USER_DISPLAY_NAME` | Bypass user profile |
 | `DISABLE_RATE_LIMITS` | `true` disables auth rate limits and (when RUM is enabled) `POST /api/v1/rum` limits; use on isolated grading hosts if desired |
-| `AUTH_REGISTER_RATE_LIMIT_MAX`, `AUTH_REGISTER_RATE_LIMIT_WINDOW_MS` | Register limiter |
-| `AUTH_LOGIN_RATE_LIMIT_MAX`, `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` | Login limiter |
+| `AUTH_REGISTER_RATE_LIMIT_MAX`, `AUTH_REGISTER_RATE_LIMIT_WINDOW_MS` | Register limiter (per IP + credential) |
+| `AUTH_REGISTER_GLOBAL_PER_IP_MAX`, `AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS` | Register cap per client IP only (default 120 / 10 min; **skipped when `NODE_ENV=test`**) |
+| `AUTH_LOGIN_RATE_LIMIT_MAX`, `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` | Login limiter (per IP + credential) |
+| `AUTH_LOGIN_GLOBAL_PER_IP_MAX`, `AUTH_LOGIN_GLOBAL_PER_IP_WINDOW_MS` | Login cap per client IP only (default 480 / min; **skipped when `NODE_ENV=test`** so Jest can mint many users) |
 | `AUTH_CONNECT_RATE_LIMIT_MAX`, `AUTH_CONNECT_RATE_LIMIT_WINDOW_MS` | OAuth connect-existing limiter |
 | `OAUTH_PENDING_SECRET`, `OAUTH_LINK_SECRET` | OAuth state tokens (fallback: JWT secrets) |
 | `BCRYPT_MAX_CONCURRENT`, `BCRYPT_MAX_WAITERS`, `BCRYPT_QUEUE_WAIT_TIMEOUT_MS` | Password hashing queue |
