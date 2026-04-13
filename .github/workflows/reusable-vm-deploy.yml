@@ -58,7 +58,7 @@ env:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, Linux, X64, deploy-prod]
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_DEPLOY != '' && vars.RUNNER_LABEL_DEPLOY || 'deploy-prod' }}"]
     timeout-minutes: 25
     environment: ${{ inputs.environment }}
     steps:

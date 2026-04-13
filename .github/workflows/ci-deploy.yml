@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   deploy-scripts:
-    runs-on: [self-hosted, Linux, X64, gcp]
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
     timeout-minutes: 10
 
     steps:
@@ -52,7 +52,7 @@ jobs:
             check rules /rules/alerts.yml
 
   backend:
-    runs-on: [self-hosted, Linux, X64, gcp]
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
     timeout-minutes: 20
 
     steps:
@@ -92,7 +92,7 @@ jobs:
           retention-days: 7
 
   frontend:
-    runs-on: [self-hosted, Linux, X64, gcp]
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
     timeout-minutes: 20
 
     steps:
@@ -129,7 +129,7 @@ jobs:
       - deploy-scripts
       - backend
       - frontend
-    runs-on: [self-hosted, Linux, X64, gcp]
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
     timeout-minutes: 15
     permissions:
       contents: write
@@ -213,11 +213,17 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs:
       - deploy-staging
-    runs-on: [self-hosted, Linux, X64, gcp]
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard_index: [1, 2]
     env:
       E2E_BASE_URL: ${{ format('http://{0}', vars.STAGING_HOST || '136.114.103.71') }}
       E2E_GLOBAL_TIMEOUT_MS: '2100000'
+      E2E_TOTAL_SHARDS: '2'
       CI: "true"
     steps:
       - uses: actions/checkout@v5
@@ -227,12 +233,21 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run e2e:staging:ci
+      - name: Run staging e2e shard
+        run: |
+          npm --prefix frontend run build
+          npx playwright test \
+            --config frontend/playwright.config.cjs \
+            --grep @staging \
+            --workers=1 \
+            --retries=2 \
+            --reporter=list \
+            --shard=${{ matrix.shard_index }}/${{ env.E2E_TOTAL_SHARDS }}
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-report-${{ github.sha }}
+          name: playwright-report-${{ github.sha }}-shard-${{ matrix.shard_index }}
           path: |
             frontend/playwright-report
             frontend/test-results
@@ -242,7 +257,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs:
       - deploy-staging
-    runs-on: [self-hosted, Linux, X64, gcp]
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
     timeout-minutes: 15
     env:
       API_CONTRACT_BASE_URL: ${{ format('http://{0}/api/v1', vars.STAGING_HOST || '136.114.103.71') }}

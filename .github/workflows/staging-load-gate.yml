@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   k6-slo:
-    runs-on: [self-hosted, Linux, X64, gcp]
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
     timeout-minutes: 30
     env:
       BASE_URL: ${{ vars.STAGING_LOAD_BASE_URL || format('http://{0}/api/v1', vars.STAGING_HOST || '136.114.103.71') }}
