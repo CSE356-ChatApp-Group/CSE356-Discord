@@ -14,7 +14,7 @@ set -euo pipefail
 url="${1:-${BASE_URL:-http://127.0.0.1:4000/health}}"
 deadline="${CURL_MAX_TIME:-5}"
 
-if curl -fsS -o /dev/null --max-time "$deadline" "$url"; then
+if curl -fsSL -o /dev/null --max-time "$deadline" "$url"; then
   val=1
 else
   val=0
