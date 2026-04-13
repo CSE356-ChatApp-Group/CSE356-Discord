@@ -232,14 +232,19 @@
       "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
       "id": 7,
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
         "tooltip": { "mode": "single", "sort": "none" }
       },
       "targets": [
         {
           "expr": "max(process_resident_memory_bytes{job=\"chatapp-api\"}) / 1024 / 1024",
-          "legendFormat": "rss memory",
+          "legendFormat": "rss max (MiB)",
           "refId": "A"
+        },
+        {
+          "expr": "650",
+          "legendFormat": "ChatAppHighMemoryUsage threshold (per process)",
+          "refId": "B"
         }
       ],
       "title": "RSS Memory (MB)",
@@ -684,6 +689,6 @@
   "timezone": "America/New_York",
   "title": "ChatApp Overview",
   "uid": "chatapp-overview",
-  "version": 6,
+  "version": 7,
   "weekStart": ""
 }

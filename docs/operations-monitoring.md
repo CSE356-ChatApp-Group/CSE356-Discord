@@ -45,6 +45,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 | Realtime | `redis_fanout_publish_failures_total`, `ws_bootstrap_wall_duration_ms`, `ws_backpressure_events_total` | Fanout health, WS bootstrap cost, slow clients. |
 | Messages | `message_post_response_total`, `message_cache_bust_failures_total` | POST outcomes and cache bust issues. |
 | Optional RUM | `client_web_vital_*`, `client_rum_batches_total` | Browser-side; requires `ENABLE_CLIENT_RUM` + built frontend flags. |
+| Memory | `process_resident_memory_bytes{job="chatapp-api"}` | **Per Node process** (each `chatapp@` port is a target). **`ChatAppHighMemoryUsage`** in [`alerts.yml`](../infrastructure/monitoring/alerts.yml) fires when RSS **> ~650 MiB for 10m** per target — tune if VM RAM or worker count changes. Grafana overview panel overlays the same threshold. |
 
 ## Example PromQL (instant or range)
 
