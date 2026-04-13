@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   deploy-scripts:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, gcp]
     timeout-minutes: 10
 
     steps:
@@ -52,7 +52,7 @@ jobs:
             check rules /rules/alerts.yml
 
   backend:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, gcp]
     timeout-minutes: 20
 
     steps:
@@ -92,7 +92,7 @@ jobs:
           retention-days: 7
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, gcp]
     timeout-minutes: 20
 
     steps:
@@ -129,7 +129,7 @@ jobs:
       - deploy-scripts
       - backend
       - frontend
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, gcp]
     timeout-minutes: 15
     permissions:
       contents: write
@@ -205,7 +205,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs:
       - deploy-staging
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, gcp]
     timeout-minutes: 45
     env:
       E2E_BASE_URL: ${{ format('http://{0}', vars.STAGING_HOST || '136.114.103.71') }}
@@ -234,7 +234,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs:
       - deploy-staging
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, gcp]
     timeout-minutes: 15
     env:
       API_CONTRACT_BASE_URL: ${{ format('http://{0}/api/v1', vars.STAGING_HOST || '136.114.103.71') }}
