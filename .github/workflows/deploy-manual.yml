@@ -31,7 +31,7 @@ jobs:
   # artifact_name (no long poll in reusable-vm-deploy). If release is not yet
   # published, build/package the artifact in this run as a fallback.
   fetch-release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, deploy-prod]
     timeout-minutes: 15
     steps:
       - name: Checkout target SHA

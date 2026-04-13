@@ -58,7 +58,7 @@ env:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, deploy-prod]
     timeout-minutes: 25
     environment: ${{ inputs.environment }}
     steps:
