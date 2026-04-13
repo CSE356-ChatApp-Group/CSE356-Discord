@@ -62,7 +62,10 @@ if str(pg_port) == '6432' and pg_host in ('127.0.0.1', 'localhost', '::1'):
     except OSError:
         pass
 
-print(f'Parsed DATABASE_URL: user={pg_user} host={pg_host}:{pg_port} db={pg_db}')
+print(
+    f'Parsed DATABASE_URL: user={pg_user} client={r.hostname}:{pg_port} '
+    f'backend={pg_host}:{pg_backend_port} db={pg_db}'
+)
 
 
 def _pgbouncer_conn_value(val: str) -> str:
