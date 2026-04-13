@@ -237,7 +237,7 @@ jobs:
         run: |
           npm --prefix frontend run build
           npx playwright test \
-            --config frontend/playwright.config.cjs \
+            --config frontend/playwright.config.ts \
             --grep @staging \
             --workers=1 \
             --retries=2 \
