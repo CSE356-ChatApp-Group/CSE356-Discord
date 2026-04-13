@@ -89,7 +89,25 @@ command -v nginx >/dev/null
 [ -f /opt/chatapp/shared/.env ]
 [ -f /etc/nginx/sites-available/chatapp ]
 grep -q "/health" /etc/nginx/sites-available/chatapp
-sudo nginx -t >/dev/null 2>&1
+SITE=/etc/nginx/sites-available/chatapp
+if ! sudo nginx -t 2>/tmp/chatapp_nginx_t.err; then
+  cat /tmp/chatapp_nginx_t.err >&2 || true
+  # One-shot heal: standalone proxy_next_upstream_non_idempotent is invalid on stock nginx;
+  # POST retry uses the non_idempotent keyword on proxy_next_upstream (idempotent sed).
+  if grep -q "proxy_next_upstream_non_idempotent" "$SITE" 2>/dev/null; then
+    echo "Preflight: removing invalid proxy_next_upstream_non_idempotent from ${SITE}..." >&2
+    sudo sed -i '/proxy_next_upstream_non_idempotent/d' "$SITE"
+  fi
+  echo "Preflight: normalizing proxy_next_upstream retry line in ${SITE}..." >&2
+  sudo sed -i \
+    's/proxy_next_upstream error timeout http_502 http_503 http_504;/proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;/g' \
+    "$SITE"
+  if ! sudo nginx -t; then
+    echo "ERROR: nginx -t still failing after heal attempt; fix ${SITE} manually." >&2
+    exit 1
+  fi
+  echo "Preflight: nginx config healed (reload happens during deploy)." >&2
+fi
 REMOTE_BASE
   if [[ "$ENVIRONMENT" == "prod" ]]; then
     cat <<'REMOTE_PROD'
