@@ -269,4 +269,62 @@ describe('CommunitySidebar presence badge', () => {
 
     expect(screen.queryByTestId('home-dms-unread-indicator')).not.toBeInTheDocument();
   });
+
+  it('refreshes browseable communities while searching so newly created ones can appear', async () => {
+    vi.useFakeTimers();
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/communities') {
+        const calls = apiGet.mock.calls.filter(([calledPath]) => calledPath === '/communities').length;
+        if (calls <= 1) {
+          return Promise.resolve({
+            communities: [{ id: 'community-old', name: 'Beta', slug: 'beta' }],
+          });
+        }
+        return Promise.resolve({
+          communities: [
+            { id: 'community-old', name: 'Beta', slug: 'beta' },
+            { id: 'community-new', name: 'Alpha World', slug: 'alpha-world' },
+          ],
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    act(() => {
+      useAuthStore.setState({
+        user: {
+          id: 'user-1',
+          username: 'sam',
+          displayName: 'Sam',
+          email: 'sam@example.com',
+        },
+      } as any);
+      useChatStore.setState({
+        communities: [],
+        activeCommunity: null,
+        conversations: [],
+        activeConv: null,
+      } as any);
+    });
+
+    render(<CommunitySidebar />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('community-join-open'));
+    });
+
+    expect(await screen.findByTestId('community-join-search')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('community-join-search'), { target: { value: 'alpha' } });
+      await vi.advanceTimersByTimeAsync(300);
+    });
+
+    await waitFor(() => {
+      expect(apiGet.mock.calls.filter(([path]) => path === '/communities').length).toBeGreaterThanOrEqual(2);
+      expect(screen.getByTestId('community-join-item-community-new')).toBeInTheDocument();
+    });
+
+    vi.useRealTimers();
+  });
 });

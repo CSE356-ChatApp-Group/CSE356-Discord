@@ -110,6 +110,8 @@ async function listChannelLifecycleAudience(communityId, channelId, client = { q
 }
 
 async function publishChannelLifecycleEvent(communityId, event, data) {
+  await fanout.publish(`community:${communityId}`, { event, data });
+
   if (event === 'channel:deleted') {
     const userIds = await listCommunityUserIds(communityId);
     await Promise.allSettled(

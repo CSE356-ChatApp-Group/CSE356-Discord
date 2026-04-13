@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { api, resolveApiAbsolutePath } from '../lib/api';
@@ -565,15 +565,38 @@ function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoin
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState('');
 
-  useEffect(() => {
-    api.get('/communities')
-      .then(data => {
-        const browseable = (data?.communities ?? []).filter((c: any) => !c.my_role);
-        setAllCommunities(browseable);
-      })
-      .catch(e => setErr(e?.message || 'Could not load communities'))
-      .finally(() => setLoading(false));
+  const loadCommunities = useCallback(async (showLoading = false) => {
+    if (showLoading) setLoading(true);
+    setErr('');
+    try {
+      const data = await api.get('/communities');
+      const browseable = (data?.communities ?? []).filter((c: any) => !c.my_role);
+      setAllCommunities(browseable);
+    } catch (e: any) {
+      setErr(e?.message || 'Could not load communities');
+    } finally {
+      if (showLoading) setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadCommunities(true);
+  }, [loadCommunities]);
+
+  useEffect(() => {
+    if (!query.trim()) return;
+    const timer = window.setTimeout(() => {
+      void loadCommunities(false);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [loadCommunities, query]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void loadCommunities(false);
+    }, query.trim() ? 1000 : 5000);
+    return () => window.clearInterval(interval);
+  }, [loadCommunities, query]);
 
   const filtered = query.trim()
     ? allCommunities.filter(c =>
@@ -602,6 +625,7 @@ function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoin
           placeholder="Search communities…"
           value={query}
           onChange={e => setQuery(e.target.value)}
+          onFocus={() => { void loadCommunities(false); }}
           autoFocus
           data-testid="community-join-search"
         />
