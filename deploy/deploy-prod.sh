@@ -21,6 +21,9 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-16384}"
 ALLOW_DB_RESTART="${ALLOW_DB_RESTART:-false}"
 RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
+# Dual-worker safety: keep both upstreams by default during companion restart.
+# Set true only if you explicitly want candidate-only routing before 9b.
+PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-false}"
 # PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
@@ -818,14 +821,15 @@ echo "✓ Nginx /api retry policy OK"
 
 # 9b–9c. Dual-worker prod: roll the companion to this release, then restore both backends in nginx.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
-  echo "9a. Pinning nginx to candidate (${NEW_PORT}) before companion restart..."
-  ssh "$PROD_USER@$PROD_HOST" "
-    set -euo pipefail
-    export NEW_PORT='${NEW_PORT}'
-    TMP_SITE=\$(mktemp)
-    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
-    export TMP_SITE
-    python3 <<'PY'
+  if [ "${PIN_CANDIDATE_BEFORE_COMPANION}" = "true" ]; then
+    echo "9a. Pinning nginx to candidate (${NEW_PORT}) before companion restart..."
+    ssh "$PROD_USER@$PROD_HOST" "
+      set -euo pipefail
+      export NEW_PORT='${NEW_PORT}'
+      TMP_SITE=\$(mktemp)
+      sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+      export TMP_SITE
+      python3 <<'PY'
 import os, re
 cfg_path = os.environ['TMP_SITE']
 newp = os.environ['NEW_PORT']
@@ -845,21 +849,37 @@ if n != 1:
     raise SystemExit('step 9a: upstream app block not replaced (n=%d)' % (n,))
 open(cfg_path, 'w').write(text)
 PY
-    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
-    rm -f \"\$TMP_SITE\"
-    sudo nginx -t >/dev/null
-    sudo systemctl reload nginx
-    echo 'Nginx: candidate-only upstream before companion roll'
-  " || {
-    echo "ERROR: Nginx pin to candidate (9a) failed."
-    rollback_cutover
-    exit 1
-  }
-  echo "✓ Nginx pinned to candidate"
+      sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+      rm -f \"\$TMP_SITE\"
+      sudo nginx -t >/dev/null
+      sudo systemctl reload nginx
+      echo 'Nginx: candidate-only upstream before companion roll'
+    " || {
+      echo "ERROR: Nginx pin to candidate (9a) failed."
+      rollback_cutover
+      exit 1
+    }
+    echo "✓ Nginx pinned to candidate"
+  else
+    echo "9a. Keeping dual upstreams during companion restart (PIN_CANDIDATE_BEFORE_COMPANION=false)."
+    echo "✓ No single-upstream window introduced"
+  fi
 
   echo "9a.1 Verifying candidate stays healthy before companion restart..."
-  if ! ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh ${NEW_PORT} http://127.0.0.1:${NEW_PORT}"; then
-    echo "ERROR: Candidate failed health check just before companion roll."
+  if ! ssh "$PROD_USER@$PROD_HOST" "
+    set -euo pipefail
+    ok=0
+    for i in 1 2 3; do
+      if /tmp/health-check.sh ${NEW_PORT} http://127.0.0.1:${NEW_PORT} >/dev/null 2>&1; then
+        ok=\$((ok+1))
+      else
+        ok=0
+      fi
+      sleep 1
+    done
+    [ \"\$ok\" -ge 3 ]
+  "; then
+    echo "ERROR: Candidate failed consecutive health checks just before companion roll."
     rollback_cutover
     exit 1
   fi
@@ -897,6 +917,19 @@ PY
   }
   if ! ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh ${OLD_PORT} http://127.0.0.1:${OLD_PORT}"; then
     echo "ERROR: Health check failed on companion port ${OLD_PORT}."
+    rollback_cutover
+    exit 1
+  fi
+  if ! ssh "$PROD_USER@$PROD_HOST" "
+    set -euo pipefail
+    fails=0
+    for i in 1 2 3 4; do
+      /tmp/health-check.sh ${OLD_PORT} http://127.0.0.1:${OLD_PORT} >/dev/null 2>&1 || fails=\$((fails+1))
+      sleep 1
+    done
+    [ \"\$fails\" -eq 0 ]
+  "; then
+    echo "ERROR: Companion port ${OLD_PORT} failed warm-up checks."
     rollback_cutover
     exit 1
   fi
