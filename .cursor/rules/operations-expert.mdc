@@ -1,0 +1,16 @@
+---
+description: ChatApp on-call — metrics, outages, tuning; use with docs/operations-monitoring.md
+alwaysApply: true
+---
+
+# Operations and metrics discipline
+
+When the user asks about **latency, outages, capacity, alerts, or production behavior**:
+
+1. **Read** `docs/operations-monitoring.md` for metric names, PromQL patterns, and how to pull a **Prometheus snapshot** the agent can analyze.
+2. **Triage** with `docs/RUNBOOKS.md` and exact thresholds in `infrastructure/monitoring/alerts.yml`.
+3. **Code truth** for exported series: `backend/src/utils/metrics.ts` and `backend/src/utils/overload.ts`.
+
+**Telemetry for the agent:** Ask the user to run `PROMETHEUS_URL=... ./scripts/metrics-snapshot.sh` (optionally `--write var/metrics-snapshot.txt`) from any host that can reach Prometheus, then **paste the output**. Do not invent metric values.
+
+Prefer **evidence → change**: snapshot + logs correlation, then **minimal** code or config patches. Keep `docs/env.md` in sync when adding tunables.

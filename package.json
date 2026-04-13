@@ -14,6 +14,7 @@
     "monitoring:restart": "docker compose restart prometheus grafana alertmanager loki promtail tempo node-exporter && ./scripts/monitoring-status.sh",
     "monitoring:logs": "docker compose logs -f prometheus grafana alertmanager loki promtail tempo node-exporter",
     "monitoring:down": "docker compose stop prometheus grafana alertmanager loki promtail tempo node-exporter",
+    "metrics:snapshot": "bash scripts/metrics-snapshot.sh",
     "load:staging": "./scripts/run-staging-capacity.sh break",
     "load:staging:smoke": "./scripts/run-staging-capacity.sh smoke",
     "load:staging:quick": "./scripts/run-staging-capacity.sh quick",

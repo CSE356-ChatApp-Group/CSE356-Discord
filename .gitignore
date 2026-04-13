@@ -15,3 +15,6 @@ playwright-report/
 blob-report/
 artifacts/load-tests/*
 !artifacts/load-tests/.gitkeep
+
+# Local Prometheus snapshots (paste into chat for agent triage; may contain internal IPs)
+var/

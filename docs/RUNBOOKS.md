@@ -2,6 +2,8 @@
 
 Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml). Replace hostnames with your environment.
 
+**Metric names, PromQL, and how to export a snapshot for debugging:** [`operations-monitoring.md`](operations-monitoring.md).
+
 ## ChatAppSyntheticProbeFailed
 
 Fires when the **host-local** synthetic probe (see [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh), `TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile`) reports **`chatapp_synthetic_probe_success == 0`** for 10 minutes. This is **not** the COMPAS harness; it is a curl to **`http://127.0.0.1/health`** through normal routing.

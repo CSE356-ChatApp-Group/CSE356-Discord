@@ -41,6 +41,7 @@ jobs:
           bash -n deploy/install-db-metrics-exporters.sh
           node --check deploy/candidate-ws-smoke.cjs
           bash -n scripts/synthetic-probe.sh
+          bash -n scripts/metrics-snapshot.sh
           python3 -m py_compile deploy/ensure-pgdump-env.py
           python3 -m py_compile deploy/prometheus-db-file-sd.py
           node --check backend/scripts/api-contract-harness.cjs
