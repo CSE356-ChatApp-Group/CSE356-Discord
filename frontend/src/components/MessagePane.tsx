@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { useAutoResize } from '../hooks/useAutoResize';
@@ -46,8 +47,8 @@ export default function MessagePane() {
     activeCommunity,
     activeChannel,
     activeConv,
-    messages,
-    messagePagination,
+    msgList,
+    paginationState,
     sendMessage,
     fetchMessages,
     search,
@@ -63,13 +64,40 @@ export default function MessagePane() {
     renameGroupDm,
     updateChannel,
     members,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => {
+      const activeChannel = s.activeChannel;
+      const activeConv = s.activeConv;
+      const target = activeChannel || activeConv;
+      const key = target?.id;
+      return {
+        activeCommunity: s.activeCommunity,
+        activeChannel,
+        activeConv,
+        msgList: key ? (s.messages[key] || []) : [],
+        paginationState: (key && s.messagePagination[key]) || { hasOlder: false, hasNewer: false },
+        sendMessage: s.sendMessage,
+        fetchMessages: s.fetchMessages,
+        search: s.search,
+        searchResults: s.searchResults,
+        clearSearch: s.clearSearch,
+        resetSearchFilters: s.resetSearchFilters,
+        jumpTargetMessageId: s.jumpTargetMessageId,
+        clearJumpTargetMessage: s.clearJumpTargetMessage,
+        fetchChannelMembers: s.fetchChannelMembers,
+        inviteToChannel: s.inviteToChannel,
+        inviteToConversation: s.inviteToConversation,
+        leaveConversation: s.leaveConversation,
+        renameGroupDm: s.renameGroupDm,
+        updateChannel: s.updateChannel,
+        members: s.members,
+      };
+    }),
+  );
   const user = useAuthStore(s => s.user);
 
   const target   = activeChannel || activeConv;
   const key      = target?.id;
-  const msgList  = (messages[key] || []);
-  const paginationState = (key && messagePagination[key]) || { hasOlder: false, hasNewer: false };
 
   const [content, setContent]     = useState('');
   const [sending, setSending]     = useState(false);

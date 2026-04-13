@@ -5,20 +5,39 @@
 # Usage:
 #   ./scripts/synthetic-probe.sh 'https://example.com/health'
 #   BASE_URL=https://example.com/health ./scripts/synthetic-probe.sh
+#   SYNTHETIC_PROBE_URLS='http://127.0.0.1/health http://127.0.0.1:4000/health' ./scripts/synthetic-probe.sh
+#
+# URL resolution (first match wins):
+#   1) First positional argument (single URL)
+#   2) BASE_URL (single URL)
+#   3) SYNTHETIC_PROBE_URLS (space-separated; each tried in order until one succeeds)
+#   4) Default list: nginx :80 first, then common Node ports (matches prod/staging layouts)
 #
 # Optional: write Prometheus textfile metrics for node_exporter (collector.textfile.directory):
-#   TEXTFILE_DIR=/var/lib/node_exporter/textfile_collector ./scripts/synthetic-probe.sh 'http://127.0.0.1/health'
+#   TEXTFILE_DIR=/var/lib/node_exporter/textfile_collector ./scripts/synthetic-probe.sh
 #
 set -euo pipefail
 
-url="${1:-${BASE_URL:-http://127.0.0.1:4000/health}}"
-deadline="${CURL_MAX_TIME:-5}"
+deadline="${CURL_MAX_TIME:-10}"
 
-if curl -fsSL -o /dev/null --max-time "$deadline" "$url"; then
-  val=1
+urls=""
+if [[ -n "${1:-}" ]]; then
+  urls="$1"
+elif [[ -n "${BASE_URL:-}" ]]; then
+  urls="${BASE_URL}"
+elif [[ -n "${SYNTHETIC_PROBE_URLS:-}" ]]; then
+  urls="${SYNTHETIC_PROBE_URLS}"
 else
-  val=0
+  urls="http://127.0.0.1/health http://127.0.0.1:4000/health http://127.0.0.1:4001/health http://127.0.0.1:3000/health"
 fi
+
+val=0
+for url in $urls; do
+  if curl -fsSL -o /dev/null --max-time "$deadline" "$url"; then
+    val=1
+    break
+  fi
+done
 
 ts_sec="$(date +%s)"
 

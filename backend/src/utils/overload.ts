@@ -87,8 +87,9 @@ function shouldRejectSearchRequests() {
 
 function searchLimit(baseLimit) {
   const stage = getStage();
-  if (stage >= 2) return Math.min(baseLimit, 10);
-  if (stage >= 1) return Math.min(baseLimit, 15);
+  // Tighter caps under load — fewer rows scanned per search (protects DB + pool).
+  if (stage >= 2) return Math.min(baseLimit, 6);
+  if (stage >= 1) return Math.min(baseLimit, 12);
   return baseLimit;
 }
 

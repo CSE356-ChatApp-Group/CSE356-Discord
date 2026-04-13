@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { api, resolveApiAbsolutePath } from '../lib/api';
@@ -23,7 +24,18 @@ export default function CommunitySidebar() {
     createCommunity,
     fetchCommunities,
     openHome,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      communities: s.communities,
+      activeCommunity: s.activeCommunity,
+      conversations: s.conversations,
+      activeConv: s.activeConv,
+      selectCommunity: s.selectCommunity,
+      createCommunity: s.createCommunity,
+      fetchCommunities: s.fetchCommunities,
+      openHome: s.openHome,
+    })),
+  );
   const logout = useAuthStore(s => s.logout);
   const user   = useAuthStore(s => s.user);
   const setUser = useAuthStore(s => s.setUser);
@@ -592,9 +604,10 @@ function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoin
   }, [loadCommunities, query]);
 
   useEffect(() => {
+    // Debounced fetch on typing + focus already keeps data fresh; poll lightly to avoid API storms.
     const interval = window.setInterval(() => {
       void loadCommunities(false);
-    }, query.trim() ? 1000 : 5000);
+    }, query.trim() ? 3000 : 20000);
     return () => window.clearInterval(interval);
   }, [loadCommunities, query]);
 

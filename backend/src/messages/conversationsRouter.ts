@@ -18,6 +18,7 @@ const presenceService  = require('../presence/service');
 const { invalidateWsBootstrapCache } = require('../websocket/server');
 const { bustConversationMessagesCache } = require('./messageCacheBust');
 const { wrapFanoutPayload } = require('./realtimePayload');
+const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 
 const router = express.Router();
 router.use(authenticate);
@@ -169,12 +170,16 @@ router.get('/', async (req, res, next) => {
   const cacheKey = conversationsCacheKey(req.user.id);
   try {
     const cached = await redis.get(cacheKey);
-    if (cached) return res.json(JSON.parse(cached));
+    if (cached) {
+      recordEndpointListCache('conversations', 'hit');
+      return res.json(JSON.parse(cached));
+    }
   } catch {
     // cache miss – fall through to DB
   }
 
   if (conversationsInflight.has(cacheKey)) {
+    recordEndpointListCache('conversations', 'coalesced');
     try {
       return res.json(await conversationsInflight.get(cacheKey));
     } catch (err) {
@@ -182,6 +187,7 @@ router.get('/', async (req, res, next) => {
     }
   }
 
+  recordEndpointListCache('conversations', 'miss');
   const promise: Promise<{ conversations: any[] }> = (async () => {
     const { rows } = await query(
       `SELECT c.*,

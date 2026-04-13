@@ -31,7 +31,8 @@ const usersRouter        = require('./auth/usersRouter');
 
 const app = express();
 app.set('trust proxy', 1);
-const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal } = require('./utils/metrics');
+const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal, pgQueriesPerRequestHistogram } = require('./utils/metrics');
+const { run: runDbContext } = require('./utils/requestDbContext');
 
 // Optional fail-fast when event-loop lag is extreme (OVERLOAD_HTTP_SHED_ENABLED=true).
 app.use((req, res, next) => {
@@ -65,6 +66,19 @@ function classifyRoute(req) {
   }
   return 'unmatched';
 }
+
+// Attribute successful `pool.query` calls to this HTTP request for `pg_queries_per_http_request`.
+app.use((req, res, next) => {
+  const pathOnly = (req.path || '').split('?')[0];
+  if (isQuietPath(pathOnly)) return next();
+  const store = { count: 0 };
+  runDbContext(store, () => {
+    res.on('finish', () => {
+      pgQueriesPerRequestHistogram.observe({ route: classifyRoute(req) }, store.count);
+    });
+    next();
+  });
+});
 
 // ── Security / Utility middleware ──────────────────────────────────────────────
 app.use(helmet());
@@ -203,6 +217,9 @@ api.use('/presence',      presenceRouter);
 api.use('/search',        searchRouter);
 api.use('/attachments',   attachmentsRouter);
 
+if (process.env.ENABLE_CLIENT_RUM === 'true') {
+  app.use('/api/v1', require('./rum/router'));
+}
 app.use('/api/v1', api);
 
 app.use((req, res) => {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { api } from '../lib/api';
@@ -10,7 +11,22 @@ export default function ChannelSidebar() {
     activeCommunity, channels, activeChannel,
     conversations, activeConv,
     selectChannel, selectConversation, createChannel, deleteChannel, deleteCommunity, leaveCommunity, openDm,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      activeCommunity: s.activeCommunity,
+      channels: s.channels,
+      activeChannel: s.activeChannel,
+      conversations: s.conversations,
+      activeConv: s.activeConv,
+      selectChannel: s.selectChannel,
+      selectConversation: s.selectConversation,
+      createChannel: s.createChannel,
+      deleteChannel: s.deleteChannel,
+      deleteCommunity: s.deleteCommunity,
+      leaveCommunity: s.leaveCommunity,
+      openDm: s.openDm,
+    })),
+  );
   const user = useAuthStore(s => s.user);
   const [showCreate, setShowCreate] = useState(false);
   const [showNewDm, setShowNewDm] = useState(false);

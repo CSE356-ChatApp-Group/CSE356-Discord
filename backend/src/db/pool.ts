@@ -41,7 +41,35 @@
 
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
+const { incrementDbQuery } = require('../utils/requestDbContext');
 const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal } = require('../utils/metrics');
+
+/**
+ * Count successful `client.query` calls toward the same per-request histogram as `query()`.
+ */
+function wrapPoolClientForRequestMetrics(client) {
+  const origQuery = client.query.bind(client);
+  client.query = function queryWrapped(...args) {
+    const last = args[args.length - 1];
+    if (typeof last === 'function') {
+      const cb = last;
+      const rest = args.slice(0, -1);
+      return origQuery(...rest, (err, result) => {
+        if (!err) incrementDbQuery();
+        cb(err, result);
+      });
+    }
+    const p = origQuery(...args);
+    if (p && typeof p.then === 'function') {
+      return p.then((result) => {
+        incrementDbQuery();
+        return result;
+      });
+    }
+    return p;
+  };
+  return client;
+}
 
 function classifyPgQueryError(err) {
   const code = err && err.code;
@@ -158,6 +186,7 @@ async function query(sql, params) {
   const start = Date.now();
   try {
     const result = await pool.query(sql, params);
+    incrementDbQuery();
     const durationMs = Date.now() - start;
     if (durationMs >= SLOW_QUERY_MS) {
       logger.warn({ durationMs, sql: truncateSql(sql), pool: poolStats() }, 'pg: slow query');
@@ -179,7 +208,7 @@ async function query(sql, params) {
 
 async function getClient() {
   checkCircuitBreaker('getClient');
-  return pool.connect();
+  return wrapPoolClientForRequestMetrics(await pool.connect());
 }
 
 // ── Transaction convenience wrapper ───────────────────────────────────────────
@@ -191,7 +220,7 @@ async function getClient() {
  */
 async function withTransaction(callback) {
   checkCircuitBreaker('withTransaction');
-  const client = await pool.connect();
+  const client = wrapPoolClientForRequestMetrics(await pool.connect());
   try {
     await client.query('BEGIN');
     const result = await callback(client);

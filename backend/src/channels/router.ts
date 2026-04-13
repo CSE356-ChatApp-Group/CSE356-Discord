@@ -22,6 +22,7 @@ const {
   invalidateWsBootstrapCache,
   evictUnauthorizedChannelSubscribers,
 } = require('../websocket/server');
+const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 
 const router = express.Router();
 router.use(authenticate);
@@ -172,10 +173,12 @@ router.get('/',
       const cacheKey = `channels:list:${communityId}:${userId}`;
       const cached = await redis.get(cacheKey).catch(() => null);
       if (cached) {
+        recordEndpointListCache('channels', 'hit');
         return res.json(JSON.parse(cached));
       }
 
       if (channelsListInflight.has(cacheKey)) {
+        recordEndpointListCache('channels', 'coalesced');
         try {
           const result = await channelsListInflight.get(cacheKey);
           if (!result.ok) {
@@ -187,6 +190,7 @@ router.get('/',
         }
       }
 
+      recordEndpointListCache('channels', 'miss');
       const promise = (async () => {
         const { rows: membership } = await query(
           `SELECT 1

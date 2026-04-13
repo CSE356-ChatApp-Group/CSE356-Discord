@@ -16,8 +16,22 @@
 
 'use strict';
 
-const { query } = require('../db/pool');
+const { withTransaction } = require('../db/pool');
 const logger = require('../utils/logger');
+
+/**
+ * Run search SQL inside a short transaction with statement_timeout so one bad query
+ * cannot hold a pool slot for ~15s (which starves messages / WS under load).
+ */
+async function runSearchQuery(sql: string, params: any[]) {
+  const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
+  const timeoutMs = Math.min(Math.max(parseInt(rawMs || '8000', 10), 1000), 120000);
+  return withTransaction(async (client) => {
+    await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    const { rows } = await client.query(sql, params);
+    return rows;
+  });
+}
 
 const SELECT_COLS = `
   m.id,
@@ -185,63 +199,8 @@ async function searchFts(q: string, opts: Record<string, any>): Promise<any> {
     ORDER BY m.created_at DESC
     LIMIT ${limitPh} OFFSET ${offsetPh}`;
 
-  const { rows } = await query(sql, params);
+  const rows = await runSearchQuery(sql, params);
   return buildResult(rows, q, offset, limit);
-}
-
-/**
- * Single round-trip: same semantics as searchFts then searchTrigram when the FTS page
- * is empty (including offset past FTS matches). Cuts pool/RTT latency on the fallback path.
- */
-async function searchFtsPageOrTrigramOneRoundTrip(q: string, opts: Record<string, any>): Promise<any> {
-  const params: any[] = [q];
-  const filters = buildFilters(params, opts);
-  const limit = Number(opts.limit) || 20;
-  const offset = Number(opts.offset) || 0;
-  const ilikePh = p(params, `%${q}%`);
-  const limitFts = p(params, limit);
-  const offsetFts = p(params, offset);
-  const limitTri = p(params, limit);
-  const offsetTri = p(params, offset);
-
-  const sql = `
-    WITH fts_hits AS (
-      SELECT ${SELECT_COLS},
-        ts_headline(
-          'english',
-          coalesce(m.content, ''),
-          websearch_to_tsquery('english', $1),
-          'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
-        ) AS highlight,
-        ts_rank(m.content_tsv, websearch_to_tsquery('english', $1)) AS _rank
-      ${FROM_CLAUSE}
-      WHERE m.deleted_at IS NULL
-        AND m.content_tsv @@ websearch_to_tsquery('english', $1)
-        ${filters}
-      ORDER BY m.created_at DESC
-      LIMIT ${limitFts} OFFSET ${offsetFts}
-    )
-    (SELECT * FROM fts_hits)
-    UNION ALL
-    (
-      SELECT ${SELECT_COLS},
-        NULL::text AS highlight,
-        0::double precision AS _rank
-      ${FROM_CLAUSE}
-      WHERE m.deleted_at IS NULL
-        AND NOT EXISTS (SELECT 1 FROM fts_hits)
-        AND m.content ILIKE ${ilikePh}
-        ${filters}
-      ORDER BY m.created_at DESC
-      LIMIT ${limitTri} OFFSET ${offsetTri}
-    )`;
-
-  const { rows } = await query(sql, params);
-  const processed = rows.map((row) => {
-    if (row.highlight != null) return row;
-    return { ...row, highlight: highlightIlike(row.content, q) };
-  });
-  return buildResult(processed, q, offset, limit);
 }
 
 /**
@@ -266,7 +225,7 @@ async function searchTrigram(q: string, opts: Record<string, any>): Promise<any>
     ORDER BY m.created_at DESC
     LIMIT ${limitPh} OFFSET ${offsetPh}`;
 
-  const { rows } = await query(sql, params);
+  const rows = await runSearchQuery(sql, params);
   const processed = rows.map(row => ({ ...row, highlight: highlightIlike(row.content, q) }));
   return buildResult(processed, q, offset, limit);
 }
@@ -287,16 +246,16 @@ async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
     ORDER BY m.created_at DESC
     LIMIT ${limitPh} OFFSET ${offsetPh}`;
 
-  const { rows } = await query(sql, params);
+  const rows = await runSearchQuery(sql, params);
   return buildResult(rows, '', offset, limit);
 }
 
 /**
  * search – main entry point.
  *
- * Uses FTS (tsvector GIN index) as the primary path for ranked, stemmed,
- * phrase-aware search.  Falls back to trigram ILIKE when FTS returns zero
- * results so partial/infix queries still resolve.
+ * FTS first (GIN). Trigram ILIKE only when allowed: always for scoped searches,
+ * and for unscoped only when the query is long enough — short unscoped queries
+ * used to fan out ILIKE %q% across all visible messages and stall the DB for many seconds.
  *
  * @param q     Raw query string (validated by caller: non-empty when present)
  * @param opts  { channelId?, conversationId?, userId, authorId?, after?, before?, limit?, offset? }
@@ -306,22 +265,27 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
     return searchFilteredOnly(opts);
   }
 
+  const trimmed = String(q).trim();
+  const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
+  const minTrigramUnscoped = Math.min(
+    Math.max(parseInt(process.env.SEARCH_TRIGRAM_MIN_LEN_UNSCOPED || '4', 10), 1),
+    32,
+  );
+  const allowTrigramFallback = scoped || trimmed.length >= minTrigramUnscoped;
+
   try {
-    return await searchFtsPageOrTrigramOneRoundTrip(q, opts);
+    const fts = await searchFts(trimmed, opts);
+    if (fts.hits.length > 0) return fts;
+    if (!allowTrigramFallback) return fts;
+    return await searchTrigram(trimmed, opts);
   } catch (err) {
-    logger.warn({ err }, 'Combined FTS/trigram search failed; using sequential FTS then trigram');
+    logger.warn({ err }, 'search FTS failed; optional trigram retry');
+    if (!allowTrigramFallback) throw err;
     try {
-      const fts = await searchFts(q, opts);
-      if (fts.hits.length > 0) return fts;
-      return await searchTrigram(q, opts);
-    } catch (seqErr) {
-      logger.warn({ err: seqErr }, 'Sequential FTS search failed, falling back to trigram');
-      try {
-        return await searchTrigram(q, opts);
-      } catch (fallbackErr) {
-        logger.error({ err: fallbackErr }, 'Trigram fallback also failed');
-        throw fallbackErr;
-      }
+      return await searchTrigram(trimmed, opts);
+    } catch (triErr) {
+      logger.error({ err: triErr }, 'search trigram fallback failed');
+      throw triErr;
     }
   }
 }

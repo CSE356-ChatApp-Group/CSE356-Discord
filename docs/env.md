@@ -4,13 +4,15 @@ Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool s
 
 ## Grading / autograder hosts
 
-If the VM is **only** hit by course autograders (no general public) and you do not care about auth brute-force or spam, set **`DISABLE_RATE_LIMITS=true`** in `/opt/chatapp/shared/.env`, then restart the API (`sudo systemctl restart 'chatapp@*'` or your usual rollout). That removes throttling on register, login, and OAuth connect ([`backend/src/auth/router.ts`](../backend/src/auth/router.ts)). Omit or set to `false` when you want limits back.
+If the VM is **only** hit by course autograders (no general public) and you do not care about auth brute-force or spam, set **`DISABLE_RATE_LIMITS=true`** in `/opt/chatapp/shared/.env`, then restart the API (`sudo systemctl restart 'chatapp@*'` or your usual rollout). That removes throttling on register, login, and OAuth connect ([`backend/src/auth/router.ts`](../backend/src/auth/router.ts)), and also disables the optional **`POST /api/v1/rum`** rate limiter when browser RUM is enabled ([`backend/src/rum/router.ts`](../backend/src/rum/router.ts)). Omit or set to `false` when you want limits back.
+
+**POST `/api/v1/messages` (channel):** The API awaits Redis fanout to every visible member’s `user:<id>` topic before returning **201** with `realtimeFanoutComplete: true` (server-side publish complete). Delivery to each grader browser over WebSocket can still take additional time; harnesses often allow on the order of **~15 seconds** for every client to observe the message—outside the HTTP response latency.
 
 ## Production shared `.env` audit (real-user deployments)
 
 On the production host, inspect `/opt/chatapp/shared/.env` (used by systemd `chatapp@` units). **SSH access is required; this checklist is not runnable from CI.**
 
-1. **`DISABLE_RATE_LIMITS`** should **not** be `true` when the app faces untrusted traffic. If set, all auth route rate limiting is disabled (register, login, oauth-connect). **Grading-only hosts are an exception** — see above.
+1. **`DISABLE_RATE_LIMITS`** should **not** be `true` when the app faces untrusted traffic. If set, auth route rate limiting is disabled (register, login, oauth-connect) and the optional RUM limiter is disabled. **Grading-only hosts are an exception** — see above.
 2. **`AUTH_REGISTER_RATE_LIMIT_MAX`**, **`AUTH_LOGIN_RATE_LIMIT_MAX`**, **`AUTH_CONNECT_RATE_LIMIT_MAX`** — only set if you intentionally override [defaults in `backend/src/auth/router.ts`](../backend/src/auth/router.ts) (register 20 / 10 min, login 60 / 1 min, connect 30 / 5 min). Absent vars use those defaults.
 3. **Window overrides** (`AUTH_*_RATE_LIMIT_WINDOW_MS`) — same as above; omit unless tuning.
 4. **`OVERLOAD_HTTP_SHED_ENABLED`** — `deploy-prod.sh` sets this to `false`. Production should **not** copy staging values (`true` + low `OVERLOAD_LAG_SHED_MS`) unless you deliberately want HTTP 503 shedding under event-loop lag.
@@ -43,7 +45,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **Auth / dev** | |
 | `AUTH_BYPASS` | `true` enables dev bypass (never in prod) |
 | `AUTH_BYPASS_USER_ID`, `AUTH_BYPASS_USER_EMAIL`, `AUTH_BYPASS_USER_USERNAME`, `AUTH_BYPASS_USER_DISPLAY_NAME` | Bypass user profile |
-| `DISABLE_RATE_LIMITS` | `true` disables auth rate limits; use on isolated grading hosts if desired |
+| `DISABLE_RATE_LIMITS` | `true` disables auth rate limits and (when RUM is enabled) `POST /api/v1/rum` limits; use on isolated grading hosts if desired |
 | `AUTH_REGISTER_RATE_LIMIT_MAX`, `AUTH_REGISTER_RATE_LIMIT_WINDOW_MS` | Register limiter |
 | `AUTH_LOGIN_RATE_LIMIT_MAX`, `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` | Login limiter |
 | `AUTH_CONNECT_RATE_LIMIT_MAX`, `AUTH_CONNECT_RATE_LIMIT_WINDOW_MS` | OAuth connect-existing limiter |
@@ -83,5 +85,9 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP endpoint |
 | **Startup** | |
 | `STARTUP_DEPENDENCY_MAX_WAIT_MS` | Max wait for dependencies on boot |
+| **Search** | |
+| `SEARCH_STATEMENT_TIMEOUT_MS` | Per-statement timeout (ms) for each search query; default 8000. Prevents multi‑second searches from holding Postgres pool connections. |
+| `SEARCH_MAX_LIMIT`, `SEARCH_MAX_OFFSET` | Cap `limit` (default 50) and `offset` (default 500) on `GET /search`. |
+| `SEARCH_TRIGRAM_MIN_LEN_UNSCOPED` | Minimum query length (default 4) before allowing trigram `ILIKE` fallback when search is **unscoped**; scoped searches still allow short/infix queries. |
 
 Metrics: `auth_rate_limit_hits_total` (Prometheus) indicates auth limiter trips. `ws_bootstrap_wall_duration_ms` (histogram) and `message_cache_bust_failures_total` help correlate grading-style delivery issues with bootstrap time and Redis bust errors.

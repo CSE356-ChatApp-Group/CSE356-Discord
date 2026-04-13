@@ -471,7 +471,45 @@
       "type": "timeseries"
     },
     {
-      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 74 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 74 },
+      "id": 28,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(pg_queries_per_http_request_bucket{job=\"chatapp-api\",route=~\"^/api/v1/.*\"}[5m])))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "DB queries per HTTP request (p95 by route)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 74 },
+      "id": 29,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (endpoint, result) (rate(endpoint_list_cache_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{endpoint}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Redis list cache (rate by endpoint + result)",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 80 },
       "id": 27,
       "options": {
         "content": "**Interpreting traffic cliffs:** If **API targets up** but **total rate** and this **ratio** collapse with **no deploy** (`journalctl -t chatapp-deploy`) and **no nginx 5xx burst**, suspect **load harness pause** or **client network path**, not Node crash. **Nginx access logs** remain ground truth for ingress volume. Optional: run [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) from a host outside the harness and alert if it fails while `up{job=\"chatapp-api\"}` is 1.",
@@ -492,6 +530,6 @@
   "timezone": "America/New_York",
   "title": "ChatApp Overview",
   "uid": "chatapp-overview",
-  "version": 5,
+  "version": 6,
   "weekStart": ""
 }

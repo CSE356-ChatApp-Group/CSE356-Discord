@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chatStore';
 import { usePresenceHeartbeat } from '../hooks/usePresenceHeartbeat';
 import CommunitySidebar  from '../components/CommunitySidebar';
@@ -34,7 +35,14 @@ export default function ChatPage() {
     fetchConversations,
     activeChannel,
     activeConv,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      fetchCommunities: s.fetchCommunities,
+      fetchConversations: s.fetchConversations,
+      activeChannel: s.activeChannel,
+      activeConv: s.activeConv,
+    })),
+  );
   const [sidebarWidth, setSidebarWidth] = useState(getInitialSidebarWidth);
   const [isResizing, setIsResizing] = useState(false);
   const layoutRef = useRef<HTMLDivElement | null>(null);

@@ -8,7 +8,7 @@ Fires when the **host-local** synthetic probe (see [`scripts/synthetic-probe.sh`
 
 1. `curl -fsS -v http://127.0.0.1/health` on the VM.
 2. `systemctl status 'chatapp@*'` and nginx `error.log` for upstream errors.
-3. If the probe script is missing, re-run a prod deploy so **`deploy-prod.sh`** syncs `/opt/chatapp-monitoring/synthetic-probe.sh` and cron (install a cron line that runs the probe every 1–2 minutes with `TEXTFILE_DIR` set).
+3. **`deploy-prod.sh`** installs `/opt/chatapp-monitoring/synthetic-probe.sh` and an **idempotent** crontab entry (every 2 minutes, `TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile`). If cron is missing, re-run a prod deploy or add that line manually for the deploy user.
 
 ## ChatAppTrafficCliffWhileInstancesUp
 

@@ -242,6 +242,40 @@ groups:
             >92% of pool slots are busy for 10m. You are at effective connection capacity even
             if the wait queue is still small — scale or tune pool/PgBouncer before waiters spike.
 
+      # pool.query + wrapped client.query counts per finished HTTP request (AsyncLocalStorage).
+      - alert: ChatAppHighDbQueriesPerRequest
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, route) (
+              rate(pg_queries_per_http_request_bucket{job="chatapp-api",route="/api/v1/messages"}[10m])
+            )
+          ) > 25
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: High DB query count per request for /api/v1/messages (p99)
+          description: >
+            The per-request query counter (including transaction client.query) suggests N+1 growth
+            or heavier transactions. Correlate with deploys and slow-query logs.
+
+      - alert: ChatAppListCacheMissDominates
+        expr: |
+          (
+            sum(rate(endpoint_list_cache_total{job="chatapp-api",result="miss"}[15m]))
+            >
+            4 * sum(rate(endpoint_list_cache_total{job="chatapp-api",result="hit"}[15m]))
+          )
+          and
+          sum(rate(endpoint_list_cache_total{job="chatapp-api",result="hit"}[15m])) > 0.1
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis list cache misses dominate hits
+          description: >
+            Miss rate is high vs hits — check Redis health, TTL churn, or thundering herds on list endpoints.
+
       - alert: ChatAppOverloadSheddingActive
         expr: max(chatapp_overload_stage{job="chatapp-api"}) >= 2
         for: 5m

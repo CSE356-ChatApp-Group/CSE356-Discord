@@ -205,6 +205,52 @@ const pgPoolOperationErrorsTotal = new client.Counter({
   labelNames: ['operation', 'reason'],
 });
 
+/**
+ * Count of `pool.query` calls attributed to the current HTTP request (AsyncLocalStorage).
+ * Detects N+1 regressions and per-route DB amplification.
+ */
+const pgQueriesPerRequestHistogram = new client.Histogram({
+  name: 'pg_queries_per_http_request',
+  help: 'Number of successful pool.query calls during one HTTP request (AsyncLocalStorage)',
+  labelNames: ['route'],
+  buckets: [0, 1, 2, 3, 5, 8, 13, 21, 34, 55],
+});
+
+/** Redis-backed list endpoint cache: hit (served from Redis), miss (DB load), coalesced (singleflight waiter). */
+const endpointListCacheTotal = new client.Counter({
+  name: 'endpoint_list_cache_total',
+  help: 'Redis list cache outcomes for hot GET list endpoints',
+  labelNames: ['endpoint', 'result'],
+});
+
+/** Optional RUM POST /api/v1/rum rate limiter only (not general API traffic). */
+const apiRateLimitHitsTotal = new client.Counter({
+  name: 'api_rate_limit_hits_total',
+  help: 'Requests rejected by optional rate limiters (scope=rum for POST /rum)',
+  labelNames: ['scope'],
+});
+
+/** Browser timing vitals (LCP, INP, FCP, TTFB) in seconds. */
+const clientWebVitalTimingSeconds = new client.Histogram({
+  name: 'client_web_vital_timing_seconds',
+  help: 'Browser timing web vitals (seconds)',
+  labelNames: ['name'],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25],
+});
+
+/** Cumulative Layout Shift score (0–1, dimensionless). */
+const clientWebVitalClsScore = new client.Histogram({
+  name: 'client_web_vital_cls_score',
+  help: 'Cumulative Layout Shift (CLS) scores from optional RUM',
+  labelNames: ['name'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1],
+});
+
+const clientRumBatchesTotal = new client.Counter({
+  name: 'client_rum_batches_total',
+  help: 'Accepted browser RUM report batches (ENABLE_CLIENT_RUM)',
+});
+
 // ── Overload stage ───────────────────────────────────────────────────────────
 
 /**
@@ -274,6 +320,27 @@ function startPgPoolMetrics(pool) {
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'connection' }, 0);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'shutdown' }, 0);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'other' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'communities', result: 'hit' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'communities', result: 'miss' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'communities', result: 'coalesced' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'channels', result: 'hit' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'channels', result: 'miss' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'channels', result: 'coalesced' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'messages_channel', result: 'hit' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'messages_channel', result: 'miss' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'messages_channel', result: 'coalesced' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'messages_conversation', result: 'hit' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'messages_conversation', result: 'miss' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'messages_conversation', result: 'coalesced' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'hit' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'miss' }, 0);
+    endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'coalesced' }, 0);
+    pgQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
+    pgQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
+    apiRateLimitHitsTotal.inc({ scope: 'rum' }, 0);
+    clientRumBatchesTotal.inc(0);
+    clientWebVitalTimingSeconds.observe({ name: 'LCP' }, 0);
+    clientWebVitalClsScore.observe({ name: 'CLS' }, 0);
   } catch {
     /* ignore during unusual test setups */
   }
@@ -306,4 +373,10 @@ module.exports = {
   startPgPoolMetrics,
   pgPoolCircuitBreakerRejectsTotal,
   pgPoolOperationErrorsTotal,
+  pgQueriesPerRequestHistogram,
+  endpointListCacheTotal,
+  apiRateLimitHitsTotal,
+  clientWebVitalTimingSeconds,
+  clientWebVitalClsScore,
+  clientRumBatchesTotal,
 };

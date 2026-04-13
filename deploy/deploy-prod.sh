@@ -1079,6 +1079,13 @@ ssh "$PROD_USER@$PROD_HOST" "
     sudo install -m 755 /tmp/synthetic-probe.sh.deploy /opt/chatapp-monitoring/synthetic-probe.sh
     rm -f /tmp/synthetic-probe.sh.deploy
   fi
+  # Host-local probe → node_exporter textfile (ChatAppSyntheticProbeFailed). Idempotent.
+  if [ -x /opt/chatapp-monitoring/synthetic-probe.sh ]; then
+    (
+      crontab -l 2>/dev/null | grep -v '/opt/chatapp-monitoring/synthetic-probe.sh' || true
+      echo '*/2 * * * * TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile CURL_MAX_TIME=12 /opt/chatapp-monitoring/synthetic-probe.sh >/dev/null 2>&1'
+    ) | crontab -
+  fi
   if [ -f /tmp/remote-compose.yml.deploy ]; then
     sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
     rm -f /tmp/remote-compose.yml.deploy

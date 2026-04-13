@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chatStore';
 import { formatDistanceToNow } from 'date-fns';
 import styles from './SearchBar.module.css';
@@ -18,7 +19,17 @@ export default function SearchBar({
     clearSearch,
     search,
     jumpToSearchResult,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      searchResults: s.searchResults,
+      searchFilters: s.searchFilters,
+      setSearchFilters: s.setSearchFilters,
+      resetSearchFilters: s.resetSearchFilters,
+      clearSearch: s.clearSearch,
+      search: s.search,
+      jumpToSearchResult: s.jumpToSearchResult,
+    })),
+  );
   const [showFilters, setShowFilters] = useState(false);
   const [jumpingMessageId, setJumpingMessageId] = useState<string | null>(null);
 

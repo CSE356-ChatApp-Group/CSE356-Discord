@@ -20,6 +20,14 @@ const overload = require('../utils/overload');
 const router = express.Router();
 router.use(authenticate);
 
+function clampSearchPaging(limitRaw, offsetRaw) {
+  const maxLimit = Math.min(Math.max(parseInt(process.env.SEARCH_MAX_LIMIT || '50', 10), 1), 100);
+  const maxOffset = Math.min(Math.max(parseInt(process.env.SEARCH_MAX_OFFSET || '500', 10), 0), 2000);
+  const lim = Math.min(Math.max(parseInt(String(limitRaw || '20'), 10) || 20, 1), maxLimit);
+  const off = Math.min(Math.max(parseInt(String(offsetRaw || '0'), 10) || 0, 0), maxOffset);
+  return { limit: lim, offset: off };
+}
+
 router.get('/', async (req, res, next) => {
   try {
     let { q, communityId, channelId, conversationId, authorId, after, before, limit, offset } = req.query;
@@ -71,13 +79,13 @@ router.get('/', async (req, res, next) => {
       if (!rowCount) return res.status(403).json({ error: 'Access denied' });
     }
 
-    const requestedLimit = parseInt(limit || '20', 10);
-    const adjustedLimit = overload.searchLimit(requestedLimit);
+    const { limit: clampedLimit, offset: clampedOffset } = clampSearchPaging(limit, offset);
+    const adjustedLimit = overload.searchLimit(clampedLimit);
     const results = await searchClient.search(normalizedQuery, {
       communityId, channelId, conversationId, authorId, after, before,
       userId,
       limit: adjustedLimit,
-      offset: parseInt(offset || '0', 10),
+      offset: clampedOffset,
     });
 
     res.json(results);

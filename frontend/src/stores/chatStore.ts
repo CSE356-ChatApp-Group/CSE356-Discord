@@ -128,6 +128,42 @@ function sortMessagesChronologically(messages: Entity[]): Entity[] {
   });
 }
 
+function messageSortKey(m: Entity): number {
+  const t = new Date(m.created_at || m.createdAt || 0).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+function compareMessageOrder(a: Entity, b: Entity): number {
+  const na = messageSortKey(a);
+  const nb = messageSortKey(b);
+  if (na !== nb) return na - nb;
+  return String(a.id || '').localeCompare(String(b.id || ''));
+}
+
+/** Upsert without full-array sort — hot path for WS + send ack (list stays chronologically sorted). */
+function upsertMessageChronologically(existing: Entity[] | undefined, incoming: Entity): Entity[] {
+  const list = Array.isArray(existing) ? existing : [];
+  const idx = list.findIndex((m) => m.id === incoming.id);
+  if (idx !== -1) {
+    const next = [...list];
+    next[idx] = { ...next[idx], ...incoming };
+    return next;
+  }
+  let lo = 0;
+  let hi = list.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (compareMessageOrder(incoming, list[mid]) <= 0) {
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  const next = [...list];
+  next.splice(lo, 0, incoming);
+  return next;
+}
+
 function channelCommunityId(channel: Entity) {
   return channel?.community_id || channel?.communityId || null;
 }
@@ -1184,7 +1220,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         set((s) => ({
           messages: {
             ...s.messages,
-            [key]: sortMessagesChronologically(upsertMessage(s.messages[key], hydrated)),
+            [key]: upsertMessageChronologically(s.messages[key], hydrated),
           },
         }));
       }
@@ -1448,7 +1484,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           const existing = s.messages[key] || [];
           const nextMessages = {
             ...s.messages,
-            [key]: sortMessagesChronologically(upsertMessage(existing, msg)),
+            [key]: upsertMessageChronologically(existing, msg),
           };
 
           let nextChannels = s.channels;

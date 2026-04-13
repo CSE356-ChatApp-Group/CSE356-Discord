@@ -25,6 +25,7 @@ const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
 const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
+const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 
 const router = express.Router();
 router.use(authenticate);
@@ -247,7 +248,10 @@ router.get('/', async (req, res, next) => {
   const cacheKey = communitiesCacheKey(req.user.id, publicVersion);
   try {
     const cached = await redis.get(cacheKey);
-    if (cached) return res.json(JSON.parse(cached));
+    if (cached) {
+      recordEndpointListCache('communities', 'hit');
+      return res.json(JSON.parse(cached));
+    }
   } catch {
     // cache miss – fall through to DB
   }
@@ -255,6 +259,7 @@ router.get('/', async (req, res, next) => {
   // Singleflight: if a DB query is already in-flight for this key, wait for it
   // rather than spawning a second concurrent query (thundering-herd defence).
   if (communitiesInflight.has(cacheKey)) {
+    recordEndpointListCache('communities', 'coalesced');
     try {
       return res.json(await communitiesInflight.get(cacheKey));
     } catch (err) {
@@ -262,6 +267,7 @@ router.get('/', async (req, res, next) => {
     }
   }
 
+  recordEndpointListCache('communities', 'miss');
   const promise: Promise<{ communities: any[] }> = (async () => {
     const { rows } = await queryCommunitiesListWithFallback(
       COMMUNITIES_LIST_CORE,
