@@ -28,12 +28,20 @@ concurrency:
 
 jobs:
   # Download the CI-built tarball from GitHub Releases so the deploy job can use
-  # artifact_name (no long poll in reusable-vm-deploy).
+  # artifact_name (no long poll in reusable-vm-deploy). If release is not yet
+  # published, build/package the artifact in this run as a fallback.
   fetch-release:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Checkout target SHA
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
       - name: Download release tarball
+        id: download_release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -42,10 +50,58 @@ jobs:
           echo "Downloading release-${TARGET_SHA} from ${{ github.repository }}"
           gh release download "release-${TARGET_SHA}" -R "${{ github.repository }}" -p '*.tar.gz' -D .
           ls -la ./*.tar.gz
+
+      - name: Build fallback release artifact
+        if: steps.download_release.outcome != 'success'
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies for fallback build
+        if: steps.download_release.outcome != 'success'
+        run: npm ci
+
+      - name: Build app for fallback artifact
+        if: steps.download_release.outcome != 'success'
+        run: |
+          npm run build --workspace=backend
+          npm run build --workspace=frontend
+
+      - name: Package fallback release artifact
+        if: steps.download_release.outcome != 'success'
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.sha || github.sha }}"
+          mkdir -p releases
+          tar --exclude=node_modules --exclude=.git --exclude=.env \
+            -czf "releases/chatapp-${TARGET_SHA}.tar.gz" \
+            backend/dist/ \
+            backend/scripts/run-migrations.cjs \
+            backend/package*.json \
+            backend/tsconfig.json \
+            frontend/dist/ \
+            frontend/package*.json \
+            migrations/ \
+            package*.json \
+            .env.example
+          ls -lh "releases/chatapp-${TARGET_SHA}.tar.gz"
+
+      - name: Normalize artifact path
+        run: |
+          set -euo pipefail
+          mkdir -p releases
+          TARGET_SHA="${{ inputs.sha || github.sha }}"
+          if ls ./*.tar.gz >/dev/null 2>&1; then
+            FILE="$(ls -1 ./*.tar.gz | head -n 1)"
+            cp "$FILE" "releases/chatapp-${TARGET_SHA}.tar.gz"
+          fi
+          test -f "releases/chatapp-${TARGET_SHA}.tar.gz"
+
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ inputs.sha || github.sha }}
-          path: '*.tar.gz'
+          path: releases/chatapp-${{ inputs.sha || github.sha }}.tar.gz
 
   deploy-staging:
     needs: fetch-release
