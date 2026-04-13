@@ -74,7 +74,13 @@ fi
 # Run all remaining remote checks in a single SSH session to avoid
 # triggering fail2ban with rapid successive connections.
 echo "Checking remote runtime prerequisites, nginx config, and health route..."
-REMOTE_SCRIPT='set -euo pipefail
+# Use quoted heredocs (not $'...\nset +a...'): in ANSI-C quotes, "\c" ends the string, so
+# $'\nset +a' is parsed as newline + "set " + "\c" — the "+a" corrupts the remote script and
+# bash reports: set: +c: invalid option.
+# Read DATABASE_URL / PGDUMP_DATABASE_URL with grep instead of sourcing .env (safer).
+{
+  cat <<'REMOTE_BASE'
+set -euo pipefail
 command -v node >/dev/null
 command -v npm >/dev/null
 command -v nginx >/dev/null
@@ -83,26 +89,26 @@ command -v nginx >/dev/null
 [ -f /opt/chatapp/shared/.env ]
 [ -f /etc/nginx/sites-available/chatapp ]
 grep -q "/health" /etc/nginx/sites-available/chatapp
-sudo nginx -t >/dev/null 2>&1'
-
-if [[ "$ENVIRONMENT" == "prod" ]]; then
-  REMOTE_SCRIPT+=$'\ncommand -v pg_dump >/dev/null 2>&1'
-  REMOTE_SCRIPT+=$'\nset -a'
-  REMOTE_SCRIPT+=$'\nsource /opt/chatapp/shared/.env'
-  REMOTE_SCRIPT+=$'\nset +a'
-  REMOTE_SCRIPT+=$'case "${DATABASE_URL:-}" in'
-  REMOTE_SCRIPT+=$'\n  *:6432*)'
-  REMOTE_SCRIPT+=$'\n    if [[ -z "${PGDUMP_DATABASE_URL:-}" ]]; then'
-  REMOTE_SCRIPT+=$'\n      echo "ERROR: DATABASE_URL uses PgBouncer (:6432). Set PGDUMP_DATABASE_URL in /opt/chatapp/shared/.env to a direct postgresql:// URL (host:5432) for pg_dump backups."'
-  REMOTE_SCRIPT+=$'\n      exit 1'
-  REMOTE_SCRIPT+=$'\n    fi'
-  REMOTE_SCRIPT+=$'\n    ;;'
-  REMOTE_SCRIPT+=$'\nesac'
-fi
-
-if ! echo "$REMOTE_SCRIPT" | ssh "$SSH_TARGET" bash -s; then
+sudo nginx -t >/dev/null 2>&1
+REMOTE_BASE
+  if [[ "$ENVIRONMENT" == "prod" ]]; then
+    cat <<'REMOTE_PROD'
+command -v pg_dump >/dev/null 2>&1
+DATABASE_URL_VAL=$(grep -E '^[[:space:]]*(export[[:space:]]+)?DATABASE_URL=' /opt/chatapp/shared/.env | tail -1 | cut -d= -f2- | tr -d '\r')
+PGDUMP_URL_VAL=$(grep -E '^[[:space:]]*(export[[:space:]]+)?PGDUMP_DATABASE_URL=' /opt/chatapp/shared/.env | tail -1 | cut -d= -f2- | tr -d '\r')
+case "$DATABASE_URL_VAL" in
+  *:6432*)
+    if [[ -z "$PGDUMP_URL_VAL" ]]; then
+      echo "ERROR: DATABASE_URL uses PgBouncer (:6432). Set PGDUMP_DATABASE_URL in /opt/chatapp/shared/.env to a direct postgresql:// URL (host:5432) for pg_dump backups."
+      exit 1
+    fi
+    ;;
+esac
+REMOTE_PROD
+  fi
+} | ssh "$SSH_TARGET" bash -s || {
   echo "ERROR: Remote prerequisite checks failed."
   exit 1
-fi
+}
 
 echo "Preflight passed for ${ENVIRONMENT}."
