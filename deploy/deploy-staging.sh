@@ -202,6 +202,7 @@ fi
 
 echo "0a) Installing and configuring PgBouncer (transaction-mode connection pooler)..."
 scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/pgbouncer-setup.py"
+scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/pgbouncer_ini_backend_is_remote.py"
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   # Pass the pre-computed pool size so pgbouncer-setup.py uses exactly the
@@ -240,6 +241,11 @@ TMPFILES
 echo "0b) Tuning PostgreSQL for available RAM and CPU..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
+  if python3 /tmp/pgbouncer_ini_backend_is_remote.py 2>/dev/null; then
+    echo 'Skipping local PostgreSQL tuning — PgBouncer backend is off-host.'
+    echo 'On the database VM run: DB_SSH=user@db-host ./deploy/tune-remote-db-postgres.sh'
+    exit 0
+  fi
   # Auto-detect total RAM in MB
   TOTAL_RAM_MB=\$(awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo)
   NCPU=\$(nproc --all)

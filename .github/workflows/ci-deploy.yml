@@ -36,6 +36,7 @@ jobs:
           bash -n scripts/prod-log-correlate.sh
           bash -n scripts/prod-capacity-snapshot.sh
           bash -n deploy/cutover-to-remote-db.sh
+          bash -n deploy/tune-remote-db-postgres.sh
           node --check deploy/candidate-ws-smoke.cjs
           node --check backend/scripts/api-contract-harness.cjs
 

@@ -7,7 +7,8 @@ Reads /opt/chatapp/shared/.env, parses DATABASE_URL, writes pgbouncer.ini
 and userlist.txt, then rewrites DATABASE_URL to point at PgBouncer (:6432).
 
 PgBouncer is configured in transaction-pooling mode with:
-  - default_pool_size = 25 × nCPU  (real PG backends; ~25/CPU before thrash)
+  - default_pool_size = from PGBOUNCER_POOL_SIZE env when set (deploy scripts pass
+    nCPU×50 + instance bump, capped at 400), else min(nCPU×50, 120) on this host
   - max_client_conn  = 1000 (virtual connections from Node instances)
   - auth_type        = trust (loopback-only; no client password needed)
 
@@ -77,11 +78,9 @@ def _pgbouncer_conn_value(val: str) -> str:
     return val
 
 # ── PgBouncer pool sizing ───────────────────────────────────────────────────────
-# Target: 2.5:1 virtual-to-real connection ratio (validated against load tests).
-# Default formula: nCPU × 40 real backends, capped at 90 (leaves headroom for
-# admin connections under max_connections=100).
-# Override via PGBOUNCER_POOL_SIZE env when the deploy script pre-computes the
-# value from CHATAPP_INSTANCES (ensures consistency whether 1 or 4 instances run).
+# Deploy passes PGBOUNCER_POOL_SIZE from the release host so pool size matches
+# CHATAPP_INSTANCES and vCPU (see deploy-prod.sh / deploy-staging.sh).  Standalone
+# runs use min(nCPU×50, 120) capped by PGBOUNCER_POOL_HARD_CAP (default 400).
 import multiprocessing
 _ncpu = multiprocessing.cpu_count()
 _default_pool_size = min(_ncpu * 50, 120)
@@ -119,7 +118,7 @@ auth_file = /etc/pgbouncer/userlist.txt
 ; statements or session-level SET commands that must persist across queries.
 pool_mode = transaction
 
-; 1000 virtual clients, ~25×nCPU real PG backends — auto-tuned at deploy time.
+; 1000 virtual clients; real PG backends = default_pool_size (deploy sets via PGBOUNCER_POOL_SIZE).
 max_client_conn     = 1000
 default_pool_size   = {PGBOUNCER_POOL_SIZE}
 reserve_pool_size   = {PGBOUNCER_RESERVE_SIZE}

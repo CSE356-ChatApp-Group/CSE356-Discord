@@ -206,6 +206,7 @@ echo "✓ Backup prepared"
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
 echo "2b) Installing and configuring PgBouncer..."
 scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:/tmp/pgbouncer-setup.py"
+scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${PROD_USER}@${PROD_HOST}:/tmp/pgbouncer_ini_backend_is_remote.py"
 ssh "$PROD_USER@$PROD_HOST" "
   set -euo pipefail
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
@@ -252,10 +253,16 @@ TMPFILES
 "
 echo "✓ PgBouncer configured"
 
-# 2c. PostgreSQL tuning (conservative for 2 GB prod VM)
+# 2c. PostgreSQL tuning on the app VM — only when PgBouncer talks to co-located Postgres.
+# If the pooler backend is a remote host, skip (ALTER SYSTEM here would touch the wrong cluster).
 echo "2c) Tuning PostgreSQL for prod VM..."
 ssh "$PROD_USER@$PROD_HOST" "
   set -euo pipefail
+  if python3 /tmp/pgbouncer_ini_backend_is_remote.py 2>/dev/null; then
+    echo 'Skipping local PostgreSQL tuning — PgBouncer backend is off-host.'
+    echo 'On the database VM run: DB_SSH=user@db-host ./deploy/tune-remote-db-postgres.sh'
+    exit 0
+  fi
   TOTAL_RAM_MB=\$(awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo)
   NCPU=\$(nproc --all)
   SHB_MB=\$(( TOTAL_RAM_MB * 19 / 100 ))
