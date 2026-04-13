@@ -819,6 +819,62 @@ echo "9.06: inserted /api retry policy + reloaded nginx"
 REMOTE
 echo "✓ Nginx /api retry policy OK"
 
+# 9.07 Idempotent: dedicated /api/v1/auth/ with longer proxy timeouts than generic /api/ (30s).
+# Auth is bcrypt-bound; without this, login/register can see nginx 504 HTML under burst.
+echo "9.07 Nginx: ensure /api/v1/auth/ extended proxy timeouts..."
+ssh "$PROD_USER@$PROD_HOST" "bash -s" <<'REMOTE'
+set -euo pipefail
+SITE=/etc/nginx/sites-available/chatapp
+if ! sudo test -f "$SITE"; then
+  echo "9.07: skip — $SITE missing"
+  exit 0
+fi
+if sudo grep -qE 'location[[:space:]]+\^~[[:space:]]+/api/v1/auth/' "$SITE"; then
+  echo "9.07: auth location already present"
+  exit 0
+fi
+TMP=$(mktemp)
+sudo cp "$SITE" "$TMP"
+export TMP
+python3 <<'PY'
+import os
+import re
+from pathlib import Path
+
+p = Path(os.environ['TMP'])
+text = p.read_text()
+if re.search(r'location\s+\^~\s+/api/v1/auth/', text):
+    raise SystemExit(0)
+needle = '  location /api/ {'
+block = """  location ^~ /api/v1/auth/ {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+"""
+if needle not in text:
+    raise SystemExit('9.07: could not find \"  location /api/ {\" — patch nginx manually')
+p.write_text(text.replace(needle, block + needle, 1))
+PY
+sudo install -m 644 "$TMP" "$SITE"
+rm -f "$TMP"
+sudo nginx -t >/dev/null
+sudo systemctl reload nginx
+echo "9.07: inserted auth location + reloaded nginx"
+REMOTE
+echo "✓ Nginx auth route OK"
+
 # 9b–9c. Dual-worker prod: roll the companion to this release, then restore both backends in nginx.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
   if [ "${PIN_CANDIDATE_BEFORE_COMPANION}" = "true" ]; then
