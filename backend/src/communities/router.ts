@@ -20,6 +20,7 @@ const { body, param, validationResult } = require('express-validator');
 
 const { query, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
+const logger           = require('../utils/logger');
 const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
@@ -133,6 +134,49 @@ const COMMUNITIES_LIST_CORE = `
        LEFT JOIN member_counts mc ON mc.community_id = vc.id
        LEFT JOIN unread_counts uc ON uc.community_id = vc.id`;
 
+// Fallback used when the heavy unread-count query times out under burst load.
+// Keeps the route available with member_count while setting unread fields to 0.
+const COMMUNITIES_LIST_FALLBACK_CORE = `
+       WITH visible_communities AS (
+         SELECT c.*, cm.role AS my_role
+         FROM communities c
+         LEFT JOIN community_members cm
+           ON cm.community_id = c.id
+          AND cm.user_id = $1
+         WHERE c.is_public = TRUE OR cm.user_id IS NOT NULL
+       ),
+       member_counts AS (
+         SELECT cm.community_id, COUNT(*)::int AS member_count
+         FROM community_members cm
+         JOIN visible_communities vc ON vc.id = cm.community_id
+         GROUP BY cm.community_id
+       )
+       SELECT vc.*,
+              COALESCE(mc.member_count, 0) AS member_count,
+              0::int AS unread_channel_count,
+              FALSE AS has_unread_channels
+       FROM visible_communities vc
+       LEFT JOIN member_counts mc ON mc.community_id = vc.id`;
+
+function isCommunitiesTimeout(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return err?.code === '57014' || msg.includes('statement timeout');
+}
+
+async function queryCommunitiesListWithFallback(baseSql, params, orderAndLimitSql) {
+  const fullSql = `${baseSql}
+       ${orderAndLimitSql}`;
+  try {
+    return await query(fullSql, params);
+  } catch (err) {
+    if (!isCommunitiesTimeout(err)) throw err;
+    logger.warn({ err }, 'Communities heavy query timed out; using fallback');
+    const fallbackSql = `${COMMUNITIES_LIST_FALLBACK_CORE}
+       ${orderAndLimitSql}`;
+    return query(fallbackSql, params);
+  }
+}
+
 function parseCommunitiesPageQuery(req) {
   const rawL = req.query.limit;
   const rawA = req.query.after;
@@ -181,12 +225,12 @@ router.get('/', async (req, res, next) => {
       }
 
       const fetchLimit = page.limit + 1;
-      const { rows } = await query(
-        `${COMMUNITIES_LIST_CORE}
-       WHERE (($2::text IS NULL AND $3::uuid IS NULL) OR (vc.name, vc.id) > ($2::text, $3::uuid))
+      const { rows } = await queryCommunitiesListWithFallback(
+        COMMUNITIES_LIST_CORE,
+        [req.user.id, cursorName, cursorId, fetchLimit],
+        `WHERE (($2::text IS NULL AND $3::uuid IS NULL) OR (vc.name, vc.id) > ($2::text, $3::uuid))
        ORDER BY vc.name, vc.id
        LIMIT $4`,
-        [req.user.id, cursorName, cursorId, fetchLimit],
       );
 
       const hasMore = rows.length > page.limit;
@@ -219,10 +263,10 @@ router.get('/', async (req, res, next) => {
   }
 
   const promise: Promise<{ communities: any[] }> = (async () => {
-    const { rows } = await query(
-      `${COMMUNITIES_LIST_CORE}
-       ORDER BY vc.name, vc.id`,
+    const { rows } = await queryCommunitiesListWithFallback(
+      COMMUNITIES_LIST_CORE,
       [req.user.id],
+      `ORDER BY vc.name, vc.id`,
     );
     const payload = { communities: rows };
     redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
