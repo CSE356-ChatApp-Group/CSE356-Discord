@@ -759,6 +759,13 @@ PY
   }
   echo "✓ Nginx pinned to candidate"
 
+  echo "9a.1 Verifying candidate stays healthy before companion restart..."
+  if ! ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh ${NEW_PORT} http://127.0.0.1:${NEW_PORT}"; then
+    echo "ERROR: Candidate failed health check just before companion roll."
+    rollback_cutover
+    exit 1
+  fi
+
   echo "9b. Rolling companion on port ${OLD_PORT} to ${RELEASE_SHA} (dual-worker)..."
   ssh "$PROD_USER@$PROD_HOST" "
     set -euo pipefail
@@ -767,9 +774,23 @@ PY
     sudo mkdir -p \"\$DROPIN_DIR\"
     printf '[Service]\\nWorkingDirectory=%s/backend\\n' \"\$RELEASE_PATH\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
     sudo systemctl daemon-reload
-    sudo systemctl stop chatapp@${OLD_PORT} 2>/dev/null || true
-    sleep 1
-    sudo systemctl start chatapp@${OLD_PORT}
+    sudo systemctl reset-failed chatapp@${OLD_PORT} 2>/dev/null || true
+    ok=0
+    for attempt in 1 2 3; do
+      sudo systemctl restart chatapp@${OLD_PORT}
+      sleep 2
+      if systemctl is-active --quiet chatapp@${OLD_PORT}; then
+        ok=1
+        break
+      fi
+      echo 'chatapp@${OLD_PORT} restart attempt' \"\$attempt\" 'failed; retrying in 3s'
+      sleep 3
+    done
+    if [ \"\$ok\" -ne 1 ]; then
+      echo 'ERROR: chatapp@${OLD_PORT} failed to become active after retries'
+      sudo journalctl -u chatapp@${OLD_PORT} --no-pager -n 60 || true
+      exit 1
+    fi
     echo 'Companion chatapp@${OLD_PORT} restarted on new release'
   " || {
     echo "ERROR: Companion roll to ${RELEASE_SHA} failed."

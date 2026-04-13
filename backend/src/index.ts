@@ -24,6 +24,23 @@ const PORT = process.env.PORT || 3000;
 let server;
 let shuttingDown = false;
 
+function isTransientRuntimeError(err) {
+  const message = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return (
+    code === 'POOL_CIRCUIT_OPEN' ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    code === 'ETIMEDOUT' ||
+    code === '57014' || // query_canceled / statement_timeout
+    message.includes('connection terminated unexpectedly') ||
+    message.includes('timeout exceeded when trying to connect') ||
+    message.includes('connection timeout') ||
+    message.includes('canceling statement due to statement timeout') ||
+    message.includes('server busy, please retry')
+  );
+}
+
 function startupMaxWaitMs() {
   const raw = process.env.STARTUP_DEPENDENCY_MAX_WAIT_MS;
   const parsed = parseInt(raw || '', 10);
@@ -137,20 +154,19 @@ async function start() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('unhandledRejection', (reason) => {
     const err = reason instanceof Error ? reason : new Error(String(reason));
-    // Transient pg-pool errors (checkout timeout or stale connection terminated by a network device)
-    // are per-request failures, not server-fatal events — log with pool stats and continue.
-    if (
-      err.message?.includes('timeout exceeded when trying to connect') ||
-      err.message?.includes('Connection terminated') ||
-      err.message?.includes('connection timeout') ||
-      (err as any).code === 'POOL_CIRCUIT_OPEN'
-    ) {
-      logger.error({ err, pool: poolStats() }, 'pg-pool transient error (unhandled); request failed without response');
+    // Transient DB/network faults are request-scoped under load; keep the process alive.
+    if (isTransientRuntimeError(err)) {
+      logger.error({ err, pool: poolStats() }, 'Transient runtime rejection; continuing');
       return;
     }
     shutdown('unhandledRejection', err);
   });
   process.on('uncaughtException', (err) => {
+    // Some pg/ioredis socket errors can bubble here from event emitters.
+    if (isTransientRuntimeError(err)) {
+      logger.error({ err, pool: poolStats() }, 'Transient runtime exception; continuing');
+      return;
+    }
     shutdown('uncaughtException', err);
   });
 }

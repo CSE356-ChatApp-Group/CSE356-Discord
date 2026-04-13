@@ -130,13 +130,26 @@ groups:
           description: Node.js RSS is above 400 MB for 5 minutes. The prod VM has 2 GB total — OOM risk if this persists.
 
       - alert: ChatAppCpuSaturationHigh
-        expr: max by (instance) (rate(process_cpu_seconds_total{job="chatapp-api"}[5m])) > 0.80
+        expr: |
+          max by (instance) (rate(process_cpu_seconds_total{job="chatapp-api"}[5m])) > 0.90
+          and (
+            max by (instance) (nodejs_eventloop_lag_p99_seconds{job="chatapp-api"}) > 0.12
+            or
+            (
+              sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[5m]))
+              /
+              clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m])), 1)
+            ) > 0.02
+          )
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: ChatApp API CPU saturation is high
-          description: API instance {{ $labels.instance }} has used more than 80% of one CPU core for 15 minutes. On production this is a practical scale-up signal.
+          description: >
+            API instance {{ $labels.instance }} is near one-core saturation and either event-loop lag
+            or 5xx ratio is elevated for 15 minutes. This filters harmless single-core spikes and
+            highlights user-impacting CPU pressure.
 
       # Pool queue depth (Node → PgBouncer). Sustained waits mean you are near DB/app
       # throughput limits — scale vertically, split DB, or reduce per-request DB work.
