@@ -60,10 +60,13 @@ services:
       - --path.sysfs=/host/sys
       - --path.rootfs=/rootfs
       - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/storage/.+)($|/)
+      - --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
+      # Synthetic probe metrics from scripts/synthetic-probe.sh (TEXTFILE_DIR on host).
+      - ./node_exporter_textfile:/var/lib/node_exporter/textfile_collector:ro
 
   grafana:
     image: grafana/grafana:11.1.0

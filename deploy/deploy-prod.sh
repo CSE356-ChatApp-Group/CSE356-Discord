@@ -1026,13 +1026,25 @@ echo "10.65. Sync alert rules + Alertmanager + redis_exporter (Discord / Redis a
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_HOST:/tmp/alerts.yml.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_HOST:/tmp/alertmanager.yml.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
+scp -qr "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "$PROD_USER@$PROD_HOST:/tmp/grafana-provisioning-remote.deploy" || true
+scp -q "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
 scp -q "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "$PROD_USER@$PROD_HOST:/tmp/prometheus-db-file-sd.py.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "$PROD_USER@$PROD_HOST:/tmp/db-node.json.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "$PROD_USER@$PROD_HOST:/tmp/db-postgres.json.deploy" || true
 ssh "$PROD_USER@$PROD_HOST" "
   set -euo pipefail
-  if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ]; then
+  if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ] || [ -d /tmp/grafana-provisioning-remote.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
+  fi
+  sudo mkdir -p /opt/chatapp-monitoring/node_exporter_textfile
+  sudo chown ${PROD_USER}:${PROD_USER} /opt/chatapp-monitoring/node_exporter_textfile
+  if [ -d /tmp/grafana-provisioning-remote.deploy ]; then
+    sudo rm -rf /opt/chatapp-monitoring/grafana-provisioning-remote
+    sudo mv /tmp/grafana-provisioning-remote.deploy /opt/chatapp-monitoring/grafana-provisioning-remote
+  fi
+  if [ -f /tmp/synthetic-probe.sh.deploy ]; then
+    sudo install -m 755 /tmp/synthetic-probe.sh.deploy /opt/chatapp-monitoring/synthetic-probe.sh
+    rm -f /tmp/synthetic-probe.sh.deploy
   fi
   if [ -f /tmp/remote-compose.yml.deploy ]; then
     sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
@@ -1070,7 +1082,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   if ! sudo grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
     echo 'ALERT_ENVIRONMENT=production' | sudo tee -a /opt/chatapp-monitoring/.env >/dev/null
   fi
-  sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d --force-recreate alertmanager prometheus >/dev/null
+  sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d --force-recreate alertmanager prometheus node-exporter grafana >/dev/null
   # Fail fast if Discord webhook wiring is broken; silent alert failures are worse than noisy deploys.
   AM_NAME=\$(sudo docker ps --format '{{.Names}}' | grep 'chatapp-monitoring-alertmanager' | head -n 1 || true)
   if [ -z \"\$AM_NAME\" ]; then

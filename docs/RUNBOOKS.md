@@ -2,6 +2,14 @@
 
 Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml). Replace hostnames with your environment.
 
+## ChatAppSyntheticProbeFailed
+
+Fires when the **host-local** synthetic probe (see [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh), `TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile`) reports **`chatapp_synthetic_probe_success == 0`** for 10 minutes. This is **not** the COMPAS harness; it is a curl to **`http://127.0.0.1/health`** through normal routing.
+
+1. `curl -fsS -v http://127.0.0.1/health` on the VM.
+2. `systemctl status 'chatapp@*'` and nginx `error.log` for upstream errors.
+3. If the probe script is missing, re-run a prod deploy so **`deploy-prod.sh`** syncs `/opt/chatapp-monitoring/synthetic-probe.sh` and cron (install a cron line that runs the probe every 1–2 minutes with `TEXTFILE_DIR` set).
+
 ## ChatAppTrafficCliffWhileInstancesUp
 
 Fires when Prometheus still scrapes at least one `chatapp-api` target but **completed HTTP traffic** (from `http_server_requests_total`) is **below 20% of the rate 15 minutes ago**, and the prior rate was above **~40 req/s**. This is **not** a deploy signal by itself.

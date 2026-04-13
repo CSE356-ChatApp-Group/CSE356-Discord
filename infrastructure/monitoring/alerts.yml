@@ -67,6 +67,18 @@ groups:
             stalled, not an API crash (5xx ratio may stay near 0). Correlate with nginx access volume,
             `journalctl -t chatapp-deploy`, and harness logs. Runbook: docs/RUNBOOKS.md (ChatAppTrafficCliffWhileInstancesUp).
 
+      # Requires scripts/synthetic-probe.sh + TEXTFILE_DIR on the host (see deploy-prod monitoring sync).
+      - alert: ChatAppSyntheticProbeFailed
+        expr: chatapp_synthetic_probe_success{job="node"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Synthetic /health probe failing (host-local)
+          description: >
+            The textfile gauge from /opt/chatapp-monitoring/synthetic-probe.sh reports failure for 10 minutes.
+            This is independent of load-harness traffic. Check curl to /health, chatapp@ units, and nginx.
+
       - alert: ChatAppHigh5xxRate
         expr: |
           sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[5m]))
