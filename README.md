@@ -92,6 +92,8 @@ npm run monitoring:logs     # tail monitoring logs
 npm run monitoring:down     # stop only monitoring services
 ```
 
+**Metric catalog, PromQL examples, and how to export data for incidents / Cursor:** [`docs/operations-monitoring.md`](docs/operations-monitoring.md). From any host that can reach Prometheus: `PROMETHEUS_URL=http://127.0.0.1:9090 npm run metrics:snapshot` or `PROMETHEUS_URL=... npm run metrics:snapshot -- --write var/metrics-snapshot.txt`.
+
 ### Error triage workflow
 
 1. Open Grafana → **Explore** → select **Loki**.
