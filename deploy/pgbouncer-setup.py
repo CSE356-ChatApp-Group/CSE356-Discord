@@ -169,16 +169,25 @@ else:
     print(f'DATABASE_URL already targets :6432, no change needed.')
 
 # ── Set PG role timeouts (safety backstop behind PgBouncer query_timeout) ───────
-result = subprocess.run(
-    ['sudo', '-u', 'postgres', 'psql', '-qAt', '-c',
-     f"ALTER ROLE \"{pg_user}\" SET statement_timeout='15s'; "
-     f"ALTER ROLE \"{pg_user}\" SET idle_in_transaction_session_timeout='10s';"],
-    capture_output=True,
-    text=True,
-)
-if result.returncode == 0:
-    print('PostgreSQL role timeouts set (statement_timeout=15s, idle_in_transaction=10s).')
+# Local Postgres only: remote DB must run ALTER ROLE as superuser on the DB host
+# (see deploy/cutover-to-remote-db.sh).
+_is_local_pg = pg_host in ('127.0.0.1', 'localhost', '::1')
+if _is_local_pg:
+    result = subprocess.run(
+        ['sudo', '-u', 'postgres', 'psql', '-qAt', '-c',
+         f"ALTER ROLE \"{pg_user}\" SET statement_timeout='15s'; "
+         f"ALTER ROLE \"{pg_user}\" SET idle_in_transaction_session_timeout='10s';"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print('PostgreSQL role timeouts set (statement_timeout=15s, idle_in_transaction=10s).')
+    else:
+        print(f'Warning: could not set PG role timeouts: {result.stderr.strip()}')
 else:
-    print(f'Warning: could not set PG role timeouts: {result.stderr.strip()}')
+    print(
+        f'Skipping ALTER ROLE on app VM (PostgreSQL host is {pg_host}). '
+        'Apply on the database server as postgres superuser if not already set.'
+    )
 
 print('PgBouncer setup complete.')
