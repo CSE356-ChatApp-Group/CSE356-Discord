@@ -44,6 +44,8 @@ describe('repointLastMessage', () => {
     await repointChannelLastMessage('chan-1');
 
     expect(mockedQuery).toHaveBeenCalledTimes(1);
+    const repointSql = String(mockedQuery.mock.calls[0][0]);
+    expect(repointSql).toContain('FOR KEY SHARE');
   });
 
   it('repointChannelLastMessage clears pointers when no messages remain', async () => {
@@ -96,6 +98,8 @@ describe('repointLastMessage', () => {
     await repointConversationLastMessage('conv-1');
 
     expect(incSpy).toHaveBeenCalledWith({ scope: 'conversation' });
+    const conversationSql = String(mockedQuery.mock.calls[2][0]);
+    expect(conversationSql).toContain('FOR KEY SHARE');
     incSpy.mockRestore();
   });
 });

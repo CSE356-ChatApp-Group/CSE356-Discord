@@ -28,11 +28,12 @@ async function clearConversationLastMessagePointers(conversationId: string) {
 }
 
 const CHANNEL_REPOINT_SQL = `WITH lm AS (
-       SELECT id, author_id, created_at
-       FROM messages
-       WHERE channel_id = $1 AND deleted_at IS NULL
-       ORDER BY created_at DESC
+       SELECT m.id, m.author_id, m.created_at
+       FROM messages m
+       WHERE m.channel_id = $1 AND m.deleted_at IS NULL
+       ORDER BY m.created_at DESC, m.id DESC
        LIMIT 1
+       FOR KEY SHARE
      )
      UPDATE channels ch
      SET last_message_id = lm.id,
@@ -42,11 +43,12 @@ const CHANNEL_REPOINT_SQL = `WITH lm AS (
      WHERE ch.id = $1`;
 
 const CONVERSATION_REPOINT_SQL = `WITH lm AS (
-       SELECT id, author_id, created_at
-       FROM messages
-       WHERE conversation_id = $1 AND deleted_at IS NULL
-       ORDER BY created_at DESC
+       SELECT m.id, m.author_id, m.created_at
+       FROM messages m
+       WHERE m.conversation_id = $1 AND m.deleted_at IS NULL
+       ORDER BY m.created_at DESC, m.id DESC
        LIMIT 1
+       FOR KEY SHARE
      )
      UPDATE conversations conv
      SET last_message_id = lm.id,
