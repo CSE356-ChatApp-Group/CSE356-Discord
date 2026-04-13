@@ -40,6 +40,33 @@ groups:
             Instance {{ $labels.instance }} reported at least two start-time changes in 15m (crash loop or deploy churn).
             Check journalctl -u 'chatapp@*' and database readiness at boot.
 
+      # Fires when scrape shows API instances up but completed HTTP traffic collapses vs 15m ago.
+      # Typical causes: load harness pause, generator network path, coordinated client backoff — not nginx 5xx.
+      - alert: ChatAppTrafficCliffWhileInstancesUp
+        expr: |
+          (
+            sum(up{job="chatapp-api"}) >= 1
+            and
+            (
+              sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m]))
+              <
+              0.2
+              * sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m] offset 15m))
+            )
+            and
+            sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m] offset 15m)) > 40
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: HTTP traffic collapsed while API targets are still up
+          description: >
+            Request rate is below 20% of the rate 15 minutes ago, while at least one chatapp-api target is up
+            and the prior window was above ~40 req/s. This often indicates the load generator or client path
+            stalled, not an API crash (5xx ratio may stay near 0). Correlate with nginx access volume,
+            `journalctl -t chatapp-deploy`, and harness logs. Runbook: docs/RUNBOOKS.md (ChatAppTrafficCliffWhileInstancesUp).
+
       - alert: ChatAppHigh5xxRate
         expr: |
           sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[5m]))

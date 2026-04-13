@@ -352,7 +352,7 @@
       "gridPos": { "h": 2, "w": 24, "x": 0, "y": 37 },
       "id": 13,
       "options": {
-        "content": "**Grader / delivery debugging** — WebSocket backpressure (dropped frames / killed sockets), message POST outcomes, async fanout queue health (read receipts & non-inline events), Postgres pool wait, and `/api/v1/messages` HTTP. Correlate spikes with grader \"delivery fails\".\n\n**Empty panels:** **fanout job errors** stays empty when no async fanout failures (normal). **POST 403 by reason** / **aborted** / **WS backpressure** sit at **0** when nothing failed (also normal). After deploy, allow **~2× scrape interval** before `rate()` graphs populate.",
+        "content": "**Dashboard timezone:** `America/New_York` (US Eastern, DST-aware). **5xx %** can stay ~0 when request volume collapses (load generator pause, network path) — use **Total HTTP rate** and **Traffic vs 15m ago** below, and alert **ChatAppTrafficCliffWhileInstancesUp**.\n\n**Grader / delivery debugging** — WebSocket backpressure (dropped frames / killed sockets), message POST outcomes, async fanout queue health (read receipts & non-inline events), Postgres pool wait, and `/api/v1/messages` HTTP. Correlate spikes with grader \"delivery fails\".\n\n**Empty panels:** **fanout job errors** stays empty when no async fanout failures (normal). **POST 403 by reason** / **aborted** / **WS backpressure** sit at **0** when nothing failed (also normal). After deploy, allow **~2× scrape interval** before `rate()` graphs populate.",
         "mode": "markdown"
       },
       "title": "",
@@ -567,6 +567,68 @@
       ],
       "title": "/api/v1/messages client-aborted requests (rate) — grader timeout / navigate away",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 69 },
+      "id": 25,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m]))",
+          "legendFormat": "total req/s",
+          "refId": "A"
+        }
+      ],
+      "title": "Total HTTP request rate (all routes, excludes /metrics)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.2 },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 69 },
+      "id": 26,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m])) / clamp_min(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m] offset 15m)), 0.001)",
+          "legendFormat": "current / 15m ago",
+          "refId": "A"
+        }
+      ],
+      "title": "Traffic ratio vs 15m ago (harness / load-path cliff detector)",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 74 },
+      "id": 27,
+      "options": {
+        "content": "**Interpreting traffic cliffs:** If **API targets up** but **total rate** and this **ratio** collapse with **no deploy** (`journalctl -t chatapp-deploy`) and **no nginx 5xx burst**, suspect **load harness pause** or **client network path**, not Node crash. **Nginx access logs** remain ground truth for ingress volume. Optional: run [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) from a host outside the harness and alert if it fails while `up{job=\"chatapp-api\"}` is 1.",
+        "mode": "markdown"
+      },
+      "title": "",
+      "transparent": true,
+      "type": "text"
     }
   ],
   "refresh": "30s",
@@ -581,9 +643,9 @@
     "to": "now"
   },
   "timepicker": {},
-  "timezone": "browser",
+  "timezone": "America/New_York",
   "title": "ChatApp Overview",
   "uid": "chatapp-overview",
-  "version": 4,
+  "version": 5,
   "weekStart": ""
 }

@@ -2,6 +2,17 @@
 
 Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml). Replace hostnames with your environment.
 
+## ChatAppTrafficCliffWhileInstancesUp
+
+Fires when Prometheus still scrapes at least one `chatapp-api` target but **completed HTTP traffic** (from `http_server_requests_total`) is **below 20% of the rate 15 minutes ago**, and the prior rate was above **~40 req/s**. This is **not** a deploy signal by itself.
+
+1. Confirm **no deploy** in the window: `journalctl -t chatapp-deploy --since '2026-04-13 14:00:00' --until '2026-04-13 15:00:00'` (adjust UTC).
+2. **Compare ingress vs app:** on the VM, `zgrep` nginx `access.log` for **requests per minute** in the incident window — if edge volume collapsed, the bottleneck is **load generators / network path** to the site, not necessarily Node.
+3. **5xx panels** can stay flat: if clients stop sending requests, you see a **traffic cliff** with **no** `ChatAppHigh5xxRate`.
+4. Optional: run a probe **outside** the harness — [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) against the public `/health`. If it stays green while Grafana RPS drops, the API process path is likely fine.
+
+Tune or silence this alert if your normal traffic pattern routinely drops >80% in 15 minutes (e.g. end of graded window).
+
 ## ChatAppApiDown / ChatAppApiDownFast
 
 1. Check HTTP: staging `http://<staging-host>/health`, prod course URL `/health`.
