@@ -37,6 +37,7 @@ jobs:
           bash -n scripts/prod-capacity-snapshot.sh
           bash -n deploy/cutover-to-remote-db.sh
           bash -n deploy/tune-remote-db-postgres.sh
+          bash -n deploy/postgres-migrate-data-volume.sh
           node --check deploy/candidate-ws-smoke.cjs
           node --check backend/scripts/api-contract-harness.cjs
 

@@ -87,6 +87,17 @@ sudo nginx -t >/dev/null 2>&1'
 
 if [[ "$ENVIRONMENT" == "prod" ]]; then
   REMOTE_SCRIPT+=$'\ncommand -v pg_dump >/dev/null 2>&1'
+  REMOTE_SCRIPT+=$'\nset -a'
+  REMOTE_SCRIPT+=$'\nsource /opt/chatapp/shared/.env'
+  REMOTE_SCRIPT+=$'\nset +a'
+  REMOTE_SCRIPT+=$'case "${DATABASE_URL:-}" in'
+  REMOTE_SCRIPT+=$'\n  *:6432*)'
+  REMOTE_SCRIPT+=$'\n    if [[ -z "${PGDUMP_DATABASE_URL:-}" ]]; then'
+  REMOTE_SCRIPT+=$'\n      echo "ERROR: DATABASE_URL uses PgBouncer (:6432). Set PGDUMP_DATABASE_URL in /opt/chatapp/shared/.env to a direct postgresql:// URL (host:5432) for pg_dump backups."'
+  REMOTE_SCRIPT+=$'\n      exit 1'
+  REMOTE_SCRIPT+=$'\n    fi'
+  REMOTE_SCRIPT+=$'\n    ;;'
+  REMOTE_SCRIPT+=$'\nesac'
 fi
 
 if ! echo "$REMOTE_SCRIPT" | ssh "$SSH_TARGET" bash -s; then

@@ -64,6 +64,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # Deploy scripts must match the release artifact (same commit), not workflow HEAD.
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
 
       - name: Ensure GitHub CLI exists
         if: ${{ inputs.artifact_name == '' }}

@@ -188,22 +188,50 @@ else
   echo "✓ Release found"
 fi
 
-# 2. Backup database before risky deploy
+# 2. Backup database before risky deploy (strict — deploy aborts if backup fails).
+# Never pg_dump through PgBouncer transaction pool (unreliable COPY); use PGDUMP_DATABASE_URL.
 echo "2. Backing up database..."
-ssh "$PROD_USER@$PROD_HOST" "
-  set -e
-  BACKUP_DIR=/opt/chatapp/backups
-  mkdir -p \$BACKUP_DIR
-  BACKUP_FILE=\$BACKUP_DIR/postgres-backup-\$(date +%Y%m%d-%H%M%S).sql
-  
-  source /opt/chatapp/shared/.env
-  pg_dump \"\$DATABASE_URL\" | gzip > \$BACKUP_FILE
-  
-  echo 'Backup created: '\$BACKUP_FILE
-  ls -lh \$BACKUP_FILE
-" || {
-  echo "WARNING: Database backup failed, but continuing"
-}
+ssh "$PROD_USER@$PROD_HOST" bash -s <<'REMOTE_BACKUP'
+set -euo pipefail
+set -o pipefail
+BACKUP_DIR=/opt/chatapp/backups
+mkdir -p "$BACKUP_DIR"
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP_FILE="${BACKUP_DIR}/postgres-backup-${STAMP}.sql.gz"
+set -a
+source /opt/chatapp/shared/.env
+set +a
+case "${DATABASE_URL:-}" in
+  *:6432*)
+    if [[ -z "${PGDUMP_DATABASE_URL:-}" ]]; then
+      echo "ERROR: DATABASE_URL points at PgBouncer (:6432). Set PGDUMP_DATABASE_URL in /opt/chatapp/shared/.env (direct postgres://user:pass@DB_HOST:5432/DBNAME)."
+      exit 1
+    fi
+    DUMP_URL="$PGDUMP_DATABASE_URL"
+    ;;
+  *)
+    DUMP_URL="${PGDUMP_DATABASE_URL:-$DATABASE_URL}"
+    ;;
+esac
+ok=0
+for attempt in 1 2 3; do
+  if pg_dump "$DUMP_URL" | gzip -c >"${BACKUP_FILE}.part"; then
+    mv -f "${BACKUP_FILE}.part" "$BACKUP_FILE"
+    ok=1
+    break
+  fi
+  echo "pg_dump attempt ${attempt} failed; retrying in 15s..."
+  rm -f "${BACKUP_FILE}.part"
+  sleep 15
+done
+if [[ "$ok" -ne 1 ]]; then
+  echo "ERROR: pg_dump failed after 3 attempts"
+  exit 1
+fi
+gzip -t "$BACKUP_FILE"
+ls -lh "$BACKUP_FILE"
+echo "Backup OK: $BACKUP_FILE"
+REMOTE_BACKUP
 echo "✓ Backup prepared"
 
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
