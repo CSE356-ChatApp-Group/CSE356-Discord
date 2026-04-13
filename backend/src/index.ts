@@ -18,6 +18,7 @@ const logger   = require('./utils/logger');
 const { pool, query: dbQuery, poolStats } = require('./db/pool');
 const redis    = require('./db/redis');
 const { startPgPoolMetrics } = require('./utils/metrics');
+const { startCapacitySnapshotHeartbeat } = require('./utils/capacitySnapshot');
 
 const PORT = process.env.PORT || 3000;
 let server;
@@ -116,6 +117,7 @@ async function start() {
   await waitForDependencies();
 
   startPgPoolMetrics(pool);
+  startCapacitySnapshotHeartbeat();
 
   server = http.createServer(app);
 

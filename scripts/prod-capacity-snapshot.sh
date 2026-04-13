@@ -23,6 +23,9 @@ OUT="${HOME}/chatapp-snapshot-$(date -u +%Y%m%dT%H%M%SZ).txt"
   echo "=== health (nginx → one upstream) ==="
   curl -sS -k -m 5 https://127.0.0.1/health 2>/dev/null || curl -sS -m 5 http://127.0.0.1/health || true
   echo
+  echo "=== health?diagnostic=1 (machine-readable capacity block per instance below) ==="
+  curl -sS -k -m 5 'https://127.0.0.1/health?diagnostic=1' 2>/dev/null || curl -sS -m 5 'http://127.0.0.1/health?diagnostic=1' || true
+  echo
   echo "=== pool metrics :4000 + :4001 (same moment) ==="
   echo "--- :4000 ---"
   curl -sS -m 5 http://127.0.0.1:4000/metrics 2>/dev/null | grep -E "nodejs_eventloop_lag_p99|chatapp_overload_stage|pg_pool_(total|idle|waiting)" || true

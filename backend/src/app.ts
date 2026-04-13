@@ -164,12 +164,25 @@ app.get('/metrics', async (_req, res) => {
 });
 
 // ── Health check (no auth required) ───────────────────────────────────────────
-app.get('/health', async (_req, res) => {
+app.get('/health', async (req, res) => {
+  const diagnostic =
+    req.query.diagnostic === '1' ||
+    req.query.diagnostic === 'true' ||
+    req.query.capacity === '1';
   try {
     const { query, poolStats } = require('./db/pool');
     await query('SELECT 1');
     await require('./db/redis').ping();
-    res.json({ status: 'ok', timestamp: new Date().toISOString(), pool: poolStats() });
+    const body: Record<string, unknown> = {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      pool: poolStats(),
+    };
+    if (diagnostic) {
+      const { buildCapacityPayload } = require('./utils/capacitySnapshot');
+      body.capacity = await buildCapacityPayload();
+    }
+    res.json(body);
   } catch (err) {
     const { poolStats } = require('./db/pool');
     logger.warn({ err, pool: poolStats() }, 'Health check failed');

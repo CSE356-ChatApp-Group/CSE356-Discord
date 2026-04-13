@@ -1025,6 +1025,14 @@ function handleUpgrade(request, socket, head) {
   });
 }
 
+function getLocalWebSocketClientCount() {
+  try {
+    return wss.clients.size;
+  } catch {
+    return 0;
+  }
+}
+
 function shutdown() {
   shuttingDown = true;
   clearInterval(heartbeatInterval);
@@ -1047,6 +1055,7 @@ module.exports = {
   handleUpgrade,
   wss,
   shutdown,
+  getLocalWebSocketClientCount,
   invalidateWsBootstrapCache,
   invalidateWsAclCache,
   evictUnauthorizedChannelSubscribers,

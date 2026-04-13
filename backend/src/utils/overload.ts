@@ -121,6 +121,19 @@ function historyLimit(baseLimit) {
   return baseLimit;
 }
 
+/**
+ * Single object for logs and /health?diagnostic=1 — stable keys for tooling.
+ * Calls getStage() so Prometheus gauge and stage-change logs stay accurate.
+ */
+function getLoadSnapshot() {
+  return {
+    overload_stage: getStage(),
+    rss_mb: toMb(process.memoryUsage().rss),
+    heap_used_mb: toMb(process.memoryUsage().heapUsed),
+    event_loop_lag_p99_ms: Math.round(lag.percentile(99) / 1e6),
+  };
+}
+
 module.exports = {
   getStage,
   shouldThrottlePresenceFanout,
@@ -131,4 +144,5 @@ module.exports = {
   shouldRestrictNonEssentialWrites,
   shouldShedIncomingRequests,
   historyLimit,
+  getLoadSnapshot,
 };
