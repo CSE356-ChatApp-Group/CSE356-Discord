@@ -11,6 +11,10 @@ SSH_USER=${3:?ssh user required}
 SSH_HOST=${4:?ssh host required}
 GITHUB_REPO=${5:?github repo required}
 LOCAL_ARTIFACT_PATH=${LOCAL_ARTIFACT_PATH:-}
+_PREFLIGHT_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=deploy-common.sh
+# shellcheck disable=SC1091
+source "${_PREFLIGHT_SCRIPT_DIR}/deploy-common.sh"
 
 if [[ "$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "prod" ]]; then
   echo "ERROR: environment must be 'staging' or 'prod'"
@@ -79,7 +83,8 @@ echo "Checking remote runtime prerequisites, nginx config, and health route..."
 # bash reports: set: +c: invalid option.
 # Read DATABASE_URL / PGDUMP_DATABASE_URL with grep instead of sourcing .env (safer).
 {
-  cat <<'REMOTE_BASE'
+  # Unquoted delimiter so ${CHATAPP_NGINX_SITE_PATH} is expanded locally into the remote script.
+  cat <<REMOTE_BASE
 set -euo pipefail
 command -v node >/dev/null
 command -v npm >/dev/null
@@ -87,23 +92,23 @@ command -v nginx >/dev/null
 [ -d /opt/chatapp/releases ]
 [ -d /opt/chatapp/shared ]
 [ -f /opt/chatapp/shared/.env ]
-[ -f /etc/nginx/sites-available/chatapp ]
-grep -q "/health" /etc/nginx/sites-available/chatapp
-SITE=/etc/nginx/sites-available/chatapp
+[ -f "${CHATAPP_NGINX_SITE_PATH}" ]
+grep -q "/health" "${CHATAPP_NGINX_SITE_PATH}"
+SITE=${CHATAPP_NGINX_SITE_PATH}
 if ! sudo nginx -t 2>/tmp/chatapp_nginx_t.err; then
   cat /tmp/chatapp_nginx_t.err >&2 || true
   # One-shot heal: standalone proxy_next_upstream_non_idempotent is invalid on stock nginx;
   # POST retry uses the non_idempotent keyword on proxy_next_upstream (idempotent sed).
-  if grep -q "proxy_next_upstream_non_idempotent" "$SITE" 2>/dev/null; then
-    echo "Preflight: removing invalid proxy_next_upstream_non_idempotent from ${SITE}..." >&2
-    sudo sed -i '/proxy_next_upstream_non_idempotent/d' "$SITE"
+  if grep -q "proxy_next_upstream_non_idempotent" "\$SITE" 2>/dev/null; then
+    echo "Preflight: removing invalid proxy_next_upstream_non_idempotent from \$SITE..." >&2
+    sudo sed -i '/proxy_next_upstream_non_idempotent/d' "\$SITE"
   fi
-  echo "Preflight: normalizing proxy_next_upstream retry line in ${SITE}..." >&2
+  echo "Preflight: normalizing proxy_next_upstream retry line in \$SITE..." >&2
   sudo sed -i \
-    's/proxy_next_upstream error timeout http_502 http_503 http_504;/proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;/g' \
-    "$SITE"
+    "s|${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}|${CHATAPP_NGINX_PROXY_RETRY_LINE}|g" \
+    "\$SITE"
   if ! sudo nginx -t; then
-    echo "ERROR: nginx -t still failing after heal attempt; fix ${SITE} manually." >&2
+    echo "ERROR: nginx -t still failing after heal attempt; fix \$SITE manually." >&2
     exit 1
   fi
   echo "Preflight: nginx config healed (reload happens during deploy)." >&2

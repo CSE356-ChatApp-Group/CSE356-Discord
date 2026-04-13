@@ -206,6 +206,8 @@ Production uses immutable release directories:
 
 ### Deploy to Production
 
+Shared nginx-related strings and the default site path live in `deploy/deploy-common.sh`; `deploy-prod.sh` and `preflight-check.sh` source it so retries and heal logic stay aligned.
+
 **Warning: This deploys to production. Ensure staging passed all checks first.**
 
 ```bash

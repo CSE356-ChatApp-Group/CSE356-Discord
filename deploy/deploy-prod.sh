@@ -15,6 +15,14 @@ CURRENT_LINK="/opt/chatapp/current"
 OLD_PORT=4000
 NEW_PORT=4001
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=deploy-common.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/deploy-common.sh"
+
+ssh_prod() {
+  ssh "${PROD_USER}@${PROD_HOST}" "$@"
+}
+
 MONITOR_SECONDS="${MONITOR_SECONDS:-30}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
@@ -32,7 +40,7 @@ DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 # Number of Node.js HTTP workers (systemd chatapp@ ports).  Default 1; set 2 when
 # nginx load-balances two ports like staging.
 CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
-_REMOTE_NCPU=$(ssh "${PROD_USER}@${PROD_HOST}" 'nproc --all' 2>/dev/null || echo 2)
+_REMOTE_NCPU=$(ssh_prod 'nproc --all' 2>/dev/null || echo 2)
 # PgBouncer pool + Node pool math matches deploy-staging.sh (same caps, different host).
 # Scale default_pool_size with **host vCPU** so 8 vCPU (etc.) actually gets more real PG
 # backends than 4 vCPU. Older `min(..., 80 + inst*45)` pinned the pool at 170 for any
@@ -76,7 +84,7 @@ UV_THREADPOOL_PER_INSTANCE=$(python3 -c "print(max(8, 16 // max(1, ${CHATAPP_INS
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
 # Formula: min(1500, max(RAM_MB * 12%, 192)) — same as deploy-staging.sh.
 # On a 2 GB prod machine: min(1500, max(246, 192)) = 246 MB.
-_REMOTE_RAM_MB=$(ssh "${PROD_USER}@${PROD_HOST}" "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 2048)
+_REMOTE_RAM_MB=$(ssh_prod "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 2048)
 NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== PRODUCTION DEPLOYMENT ==="
@@ -88,10 +96,11 @@ echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: $
 
 # First server port inside `upstream app` only (avoids accidental matches elsewhere and
 # duplicate-line collapse where a naive grep | head picked an arbitrary port).
-CURRENT_UPSTREAM_PORT=$(ssh "$PROD_USER@$PROD_HOST" "python3 <<'PY'
+CURRENT_UPSTREAM_PORT=$(ssh_prod "SITE='${CHATAPP_NGINX_SITE_PATH}' python3 <<'PY'
+import os
 import re
 from pathlib import Path
-p = Path('/etc/nginx/sites-available/chatapp')
+p = Path(os.environ['SITE'])
 if not p.is_file():
     print('')
     raise SystemExit(0)
@@ -121,15 +130,21 @@ fi
 echo "Current live port: $OLD_PORT"
 echo "Candidate port: $NEW_PORT"
 
-ssh "$PROD_USER@$PROD_HOST" "sudo logger -t chatapp-deploy \"event=start sha=${RELEASE_SHA} old_port=${OLD_PORT} new_port=${NEW_PORT} instances=${CHATAPP_INSTANCES}\"" || true
+stop_chatapp_port() {
+  local p="${1:?port required}"
+  ssh_prod "sudo systemctl stop chatapp@${p} 2>/dev/null || true"
+}
+
+ssh_prod "sudo logger -t chatapp-deploy \"event=start sha=${RELEASE_SHA} old_port=${OLD_PORT} new_port=${NEW_PORT} instances=${CHATAPP_INSTANCES}\"" || true
 
 rollback_cutover() {
   echo "↩ Rolling back nginx upstream to prior live port ${OLD_PORT} (single upstream)..."
-  ssh "$PROD_USER@$PROD_HOST" "
+  ssh_prod "
     set -euo pipefail
     export ROLLBACK_PORT='${OLD_PORT}'
+    export SITE='${CHATAPP_NGINX_SITE_PATH}'
     TMP_SITE=\$(mktemp)
-    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    sudo cp \"\$SITE\" \"\$TMP_SITE\"
     export TMP_SITE
     python3 <<'PY'
 import os, re
@@ -151,7 +166,7 @@ if n != 1:
     raise SystemExit('rollback: upstream app block not replaced (n=%d)' % (n,))
 open(cfg_path, 'w').write(text)
 PY
-    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
     rm -f \"\$TMP_SITE\"
     sudo nginx -t >/dev/null
     sudo systemctl reload nginx
@@ -195,7 +210,7 @@ fi
 # 2. Backup database before risky deploy (strict — deploy aborts if backup fails).
 # Never pg_dump through PgBouncer transaction pool (unreliable COPY); use PGDUMP_DATABASE_URL.
 echo "2. Backing up database..."
-ssh "$PROD_USER@$PROD_HOST" bash -s <<'REMOTE_BACKUP'
+ssh_prod bash -s <<'REMOTE_BACKUP'
 set -euo pipefail
 set -o pipefail
 BACKUP_DIR=/opt/chatapp/backups
@@ -240,10 +255,10 @@ echo "✓ Backup prepared"
 
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
 echo "2b) Installing and configuring PgBouncer..."
-ssh "$PROD_USER@$PROD_HOST" "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
+ssh_prod "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
 scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
 scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
-ssh "$PROD_USER@$PROD_HOST" "
+ssh_prod "
   set -euo pipefail
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
     sudo apt-get install -y pgbouncer
@@ -292,7 +307,7 @@ echo "✓ PgBouncer configured"
 # 2c. PostgreSQL tuning on the app VM — only when PgBouncer talks to co-located Postgres.
 # If the pooler backend is a remote host, skip (ALTER SYSTEM here would touch the wrong cluster).
 echo "2c) Tuning PostgreSQL for prod VM..."
-ssh "$PROD_USER@$PROD_HOST" "
+ssh_prod "
   set -euo pipefail
   # Primary signal: helper inspects PgBouncer backend in pgbouncer.ini.
   if python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py\" 2>/dev/null; then
@@ -429,7 +444,7 @@ echo "✓ Copied to production"
 
 # 5. Unpack candidate release
 echo "5. Unpacking candidate release..."
-ssh "$PROD_USER@$PROD_HOST" "
+ssh_prod "
   set -e
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
   
@@ -490,8 +505,8 @@ echo "✓ Candidate release ready"
 echo "5.5. Installing/updating systemd unit..."
 # Use ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
 # subsystem which misparses '@' in remote paths, causing "Permission denied".
-ssh "$PROD_USER@$PROD_HOST" 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
-ssh "$PROD_USER@$PROD_HOST" "
+ssh_prod 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
+ssh_prod "
   set -e
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
@@ -577,7 +592,7 @@ echo "✓ systemd unit ready"
 
 # 6. Start candidate on alternate port via systemd
 echo "6. Starting candidate process via systemd..."
-ssh "$PROD_USER@$PROD_HOST" "
+ssh_prod "
   set -e
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
 
@@ -598,24 +613,24 @@ echo "✓ Candidate process started on port $NEW_PORT"
 
 # 7. Health checks
 echo "7. Running health checks on candidate..."
-ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
+ssh_prod "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
   echo "ERROR: Health check failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "sudo systemctl stop chatapp@${NEW_PORT} || true"
+  stop_chatapp_port "$NEW_PORT"
   exit 1
 }
 echo "✓ Health checks passed"
 
 # 8. Smoke tests
 echo "8. Running smoke tests..."
-ssh "$PROD_USER@$PROD_HOST" "/tmp/smoke-test.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
+ssh_prod "/tmp/smoke-test.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
   echo "ERROR: Smoke tests failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "sudo systemctl stop chatapp@${NEW_PORT} || true"
+  stop_chatapp_port "$NEW_PORT"
   exit 1
 }
 echo "✓ Smoke tests passed"
 
 echo "8b. Candidate WebSocket message round-trip..."
-ssh "$PROD_USER@$PROD_HOST" "
+ssh_prod "
   set -euo pipefail
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
   export API_CONTRACT_BASE_URL=http://127.0.0.1:$NEW_PORT/api/v1
@@ -625,7 +640,7 @@ ssh "$PROD_USER@$PROD_HOST" "
   rm -f \"\$RELEASE_PATH/backend/candidate-ws-smoke.cjs\"
 " || {
   echo "ERROR: Candidate WS smoke failed. Stopping candidate."
-  ssh "$PROD_USER@$PROD_HOST" "sudo systemctl stop chatapp@${NEW_PORT} || true"
+  stop_chatapp_port "$NEW_PORT"
   exit 1
 }
 echo "✓ Candidate WS smoke passed"
@@ -638,13 +653,14 @@ echo "✓ Candidate WS smoke passed"
 # Single-worker: point nginx at NEW_PORT only, then tune (original behavior).
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
   echo "9. Dual-worker: nginx/kernel tuning only (upstream unchanged — both ports stay live)..."
-  ssh "$PROD_USER@$PROD_HOST" "
+  ssh_prod "
     set -euo pipefail
+    export SITE='${CHATAPP_NGINX_SITE_PATH}'
     TMP_SITE=\$(mktemp)
-    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    sudo cp \"\$SITE\" \"\$TMP_SITE\"
     sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' \"\$TMP_SITE\"
     sudo sed -i 's/listen \\[::\\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' \"\$TMP_SITE\"
-    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
     rm -f \"\$TMP_SITE\"
     sudo sysctl -w net.ipv4.tcp_max_syn_backlog=${NGINX_WORKER_CONNECTIONS} >/dev/null
     sudo sysctl -w net.core.somaxconn=${NGINX_WORKER_CONNECTIONS} >/dev/null
@@ -666,12 +682,13 @@ else
   # Rewrite the whole `upstream app { ... }` block instead of globally s/OLD/NEW/g, which
   # collapses dual server lines into duplicate ports (no load balancing + capacity loss).
   echo "9. Switching Nginx to candidate (single-upstream cutover)..."
-  ssh "$PROD_USER@$PROD_HOST" "
+  ssh_prod "
     set -e
     export NEW_PORT='${NEW_PORT}'
     export OLD_PORT='${OLD_PORT}'
+    export SITE='${CHATAPP_NGINX_SITE_PATH}'
     TMP_SITE=\$(mktemp)
-    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    sudo cp \"\$SITE\" \"\$TMP_SITE\"
     export TMP_SITE
     python3 <<'PY'
 import os, re
@@ -695,7 +712,7 @@ open(cfg_path, 'w').write(text)
 PY
     sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' \"\$TMP_SITE\"
     sudo sed -i 's/listen \\[::\\]:80 default_server;/listen [::]:80 default_server backlog=4096;/g' \"\$TMP_SITE\"
-    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
     rm -f \"\$TMP_SITE\"
     sudo nginx -t >/dev/null
     sudo systemctl reload nginx
@@ -720,9 +737,8 @@ fi
 # 9.05 Idempotent: longer read timeout for search only (general /api/ stays 30s).
 # Prevents nginx from returning 502 while Node is still working on a successful search.
 echo "9.05 Nginx: ensure /api/v1/search extended proxy timeouts..."
-ssh "$PROD_USER@$PROD_HOST" "bash -s" <<'REMOTE'
+ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; bash -s" <<'REMOTE'
 set -euo pipefail
-SITE=/etc/nginx/sites-available/chatapp
 if ! sudo test -f "$SITE"; then
   echo "9.05: skip — $SITE missing"
   exit 0
@@ -771,9 +787,8 @@ echo "✓ Nginx search route OK"
 
 # 9.06 Idempotent: add upstream retry policy for /api/ only (exclude websocket path).
 echo "9.06 Nginx: ensure /api/ upstream retry policy..."
-ssh "$PROD_USER@$PROD_HOST" "bash -s" <<'REMOTE'
+ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; export RETRY_FULL='${CHATAPP_NGINX_PROXY_RETRY_LINE}'; export RETRY_LEGACY='${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}'; bash -s" <<'REMOTE'
 set -euo pipefail
-SITE=/etc/nginx/sites-available/chatapp
 if ! sudo test -f "$SITE"; then
   echo "9.06: skip — $SITE missing"
   exit 0
@@ -810,10 +825,8 @@ orig = body
 # Remove mistaken standalone directive (not valid nginx); real knob is
 # `non_idempotent` on the proxy_next_upstream line.
 body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
-retry_full = (
-    "proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;"
-)
-retry_old = "proxy_next_upstream error timeout http_502 http_503 http_504;"
+retry_full = os.environ["RETRY_FULL"]
+retry_old = os.environ["RETRY_LEGACY"]
 if retry_old in body:
     body = body.replace(retry_old, retry_full, 1)
 elif retry_full not in body:
@@ -848,9 +861,8 @@ echo "✓ Nginx /api retry policy OK"
 # 9.07 Idempotent: dedicated /api/v1/auth/ with longer proxy timeouts than generic /api/ (30s).
 # Auth is bcrypt-bound; without this, login/register can see nginx 504 HTML under burst.
 echo "9.07 Nginx: ensure /api/v1/auth/ extended proxy timeouts..."
-ssh "$PROD_USER@$PROD_HOST" "bash -s" <<'REMOTE'
+ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; bash -s" <<'REMOTE'
 set -euo pipefail
-SITE=/etc/nginx/sites-available/chatapp
 if ! sudo test -f "$SITE"; then
   echo "9.07: skip — $SITE missing"
   exit 0
@@ -904,9 +916,8 @@ echo "✓ Nginx auth route OK"
 # 9.075 Idempotent: fix auth block — `non_idempotent` must be on proxy_next_upstream,
 # and remove invalid standalone proxy_next_upstream_non_idempotent if present.
 echo "9.075 Nginx: ensure auth proxy_next_upstream includes non_idempotent..."
-ssh "$PROD_USER@$PROD_HOST" "bash -s" <<'REMOTE'
+ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; export RETRY_FULL='${CHATAPP_NGINX_PROXY_RETRY_LINE}'; export RETRY_LEGACY='${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}'; bash -s" <<'REMOTE'
 set -euo pipefail
-SITE=/etc/nginx/sites-available/chatapp
 if ! sudo test -f "$SITE"; then
   echo "9.075: skip — $SITE missing"
   exit 0
@@ -930,10 +941,8 @@ if not m:
 body = m.group(2)
 orig = body
 body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
-retry_old = "proxy_next_upstream error timeout http_502 http_503 http_504;"
-retry_full = (
-    "proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;"
-)
+retry_old = os.environ["RETRY_LEGACY"]
+retry_full = os.environ["RETRY_FULL"]
 if retry_old in body:
     body = body.replace(retry_old, retry_full, 1)
 elif retry_full in body:
@@ -969,11 +978,12 @@ echo "✓ Nginx auth POST retry OK"
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
   if [ "${PIN_CANDIDATE_BEFORE_COMPANION}" = "true" ]; then
     echo "9a. Pinning nginx to candidate (${NEW_PORT}) before companion restart..."
-    ssh "$PROD_USER@$PROD_HOST" "
+    ssh_prod "
       set -euo pipefail
       export NEW_PORT='${NEW_PORT}'
+      export SITE='${CHATAPP_NGINX_SITE_PATH}'
       TMP_SITE=\$(mktemp)
-      sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+      sudo cp \"\$SITE\" \"\$TMP_SITE\"
       export TMP_SITE
       python3 <<'PY'
 import os, re
@@ -995,7 +1005,7 @@ if n != 1:
     raise SystemExit('step 9a: upstream app block not replaced (n=%d)' % (n,))
 open(cfg_path, 'w').write(text)
 PY
-      sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+      sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
       rm -f \"\$TMP_SITE\"
       sudo nginx -t >/dev/null
       sudo systemctl reload nginx
@@ -1012,7 +1022,7 @@ PY
   fi
 
   echo "9a.1 Verifying candidate stays healthy before companion restart..."
-  if ! ssh "$PROD_USER@$PROD_HOST" "
+  if ! ssh_prod "
     set -euo pipefail
     ok=0
     for i in 1 2 3; do
@@ -1031,7 +1041,7 @@ PY
   fi
 
   echo "9b. Rolling companion on port ${OLD_PORT} to ${RELEASE_SHA} (dual-worker)..."
-  ssh "$PROD_USER@$PROD_HOST" "
+  ssh_prod "
     set -euo pipefail
     RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
     DROPIN_DIR=/etc/systemd/system/chatapp@${OLD_PORT}.service.d
@@ -1061,12 +1071,12 @@ PY
     rollback_cutover
     exit 1
   }
-  if ! ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh ${OLD_PORT} http://127.0.0.1:${OLD_PORT}"; then
+  if ! ssh_prod "/tmp/health-check.sh ${OLD_PORT} http://127.0.0.1:${OLD_PORT}"; then
     echo "ERROR: Health check failed on companion port ${OLD_PORT}."
     rollback_cutover
     exit 1
   fi
-  if ! ssh "$PROD_USER@$PROD_HOST" "
+  if ! ssh_prod "
     set -euo pipefail
     fails=0
     for i in 1 2 3 4; do
@@ -1081,12 +1091,13 @@ PY
   fi
 
   echo "9c. Restoring nginx upstream (least_conn, both workers; passive health on upstream)..."
-  ssh "$PROD_USER@$PROD_HOST" "
+  ssh_prod "
     set -euo pipefail
     export NEW_PORT='${NEW_PORT}'
     export OLD_PORT='${OLD_PORT}'
+    export SITE='${CHATAPP_NGINX_SITE_PATH}'
     TMP_SITE=\$(mktemp)
-    sudo cp /etc/nginx/sites-available/chatapp \"\$TMP_SITE\"
+    sudo cp \"\$SITE\" \"\$TMP_SITE\"
     export TMP_SITE
     python3 <<'PY'
 import os, re
@@ -1111,7 +1122,7 @@ if n != 1:
     raise SystemExit('step 9c: upstream app block not replaced (n=%d)' % (n,))
 open(cfg_path, 'w').write(text)
 PY
-    sudo install -m 644 \"\$TMP_SITE\" /etc/nginx/sites-available/chatapp
+    sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
     rm -f \"\$TMP_SITE\"
     sudo nginx -t >/dev/null
     sudo systemctl reload nginx
@@ -1127,7 +1138,7 @@ fi
 
 # 9.5. Enable new service for auto-start on reboot
 echo "9.5 Enabling candidate service for auto-start on reboot..."
-ssh "$PROD_USER@$PROD_HOST" "sudo systemctl enable chatapp@${NEW_PORT} 2>/dev/null || true"
+ssh_prod "sudo systemctl enable chatapp@${NEW_PORT} 2>/dev/null || true"
 echo "✓ Service enabled"
 
 # 10. Monitor briefly
@@ -1140,7 +1151,7 @@ echo "10. Monitoring for ${MONITOR_SECONDS} seconds..."
 MONITOR_FAILS=0
 for i in $(seq 1 "$MONITOR_CHECKS"); do
   sleep 5
-  if ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
+  if ssh_prod "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
     echo "  ✓ Check $i/$MONITOR_CHECKS passed"
   else
     echo "  ✗ Check $i/$MONITOR_CHECKS: health check failed"
@@ -1161,7 +1172,7 @@ echo "✓ Monitoring window complete"
 # To roll back after this point: re-run this script with the previous SHA.
 if [ "${RECLAIM_OLD_PORT}" = "true" ]; then
   echo "10.5. Stopping old instance on port ${OLD_PORT} to reclaim RAM..."
-  ssh "$PROD_USER@$PROD_HOST" "
+  ssh_prod "
     sudo systemctl stop chatapp@${OLD_PORT} 2>/dev/null || true
     sudo systemctl disable chatapp@${OLD_PORT} 2>/dev/null || true
     echo 'Old instance stopped'"
@@ -1181,7 +1192,7 @@ scp -q "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "$PROD_USER@
 # Do **not** global-sed replace ports here: that collapses dual targets to one
 # port when nginx load-balances two Node workers.
 echo "10.6. Refreshing Prometheus scrape config..."
-ssh "$PROD_USER@$PROD_HOST" "
+ssh_prod "
   if [ -f /tmp/prometheus-host.yml.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
     sudo cp /tmp/prometheus-host.yml.deploy /opt/chatapp-monitoring/prometheus-host.yml
@@ -1210,7 +1221,7 @@ scp -q "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/syn
 scp -q "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "$PROD_USER@$PROD_HOST:/tmp/prometheus-db-file-sd.py.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "$PROD_USER@$PROD_HOST:/tmp/db-node.json.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "$PROD_USER@$PROD_HOST:/tmp/db-postgres.json.deploy" || true
-ssh "$PROD_USER@$PROD_HOST" "
+ssh_prod "
   set -euo pipefail
   if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ] || [ -d /tmp/grafana-provisioning-remote.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
@@ -1299,7 +1310,7 @@ echo "✓ Monitoring updated"
 
 # 11. Update current symlink
 echo "11. Updating current release symlink..."
-if ssh "$PROD_USER@$PROD_HOST" "
+if ssh_prod "
   ln -sfn $RELEASE_DIR/$RELEASE_SHA $CURRENT_LINK
   echo 'Symlink: $CURRENT_LINK -> $RELEASE_SHA'
   # Keep only the 3 most recent releases to prevent disk exhaustion (node_modules ~200MB each).
@@ -1312,7 +1323,7 @@ fi
 
 # 12. Final health check
 echo "12. Final verification..."
-if ssh "$PROD_USER@$PROD_HOST" "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
+if ssh_prod "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
   echo "✓ Production deployment SUCCESSFUL"
 else
   echo "ERROR: Final health check failed after cutover."
@@ -1322,7 +1333,7 @@ fi
 
 # 13. Cleanup older releases/backups to control disk usage on small VMs.
 echo "13. Pruning old releases/backups (keep releases=$KEEP_RELEASES backups=$KEEP_BACKUPS)..."
-if ssh "$PROD_USER@$PROD_HOST" "
+if ssh_prod "
   set -e
   if [ -d '$RELEASE_DIR' ]; then
     ls -1dt '$RELEASE_DIR'/* 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | xargs -r rm -rf
@@ -1336,7 +1347,7 @@ else
   echo "⚠ WARNING: Cleanup skipped due to transient SSH failure."
 fi
 
-ssh "$PROD_USER@$PROD_HOST" "sudo logger -t chatapp-deploy \"event=complete sha=${RELEASE_SHA} candidate_port=${NEW_PORT} companion_port=${OLD_PORT} instances=${CHATAPP_INSTANCES}\"" || true
+ssh_prod "sudo logger -t chatapp-deploy \"event=complete sha=${RELEASE_SHA} candidate_port=${NEW_PORT} companion_port=${OLD_PORT} instances=${CHATAPP_INSTANCES}\"" || true
 
 echo ""
 echo "=== Deployment Complete ==="
