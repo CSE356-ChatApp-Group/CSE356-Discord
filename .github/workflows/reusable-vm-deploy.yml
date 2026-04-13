@@ -114,10 +114,14 @@ jobs:
         id: artifact
         if: ${{ inputs.artifact_name != '' }}
         shell: bash
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
-          FILE=$(find .artifacts -type f -name '*.tar.gz' | head -n 1)
-          test -n "$FILE" || { echo "Artifact tarball not found after download"; exit 1; }
+          EXPECTED="chatapp-${TARGET_SHA}.tar.gz"
+          FILE=$(find .artifacts -type f -name "$EXPECTED")
+          COUNT=$(printf '%s\n' "$FILE" | sed '/^$/d' | wc -l | tr -d ' ')
+          test "$COUNT" = "1" || { echo "Expected exactly one $EXPECTED artifact, found $COUNT"; exit 1; }
           echo "local_path=$FILE" >> "$GITHUB_OUTPUT"
 
       - name: Validate deploy inputs

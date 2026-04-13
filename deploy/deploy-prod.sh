@@ -290,7 +290,50 @@ echo "✓ PgBouncer configured"
 echo "2c) Tuning PostgreSQL for prod VM..."
 ssh "$PROD_USER@$PROD_HOST" "
   set -euo pipefail
+  # Primary signal: helper inspects PgBouncer backend in pgbouncer.ini.
   if python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py\" 2>/dev/null; then
+    echo 'Skipping local PostgreSQL tuning — PgBouncer backend is off-host.'
+    echo 'On the database VM run: DB_SSH=user@db-host ./deploy/tune-remote-db-postgres.sh'
+    exit 0
+  fi
+  # Fallback signal: parse PGDUMP_DATABASE_URL / DATABASE_URL from shared .env.
+  # This prevents false local-tune attempts when helper is missing or cannot parse.
+  if python3 - <<'PY'
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+
+env_path = Path('/opt/chatapp/shared/.env')
+if not env_path.is_file():
+    raise SystemExit(1)
+
+env = {}
+for raw in env_path.read_text(encoding='utf-8', errors='replace').splitlines():
+    line = raw.strip()
+    if not line or line.startswith('#') or '=' not in line:
+        continue
+    if line.startswith('export '):
+        line = line[7:].strip()
+    k, _, v = line.partition('=')
+    k = k.strip()
+    v = v.strip().strip('\"').strip(\"'\")
+    env[k] = v
+
+url = (env.get('PGDUMP_DATABASE_URL') or env.get('DATABASE_URL') or '').strip()
+if not url:
+    raise SystemExit(1)
+if url.startswith('postgres://'):
+    url = 'postgresql://' + url[len('postgres://'):]
+elif url.startswith('postgresql+asyncpg://'):
+    url = 'postgresql://' + url[len('postgresql+asyncpg://'):]
+if not url.startswith('postgresql://'):
+    raise SystemExit(1)
+host = urlparse(url).hostname
+if host and host not in ('localhost', '127.0.0.1', '::1'):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
     echo 'Skipping local PostgreSQL tuning — PgBouncer backend is off-host.'
     echo 'On the database VM run: DB_SSH=user@db-host ./deploy/tune-remote-db-postgres.sh'
     exit 0

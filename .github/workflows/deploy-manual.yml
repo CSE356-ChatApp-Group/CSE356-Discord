@@ -47,9 +47,11 @@ jobs:
         run: |
           set -euo pipefail
           TARGET_SHA="${{ inputs.sha || github.sha }}"
+          ARTIFACT="chatapp-${TARGET_SHA}.tar.gz"
           echo "Downloading release-${TARGET_SHA} from ${{ github.repository }}"
-          gh release download "release-${TARGET_SHA}" -R "${{ github.repository }}" -p '*.tar.gz' -D .
-          ls -la ./*.tar.gz
+          gh release download "release-${TARGET_SHA}" -R "${{ github.repository }}" -p "${ARTIFACT}" -D .
+          test -f "${ARTIFACT}"
+          ls -la "./${ARTIFACT}"
 
       - name: Build fallback release artifact
         if: steps.download_release.outcome != 'success'
@@ -92,9 +94,9 @@ jobs:
           set -euo pipefail
           mkdir -p releases
           TARGET_SHA="${{ inputs.sha || github.sha }}"
-          if ls ./*.tar.gz >/dev/null 2>&1; then
-            FILE="$(ls -1 ./*.tar.gz | head -n 1)"
-            cp "$FILE" "releases/chatapp-${TARGET_SHA}.tar.gz"
+          ARTIFACT="chatapp-${TARGET_SHA}.tar.gz"
+          if [[ -f "./${ARTIFACT}" ]]; then
+            cp "./${ARTIFACT}" "releases/chatapp-${TARGET_SHA}.tar.gz"
           fi
           test -f "releases/chatapp-${TARGET_SHA}.tar.gz"
 

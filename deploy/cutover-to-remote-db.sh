@@ -9,14 +9,14 @@
 #   - Local Postgres on app VM still running with data to migrate.
 #
 # Usage:
-#   APP_SSH=root@130.245.136.44 DB_SSH=root@130.245.136.21 DB_PRIVATE_IP=10.0.1.62 \
-#     ./deploy/cutover-to-remote-db.sh
+#   APP_SSH=user@app-host DB_SSH=user@db-host DB_PRIVATE_IP=10.x.x.x \
+#     CUTOVER_CONFIRM=YES ./deploy/cutover-to-remote-db.sh
 #
 set -euo pipefail
 
-APP_SSH="${APP_SSH:-root@130.245.136.44}"
-DB_SSH="${DB_SSH:-root@130.245.136.21}"
-DB_PRIVATE_IP="${DB_PRIVATE_IP:-10.0.1.62}"
+APP_SSH="${APP_SSH:?Set APP_SSH explicitly (e.g. ubuntu@<app-host>)}"
+DB_SSH="${DB_SSH:?Set DB_SSH explicitly (e.g. root@<db-host>)}"
+DB_PRIVATE_IP="${DB_PRIVATE_IP:?Set DB_PRIVATE_IP explicitly (private DB host IP)}"
 DB_CREDS_REMOTE="${DB_CREDS_REMOTE:-/root/chatapp_prod_db_credentials.txt}"
 ENV_FILE="${ENV_FILE:-/opt/chatapp/shared/.env}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +29,10 @@ echo "  App SSH:    ${APP_SSH}"
 echo "  DB SSH:     ${DB_SSH}"
 echo "  DB private: ${DB_PRIVATE_IP}"
 echo ""
+
+if [[ "${CUTOVER_CONFIRM:-}" != "YES" ]]; then
+  die "Refusing to run without CUTOVER_CONFIRM=YES (resolved targets shown above)"
+fi
 
 echo "==> SSH check"
 ssh -o BatchMode=yes -o ConnectTimeout=20 "${APP_SSH}" 'hostname' >/dev/null || die "Cannot SSH to app (${APP_SSH})"

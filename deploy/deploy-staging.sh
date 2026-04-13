@@ -98,7 +98,23 @@ echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: $
 
 ssh "${STAGING_USER}@${STAGING_HOST}" "sudo logger -t chatapp-deploy \"event=start env=staging sha=${RELEASE_SHA} instances=${CHATAPP_INSTANCES}\"" || true
 
-CURRENT_UPSTREAM_PORT=$(ssh "${STAGING_USER}@${STAGING_HOST}" "grep -oE '127\.0\.0\.1:[0-9]+' /etc/nginx/sites-available/chatapp | head -n1 | cut -d: -f2" || true)
+CURRENT_UPSTREAM_PORT=$(ssh "${STAGING_USER}@${STAGING_HOST}" "
+  python3 - <<'PY'
+import re
+try:
+    cfg = open('/etc/nginx/sites-available/chatapp', encoding='utf-8', errors='replace').read()
+except FileNotFoundError:
+    raise SystemExit(0)
+m = re.search(r'upstream\\s+chatapp_upstream\\s*\\{([^}]*)\\}', cfg, re.DOTALL)
+if not m:
+    raise SystemExit(0)
+for line in m.group(1).splitlines():
+    sm = re.search(r'server\\s+127\\.0\\.0\\.1:(\\d+)', line)
+    if sm:
+        print(sm.group(1))
+        raise SystemExit(0)
+PY
+" || true)
 if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
   CURRENT_UPSTREAM_PORT="${LIVE_PORT}"
 fi
@@ -223,7 +239,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 d /var/run/pgbouncer 0755 postgres postgres -
 TMPFILES
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgbouncer-chatapp.conf 2>/dev/null || true
-  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 /tmp/pgbouncer-setup.py
+  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
   sudo systemctl enable pgbouncer
   # pgbouncer is a sysv service on Ubuntu 22.04 — use the init.d script for
   # reliable stop/start (handles PID file cleanup correctly).  systemctl restart

@@ -14,10 +14,14 @@ url = f"postgres://chatapp:{urllib.parse.quote(pw, safe='')}@{dbip}:5432/chatapp
 text = path.read_text()
 out = []
 found = False
+seen_database_url = False
 for line in text.splitlines(keepends=True):
-    if line.startswith("DATABASE_URL="):
-        out.append("DATABASE_URL=" + url + "\n")
-        found = True
+    stripped = line.lstrip()
+    if stripped.startswith("DATABASE_URL=") or stripped.startswith("export DATABASE_URL="):
+        if not seen_database_url:
+            out.append("DATABASE_URL=" + url + "\n")
+            found = True
+            seen_database_url = True
     else:
         out.append(line)
 if not found:

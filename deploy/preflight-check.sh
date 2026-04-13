@@ -58,7 +58,7 @@ SSH_TARGET="${SSH_USER}@${SSH_HOST}"
 echo "Checking SSH connectivity..."
 SSH_OK=0
 for attempt in 1 2 3; do
-  if ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
+  if ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
     SSH_OK=1
     break
   fi
