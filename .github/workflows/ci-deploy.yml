@@ -38,8 +38,10 @@ jobs:
           bash -n deploy/cutover-to-remote-db.sh
           bash -n deploy/tune-remote-db-postgres.sh
           bash -n deploy/postgres-migrate-data-volume.sh
+          bash -n deploy/install-db-metrics-exporters.sh
           node --check deploy/candidate-ws-smoke.cjs
           python3 -m py_compile deploy/ensure-pgdump-env.py
+          python3 -m py_compile deploy/prometheus-db-file-sd.py
           node --check backend/scripts/api-contract-harness.cjs
 
       - name: Validate Prometheus alert rules

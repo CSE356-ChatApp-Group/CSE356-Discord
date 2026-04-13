@@ -906,10 +906,35 @@ ssh "$PROD_USER@$PROD_HOST" "
 echo "10.65. Sync alert rules + Alertmanager + redis_exporter (Discord / Redis alerts)..."
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_HOST:/tmp/alerts.yml.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_HOST:/tmp/alertmanager.yml.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
+scp -q "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "$PROD_USER@$PROD_HOST:/tmp/prometheus-db-file-sd.py.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "$PROD_USER@$PROD_HOST:/tmp/db-node.json.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "$PROD_USER@$PROD_HOST:/tmp/db-postgres.json.deploy" || true
 ssh "$PROD_USER@$PROD_HOST" "
   set -euo pipefail
-  if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ]; then
+  if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
+  fi
+  if [ -f /tmp/remote-compose.yml.deploy ]; then
+    sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
+    rm -f /tmp/remote-compose.yml.deploy
+  fi
+  if [ -f /tmp/prometheus-db-file-sd.py.deploy ]; then
+    sudo cp /tmp/prometheus-db-file-sd.py.deploy /opt/chatapp-monitoring/prometheus-db-file-sd.py
+    sudo chmod 644 /opt/chatapp-monitoring/prometheus-db-file-sd.py
+    rm -f /tmp/prometheus-db-file-sd.py.deploy
+  fi
+  sudo mkdir -p /opt/chatapp-monitoring/file_sd
+  if [ -f /tmp/db-node.json.deploy ]; then
+    sudo cp /tmp/db-node.json.deploy /opt/chatapp-monitoring/file_sd/db-node.json
+    rm -f /tmp/db-node.json.deploy
+  fi
+  if [ -f /tmp/db-postgres.json.deploy ]; then
+    sudo cp /tmp/db-postgres.json.deploy /opt/chatapp-monitoring/file_sd/db-postgres.json
+    rm -f /tmp/db-postgres.json.deploy
+  fi
+  if [ -f /opt/chatapp-monitoring/prometheus-db-file-sd.py ] && [ -f /opt/chatapp/shared/.env ]; then
+    sudo python3 /opt/chatapp-monitoring/prometheus-db-file-sd.py || echo 'WARN: prometheus-db-file-sd.py failed (non-fatal)'
   fi
   if [ -f /tmp/alerts.yml.deploy ]; then
     sudo cp /tmp/alerts.yml.deploy /opt/chatapp-monitoring/alerts.yml

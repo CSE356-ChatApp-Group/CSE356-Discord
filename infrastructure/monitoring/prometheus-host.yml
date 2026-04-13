@@ -32,9 +32,27 @@ scrape_configs:
     static_configs:
       - targets: ['127.0.0.1:9000']
 
+  # App VM host metrics (node_exporter in remote-compose).
   - job_name: 'node'
     static_configs:
       - targets: ['127.0.0.1:9100']
+
+  # Dedicated DB VM — targets from file_sd (see deploy/prometheus-db-file-sd.py).
+  # Empty [] when Postgres is local or PGDUMP_DATABASE_URL is unset. Install exporters:
+  #   DB_SSH=root@<db-host> ./deploy/install-db-metrics-exporters.sh
+  - job_name: 'db-node'
+    scrape_interval: 15s
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/file_sd/db-node.json
+        refresh_interval: 30s
+
+  - job_name: 'db-postgres'
+    scrape_interval: 15s
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/file_sd/db-postgres.json
+        refresh_interval: 30s
 
   # Host-network redis_exporter (deploy-staging ensures container). Metrics:
   # redis_memory_used_bytes, redis_connected_clients, redis_commands_processed_total, ...

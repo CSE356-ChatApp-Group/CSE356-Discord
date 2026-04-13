@@ -449,6 +449,13 @@ Set up alerting:
 - `deploy-prod.sh` now validates Alertmanager webhook wiring and fails fast if it is blank/invalid (prevents silent alert loss)
 - Use `http://127.0.0.1:9093` on the monitor host to verify active alerts and silences
 
+**Dedicated database VM in Grafana / Prometheus:** By default, Prometheus on the **app** VM only scraped localhost (API, Redis, this VM’s `node_exporter`). To see **CPU / memory / disk** on the Postgres host and **`postgres_exporter`** metrics (connections, replication, bloat-related views, etc.), do this once:
+
+1. On the **DB VM**, install exporters: `DB_SSH=root@<db-host> ./deploy/install-db-metrics-exporters.sh`  
+   Restrict **:9100** and **:9187** in the cloud firewall / `ufw` to the **app VM’s private IP** only.
+2. On the **next prod (or staging) deploy**, `deploy-prod.sh` / `deploy-staging.sh` sync `remote-compose.yml`, mount `file_sd/`, and run `deploy/prometheus-db-file-sd.py`, which builds scrape targets from **`PGDUMP_DATABASE_URL`** (direct `:5432` host). If that URL is missing or points at localhost, targets stay empty so all-in-one staging does not scrape junk addresses.
+3. In Grafana → Explore → Prometheus, verify `up{job="db-node"} == 1` and `up{job="db-postgres"} == 1`, then use `node_*` metrics for the DB host and `pg_*` / `pg_stat_*` series from postgres_exporter.
+
 ### WebSocket Connections
 
 After deployment, verify WebSocket stability:

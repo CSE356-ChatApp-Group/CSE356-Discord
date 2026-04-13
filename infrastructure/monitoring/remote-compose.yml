@@ -14,6 +14,7 @@ services:
     volumes:
       - ./prometheus-host.yml:/etc/prometheus/prometheus.yml.template:ro
       - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./file_sd:/etc/prometheus/file_sd:ro
       - prometheus_data:/prometheus
 
   alertmanager:
