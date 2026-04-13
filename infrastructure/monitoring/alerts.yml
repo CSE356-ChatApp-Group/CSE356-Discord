@@ -204,6 +204,18 @@ groups:
             **Capacity signal:** add vCPU/RAM, enlarge PgBouncer/Postgres limits, or split app/DB.
             Check Grafana/pg_pool_waiting and PG logs for slow queries.
 
+      # Catch shorter contention bursts that can hurt p95 before sustained pressure alerts fire.
+      - alert: ChatAppPgPoolWaitSpikeFast
+        expr: max(pg_pool_waiting{job="chatapp-api"}) > 8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Postgres pool waiters spiked (fast-burn)
+          description: >
+            pg_pool_waiting exceeded 8 for 2 minutes. This is an early warning of intermittent DB/pgbouncer
+            contention and can precede latency spikes even when longer-window saturation alerts stay quiet.
+
       - alert: ChatAppPgPoolSevereSaturation
         expr: max(pg_pool_waiting{job="chatapp-api"}) > 100
         for: 5m
@@ -278,6 +290,17 @@ groups:
           description: >
             CPU iowait is above 20% for 10m on {{ $labels.instance }}. The node is stalling on disk/network I/O,
             which often amplifies tail latency under burst traffic.
+
+      - alert: ChatAppDbHostIoWaitHigh
+        expr: 100 * avg by (instance) (rate(node_cpu_seconds_total{job="db-node",mode="iowait"}[5m])) > 12
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Database host I/O wait is elevated
+          description: >
+            DB host {{ $labels.instance }} iowait is above 12% for 10m. Sustained storage wait on the DB VM can
+            drive query latency and pool contention on the API tier before CPU or connection limits are exhausted.
 
       - alert: ChatAppHostMemoryPressure
         expr: (node_memory_MemAvailable_bytes{job="node"} / node_memory_MemTotal_bytes{job="node"}) < 0.15
