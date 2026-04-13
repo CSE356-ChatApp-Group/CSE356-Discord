@@ -21,9 +21,10 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-16384}"
 ALLOW_DB_RESTART="${ALLOW_DB_RESTART:-false}"
 RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
-# Dual-worker safety: keep both upstreams by default during companion restart.
-# Set true only if you explicitly want candidate-only routing before 9b.
-PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-false}"
+# Dual-worker: pin nginx to the candidate port before restarting the companion (9a).
+# Default true — nginx otherwise may pick the restarting peer for POST; without
+# proxy_next_upstream_non_idempotent, POST is not retried and clients see 502 HTML.
+PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-true}"
 # PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
@@ -780,18 +781,21 @@ fi
 if sudo awk '
   /location \/api\/ \{/ {in_api=1; next}
   in_api && /\}/ {in_api=0}
-  in_api && /proxy_next_upstream error timeout http_502 http_503 http_504;/ {found=1}
-  END {exit(found ? 0 : 1)}
+  in_api && /proxy_next_upstream error timeout http_502 http_503 http_504;/ {retry=1}
+  in_api && /proxy_next_upstream_non_idempotent/ {non=1}
+  END {exit((retry && non) ? 0 : 1)}
 ' "$SITE"; then
-  echo "9.06: /api retry policy already present"
+  echo "9.06: /api retry + non-idempotent POST policy already present"
   exit 0
 fi
 TMP=$(mktemp)
 sudo cp "$SITE" "$TMP"
 export TMP
+set +e
 python3 <<'PY'
 import os
 import re
+import sys
 from pathlib import Path
 
 p = Path(os.environ['TMP'])
@@ -799,23 +803,39 @@ text = p.read_text()
 pattern = re.compile(r'(location\s+/api/\s*\{)(.*?)(\n\s*\})', re.DOTALL)
 m = pattern.search(text)
 if not m:
-    raise SystemExit('9.06: /api location block not found — patch nginx manually')
+    print('9.06: /api location block not found', file=sys.stderr)
+    sys.exit(1)
 body = m.group(2)
-if 'proxy_next_upstream error timeout http_502 http_503 http_504;' in body:
-    raise SystemExit(0)
-insertion = (
-    "\n    proxy_next_upstream error timeout http_502 http_503 http_504;"
-    "\n    proxy_next_upstream_tries 2;"
-)
-body = body + insertion
+orig = body
+if 'proxy_next_upstream error timeout http_502 http_503 http_504;' not in body:
+    body += (
+        "\n    proxy_next_upstream error timeout http_502 http_503 http_504;"
+        "\n    proxy_next_upstream_tries 2;"
+    )
+if 'proxy_next_upstream_non_idempotent' not in body:
+    body += "\n    proxy_next_upstream_non_idempotent on;"
+if body == orig:
+    sys.exit(2)
 text = text[:m.start()] + m.group(1) + body + m.group(3) + text[m.end():]
 p.write_text(text)
+sys.exit(0)
 PY
+py_ret=$?
+set -e
+if [ "$py_ret" -eq 2 ]; then
+  echo "9.06: /api block already complete (race with parallel check); skipping reload"
+  rm -f "$TMP"
+  exit 0
+fi
+if [ "$py_ret" -ne 0 ]; then
+  rm -f "$TMP"
+  exit "$py_ret"
+fi
 sudo install -m 644 "$TMP" "$SITE"
 rm -f "$TMP"
 sudo nginx -t >/dev/null
 sudo systemctl reload nginx
-echo "9.06: inserted /api retry policy + reloaded nginx"
+echo "9.06: updated /api upstream retry policy (+ non-idempotent POST) + reloaded nginx"
 REMOTE
 echo "✓ Nginx /api retry policy OK"
 
@@ -857,6 +877,7 @@ block = """  location ^~ /api/v1/auth/ {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_503 http_504;
     proxy_next_upstream_tries 2;
+    proxy_next_upstream_non_idempotent on;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -874,6 +895,65 @@ sudo systemctl reload nginx
 echo "9.07: inserted auth location + reloaded nginx"
 REMOTE
 echo "✓ Nginx auth route OK"
+
+# 9.075 Idempotent: older 9.07 inserts lacked non-idempotent POST retry on auth.
+echo "9.075 Nginx: add proxy_next_upstream_non_idempotent to auth if missing..."
+ssh "$PROD_USER@$PROD_HOST" "bash -s" <<'REMOTE'
+set -euo pipefail
+SITE=/etc/nginx/sites-available/chatapp
+if ! sudo test -f "$SITE"; then
+  echo "9.075: skip — $SITE missing"
+  exit 0
+fi
+TMP=$(mktemp)
+sudo cp "$SITE" "$TMP"
+export TMP
+set +e
+python3 <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+p = Path(os.environ['TMP'])
+text = p.read_text()
+pat = re.compile(r'(location\s+\^~\s+/api/v1/auth/\s*\{)(.*?)(\n\s*\})', re.DOTALL)
+m = pat.search(text)
+if not m:
+    sys.exit(3)
+body = m.group(2)
+if 'proxy_next_upstream_non_idempotent' in body:
+    sys.exit(2)
+if 'proxy_next_upstream_tries 2;' in body:
+    body = body.replace(
+        'proxy_next_upstream_tries 2;',
+        'proxy_next_upstream_tries 2;\n    proxy_next_upstream_non_idempotent on;',
+        1,
+    )
+else:
+    body = body.rstrip() + "\n    proxy_next_upstream_non_idempotent on;\n"
+text = text[: m.start()] + m.group(1) + body + m.group(3) + text[m.end() :]
+p.write_text(text)
+sys.exit(0)
+PY
+py_ret=$?
+set -e
+if [ "$py_ret" -eq 3 ] || [ "$py_ret" -eq 2 ]; then
+  rm -f "$TMP"
+  echo "9.075: skip (no auth block or already patched)"
+  exit 0
+fi
+if [ "$py_ret" -ne 0 ]; then
+  rm -f "$TMP"
+  exit "$py_ret"
+fi
+sudo install -m 644 "$TMP" "$SITE"
+rm -f "$TMP"
+sudo nginx -t >/dev/null
+sudo systemctl reload nginx
+echo "9.075: patched auth location + reloaded nginx"
+REMOTE
+echo "✓ Nginx auth POST retry OK"
 
 # 9b–9c. Dual-worker prod: roll the companion to this release, then restore both backends in nginx.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
@@ -917,8 +997,8 @@ PY
     }
     echo "✓ Nginx pinned to candidate"
   else
-    echo "9a. Keeping dual upstreams during companion restart (PIN_CANDIDATE_BEFORE_COMPANION=false)."
-    echo "✓ No single-upstream window introduced"
+    echo "9a. Skipping nginx pin (PIN_CANDIDATE_BEFORE_COMPANION=false) — ensure /api/ has proxy_next_upstream_non_idempotent."
+    echo "✓ Companion restart may briefly 502 POST if an upstream is down"
   fi
 
   echo "9a.1 Verifying candidate stays healthy before companion restart..."

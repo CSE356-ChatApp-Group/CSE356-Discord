@@ -37,6 +37,10 @@ Tune or silence this alert if your normal traffic pattern routinely drops >80% i
 2. Check disk and memory: `df -h`, `free -h`.
 3. Temporarily reduce load or scale instances if available.
 
+## Brief nginx 502 on `POST` during production deploy
+
+If **`sendMessage`** (or other `POST /api/`) returns **502 HTML from nginx** for a few seconds **during** a dual-worker rollout: nginx’s default **`proxy_next_upstream`** does **not** retry **POST** when the first upstream is **connection refused** (companion restart). **`deploy-prod.sh`** now defaults **`PIN_CANDIDATE_BEFORE_COMPANION=true`** and injects **`proxy_next_upstream_non_idempotent on`** into **`/api/`** (and auth). Re-run a deploy after pulling that script, or patch nginx manually to match [`deploy/nginx/staging.conf`](../deploy/nginx/staging.conf).
+
 ## ChatAppHigh5xxRate / ChatAppFast5xxBurn
 
 1. Correlate with deploy time and **`FORCE_OVERLOAD_STAGE`** / load shedder in logs.
