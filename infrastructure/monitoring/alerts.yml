@@ -160,13 +160,18 @@ groups:
           description: Node.js event loop p99 lag is above 250ms for at least 10 minutes.
 
       - alert: ChatAppHighMemoryUsage
-        expr: process_resident_memory_bytes{job="chatapp-api"} > 400e6
-        for: 5m
+        # Per scrape target (each Node worker). Dual chatapp@ ports ≈ 2× aggregate RSS on host.
+        expr: process_resident_memory_bytes{job="chatapp-api"} > 650e6
+        for: 10m
         labels:
           severity: warning
         annotations:
           summary: ChatApp API memory usage is high
-          description: Node.js RSS is above 400 MB for 5 minutes. The prod VM has 2 GB total — OOM risk if this persists.
+          description: >
+            Per-process RSS above ~650 MiB for 10 minutes (instance {{ $labels.instance }}).
+            Correlate with `node_memory_MemAvailable_bytes` / MemTotal on the host; resize RAM,
+            reduce `CHATAPP_INSTANCES`, or tune `--max-old-space-size` in deploy if sustained growth
+            (not a short deploy or traffic spike).
 
       - alert: ChatAppCpuSaturationHigh
         expr: |

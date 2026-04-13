@@ -81,7 +81,8 @@ Prometheus must **fire** an alert; Alertmanager must **deliver** it. Common gaps
 ## ChatAppHighMemoryUsage
 
 1. Confirm trend; if growing, plan restart window and investigate leaks.
-2. Ensure Node heap limits match VM size (2 GB VM → keep RSS well below OOM).
+2. **Per process:** rule uses `process_resident_memory_bytes` per `chatapp-api` target (~650 MiB × **each** worker). Compare host **MemAvailable** / **MemTotal** (node_exporter) to total RSS of all API processes.
+3. Tune alert threshold in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) if VM RAM or instance count changed.
 
 ## WebSocket / fanout
 
