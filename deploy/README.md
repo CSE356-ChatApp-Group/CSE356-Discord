@@ -343,7 +343,7 @@ Verifies:
 
 3. **Backup database**:
    - `deploy-prod.sh` runs **strict** `pg_dump` before deploy (3 attempts, `pipefail`, `gzip -t` verify). **Deploy fails** if backup fails.
-   - When `DATABASE_URL` uses **PgBouncer (`:6432`)**, set **`PGDUMP_DATABASE_URL`** in `/opt/chatapp/shared/.env` to a **direct** `postgresql://…:5432/…` URL (same DB). Dumping through transaction pooling is unreliable.
+   - When `DATABASE_URL` uses **PgBouncer (`:6432`)**, set **`PGDUMP_DATABASE_URL`** in `/opt/chatapp/shared/.env` to a **direct** `postgresql://…:5432/…` URL (same DB). Dumping through transaction pooling is unreliable. **One-shot helper (app VM):** `scp deploy/ensure-pgdump-env.py user@host:~/ && ssh user@host 'sudo python3 ~/ensure-pgdump-env.py'`
    - **Dedicated volume:** to move Postgres data off root disk, use a maintenance window and [`postgres-migrate-data-volume.sh`](./postgres-migrate-data-volume.sh) on the DB VM (see script header).
    - Keep backups for at least 24 hours
 
