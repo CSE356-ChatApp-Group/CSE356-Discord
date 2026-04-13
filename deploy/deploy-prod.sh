@@ -23,7 +23,7 @@ ALLOW_DB_RESTART="${ALLOW_DB_RESTART:-false}"
 RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
 # Dual-worker: pin nginx to the candidate port before restarting the companion (9a).
 # Default true — nginx otherwise may pick the restarting peer for POST; without
-# proxy_next_upstream_non_idempotent, POST is not retried and clients see 502 HTML.
+# `non_idempotent` on proxy_next_upstream, POST is not retried and clients see 502 HTML.
 PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-true}"
 # PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
@@ -781,9 +781,9 @@ fi
 if sudo awk '
   /location \/api\/ \{/ {in_api=1; next}
   in_api && /\}/ {in_api=0}
-  in_api && /proxy_next_upstream error timeout http_502 http_503 http_504;/ {retry=1}
-  in_api && /proxy_next_upstream_non_idempotent/ {non=1}
-  END {exit((retry && non) ? 0 : 1)}
+  in_api && /proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;/ {retry=1}
+  in_api && /proxy_next_upstream_tries 2;/ {tries=1}
+  END {exit((retry && tries) ? 0 : 1)}
 ' "$SITE"; then
   echo "9.06: /api retry + non-idempotent POST policy already present"
   exit 0
@@ -807,13 +807,19 @@ if not m:
     sys.exit(1)
 body = m.group(2)
 orig = body
-if 'proxy_next_upstream error timeout http_502 http_503 http_504;' not in body:
-    body += (
-        "\n    proxy_next_upstream error timeout http_502 http_503 http_504;"
-        "\n    proxy_next_upstream_tries 2;"
-    )
-if 'proxy_next_upstream_non_idempotent' not in body:
-    body += "\n    proxy_next_upstream_non_idempotent on;"
+# Remove mistaken standalone directive (not valid nginx); real knob is
+# `non_idempotent` on the proxy_next_upstream line.
+body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
+retry_full = (
+    "proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;"
+)
+retry_old = "proxy_next_upstream error timeout http_502 http_503 http_504;"
+if retry_old in body:
+    body = body.replace(retry_old, retry_full, 1)
+elif retry_full not in body:
+    body += f"\n    {retry_full}\n    proxy_next_upstream_tries 2;"
+if "proxy_next_upstream_tries 2;" not in body:
+    body += "\n    proxy_next_upstream_tries 2;"
 if body == orig:
     sys.exit(2)
 text = text[:m.start()] + m.group(1) + body + m.group(3) + text[m.end():]
@@ -835,7 +841,7 @@ sudo install -m 644 "$TMP" "$SITE"
 rm -f "$TMP"
 sudo nginx -t >/dev/null
 sudo systemctl reload nginx
-echo "9.06: updated /api upstream retry policy (+ non-idempotent POST) + reloaded nginx"
+echo "9.06: updated /api upstream retry policy (proxy_next_upstream … non_idempotent) + reloaded nginx"
 REMOTE
 echo "✓ Nginx /api retry policy OK"
 
@@ -875,9 +881,8 @@ block = """  location ^~ /api/v1/auth/ {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_next_upstream error timeout http_502 http_503 http_504;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
     proxy_next_upstream_tries 2;
-    proxy_next_upstream_non_idempotent on;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -896,8 +901,9 @@ echo "9.07: inserted auth location + reloaded nginx"
 REMOTE
 echo "✓ Nginx auth route OK"
 
-# 9.075 Idempotent: older 9.07 inserts lacked non-idempotent POST retry on auth.
-echo "9.075 Nginx: add proxy_next_upstream_non_idempotent to auth if missing..."
+# 9.075 Idempotent: fix auth block — `non_idempotent` must be on proxy_next_upstream,
+# and remove invalid standalone proxy_next_upstream_non_idempotent if present.
+echo "9.075 Nginx: ensure auth proxy_next_upstream includes non_idempotent..."
 ssh "$PROD_USER@$PROD_HOST" "bash -s" <<'REMOTE'
 set -euo pipefail
 SITE=/etc/nginx/sites-available/chatapp
@@ -922,16 +928,20 @@ m = pat.search(text)
 if not m:
     sys.exit(3)
 body = m.group(2)
-if 'proxy_next_upstream_non_idempotent' in body:
-    sys.exit(2)
-if 'proxy_next_upstream_tries 2;' in body:
-    body = body.replace(
-        'proxy_next_upstream_tries 2;',
-        'proxy_next_upstream_tries 2;\n    proxy_next_upstream_non_idempotent on;',
-        1,
-    )
+orig = body
+body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
+retry_old = "proxy_next_upstream error timeout http_502 http_503 http_504;"
+retry_full = (
+    "proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;"
+)
+if retry_old in body:
+    body = body.replace(retry_old, retry_full, 1)
+elif retry_full in body:
+    pass
 else:
-    body = body.rstrip() + "\n    proxy_next_upstream_non_idempotent on;\n"
+    sys.exit(2)
+if body == orig:
+    sys.exit(2)
 text = text[: m.start()] + m.group(1) + body + m.group(3) + text[m.end() :]
 p.write_text(text)
 sys.exit(0)
@@ -951,7 +961,7 @@ sudo install -m 644 "$TMP" "$SITE"
 rm -f "$TMP"
 sudo nginx -t >/dev/null
 sudo systemctl reload nginx
-echo "9.075: patched auth location + reloaded nginx"
+echo "9.075: patched auth proxy_next_upstream (non_idempotent) + reloaded nginx"
 REMOTE
 echo "✓ Nginx auth POST retry OK"
 
@@ -997,7 +1007,7 @@ PY
     }
     echo "✓ Nginx pinned to candidate"
   else
-    echo "9a. Skipping nginx pin (PIN_CANDIDATE_BEFORE_COMPANION=false) — ensure /api/ has proxy_next_upstream_non_idempotent."
+    echo "9a. Skipping nginx pin (PIN_CANDIDATE_BEFORE_COMPANION=false) — ensure /api/ proxy_next_upstream includes non_idempotent."
     echo "✓ Companion restart may briefly 502 POST if an upstream is down"
   fi
 

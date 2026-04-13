@@ -39,7 +39,7 @@ Tune or silence this alert if your normal traffic pattern routinely drops >80% i
 
 ## Brief nginx 502 on `POST` during production deploy
 
-If **`sendMessage`** (or other `POST /api/`) returns **502 HTML from nginx** for a few seconds **during** a dual-worker rollout: nginx’s default **`proxy_next_upstream`** does **not** retry **POST** when the first upstream is **connection refused** (companion restart). **`deploy-prod.sh`** now defaults **`PIN_CANDIDATE_BEFORE_COMPANION=true`** and injects **`proxy_next_upstream_non_idempotent on`** into **`/api/`** (and auth). Re-run a deploy after pulling that script, or patch nginx manually to match [`deploy/nginx/staging.conf`](../deploy/nginx/staging.conf).
+If **`sendMessage`** (or other `POST /api/`) returns **502 HTML from nginx** for a few seconds **during** a dual-worker rollout: nginx’s default **`proxy_next_upstream`** does **not** retry **POST** when the first upstream is **connection refused** (companion restart). **`deploy-prod.sh`** now defaults **`PIN_CANDIDATE_BEFORE_COMPANION=true`** and ensures **`proxy_next_upstream`** for **`/api/`** (and auth) includes the **`non_idempotent`** keyword (not a separate directive). Re-run a deploy after pulling that script, or patch nginx manually to match [`deploy/nginx/staging.conf`](../deploy/nginx/staging.conf).
 
 ## ChatAppHigh5xxRate / ChatAppFast5xxBurn
 
