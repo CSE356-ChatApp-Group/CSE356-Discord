@@ -271,7 +271,8 @@ describe('CommunitySidebar presence badge', () => {
   });
 
   it('refreshes browseable communities while searching so newly created ones can appear', async () => {
-    vi.useFakeTimers();
+    // Real timers only: JoinCommunityModal uses debounced setTimeout + polling interval; fake timers
+    // break findBy/waitFor in Testing Library (their retries never advance under vi.useFakeTimers()).
     apiGet.mockImplementation((path: string) => {
       if (path === '/communities') {
         const calls = apiGet.mock.calls.filter(([calledPath]) => calledPath === '/communities').length;
@@ -317,14 +318,14 @@ describe('CommunitySidebar presence badge', () => {
 
     await act(async () => {
       fireEvent.change(screen.getByTestId('community-join-search'), { target: { value: 'alpha' } });
-      await vi.advanceTimersByTimeAsync(300);
     });
 
-    await waitFor(() => {
-      expect(apiGet.mock.calls.filter(([path]) => path === '/communities').length).toBeGreaterThanOrEqual(2);
-      expect(screen.getByTestId('community-join-item-community-new')).toBeInTheDocument();
-    });
-
-    vi.useRealTimers();
+    await waitFor(
+      () => {
+        expect(apiGet.mock.calls.filter(([path]) => path === '/communities').length).toBeGreaterThanOrEqual(2);
+        expect(screen.getByTestId('community-join-item-community-new')).toBeInTheDocument();
+      },
+      { timeout: 4000 },
+    );
   });
 });
