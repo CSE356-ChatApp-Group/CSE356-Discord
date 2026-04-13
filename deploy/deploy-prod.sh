@@ -21,6 +21,9 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
 NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-16384}"
 ALLOW_DB_RESTART="${ALLOW_DB_RESTART:-false}"
 RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
+# PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual
+# `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
+DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 
 # Number of Node.js HTTP workers (systemd chatapp@ ports).  Default 1; set 2 when
 # nginx load-balances two ports like staging.
@@ -205,8 +208,9 @@ echo "✓ Backup prepared"
 
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
 echo "2b) Installing and configuring PgBouncer..."
-scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:/tmp/pgbouncer-setup.py"
-scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${PROD_USER}@${PROD_HOST}:/tmp/pgbouncer_ini_backend_is_remote.py"
+ssh "$PROD_USER@$PROD_HOST" "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
+scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
+scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
 ssh "$PROD_USER@$PROD_HOST" "
   set -euo pipefail
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
@@ -219,7 +223,7 @@ ssh "$PROD_USER@$PROD_HOST" "
 d /var/run/pgbouncer 0755 postgres postgres -
 TMPFILES
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgbouncer-chatapp.conf 2>/dev/null || true
-  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 /tmp/pgbouncer-setup.py
+  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
   sudo systemctl enable pgbouncer
   if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then
     sudo service pgbouncer stop 2>/dev/null || true
@@ -258,7 +262,7 @@ echo "✓ PgBouncer configured"
 echo "2c) Tuning PostgreSQL for prod VM..."
 ssh "$PROD_USER@$PROD_HOST" "
   set -euo pipefail
-  if python3 /tmp/pgbouncer_ini_backend_is_remote.py 2>/dev/null; then
+  if python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py\" 2>/dev/null; then
     echo 'Skipping local PostgreSQL tuning — PgBouncer backend is off-host.'
     echo 'On the database VM run: DB_SSH=user@db-host ./deploy/tune-remote-db-postgres.sh'
     exit 0

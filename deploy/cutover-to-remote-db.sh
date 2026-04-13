@@ -20,6 +20,7 @@ DB_PRIVATE_IP="${DB_PRIVATE_IP:-10.0.1.62}"
 DB_CREDS_REMOTE="${DB_CREDS_REMOTE:-/root/chatapp_prod_db_credentials.txt}"
 ENV_FILE="${ENV_FILE:-/opt/chatapp/shared/.env}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -75,7 +76,8 @@ ssh "${APP_SSH}" "sudo chmod 600 /root/.cutover_pw"
 ssh "${APP_SSH}" "export DB_PRIVATE_IP='${DB_PRIVATE_IP}' ENV_FILE='${ENV_FILE}' PW_FILE=/root/.cutover_pw; sudo -E python3 /root/cutover-update-env.py; sudo rm -f /root/.cutover_pw /root/cutover-update-env.py"
 
 echo "==> PgBouncer config"
-scp -q "${SCRIPT_DIR}/pgbouncer-setup.py" "${APP_SSH}:/tmp/pgbouncer-setup.py"
+ssh "${APP_SSH}" "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
+scp -q "${SCRIPT_DIR}/pgbouncer-setup.py" "${APP_SSH}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
 # Match deploy-prod.sh: cap 400, ncpu*50 (+ multi-instance bump if CHATAPP_INSTANCES set)
 PGBOUNCER_POOL_SIZE="${PGBOUNCER_POOL_SIZE:-}"
 if [[ -z "${PGBOUNCER_POOL_SIZE}" ]]; then
@@ -90,7 +92,7 @@ if [[ -z "${PGBOUNCER_POOL_SIZE}" ]]; then
   [[ "${PGBOUNCER_POOL_SIZE}" -lt 60 ]] && PGBOUNCER_POOL_SIZE=60
 fi
 echo "    PGBOUNCER_POOL_SIZE=${PGBOUNCER_POOL_SIZE}"
-ssh "${APP_SSH}" "sudo env PGBOUNCER_POOL_SIZE=${PGBOUNCER_POOL_SIZE} python3 /tmp/pgbouncer-setup.py"
+ssh "${APP_SSH}" "sudo env PGBOUNCER_POOL_SIZE=${PGBOUNCER_POOL_SIZE} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\""
 
 echo "==> systemd: stop local Postgres; drop-in so chatapp does not pull postgresql.service"
 scp -q "${SCRIPT_DIR}/systemd/chatapp-remote-db.drop-in.conf" "${APP_SSH}:/tmp/remote-db.conf"

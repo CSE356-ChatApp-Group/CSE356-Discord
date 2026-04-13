@@ -17,6 +17,8 @@ LIVE_PORT=4000
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUTOVER_COMPLETED=0
 NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-16384}"
+# Avoid scp to /tmp (root-owned files block the deploy user). See deploy-prod.sh.
+DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 
 # Remote VM shape (used for Postgres / PgBouncer — independent of HTTP worker count).
 _REMOTE_NPROC=$(ssh "${STAGING_USER}@${STAGING_HOST}" 'nproc --all' 2>/dev/null || echo 2)
@@ -201,8 +203,9 @@ PYEOF
 fi
 
 echo "0a) Installing and configuring PgBouncer (transaction-mode connection pooler)..."
-scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/pgbouncer-setup.py"
-scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/pgbouncer_ini_backend_is_remote.py"
+ssh "${STAGING_USER}@${STAGING_HOST}" "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
+scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
+scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${STAGING_USER}@${STAGING_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   # Pass the pre-computed pool size so pgbouncer-setup.py uses exactly the
@@ -241,7 +244,7 @@ TMPFILES
 echo "0b) Tuning PostgreSQL for available RAM and CPU..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
-  if python3 /tmp/pgbouncer_ini_backend_is_remote.py 2>/dev/null; then
+  if python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py\" 2>/dev/null; then
     echo 'Skipping local PostgreSQL tuning — PgBouncer backend is off-host.'
     echo 'On the database VM run: DB_SSH=user@db-host ./deploy/tune-remote-db-postgres.sh'
     exit 0
