@@ -177,6 +177,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   # Raise nginx worker_connections and FD limit (Ubuntu defaults: 768 connections, 1024 nofile).
   sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' /etc/nginx/nginx.conf
   sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' /etc/nginx/nginx.conf
+  sudo grep -q '^worker_shutdown_timeout' /etc/nginx/nginx.conf \
+    || sudo sed -i '/^worker_processes/a worker_shutdown_timeout 20s;' /etc/nginx/nginx.conf
   # worker_rlimit_nofile lets nginx workers raise their own nofile limit (bypasses OS default 1024).
   sudo grep -q 'worker_rlimit_nofile' /etc/nginx/nginx.conf \
     || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' /etc/nginx/nginx.conf

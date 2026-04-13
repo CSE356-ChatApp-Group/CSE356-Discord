@@ -31,6 +31,9 @@ echo "2b. Tuning nginx/kernel connection limits..."
 if ! grep -q '^worker_rlimit_nofile' /etc/nginx/nginx.conf; then
   sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' /etc/nginx/nginx.conf
 fi
+if ! grep -q '^worker_shutdown_timeout' /etc/nginx/nginx.conf; then
+  sudo sed -i '/^worker_processes/a worker_shutdown_timeout 20s;' /etc/nginx/nginx.conf
+fi
 sudo sed -i 's/worker_connections [0-9]*/worker_connections 16384/' /etc/nginx/nginx.conf
 sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' /etc/nginx/nginx.conf
 sudo sysctl -w net.core.somaxconn=16384 >/dev/null
@@ -90,6 +93,8 @@ server {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504;
+    proxy_next_upstream_tries 2;
     proxy_read_timeout 30s;
     client_max_body_size 10m;
   }

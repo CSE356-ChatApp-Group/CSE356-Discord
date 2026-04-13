@@ -648,6 +648,8 @@ if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
     sudo cp /etc/nginx/nginx.conf \"\$TMP_MAIN\"
     sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' \"\$TMP_MAIN\"
     sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' \"\$TMP_MAIN\"
+    sudo grep -q '^worker_shutdown_timeout' \"\$TMP_MAIN\" \
+      || sudo sed -i '/^worker_processes/a worker_shutdown_timeout 20s;' \"\$TMP_MAIN\"
     sudo grep -q 'worker_rlimit_nofile' \"\$TMP_MAIN\" \
       || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' \"\$TMP_MAIN\"
     sudo install -m 644 \"\$TMP_MAIN\" /etc/nginx/nginx.conf
@@ -699,6 +701,8 @@ PY
     sudo cp /etc/nginx/nginx.conf \"\$TMP_MAIN\"
     sudo sed -i 's/worker_connections [0-9]*/worker_connections ${NGINX_WORKER_CONNECTIONS}/' \"\$TMP_MAIN\"
     sudo sed -i 's/#[[:space:]]*multi_accept on/multi_accept on/' \"\$TMP_MAIN\"
+    sudo grep -q '^worker_shutdown_timeout' \"\$TMP_MAIN\" \
+      || sudo sed -i '/^worker_processes/a worker_shutdown_timeout 20s;' \"\$TMP_MAIN\"
     sudo grep -q 'worker_rlimit_nofile' \"\$TMP_MAIN\" \
       || sudo sed -i '/^worker_processes/a worker_rlimit_nofile 65535;' \"\$TMP_MAIN\"
     sudo install -m 644 \"\$TMP_MAIN\" /etc/nginx/nginx.conf
@@ -760,6 +764,57 @@ sudo systemctl reload nginx
 echo "9.05: inserted search location + reloaded nginx"
 REMOTE
 echo "✓ Nginx search route OK"
+
+# 9.06 Idempotent: add upstream retry policy for /api/ only (exclude websocket path).
+echo "9.06 Nginx: ensure /api/ upstream retry policy..."
+ssh "$PROD_USER@$PROD_HOST" "bash -s" <<'REMOTE'
+set -euo pipefail
+SITE=/etc/nginx/sites-available/chatapp
+if ! sudo test -f "$SITE"; then
+  echo "9.06: skip — $SITE missing"
+  exit 0
+fi
+if sudo awk '
+  /location \/api\/ \{/ {in_api=1; next}
+  in_api && /\}/ {in_api=0}
+  in_api && /proxy_next_upstream error timeout http_502 http_503 http_504;/ {found=1}
+  END {exit(found ? 0 : 1)}
+' "$SITE"; then
+  echo "9.06: /api retry policy already present"
+  exit 0
+fi
+TMP=$(mktemp)
+sudo cp "$SITE" "$TMP"
+export TMP
+python3 <<'PY'
+import os
+import re
+from pathlib import Path
+
+p = Path(os.environ['TMP'])
+text = p.read_text()
+pattern = re.compile(r'(location\s+/api/\s*\{)(.*?)(\n\s*\})', re.DOTALL)
+m = pattern.search(text)
+if not m:
+    raise SystemExit('9.06: /api location block not found — patch nginx manually')
+body = m.group(2)
+if 'proxy_next_upstream error timeout http_502 http_503 http_504;' in body:
+    raise SystemExit(0)
+insertion = (
+    "\n    proxy_next_upstream error timeout http_502 http_503 http_504;"
+    "\n    proxy_next_upstream_tries 2;"
+)
+body = body + insertion
+text = text[:m.start()] + m.group(1) + body + m.group(3) + text[m.end():]
+p.write_text(text)
+PY
+sudo install -m 644 "$TMP" "$SITE"
+rm -f "$TMP"
+sudo nginx -t >/dev/null
+sudo systemctl reload nginx
+echo "9.06: inserted /api retry policy + reloaded nginx"
+REMOTE
+echo "✓ Nginx /api retry policy OK"
 
 # 9b–9c. Dual-worker prod: roll the companion to this release, then restore both backends in nginx.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
