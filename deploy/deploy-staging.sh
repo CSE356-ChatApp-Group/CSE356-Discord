@@ -500,13 +500,18 @@ scp -q "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "${STAGING_U
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/alerts.yml.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/alertmanager.yml.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/remote-compose.yml.deploy" || true
+scp -qr "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "${STAGING_USER}@${STAGING_HOST}:/tmp/grafana-provisioning-remote.deploy" || true
 scp -q "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/prometheus-db-file-sd.py.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "${STAGING_USER}@${STAGING_HOST}:/tmp/db-node.json.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "${STAGING_USER}@${STAGING_HOST}:/tmp/db-postgres.json.deploy" || true
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
-  if [ -f /tmp/prometheus-host.yml.deploy ] || [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ]; then
+  if [ -f /tmp/prometheus-host.yml.deploy ] || [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ] || [ -d /tmp/grafana-provisioning-remote.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
+  fi
+  if [ -d /tmp/grafana-provisioning-remote.deploy ]; then
+    sudo rm -rf /opt/chatapp-monitoring/grafana-provisioning-remote
+    sudo mv /tmp/grafana-provisioning-remote.deploy /opt/chatapp-monitoring/grafana-provisioning-remote
   fi
   if [ -f /tmp/remote-compose.yml.deploy ]; then
     sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
@@ -547,7 +552,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   if ! sudo grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
     echo 'ALERT_ENVIRONMENT=staging' | sudo tee -a /opt/chatapp-monitoring/.env >/dev/null
   fi
-  sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d --force-recreate alertmanager prometheus >/dev/null 2>&1 || true
+  sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d --force-recreate alertmanager prometheus grafana >/dev/null 2>&1 || true
   # Staging guardrail: warn loudly if Discord webhook wiring is invalid.
   AM_NAME=\$(sudo docker ps --format '{{.Names}}' | grep 'chatapp-monitoring-alertmanager' | head -n 1 || true)
   if [ -n \"\$AM_NAME\" ]; then
