@@ -198,7 +198,11 @@ jobs:
 
           EXTRA_ARGS=(-e "deploy_sha=${TARGET_SHA}")
           if [[ -n "${LOCAL_ARTIFACT_PATH:-}" ]]; then
-            EXTRA_ARGS+=(-e "local_artifact_path=${LOCAL_ARTIFACT_PATH}")
+            LP="${LOCAL_ARTIFACT_PATH}"
+            if [[ "${LP}" != /* ]]; then
+              LP="${GITHUB_WORKSPACE}/${LP}"
+            fi
+            EXTRA_ARGS+=(-e "local_artifact_path=${LP}")
           fi
           if [[ "$DEPLOY_ENV" == "production" ]] && [[ -n "${CHATAPP_INSTANCES_INPUT:-}" ]]; then
             EXTRA_ARGS+=(-e "chatapp_instances=${CHATAPP_INSTANCES_INPUT}")
