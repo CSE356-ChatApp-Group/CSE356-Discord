@@ -860,7 +860,8 @@ describe('Unsubscribe isolation', () => {
 
       const recipientEvent = await recipientEventPromise;
       expect(recipientEvent.data.content).toBe('unsubscribe isolation check');
-      expect(recipientEvent.channel).toBe(`user:${member.user.id}`);
+      // Channel-first fanout may deliver on channel: before user: duplicate; both are valid for B.
+      expect([`user:${member.user.id}`, `channel:${channelId}`]).toContain(recipientEvent.channel);
       await noEventPromise;
     } finally {
       await closeWebSocket(socketA);

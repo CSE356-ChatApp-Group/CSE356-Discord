@@ -161,9 +161,15 @@ function getQueueDepth() {
   return queues['fanout:critical'].length + queues['fanout:background'].length;
 }
 
+/** Expose enqueue for channel user-topic fanout when HTTP returns before fanout completes. */
+function enqueueFanoutJob(name, fn) {
+  return enqueue(name, fn);
+}
+
 module.exports = {
   publishMessageEvent,
   publishBackgroundEvent,
   deleteAttachmentObjects,
   getQueueDepth,
+  enqueueFanoutJob,
 };

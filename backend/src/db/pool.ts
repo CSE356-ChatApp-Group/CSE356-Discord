@@ -151,6 +151,25 @@ pool.on('error', (err) => {
   logger.error({ err, pool: poolStats() }, 'pg-pool background client error');
 });
 
+/** Optional read replica for SELECT-heavy paths (eventual consistency). */
+const READ_REPLICA_URL = process.env.PG_READ_REPLICA_URL || '';
+const READ_POOL_MAX = parseInt(process.env.PG_READ_POOL_MAX || '15', 10);
+let readPool = null;
+if (READ_REPLICA_URL) {
+  readPool = new Pool({
+    connectionString: READ_REPLICA_URL,
+    max: Number.isFinite(READ_POOL_MAX) && READ_POOL_MAX > 0 ? READ_POOL_MAX : 15,
+    connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+    idleTimeoutMillis: IDLE_TIMEOUT_MS,
+    keepAlive: false,
+    application_name: `${APPLICATION_NAME}-read`,
+  });
+  readPool.on('error', (err) => {
+    logger.error({ err }, 'pg read-replica pool background client error');
+  });
+  logger.info('PG_READ_REPLICA_URL set — queryRead() enabled for eligible SELECTs');
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function poolStats() {
@@ -190,6 +209,33 @@ function checkCircuitBreaker(operation) {
 }
 
 // ── Wrapped single query ───────────────────────────────────────────────────────
+
+/**
+ * Route read-only SELECTs to PG_READ_REPLICA_URL when set; else primary.
+ * Callers must tolerate replication lag (missed very recent writes).
+ */
+async function queryRead(sql, params) {
+  if (!readPool) return query(sql, params);
+  const start = Date.now();
+  try {
+    const result = await readPool.query(sql, params);
+    incrementDbQuery(isTransactionControlSql(sql) ? 'all' : 'business_sql');
+    const durationMs = Date.now() - start;
+    if (durationMs >= SLOW_QUERY_MS) {
+      logger.warn({ durationMs, sql: truncateSql(sql), pool: 'read' }, 'pg read replica: slow query');
+    }
+    return result;
+  } catch (err) {
+    const durationMs = Date.now() - start;
+    const reason = classifyPgQueryError(err);
+    pgPoolOperationErrorsTotal.inc({ operation: 'query', reason });
+    logger.error(
+      { err, durationMs, sql: truncateSql(sql), pool: 'read', pgErrorReason: reason },
+      'pg: read replica query error',
+    );
+    throw err;
+  }
+}
 
 async function query(sql, params) {
   checkCircuitBreaker('query');
@@ -244,4 +290,13 @@ async function withTransaction(callback) {
   }
 }
 
-module.exports = { pool, query, getClient, withTransaction, poolStats, PoolCircuitBreakerError };
+module.exports = {
+  pool,
+  readPool,
+  query,
+  queryRead,
+  getClient,
+  withTransaction,
+  poolStats,
+  PoolCircuitBreakerError,
+};

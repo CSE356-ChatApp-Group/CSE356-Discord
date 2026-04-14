@@ -6,7 +6,7 @@ Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool s
 
 If the VM is **only** hit by course autograders (no general public) and you do not care about auth brute-force or spam, set **`DISABLE_RATE_LIMITS=true`** in `/opt/chatapp/shared/.env`, then restart the API (`sudo systemctl restart 'chatapp@*'` or your usual rollout). That removes throttling on register, login, and OAuth connect ([`backend/src/auth/router.ts`](../backend/src/auth/router.ts)), and also disables the optional **`POST /api/v1/rum`** rate limiter when browser RUM is enabled ([`backend/src/rum/router.ts`](../backend/src/rum/router.ts)). Omit or set to `false` when you want limits back.
 
-**POST `/api/v1/messages` (channel):** The API awaits Redis fanout to every visible member’s `user:<id>` topic before returning **201** with `realtimeFanoutComplete: true` (server-side publish complete). Delivery to each grader browser over WebSocket can still take additional time; harnesses often allow on the order of **~15 seconds** for every client to observe the message—outside the HTTP response latency.
+**POST `/api/v1/messages`:** **201** includes explicit realtime fields — not one ambiguous “complete” flag. **Channel** posts: `realtimeChannelFanoutComplete: true` after the `channel:<uuid>` Redis publish; `realtimeUserFanoutDeferred: true|false` states whether per-member `user:` duplicates finished before **201** (`MESSAGE_USER_FANOUT_HTTP_BLOCKING`). **Conversation/DM** posts: `realtimeConversationFanoutComplete: true`. End-to-end browser delivery is still asynchronous; graders often allow **~15s** per listener.
 
 ## Auth bursts without extra 429s
 
@@ -91,6 +91,12 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **HTTP / caches** | |
 | `COMMUNITIES_LIST_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS` | List route cache TTLs (deploy default: `300`) |
 | `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS` | Per-query timeout (ms) for heavy `GET /communities` unread-count SQL before falling back to a lightweight member-count response (default `2500`) |
+| `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST` | When `true` (default), `message:created` is published to `channel:<uuid>` before per-member `user:` duplicates |
+| `CHANNEL_MESSAGE_USER_FANOUT_MAX` | Max per-message **`user:`** duplicate publishes (default **10000**, cap **10000**). Members beyond this rely on **`channel:`** delivery only — intentional for mega-channels; clients must listen on `channel:` or accept missing `user:` duplicate. |
+| `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | When `true` (default), `POST /messages` awaits all `user:` Redis publishes; when `false`, enqueue after `channel:` publish (`realtimeUserFanoutDeferred: true` on **201**) |
+| `MESSAGE_INGEST_STREAM_ENABLED`, `MESSAGE_INGEST_STREAM_CONSUMER` | `1`/`true` to append channel message metadata to Redis Stream `MESSAGE_INGEST_STREAM_KEY` and run an ACK consumer (pipeline hook before Kafka/NATS) |
+| `MESSAGE_INGEST_STREAM_KEY`, `MESSAGE_INGEST_STREAM_GROUP`, `MESSAGE_INGEST_STREAM_MAXLEN` | Stream name, consumer group, approximate max stream length |
+| `PG_READ_REPLICA_URL`, `PG_READ_POOL_MAX` | Optional read replica for `GET /api/v1/messages` list `SELECT`s ([`docs/db-scaling-messages.md`](db-scaling-messages.md)). Request **`X-ChatApp-Read-Consistency: primary`** on that GET to force the primary when you need read-your-writes after a POST. |
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |

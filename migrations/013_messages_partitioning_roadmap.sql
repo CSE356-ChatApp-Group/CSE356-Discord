@@ -1,0 +1,21 @@
+-- =============================================================================
+-- Roadmap: horizontal scale for `messages` (DO NOT run blindly on production)
+-- =============================================================================
+-- Target: 30k+ msg/s aggregate requires splitting hot tables and/or shards.
+-- Native PostgreSQL declarative partitioning (RANGE on created_at, HASH channel_id)
+-- or Citus/Cockroach are typical next steps.
+--
+-- Before applying:
+--   1. Benchmark INSERT/SELECT on a fork with realistic row width and indexes.
+--   2. Plan a cutover window; existing FKs and indexes must be recreated per child.
+--   3. Align with PgBouncer pool sizes and application routing (primary vs replica).
+--
+-- Example sketch (not executed by default migrations):
+--
+--   CREATE TABLE messages_partitioned (LIKE messages INCLUDING ALL) PARTITION BY RANGE (created_at);
+--   CREATE TABLE messages_2026_q2 PARTITION OF messages_partitioned
+--     FOR VALUES FROM ('2026-04-01') TO ('2026-07-01');
+--
+-- See docs/db-scaling-messages.md for operational notes.
+
+SELECT 1;

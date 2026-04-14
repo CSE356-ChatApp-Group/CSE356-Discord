@@ -15,7 +15,8 @@ const http     = require('http');
 const app      = require('./app');
 const wsServer = require('./websocket/server');
 const logger   = require('./utils/logger');
-const { pool, query: dbQuery, poolStats } = require('./db/pool');
+const { pool, readPool, query: dbQuery, poolStats } = require('./db/pool');
+const { startMessageIngestConsumerIfEnabled, stopMessageIngestConsumer } = require('./messages/messageIngestLog');
 const redis    = require('./db/redis');
 const { startPgPoolMetrics } = require('./utils/metrics');
 const { startCapacitySnapshotHeartbeat } = require('./utils/capacitySnapshot');
@@ -121,8 +122,10 @@ async function shutdown(signal, err = null) {
     await new Promise((resolve) => server.close(resolve));
   }
 
+  stopMessageIngestConsumer();
   await Promise.allSettled([
     pool.end(),
+    readPool ? readPool.end() : Promise.resolve(),
     redis.closeRedisConnections(),
   ]);
 
@@ -148,6 +151,7 @@ async function start() {
 
   server.listen({ port: PORT, backlog: 4096 }, () => {
     logger.info({ port: PORT }, 'ChatApp API listening');
+    startMessageIngestConsumerIfEnabled();
   });
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));

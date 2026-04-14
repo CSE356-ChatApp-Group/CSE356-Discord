@@ -123,6 +123,18 @@ const messagePostAccessDeniedTotal = new client.Counter({
 });
 
 /** POST /api/v1/messages only — exact HTTP status (correlates with grader sendMessage failures). */
+const messageIngestStreamAppendedTotal = new client.Counter({
+  name: 'message_ingest_stream_appended_total',
+  help: 'Redis Stream XADD for message ingest log',
+  labelNames: ['result'],
+});
+
+const messageIngestStreamConsumedTotal = new client.Counter({
+  name: 'message_ingest_stream_consumed_total',
+  help: 'Redis Stream messages ACKed by ingest consumer',
+  labelNames: ['result'],
+});
+
 const messagePostResponseTotal = new client.Counter({
   name: 'message_post_response_total',
   help: 'POST /api/v1/messages responses by HTTP status code',
@@ -341,6 +353,9 @@ function startPgPoolMetrics(pool) {
     messageCacheBustFailuresTotal.inc({ target: 'conversation' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
+    messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
+    messageIngestStreamAppendedTotal.inc({ result: 'error' }, 0);
+    messageIngestStreamConsumedTotal.inc({ result: 'ack' }, 0);
     httpRequestsAbortedTotal.inc({ method: 'GET', route: '/api/v1/messages' }, 0);
     httpRequestsAbortedTotal.inc({ method: 'POST', route: '/api/v1/messages' }, 0);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'acquire_timeout' }, 0);
@@ -396,6 +411,8 @@ module.exports = {
   authBcryptDurationMs,
   authRateLimitHitsTotal,
   messagePostAccessDeniedTotal,
+  messageIngestStreamAppendedTotal,
+  messageIngestStreamConsumedTotal,
   messagePostResponseTotal,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,

@@ -10,6 +10,10 @@ jest.mock('../src/websocket/fanout', () => ({
   publish: jest.fn(() => Promise.resolve()),
 }));
 
+jest.mock('../src/messages/sideEffects', () => ({
+  enqueueFanoutJob: jest.fn((_name: string, fn: () => Promise<void>) => fn()),
+}));
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { query } = require('../src/db/pool') as { query: jest.Mock };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -37,13 +41,27 @@ describe('channelRealtimeFanout', () => {
     expect(keys).toEqual(['user:u1', 'user:u2']);
   });
 
-  it('publishChannelMessageCreated publishes to all visible member user targets', async () => {
+  it('publishChannelMessageCreated publishes channel topic then all visible member user targets', async () => {
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
-    expect(fanout.publish).toHaveBeenCalledTimes(2);
+    expect(fanout.publish).toHaveBeenCalledTimes(3);
     expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+      'channel:c1',
       'user:a',
       'user:b',
     ]);
+  });
+
+  it('publishChannelMessageCreated skips user topics when CHANNEL_MESSAGE_USER_FANOUT=0', async () => {
+    const prev = process.env.CHANNEL_MESSAGE_USER_FANOUT;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT = '0';
+    try {
+      await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
+      expect(fanout.publish).toHaveBeenCalledTimes(1);
+      expect(fanout.publish.mock.calls[0][0]).toBe('channel:c1');
+    } finally {
+      if (prev === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT = prev;
+    }
   });
 });

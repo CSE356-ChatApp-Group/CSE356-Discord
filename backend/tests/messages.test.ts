@@ -42,7 +42,8 @@ describe('POST /messages idempotency', () => {
       .send(body);
     expect(r1.status).toBe(201);
     const id1 = r1.body.message.id;
-    expect(r1.body.realtimeFanoutComplete).toBe(true);
+    expect(r1.body.realtimeChannelFanoutComplete).toBe(true);
+    expect(r1.body.realtimeUserFanoutDeferred).toBe(false);
     expect(typeof r1.body.realtimePublishedAt).toBe('string');
 
     const r2 = await request(app)
@@ -52,7 +53,8 @@ describe('POST /messages idempotency', () => {
       .send(body);
     expect(r2.status).toBe(201);
     expect(r2.body.message.id).toBe(id1);
-    expect(r2.body.realtimeFanoutComplete).toBe(true);
+    expect(r2.body.realtimeChannelFanoutComplete).toBe(true);
+    expect(r2.body.realtimeUserFanoutDeferred).toBe(false);
     expect(typeof r2.body.realtimePublishedAt).toBe('string');
   });
 
