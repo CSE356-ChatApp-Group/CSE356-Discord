@@ -31,7 +31,7 @@ On the production host, inspect `/opt/chatapp/shared/.env` (used by systemd `cha
 6. **`NODE_ENV`** — should be **`production`** on the API host; **`deploy-prod.sh`** enforces it.
 7. **`OVERLOAD_LAG_SHED_MS`** — **`deploy-prod.sh`** sets **`250`** (matches code default when HTTP shedding is enabled). **`OVERLOAD_HTTP_SHED_ENABLED`** remains **`false`** on prod unless you opt in.
 
-**Repository audit (no server access):** `DISABLE_RATE_LIMITS` and `AUTH_*_RATE_LIMIT_*` do not appear in deploy scripts (set manually on grading-only hosts if desired). [`docker-compose.yml`](../docker-compose.yml) sets high register/login limits (500) **only** for the local `api` service to support parallel E2E; production does not use that compose stack as-is. Channel **`message:created`** per-user Redis fanout is **on by default in code**; compose and [`deploy/deploy-staging.sh`](../deploy/deploy-staging.sh) / [`deploy/deploy-prod.sh`](../deploy/deploy-prod.sh) **re-apply on every deploy** **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, and **`WS_BOOTSTRAP_BATCH_SIZE=120`**, plus prod-only **`NODE_ENV=production`**, **`AUTH_BYPASS=false`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`**, and **`OVERLOAD_LAG_SHED_MS=250`** (see script block in `deploy-prod.sh`).
+**Repository audit (no server access):** `DISABLE_RATE_LIMITS` and `AUTH_*_RATE_LIMIT_*` do not appear in deploy scripts (set manually on grading-only hosts if desired). [`docker-compose.yml`](../docker-compose.yml) sets high register/login limits (500) **only** for the local `api` service to support parallel E2E; production does not use that compose stack as-is. Channel **`message:created`** per-user Redis fanout is **on by default in code**; compose and [`deploy/deploy-staging.sh`](../deploy/deploy-staging.sh) / [`deploy/deploy-prod.sh`](../deploy/deploy-prod.sh) **re-apply on every deploy** **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, **`WS_BOOTSTRAP_BATCH_SIZE=64`**, **`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`**, **`COMMUNITIES_LIST_CACHE_TTL_SECS=300`**, and **`CHANNELS_LIST_CACHE_TTL_SECS=300`**, plus prod-only **`NODE_ENV=production`**, **`AUTH_BYPASS=false`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`**, and **`OVERLOAD_LAG_SHED_MS=250`** (see script block in `deploy-prod.sh`).
 
 ## Backend API (`backend/src`) — optional tunables
 
@@ -73,6 +73,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **Postgres pool** | |
 | `PG_POOL_MAX`, `POOL_CIRCUIT_BREAKER_QUEUE` | Pool size and circuit-breaker queue |
 | `PG_SLOW_QUERY_MS`, `PG_CONNECTION_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS` | Pool behavior |
+| `READ_RECEIPT_DEFER_POOL_WAITING` | Soft-defer `PUT /messages/:id/read` when pool waiters reach this threshold (default 8) to protect message-post and read/list latency under burst |
 | **Overload / degradation** | |
 | `OVERLOAD_RSS_WARN_MB`, `OVERLOAD_RSS_HIGH_MB`, `OVERLOAD_RSS_CRITICAL_MB` | RSS thresholds (MB) |
 | `OVERLOAD_LAG_WARN_MS`, `OVERLOAD_LAG_HIGH_MS`, `OVERLOAD_LAG_CRITICAL_MS` | Event-loop p99 lag (ms) |
@@ -88,11 +89,11 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `S3_PRESIGN_SIGNING_ENDPOINT` | Presign signing host when public URL differs |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | Credentials |
 | **HTTP / caches** | |
-| `COMMUNITIES_LIST_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS` | List route cache TTLs |
+| `COMMUNITIES_LIST_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS` | List route cache TTLs (deploy default: `300`) |
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
-| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS` | WS tuning |
+| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS` | WS tuning (deploy defaults: `64` and `180`) |
 | **Observability** | |
 | `OTEL_ENABLED` | Set `false` to disable tracing |
 | `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio (production default 0.1) |
@@ -100,7 +101,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **Startup** | |
 | `STARTUP_DEPENDENCY_MAX_WAIT_MS` | Max wait for dependencies on boot |
 | **Search** | |
-| `SEARCH_STATEMENT_TIMEOUT_MS` | Per-statement timeout (ms) for each search query; default 8000. Prevents multi‑second searches from holding Postgres pool connections. |
+| `SEARCH_STATEMENT_TIMEOUT_MS` | Per-statement timeout (ms) for each search query; code default 8000. Deploy scripts currently set 5000 on staging/prod to cap pool hold-time under load. |
 | `SEARCH_MAX_LIMIT`, `SEARCH_MAX_OFFSET` | Cap `limit` (default 50) and `offset` (default 500) on `GET /search`. |
 | `SEARCH_TRIGRAM_MIN_LEN_UNSCOPED` | Minimum query length (default 4) before allowing trigram `ILIKE` fallback when search is **unscoped**; scoped searches still allow short/infix queries. |
 | `SEARCH_TRIGRAM_MIN_LEN_SCOPED` | Minimum query length (default 2) before allowing trigram `ILIKE` fallback when search is scoped by `communityId`, `channelId`, or `conversationId`; reduces one-character fallback scans on hot paths. |

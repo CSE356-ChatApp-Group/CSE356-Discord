@@ -213,8 +213,8 @@ Shared nginx-related strings and the default site path live in `deploy/deploy-co
 **Warning: This deploys to production. Ensure staging passed all checks first.**
 
 ```bash
-# Default is one Node worker (CHATAPP_INSTANCES=1). For production with **both**
-# systemd units `chatapp@4000` and `chatapp@4001` and nginx load-balancing, set:
+# Default is dual-worker (CHATAPP_INSTANCES=2). Override only if you intentionally
+# run single-worker on a very small host:
 CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <commit-sha>
 ```
 
@@ -496,7 +496,7 @@ Create `/opt/chatapp/shared/.env` on production VM:
 
 **Fanout:** `FANOUT_QUEUE_CONCURRENCY` is written by `deploy-prod.sh` from VM shape; raise only after staging load tests show headroom.
 
-**Channel `message:created`:** the app **defaults to** duplicate Redis publish to each member’s **`user:<id>`** (see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md)). **`deploy-staging.sh`** and **`deploy-prod.sh`** both re-apply recommended **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, and **`WS_BOOTSTRAP_BATCH_SIZE=120`** on every deploy so shared `.env` cannot drift. To **permanently** turn off user-topic fanout (e.g. Redis-bound tiny host), edit or remove those lines in **`deploy-prod.sh`** / **`deploy-staging.sh`** — editing only `/opt/chatapp/shared/.env` is overwritten on the next deploy.
+**Channel `message:created`:** the app **defaults to** duplicate Redis publish to each member’s **`user:<id>`** (see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md)). **`deploy-staging.sh`** and **`deploy-prod.sh`** both re-apply recommended **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, **`WS_BOOTSTRAP_BATCH_SIZE=64`**, **`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`**, and list-cache TTLs (`COMMUNITIES_LIST_CACHE_TTL_SECS=300`, `CHANNELS_LIST_CACHE_TTL_SECS=300`) on every deploy so shared `.env` cannot drift. To **permanently** turn off user-topic fanout (e.g. Redis-bound tiny host), edit or remove those lines in **`deploy-prod.sh`** / **`deploy-staging.sh`** — editing only `/opt/chatapp/shared/.env` is overwritten on the next deploy.
 
 ### Course grader: “delivery fails” vs HTTP 403
 

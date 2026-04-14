@@ -37,9 +37,9 @@ PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-true}"
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 
-# Number of Node.js HTTP workers (systemd chatapp@ ports).  Default 1; set 2 when
-# nginx load-balances two ports like staging.
-CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-1}
+# Number of Node.js HTTP workers (systemd chatapp@ ports).
+# Default to 2 so prod uses both ports on multi-core hosts unless explicitly overridden.
+CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-2}
 _REMOTE_NCPU=$(ssh_prod 'nproc --all' 2>/dev/null || echo 2)
 # PgBouncer pool + Node pool math matches deploy-staging.sh (same caps, different host).
 # Scale default_pool_size with **host vCPU** so 8 vCPU (etc.) actually gets more real PG
@@ -65,7 +65,8 @@ print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-print(max(64, min(900, pmi * 4 + inst * 80)))
+# Keep queue bounded so overload fails fast instead of long timeout buildup.
+print(max(64, min(300, pmi * 3 + inst * 60)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
@@ -522,10 +523,9 @@ ssh_prod "
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # POOL_CIRCUIT_BREAKER_QUEUE: number of requests allowed to wait for a pool
-  # connection before returning 503. Raised to 400 so burst traffic is buffered
-  # (messages succeed with latency) rather than failed immediately.
-  # PG_CONNECTION_TIMEOUT_MS=10000 gives each queued request up to 10s to get a
-  # connection before timing out.
+  # connection before returning 503. Keep this moderate so overload degrades
+  # quickly instead of building multi-second queue latency.
+  # PG_CONNECTION_TIMEOUT_MS=7000 keeps tail wait bounded under pressure.
   sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}/' /opt/chatapp/shared/.env \
     || echo 'POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -533,8 +533,16 @@ ssh_prod "
     && sudo sed -i 's/^BCRYPT_MAX_CONCURRENT=.*/BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}/' /opt/chatapp/shared/.env \
     || echo 'BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
-    || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=7000/' /opt/chatapp/shared/.env \
+    || echo 'PG_CONNECTION_TIMEOUT_MS=7000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^READ_RECEIPT_DEFER_POOL_WAITING=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^READ_RECEIPT_DEFER_POOL_WAITING=.*/READ_RECEIPT_DEFER_POOL_WAITING=8/' /opt/chatapp/shared/.env \
+    || echo 'READ_RECEIPT_DEFER_POOL_WAITING=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Bound search query hold-time in the pool; keeps hot non-search paths from
+  # starving behind long text-search statements during traffic spikes.
+  sudo grep -q '^SEARCH_STATEMENT_TIMEOUT_MS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^SEARCH_STATEMENT_TIMEOUT_MS=.*/SEARCH_STATEMENT_TIMEOUT_MS=5000/' /opt/chatapp/shared/.env \
+    || echo 'SEARCH_STATEMENT_TIMEOUT_MS=5000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Grader clients often use bearer tokens without cookie-based refresh loops.
   # Keep access tokens valid for long test windows to avoid 401 delivery failures.
   sudo grep -q '^JWT_ACCESS_TTL=' /opt/chatapp/shared/.env \
@@ -558,11 +566,6 @@ ssh_prod "
   sudo grep -q '^AUTH_BYPASS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^AUTH_BYPASS=.*/AUTH_BYPASS=false/' /opt/chatapp/shared/.env \
     || echo 'AUTH_BYPASS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY: 1 on the 1-CPU prod VM so async
-  # search-indexing side effects don't compete with request handling.
-  sudo grep -q '^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=.*/SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=1/' /opt/chatapp/shared/.env \
-    || echo 'SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=1' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # FANOUT_QUEUE_CONCURRENCY: parallel fanout:critical workers per instance.
   # Prod has 1 CPU so 2 concurrent fanout jobs is enough — keeps queue latency
   # low without over-parallelising on a single core.
@@ -578,9 +581,18 @@ ssh_prod "
   sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MAX=.*/CHANNEL_MESSAGE_USER_FANOUT_MAX=10000/' /opt/chatapp/shared/.env \
     || echo 'CHANNEL_MESSAGE_USER_FANOUT_MAX=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
+    || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^CHANNELS_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^CHANNELS_LIST_CACHE_TTL_SECS=.*/CHANNELS_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
+    || echo 'CHANNELS_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^WS_BOOTSTRAP_BATCH_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_BOOTSTRAP_BATCH_SIZE=.*/WS_BOOTSTRAP_BATCH_SIZE=120/' /opt/chatapp/shared/.env \
-    || echo 'WS_BOOTSTRAP_BATCH_SIZE=120' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^WS_BOOTSTRAP_BATCH_SIZE=.*/WS_BOOTSTRAP_BATCH_SIZE=64/' /opt/chatapp/shared/.env \
+    || echo 'WS_BOOTSTRAP_BATCH_SIZE=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^WS_BOOTSTRAP_CACHE_TTL_SECONDS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^WS_BOOTSTRAP_CACHE_TTL_SECONDS=.*/WS_BOOTSTRAP_CACHE_TTL_SECONDS=180/' /opt/chatapp/shared/.env \
+    || echo 'WS_BOOTSTRAP_CACHE_TTL_SECONDS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer fires.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \

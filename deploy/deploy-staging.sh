@@ -387,6 +387,14 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
     || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^READ_RECEIPT_DEFER_POOL_WAITING=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^READ_RECEIPT_DEFER_POOL_WAITING=.*/READ_RECEIPT_DEFER_POOL_WAITING=8/' /opt/chatapp/shared/.env \
+    || echo 'READ_RECEIPT_DEFER_POOL_WAITING=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Keep search DB statements bounded so a slow query cannot monopolize a pool
+  # slot for too long during burst load.
+  sudo grep -q '^SEARCH_STATEMENT_TIMEOUT_MS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^SEARCH_STATEMENT_TIMEOUT_MS=.*/SEARCH_STATEMENT_TIMEOUT_MS=5000/' /opt/chatapp/shared/.env \
+    || echo 'SEARCH_STATEMENT_TIMEOUT_MS=5000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Keep access tokens valid across long load windows to reduce auth churn-driven 401s.
   sudo grep -q '^JWT_ACCESS_TTL=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^JWT_ACCESS_TTL=.*/JWT_ACCESS_TTL=24h/' /opt/chatapp/shared/.env \
@@ -394,12 +402,6 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^JWT_REFRESH_TTL=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^JWT_REFRESH_TTL=.*/JWT_REFRESH_TTL=7d/' /opt/chatapp/shared/.env \
     || echo 'JWT_REFRESH_TTL=7d' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY: 1 per instance on staging — with
-  # CHATAPP_INSTANCES>=2 that means up to 2 total indexing jobs in flight
-  # across the cluster, which matches the 2-CPU budget without over-subscribing.
-  sudo grep -q '^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=.*/SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=1/' /opt/chatapp/shared/.env \
-    || echo 'SEARCH_SIDE_EFFECT_QUEUE_CONCURRENCY=1' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
     || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -411,9 +413,18 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MAX=.*/CHANNEL_MESSAGE_USER_FANOUT_MAX=10000/' /opt/chatapp/shared/.env \
     || echo 'CHANNEL_MESSAGE_USER_FANOUT_MAX=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
+    || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^CHANNELS_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^CHANNELS_LIST_CACHE_TTL_SECS=.*/CHANNELS_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
+    || echo 'CHANNELS_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^WS_BOOTSTRAP_BATCH_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_BOOTSTRAP_BATCH_SIZE=.*/WS_BOOTSTRAP_BATCH_SIZE=120/' /opt/chatapp/shared/.env \
-    || echo 'WS_BOOTSTRAP_BATCH_SIZE=120' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^WS_BOOTSTRAP_BATCH_SIZE=.*/WS_BOOTSTRAP_BATCH_SIZE=64/' /opt/chatapp/shared/.env \
+    || echo 'WS_BOOTSTRAP_BATCH_SIZE=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^WS_BOOTSTRAP_CACHE_TTL_SECONDS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^WS_BOOTSTRAP_CACHE_TTL_SECONDS=.*/WS_BOOTSTRAP_CACHE_TTL_SECONDS=180/' /opt/chatapp/shared/.env \
+    || echo 'WS_BOOTSTRAP_CACHE_TTL_SECONDS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Fail fast with 503 when event-loop lag spikes (avoids long PG pool waits + status 0).
   sudo grep -q '^OVERLOAD_HTTP_SHED_ENABLED=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^OVERLOAD_HTTP_SHED_ENABLED=.*/OVERLOAD_HTTP_SHED_ENABLED=true/' /opt/chatapp/shared/.env \
