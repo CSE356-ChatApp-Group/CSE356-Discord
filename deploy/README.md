@@ -12,6 +12,8 @@ This document describes the staged deployment pipeline for ChatApp:
 
 **Environment variables:** see [docs/env.md](../docs/env.md) for every API tunable and a **production shared `.env` audit** checklist (`/opt/chatapp/shared/.env` on the host).
 
+**Infrastructure inventory:** see [docs/infrastructure-inventory.md](../docs/infrastructure-inventory.md) for current VM shapes (staging, prod, runners).
+
 ## Architecture Overview
 
 ```

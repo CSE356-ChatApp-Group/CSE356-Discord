@@ -1,0 +1,11 @@
+---
+description: Use repo infrastructure inventory for deploy/ops guidance
+alwaysApply: true
+---
+
+# Infrastructure Context Rule
+
+- Before answering staging/prod topology, sizing, or capacity questions, read `docs/infrastructure-inventory.md`.
+- Treat that file as the canonical environment shape unless the user gives newer information.
+- When the user provides infra changes (VM size, host, provider, runners), update `docs/infrastructure-inventory.md` in the same task.
+- If guidance depends on unknown details, ask only for the missing fields and then write them into `docs/infrastructure-inventory.md`.
