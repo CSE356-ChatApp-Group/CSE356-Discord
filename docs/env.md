@@ -90,6 +90,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | Credentials |
 | **HTTP / caches** | |
 | `COMMUNITIES_LIST_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS` | List route cache TTLs (deploy default: `300`) |
+| `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS` | Per-query timeout (ms) for heavy `GET /communities` unread-count SQL before falling back to a lightweight member-count response (default `2500`) |
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |

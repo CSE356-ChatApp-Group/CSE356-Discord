@@ -46,9 +46,14 @@ async function loadMembership(req, res, next) {
   next();
 }
 
-const _communitiesTtl = parseInt(process.env.COMMUNITIES_LIST_CACHE_TTL_SECS || '45', 10);
+const _communitiesTtl = parseInt(process.env.COMMUNITIES_LIST_CACHE_TTL_SECS || '300', 10);
 const COMMUNITIES_CACHE_TTL_SECS =
-  Number.isFinite(_communitiesTtl) && _communitiesTtl > 0 ? _communitiesTtl : 45;
+  Number.isFinite(_communitiesTtl) && _communitiesTtl > 0 ? _communitiesTtl : 300;
+const _communitiesHeavyTimeout = parseInt(process.env.COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS || '2500', 10);
+const COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS =
+  Number.isFinite(_communitiesHeavyTimeout) && _communitiesHeavyTimeout > 100
+    ? _communitiesHeavyTimeout
+    : 2500;
 const PUBLIC_COMMUNITIES_VERSION_KEY = 'communities:list:public_version';
 
 function communitiesCacheKey(userId, publicVersion = '0') {
@@ -101,21 +106,28 @@ const COMMUNITIES_LIST_CORE = `
          SELECT ch.community_id, COUNT(*)::int AS unread_channel_count
          FROM channels ch
          JOIN visible_communities vc ON vc.id = ch.community_id
+         LEFT JOIN channel_members chm
+           ON chm.channel_id = ch.id
+          AND chm.user_id = $1
          LEFT JOIN read_states rs
            ON rs.channel_id = ch.id
           AND rs.user_id = $1
-         WHERE (ch.is_private = FALSE OR EXISTS (
-                 SELECT 1
-                 FROM channel_members chm
-                 WHERE chm.channel_id = ch.id
-                   AND chm.user_id = $1
-               ))
+         WHERE (ch.is_private = FALSE OR chm.user_id IS NOT NULL)
            AND ch.last_message_id IS NOT NULL
            AND ch.last_message_author_id IS DISTINCT FROM $1
            AND rs.last_read_message_id IS DISTINCT FROM ch.last_message_id
          GROUP BY ch.community_id
        )
-       SELECT vc.*,
+       SELECT vc.id,
+              vc.slug,
+              vc.name,
+              vc.description,
+              vc.icon_url,
+              vc.is_public,
+              vc.owner_id,
+              vc.created_at,
+              vc.updated_at,
+              vc.my_role,
               COALESCE(mc.member_count, 0) AS member_count,
               COALESCE(uc.unread_channel_count, 0) AS unread_channel_count,
               (COALESCE(uc.unread_channel_count, 0) > 0) AS has_unread_channels
@@ -140,7 +152,16 @@ const COMMUNITIES_LIST_FALLBACK_CORE = `
          JOIN visible_communities vc ON vc.id = cm.community_id
          GROUP BY cm.community_id
        )
-       SELECT vc.*,
+       SELECT vc.id,
+              vc.slug,
+              vc.name,
+              vc.description,
+              vc.icon_url,
+              vc.is_public,
+              vc.owner_id,
+              vc.created_at,
+              vc.updated_at,
+              vc.my_role,
               COALESCE(mc.member_count, 0) AS member_count,
               0::int AS unread_channel_count,
               FALSE AS has_unread_channels
@@ -149,20 +170,34 @@ const COMMUNITIES_LIST_FALLBACK_CORE = `
 
 function isCommunitiesTimeout(err) {
   const msg = String(err?.message || '').toLowerCase();
-  return err?.code === '57014' || msg.includes('statement timeout');
+  return (
+    err?.code === '57014'
+    || msg.includes('statement timeout')
+    || msg.includes('query read timeout')
+    || msg.includes('query timed out')
+  );
 }
 
 async function queryCommunitiesListWithFallback(baseSql, params, orderAndLimitSql) {
   const fullSql = `${baseSql}
        ${orderAndLimitSql}`;
   try {
-    return await query(fullSql, params);
+    return await query({
+      text: fullSql,
+      values: params,
+      // Keep communities list responsive under burst; fallback omits unread scan.
+      query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
+    });
   } catch (err) {
     if (!isCommunitiesTimeout(err)) throw err;
     logger.warn({ err }, 'Communities heavy query timed out; using fallback');
     const fallbackSql = `${COMMUNITIES_LIST_FALLBACK_CORE}
        ${orderAndLimitSql}`;
-    return query(fallbackSql, params);
+    return query({
+      text: fallbackSql,
+      values: params,
+      query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
+    });
   }
 }
 
