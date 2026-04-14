@@ -248,21 +248,30 @@ groups:
             if the wait queue is still small — scale or tune pool/PgBouncer before waiters spike.
 
       # pool.query + wrapped client.query counts per finished HTTP request (AsyncLocalStorage).
+      # NOTE: A single POST /messages uses BEGIN + CTE + COMMIT (3+ round-trips); list/hydration paths
+      # often land in dozens. A fixed p99>25 fired constantly in production (noise). Use sustained
+      # *mean* queries/request vs traffic floor; tune threshold from Grafana
+      # sum(rate(..._sum))/sum(rate(..._count)) after a baseline week.
       - alert: ChatAppHighDbQueriesPerRequest
         expr: |
-          histogram_quantile(0.99,
-            sum by (le, route) (
-              rate(pg_queries_per_http_request_bucket{job="chatapp-api",route=~"/api/v1/messages/?"}[10m])
-            )
-          ) > 25
-        for: 15m
+          (
+            sum(rate(pg_queries_per_http_request_sum{job="chatapp-api",route=~"/api/v1/messages/?"}[15m]))
+            /
+            clamp_min(sum(rate(pg_queries_per_http_request_count{job="chatapp-api",route=~"/api/v1/messages/?"}[15m])), 1e-9)
+          ) > 105
+          and
+          sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages/?"}[15m])) > 0.05
+        for: 20m
         labels:
           severity: warning
         annotations:
-          summary: High DB query count per request for /api/v1/messages (p99)
+          summary: Elevated mean Postgres round-trips per /api/v1/messages request
           description: >
-            The per-request query counter (including transaction client.query) suggests N+1 growth
-            or heavier transactions. Correlate with deploys and slow-query logs.
+            Sustained mean successful `query()`/wrapped `client.query()` count per HTTP request to
+            /api/v1/messages (including BEGIN/COMMIT) is above ~105 for 20m while traffic is non-trivial.
+            Typical warm load is often ~50–90 depending on mix of GET vs POST and cache hits — raise the
+            threshold in alerts.yml if you have verified a new healthy baseline after optimizations.
+            Correlate with deploys, `PG_SLOW_QUERY_MS` logs, and Grafana mean (sum/count) for this route.
 
       - alert: ChatAppListCacheMissDominates
         expr: |

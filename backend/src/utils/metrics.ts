@@ -207,8 +207,9 @@ const pgPoolOperationErrorsTotal = new client.Counter({
 
 /**
  * Count of successful `query()` / wrapped `client.query()` round-trips per HTTP request
- * (AsyncLocalStorage). Includes BEGIN/COMMIT/ROLLBACK from transactions. Hot read routes
- * normally sit in the low single digits; interpret high p95 only when histogram buckets
+ * (AsyncLocalStorage). Includes BEGIN/COMMIT/ROLLBACK from transactions. Simple reads can be
+ * single digits; heavy routes (e.g. `/api/v1/messages/`) often land much higher — interpret high p95
+ * only when histogram buckets
  * extend above observed values (otherwise quantiles clip at the top bucket).
  */
 const pgQueriesPerRequestHistogram = new client.Histogram({
