@@ -499,7 +499,33 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 echo "7) Switching Nginx upstream from ${LIVE_PORT} to ${CANDIDATE_PORT}..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
-  sudo sed -i 's/127.0.0.1:${LIVE_PORT}/127.0.0.1:${CANDIDATE_PORT}/g' /etc/nginx/sites-available/chatapp
+  # Rewrite the whole upstream block (instead of global s/LIVE/CANDIDATE/) so
+  # an interrupted deploy cannot leave duplicate candidate lines (4000,4000).
+  # If step 7b does not run, this still leaves a valid single-upstream config.
+  sudo python3 - <<'PYEOF'
+import re
+
+cfg_path = '/etc/nginx/sites-available/chatapp'
+config = open(cfg_path).read()
+new_upstream = (
+    'upstream chatapp_upstream {\n'
+    '  server 127.0.0.1:${CANDIDATE_PORT} max_fails=0;\n'
+    '  keepalive 256;\n'
+    '  keepalive_requests 10000;\n'
+    '  keepalive_timeout 75s;\n'
+    '}'
+)
+config, n = re.subn(
+    r'upstream chatapp_upstream \{[^}]+\}',
+    new_upstream,
+    config,
+    count=1,
+    flags=re.DOTALL,
+)
+if n != 1:
+    raise SystemExit(f'step 7: upstream chatapp_upstream block not replaced (n={n})')
+open(cfg_path, 'w').write(config)
+PYEOF
   sudo nginx -t
   sudo systemctl reload nginx
 "
