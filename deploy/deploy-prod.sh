@@ -793,7 +793,7 @@ echo "✓ Nginx search route OK"
 
 # 9.06 Idempotent: add upstream retry policy for /api/ only (exclude websocket path).
 echo "9.06 Nginx: ensure /api/ upstream retry policy..."
-ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; export RETRY_FULL='${CHATAPP_NGINX_PROXY_RETRY_LINE}'; export RETRY_LEGACY='${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}'; bash -s" <<'REMOTE'
+ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; export RETRY_FULL='${CHATAPP_NGINX_PROXY_RETRY_LINE}'; bash -s" <<'REMOTE'
 set -euo pipefail
 if ! sudo test -f "$SITE"; then
   echo "9.06: skip — $SITE missing"
@@ -802,7 +802,7 @@ fi
 if sudo awk '
   /location \/api\/ \{/ {in_api=1; next}
   in_api && /\}/ {in_api=0}
-  in_api && /proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;/ {retry=1}
+  in_api && /proxy_next_upstream error timeout http_502 http_504 non_idempotent;/ {retry=1}
   in_api && /proxy_next_upstream_tries 2;/ {tries=1}
   END {exit((retry && tries) ? 0 : 1)}
 ' "$SITE"; then
@@ -832,13 +832,10 @@ orig = body
 # `non_idempotent` on the proxy_next_upstream line.
 body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
 retry_full = os.environ["RETRY_FULL"]
-retry_old = os.environ["RETRY_LEGACY"]
-if retry_old in body:
-    body = body.replace(retry_old, retry_full, 1)
-elif retry_full not in body:
-    body += f"\n    {retry_full}\n    proxy_next_upstream_tries 2;"
-if "proxy_next_upstream_tries 2;" not in body:
-    body += "\n    proxy_next_upstream_tries 2;"
+# Normalize all retry directives in /api/ to one canonical pair to keep patching idempotent.
+body = re.sub(r"\n\s*proxy_next_upstream[^\n]*;", "", body)
+body = re.sub(r"\n\s*proxy_next_upstream_tries\s+\d+;", "", body)
+body += f"\n    {retry_full}\n    proxy_next_upstream_tries 2;"
 if body == orig:
     sys.exit(2)
 text = text[:m.start()] + m.group(1) + body + m.group(3) + text[m.end():]
