@@ -517,10 +517,53 @@
       "type": "timeseries"
     },
     {
-      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 80 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 80 },
+      "id": 30,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\"}[5m])))",
+          "legendFormat": "search p95",
+          "refId": "A"
+        }
+      ],
+      "title": "Search route p95 latency (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 80 },
+      "id": 31,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(node_cpu_seconds_total{job=\"db-node\",mode=\"iowait\"}[5m])) / clamp_min(sum(rate(node_cpu_seconds_total{job=\"db-node\"}[5m])), 1e-9)",
+          "legendFormat": "DB iowait / total CPU",
+          "refId": "A"
+        },
+        {
+          "expr": "max(rate(node_disk_io_time_seconds_total{job=\"db-node\"}[5m]))",
+          "legendFormat": "DB disk IO util (max device)",
+          "refId": "B"
+        }
+      ],
+      "title": "DB host: iowait share + disk busy (needs db-node scrape)",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 86 },
       "id": 27,
       "options": {
-        "content": "**Interpreting traffic cliffs:** If **API targets up** but **total rate** and this **ratio** collapse with **no deploy** (`journalctl -t chatapp-deploy`) and **no nginx 5xx burst**, suspect **load harness pause** or **client network path**, not Node crash. **Nginx access logs** remain ground truth for ingress volume. Optional: run [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) from a host outside the harness and alert if it fails while `up{job=\"chatapp-api\"}` is 1.",
+        "content": "**Interpreting traffic cliffs:** If **API targets up** but **total rate** and this **ratio** collapse with **no deploy** (`journalctl -t chatapp-deploy`) and **no nginx 5xx burst**, suspect **load harness pause** or **client network path**, not Node crash. **Nginx access logs** remain ground truth for ingress volume; after deploy they include **`rt=`** and **`urt=`** for request/upstream seconds. Optional: run [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) from a host outside the harness and alert if it fails while `up{job=\"chatapp-api\"}` is 1. **DB checkpoint tail latency:** correlate search p95 (above) with **DB iowait / disk busy** when `job=db-node` is scraped; run **`DB_SSH=… ./deploy/tune-postgres-checkpoints.sh`** on the Postgres VM if logs show multi-minute checkpoint writes every few minutes.",
         "mode": "markdown"
       },
       "title": "",
@@ -538,6 +581,6 @@
   "timezone": "America/New_York",
   "title": "ChatApp Overview",
   "uid": "chatapp-overview",
-  "version": 7,
+  "version": 8,
   "weekStart": ""
 }

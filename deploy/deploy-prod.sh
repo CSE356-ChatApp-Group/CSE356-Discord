@@ -645,6 +645,12 @@ ssh_prod "
 }
 echo "✓ Candidate WS smoke passed"
 
+# 8c. Nginx access.log: append request_time + upstream_response_time (idempotent).
+echo "8c. Nginx access log timing fields (idempotent)..."
+scp -o BatchMode=yes -o ConnectTimeout=20 "${SCRIPT_DIR}/patch-nginx-access-log-timing.sh" "${PROD_USER}@${PROD_HOST}:/tmp/patch-nginx-access-log-timing.sh"
+ssh_prod 'sudo bash /tmp/patch-nginx-access-log-timing.sh && sudo rm -f /tmp/patch-nginx-access-log-timing.sh'
+echo "✓ Nginx access log timing patch applied"
+
 # 9. Nginx + kernel tuning / cutover
 # Dual-worker (CHATAPP_INSTANCES>=2): keep both upstreams while candidate warms up, then step 9a
 # pins traffic to NEW_PORT only before the companion stop/restart (9b) so nginx never targets a

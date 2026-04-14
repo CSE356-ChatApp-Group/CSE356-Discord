@@ -185,6 +185,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo nginx -t && sudo systemctl reload nginx
 "
 
+echo "0b) Nginx access log timing fields (idempotent)..."
+scp -o BatchMode=yes -o ConnectTimeout=20 "${SCRIPT_DIR}/patch-nginx-access-log-timing.sh" "${STAGING_USER}@${STAGING_HOST}:/tmp/patch-nginx-access-log-timing.sh"
+ssh "${STAGING_USER}@${STAGING_HOST}" 'sudo bash /tmp/patch-nginx-access-log-timing.sh && sudo rm -f /tmp/patch-nginx-access-log-timing.sh'
+
 # Step 0 wrote nginx with only LIVE_PORT.  If the companion was running before
 # the deploy started, restore it in the upstream immediately so capacity stays
 # at 2 workers during the deploy window instead of dropping to 1.

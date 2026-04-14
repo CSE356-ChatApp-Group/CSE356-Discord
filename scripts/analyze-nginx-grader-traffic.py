@@ -23,7 +23,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
-from typing import Iterator
+from typing import Iterator, Optional
 
 # Nginx combined-style: $remote_addr ... "$request" $status ...
 LINE_RE = re.compile(

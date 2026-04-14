@@ -387,6 +387,10 @@ Grading and load tests open many **HTTP + WebSocket** connections on a small VM.
 
 5. **Access logs**: keep **JWTs out of nginx access logs** (do not log the `Authorization` header).
 
+6. **Nginx request timing**: each `deploy-staging.sh` / `deploy-prod.sh` run executes [`deploy/patch-nginx-access-log-timing.sh`](./patch-nginx-access-log-timing.sh) so `/var/log/nginx/access.log` lines include **`rt=`** (`$request_time`) and **`urt=`** (`$upstream_response_time`) for correlating slow searches with DB or app stalls—without changing the combined-log prefix analyzers rely on.
+
+7. **Postgres checkpoints (dedicated DB VM)**: if logs show multi-minute `checkpoint complete: wrote …` bursts on a short cadence, run [`deploy/tune-postgres-checkpoints.sh`](./tune-postgres-checkpoints.sh) with **`DB_SSH=user@db-host`**. It widens **`checkpoint_timeout`**, raises **`max_wal_size`**, and pins **`checkpoint_completion_target=0.9`**, then **`pg_reload_conf()`** (no restart). Override defaults only when you understand the trade-offs.
+
 ### During Deploy
 
 - Old and new versions coexist briefly
