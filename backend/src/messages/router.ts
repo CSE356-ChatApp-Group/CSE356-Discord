@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
-const { query, getClient, withTransaction } = require('../db/pool');
+const { query, getClient, withTransaction, poolStats } = require('../db/pool');
 const { messagePostAccessDeniedTotal, messageCacheBustFailuresTotal } = require('../utils/metrics');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
@@ -61,6 +61,11 @@ const _idemSuccessTtl = parseInt(process.env.MSG_IDEM_SUCCESS_TTL_SECS || '86400
 /** How long to remember a successful idempotent POST /messages (seconds). */
 const MSG_IDEM_SUCCESS_TTL_SECS =
   Number.isFinite(_idemSuccessTtl) && _idemSuccessTtl > 0 ? _idemSuccessTtl : 86400;
+const _readReceiptDeferWaiting = parseInt(process.env.READ_RECEIPT_DEFER_POOL_WAITING || '8', 10);
+const READ_RECEIPT_DEFER_POOL_WAITING =
+  Number.isFinite(_readReceiptDeferWaiting) && _readReceiptDeferWaiting >= 0
+    ? _readReceiptDeferWaiting
+    : 8;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -1195,6 +1200,10 @@ router.put('/:id/read',
   param('id').isUUID(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
+    const pool = poolStats();
+    if (pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING) {
+      return res.json({ success: true, deferred: true, reason: 'pool_waiting' });
+    }
     // Grader reliability first: under sustained pressure (stage 2), skip DB-heavy
     // read-receipt persistence so writes + message delivery keep capacity.
     const overloadStage = overload.getStage();
@@ -1214,52 +1223,61 @@ router.put('/:id/read',
       const { channel_id, conversation_id } = target;
       const uid = req.user.id;
       const messageId = req.params.id;
+      const messageCreatedAt = target.created_at;
 
-      const { rows: upsertRows } = await query(
-        `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
-         VALUES ($1,$2,$3,$4,NOW())
-         ON CONFLICT (user_id, COALESCE(channel_id, conversation_id))
-         DO UPDATE SET
-           last_read_message_id = CASE
-             WHEN read_states.last_read_message_id IS NULL THEN EXCLUDED.last_read_message_id
-             WHEN (
-               SELECT m.created_at
-               FROM messages m
-               WHERE m.id = EXCLUDED.last_read_message_id AND m.deleted_at IS NULL
-             ) >= COALESCE(
-               (
-                 SELECT m2.created_at
-                 FROM messages m2
-                 WHERE m2.id = read_states.last_read_message_id AND m2.deleted_at IS NULL
-               ),
-               '-infinity'::timestamptz
-             )
-             THEN EXCLUDED.last_read_message_id
-             ELSE read_states.last_read_message_id
-           END,
-           last_read_at = CASE
-             WHEN read_states.last_read_message_id IS NULL THEN NOW()
-             WHEN (
-               SELECT m.created_at
-               FROM messages m
-               WHERE m.id = EXCLUDED.last_read_message_id AND m.deleted_at IS NULL
-             ) >= COALESCE(
-               (
-                 SELECT m2.created_at
-                 FROM messages m2
-                 WHERE m2.id = read_states.last_read_message_id AND m2.deleted_at IS NULL
-               ),
-               '-infinity'::timestamptz
-             )
-             AND EXCLUDED.last_read_message_id IS DISTINCT FROM read_states.last_read_message_id
-             THEN NOW()
-             ELSE read_states.last_read_at
-           END
-         RETURNING last_read_message_id, last_read_at`,
-        [uid, channel_id, conversation_id, messageId]
+      const scopeColumn = channel_id ? 'channel_id' : 'conversation_id';
+      const scopeValue = channel_id || conversation_id;
+      const { rows: existingRows } = await query(
+        `SELECT last_read_message_id
+         FROM read_states
+         WHERE user_id = $1
+           AND ${scopeColumn} = $2
+         LIMIT 1`,
+        [uid, scopeValue],
       );
 
-      const applied = upsertRows[0];
+      let applied;
+      if (!existingRows.length) {
+        const { rows: insertedRows } = await query(
+          `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
+           VALUES ($1,$2,$3,$4,NOW())
+           RETURNING last_read_message_id, last_read_at`,
+          [uid, channel_id, conversation_id, messageId],
+        );
+        applied = insertedRows[0];
+      } else {
+        const currentReadId = existingRows[0].last_read_message_id;
+        let shouldAdvance = !currentReadId;
+        if (!shouldAdvance && String(currentReadId) === String(messageId)) {
+          shouldAdvance = false;
+        } else if (!shouldAdvance) {
+          const { rows: currentRows } = await query(
+            `SELECT created_at
+             FROM messages
+             WHERE id = $1
+               AND deleted_at IS NULL`,
+            [currentReadId],
+          );
+          const currentCreatedAt = currentRows[0]?.created_at;
+          shouldAdvance = !currentCreatedAt || currentCreatedAt <= messageCreatedAt;
+        }
+
+        if (shouldAdvance) {
+          const { rows: updatedRows } = await query(
+            `UPDATE read_states
+             SET last_read_message_id = $3,
+                 last_read_at = NOW()
+             WHERE user_id = $1
+               AND ${scopeColumn} = $2
+             RETURNING last_read_message_id, last_read_at`,
+            [uid, scopeValue, messageId],
+          );
+          applied = updatedRows[0];
+        } else {
+          applied = { last_read_message_id: currentReadId, last_read_at: null };
+        }
+      }
+
       const advancedTo = applied?.last_read_message_id;
       const didAdvanceCursor =
         advancedTo != null && String(advancedTo) === String(messageId);

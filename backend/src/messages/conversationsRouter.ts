@@ -248,9 +248,8 @@ router.get('/', async (req, res, next) => {
               COALESCE(m_denorm.created_at, lm.created_at) AS last_message_at,
               my_rs.last_read_message_id AS my_last_read_message_id,
               my_rs.last_read_at AS my_last_read_at,
-              (array_agg(other_rs.last_read_message_id ORDER BY other_rs.last_read_at DESC NULLS LAST)
-                FILTER (WHERE other_rs.user_id IS NOT NULL))[1] AS other_last_read_message_id,
-              MAX(other_rs.last_read_at) AS other_last_read_at,
+              latest_other_rs.last_read_message_id AS other_last_read_message_id,
+              latest_other_rs.last_read_at AS other_last_read_at,
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name,'avatarUrl',u.avatar_url))
                 AS participants
        FROM   conversations c
@@ -274,12 +273,21 @@ router.get('/', async (req, res, next) => {
        LEFT JOIN read_states my_rs
               ON my_rs.conversation_id = c.id
              AND my_rs.user_id = $1
-       LEFT JOIN read_states other_rs
-              ON other_rs.conversation_id = c.id
-             AND other_rs.user_id = cp2.user_id
-             AND cp2.user_id <> $1
+       LEFT JOIN LATERAL (
+         SELECT rs.last_read_message_id, rs.last_read_at
+         FROM read_states rs
+         JOIN conversation_participants cp_other
+           ON cp_other.conversation_id = c.id
+          AND cp_other.user_id = rs.user_id
+          AND cp_other.left_at IS NULL
+         WHERE rs.conversation_id = c.id
+           AND rs.user_id <> $1
+         ORDER BY rs.last_read_at DESC NULLS LAST
+         LIMIT 1
+       ) latest_other_rs ON TRUE
        GROUP  BY c.id, m_denorm.id, m_denorm.author_id, m_denorm.created_at,
-                 lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at
+                 lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at,
+                 latest_other_rs.last_read_message_id, latest_other_rs.last_read_at
       HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
        ORDER  BY COALESCE(m_denorm.created_at, lm.created_at, c.updated_at) DESC`,
       [req.user.id]

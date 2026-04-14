@@ -70,6 +70,17 @@ function membersCacheKey(communityId) { return `community:${communityId}:members
 // All concurrent requests for the same key share one DB query in flight.
 const communitiesInflight: Map<string, Promise<{ communities: any[] }>> = new Map();
 
+async function cleanupCommunityUnreadCounterKeys(communityId) {
+  try {
+    const { rows } = await query('SELECT id::text FROM channels WHERE community_id = $1', [communityId]);
+    if (!rows.length) return;
+    const channelKeys = rows.map((row) => `channel:msg_count:${row.id}`);
+    await redis.del(...channelKeys);
+  } catch {
+    // Best-effort cleanup; never block community deletion.
+  }
+}
+
 /** Shared list body (full list + keyset pages use the same SELECT list). */
 const COMMUNITIES_LIST_CORE = `
        WITH visible_communities AS (
@@ -86,45 +97,22 @@ const COMMUNITIES_LIST_CORE = `
          JOIN visible_communities vc ON vc.id = cm.community_id
          GROUP BY cm.community_id
        ),
-       visible_channels AS (
-         SELECT ch.id, ch.community_id
-         FROM channels ch
-         JOIN visible_communities vc ON vc.id = ch.community_id
-         WHERE ch.is_private = FALSE
-            OR EXISTS (
-              SELECT 1
-              FROM channel_members chm
-              WHERE chm.channel_id = ch.id
-                AND chm.user_id = $1
-            )
-       ),
-       latest_messages AS (
-         SELECT vch.id AS channel_id,
-                COALESCE(m_denorm.id, lm.id) AS id,
-                COALESCE(m_denorm.author_id, lm.author_id) AS author_id
-         FROM visible_channels vch
-         JOIN channels ch ON ch.id = vch.id
-         LEFT JOIN messages m_denorm
-           ON m_denorm.id = ch.last_message_id
-          AND m_denorm.channel_id = ch.id
-          AND m_denorm.deleted_at IS NULL
-         LEFT JOIN LATERAL (
-           SELECT m.id, m.author_id
-           FROM messages m
-           WHERE m.channel_id = vch.id AND m.deleted_at IS NULL
-           ORDER BY m.created_at DESC
-           LIMIT 1
-         ) lm ON m_denorm.id IS NULL
-       ),
        unread_counts AS (
          SELECT ch.community_id, COUNT(*)::int AS unread_channel_count
-         FROM visible_channels ch
-         JOIN latest_messages lm ON lm.channel_id = ch.id
+         FROM channels ch
+         JOIN visible_communities vc ON vc.id = ch.community_id
          LEFT JOIN read_states rs
            ON rs.channel_id = ch.id
           AND rs.user_id = $1
-         WHERE lm.author_id <> $1
-           AND rs.last_read_message_id IS DISTINCT FROM lm.id
+         WHERE (ch.is_private = FALSE OR EXISTS (
+                 SELECT 1
+                 FROM channel_members chm
+                 WHERE chm.channel_id = ch.id
+                   AND chm.user_id = $1
+               ))
+           AND ch.last_message_id IS NOT NULL
+           AND ch.last_message_author_id IS DISTINCT FROM $1
+           AND rs.last_read_message_id IS DISTINCT FROM ch.last_message_id
          GROUP BY ch.community_id
        )
        SELECT vc.*,
@@ -401,6 +389,7 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
       'SELECT user_id FROM community_members WHERE community_id=$1',
       [req.params.id]
     );
+    await cleanupCommunityUnreadCounterKeys(req.params.id);
 
     await query('DELETE FROM communities WHERE id=$1', [req.params.id]);
 

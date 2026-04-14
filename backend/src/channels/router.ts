@@ -217,24 +217,12 @@ router.get('/',
            )
            SELECT vc.*,
                   vc.can_access,
-                  CASE WHEN vc.can_access THEN COALESCE(m_denorm.id, lm.id) ELSE NULL END AS last_message_id,
-                  CASE WHEN vc.can_access THEN COALESCE(m_denorm.author_id, lm.author_id) ELSE NULL END AS last_message_author_id,
-                  CASE WHEN vc.can_access THEN COALESCE(m_denorm.created_at, lm.created_at) ELSE NULL END AS last_message_at,
+                  CASE WHEN vc.can_access THEN vc.last_message_id ELSE NULL END AS last_message_id,
+                  CASE WHEN vc.can_access THEN vc.last_message_author_id ELSE NULL END AS last_message_author_id,
+                  CASE WHEN vc.can_access THEN vc.last_message_at ELSE NULL END AS last_message_at,
                   CASE WHEN vc.can_access THEN rs.last_read_message_id ELSE NULL END AS my_last_read_message_id,
                   CASE WHEN vc.can_access THEN rs.last_read_at ELSE NULL END AS my_last_read_at
            FROM   visible_channels vc
-           LEFT JOIN messages m_denorm
-                  ON vc.can_access
-                 AND m_denorm.id = vc.last_message_id
-                 AND m_denorm.channel_id = vc.id
-                 AND m_denorm.deleted_at IS NULL
-           LEFT JOIN LATERAL (
-             SELECT m.id, m.author_id, m.created_at
-             FROM messages m
-             WHERE m.channel_id = vc.id AND m.deleted_at IS NULL
-             ORDER BY m.created_at DESC
-             LIMIT 1
-           ) lm ON vc.can_access AND m_denorm.id IS NULL
            LEFT JOIN read_states rs
                   ON vc.can_access
                  AND rs.channel_id = vc.id
@@ -612,6 +600,8 @@ router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
         id: rows[0].id,
         community_id: communityId,
       });
+      // Remove unread-counter helpers for deleted channel to avoid stale key buildup.
+      redis.del(`channel:msg_count:${rows[0].id}`).catch(() => {});
       bustChannelListCache(communityId).catch(() => {});
     }
     res.json({ success: true });

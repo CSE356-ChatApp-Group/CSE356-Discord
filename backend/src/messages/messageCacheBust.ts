@@ -8,7 +8,6 @@ type RedisLike = {
   get(key: string): Promise<string | null>;
   del(...keys: string[]): Promise<unknown>;
   incr(key: string): Promise<number>;
-  scan?(cursor: string, ...args: string[]): Promise<[string, string[]]>;
 };
 
 function normalizeLimit(limit: number): number {
@@ -43,18 +42,6 @@ export function conversationMsgCacheEpochKey(conversationId: string): string {
   return `messages:conversation:${conversationId}:cacheEpoch`;
 }
 
-async function deleteByPrefix(redis: RedisLike, prefix: string): Promise<void> {
-  if (typeof redis.scan !== 'function') return;
-  let cursor = '0';
-  do {
-    const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', `${prefix}:*`, 'COUNT', '200');
-    if (Array.isArray(keys) && keys.length > 0) {
-      await redis.del(...keys);
-    }
-    cursor = nextCursor;
-  } while (cursor !== '0');
-}
-
 export async function readMessageCacheEpoch(
   redis: RedisLike,
   epochKey: string
@@ -75,8 +62,6 @@ export async function bustChannelMessagesCache(
   if (!channelId) return;
   try {
     await redis.del(channelMsgCacheKey(channelId));
-    // If INCR fails below, this still clears known versioned/limit variants.
-    await deleteByPrefix(redis, channelMsgCacheKey(channelId));
   } catch {
     /* TTL + epoch backstop */
   }
@@ -94,8 +79,6 @@ export async function bustConversationMessagesCache(
   if (!conversationId) return;
   try {
     await redis.del(conversationMsgCacheKey(conversationId));
-    // If INCR fails below, this still clears known versioned/limit variants.
-    await deleteByPrefix(redis, conversationMsgCacheKey(conversationId));
   } catch {
     /* TTL + epoch backstop */
   }
