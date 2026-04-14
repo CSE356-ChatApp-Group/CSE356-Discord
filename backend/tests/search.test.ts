@@ -205,12 +205,17 @@ describe('Search – community scope', () => {
 describe('Search – access control', () => {
   let ownerToken: string;
   let privateChannelId: string;
+  let publicChannelId: string;
   const markerChannel = `accctrl${uniqueSuffix()}`;
+  const markerPublic = `pubacc${uniqueSuffix()}`;
 
   beforeAll(async () => {
     const owner = await createAuthenticatedUser('srchac');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken, uniqueSuffix());
+    const publicChannel = await createChannel(ownerToken, community.id, { isPrivate: false });
+    publicChannelId = publicChannel.id;
+    await sendMessage(ownerToken, publicChannelId, `Public message: ${markerPublic}`);
     // Use a PRIVATE channel so non-members are denied
     const channel = await createChannel(ownerToken, community.id, { isPrivate: true });
     privateChannelId = channel.id;
@@ -233,6 +238,15 @@ describe('Search – access control', () => {
     expect(res.status).toBe(401);
   });
 
+  it('returns 403 when searching a public channel without community membership', async () => {
+    const outsider = await createAuthenticatedUser('srchoutpublic');
+    const res = await request(app)
+      .get(`/api/v1/search?q=${markerPublic}&channelId=${publicChannelId}`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+
+    expect(res.status).toBe(403);
+  });
+
   it('unscoped search does not return messages from private channels outside the user\'s access', async () => {
     const outsider = await createAuthenticatedUser('srchunscoped');
     const res = await request(app)
@@ -243,6 +257,18 @@ describe('Search – access control', () => {
     // outsider has no access to the private channel — must not appear in results
     for (const hit of res.body.hits) {
       expect(hit.channelId).not.toBe(privateChannelId);
+    }
+  });
+
+  it('unscoped search does not return messages from public channels outside the user\'s communities', async () => {
+    const outsider = await createAuthenticatedUser('srchunscopedpublic');
+    const res = await request(app)
+      .get(`/api/v1/search?q=${markerPublic}`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+
+    expect(res.status).toBe(200);
+    for (const hit of res.body.hits) {
+      expect(hit.channelId).not.toBe(publicChannelId);
     }
   });
 });

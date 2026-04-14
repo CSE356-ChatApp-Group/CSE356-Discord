@@ -124,4 +124,23 @@ describe('community admin channel controls', () => {
       .set('Authorization', `Bearer ${member.accessToken}`);
     expect(memberDeleteRes.status).toBe(403);
   });
+
+  it('does not expose community members and presence to non-members', async () => {
+    const owner = await createAuthenticatedUser('communitymemberlistowner');
+    const outsider = await createAuthenticatedUser('communitymemberlistoutsider');
+    const slug = `community-member-list-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'community member list privacy' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const membersRes = await request(app)
+      .get(`/api/v1/communities/${communityId}/members`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+
+    expect(membersRes.status).toBe(403);
+  });
 });

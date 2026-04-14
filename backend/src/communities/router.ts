@@ -499,9 +499,16 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 });
 
 // ── Members + presence ─────────────────────────────────────────────────────────
-router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
+router.get('/:id/members', param('id').isUUID(), loadMembership, async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
+    const { rowCount: communityExists } = await query(
+      'SELECT 1 FROM communities WHERE id = $1',
+      [req.params.id]
+    );
+    if (!communityExists) return res.status(404).json({ error: 'Community not found' });
+    if (!req.membership) return res.status(403).json({ error: 'Not a community member' });
+
     const { rows } = await query(
       `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
        FROM community_members cm JOIN users u ON u.id = cm.user_id

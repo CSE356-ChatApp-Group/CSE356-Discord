@@ -229,35 +229,12 @@ describe('GET /api/v1/attachments/:id', () => {
     expect(res.body.attachment.conversation_id).toBeUndefined();
   });
 
-  it('returns 403 to a user who is not a member of the channel', async () => {
-    // nonMember never joined the community — channel is public but they have
-    // no community membership so the access check must block them.
-    // Make the channel private first by creating a private one.
-    const privChanRes = await request(app)
-      .post('/api/v1/channels')
-      .set('Authorization', `Bearer ${ownerToken}`)
-      .send({
-        communityId: (await request(app)
-          .get('/api/v1/communities')
-          .set('Authorization', `Bearer ${ownerToken}`)
-          .then((r) => r.body.communities.find((c: any) => c.id)?.id)),
-        name: `priv-${uniqueSuffix()}`.slice(0, 32),
-        isPrivate: true,
-      });
-    // Fallback: use existing messageId but with a non-member who should 403
-    // on a private channel. For the public channel case, channel membership
-    // is unrestricted, so we test the community-member guard indirectly.
-    // The key security case: a completely different user who didn't join.
+  it('returns 403 to a user who is not in the community that owns the channel', async () => {
     const res = await request(app)
       .get(`/api/v1/attachments/${attachmentId}`)
       .set('Authorization', `Bearer ${nonMemberToken}`);
 
-    // nonMember is not in the community that owns this channel.
-    // Channel is public (is_private = FALSE) so the SELECT 1 FROM channels check
-    // passes — this tests that we DON'T over-restrict public channels.
-    // For this test community's public channel, non-members CAN view per app design.
-    // The real security test is the private-channel case below.
-    expect([200, 403]).toContain(res.status);
+    expect(res.status).toBe(403);
   });
 
   it('returns 403 to a user who is not a participant in a private-channel message', async () => {

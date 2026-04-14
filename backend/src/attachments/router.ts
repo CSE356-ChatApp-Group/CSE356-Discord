@@ -153,10 +153,19 @@ router.get('/:id',
       // the attachment's message belongs to.
       if (attachment.channel_id) {
         const { rows: access } = await query(
-          `SELECT 1 FROM channels WHERE id = $1
-           AND (is_private = FALSE OR EXISTS (
-             SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2
-           ))`,
+          `SELECT 1
+           FROM channels c
+           JOIN community_members community_member
+             ON community_member.community_id = c.community_id
+            AND community_member.user_id = $2
+           WHERE c.id = $1
+             AND (
+               c.is_private = FALSE
+               OR EXISTS (
+                 SELECT 1 FROM channel_members
+                 WHERE channel_id = c.id AND user_id = $2
+               )
+             )`,
           [attachment.channel_id, req.user.id]
         );
         if (!access.length) return res.status(403).json({ error: 'Access denied' });

@@ -90,6 +90,9 @@ function buildFilters(params: any[], opts: Record<string, any>): string {
     AND (
       (m.channel_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM channels ch
+        JOIN community_members community_member
+          ON community_member.community_id = ch.community_id
+         AND community_member.user_id = ${uid}
         LEFT JOIN channel_members cm ON cm.channel_id = ch.id AND cm.user_id = ${uid}
         WHERE ch.id = m.channel_id
           AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)

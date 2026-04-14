@@ -106,6 +106,9 @@ async function ensureChannelAccess(channelId, userId) {
   const { rows } = await query(
     `SELECT 1
      FROM channels c
+     JOIN community_members community_member
+       ON community_member.community_id = c.community_id
+      AND community_member.user_id = $2
      WHERE c.id = $1
        AND (
          c.is_private = FALSE
@@ -138,6 +141,9 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
   const { rows } = await query(
     `SELECT c.id::text AS id
      FROM channels c
+     JOIN community_members community_member
+       ON community_member.community_id = c.community_id
+      AND community_member.user_id = $2::uuid
      WHERE c.id = $1::uuid
        AND (
          c.is_private = FALSE
@@ -317,6 +323,9 @@ router.get('/',
             WHERE  m.channel_id = $3 AND m.deleted_at IS NULL
               AND  EXISTS (
                 SELECT 1 FROM channels c
+                JOIN community_members community_member
+                  ON community_member.community_id = c.community_id
+                 AND community_member.user_id = $2
                 WHERE c.id = $3
                   AND (c.is_private = FALSE
                        OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
@@ -328,7 +337,19 @@ router.get('/',
           const { rows } = await query(sql, params);
           if (rows.length === 0) {
             const accessCheck = await query(
-              `SELECT 1 FROM channels WHERE id = $1 AND (is_private = FALSE OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2))`,
+              `SELECT 1
+               FROM channels c
+               JOIN community_members community_member
+                 ON community_member.community_id = c.community_id
+                AND community_member.user_id = $2
+               WHERE c.id = $1
+                 AND (
+                   c.is_private = FALSE
+                   OR EXISTS (
+                     SELECT 1 FROM channel_members
+                     WHERE channel_id = c.id AND user_id = $2
+                   )
+                 )`,
               [channelId, req.user.id]
             );
             if (!accessCheck.rows.length) {
@@ -443,6 +464,9 @@ router.get('/',
         const ci = params.length; // $3
         accessWhere = `EXISTS (
           SELECT 1 FROM channels c
+          JOIN community_members community_member
+            ON community_member.community_id = c.community_id
+           AND community_member.user_id = $2
           WHERE c.id = $${ci}
             AND (c.is_private = FALSE
                  OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
@@ -489,7 +513,19 @@ router.get('/',
         // Distinguish "no messages" from "access denied" with a lightweight check.
         const accessCheck = await query(
           channelId
-            ? `SELECT 1 FROM channels WHERE id = $1 AND (is_private = FALSE OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2))`
+            ? `SELECT 1
+               FROM channels c
+               JOIN community_members community_member
+                 ON community_member.community_id = c.community_id
+                AND community_member.user_id = $2
+               WHERE c.id = $1
+                 AND (
+                   c.is_private = FALSE
+                   OR EXISTS (
+                     SELECT 1 FROM channel_members
+                     WHERE channel_id = c.id AND user_id = $2
+                   )
+                 )`
             : `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
           [channelId ?? conversationId, req.user.id]
         );
@@ -720,12 +756,15 @@ router.post('/',
           ({ rows } = await client.query(
             `WITH access AS (
                SELECT community_id
-               FROM   channels
-               WHERE  id = $1
-                 AND  (is_private = FALSE
+               FROM   channels c
+               JOIN   community_members community_member
+                 ON   community_member.community_id = c.community_id
+                AND   community_member.user_id = $2
+               WHERE  c.id = $1
+                 AND  (c.is_private = FALSE
                        OR EXISTS (
                          SELECT 1 FROM channel_members
-                         WHERE  channel_id = $1 AND user_id = $2
+                         WHERE  channel_id = c.id AND user_id = $2
                        ))
                  AND  EXISTS (SELECT 1 FROM users WHERE id = $2)
              ), ins AS (

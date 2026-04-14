@@ -942,3 +942,42 @@ describe('GET /messages latest-page cache vs group DM system rows', () => {
     ).toBe(true);
   });
 });
+
+describe('Channel community-membership enforcement', () => {
+  it('rejects reading or posting in a public channel when the user is not in the community', async () => {
+    const owner = await createAuthenticatedUser('publicchannelowner');
+    const outsider = await createAuthenticatedUser('publicchanneloutsider');
+    const slug = `public-channel-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'public channel access control' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `pub-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const postOwnerRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'owner message in public channel' });
+    expect(postOwnerRes.status).toBe(201);
+
+    const outsiderGetRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+    expect(outsiderGetRes.status).toBe(403);
+
+    const outsiderPostRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${outsider.accessToken}`)
+      .send({ channelId, content: 'outsider should not post' });
+    expect(outsiderPostRes.status).toBe(403);
+  });
+});

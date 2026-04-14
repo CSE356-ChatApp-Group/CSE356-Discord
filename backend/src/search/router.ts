@@ -64,6 +64,9 @@ router.get('/', async (req, res, next) => {
     } else if (channelId) {
       const { rowCount } = await query(
         `SELECT 1 FROM channels ch
+         JOIN community_members community_member
+           ON community_member.community_id = ch.community_id
+          AND community_member.user_id = $1
          LEFT JOIN channel_members cm ON cm.channel_id = ch.id AND cm.user_id = $1
          WHERE ch.id = $2
            AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)`,
