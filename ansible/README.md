@@ -14,7 +14,7 @@ CI still runs **`deploy/deploy-staging.sh`** / **`deploy/deploy-prod.sh`** direc
 
 **Releases:** `deploy-staging.sh` downloads from **`GITHUB_REPO`** (default in script). If your fork is not the default org/repo, set `github_repo` in `group_vars/all.yml` or pass `-e github_repo=owner/repo` when running deploy playbooks.
 
-**CI:** `ci-deploy.yml` runs `ansible-playbook --syntax-check` on all playbooks in the **`deploy-scripts`** job so broken YAML does not reach `main`.
+**CI:** `ci-deploy.yml` runs `ansible-playbook --syntax-check` on all playbooks in the **`deploy-scripts`** job (installs **`ansible-core`** via **`apt-get`** on the self-hosted runner if `ansible-playbook` is missing).
 
 ## Inventory
 

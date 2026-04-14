@@ -57,8 +57,8 @@ jobs:
       - name: Validate Ansible playbooks (syntax)
         run: |
           if ! command -v ansible-playbook >/dev/null 2>&1; then
-            python3 -m pip install --user -q ansible-core
-            export PATH="$HOME/.local/bin:$PATH"
+            sudo apt-get update -qq
+            sudo apt-get install -y ansible-core
           fi
           cd ansible
           ansible-playbook --syntax-check \
