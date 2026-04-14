@@ -249,6 +249,23 @@ const COURSE_CLIENT_ID = process.env.COURSE_OIDC_CLIENT_ID || 'web-service';
 const COURSE_CLIENT_SECRET = process.env.COURSE_OIDC_CLIENT_SECRET || 'web-service-secret';
 let courseDiscoveryCache;
 
+function isTransientOidcFetchFailure(err) {
+  return Boolean(
+    err
+    && typeof err === 'object'
+    && (
+      err.code === 'ECONNREFUSED'
+      || err.code === 'ENOTFOUND'
+      || err.code === 'EHOSTUNREACH'
+      || err.code === 'ECONNRESET'
+      || err.code === 'ETIMEDOUT'
+      || err.code === 'UND_ERR_CONNECT_TIMEOUT'
+      || err.code === 'UND_ERR_SOCKET'
+      || err.name === 'TypeError'
+    )
+  );
+}
+
 async function getCourseDiscovery() {
   if (courseDiscoveryCache) return courseDiscoveryCache;
   const res = await fetch(COURSE_DISCOVERY_URL);
@@ -650,6 +667,9 @@ router.get('/course', async (req, res, next) => {
 
     res.redirect(`${discovery.authorization_endpoint}?${params.toString()}`);
   } catch (err) {
+    if (isTransientOidcFetchFailure(err)) {
+      return res.status(503).json({ error: 'Course OIDC is temporarily unavailable' });
+    }
     next(err);
   }
 });
