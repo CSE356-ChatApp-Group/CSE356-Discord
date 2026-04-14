@@ -23,6 +23,8 @@
         argv:
           - "{{ playbook_dir }}/../../deploy/deploy-staging.sh"
           - "{{ deploy_sha }}"
+        # Repo-relative LOCAL_ARTIFACT_PATH (e.g. .artifacts/ from CI) must resolve from workspace root.
+        chdir: "{{ playbook_dir }}/../.."
       environment:
         STAGING_HOST: "{{ staging_host }}"
         STAGING_USER: "{{ staging_user }}"

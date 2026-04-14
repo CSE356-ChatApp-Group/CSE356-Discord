@@ -10,7 +10,7 @@ This directory drives **inventory** and optional **playbooks** around the existi
 
 ## Parity with GitHub Actions deploys
 
-**CI deploys use Ansible:** [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml) writes a temporary INI inventory from workflow inputs (`host`, `user`, `environment`) and runs **`ansible/playbooks/deploy-staging.yml`** or **`deploy-prod.yml`**, which invoke the same **`deploy/deploy-*.sh`** scripts with the same environment variables (`STAGING_*` / `PROD_*`, **`GITHUB_REPO`** = `github.repository`, optional **`LOCAL_ARTIFACT_PATH`** from the workflow artifact).
+**CI deploys use Ansible:** [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml) writes a temporary INI inventory from workflow inputs (`host`, `user`, `environment`) and runs **`ansible/playbooks/deploy-staging.yml`** or **`deploy-prod.yml`**, which invoke the same **`deploy/deploy-*.sh`** scripts with the same environment variables (`STAGING_*` / `PROD_*`, **`GITHUB_REPO`** = `github.repository`, optional **`LOCAL_ARTIFACT_PATH`** from the workflow artifact). Deploy tasks use **`chdir`** to the **repository root** so relative paths like **`.artifacts/chatapp-<sha>.tar.gz`** match the pre-Ansible CI behavior.
 
 Keep **`ansible/inventory/hosts.yml`** aligned with repo variables **`STAGING_HOST`**, **`STAGING_USER`**, **`PROD_HOST`**, **`PROD_USER`** so **manual** `ansible-playbook` runs target the same hosts as Actions (CI does not read the committed inventory file).
 

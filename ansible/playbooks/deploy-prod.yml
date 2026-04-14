@@ -25,6 +25,7 @@
         argv:
           - "{{ playbook_dir }}/../../deploy/deploy-prod.sh"
           - "{{ deploy_sha }}"
+        chdir: "{{ playbook_dir }}/../.."
       environment:
         PROD_HOST: "{{ prod_host }}"
         PROD_USER: "{{ prod_user }}"
