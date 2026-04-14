@@ -140,6 +140,45 @@ async function getUserDisplayName(client, userId) {
   return rows[0]?.display_name || 'User';
 }
 
+/** One round-trip for display names (group invite system messages). */
+async function getUserDisplayNamesMap(client, userIds: string[]) {
+  const map = new Map<string, string>();
+  if (!userIds.length) return map;
+  const { rows } = await client.query(
+    `SELECT id::text AS id, display_name FROM users WHERE id = ANY($1::uuid[])`,
+    [userIds]
+  );
+  for (const row of rows) {
+    map.set(row.id, row.display_name?.trim() ? row.display_name : 'User');
+  }
+  for (const id of userIds) {
+    if (!map.has(id)) map.set(id, 'User');
+  }
+  return map;
+}
+
+async function insertConversationParticipantsBatch(client, conversationId: string, userIds: string[]) {
+  if (!userIds.length) return;
+  await client.query(
+    `INSERT INTO conversation_participants (conversation_id, user_id)
+     SELECT $1::uuid, uid
+     FROM unnest($2::uuid[]) AS uid`,
+    [conversationId, userIds]
+  );
+}
+
+async function upsertConversationParticipantsBatch(client, conversationId: string, userIds: string[]) {
+  if (!userIds.length) return;
+  await client.query(
+    `INSERT INTO conversation_participants (conversation_id, user_id, joined_at, left_at)
+     SELECT $1::uuid, uid, NOW(), NULL
+     FROM unnest($2::uuid[]) AS uid
+     ON CONFLICT (conversation_id, user_id)
+     DO UPDATE SET left_at = NULL, joined_at = NOW()`,
+    [conversationId, userIds]
+  );
+}
+
 async function createSystemMessage(client, conversationId, content) {
   const { rows } = await client.query(
     `INSERT INTO messages (conversation_id, author_id, content, type)
@@ -148,6 +187,19 @@ async function createSystemMessage(client, conversationId, content) {
     [conversationId, content]
   );
   return rows[0] || null;
+}
+
+/** One INSERT … SELECT unnest for multiple “X joined the group.” lines. */
+async function createSystemMessagesBatch(client, conversationId: string, contents: string[]) {
+  if (!contents.length) return [];
+  const { rows } = await client.query(
+    `INSERT INTO messages (conversation_id, author_id, content, type)
+     SELECT $1::uuid, NULL, c, 'system'::message_type
+     FROM unnest($2::text[]) AS c
+     RETURNING id, conversation_id, author_id, content, type, created_at, updated_at, deleted_at, edited_at, channel_id, thread_id`,
+    [conversationId, contents]
+  );
+  return rows;
 }
 
 async function isGroupConversation(client, conversationId) {
@@ -302,12 +354,7 @@ router.post('/',
         [req.body.name || null, req.user.id, isGroup]
       );
 
-      for (const uid of allIds) {
-        await client.query(
-          `INSERT INTO conversation_participants (conversation_id, user_id) VALUES ($1,$2)`,
-          [conv.id, uid]
-        );
-      }
+      await insertConversationParticipantsBatch(client, conv.id, allIds);
 
       const conversation = await loadConversationWithParticipants(client, conv.id);
       const invitedUserIds = allIds.filter(id => id !== req.user.id);
@@ -473,23 +520,15 @@ async function addParticipantsHandler(req, res, next) {
       return res.status(403).json({ error: 'Cannot invite users to a 1-to-1 DM' });
     }
 
-    for (const participantId of participantIdsToAdd) {
-      await client.query(
-        `INSERT INTO conversation_participants (conversation_id, user_id, joined_at, left_at)
-         VALUES ($1, $2, NOW(), NULL)
-         ON CONFLICT (conversation_id, user_id)
-         DO UPDATE SET left_at = NULL, joined_at = NOW()`,
-        [req.params.id, participantId]
-      );
-    }
+    await upsertConversationParticipantsBatch(client, req.params.id, participantIdsToAdd);
 
     let joinedGroupMessages = [];
     if (convMeta.is_group && participantIdsToAdd.length > 0) {
-      for (const participantId of participantIdsToAdd) {
-        const joinedUserName = await getUserDisplayName(client, participantId);
-        const joinedMessage = await createSystemMessage(client, req.params.id, `${joinedUserName} joined the group.`);
-        if (joinedMessage) joinedGroupMessages.push(joinedMessage);
-      }
+      const nameMap = await getUserDisplayNamesMap(client, participantIdsToAdd);
+      const contents = participantIdsToAdd.map(
+        (pid) => `${nameMap.get(pid) || 'User'} joined the group.`,
+      );
+      joinedGroupMessages = await createSystemMessagesBatch(client, req.params.id, contents);
     }
 
     const conversation = await loadConversationWithParticipants(client, req.params.id);
