@@ -8,6 +8,7 @@ This folder contains a repeatable **staging-only** load test that ramps traffic 
 - `GET /api/v1/communities`
 - `GET /api/v1/conversations`
 - `GET /api/v1/messages?channelId=...`
+- `PUT /api/v1/messages/:id/read`
 - `POST /api/v1/messages`
 - WebSocket presence/activity churn
 
@@ -52,6 +53,10 @@ Optional knobs:
 - `LOADTEST_PASSWORD=...`
 - `MESSAGE_SIZE=128`
 - `RUN_ID=my-custom-label`
+- Mix tuning (all optional, auto-normalized):  
+  `LOADTEST_MIX_COMMUNITIES`, `LOADTEST_MIX_CONVERSATIONS`, `LOADTEST_MIX_MESSAGES_LIST`,  
+  `LOADTEST_MIX_CHANNELS`, `LOADTEST_MIX_MESSAGE_READ`, `LOADTEST_MIX_POST_CHANNEL`,  
+  `LOADTEST_MIX_POST_CONVERSATION`, `LOADTEST_MIX_REAUTH`
 
 ## Important notes
 

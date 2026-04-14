@@ -77,6 +77,36 @@ const channelsDuration = new Trend('channels_req_duration', true);
 const messagePostDuration = new Trend('message_post_req_duration', true);
 const authLoginDuration = new Trend('auth_login_req_duration', true);
 
+function parseRatioEnv(name, fallback) {
+  const raw = __ENV[name];
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+const HTTP_MIX = (() => {
+  // Defaults are intentionally read-heavy to mirror production where
+  // `/messages/:id/read` dominates request volume.
+  const mix = {
+    communities: parseRatioEnv('LOADTEST_MIX_COMMUNITIES', 0.12),
+    conversations: parseRatioEnv('LOADTEST_MIX_CONVERSATIONS', 0.08),
+    messagesList: parseRatioEnv('LOADTEST_MIX_MESSAGES_LIST', 0.10),
+    channels: parseRatioEnv('LOADTEST_MIX_CHANNELS', 0.05),
+    messageRead: parseRatioEnv('LOADTEST_MIX_MESSAGE_READ', 0.50),
+    postChannel: parseRatioEnv('LOADTEST_MIX_POST_CHANNEL', 0.10),
+    postConversation: parseRatioEnv('LOADTEST_MIX_POST_CONVERSATION', 0.03),
+    reauth: parseRatioEnv('LOADTEST_MIX_REAUTH', 0.02),
+  };
+  const total = Object.values(mix).reduce((sum, v) => sum + v, 0);
+  if (total <= 0) return mix;
+  Object.keys(mix).forEach((k) => {
+    mix[k] = mix[k] / total;
+  });
+  return mix;
+})();
+const vuReadState = {};
+
 const PROFILES = {
   smoke: {
     httpStages: [
@@ -302,8 +332,10 @@ function jsonParams(token, tags = {}, keepBody = false) {
 }
 
 /** GET helpers use the same timeout as POST (list endpoints were bypassing jsonParams). */
-function getAuthParams(token, tags) {
-  return baseHttpParams(token, tags);
+function getAuthParams(token, tags, keepBody = false) {
+  const params = baseHttpParams(token, tags);
+  if (keepBody) params.responseType = 'text';
+  return params;
 }
 
 function safeJson(res) {
@@ -504,12 +536,20 @@ function listConversations(token) {
   checksRate.add(ok);
 }
 
-function listMessages(token, channelId) {
-  const res = http.get(`${BASE_URL}/messages?channelId=${channelId}`, getAuthParams(token, { endpoint: 'messages_list_channel' }));
+function listMessages(token, channelId, keepBody = false) {
+  const res = http.get(
+    `${BASE_URL}/messages?channelId=${channelId}`,
+    getAuthParams(token, { endpoint: 'messages_list_channel' }, keepBody),
+  );
   recordHttpStatus(res, 'messages_list_channel');
   channelListDuration.add(res.timings.duration);
   const ok = check(res, { 'channel message list 200': (r) => r.status === 200 });
   checksRate.add(ok);
+  if (!keepBody || res.status !== 200) return null;
+  const payload = safeJson(res);
+  const messages = payload && Array.isArray(payload.messages) ? payload.messages : [];
+  const last = messages.length ? messages[messages.length - 1] : null;
+  return last && last.id ? String(last.id) : null;
 }
 
 function listChannels(token, communityId) {
@@ -559,32 +599,73 @@ function reauthenticate(loginId) {
   checksRate.add(ok);
 }
 
+function markMessageRead(token, messageId) {
+  if (!messageId) return;
+  const res = http.put(
+    `${BASE_URL}/messages/${messageId}/read`,
+    null,
+    getAuthParams(token, { endpoint: 'messages_read_mark' }),
+  );
+  recordHttpStatus(res, 'messages_read_mark');
+  const ok = check(res, {
+    'message read mark ok': (r) => r.status === 200 || r.status === 404,
+  });
+  checksRate.add(ok);
+}
+
 export function httpMix(data) {
   const roll = Math.random();
   // Pin each VU to a reader so list/read operations hit NUM_READER_POOL distinct
   // Redis keys. Writes still use ownerToken (has ownership) or peerToken
   // (is a conversation participant) — their write paths are not cache-read-heavy.
   const reader = data.readerPool[exec.vu.idInTest % data.readerPool.length];
-
-  if (roll < 0.20) {
+  const state = vuReadState[exec.vu.idInTest] || (vuReadState[exec.vu.idInTest] = {});
+  let cursor = 0;
+  cursor += HTTP_MIX.communities;
+  if (roll < cursor) {
     listCommunities(reader.token);
-  } else if (roll < 0.36) {
+    return sleep(Math.random() * 0.35);
+  }
+  cursor += HTTP_MIX.conversations;
+  if (roll < cursor) {
     listConversations(reader.token);
-  } else if (roll < 0.50) {
+    return sleep(Math.random() * 0.35);
+  }
+  cursor += HTTP_MIX.messagesList;
+  if (roll < cursor) {
     listMessages(reader.token, data.channelId);
-  } else if (roll < 0.62) {
+    return sleep(Math.random() * 0.35);
+  }
+  cursor += HTTP_MIX.channels;
+  if (roll < cursor) {
     // GET /channels fires every time a user opens a community in the real app.
     // It exercises per-user private-channel filtering (LATERAL join) and the
     // unread count pipeline — the most complex read query after communities.
     listChannels(reader.token, data.communityId);
-  } else if (roll < 0.80) {
-    sendChannelMessage(data.ownerToken, data.channelId);
-  } else if (roll < 0.90) {
-    sendConversationMessage(data.peerToken, data.conversationId);
-  } else {
-    const vuIdx = (exec.vu.idInTest - 1) % data.wsPeers.length;
-    reauthenticate(data.wsPeers[vuIdx].username);
+    return sleep(Math.random() * 0.35);
   }
+  cursor += HTTP_MIX.messageRead;
+  if (roll < cursor) {
+    let messageId = state.lastReadMessageId || null;
+    if (!messageId) {
+      messageId = listMessages(reader.token, data.channelId, true);
+      if (messageId) state.lastReadMessageId = messageId;
+    }
+    markMessageRead(reader.token, messageId);
+    return sleep(Math.random() * 0.35);
+  }
+  cursor += HTTP_MIX.postChannel;
+  if (roll < cursor) {
+    sendChannelMessage(data.ownerToken, data.channelId);
+    return sleep(Math.random() * 0.35);
+  }
+  cursor += HTTP_MIX.postConversation;
+  if (roll < cursor) {
+    sendConversationMessage(data.peerToken, data.conversationId);
+    return sleep(Math.random() * 0.35);
+  }
+  const vuIdx = (exec.vu.idInTest - 1) % data.wsPeers.length;
+  reauthenticate(data.wsPeers[vuIdx].username);
 
   sleep(Math.random() * 0.35);
 }
