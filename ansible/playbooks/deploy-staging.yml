@@ -1,0 +1,29 @@
+---
+# Wraps deploy/deploy-staging.sh using inventory hosts (same behavior as manual run).
+# Usage: ansible-playbook playbooks/deploy-staging.yml -e deploy_sha=<full-or-short-sha>
+- name: Deploy artifact to staging
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _staging: "{{ groups['staging'][0] }}"
+    staging_host: "{{ hostvars[_staging].ansible_host }}"
+    staging_user: "{{ hostvars[_staging].ansible_user }}"
+    _github: "{{ hostvars[_staging].github_repo | default('CSE356-ChatApp-Group/CSE356-Discord') }}"
+  tasks:
+    - name: Require deploy_sha
+      ansible.builtin.assert:
+        that:
+          - deploy_sha is defined
+          - (deploy_sha | string | length) > 0
+        fail_msg: "Pass -e deploy_sha=<git-commit-sha> (GitHub release artifact tag)."
+
+    - name: Run deploy-staging.sh
+      ansible.builtin.command:
+        argv:
+          - "{{ playbook_dir }}/../../deploy/deploy-staging.sh"
+          - "{{ deploy_sha }}"
+      environment:
+        STAGING_HOST: "{{ staging_host }}"
+        STAGING_USER: "{{ staging_user }}"
+        GITHUB_REPO: "{{ _github }}"

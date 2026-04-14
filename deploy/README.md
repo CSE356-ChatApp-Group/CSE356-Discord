@@ -95,6 +95,8 @@ You can still deploy manually from GitHub Actions using **Manual Deploy** (`work
 
 The workflow uses the same deploy scripts as local console deploys, so behavior is consistent.
 
+**Ansible:** optional inventory and playbooks (connectivity check, VM bootstrap, deploy wrappers) are in [`ansible/README.md`](../ansible/README.md).
+
 ## Staging Deployment
 
 ### Prerequisites
@@ -211,6 +213,20 @@ Production uses immutable release directories:
 Shared nginx-related strings and the default site path live in `deploy/deploy-common.sh`; `deploy-prod.sh` and `preflight-check.sh` source it so retries and heal logic stay aligned.
 
 **Warning: This deploys to production. Ensure staging passed all checks first.**
+
+#### Zero-downtime production rollout (plan)
+
+Production deploys are designed for **no hard cut** while old and new binaries briefly overlap:
+
+1. **Ship code** — merge to `main`, wait for **CI Build & Package** + **`release-<sha>`** on GitHub Releases (same artifact staging and prod use).
+2. **Prove staging** — `./deploy/deploy-staging.sh <sha>` (or Actions auto-deploy) until green; run smoke / e2e / capacity scripts you rely on.
+3. **Preflight prod** — `./deploy/preflight-check.sh prod <sha> <PROD_USER> <PROD_HOST> <GITHUB_REPO>` from a host that can SSH and reach the artifact (VPN/firewall as needed).
+4. **Run prod deploy** — `CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <sha>` (or **Manual Deploy** → `production` in GitHub Actions). The script: **pg_dump backup** → candidate on **alternate port** → health + smoke **before** nginx sends live traffic → dual-worker **pin candidate → roll companion → restore upstream** so users keep an upstream during the swap.
+5. **Migrations** — keep changes **backward compatible** across the window where both versions may answer (see step 9 narrative below). Destructive DDL only with a separate maintenance plan.
+6. **After cutover** — `./scripts/prod-nginx-audit.sh`, watch Grafana/Prometheus, keep old release on disk for rollback.
+7. **Rollback** — re-run `deploy-prod.sh` with the **previous SHA**, or use the script’s rollback path / nginx upstream fix (see **Immediate Rollback** below); do not blind-`sed` nginx ports.
+
+**Not touched by this process:** DNS (same VM), Postgres availability (brief pool pressure only if migrations are heavy). **Downtime risk** is usually mis-nginx or bad migration, not the Node swap itself.
 
 ```bash
 # Default is dual-worker (CHATAPP_INSTANCES=2). Override only if you intentionally

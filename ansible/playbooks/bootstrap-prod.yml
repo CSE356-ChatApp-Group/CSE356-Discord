@@ -1,0 +1,9 @@
+---
+# One-time production app host bootstrap. Requires Node 20 already installed.
+# Usage: ansible-playbook playbooks/bootstrap-prod.yml
+- name: Bootstrap production app VM
+  hosts: production
+  gather_facts: false
+  tasks:
+    - name: Run deploy/prod-vm-setup.sh from repo checkout on controller
+      ansible.builtin.script: "{{ playbook_dir }}/../../deploy/prod-vm-setup.sh"

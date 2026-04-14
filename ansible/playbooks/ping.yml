@@ -1,0 +1,8 @@
+---
+# Quick SSH connectivity check: ansible-playbook playbooks/ping.yml
+- name: Ping staging and production
+  hosts: staging:production
+  gather_facts: false
+  tasks:
+    - name: Ping
+      ansible.builtin.ping:

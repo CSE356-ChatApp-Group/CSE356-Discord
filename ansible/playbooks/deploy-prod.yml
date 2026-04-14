@@ -1,0 +1,32 @@
+---
+# Wraps deploy/deploy-prod.sh using inventory hosts. Interactive prod confirmation still applies.
+# Usage: ansible-playbook playbooks/deploy-prod.yml -e deploy_sha=<full-or-short-sha>
+# Optional: -e chatapp_instances=1
+- name: Deploy artifact to production
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    _prod: "{{ groups['production'][0] }}"
+    prod_host: "{{ hostvars[_prod].ansible_host }}"
+    prod_user: "{{ hostvars[_prod].ansible_user }}"
+    _github: "{{ hostvars[_prod].github_repo | default('CSE356-ChatApp-Group/CSE356-Discord') }}"
+    _instances: "{{ hostvars[_prod].chatapp_instances | default(2) }}"
+  tasks:
+    - name: Require deploy_sha
+      ansible.builtin.assert:
+        that:
+          - deploy_sha is defined
+          - (deploy_sha | string | length) > 0
+        fail_msg: "Pass -e deploy_sha=<git-commit-sha> (GitHub release artifact tag)."
+
+    - name: Run deploy-prod.sh
+      ansible.builtin.command:
+        argv:
+          - "{{ playbook_dir }}/../../deploy/deploy-prod.sh"
+          - "{{ deploy_sha }}"
+      environment:
+        PROD_HOST: "{{ prod_host }}"
+        PROD_USER: "{{ prod_user }}"
+        GITHUB_REPO: "{{ _github }}"
+        CHATAPP_INSTANCES: "{{ chatapp_instances | default(_instances) | string }}"

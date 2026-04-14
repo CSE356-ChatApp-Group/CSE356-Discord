@@ -42,6 +42,7 @@ jobs:
           node --check deploy/candidate-ws-smoke.cjs
           bash -n scripts/synthetic-probe.sh
           bash -n scripts/metrics-snapshot.sh
+          bash -n scripts/measure-fanout-baseline.sh
           python3 -m py_compile deploy/ensure-pgdump-env.py
           python3 -m py_compile deploy/prometheus-db-file-sd.py
           node --check backend/scripts/api-contract-harness.cjs
@@ -52,6 +53,20 @@ jobs:
             -v "$GITHUB_WORKSPACE/infrastructure/monitoring:/rules:ro" \
             prom/prometheus:v2.53.1 \
             check rules /rules/alerts.yml
+
+      - name: Validate Ansible playbooks (syntax)
+        run: |
+          if ! command -v ansible-playbook >/dev/null 2>&1; then
+            python3 -m pip install --user -q ansible-core
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          cd ansible
+          ansible-playbook --syntax-check \
+            playbooks/ping.yml \
+            playbooks/bootstrap-staging.yml \
+            playbooks/bootstrap-prod.yml \
+            playbooks/deploy-staging.yml \
+            playbooks/deploy-prod.yml
 
   backend:
     runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]

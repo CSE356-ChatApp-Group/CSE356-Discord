@@ -1,0 +1,9 @@
+---
+# One-time VM bootstrap (packages, nginx, dirs). Idempotent per deploy/staging-vm-setup.sh.
+# Usage: ansible-playbook playbooks/bootstrap-staging.yml
+- name: Bootstrap staging VM
+  hosts: staging
+  gather_facts: false
+  tasks:
+    - name: Run deploy/staging-vm-setup.sh from repo checkout on controller
+      ansible.builtin.script: "{{ playbook_dir }}/../../deploy/staging-vm-setup.sh"

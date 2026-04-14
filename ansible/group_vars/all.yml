@@ -1,0 +1,3 @@
+---
+# Shared defaults for playbooks that run on localhost but read inventory host facts.
+github_repo: CSE356-ChatApp-Group/CSE356-Discord
