@@ -1031,15 +1031,23 @@ PY
   if ! ssh_prod "
     set -euo pipefail
     ok=0
+    health_log=/tmp/chatapp-candidate-health-${NEW_PORT}.log
+    rm -f \"\$health_log\"
     for i in 1 2 3; do
-      if /tmp/health-check.sh ${NEW_PORT} http://127.0.0.1:${NEW_PORT} >/dev/null 2>&1; then
+      if /tmp/health-check.sh ${NEW_PORT} http://127.0.0.1:${NEW_PORT} >\"\$health_log\" 2>&1; then
         ok=\$((ok+1))
       else
         ok=0
       fi
       sleep 1
     done
-    [ \"\$ok\" -ge 3 ]
+    if [ \"\$ok\" -lt 3 ]; then
+      echo '--- Candidate health-check output (tail) ---'
+      tail -n 80 \"\$health_log\" || true
+      echo '--- Candidate service journal (recent) ---'
+      sudo journalctl -u chatapp@${NEW_PORT} --no-pager -n 80 || true
+      exit 1
+    fi
   "; then
     echo "ERROR: Candidate failed consecutive health checks just before companion roll."
     rollback_cutover
