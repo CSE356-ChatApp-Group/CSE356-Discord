@@ -69,7 +69,7 @@ Each release is immutable and tagged by commit SHA. The **same artifact** is dep
 
 ## GitHub Button Deploys
 
-Staging deploys automatically from GitHub Actions after **CI Build & Package** succeeds on pushes to `main` via `.github/workflows/deploy-staging-auto.yml`.
+Staging deploys automatically from GitHub Actions after **CI Build & Package** succeeds on pushes to `main` via `.github/workflows/ci-deploy.yml` (reusable deploy job).
 
 You can still deploy manually from GitHub Actions using **Manual Deploy** (`workflow_dispatch`) in `.github/workflows/deploy-manual.yml`.
 
@@ -93,9 +93,9 @@ You can still deploy manually from GitHub Actions using **Manual Deploy** (`work
 3. Choose `environment`: `staging` or `prod`.
 4. Optionally provide `sha` (if empty, workflow uses selected ref SHA).
 
-The workflow uses the same deploy scripts as local console deploys, so behavior is consistent.
+Actions run **`ansible/playbooks/deploy-staging.yml`** / **`deploy-prod.yml`** ([`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml)), which call the same **`deploy/deploy-*.sh`** scripts as a local console deploy — one canonical path.
 
-**Ansible:** optional inventory and playbooks (connectivity check, VM bootstrap, deploy wrappers) are in [`ansible/README.md`](../ansible/README.md).
+**Ansible:** inventory for **manual** runs, bootstrap playbooks, and docs are in [`ansible/README.md`](../ansible/README.md).
 
 ## Staging Deployment
 

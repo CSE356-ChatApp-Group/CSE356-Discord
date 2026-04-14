@@ -10,11 +10,15 @@ This directory drives **inventory** and optional **playbooks** around the existi
 
 ## Parity with GitHub Actions deploys
 
-CI still runs **`deploy/deploy-staging.sh`** / **`deploy/deploy-prod.sh`** directly ([`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml)); these playbooks are **wrappers** with the same environment variables. Keep **`ansible/inventory/hosts.yml`** aligned with repo variables **`STAGING_HOST`**, **`STAGING_USER`**, **`PROD_HOST`**, **`PROD_USER`** (or workflow defaults) so manual Ansible runs target the same hosts as Actions.
+**CI deploys use Ansible:** [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml) writes a temporary INI inventory from workflow inputs (`host`, `user`, `environment`) and runs **`ansible/playbooks/deploy-staging.yml`** or **`deploy-prod.yml`**, which invoke the same **`deploy/deploy-*.sh`** scripts with the same environment variables (`STAGING_*` / `PROD_*`, **`GITHUB_REPO`** = `github.repository`, optional **`LOCAL_ARTIFACT_PATH`** from the workflow artifact).
 
-**Releases:** `deploy-staging.sh` downloads from **`GITHUB_REPO`** (default in script). If your fork is not the default org/repo, set `github_repo` in `group_vars/all.yml` or pass `-e github_repo=owner/repo` when running deploy playbooks.
+Keep **`ansible/inventory/hosts.yml`** aligned with repo variables **`STAGING_HOST`**, **`STAGING_USER`**, **`PROD_HOST`**, **`PROD_USER`** so **manual** `ansible-playbook` runs target the same hosts as Actions (CI does not read the committed inventory file).
 
-**CI:** `ci-deploy.yml` runs `ansible-playbook --syntax-check` on all playbooks in the **`deploy-scripts`** job (installs **`ansible-core`** via **`apt-get`** on the self-hosted runner if `ansible-playbook` is missing).
+**Releases:** Scripts download from **`GITHUB_REPO`**. CI passes the current repository; for local Ansible against another org, set `group_vars/all.yml` or `-e github_repo=owner/repo`.
+
+**CI validation:** `ci-deploy.yml` runs `ansible-playbook --syntax-check` on all playbooks in the **`deploy-scripts`** job (installs **`ansible-core`** via **`apt-get`** on the self-hosted runner if `ansible-playbook` is missing).
+
+**`script_path` workflow input:** Deprecated and ignored; kept so existing `workflow_call` sites do not break.
 
 ## Inventory
 

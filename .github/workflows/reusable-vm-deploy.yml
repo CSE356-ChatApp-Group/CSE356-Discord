@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       script_path:
-        description: Deploy script to execute
+        description: "Deprecated — ignored. Deploy uses Ansible (playbooks/deploy-staging.yml or deploy-prod.yml). Kept for workflow_call compatibility."
         required: true
         type: string
       artifact_name:
@@ -164,7 +164,7 @@ jobs:
           fi
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Deploy
+      - name: Deploy via Ansible
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -173,18 +173,43 @@ jobs:
           DEPLOY_USER: ${{ inputs.user }}
           LOCAL_ARTIFACT_PATH: ${{ steps.artifact.outputs.local_path }}
           CHATAPP_INSTANCES_INPUT: ${{ inputs.chatapp_instances }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DEPLOY_ENV: ${{ inputs.environment }}
         run: |
           set -euo pipefail
-          EXTRA_ENV=()
-          if [[ -n "${CHATAPP_INSTANCES_INPUT}" ]]; then
-            EXTRA_ENV+=("CHATAPP_INSTANCES=${CHATAPP_INSTANCES_INPUT}")
+          if ! command -v ansible-playbook >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ansible-core
           fi
-          if [[ "${{ inputs.auto_confirm }}" == "true" ]]; then
-            printf 'y\n' | env "${EXTRA_ENV[@]}" LOCAL_ARTIFACT_PATH="$LOCAL_ARTIFACT_PATH" STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
-              "./${{ inputs.script_path }}" "$TARGET_SHA"
+
+          INV="${RUNNER_TEMP}/vm-deploy-inventory.ini"
+          if [[ "$DEPLOY_ENV" == "staging" ]]; then
+            printf '%s\n' '[staging]' \
+              "staging-vm ansible_host=${DEPLOY_HOST} ansible_user=${DEPLOY_USER} github_repo=${GITHUB_REPOSITORY}" > "$INV"
+            PLAYBOOK="ansible/playbooks/deploy-staging.yml"
+          elif [[ "$DEPLOY_ENV" == "production" ]]; then
+            printf '%s\n' '[production]' \
+              "prod-app ansible_host=${DEPLOY_HOST} ansible_user=${DEPLOY_USER} github_repo=${GITHUB_REPOSITORY}" > "$INV"
+            PLAYBOOK="ansible/playbooks/deploy-prod.yml"
           else
-            env "${EXTRA_ENV[@]}" LOCAL_ARTIFACT_PATH="$LOCAL_ARTIFACT_PATH" STAGING_HOST="$DEPLOY_HOST" STAGING_USER="$DEPLOY_USER" PROD_HOST="$DEPLOY_HOST" PROD_USER="$DEPLOY_USER" GITHUB_REPO="${{ github.repository }}" \
-              "./${{ inputs.script_path }}" "$TARGET_SHA"
+            echo "Unknown environment: $DEPLOY_ENV (expected staging or production)"
+            exit 1
+          fi
+
+          EXTRA_ARGS=(-e "deploy_sha=${TARGET_SHA}")
+          if [[ -n "${LOCAL_ARTIFACT_PATH:-}" ]]; then
+            EXTRA_ARGS+=(-e "local_artifact_path=${LOCAL_ARTIFACT_PATH}")
+          fi
+          if [[ "$DEPLOY_ENV" == "production" ]] && [[ -n "${CHATAPP_INSTANCES_INPUT:-}" ]]; then
+            EXTRA_ARGS+=(-e "chatapp_instances=${CHATAPP_INSTANCES_INPUT}")
+          fi
+
+          cd "${GITHUB_WORKSPACE}"
+
+          if [[ "${{ inputs.auto_confirm }}" == "true" ]] && [[ "$DEPLOY_ENV" == "production" ]]; then
+            printf 'y\n' | ansible-playbook -i "$INV" "$PLAYBOOK" "${EXTRA_ARGS[@]}"
+          else
+            ansible-playbook -i "$INV" "$PLAYBOOK" "${EXTRA_ARGS[@]}"
           fi
 
       - name: Verify public endpoints

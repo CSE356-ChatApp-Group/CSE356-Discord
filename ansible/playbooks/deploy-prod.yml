@@ -30,3 +30,4 @@
         PROD_USER: "{{ prod_user }}"
         GITHUB_REPO: "{{ _github }}"
         CHATAPP_INSTANCES: "{{ chatapp_instances | default(_instances) | string }}"
+        LOCAL_ARTIFACT_PATH: "{{ local_artifact_path | default('') }}"

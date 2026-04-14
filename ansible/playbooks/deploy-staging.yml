@@ -27,3 +27,5 @@
         STAGING_HOST: "{{ staging_host }}"
         STAGING_USER: "{{ staging_user }}"
         GITHUB_REPO: "{{ _github }}"
+        # When set (e.g. GitHub Actions artifact), skip gh download — same as direct script run.
+        LOCAL_ARTIFACT_PATH: "{{ local_artifact_path | default('') }}"
