@@ -19,17 +19,33 @@
 const { withTransaction } = require('../db/pool');
 const logger = require('../utils/logger');
 
+function getSearchStatementTimeoutMs() {
+  const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
+  return Math.min(Math.max(parseInt(rawMs || '8000', 10), 1000), 120000);
+}
+
 /**
  * Run search SQL inside a short transaction with statement_timeout so one bad query
  * cannot hold a pool slot for ~15s (which starves messages / WS under load).
  */
 async function runSearchQuery(sql: string, params: any[]) {
-  const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
-  const timeoutMs = Math.min(Math.max(parseInt(rawMs || '8000', 10), 1000), 120000);
+  const timeoutMs = getSearchStatementTimeoutMs();
   return withTransaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     const { rows } = await client.query(sql, params);
     return rows;
+  });
+}
+
+/**
+ * One transaction, one SET LOCAL, multiple SELECTs — halves round-trips when FTS is empty
+ * and trigram fallback runs (was 2× BEGIN/COMMIT + 2× SET).
+ */
+async function runSearchTransaction(run) {
+  const timeoutMs = getSearchStatementTimeoutMs();
+  return withTransaction(async (client) => {
+    await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    return run(client);
   });
 }
 
@@ -177,13 +193,13 @@ function buildResult(rows: any[], q: string, offset: number, limit: number) {
   };
 }
 
-/** Primary: ranked FTS via the content_tsv GIN index. */
-async function searchFts(q: string, opts: Record<string, any>): Promise<any> {
-  const params: any[] = [q];    // $1 reserved for the query string
-  const filters  = buildFilters(params, opts);
-  const limit    = Number(opts.limit)  || 20;
-  const offset   = Number(opts.offset) || 0;
-  const limitPh  = p(params, limit);
+/** Statement + paging metadata for FTS (content_tsv GIN). */
+function buildFtsParts(q: string, opts: Record<string, any>) {
+  const params: any[] = [q]; // $1 reserved for the query string
+  const filters = buildFilters(params, opts);
+  const limit = Number(opts.limit) || 20;
+  const offset = Number(opts.offset) || 0;
+  const limitPh = p(params, limit);
   const offsetPh = p(params, offset);
 
   const sql = `
@@ -202,21 +218,16 @@ async function searchFts(q: string, opts: Record<string, any>): Promise<any> {
     ORDER BY m.created_at DESC
     LIMIT ${limitPh} OFFSET ${offsetPh}`;
 
-  const rows = await runSearchQuery(sql, params);
-  return buildResult(rows, q, offset, limit);
+  return { sql, params, limit, offset, q };
 }
 
-/**
- * Fallback: ILIKE via the existing pg_trgm GIN index.
- * Activates when FTS returns 0 results — handles partial/infix queries
- * ("hel" matching "hello") and queries whose lexemes are all stop words.
- */
-async function searchTrigram(q: string, opts: Record<string, any>): Promise<any> {
-  const params: any[] = [`%${q}%`];   // $1 reserved for the ILIKE pattern
-  const filters  = buildFilters(params, opts);
-  const limit    = Number(opts.limit)  || 20;
-  const offset   = Number(opts.offset) || 0;
-  const limitPh  = p(params, limit);
+/** Statement + paging metadata for trigram ILIKE fallback. */
+function buildTrigramParts(q: string, opts: Record<string, any>) {
+  const params: any[] = [`%${q}%`]; // $1 reserved for the ILIKE pattern
+  const filters = buildFilters(params, opts);
+  const limit = Number(opts.limit) || 20;
+  const offset = Number(opts.offset) || 0;
+  const limitPh = p(params, limit);
   const offsetPh = p(params, offset);
 
   const sql = `
@@ -228,9 +239,18 @@ async function searchTrigram(q: string, opts: Record<string, any>): Promise<any>
     ORDER BY m.created_at DESC
     LIMIT ${limitPh} OFFSET ${offsetPh}`;
 
-  const rows = await runSearchQuery(sql, params);
-  const processed = rows.map(row => ({ ...row, highlight: highlightIlike(row.content, q) }));
-  return buildResult(processed, q, offset, limit);
+  return { sql, params, limit, offset, q };
+}
+
+/**
+ * Fallback: ILIKE via the existing pg_trgm GIN index (separate transaction).
+ * Used when the combined FTS+trigram transaction fails mid-flight.
+ */
+async function searchTrigram(q: string, opts: Record<string, any>): Promise<any> {
+  const b = buildTrigramParts(q, opts);
+  const rows = await runSearchQuery(b.sql, b.params);
+  const processed = rows.map((row) => ({ ...row, highlight: highlightIlike(row.content, q) }));
+  return buildResult(processed, b.q, b.offset, b.limit);
 }
 
 async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
@@ -277,10 +297,23 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   const allowTrigramFallback = scoped || trimmed.length >= minTrigramUnscoped;
 
   try {
-    const fts = await searchFts(trimmed, opts);
-    if (fts.hits.length > 0) return fts;
-    if (!allowTrigramFallback) return fts;
-    return await searchTrigram(trimmed, opts);
+    const ftsMeta = buildFtsParts(trimmed, opts);
+    const triMeta = buildTrigramParts(trimmed, opts);
+    return await runSearchTransaction(async (client) => {
+      const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
+      if (ftsRes.rows.length > 0) {
+        return buildResult(ftsRes.rows, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
+      }
+      if (!allowTrigramFallback) {
+        return buildResult([], ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
+      }
+      const triRes = await client.query(triMeta.sql, triMeta.params);
+      const processed = triRes.rows.map((row) => ({
+        ...row,
+        highlight: highlightIlike(row.content, trimmed),
+      }));
+      return buildResult(processed, triMeta.q, triMeta.offset, triMeta.limit);
+    });
   } catch (err) {
     logger.warn({ err }, 'search FTS failed; optional trigram retry');
     if (!allowTrigramFallback) throw err;

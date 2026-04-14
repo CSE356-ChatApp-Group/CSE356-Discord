@@ -63,8 +63,10 @@ function classifyRoute(req) {
   // When Express never matched a layer (early 401/404, or body errors), `req.route` is unset.
   // Bucket by first /api/v1 segment so pg_queries_per_http_request stays per-area, not "unmatched".
   if (rawPath.startsWith('/api/v1/')) {
-    const rest = rawPath.slice('/api/v1/'.length);
-    const first = rest.split('/').filter(Boolean)[0];
+    const parts = rawPath.slice('/api/v1/'.length).split('/').filter(Boolean);
+    // Auth has many subpaths (refresh, session, login); keep them distinct for Grafana.
+    if (parts[0] === 'auth' && parts[1]) return `/api/v1/auth/${parts[1]}`;
+    const first = parts[0];
     if (first) return `/api/v1/${first}/`;
     return '/api/v1/';
   }

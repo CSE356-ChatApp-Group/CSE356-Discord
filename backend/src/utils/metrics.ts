@@ -215,9 +215,12 @@ const pgQueriesPerRequestHistogram = new client.Histogram({
   name: 'pg_queries_per_http_request',
   help: 'Successful Postgres round-trips per HTTP request (includes txn control statements)',
   labelNames: ['route'],
-  // Fibonacci-ish spacing; do not stop at 55 — p95/p99 would otherwise pile up at the top
-  // bucket and look "suspiciously identical" across hot routes under load harness traffic.
-  buckets: [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377],
+  // Fibonacci-ish spacing; extend past 377 so histogram_quantile does not pile every hot
+  // route at the same top finite bucket (looks like identical p95 across routes).
+  buckets: [
+    0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
+    610, 987, 1597, 2584, 4181, 6765, 10946,
+  ],
 });
 
 /** Redis-backed list endpoint cache: hit (served from Redis), miss (DB load), coalesced (singleflight waiter). */

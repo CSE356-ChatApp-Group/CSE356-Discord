@@ -499,15 +499,22 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 });
 
 // ── Members + presence ─────────────────────────────────────────────────────────
-router.get('/:id/members', param('id').isUUID(), loadMembership, async (req, res, next) => {
+router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    const { rowCount: communityExists } = await query(
-      'SELECT 1 FROM communities WHERE id = $1',
-      [req.params.id]
+    // One round-trip for community existence + caller membership (replaces loadMembership + EXISTS).
+    const { rows: accessRows } = await query(
+      `SELECT cm.role AS my_role
+       FROM communities c
+       LEFT JOIN community_members cm
+         ON cm.community_id = c.id AND cm.user_id = $2
+       WHERE c.id = $1`,
+      [req.params.id, req.user.id]
     );
-    if (!communityExists) return res.status(404).json({ error: 'Community not found' });
-    if (!req.membership) return res.status(403).json({ error: 'Not a community member' });
+    if (!accessRows.length) return res.status(404).json({ error: 'Community not found' });
+    if (!accessRows[0].my_role) {
+      return res.status(403).json({ error: 'Not a community member' });
+    }
 
     const { rows } = await query(
       `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
