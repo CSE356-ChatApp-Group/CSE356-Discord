@@ -69,7 +69,7 @@ n = int('${_REMOTE_NPROC}')
 print(min(12, max(2, (n + 1) // 2 + 1)))
 ")
 
-# bcrypt compare concurrency (staging uses lower BCRYPT_ROUNDS — still cap CPU).
+# bcrypt compare concurrency (minimal BCRYPT_ROUNDS — still cap parallel bcrypt CPU).
 BCRYPT_MAX_CONCURRENT=$(python3 -c "
 n = int('${_REMOTE_NPROC}')
 print(min(32, max(8, n * 4)))
@@ -360,12 +360,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
   # Ensure performance-critical env vars are set for this deployment.
-  # BCRYPT_ROUNDS=6: ~30ms/op on a 2-vCPU Xeon vs ~125ms at rounds=8.
-  # Staging is CPU-bound under load; reducing from 8→6 cuts bcrypt CPU ~4×
-  # (each extra round doubles cost) while remaining above OWASP minimum (4).
+  # BCRYPT_ROUNDS=1: minimal configured cost; bcrypt@6 floors <4 to cost 4 in the hash.
   sudo grep -q '^BCRYPT_ROUNDS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=6/' /opt/chatapp/shared/.env \
-    || echo 'BCRYPT_ROUNDS=6' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=1/' /opt/chatapp/shared/.env \
+    || echo 'BCRYPT_ROUNDS=1' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # UV_THREADPOOL_SIZE: increase libuv thread pool for concurrent bcrypt/dns/fs work.
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \

@@ -14,7 +14,7 @@ If you **do not** want **`AUTH_GLOBAL_PER_IP_RATE_LIMIT`** (or you keep **`DISAB
 
 1. **More API processes** — e.g. **`CHATAPP_INSTANCES=2`** (or higher) with nginx balancing **two ports**, when the host has **enough CPU and RAM** (each Node heap is sized in deploy scripts).
 2. **Larger or additional VMs** — horizontal scale + connection pool tuning (Postgres / PgBouncer).
-3. **`BCRYPT_MAX_CONCURRENT`** / **`BCRYPT_ROUNDS`** — trade security vs CPU only with care; raising concurrency increases parallel CPU load.
+3. **`BCRYPT_MAX_CONCURRENT`** / **`BCRYPT_ROUNDS`** — default **`1`** (lowest configured cost; bcrypt still uses at least cost **4** in the hash). Raising rounds or concurrency increases parallel CPU load.
 4. **Nginx `proxy_read_timeout` on `/api/v1/auth/`** — already raised in repo templates (**75s**) so fewer **504 HTML** pages while upstream is slow; clients still wait longer.
 
 There is no way to accept **unlimited** simultaneous bcrypt-heavy logins on **finite** hardware with bounded latency; the choice is **where** overload appears (app JSON vs nginx HTML vs long waits).
@@ -65,7 +65,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `AUTH_CONNECT_RATE_LIMIT_MAX`, `AUTH_CONNECT_RATE_LIMIT_WINDOW_MS` | OAuth connect-existing limiter |
 | `OAUTH_PENDING_SECRET`, `OAUTH_LINK_SECRET` | OAuth state tokens (fallback: JWT secrets) |
 | `BCRYPT_MAX_CONCURRENT`, `BCRYPT_MAX_WAITERS`, `BCRYPT_QUEUE_WAIT_TIMEOUT_MS` | Password hashing queue |
-| `BCRYPT_ROUNDS` | bcrypt cost |
+| `BCRYPT_ROUNDS` | bcrypt cost (default **1**; bcrypt raises configured costs **1–3** to **4** in the stored hash) |
 | **OAuth providers** | |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL` | Google OAuth |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_CALLBACK_URL` | GitHub OAuth |

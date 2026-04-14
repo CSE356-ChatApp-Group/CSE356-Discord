@@ -38,9 +38,9 @@ passport.use(new LocalStrategy(
       const match = await comparePassword(password, user.password_hash, 'login_compare');
       if (!match) return done(null, false, { message: 'Invalid credentials' });
 
-      // Transparent rehash: if the stored cost factor is below the current target
-      // (e.g. existing 8-round accounts after we lowered BCRYPT_ROUNDS to 6),
-      // upgrade the hash on successful login.  Fire-and-forget — failure here
+      // Transparent rehash: if the stored cost factor differs from the current
+      // target (e.g. legacy higher-cost hashes after lowering BCRYPT_ROUNDS),
+      // rewrite the hash on successful login. Fire-and-forget — failure here
       // must never block or fail the login response.
       const storedRounds = getRoundsFromHash(user.password_hash);
       if (storedRounds !== null && storedRounds > getBcryptRounds()) {

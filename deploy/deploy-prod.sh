@@ -514,8 +514,8 @@ ssh_prod "
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
   # Ensure performance-critical env vars are set for this deployment.
   sudo grep -q '^BCRYPT_ROUNDS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=8/' /opt/chatapp/shared/.env \
-    || echo 'BCRYPT_ROUNDS=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=1/' /opt/chatapp/shared/.env \
+    || echo 'BCRYPT_ROUNDS=1' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null

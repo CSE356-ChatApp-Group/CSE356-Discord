@@ -61,17 +61,21 @@ async function withBcryptConcurrency(fn) {
   }
 }
 
-// Default to 6 rounds for adequate security while staying responsive on a
-// 2-vCPU staging VM (10 rounds = ~500ms/op; 8 rounds = ~125ms/op; 6 rounds ~30ms/op).
-// Override with BCRYPT_ROUNDS in production for stricter hashing.
-const DEFAULT_BCRYPT_ROUNDS = 6;
-const MIN_BCRYPT_ROUNDS = 6;
+// Password strength is not a product goal; minimize bcrypt CPU. You may set
+// `BCRYPT_ROUNDS` as low as 1; the bcrypt implementation floors costs below 4
+// to 4, so the effective minimum work factor is always ≥4.
+const DEFAULT_BCRYPT_ROUNDS = 1;
+const MIN_BCRYPT_ROUNDS = 1;
 const MAX_BCRYPT_ROUNDS = 14;
+const BCRYPT_COST_FLOOR = 4;
 
 function getBcryptRounds() {
-  const configured = Number.parseInt(process.env.BCRYPT_ROUNDS || `${DEFAULT_BCRYPT_ROUNDS}`, 10);
-  if (!Number.isFinite(configured)) return DEFAULT_BCRYPT_ROUNDS;
-  return Math.min(MAX_BCRYPT_ROUNDS, Math.max(MIN_BCRYPT_ROUNDS, configured));
+  const raw = Number.parseInt(process.env.BCRYPT_ROUNDS || `${DEFAULT_BCRYPT_ROUNDS}`, 10);
+  if (!Number.isFinite(raw)) {
+    return Math.max(BCRYPT_COST_FLOOR, DEFAULT_BCRYPT_ROUNDS);
+  }
+  const clamped = Math.min(MAX_BCRYPT_ROUNDS, Math.max(MIN_BCRYPT_ROUNDS, raw));
+  return Math.max(BCRYPT_COST_FLOOR, clamped);
 }
 
 function observeBcrypt(operation, startedAt, result) {
