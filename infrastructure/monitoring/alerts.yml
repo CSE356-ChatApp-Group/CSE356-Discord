@@ -232,6 +232,19 @@ groups:
             Over 100 waiters for 5m. The app is past comfortable capacity; clients likely see
             circuit-open 503s, connect timeouts, or status 0. **Act:** scale DB tier or reduce load.
 
+      # Explicitly detect application-side pool circuit-open responses (503 guardrail trips).
+      - alert: ChatAppPgPoolCircuitOpenSustained
+        expr: sum(rate(pg_pool_circuit_breaker_rejects_total{job="chatapp-api"}[2m])) > 0.5
+        for: 4m
+        labels:
+          severity: warning
+        annotations:
+          summary: Postgres pool circuit breaker is actively rejecting requests
+          description: >
+            Application pool circuit-open rejects exceed ~0.5/s for 4m. This usually means
+            DB/PgBouncer throughput is saturated and user-visible 503/502 risk is rising.
+            Correlate with pg_pool_waiting, db-node iowait, and nginx `no live upstreams`.
+
       - alert: ChatAppPgPoolMostlyCheckedOut
         expr: |
           max by (instance) (

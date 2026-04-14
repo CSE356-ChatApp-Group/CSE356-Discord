@@ -1118,7 +1118,7 @@ keepalive = '''  keepalive 512;
   keepalive_requests 100000;
   keepalive_timeout 75s;
 '''
-srv = '  server localhost:%s max_fails=2 fail_timeout=10s;\\n'
+srv = '  server localhost:%s max_fails=0;\\n'
 block = (
     'upstream app {\\n'
     '  least_conn;\\n'
