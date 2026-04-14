@@ -755,7 +755,7 @@ router.post('/',
         if (channelId) {
           ({ rows } = await client.query(
             `WITH access AS (
-               SELECT community_id
+               SELECT c.community_id AS community_id
                FROM   channels c
                JOIN   community_members community_member
                  ON   community_member.community_id = c.community_id
