@@ -223,12 +223,31 @@ const pgQueriesPerRequestHistogram = new client.Histogram({
     610, 987, 1597, 2584, 4181, 6765, 10946,
   ],
 });
+const pgBusinessSqlQueriesPerRequestHistogram = new client.Histogram({
+  name: 'pg_business_sql_queries_per_http_request',
+  help: 'Successful Postgres business-SQL round-trips per HTTP request (excludes BEGIN/COMMIT/ROLLBACK)',
+  labelNames: ['route'],
+  buckets: [
+    0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
+    610, 987, 1597, 2584, 4181, 6765, 10946,
+  ],
+});
 
 /** Redis-backed list endpoint cache: hit (served from Redis), miss (DB load), coalesced (singleflight waiter). */
 const endpointListCacheTotal = new client.Counter({
   name: 'endpoint_list_cache_total',
   help: 'Redis list cache outcomes for hot GET list endpoints',
   labelNames: ['endpoint', 'result'],
+});
+const endpointListCacheBypassTotal = new client.Counter({
+  name: 'endpoint_list_cache_bypass_total',
+  help: 'Redis list cache bypasses by endpoint and reason',
+  labelNames: ['endpoint', 'reason'],
+});
+const endpointListCacheInvalidationsTotal = new client.Counter({
+  name: 'endpoint_list_cache_invalidations_total',
+  help: 'Redis list cache invalidations by endpoint and reason',
+  labelNames: ['endpoint', 'reason'],
 });
 
 /** Optional RUM POST /api/v1/rum rate limiter only (not general API traffic). */
@@ -343,8 +362,14 @@ function startPgPoolMetrics(pool) {
     endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'hit' }, 0);
     endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'miss' }, 0);
     endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'coalesced' }, 0);
+    endpointListCacheBypassTotal.inc({ endpoint: 'messages_channel', reason: 'pagination' }, 0);
+    endpointListCacheBypassTotal.inc({ endpoint: 'messages_conversation', reason: 'pagination' }, 0);
+    endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_channel', reason: 'write' }, 0);
+    endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_conversation', reason: 'write' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
+    pgBusinessSqlQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
+    pgBusinessSqlQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
     apiRateLimitHitsTotal.inc({ scope: 'rum' }, 0);
     clientRumBatchesTotal.inc(0);
     clientWebVitalTimingSeconds.observe({ name: 'LCP' }, 0);
@@ -382,7 +407,10 @@ module.exports = {
   pgPoolCircuitBreakerRejectsTotal,
   pgPoolOperationErrorsTotal,
   pgQueriesPerRequestHistogram,
+  pgBusinessSqlQueriesPerRequestHistogram,
   endpointListCacheTotal,
+  endpointListCacheBypassTotal,
+  endpointListCacheInvalidationsTotal,
   apiRateLimitHitsTotal,
   clientWebVitalTimingSeconds,
   clientWebVitalClsScore,

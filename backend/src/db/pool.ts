@@ -44,6 +44,16 @@ const logger = require('../utils/logger');
 const { incrementDbQuery } = require('../utils/requestDbContext');
 const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal } = require('../utils/metrics');
 
+function extractSqlText(queryArg) {
+  if (!queryArg) return '';
+  return typeof queryArg === 'string' ? queryArg : String(queryArg.text || '');
+}
+
+function isTransactionControlSql(queryArg) {
+  const text = extractSqlText(queryArg).trim().toUpperCase();
+  return text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK';
+}
+
 /**
  * Count successful `client.query` calls toward the same per-request histogram as `query()`.
  */
@@ -55,14 +65,14 @@ function wrapPoolClientForRequestMetrics(client) {
       const cb = last;
       const rest = args.slice(0, -1);
       return origQuery(...rest, (err, result) => {
-        if (!err) incrementDbQuery();
+        if (!err) incrementDbQuery(isTransactionControlSql(rest[0]) ? 'all' : 'business_sql');
         cb(err, result);
       });
     }
     const p = origQuery(...args);
     if (p && typeof p.then === 'function') {
       return p.then((result) => {
-        incrementDbQuery();
+        incrementDbQuery(isTransactionControlSql(args[0]) ? 'all' : 'business_sql');
         return result;
       });
     }
@@ -186,7 +196,7 @@ async function query(sql, params) {
   const start = Date.now();
   try {
     const result = await pool.query(sql, params);
-    incrementDbQuery();
+    incrementDbQuery(isTransactionControlSql(sql) ? 'all' : 'business_sql');
     const durationMs = Date.now() - start;
     if (durationMs >= SLOW_QUERY_MS) {
       logger.warn({ durationMs, sql: truncateSql(sql), pool: poolStats() }, 'pg: slow query');

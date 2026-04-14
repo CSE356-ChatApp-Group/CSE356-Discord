@@ -576,6 +576,7 @@ function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoin
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState('');
+  const lastLoadedAtRef = useRef(0);
 
   const loadCommunities = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -584,6 +585,7 @@ function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoin
       const data = await api.get('/communities');
       const browseable = (data?.communities ?? []).filter((c: any) => !c.my_role);
       setAllCommunities(browseable);
+      lastLoadedAtRef.current = Date.now();
     } catch (e: any) {
       setErr(e?.message || 'Could not load communities');
     } finally {
@@ -601,14 +603,6 @@ function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoin
       void loadCommunities(false);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [loadCommunities, query]);
-
-  useEffect(() => {
-    // Debounced fetch on typing + focus already keeps data fresh; poll lightly to avoid API storms.
-    const interval = window.setInterval(() => {
-      void loadCommunities(false);
-    }, query.trim() ? 3000 : 20000);
-    return () => window.clearInterval(interval);
   }, [loadCommunities, query]);
 
   const filtered = query.trim()
@@ -638,7 +632,11 @@ function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoin
           placeholder="Search communities…"
           value={query}
           onChange={e => setQuery(e.target.value)}
-          onFocus={() => { void loadCommunities(false); }}
+          onFocus={() => {
+            if (Date.now() - lastLoadedAtRef.current > 30_000) {
+              void loadCommunities(false);
+            }
+          }}
           autoFocus
           data-testid="community-join-search"
         />

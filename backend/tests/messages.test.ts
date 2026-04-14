@@ -142,6 +142,46 @@ describe('GET /messages first-page cache vs POST', () => {
     const ids = (getRes.body.messages || []).map((m: { id: string }) => m.id);
     expect(ids).toContain(messageId);
   });
+
+  it('does not mix cached payloads across different first-page limits', async () => {
+    const owner = await createAuthenticatedUser('cachelimitmix');
+    const slug = `cachelimitmix-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'cache limit mix' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `clm-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    for (let i = 0; i < 8; i += 1) {
+      const postRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: `limit-mix-${i}-${uniqueSuffix()}` });
+      expect(postRes.status).toBe(201);
+    }
+
+    const small = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=1`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(small.status).toBe(200);
+    expect(Array.isArray(small.body.messages)).toBe(true);
+    expect(small.body.messages.length).toBe(1);
+
+    const large = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=7`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(large.status).toBe(200);
+    expect(Array.isArray(large.body.messages)).toBe(true);
+    expect(large.body.messages.length).toBe(7);
+  });
 });
 
 describe('GET /messages channel id as conversationId (generated-client compatibility)', () => {

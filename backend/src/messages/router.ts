@@ -34,7 +34,11 @@ const {
   bustChannelMessagesCache,
   bustConversationMessagesCache,
 } = require('./messageCacheBust');
-const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
+const {
+  recordEndpointListCache,
+  recordEndpointListCacheBypass,
+  recordEndpointListCacheInvalidation,
+} = require('../utils/endpointCacheMetrics');
 const {
   messageFanoutEnvelope,
   wrapFanoutPayload,
@@ -69,8 +73,13 @@ function validate(req, res) {
 async function bustMessagesCacheSafe(opts: { channelId?: string; conversationId?: string }) {
   const { channelId, conversationId } = opts;
   try {
-    if (channelId) await bustChannelMessagesCache(redis, channelId);
-    else if (conversationId) await bustConversationMessagesCache(redis, conversationId);
+    if (channelId) {
+      await bustChannelMessagesCache(redis, channelId);
+      recordEndpointListCacheInvalidation('messages_channel', 'write');
+    } else if (conversationId) {
+      await bustConversationMessagesCache(redis, conversationId);
+      recordEndpointListCacheInvalidation('messages_conversation', 'write');
+    }
   } catch (err) {
     messageCacheBustFailuresTotal.inc({ target: channelId ? 'channel' : 'conversation' });
     logger.warn({ err, channelId, conversationId }, 'message list cache bust failed');
@@ -197,14 +206,22 @@ async function publishConversationEventNow(conversationId, event, data) {
 
 async function incrementChannelMessageCount(channelId) {
   const countKey = `channel:msg_count:${channelId}`;
-  const exists = await redis.exists(countKey);
-  if (!exists) {
+  const ensureInitialized = async () => {
+    const exists = await redis.exists(countKey);
+    if (exists) return;
     const { rows } = await query(
       `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
       [channelId]
     );
     const total = rows[0]?.cnt ?? 0;
     await redis.set(countKey, total, 'NX');
+  };
+  if (channelMsgCountInitInflight.has(countKey)) {
+    await channelMsgCountInitInflight.get(countKey);
+  } else {
+    const p = ensureInitialized().finally(() => channelMsgCountInitInflight.delete(countKey));
+    channelMsgCountInitInflight.set(countKey, p);
+    await p;
   }
   await redis.incr(countKey);
 }
@@ -293,6 +310,7 @@ const DEFAULT_CONTEXT_SIDE_LIMIT = 25;
 // when a popular target's cache key expires simultaneously for many readers.
 const msgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
 const convMsgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
+const channelMsgCountInitInflight: Map<string, Promise<void>> = new Map();
 
 // ── GET /messages ──────────────────────────────────────────────────────────────
 router.get('/',
@@ -331,7 +349,9 @@ router.get('/',
       // the key so the latest page stays consistent with new writes; TTL remains
       // a backstop for edits/deletes from other paths.
       if (channelId && !before && !after) {
-        const cacheKey = channelMsgCacheKey(channelId);
+        const epochKey = channelMsgCacheEpochKey(channelId);
+        const epochBefore = await readMessageCacheEpoch(redis, epochKey);
+        const cacheKey = channelMsgCacheKey(channelId, { limit, epoch: epochBefore });
         try {
           const cached = await redis.get(cacheKey);
           if (cached) {
@@ -353,8 +373,6 @@ router.get('/',
 
         recordEndpointListCache('messages_channel', 'miss');
         const promise: Promise<{ messages: any[] }> = (async () => {
-          const epochKey = channelMsgCacheEpochKey(channelId);
-          const epochBefore = await readMessageCacheEpoch(redis, epochKey);
           const params: any[] = [limit, req.user.id, channelId];
           const sql = `
             SELECT m.*,
@@ -422,12 +440,17 @@ router.get('/',
           return next(err);
         }
       }
+      if (channelId && (before || after)) {
+        recordEndpointListCacheBypass('messages_channel', 'pagination');
+      }
 
       // Conversation messages (non-paginated) — same singleflight+cache pattern as channels.
       // All participants see identical message history so the cache is shared by conversationId.
       // POST busts this key; WS still carries realtime delivery.
       if (conversationId && !before && !after) {
-        const cacheKey = conversationMsgCacheKey(conversationId);
+        const epochKey = conversationMsgCacheEpochKey(conversationId);
+        const epochBefore = await readMessageCacheEpoch(redis, epochKey);
+        const cacheKey = conversationMsgCacheKey(conversationId, { limit, epoch: epochBefore });
         try {
           const cached = await redis.get(cacheKey);
           if (cached) {
@@ -447,8 +470,6 @@ router.get('/',
 
         recordEndpointListCache('messages_conversation', 'miss');
         const promise: Promise<{ messages: any[] }> = (async () => {
-          const epochKey = conversationMsgCacheEpochKey(conversationId);
-          const epochBefore = await readMessageCacheEpoch(redis, epochKey);
           const { rows } = await query(`
             SELECT m.*,
                    CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
@@ -493,6 +514,9 @@ router.get('/',
           if (err.statusCode === 403) return res.status(403).json({ error: err.message });
           return next(err);
         }
+      }
+      if (conversationId && (before || after)) {
+        recordEndpointListCacheBypass('messages_conversation', 'pagination');
       }
 
       // Paginated requests (before= cursor) — no caching.
@@ -595,13 +619,12 @@ router.get('/context/:messageId',
         ? Math.min(Math.max(requestedLimit, 1), 50)
         : DEFAULT_CONTEXT_SIDE_LIMIT;
 
-      const target = await loadMessageTarget(messageId);
+      const target = await loadMessageTargetForUser(messageId, req.user.id);
       if (!target) {
         return res.status(404).json({ error: 'Message not found' });
       }
 
-      const hasAccess = await ensureMessageAccess(target, req.user.id);
-      if (!hasAccess) {
+      if (!target.has_access) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
@@ -683,6 +706,23 @@ router.get('/context/:messageId',
 // ── POST /messages ─────────────────────────────────────────────────────────────
 const ALLOWED_ATTACHMENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_ATTACHMENTS_PER_MESSAGE = 4;
+function buildIdempotentSuccessPayload(payload: any) {
+  if (!payload || typeof payload !== 'object' || !payload.message || typeof payload.message !== 'object') {
+    return null;
+  }
+  if (!payload.message.id || typeof payload.message.id !== 'string') {
+    return null;
+  }
+  const publishedAt = typeof payload.realtimePublishedAt === 'string'
+    ? payload.realtimePublishedAt
+    : messageCreatedAtIso(payload.message);
+  return {
+    message: payload.message,
+    realtimeFanoutComplete: true,
+    realtimePublishedAt: publishedAt,
+  };
+}
+
 router.post('/',
   body('content').optional().isString(),
   body('channelId').optional().isUUID(),
@@ -738,6 +778,10 @@ router.post('/',
             if (existing) {
               let parsed: any;
               try { parsed = JSON.parse(existing); } catch { parsed = null; }
+              const replay = buildIdempotentSuccessPayload(parsed);
+              if (replay) {
+                return res.status(201).json(replay);
+              }
               if (parsed?.messageId) {
                 const cachedMsg = await loadHydratedMessageById(parsed.messageId);
                 if (cachedMsg) {
@@ -763,6 +807,10 @@ router.post('/',
                 if (!again) break;
                 let p2: any;
                 try { p2 = JSON.parse(again); } catch { break; }
+                const replay = buildIdempotentSuccessPayload(p2);
+                if (replay) {
+                  return res.status(201).json(replay);
+                }
                 if (p2?.messageId) {
                   const msg2 = await loadHydratedMessageById(p2.messageId);
                   if (msg2) {
@@ -970,7 +1018,7 @@ router.post('/',
         redis
           .set(
             idemRedisKey,
-            JSON.stringify({ messageId: message.id }),
+            JSON.stringify({ messageId: message.id, message, realtimePublishedAt: realtimePublishedAtForHttp }),
             'EX',
             MSG_IDEM_SUCCESS_TTL_SECS,
           )

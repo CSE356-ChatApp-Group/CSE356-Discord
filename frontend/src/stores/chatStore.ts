@@ -353,6 +353,9 @@ let lastWsServerReadyRefetchAt = 0;
 /** When returning to a visible tab, refetch the active pane (missed WS while backgrounded). */
 const TAB_VISIBLE_MESSAGE_REFETCH_COOLDOWN_MS = 3000;
 let lastTabVisibleMessageRefetchAt = 0;
+const ACTIVE_MESSAGE_REFETCH_MIN_MS = 2000;
+let lastActiveMessageRefetchAt = 0;
+let activeMessageRefetchInFlight: Promise<void> | null = null;
 
 function hookReadFlushOnVisibilityHidden() {
   if (readFlushVisibilityHooked || typeof document === 'undefined') return;
@@ -2159,24 +2162,14 @@ wsManager.onOpen(() => {
     skipMessageRefetchOnNextWsOpen = false;
     return;
   }
-  const { activeChannel, activeConv, fetchMessages } = useChatStore.getState();
-  if (activeChannel?.id) {
-    void fetchMessages({ channelId: activeChannel.id });
-  } else if (activeConv?.id) {
-    void fetchMessages({ conversationId: activeConv.id });
-  }
+  void refetchActiveMessagesIfStale();
 });
 
 wsManager.onServerReady(() => {
   const now = Date.now();
   if (now - lastWsServerReadyRefetchAt < WS_SERVER_READY_REFETCH_MS) return;
   lastWsServerReadyRefetchAt = now;
-  const { activeChannel, activeConv, fetchMessages } = useChatStore.getState();
-  if (activeChannel?.id) {
-    void fetchMessages({ channelId: activeChannel.id });
-  } else if (activeConv?.id) {
-    void fetchMessages({ conversationId: activeConv.id });
-  }
+  void refetchActiveMessagesIfStale();
 });
 
 if (typeof document !== 'undefined') {
@@ -2186,11 +2179,25 @@ if (typeof document !== 'undefined') {
     const now = Date.now();
     if (now - lastTabVisibleMessageRefetchAt < TAB_VISIBLE_MESSAGE_REFETCH_COOLDOWN_MS) return;
     lastTabVisibleMessageRefetchAt = now;
-    const { activeChannel, activeConv, fetchMessages } = useChatStore.getState();
-    if (activeChannel?.id) {
-      void fetchMessages({ channelId: activeChannel.id });
-    } else if (activeConv?.id) {
-      void fetchMessages({ conversationId: activeConv.id });
-    }
+    void refetchActiveMessagesIfStale();
   });
+}
+
+function refetchActiveMessagesIfStale(minIntervalMs = ACTIVE_MESSAGE_REFETCH_MIN_MS) {
+  if (activeMessageRefetchInFlight) return activeMessageRefetchInFlight;
+  const now = Date.now();
+  if (now - lastActiveMessageRefetchAt < minIntervalMs) return Promise.resolve();
+  const { activeChannel, activeConv, fetchMessages } = useChatStore.getState();
+  if (!activeChannel?.id && !activeConv?.id) return Promise.resolve();
+  lastActiveMessageRefetchAt = now;
+  activeMessageRefetchInFlight = (async () => {
+    if (activeChannel?.id) {
+      await fetchMessages({ channelId: activeChannel.id });
+    } else if (activeConv?.id) {
+      await fetchMessages({ conversationId: activeConv.id });
+    }
+  })().catch(() => {}).finally(() => {
+    activeMessageRefetchInFlight = null;
+  });
+  return activeMessageRefetchInFlight;
 }

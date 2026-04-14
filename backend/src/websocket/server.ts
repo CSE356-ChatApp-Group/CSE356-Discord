@@ -529,6 +529,7 @@ const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
   process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '30',
   10,
 );
+const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
 
 function wsBootstrapCacheKey(userId) {
   return `ws:bootstrap:${userId}`;
@@ -557,47 +558,57 @@ async function listAutoSubscriptionChannels(userId) {
     }
   }
 
-  const [conversationRes, communityRes, channelRes] = await Promise.all([
-    query(
-      `SELECT conversation_id::text AS id
-       FROM conversation_participants
-       WHERE user_id = $1 AND left_at IS NULL`,
-      [userId],
-    ),
-    query(
-      `SELECT community_id::text AS id
-       FROM community_members
-       WHERE user_id = $1`,
-      [userId],
-    ),
-    query(
-      `SELECT c.id::text AS id
-       FROM channels c
-       JOIN community_members cm
-         ON cm.community_id = c.community_id
-        AND cm.user_id = $1
-       LEFT JOIN channel_members chm
-         ON chm.channel_id = c.id
-        AND chm.user_id = $1
-       WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
-      [userId],
-    ),
-  ]);
+  if (wsBootstrapListInFlight.has(cacheKey)) {
+    return wsBootstrapListInFlight.get(cacheKey);
+  }
 
-  // Subscribe channel topics first so message fanout can arrive before the tail
-  // of community/conversation Redis topics finishes (grading: many listeners).
-  const channels = [
-    ...channelRes.rows.map((row) => `channel:${row.id}`),
-    ...conversationRes.rows.map((row) => `conversation:${row.id}`),
-    ...communityRes.rows.map((row) => `community:${row.id}`),
-  ];
+  const load = (async () => {
+    const [conversationRes, communityRes, channelRes] = await Promise.all([
+      query(
+        `SELECT conversation_id::text AS id
+         FROM conversation_participants
+         WHERE user_id = $1 AND left_at IS NULL`,
+        [userId],
+      ),
+      query(
+        `SELECT community_id::text AS id
+         FROM community_members
+         WHERE user_id = $1`,
+        [userId],
+      ),
+      query(
+        `SELECT c.id::text AS id
+         FROM channels c
+         JOIN community_members cm
+           ON cm.community_id = c.community_id
+          AND cm.user_id = $1
+         LEFT JOIN channel_members chm
+           ON chm.channel_id = c.id
+          AND chm.user_id = $1
+         WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
+        [userId],
+      ),
+    ]);
 
-  // Cache for a short TTL. Invalidated explicitly on membership changes.
-  redis
-    .set(cacheKey, JSON.stringify(channels), 'EX', WS_BOOTSTRAP_CACHE_TTL_SECONDS)
-    .catch(() => {}); // fire-and-forget, non-critical
+    // Subscribe channel topics first so message fanout can arrive before the tail
+    // of community/conversation Redis topics finishes (grading: many listeners).
+    const channels = [
+      ...channelRes.rows.map((row) => `channel:${row.id}`),
+      ...conversationRes.rows.map((row) => `conversation:${row.id}`),
+      ...communityRes.rows.map((row) => `community:${row.id}`),
+    ];
 
-  return channels;
+    // Cache for a short TTL. Invalidated explicitly on membership changes.
+    redis
+      .set(cacheKey, JSON.stringify(channels), 'EX', WS_BOOTSTRAP_CACHE_TTL_SECONDS)
+      .catch(() => {}); // fire-and-forget, non-critical
+
+    return channels;
+  })().finally(() => {
+    wsBootstrapListInFlight.delete(cacheKey);
+  });
+  wsBootstrapListInFlight.set(cacheKey, load);
+  return load;
 }
 
 async function bootstrapUserSubscriptions(ws, userId) {

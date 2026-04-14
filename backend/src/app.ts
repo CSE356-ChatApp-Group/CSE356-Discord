@@ -31,7 +31,7 @@ const usersRouter        = require('./auth/usersRouter');
 
 const app = express();
 app.set('trust proxy', 1);
-const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal, pgQueriesPerRequestHistogram } = require('./utils/metrics');
+const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal, pgQueriesPerRequestHistogram, pgBusinessSqlQueriesPerRequestHistogram } = require('./utils/metrics');
 const { run: runDbContext } = require('./utils/requestDbContext');
 
 // Optional fail-fast when event-loop lag is extreme (OVERLOAD_HTTP_SHED_ENABLED=true).
@@ -78,13 +78,14 @@ function classifyRoute(req) {
 app.use((req, res, next) => {
   const pathOnly = (req.path || '').split('?')[0];
   if (isQuietPath(pathOnly)) return next();
-  const store = { count: 0 };
+  const store = { count: 0, sqlCount: 0 };
   runDbContext(store, () => {
     let observed = false;
     const observePgQueries = () => {
       if (observed) return;
       observed = true;
       pgQueriesPerRequestHistogram.observe({ route: classifyRoute(req) }, store.count);
+      pgBusinessSqlQueriesPerRequestHistogram.observe({ route: classifyRoute(req) }, store.sqlCount);
     };
     res.on('finish', observePgQueries);
     res.on('close', observePgQueries);
