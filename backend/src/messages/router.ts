@@ -240,6 +240,49 @@ async function loadMessageTarget(messageId) {
   return rows[0] || null;
 }
 
+/**
+ * Load message target and caller access in one query for hot read-receipt path.
+ * This avoids separate target lookup + ACL check round-trips.
+ */
+async function loadMessageTargetForUser(messageId, userId) {
+  const { rows } = await query(
+    `SELECT m.id,
+            m.author_id,
+            m.channel_id,
+            m.conversation_id,
+            m.created_at,
+            ch.community_id,
+            CASE
+              WHEN m.conversation_id IS NOT NULL THEN EXISTS (
+                SELECT 1
+                FROM conversation_participants cp
+                WHERE cp.conversation_id = m.conversation_id
+                  AND cp.user_id = $2
+                  AND cp.left_at IS NULL
+              )
+              WHEN m.channel_id IS NOT NULL THEN EXISTS (
+                SELECT 1
+                FROM channels c
+                JOIN community_members community_member
+                  ON community_member.community_id = c.community_id
+                 AND community_member.user_id = $2
+                LEFT JOIN channel_members cm
+                  ON cm.channel_id = c.id
+                 AND cm.user_id = $2
+                WHERE c.id = m.channel_id
+                  AND (c.is_private = FALSE OR cm.user_id IS NOT NULL)
+              )
+              ELSE FALSE
+            END AS has_access
+     FROM messages m
+     LEFT JOIN channels ch ON ch.id = m.channel_id
+     WHERE m.id = $1
+       AND m.deleted_at IS NULL`,
+    [messageId, userId],
+  );
+  return rows[0] || null;
+}
+
 // ── Helpers ── message cache ─────────────────────────────────────────────────
 const MESSAGES_CACHE_TTL_SECS = 15;
 const DEFAULT_CONTEXT_SIDE_LIMIT = 25;
@@ -1108,32 +1151,15 @@ router.put('/:id/read',
       return res.status(503).json({ error: 'Read receipts temporarily delayed under high load' });
     }
     try {
-      const target = await loadMessageTarget(req.params.id);
+      const target = await loadMessageTargetForUser(req.params.id, req.user.id);
       if (!target) return res.status(404).json({ error: 'Message not found' });
-
-      const hasAccess = await ensureMessageAccess({
-        channelId: target.channel_id,
-        conversationId: target.conversation_id,
-      }, req.user.id);
-      if (!hasAccess) {
+      if (!target.has_access) {
         return res.status(403).json({ error: 'Access denied' });
       }
 
       const { channel_id, conversation_id } = target;
       const uid = req.user.id;
       const messageId = req.params.id;
-
-      const { rows: existingRows } = await query(
-        `SELECT last_read_message_id
-         FROM read_states
-         WHERE user_id = $1
-           AND channel_id IS NOT DISTINCT FROM $2
-           AND conversation_id IS NOT DISTINCT FROM $3`,
-        [uid, channel_id, conversation_id]
-      );
-      if (existingRows[0]?.last_read_message_id === messageId) {
-        return res.json({ success: true });
-      }
 
       const { rows: upsertRows } = await query(
         `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)

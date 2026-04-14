@@ -74,3 +74,18 @@ Optional mitigation in code: set **`AUTH_GLOBAL_PER_IP_RATE_LIMIT=true`** to ena
 ## Synthetic probe (host alert)
 
 `chatapp_synthetic_probe_success` comes from [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) via node_exporter textfile — see `RUNBOOKS.md` (ChatAppSyntheticProbeFailed).
+
+## DB scaling trigger thresholds (objective gate)
+
+Use these as a **joint condition** before resizing the DB VM. One noisy metric alone is not enough.
+
+Scale only when all of the following persist for at least **10 minutes**:
+
+1. `max(pg_pool_waiting{job="chatapp-api"}) >= 8`
+2. Route p95 is elevated for hot write/read paths (for example `/api/v1/messages/` or `/api/v1/conversations/`) and does not recover after traffic dips
+3. DB-host pressure indicators trend high together (from `db-node`):
+   - iowait share materially elevated vs baseline, and
+   - disk utilization (max device busy) remains high
+4. Error-side corroboration appears (`http_server_requests_total{status_class="5xx"}` or `pg_pool_operation_errors_total` non-zero over window)
+
+Do **not** scale if `pg_pool_waiting` remains near 0 and app-side lag/backpressure are the dominant signals; that pattern usually indicates app/realtime bottlenecks, not DB saturation.

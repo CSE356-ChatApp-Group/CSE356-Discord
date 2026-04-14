@@ -290,11 +290,17 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
 
   const trimmed = String(q).trim();
   const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
+  const minTrigramScoped = Math.min(
+    Math.max(parseInt(process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED || '2', 10), 1),
+    32,
+  );
   const minTrigramUnscoped = Math.min(
     Math.max(parseInt(process.env.SEARCH_TRIGRAM_MIN_LEN_UNSCOPED || '4', 10), 1),
     32,
   );
-  const allowTrigramFallback = scoped || trimmed.length >= minTrigramUnscoped;
+  const allowTrigramFallback = scoped
+    ? trimmed.length >= minTrigramScoped
+    : trimmed.length >= minTrigramUnscoped;
 
   try {
     const ftsMeta = buildFtsParts(trimmed, opts);

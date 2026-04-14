@@ -103,5 +103,6 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `SEARCH_STATEMENT_TIMEOUT_MS` | Per-statement timeout (ms) for each search query; default 8000. Prevents multi‑second searches from holding Postgres pool connections. |
 | `SEARCH_MAX_LIMIT`, `SEARCH_MAX_OFFSET` | Cap `limit` (default 50) and `offset` (default 500) on `GET /search`. |
 | `SEARCH_TRIGRAM_MIN_LEN_UNSCOPED` | Minimum query length (default 4) before allowing trigram `ILIKE` fallback when search is **unscoped**; scoped searches still allow short/infix queries. |
+| `SEARCH_TRIGRAM_MIN_LEN_SCOPED` | Minimum query length (default 2) before allowing trigram `ILIKE` fallback when search is scoped by `communityId`, `channelId`, or `conversationId`; reduces one-character fallback scans on hot paths. |
 
 Metrics: `auth_rate_limit_hits_total` (Prometheus) indicates auth limiter trips. `ws_bootstrap_wall_duration_ms` (histogram) and `message_cache_bust_failures_total` help correlate grading-style delivery issues with bootstrap time and Redis bust errors.
