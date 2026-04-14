@@ -727,6 +727,7 @@ router.post('/',
                          SELECT 1 FROM channel_members
                          WHERE  channel_id = $1 AND user_id = $2
                        ))
+                 AND  EXISTS (SELECT 1 FROM users WHERE id = $2)
              ), ins AS (
                INSERT INTO messages (channel_id, author_id, content, thread_id)
                SELECT $1, $2, $3, $4 FROM access
@@ -742,6 +743,7 @@ router.post('/',
                RETURNING ch.id
              )
              SELECT
+               (SELECT EXISTS(SELECT 1 FROM users WHERE id = $2)) AS author_exists,
                (SELECT COUNT(*) FROM access)::int             AS has_access,
                (SELECT community_id FROM access LIMIT 1)      AS community_id,
                ins.*,
@@ -759,6 +761,7 @@ router.post('/',
                SELECT 1
                FROM   conversation_participants
                WHERE  conversation_id = $1 AND user_id = $2 AND left_at IS NULL
+                 AND  EXISTS (SELECT 1 FROM users WHERE id = $2)
              ), ins AS (
                INSERT INTO messages (conversation_id, author_id, content, thread_id)
                SELECT $1, $2, $3, $4 FROM access
@@ -775,6 +778,7 @@ router.post('/',
                RETURNING conv.id
              )
              SELECT
+               (SELECT EXISTS(SELECT 1 FROM users WHERE id = $2)) AS author_exists,
                (SELECT COUNT(*) FROM access)::int             AS has_access,
                ins.*,
                CASE WHEN u.id IS NULL THEN NULL
@@ -788,6 +792,12 @@ router.post('/',
         }
 
         const row = rows[0];
+        if (row && row.author_exists === false) {
+          const err: any = new Error('Session no longer valid');
+          err.statusCode = 401;
+          err.messagePostDenyReason = 'author_missing';
+          throw err;
+        }
         if (!row?.has_access) {
           const err: any = new Error(channelId ? 'Access denied' : 'Not a participant');
           err.statusCode = 403;
@@ -894,6 +904,9 @@ router.post('/',
       if (idemRedisKey && idemLease) {
         redis.del(idemRedisKey).catch(() => {});
       }
+      if (err.statusCode === 401 && err.messagePostDenyReason === 'author_missing') {
+        return res.status(401).json({ error: err.message });
+      }
       if (err.statusCode === 403) {
         const reason = err.messagePostDenyReason;
         if (reason === 'channel_access' || reason === 'conversation_participant') {
@@ -904,6 +917,19 @@ router.post('/',
           );
         }
         return res.status(403).json({ error: err.message });
+      }
+      if (err?.code === '23503') {
+        logger.warn(
+          { requestId: req.id, constraint: err.constraint, detail: err.detail },
+          'POST /messages foreign key violation',
+        );
+        if (
+          err.constraint === 'messages_author_id_fkey' ||
+          String(err.detail || '').includes('messages_author_id_fkey')
+        ) {
+          return res.status(401).json({ error: 'Session no longer valid' });
+        }
+        return res.status(409).json({ error: 'Could not save message; please try again' });
       }
       next(err);
     }

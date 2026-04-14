@@ -206,14 +206,18 @@ const pgPoolOperationErrorsTotal = new client.Counter({
 });
 
 /**
- * Count of `pool.query` calls attributed to the current HTTP request (AsyncLocalStorage).
- * Detects N+1 regressions and per-route DB amplification.
+ * Count of successful `query()` / wrapped `client.query()` round-trips per HTTP request
+ * (AsyncLocalStorage). Includes BEGIN/COMMIT/ROLLBACK from transactions. Hot read routes
+ * normally sit in the low single digits; interpret high p95 only when histogram buckets
+ * extend above observed values (otherwise quantiles clip at the top bucket).
  */
 const pgQueriesPerRequestHistogram = new client.Histogram({
   name: 'pg_queries_per_http_request',
-  help: 'Number of successful pool.query calls during one HTTP request (AsyncLocalStorage)',
+  help: 'Successful Postgres round-trips per HTTP request (includes txn control statements)',
   labelNames: ['route'],
-  buckets: [0, 1, 2, 3, 5, 8, 13, 21, 34, 55],
+  // Fibonacci-ish spacing; do not stop at 55 — p95/p99 would otherwise pile up at the top
+  // bucket and look "suspiciously identical" across hot routes under load harness traffic.
+  buckets: [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377],
 });
 
 /** Redis-backed list endpoint cache: hit (served from Redis), miss (DB load), coalesced (singleflight waiter). */

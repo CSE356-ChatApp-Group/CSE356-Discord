@@ -231,8 +231,12 @@ async function setPresence(userId, status, awayMessage) {
     // Mirror to Postgres (non-blocking)
     query(
       `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
-       VALUES ($1,$2,$3,NOW())
-       ON CONFLICT (user_id) DO UPDATE SET status=$2, custom_msg=$3, updated_at=NOW()`,
+       SELECT $1, $2, $3, NOW()
+       WHERE EXISTS (SELECT 1 FROM users WHERE id = $1)
+       ON CONFLICT (user_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         custom_msg = EXCLUDED.custom_msg,
+         updated_at = NOW()`,
       [userId, status, status === "away" ? nextAwayMessage : null],
     ).catch(() => {});
   }

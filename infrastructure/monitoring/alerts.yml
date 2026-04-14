@@ -252,7 +252,7 @@ groups:
         expr: |
           histogram_quantile(0.99,
             sum by (le, route) (
-              rate(pg_queries_per_http_request_bucket{job="chatapp-api",route="/api/v1/messages"}[10m])
+              rate(pg_queries_per_http_request_bucket{job="chatapp-api",route=~"/api/v1/messages/?"}[10m])
             )
           ) > 25
         for: 15m

@@ -635,12 +635,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(pg_queries_per_http_request_bucket{job=\"chatapp-api\",route=~\"^/api/v1/.*\"}[5m])))",
-          "legendFormat": "{{route}}",
+          "expr": "sum by (route) (rate(pg_queries_per_http_request_sum{job=\"chatapp-api\",route=~\"^/api/v1/.*\"}[5m])) / clamp_min(sum by (route) (rate(pg_queries_per_http_request_count{job=\"chatapp-api\",route=~\"^/api/v1/.*\"}[5m])), 1e-9)",
+          "legendFormat": "{{route}} mean",
           "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(pg_queries_per_http_request_bucket{job=\"chatapp-api\",route=~\"^/api/v1/.*\"}[5m])))",
+          "legendFormat": "{{route}} p95",
+          "refId": "B"
         }
       ],
-      "title": "DB queries per HTTP request (p95 by route)",
+      "title": "DB queries per HTTP request (mean vs p95 by route)",
       "type": "timeseries"
     },
     {

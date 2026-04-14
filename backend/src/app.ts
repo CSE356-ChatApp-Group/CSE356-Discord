@@ -59,11 +59,16 @@ function classifyRoute(req) {
   const rawPath = (req.originalUrl || req.url || '').split('?')[0];
   if (!rawPath) return 'unknown';
   if (isQuietPath(rawPath)) return rawPath;
-  // JWT and body-parser failures run before Express sets `req.route` — keep stable templates
-  // so Prometheus/Grafana see /api/v1/messages (not "unmatched") for 401/403/early errors.
-  if (rawPath === '/api/v1/messages' || rawPath.startsWith('/api/v1/messages/')) {
-    return '/api/v1/messages';
+
+  // When Express never matched a layer (early 401/404, or body errors), `req.route` is unset.
+  // Bucket by first /api/v1 segment so pg_queries_per_http_request stays per-area, not "unmatched".
+  if (rawPath.startsWith('/api/v1/')) {
+    const rest = rawPath.slice('/api/v1/'.length);
+    const first = rest.split('/').filter(Boolean)[0];
+    if (first) return `/api/v1/${first}/`;
+    return '/api/v1/';
   }
+
   return 'unmatched';
 }
 
@@ -73,9 +78,14 @@ app.use((req, res, next) => {
   if (isQuietPath(pathOnly)) return next();
   const store = { count: 0 };
   runDbContext(store, () => {
-    res.on('finish', () => {
+    let observed = false;
+    const observePgQueries = () => {
+      if (observed) return;
+      observed = true;
       pgQueriesPerRequestHistogram.observe({ route: classifyRoute(req) }, store.count);
-    });
+    };
+    res.on('finish', observePgQueries);
+    res.on('close', observePgQueries);
     next();
   });
 });
