@@ -72,7 +72,7 @@ jobs:
             playbooks/deploy-prod.yml
 
   backend:
-    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
