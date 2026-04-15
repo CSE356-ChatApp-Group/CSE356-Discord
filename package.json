@@ -48,7 +48,8 @@
     "e2e:dm-invite": "npm --prefix frontend run e2e:dm-invite",
     "e2e:dm-realtime:root": "npm --prefix frontend run build && playwright test -c playwright.config.cjs e2e/dm-realtime-delivery.spec.ts",
     "api-contract": "npm --prefix backend run api-contract",
-    "api-contract:local": "npm --prefix backend run api-contract:local"
+    "api-contract:local": "npm --prefix backend run api-contract:local",
+    "verify:release": "bash scripts/recommended-release-verify.sh"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.23"

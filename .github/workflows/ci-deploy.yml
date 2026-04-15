@@ -42,6 +42,7 @@ jobs:
           node --check deploy/candidate-ws-smoke.cjs
           bash -n scripts/synthetic-probe.sh
           bash -n scripts/metrics-snapshot.sh
+          bash -n scripts/recommended-release-verify.sh
           bash -n scripts/measure-fanout-baseline.sh
           python3 -m py_compile deploy/ensure-pgdump-env.py
           python3 -m py_compile deploy/apply-env-profile.py

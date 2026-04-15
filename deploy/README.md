@@ -223,7 +223,7 @@ Production deploys are designed for **no hard cut** while old and new binaries b
 3. **Preflight prod** — `./deploy/preflight-check.sh prod <sha> <PROD_USER> <PROD_HOST> <GITHUB_REPO>` from a host that can SSH and reach the artifact (VPN/firewall as needed).
 4. **Run prod deploy** — `CHATAPP_INSTANCES=4 ./deploy/deploy-prod.sh <sha>` (or **Manual Deploy** → `production` in GitHub Actions). The script: **pg_dump backup** → candidate on **alternate port** → health + smoke **before** nginx sends live traffic → **pin candidate → roll non-candidate workers → restore upstream** so users keep an upstream during the swap.
 5. **Migrations** — keep changes **backward compatible** across the window where both versions may answer (see step 9 narrative below). Destructive DDL only with a separate maintenance plan.
-6. **After cutover** — `./scripts/prod-nginx-audit.sh`, watch Grafana/Prometheus, keep old release on disk for rollback.
+6. **After cutover** — `./scripts/prod-nginx-audit.sh`, watch Grafana/Prometheus, keep old release on disk for rollback. For a single local bundle (backend tests + staging API contract + deploy script sanity + optional grader gate): `npm run verify:release` (set `SKIP_GRADER_WATCH_GATE=1` if you are not in an active soak window, or truncate stale `artifacts/rollout-monitoring/grader-watch-events.jsonl` before gating).
 7. **Rollback** — re-run `deploy-prod.sh` with the **previous SHA**, or use the script’s rollback path / nginx upstream fix (see **Immediate Rollback** below); do not blind-`sed` nginx ports.
 
 **Not touched by this process:** DNS (same VM), Postgres availability (brief pool pressure only if migrations are heavy). **Downtime risk** is usually mis-nginx or bad migration, not the Node swap itself.

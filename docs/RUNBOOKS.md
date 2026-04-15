@@ -169,6 +169,8 @@ Use a local authenticated watcher to detect grader-side delivery regressions wit
 
    Exit code is non-zero when recent watcher events include critical delivery errors (`Delivery timeout` or `sendMessage failed: 5xx`) or repeated 403s.
 
+5. One-shot bundle (local, before prod or after a risky merge): from repo root run `npm run verify:release` — backend tests, staging API contract, deploy script checks, and the grader gate when `artifacts/rollout-monitoring/grader-watch-events.jsonl` exists (use `SKIP_GRADER_WATCH_GATE=1` outside an active soak, or archive a stale events file so the gate reflects the current window only).
+
 ## Harness outage — correlate a specific time window (minute-level)
 
 COMPAS **outage** bands are often **short**. Repo-wide HTTP **5xx%** panels can stay flat while the harness reports **failed deliveries** (WS SLA), so triage needs **logs + journals** on the exact minutes.
