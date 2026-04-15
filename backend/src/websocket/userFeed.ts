@@ -38,6 +38,13 @@ function userFeedRedisChannelForUserId(userId) {
   return `userfeed:${userFeedShardForUserId(userId)}`;
 }
 
+function allUserFeedRedisChannels() {
+  return Array.from(
+    { length: USER_FEED_SHARD_COUNT },
+    (_unused, shardIndex) => `userfeed:${shardIndex}`,
+  );
+}
+
 function userFeedEnvelope(userIds, payload) {
   return {
     __wsRoute: {
@@ -105,6 +112,7 @@ function isUserFeedEnvelope(value) {
 }
 
 module.exports = {
+  allUserFeedRedisChannels,
   USER_FEED_SHARD_COUNT,
   isUserFeedEnvelope,
   publishUserFeedTargets,

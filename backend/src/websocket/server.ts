@@ -64,8 +64,8 @@ const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { markWsRecentConnect } = require("./recentConnect");
 const {
+  allUserFeedRedisChannels,
   isUserFeedEnvelope,
-  userFeedRedisChannelForUserId,
   userIdFromTarget,
 } = require("./userFeed");
 const {
@@ -411,7 +411,6 @@ async function reconcileAllConnectedUsers() {
  */
 const channelClients = new Map(); // key → Set<WebSocket>
 const localUserClients = new Map(); // userId → Set<WebSocket>
-const localUserFeedShardCounts = new Map(); // shard channel → count
 
 /**
  * Keep track of which Redis channels this process has subscribed to.
@@ -420,6 +419,8 @@ const localUserFeedShardCounts = new Map(); // shard channel → count
  */
 const redisSubscribed = new Set();
 const redisSubscribeInFlight = new Map();
+const USER_FEED_SHARD_CHANNELS = allUserFeedRedisChannels();
+let wsStartupPromise: Promise<void> | null = null;
 
 // ── Redis subscriber listener ──────────────────────────────────────────────────
 function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
@@ -738,6 +739,29 @@ async function ensureRedisChannelSubscribed(redisChannel) {
   await op;
 }
 
+async function ensureUserFeedShardSubscriptions() {
+  await Promise.all(
+    USER_FEED_SHARD_CHANNELS.map((redisChannel) => ensureRedisChannelSubscribed(redisChannel)),
+  );
+}
+
+function ready() {
+  if (!wsStartupPromise) {
+    wsStartupPromise = ensureUserFeedShardSubscriptions()
+      .then(() => {
+        logger.info(
+          { shardCount: USER_FEED_SHARD_CHANNELS.length },
+          'WS userfeed shard subscriptions ready',
+        );
+      })
+      .catch((err) => {
+        wsStartupPromise = null;
+        throw err;
+      });
+  }
+  return wsStartupPromise;
+}
+
 // ── Connection handling ────────────────────────────────────────────────────────
 wss.on("connection", async (ws, req) => {
   // Authenticate
@@ -1020,17 +1044,22 @@ async function subscribeClient(ws, redisChannel) {
 
   const userId = userIdFromTarget(redisChannel);
   if (redisChannel.startsWith("user:") && userId) {
-    const shardChannel = userFeedRedisChannelForUserId(userId);
-    await ensureRedisChannelSubscribed(shardChannel);
     if (!localUserClients.has(userId)) {
       localUserClients.set(userId, new Set());
     }
     localUserClients.get(userId).add(ws);
-    localUserFeedShardCounts.set(
-      shardChannel,
-      (localUserFeedShardCounts.get(shardChannel) || 0) + 1,
-    );
     ws._subscriptions.add(redisChannel);
+    try {
+      await ready();
+    } catch (err) {
+      const clients = localUserClients.get(userId);
+      clients?.delete(ws);
+      if ((clients?.size || 0) === 0) {
+        localUserClients.delete(userId);
+      }
+      ws._subscriptions.delete(redisChannel);
+      throw err;
+    }
     return;
   }
 
@@ -1055,18 +1084,6 @@ async function unsubscribeClient(ws, redisChannel) {
       localUserClients.delete(userId);
     }
     ws._subscriptions.delete(redisChannel);
-
-    const shardChannel = userFeedRedisChannelForUserId(userId);
-    const nextCount = Math.max(0, (localUserFeedShardCounts.get(shardChannel) || 0) - 1);
-    if (nextCount === 0) {
-      localUserFeedShardCounts.delete(shardChannel);
-      if (redisSubscribed.has(shardChannel) && isRedisOperational(redisSub)) {
-        redisSubscribed.delete(shardChannel);
-        redisSub.unsubscribe(shardChannel).catch(() => {});
-      }
-    } else {
-      localUserFeedShardCounts.set(shardChannel, nextCount);
-    }
     return;
   }
 
@@ -1170,6 +1187,7 @@ function shutdown() {
 module.exports = {
   handleUpgrade,
   wss,
+  ready,
   shutdown,
   getLocalWebSocketClientCount,
   invalidateWsBootstrapCache,

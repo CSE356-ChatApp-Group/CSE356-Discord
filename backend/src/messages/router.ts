@@ -280,6 +280,95 @@ async function loadHydratedMessageById(messageId) {
   return rows[0] || null;
 }
 
+async function advanceReadStateCursor({
+  userId,
+  channelId,
+  conversationId,
+  messageId,
+  messageCreatedAt,
+}) {
+  const scopeColumn = channelId ? 'channel_id' : 'conversation_id';
+  const scopeValue = channelId || conversationId;
+  const client = await getClient();
+
+  try {
+    await client.query('BEGIN');
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const { rows: existingRows } = await client.query(
+        `SELECT last_read_message_id, last_read_at
+         FROM read_states
+         WHERE user_id = $1
+           AND ${scopeColumn} = $2
+         LIMIT 1
+         FOR UPDATE`,
+        [userId, scopeValue],
+      );
+
+      if (!existingRows.length) {
+        const { rows: insertedRows } = await client.query(
+          `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
+           VALUES ($1,$2,$3,$4,NOW())
+           ON CONFLICT DO NOTHING
+           RETURNING last_read_message_id, last_read_at`,
+          [userId, channelId, conversationId, messageId],
+        );
+
+        if (insertedRows[0]) {
+          await client.query('COMMIT');
+          return { applied: insertedRows[0], didAdvanceCursor: true };
+        }
+        continue;
+      }
+
+      const existing = existingRows[0];
+      const currentReadId = existing.last_read_message_id || null;
+      if (currentReadId && String(currentReadId) === String(messageId)) {
+        await client.query('COMMIT');
+        return { applied: existing, didAdvanceCursor: false };
+      }
+
+      let shouldAdvance = !currentReadId;
+      if (!shouldAdvance) {
+        const { rows: currentRows } = await client.query(
+          `SELECT created_at
+           FROM messages
+           WHERE id = $1
+             AND deleted_at IS NULL`,
+          [currentReadId],
+        );
+        const currentCreatedAt = currentRows[0]?.created_at;
+        shouldAdvance = !currentCreatedAt || currentCreatedAt <= messageCreatedAt;
+      }
+
+      if (!shouldAdvance) {
+        await client.query('COMMIT');
+        return { applied: existing, didAdvanceCursor: false };
+      }
+
+      const { rows: updatedRows } = await client.query(
+        `UPDATE read_states
+         SET last_read_message_id = $3,
+             last_read_at = NOW()
+         WHERE user_id = $1
+           AND ${scopeColumn} = $2
+         RETURNING last_read_message_id, last_read_at`,
+        [userId, scopeValue, messageId],
+      );
+
+      await client.query('COMMIT');
+      return { applied: updatedRows[0], didAdvanceCursor: true };
+    }
+
+    throw new Error('read_state_advance_failed_after_retries');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function loadMessageTarget(messageId) {
   const { rows } = await query(
     `SELECT m.id,
@@ -1300,86 +1389,13 @@ router.put('/:id/read',
       const messageId = req.params.id;
       const messageCreatedAt = target.created_at;
 
-      const scopeColumn = channel_id ? 'channel_id' : 'conversation_id';
-      const scopeValue = channel_id || conversation_id;
-      const { rows: existingRows } = await query(
-        `SELECT last_read_message_id
-         FROM read_states
-         WHERE user_id = $1
-           AND ${scopeColumn} = $2
-         LIMIT 1`,
-        [uid, scopeValue],
-      );
-
-      let applied;
-      let currentReadId = existingRows[0]?.last_read_message_id || null;
-      if (!existingRows.length) {
-        try {
-          const { rows: insertedRows } = await query(
-            `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
-             VALUES ($1,$2,$3,$4,NOW())
-             RETURNING last_read_message_id, last_read_at`,
-            [uid, channel_id, conversation_id, messageId],
-          );
-          applied = insertedRows[0];
-        } catch (err) {
-          // Concurrent read-mark requests can race between SELECT and INSERT.
-          // Treat uniqueness collisions as idempotent and continue with UPDATE path.
-          const detail = String(err?.detail || err?.message || '');
-          const readStateRace =
-            err?.code === '23505' &&
-            (err?.constraint === 'idx_read_states_user_target' ||
-              /idx_read_states_user_target/i.test(detail));
-          if (!readStateRace) {
-            throw err;
-          }
-          const { rows: racedRows } = await query(
-            `SELECT last_read_message_id
-             FROM read_states
-             WHERE user_id = $1
-               AND ${scopeColumn} = $2
-             LIMIT 1`,
-            [uid, scopeValue],
-          );
-          currentReadId = racedRows[0]?.last_read_message_id || null;
-        }
-      }
-
-      if (!applied) {
-        let shouldAdvance = !currentReadId;
-        if (!shouldAdvance && String(currentReadId) === String(messageId)) {
-          shouldAdvance = false;
-        } else if (!shouldAdvance) {
-          const { rows: currentRows } = await query(
-            `SELECT created_at
-             FROM messages
-             WHERE id = $1
-               AND deleted_at IS NULL`,
-            [currentReadId],
-          );
-          const currentCreatedAt = currentRows[0]?.created_at;
-          shouldAdvance = !currentCreatedAt || currentCreatedAt <= messageCreatedAt;
-        }
-
-        if (shouldAdvance) {
-          const { rows: updatedRows } = await query(
-            `UPDATE read_states
-             SET last_read_message_id = $3,
-                 last_read_at = NOW()
-             WHERE user_id = $1
-               AND ${scopeColumn} = $2
-             RETURNING last_read_message_id, last_read_at`,
-            [uid, scopeValue, messageId],
-          );
-          applied = updatedRows[0];
-        } else {
-          applied = { last_read_message_id: currentReadId, last_read_at: null };
-        }
-      }
-
-      const advancedTo = applied?.last_read_message_id;
-      const didAdvanceCursor =
-        advancedTo != null && String(advancedTo) === String(messageId);
+      const { applied, didAdvanceCursor } = await advanceReadStateCursor({
+        userId: uid,
+        channelId: channel_id,
+        conversationId: conversation_id,
+        messageId,
+        messageCreatedAt,
+      });
 
       if (!didAdvanceCursor) {
         return res.json({ success: true });

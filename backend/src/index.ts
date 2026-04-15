@@ -135,6 +135,7 @@ async function shutdown(signal, err = null) {
 
 async function start() {
   await waitForDependencies();
+  await wsServer.ready();
 
   startPgPoolMetrics(pool);
   startCapacitySnapshotHeartbeat();

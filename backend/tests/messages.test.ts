@@ -107,6 +107,66 @@ describe('POST /messages idempotency', () => {
   });
 });
 
+describe('Read state writes', () => {
+  it('treats concurrent mark-read requests idempotently and never moves the cursor backwards', async () => {
+    const owner = await createAuthenticatedUser('readrace');
+    const slug = `read-race-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'read race coverage' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `read-race-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const firstMessageRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'first read target' });
+    expect(firstMessageRes.status).toBe(201);
+    const firstMessageId = firstMessageRes.body.message.id;
+
+    const secondMessageRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'second read target' });
+    expect(secondMessageRes.status).toBe(201);
+    const secondMessageId = secondMessageRes.body.message.id;
+
+    const [readA, readB] = await Promise.all([
+      request(app)
+        .put(`/api/v1/messages/${secondMessageId}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`),
+      request(app)
+        .put(`/api/v1/messages/${secondMessageId}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`),
+    ]);
+
+    expect(readA.status).toBe(200);
+    expect(readB.status).toBe(200);
+
+    const staleReadRes = await request(app)
+      .put(`/api/v1/messages/${firstMessageId}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(staleReadRes.status).toBe(200);
+
+    const { rows } = await pool.query(
+      `SELECT last_read_message_id::text AS last_read_message_id
+       FROM read_states
+       WHERE user_id = $1
+         AND channel_id = $2`,
+      [owner.user.id, channelId],
+    );
+    expect(rows[0]?.last_read_message_id).toBe(secondMessageId);
+  });
+});
+
 describe('GET /messages first-page cache vs POST', () => {
   it('does not serve stale Redis first-page cache after POST /messages', async () => {
     const owner = await createAuthenticatedUser('cachebust');

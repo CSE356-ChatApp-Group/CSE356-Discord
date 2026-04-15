@@ -7,7 +7,7 @@
  */
 
 import http from 'http';
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app, wsServer, wsServerReady, pool, closeRedisConnections } from './runtime';
 
 import {
   uniqueSuffix,
@@ -24,6 +24,7 @@ let server: any;
 let port: number;
 
 beforeAll(async () => {
+  await wsServerReady;
   server = http.createServer(app);
   server.on('upgrade', wsServer.handleUpgrade);
   await new Promise<void>((resolve) => {
@@ -42,6 +43,56 @@ afterAll(async () => {
 // ── DM realtime (message create / update / delete / read receipt) ─────────────
 
 describe('DM realtime delivery', () => {
+  it('delivers a DM to a socket that only waited for websocket open', async () => {
+    const sender = await createAuthenticatedUser('dmopenonlysend');
+    const recipient = await createAuthenticatedUser('dmopenonlyrecv');
+
+    const recipientSocket = await new Promise<any>((resolve, reject) => {
+      const { WebSocket } = require('ws');
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(recipient.accessToken)}`);
+      const timer = setTimeout(() => {
+        socket.terminate();
+        reject(new Error('Timed out waiting for websocket open'));
+      }, 3000);
+      socket.once('open', () => {
+        clearTimeout(timer);
+        resolve(socket);
+      });
+      socket.once('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+
+    try {
+      const createConversationRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ participantIds: [recipient.user.id] });
+
+      expect(createConversationRes.status).toBe(201);
+      const conversationId = createConversationRes.body.conversation.id;
+
+      const createdEventPromise = waitForWsEvent(
+        recipientSocket,
+        (event) =>
+          event.event === 'message:created' && event.data?.conversation_id === conversationId,
+      );
+
+      const createMessageRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ conversationId, content: 'open-only dm delivery' });
+
+      expect(createMessageRes.status).toBe(201);
+      const createdEvent = await createdEventPromise;
+      expect(createdEvent.data.content).toBe('open-only dm delivery');
+      expect(createdEvent.channel).toBe(`user:${recipient.user.id}`);
+    } finally {
+      await closeWebSocket(recipientSocket);
+    }
+  });
+
   it('delivers DM message and read events on user websocket channels', async () => {
     const sender = await createAuthenticatedUser('dmsender');
     const recipient = await createAuthenticatedUser('dmrecipient');
