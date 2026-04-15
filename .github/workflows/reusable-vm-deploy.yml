@@ -53,6 +53,10 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: vm-deploy-${{ inputs.environment }}-${{ inputs.host }}
+  cancel-in-progress: false
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 

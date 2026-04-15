@@ -23,6 +23,45 @@ ssh_prod() {
   ssh "${PROD_USER}@${PROD_HOST}" "$@"
 }
 
+DEPLOY_LOCK_DIR="/opt/chatapp/.deploy-lock-prod"
+DEPLOY_LOCK_TTL_SECS="${DEPLOY_LOCK_TTL_SECS:-3600}"
+
+acquire_remote_deploy_lock() {
+  ssh_prod "
+    set -euo pipefail
+    lock='${DEPLOY_LOCK_DIR}'
+    ttl='${DEPLOY_LOCK_TTL_SECS}'
+    now=\$(date +%s)
+    stale=0
+    if [ -f \"\$lock/started_at\" ]; then
+      started=\$(cat \"\$lock/started_at\" 2>/dev/null || echo 0)
+      if [ \"\$started\" -gt 0 ] && [ \$((now - started)) -gt \"\$ttl\" ]; then
+        stale=1
+      fi
+    fi
+    if mkdir \"\$lock\" 2>/dev/null; then
+      :
+    elif [ \"\$stale\" -eq 1 ]; then
+      echo \"WARN: removing stale prod deploy lock (older than \${ttl}s)\"
+      rm -rf \"\$lock\"
+      mkdir \"\$lock\"
+    else
+      owner=\$(cat \"\$lock/owner\" 2>/dev/null || echo unknown)
+      started=\$(cat \"\$lock/started_at_iso\" 2>/dev/null || echo unknown)
+      echo \"ERROR: another prod deploy is running (owner=\$owner started_at=\$started)\" >&2
+      exit 42
+    fi
+    echo '${RELEASE_SHA}' > \"\$lock/release_sha\"
+    echo \"\$(hostname)-\$\$\" > \"\$lock/owner\"
+    date +%s > \"\$lock/started_at\"
+    date -u +%Y-%m-%dT%H:%M:%SZ > \"\$lock/started_at_iso\"
+  "
+}
+
+release_remote_deploy_lock() {
+  ssh_prod "rm -rf '${DEPLOY_LOCK_DIR}'" >/dev/null 2>&1 || true
+}
+
 MONITOR_SECONDS="${MONITOR_SECONDS:-30}"
 KEEP_RELEASES="${KEEP_RELEASES:-3}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-5}"
@@ -104,6 +143,12 @@ echo "  VM vCPUs: ${_REMOTE_NCPU}  workers: ${CHATAPP_INSTANCES}  pgbouncer_pool
 echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: ${POOL_CIRCUIT_BREAKER_QUEUE}"
 echo "  UV threadpool/instance: ${UV_THREADPOOL_PER_INSTANCE}  bcrypt_conc: ${BCRYPT_MAX_CONCURRENT}"
 echo "  communities_heavy_max_inflight: ${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}"
+
+echo "Acquiring remote deploy lock..."
+acquire_remote_deploy_lock
+trap release_remote_deploy_lock EXIT
+echo "✓ Remote deploy lock acquired"
+
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
 
 # First server port inside `upstream app` only (avoids accidental matches elsewhere and
