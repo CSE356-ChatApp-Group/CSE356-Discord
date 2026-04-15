@@ -51,12 +51,26 @@ function isQuietPath(path = '') {
 }
 
 function classifyRoute(req) {
+  const rawPath = (req.originalUrl || req.url || '').split('?')[0];
   const routePath = Array.isArray(req.route?.path) ? req.route.path[0] : req.route?.path;
+
+  // Some error paths can lose req.baseUrl while still carrying req.route.path
+  // (for example "/register" from auth router). Canonicalize these to the
+  // externally-visible API route so Grafana does not split one endpoint into
+  // two labels (/api/v1/auth/register vs /register).
+  if (
+    routePath
+    && rawPath.startsWith('/api/v1/auth/')
+    && typeof routePath === 'string'
+    && routePath.startsWith('/')
+  ) {
+    return `/api/v1/auth/${routePath.slice(1)}`.replace(/\/+/g, '/');
+  }
+
   if (routePath) {
     return `${req.baseUrl || ''}${routePath}`.replace(/\/+/g, '/');
   }
 
-  const rawPath = (req.originalUrl || req.url || '').split('?')[0];
   if (!rawPath) return 'unknown';
   if (isQuietPath(rawPath)) return rawPath;
 
