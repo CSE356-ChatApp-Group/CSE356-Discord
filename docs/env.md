@@ -20,7 +20,7 @@ If you **do not** want **`AUTH_GLOBAL_PER_IP_RATE_LIMIT`** (or you keep **`DISAB
 
 1. **More API processes** — e.g. **`CHATAPP_INSTANCES=2`** (or higher) with nginx balancing **two ports**, when the host has **enough CPU and RAM** (each Node heap is sized in deploy scripts).
 2. **Larger or additional VMs** — horizontal scale + connection pool tuning (Postgres / PgBouncer).
-3. **`BCRYPT_MAX_CONCURRENT`** / **`BCRYPT_ROUNDS`** — default **`1`** (lowest configured cost; bcrypt still uses at least cost **4** in the hash). Raising rounds or concurrency increases parallel CPU load.
+3. **`BCRYPT_MAX_CONCURRENT`** / **`BCRYPT_ROUNDS`** — default **`BCRYPT_ROUNDS=1`** (lowest configured cost; bcrypt still uses at least cost **4** in the hash). When **`BCRYPT_MAX_CONCURRENT`** is unset, code derives a threadpool-aware default from **`UV_THREADPOOL_SIZE`** and host CPU count; deploy scripts still pin an explicit per-instance value so auth burst queueing stays visible in app metrics instead of disappearing into libuv backlog. Raising rounds or concurrency increases parallel CPU load.
 4. **Nginx `proxy_read_timeout` on `/api/v1/auth/`** — already raised in repo templates (**75s**) so fewer **504 HTML** pages while upstream is slow; clients still wait longer.
 
 There is no way to accept **unlimited** simultaneous bcrypt-heavy logins on **finite** hardware with bounded latency; the choice is **where** overload appears (app JSON vs nginx HTML vs long waits).
@@ -37,7 +37,7 @@ On the production host, inspect `/opt/chatapp/shared/.env` (used by systemd `cha
 6. **`NODE_ENV`** — should be **`production`** on the API host; **`deploy-prod.sh`** enforces it.
 7. **`OVERLOAD_LAG_SHED_MS`** — **`deploy-prod.sh`** sets **`250`** (matches code default when HTTP shedding is enabled). **`OVERLOAD_HTTP_SHED_ENABLED`** remains **`false`** on prod unless you opt in.
 
-**Repository audit (no server access):** [`docker-compose.yml`](../docker-compose.yml) sets high register/login limits (500) **only** for the local `api` service to support parallel E2E; production does not use that compose stack as-is. Channel **`message:created`** per-user Redis fanout is **on by default in code**; compose and [`deploy/deploy-staging.sh`](../deploy/deploy-staging.sh) / [`deploy/deploy-prod.sh`](../deploy/deploy-prod.sh) **re-apply on every deploy** **`DISABLE_RATE_LIMITS=true`**, **`AUTH_GLOBAL_PER_IP_RATE_LIMIT=false`**, **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, **`CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180`**, **`CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180`**, **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=false`**, **`WS_BOOTSTRAP_BATCH_SIZE=64`**, **`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`**, **`COMMUNITIES_LIST_CACHE_TTL_SECS=300`**, and **`CHANNELS_LIST_CACHE_TTL_SECS=300`**, plus prod-only **`NODE_ENV=production`**, **`AUTH_BYPASS=false`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`**, and **`OVERLOAD_LAG_SHED_MS=250`** (see script block in `deploy-prod.sh`).
+**Repository audit (no server access):** [`docker-compose.yml`](../docker-compose.yml) sets high register/login limits (500) **only** for the local `api` service to support parallel E2E; production does not use that compose stack as-is. Channel **`message:created`** per-user Redis fanout is **on by default in code**; compose and [`deploy/deploy-staging.sh`](../deploy/deploy-staging.sh) / [`deploy/deploy-prod.sh`](../deploy/deploy-prod.sh) **re-apply on every deploy** **`DISABLE_RATE_LIMITS=true`**, **`AUTH_GLOBAL_PER_IP_RATE_LIMIT=false`**, **`AUTH_PASSWORD_STORAGE_MODE=plain`**, **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, **`CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180`**, **`CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180`**, **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=false`**, **`WS_BOOTSTRAP_BATCH_SIZE=64`**, **`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`**, **`COMMUNITIES_LIST_CACHE_TTL_SECS=300`**, and **`CHANNELS_LIST_CACHE_TTL_SECS=300`**, plus prod-only **`NODE_ENV=production`**, **`AUTH_BYPASS=false`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`**, and **`OVERLOAD_LAG_SHED_MS=250`** (see script block in `deploy-prod.sh`).
 
 ## Backend API (`backend/src`) — optional tunables
 
@@ -70,8 +70,9 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `AUTH_LOGIN_GLOBAL_PER_IP_MAX`, `AUTH_LOGIN_GLOBAL_PER_IP_WINDOW_MS` | Login cap per client IP only (defaults apply when enabled; **skipped when `NODE_ENV=test`**) |
 | `AUTH_CONNECT_RATE_LIMIT_MAX`, `AUTH_CONNECT_RATE_LIMIT_WINDOW_MS` | OAuth connect-existing limiter |
 | `OAUTH_PENDING_SECRET`, `OAUTH_LINK_SECRET` | OAuth state tokens (fallback: JWT secrets) |
-| `BCRYPT_MAX_CONCURRENT`, `BCRYPT_MAX_WAITERS`, `BCRYPT_QUEUE_WAIT_TIMEOUT_MS` | Password hashing queue |
+| `BCRYPT_MAX_CONCURRENT`, `BCRYPT_MAX_WAITERS`, `BCRYPT_QUEUE_WAIT_TIMEOUT_MS` | Password hashing queue; watch `auth_bcrypt_active`, `auth_bcrypt_waiters`, and `auth_bcrypt_queue_rejects_total` |
 | `BCRYPT_ROUNDS` | bcrypt cost (default **1**; bcrypt raises configured costs **1–3** to **4** in the stored hash) |
+| `AUTH_PASSWORD_STORAGE_MODE` | `bcrypt` (default) or `plain` (throughput-first, insecure). In `plain`, new/updated passwords are stored as a non-bcrypt prefixed value while existing bcrypt hashes still validate normally. |
 | **OAuth providers** | |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL` | Google OAuth |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_CALLBACK_URL` | GitHub OAuth |
@@ -96,7 +97,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | Credentials |
 | **HTTP / caches** | |
 | `COMMUNITIES_LIST_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS` | List route cache TTLs (deploy default: `300`) |
-| `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS` | Per-query timeout (ms) for heavy `GET /communities` unread-count SQL before falling back to a lightweight member-count response (default `2500`) |
+| `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS`, `COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT` | Heavy `GET /communities` unread-count timeout plus concurrency cap before serving the lightweight member-count fallback; watch route p95 and `endpoint_list_cache_bypass_total{endpoint="communities",reason=~"pressure|timeout"}` |
 | `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST` | When `true` (default), `message:created` is published to `channel:<uuid>` before per-member `user:` duplicates |
 | `CHANNEL_MESSAGE_USER_FANOUT_MAX` | Max per-message **`user:`** duplicate publishes (default **10000**, cap **10000**). Members beyond this rely on **`channel:`** delivery only — intentional for mega-channels; clients must listen on `channel:` or accept missing `user:` duplicate. |
 | `CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS` | Redis TTL for cached per-channel `user:` fanout audiences used by channel message publishes (default `180`) |

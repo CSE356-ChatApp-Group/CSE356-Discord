@@ -11,16 +11,22 @@ This folder contains a repeatable **staging-only** load test that ramps traffic 
 - `PUT /api/v1/messages/:id/read`
 - `POST /api/v1/messages`
 - WebSocket presence/activity churn
+- Optional WebSocket post-to-delivery probe (`message:created` after `POST /messages`)
 
 ## Run profiles
 
 ```bash
 npm run load:staging:smoke
+npm run load:staging:slo
+npm run load:staging:tune
 npm run load:staging:peak
+npm run load:staging:break-fast
 npm run load:staging:break
 ```
 
 The `break` profile is intentionally aggressive and is meant to find the failure point.
+Use `slo` for steady-state go/no-go checks, `tune` for fast iteration while changing knobs,
+and `break-fast` when you want the stress envelope sooner.
 
 ## Output artifacts
 
@@ -53,6 +59,7 @@ Optional knobs:
 - `LOADTEST_PASSWORD=...`
 - `MESSAGE_SIZE=128`
 - `RUN_ID=my-custom-label`
+- `LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1`
 - Mix tuning (all optional, auto-normalized):  
   `LOADTEST_MIX_COMMUNITIES`, `LOADTEST_MIX_CONVERSATIONS`, `LOADTEST_MIX_MESSAGES_LIST`,  
   `LOADTEST_MIX_CHANNELS`, `LOADTEST_MIX_MESSAGE_READ`, `LOADTEST_MIX_POST_CHANNEL`,  
@@ -63,3 +70,4 @@ Optional knobs:
 - **Do not run this against production.**
 - Expect staging alerts and noisy dashboards during the run.
 - A non-zero exit code usually means the system hit the defined latency/error thresholds — that is useful capacity data, not necessarily a tooling bug.
+- `slo` enables the WS delivery probe by default; other profiles can opt in with `LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1`.

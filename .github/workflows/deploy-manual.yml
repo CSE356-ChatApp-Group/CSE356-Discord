@@ -11,7 +11,7 @@ on:
           - staging
           - prod
       sha:
-        description: "Commit SHA to deploy (defaults to current ref SHA)"
+        description: "Commit SHA or ref to deploy (defaults to current ref SHA)"
         required: false
         type: string
 
@@ -27,17 +27,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve-target:
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
+    outputs:
+      resolved_sha: ${{ steps.resolve.outputs.resolved_sha }}
+    steps:
+      - name: Resolve target SHA
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ref = `${{ inputs.sha || github.sha }}`.trim();
+            const { data } = await github.rest.repos.getCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref,
+            });
+            core.setOutput('resolved_sha', data.sha);
+            core.info(`Resolved deploy target ${ref} -> ${data.sha}`);
+
   # Download the CI-built tarball from GitHub Releases so the deploy job can use
   # artifact_name (no long poll in reusable-vm-deploy). If release is not yet
   # published, build/package the artifact in this run as a fallback.
   fetch-release:
+    needs: resolve-target
     runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
     timeout-minutes: 15
     steps:
       - name: Checkout target SHA
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.sha || github.sha }}
+          ref: ${{ needs.resolve-target.outputs.resolved_sha }}
 
       - name: Ensure GitHub CLI exists
         shell: bash
@@ -52,9 +72,9 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ needs.resolve-target.outputs.resolved_sha }}
         run: |
           set -euo pipefail
-          TARGET_SHA="${{ inputs.sha || github.sha }}"
           ARTIFACT="chatapp-${TARGET_SHA}.tar.gz"
           echo "Downloading release-${TARGET_SHA} from ${{ github.repository }}"
           gh release download "release-${TARGET_SHA}" -R "${{ github.repository }}" -p "${ARTIFACT}" -D .
@@ -80,9 +100,10 @@ jobs:
 
       - name: Package fallback release artifact
         if: steps.download_release.outcome != 'success'
+        env:
+          TARGET_SHA: ${{ needs.resolve-target.outputs.resolved_sha }}
         run: |
           set -euo pipefail
-          TARGET_SHA="${{ inputs.sha || github.sha }}"
           mkdir -p releases
           tar --exclude=node_modules --exclude=.git --exclude=.env \
             -czf "releases/chatapp-${TARGET_SHA}.tar.gz" \
@@ -98,10 +119,11 @@ jobs:
           ls -lh "releases/chatapp-${TARGET_SHA}.tar.gz"
 
       - name: Normalize artifact path
+        env:
+          TARGET_SHA: ${{ needs.resolve-target.outputs.resolved_sha }}
         run: |
           set -euo pipefail
           mkdir -p releases
-          TARGET_SHA="${{ inputs.sha || github.sha }}"
           ARTIFACT="chatapp-${TARGET_SHA}.tar.gz"
           if [[ -f "./${ARTIFACT}" ]]; then
             cp "./${ARTIFACT}" "releases/chatapp-${TARGET_SHA}.tar.gz"
@@ -110,35 +132,35 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: release-${{ inputs.sha || github.sha }}
-          path: releases/chatapp-${{ inputs.sha || github.sha }}.tar.gz
+          name: release-${{ needs.resolve-target.outputs.resolved_sha }}
+          path: releases/chatapp-${{ needs.resolve-target.outputs.resolved_sha }}.tar.gz
 
   deploy-staging:
-    needs: fetch-release
+    needs: [resolve-target, fetch-release]
     if: inputs.environment == 'staging'
     uses: ./.github/workflows/reusable-vm-deploy.yml
     secrets: inherit
     with:
       environment: staging
-      target_sha: ${{ inputs.sha || github.sha }}
+      target_sha: ${{ needs.resolve-target.outputs.resolved_sha }}
       host: ${{ vars.STAGING_HOST || '136.114.103.71' }}
       user: ${{ vars.STAGING_USER || 'ssperrottet' }}
       script_path: deploy/deploy-staging.sh
-      artifact_name: release-${{ inputs.sha || github.sha }}
+      artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
 
   deploy-prod:
-    needs: fetch-release
+    needs: [resolve-target, fetch-release]
     if: inputs.environment == 'prod'
     uses: ./.github/workflows/reusable-vm-deploy.yml
     secrets: inherit
     with:
       environment: production
-      target_sha: ${{ inputs.sha || github.sha }}
+      target_sha: ${{ needs.resolve-target.outputs.resolved_sha }}
       host: ${{ vars.PROD_HOST }}
       user: ${{ vars.PROD_USER }}
       script_path: deploy/deploy-prod.sh
       verify_public_host: true
       auto_confirm: true
-      artifact_name: release-${{ inputs.sha || github.sha }}
+      artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
       # Dual workers on prod (chatapp@4000 + @4001): nginx must list both; deploy-prod runs 9b/9c when >=2.
       chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '2' }}

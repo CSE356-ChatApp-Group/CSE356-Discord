@@ -5,6 +5,15 @@
 #   ./scripts/prod-capacity-snapshot.sh   # if already on the VM
 set -euo pipefail
 OUT="${HOME}/chatapp-snapshot-$(date -u +%Y%m%dT%H%M%SZ).txt"
+CHATAPP_PORTS="$(
+  systemctl list-units 'chatapp@*.service' --type=service --state=running --no-legend 2>/dev/null \
+    | sed -n 's/.*chatapp@\([0-9]\+\)\.service.*/\1/p' \
+    | sort -n \
+    | xargs
+)"
+if [[ -z "${CHATAPP_PORTS}" ]]; then
+  CHATAPP_PORTS="4000 4001"
+fi
 {
   echo "host=$(hostname) utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "=== loadavg (compare to \$(nproc)) ==="
@@ -26,11 +35,19 @@ OUT="${HOME}/chatapp-snapshot-$(date -u +%Y%m%dT%H%M%SZ).txt"
   echo "=== health?diagnostic=1 (machine-readable capacity block per instance below) ==="
   curl -sS -k -m 5 'https://127.0.0.1/health?diagnostic=1' 2>/dev/null || curl -sS -m 5 'http://127.0.0.1/health?diagnostic=1' || true
   echo
-  echo "=== pool metrics :4000 + :4001 (same moment) ==="
-  echo "--- :4000 ---"
-  curl -sS -m 5 http://127.0.0.1:4000/metrics 2>/dev/null | grep -E "nodejs_eventloop_lag_p99|chatapp_overload_stage|pg_pool_(total|idle|waiting)" || true
-  echo "--- :4001 ---"
-  curl -sS -m 5 http://127.0.0.1:4001/metrics 2>/dev/null | grep -E "nodejs_eventloop_lag_p99|chatapp_overload_stage|pg_pool_(total|idle|waiting)" || true
+  echo "=== direct /health?diagnostic=1 per running instance ==="
+  for port in $CHATAPP_PORTS; do
+    echo "--- :${port} ---"
+    curl -sS -m 5 "http://127.0.0.1:${port}/health?diagnostic=1" 2>/dev/null || true
+  done
+  echo
+  echo "=== selected metrics per running instance ==="
+  for port in $CHATAPP_PORTS; do
+    echo "--- :${port} ---"
+    curl -sS -m 5 "http://127.0.0.1:${port}/metrics" 2>/dev/null \
+      | grep -E "nodejs_eventloop_lag_p99|chatapp_overload_stage|pg_pool_(total|idle|waiting)|auth_bcrypt_(active|waiters)|side_effect_queue_(depth|active_workers)" \
+      || true
+  done
   echo "=== Postgres (if local) ==="
   if sudo -u postgres psql -d postgres -tAc 'SELECT 1' >/dev/null 2>&1; then
     sudo -u postgres psql -d postgres -tAc 'SHOW max_connections;'

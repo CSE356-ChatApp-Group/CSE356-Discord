@@ -271,7 +271,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
       "gridPos": { "h": 6, "w": 8, "x": 8, "y": 21 },
       "id": 9,
       "options": {
@@ -280,12 +280,22 @@
       },
       "targets": [
         {
-          "expr": "sum by (route) (rate(auth_rate_limit_hits_total{job=\"chatapp-api\"}[5m]))",
-          "legendFormat": "{{route}}",
+          "expr": "max(auth_bcrypt_waiters{job=\"chatapp-api\"}) by (instance)",
+          "legendFormat": "waiters {{instance}}",
           "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(auth_bcrypt_queue_rejects_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "reject {{reason}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max(auth_bcrypt_active{job=\"chatapp-api\"}) by (instance)",
+          "legendFormat": "active {{instance}}",
+          "refId": "C"
         }
       ],
-      "title": "Auth rate-limit hits (rate) — login abuse / Login fails",
+      "title": "Auth bcrypt queue pressure — active, waiters, rejects",
       "type": "timeseries"
     },
     {
@@ -357,7 +367,7 @@
       "gridPos": { "h": 2, "w": 24, "x": 0, "y": 37 },
       "id": 13,
       "options": {
-        "content": "**Dashboard timezone:** `America/New_York` (US Eastern, DST-aware). **5xx %** can stay ~0 when request volume collapses (load generator pause, network path) — use **Total HTTP rate** and **Traffic vs 15m ago** below, and alert **ChatAppTrafficCliffWhileInstancesUp**.\n\n**Grader / delivery debugging** — WebSocket backpressure (dropped frames / killed sockets), message POST outcomes, async fanout queue health (read receipts & non-inline events), Postgres pool wait, and `/api/v1/messages` HTTP. Correlate spikes with grader \"delivery fails\".\n\n**Empty panels:** **fanout job errors** stays empty when no async fanout failures (normal). **POST 403 by reason** / **aborted** / **WS backpressure** sit at **0** when nothing failed (also normal). After deploy, allow **~2× scrape interval** before `rate()` graphs populate.",
+        "content": "**Dashboard timezone:** `America/New_York` (US Eastern, DST-aware). **5xx %** can stay ~0 when request volume collapses (load generator pause, network path) — use **Total HTTP rate** and **Traffic vs 15m ago** below, and alert **ChatAppTrafficCliffWhileInstancesUp**.\n\n**Grader / delivery debugging** — WebSocket backpressure (dropped frames / killed sockets), message POST outcomes, async fanout queue health (read receipts & non-inline events), Postgres pool wait, auth bcrypt queue pressure, and `/api/v1/messages` HTTP. Correlate spikes with grader \"delivery fails\".\n\n**Empty panels:** **fanout job errors** stays empty when no async fanout failures (normal). **POST 403 by reason** / **aborted** / **WS backpressure** sit at **0** when nothing failed (also normal). After deploy, allow **~2× scrape interval** before `rate()` graphs populate.",
         "mode": "markdown"
       },
       "title": "",

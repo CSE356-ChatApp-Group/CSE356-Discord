@@ -91,7 +91,7 @@ You can still deploy manually from GitHub Actions using **Manual Deploy** (`work
 1. Open GitHub Actions → **Manual Deploy**.
 2. Click **Run workflow**.
 3. Choose `environment`: `staging` or `prod`.
-4. Optionally provide `sha` (if empty, workflow uses selected ref SHA).
+4. Optionally provide `sha` (if empty, workflow uses selected ref SHA). Short SHAs and refs are resolved to the full commit before checkout/download.
 
 Actions run **`ansible/playbooks/deploy-staging.yml`** / **`deploy-prod.yml`** ([`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml)), which call the same **`deploy/deploy-*.sh`** scripts as a local console deploy — one canonical path.
 

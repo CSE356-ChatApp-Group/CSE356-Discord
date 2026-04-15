@@ -109,6 +109,22 @@ const authBcryptDurationMs = new client.Histogram({
   buckets: [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
 });
 
+const authBcryptActive = new client.Gauge({
+  name: 'auth_bcrypt_active',
+  help: 'Number of bcrypt operations currently executing inside the app-level bcrypt gate',
+});
+
+const authBcryptWaiters = new client.Gauge({
+  name: 'auth_bcrypt_waiters',
+  help: 'Number of bcrypt operations currently waiting in the app-level bcrypt queue',
+});
+
+const authBcryptQueueRejectsTotal = new client.Counter({
+  name: 'auth_bcrypt_queue_rejects_total',
+  help: 'Number of bcrypt operations rejected or timed out before execution',
+  labelNames: ['reason'],
+});
+
 const authRateLimitHitsTotal = new client.Counter({
   name: 'auth_rate_limit_hits_total',
   help: 'Number of auth requests rejected by the auth-specific rate limiter',
@@ -446,6 +462,8 @@ function startPgPoolMetrics(pool) {
     clientRumBatchesTotal.inc(0);
     clientWebVitalTimingSeconds.observe({ name: 'LCP' }, 0);
     clientWebVitalClsScore.observe({ name: 'CLS' }, 0);
+    authBcryptQueueRejectsTotal.inc({ reason: 'saturated' }, 0);
+    authBcryptQueueRejectsTotal.inc({ reason: 'timeout' }, 0);
   } catch {
     /* ignore during unusual test setups */
   }
@@ -466,6 +484,9 @@ module.exports = {
   sideEffectQueueDroppedTotal,
   overloadStageGauge,
   authBcryptDurationMs,
+  authBcryptActive,
+  authBcryptWaiters,
+  authBcryptQueueRejectsTotal,
   authRateLimitHitsTotal,
   messagePostAccessDeniedTotal,
   messageIngestStreamAppendedTotal,

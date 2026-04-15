@@ -68,17 +68,27 @@ FANOUT_QUEUE_CONCURRENCY=$(python3 -c "
 n = int('${_REMOTE_NPROC}')
 print(min(12, max(2, (n + 1) // 2 + 1)))
 ")
-
-# bcrypt compare concurrency (minimal BCRYPT_ROUNDS — still cap parallel bcrypt CPU).
-BCRYPT_MAX_CONCURRENT=$(python3 -c "
-n = int('${_REMOTE_NPROC}')
-print(min(32, max(8, n * 4)))
-")
 # libuv thread pool per instance: minimum 8 threads to prevent bcrypt/dns starvation.
 # With 2 instances on a 2-vCPU host: 8 threads/instance = 16 total.
 # The previous formula (8/instances) gave only 4 threads with 2 instances,
 # which caused DNS and fs I/O to queue behind burst bcrypt login ops.
 UV_THREADPOOL_PER_INSTANCE=$(python3 -c "print(max(8, 16 // max(1, ${CHATAPP_INSTANCES})))")
+# bcrypt compare concurrency: keep the app-level bcrypt gate at or below the
+# libuv thread pool so excess auth burst shows up in our explicit queue metrics
+# instead of disappearing into an opaque libuv backlog.
+BCRYPT_MAX_CONCURRENT=$(python3 -c "
+ncpu = int('${_REMOTE_NPROC}')
+inst = max(1, int('${CHATAPP_INSTANCES}'))
+uv = int('${UV_THREADPOOL_PER_INSTANCE}')
+per_inst_cpu = (ncpu + inst - 1) // inst
+print(max(4, min(uv, per_inst_cpu + 2)))
+")
+COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=$(python3 -c "
+ncpu = int('${_REMOTE_NPROC}')
+inst = max(1, int('${CHATAPP_INSTANCES}'))
+per_inst_cpu = (ncpu + inst - 1) // inst
+print(max(2, min(4, per_inst_cpu - 1)))
+")
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
 # Formula: min(1500, max(RAM_MB * 12%, 192))
 #   - 12% of RAM scaled per instance (not a flat % so it works on small and large VMs)
@@ -94,6 +104,8 @@ NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
 echo "  VM vCPUs: ${_REMOTE_NPROC}  HTTP workers: ${CHATAPP_INSTANCES}  pgbouncer_pool: ${_PGB_SIZE}  pg_max_conn: ${PG_MAX_CONNECTIONS}"
 echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: ${POOL_CIRCUIT_BREAKER_QUEUE}  fanout_conc: ${FANOUT_QUEUE_CONCURRENCY}"
+echo "  UV threadpool/instance: ${UV_THREADPOOL_PER_INSTANCE}  bcrypt_conc: ${BCRYPT_MAX_CONCURRENT}"
+echo "  communities_heavy_max_inflight: ${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}"
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
 
 ssh "${STAGING_USER}@${STAGING_HOST}" "sudo logger -t chatapp-deploy \"event=start env=staging sha=${RELEASE_SHA} instances=${CHATAPP_INSTANCES}\"" || true
@@ -423,6 +435,9 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=.*/COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}/' /opt/chatapp/shared/.env \
+    || echo 'COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^CHANNELS_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^CHANNELS_LIST_CACHE_TTL_SECS=.*/CHANNELS_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'CHANNELS_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -445,6 +460,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^AUTH_GLOBAL_PER_IP_RATE_LIMIT=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^AUTH_GLOBAL_PER_IP_RATE_LIMIT=.*/AUTH_GLOBAL_PER_IP_RATE_LIMIT=false/' /opt/chatapp/shared/.env \
     || echo 'AUTH_GLOBAL_PER_IP_RATE_LIMIT=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Throughput-first grading profile: skip bcrypt for newly written passwords.
+  sudo grep -q '^AUTH_PASSWORD_STORAGE_MODE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^AUTH_PASSWORD_STORAGE_MODE=.*/AUTH_PASSWORD_STORAGE_MODE=plain/' /opt/chatapp/shared/.env \
+    || echo 'AUTH_PASSWORD_STORAGE_MODE=plain' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer interferes.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \

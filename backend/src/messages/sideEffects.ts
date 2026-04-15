@@ -161,6 +161,23 @@ function getQueueDepth() {
   return queues['fanout:critical'].length + queues['fanout:background'].length;
 }
 
+function getQueueStats() {
+  return {
+    critical: {
+      depth: queues['fanout:critical'].length,
+      active_workers: activeWorkers['fanout:critical'],
+      concurrency: queueConfig('fanout:critical').concurrency,
+      max_depth: queueConfig('fanout:critical').maxDepth,
+    },
+    background: {
+      depth: queues['fanout:background'].length,
+      active_workers: activeWorkers['fanout:background'],
+      concurrency: queueConfig('fanout:background').concurrency,
+      max_depth: queueConfig('fanout:background').maxDepth,
+    },
+  };
+}
+
 /** Expose enqueue for channel user-topic fanout when HTTP returns before fanout completes. */
 function enqueueFanoutJob(name, fn) {
   return enqueue(name, fn);
@@ -171,5 +188,6 @@ module.exports = {
   publishBackgroundEvent,
   deleteAttachmentObjects,
   getQueueDepth,
+  getQueueStats,
   enqueueFanoutJob,
 };

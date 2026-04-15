@@ -17,6 +17,8 @@ const overload = require('./overload');
 const { poolStats } = require('../db/pool');
 const redis = require('../db/redis');
 const wsServer = require('../websocket/server');
+const { getBcryptQueueStats } = require('../auth/passwords');
+const { getQueueStats } = require('../messages/sideEffects');
 
 function parseEnvInt(name: string, fallback: number): number {
   const v = parseInt(process.env[name] || '', 10);
@@ -46,6 +48,8 @@ function buildCapacityCore(
   redisPingMs: number | null,
 ) {
   const cfg = pgPoolConfig();
+  const bcrypt = getBcryptQueueStats();
+  const sideEffects = getQueueStats();
   return {
     schema: 1,
     port: parseEnvInt('PORT', 0),
@@ -61,6 +65,16 @@ function buildCapacityCore(
     pg_pool_max: pool.max,
     pg_pool_circuit_queue_max: cfg.circuit_queue_max,
     ws_local_clients: wsServer.getLocalWebSocketClientCount(),
+    bcrypt_active: bcrypt.active,
+    bcrypt_waiting: bcrypt.waiting,
+    bcrypt_max_concurrent: bcrypt.max_concurrent,
+    bcrypt_max_waiters: bcrypt.max_waiters,
+    fanout_critical_depth: sideEffects.critical.depth,
+    fanout_critical_workers: sideEffects.critical.active_workers,
+    fanout_critical_max_depth: sideEffects.critical.max_depth,
+    fanout_background_depth: sideEffects.background.depth,
+    fanout_background_workers: sideEffects.background.active_workers,
+    fanout_background_max_depth: sideEffects.background.max_depth,
     redis_ping_ms: redisPingMs,
   };
 }

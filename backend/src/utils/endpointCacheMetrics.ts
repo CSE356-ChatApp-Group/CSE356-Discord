@@ -10,7 +10,7 @@ export type ListCacheEndpoint =
   | 'conversations';
 
 export type ListCacheResult = 'hit' | 'miss' | 'coalesced';
-export type ListCacheBypassReason = 'pagination' | 'no_target' | 'redis_error';
+export type ListCacheBypassReason = 'pagination' | 'no_target' | 'redis_error' | 'pressure' | 'timeout';
 export type ListCacheInvalidationReason = 'write' | 'membership' | 'delete' | 'other';
 
 export function recordEndpointListCache(endpoint: ListCacheEndpoint, result: ListCacheResult): void {

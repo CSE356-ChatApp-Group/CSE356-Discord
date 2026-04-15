@@ -22,11 +22,22 @@
   "links": [],
   "panels": [
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
           "unit": "none"
         },
         "overrides": []
@@ -38,19 +49,40 @@
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "textMode": "value"
       },
-      "targets": [{ "expr": "sum(up{job=\"chatapp-api\"})", "refId": "A" }],
+      "targets": [
+        {
+          "expr": "sum(up{job=\"chatapp-api\"})",
+          "refId": "A"
+        }
+      ],
       "title": "API Targets Up",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 2 }] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          },
           "unit": "none"
         },
         "overrides": []
@@ -62,29 +94,141 @@
         "graphMode": "none",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "textMode": "value"
       },
-      "targets": [{ "expr": "sum(ALERTS{alertstate=\"firing\",alertname=~\"ChatApp.*\"}) or vector(0)", "refId": "A" }],
+      "targets": [
+        {
+          "expr": "sum(ALERTS{alertstate=\"firing\",alertname=~\"ChatApp.*\"}) or vector(0)",
+          "refId": "A"
+        }
+      ],
       "title": "Firing Alerts",
       "type": "stat"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 5 },
+      "id": 3,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m]))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Rate by Route",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
       "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
       "id": 4,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
         "tooltip": { "mode": "single", "sort": "none" }
       },
-      "targets": [{ "expr": "(100 * sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m])) / clamp_min(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m])), 1)) or vector(0)", "legendFormat": "5xx %", "refId": "A" }],
+      "targets": [
+        {
+          "expr": "(100 * sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m])) / clamp_min(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m])), 1)) or vector(0)",
+          "legendFormat": "5xx %",
+          "refId": "A"
+        }
+      ],
       "title": "5xx Error % (5m)",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "id": 5,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\"}[5m])))",
+          "legendFormat": "p95 latency",
+          "refId": "A"
+        }
+      ],
+      "title": "p95 Latency (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "id": 6,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "1000 * max(nodejs_eventloop_lag_p99_seconds{job=\"chatapp-api\"})",
+          "legendFormat": "event loop p99",
+          "refId": "A"
+        }
+      ],
+      "title": "Event Loop Lag p99 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes"
+        },
+        "overrides": []
+      },
       "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
       "id": 7,
       "options": {
@@ -92,49 +236,18 @@
         "tooltip": { "mode": "single", "sort": "none" }
       },
       "targets": [
-        { "expr": "max(process_resident_memory_bytes{job=\"chatapp-api\"}) / 1024 / 1024", "legendFormat": "rss max (MiB)", "refId": "A" },
-        { "expr": "650", "legendFormat": "ChatAppHighMemoryUsage threshold (per process)", "refId": "B" }
+        {
+          "expr": "max(process_resident_memory_bytes{job=\"chatapp-api\"}) / 1024 / 1024",
+          "legendFormat": "rss max (MiB)",
+          "refId": "A"
+        },
+        {
+          "expr": "650",
+          "legendFormat": "ChatAppHighMemoryUsage threshold (per process)",
+          "refId": "B"
+        }
       ],
       "title": "RSS Memory (MB)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 5 },
-      "id": 3,
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      },
-      "targets": [{ "expr": "sum by (route) (rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m]))", "legendFormat": "{{route}}", "refId": "A" }],
-      "title": "Request Rate by Route",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
-      "id": 5,
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
-        "tooltip": { "mode": "single", "sort": "none" }
-      },
-      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\"}[5m])))", "legendFormat": "p95 latency", "refId": "A" }],
-      "title": "p95 Latency (ms)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
-      "id": 6,
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
-        "tooltip": { "mode": "single", "sort": "none" }
-      },
-      "targets": [{ "expr": "1000 * max(nodejs_eventloop_lag_p99_seconds{job=\"chatapp-api\"})", "legendFormat": "event loop p99", "refId": "A" }],
-      "title": "Event Loop Lag p99 (ms)",
       "type": "timeseries"
     },
     {
@@ -146,21 +259,43 @@
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
         "tooltip": { "mode": "single", "sort": "none" }
       },
-      "targets": [{ "expr": "sum(rate(http_overload_shed_total{job=\"chatapp-api\"}[5m]))", "legendFormat": "shed / s", "refId": "A" }],
+      "targets": [
+        {
+          "expr": "sum(rate(http_overload_shed_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "shed / s",
+          "refId": "A"
+        }
+      ],
       "title": "Event-loop shed (rate) — early 503 under lag",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
       "gridPos": { "h": 6, "w": 8, "x": 8, "y": 21 },
       "id": 9,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
         "tooltip": { "mode": "single", "sort": "none" }
       },
-      "targets": [{ "expr": "sum by (route) (rate(auth_rate_limit_hits_total{job=\"chatapp-api\"}[5m]))", "legendFormat": "{{route}}", "refId": "A" }],
-      "title": "Auth rate-limit hits (rate) — login abuse / Login fails",
+      "targets": [
+        {
+          "expr": "max(auth_bcrypt_waiters{job=\"chatapp-api\"}) by (instance)",
+          "legendFormat": "waiters {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(auth_bcrypt_queue_rejects_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "reject {{reason}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max(auth_bcrypt_active{job=\"chatapp-api\"}) by (instance)",
+          "legendFormat": "active {{instance}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Auth bcrypt queue pressure — active, waiters, rejects",
       "type": "timeseries"
     },
     {
@@ -172,7 +307,13 @@
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
         "tooltip": { "mode": "single", "sort": "none" }
       },
-      "targets": [{ "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route=~\"/api/v1/auth.*\",status_class=\"5xx\"}[5m]))", "legendFormat": "auth 5xx", "refId": "A" }],
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route=~\"/api/v1/auth.*\",status_class=\"5xx\"}[5m]))",
+          "legendFormat": "auth 5xx",
+          "refId": "A"
+        }
+      ],
       "title": "Auth routes 5xx (rate) — Login fails",
       "type": "timeseries"
     },
@@ -185,20 +326,40 @@
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
-      "targets": [{ "expr": "sum(rate(side_effect_queue_dropped_total{job=\"chatapp-api\"}[5m])) by (name, reason)", "legendFormat": "{{name}} {{reason}}", "refId": "A" }],
+      "targets": [
+        {
+          "expr": "sum(rate(side_effect_queue_dropped_total{job=\"chatapp-api\"}[5m])) by (name, reason)",
+          "legendFormat": "{{name}} {{reason}}",
+          "refId": "A"
+        }
+      ],
       "title": "Side-effect queue drops (rate) — delivery pressure",
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
       "gridPos": { "h": 5, "w": 24, "x": 0, "y": 32 },
       "id": 12,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
         "tooltip": { "mode": "single", "sort": "none" }
       },
-      "targets": [{ "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m]))", "legendFormat": "5xx / s", "refId": "A" }],
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m]))",
+          "legendFormat": "5xx / s",
+          "refId": "A"
+        }
+      ],
       "title": "5xx absolute rate (req/s) — use with ChatApp5xxAbsoluteRate alert",
       "type": "timeseries"
     },
@@ -206,7 +367,7 @@
       "gridPos": { "h": 2, "w": 24, "x": 0, "y": 37 },
       "id": 13,
       "options": {
-        "content": "**Dashboard timezone:** `America/New_York` (US Eastern, DST-aware). **5xx %** can stay ~0 when request volume collapses (load generator pause, network path) — use **Total HTTP rate** and **Traffic vs 15m ago** below, and alert **ChatAppTrafficCliffWhileInstancesUp**.\n\n**Grader / delivery debugging** — WebSocket backpressure (dropped frames / killed sockets), message POST outcomes, async fanout queue health (read receipts & non-inline events), Postgres pool wait, and `/api/v1/messages` HTTP. Correlate spikes with grader \"delivery fails\".\n\n**Empty panels:** **fanout job errors** stays empty when no async fanout failures (normal). **POST 403 by reason** / **aborted** / **WS backpressure** sit at **0** when nothing failed (also normal). After deploy, allow **~2× scrape interval** before `rate()` graphs populate.",
+        "content": "**Dashboard timezone:** `America/New_York` (US Eastern, DST-aware). **5xx %** can stay ~0 when request volume collapses (load generator pause, network path) — use **Total HTTP rate** and **Traffic vs 15m ago** below, and alert **ChatAppTrafficCliffWhileInstancesUp**.\n\n**Grader / delivery debugging** — WebSocket backpressure (dropped frames / killed sockets), message POST outcomes, async fanout queue health (read receipts & non-inline events), Postgres pool wait, auth bcrypt queue pressure, and `/api/v1/messages` HTTP. Correlate spikes with grader \"delivery fails\".\n\n**Empty panels:** **fanout job errors** stays empty when no async fanout failures (normal). **POST 403 by reason** / **aborted** / **WS backpressure** sit at **0** when nothing failed (also normal). After deploy, allow **~2× scrape interval** before `rate()` graphs populate.",
         "mode": "markdown"
       },
       "title": "",
@@ -670,8 +831,13 @@
   "schemaVersion": 39,
   "style": "dark",
   "tags": ["chatapp", "observability"],
-  "templating": { "list": [] },
-  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "America/New_York",
   "title": "ChatApp Overview",

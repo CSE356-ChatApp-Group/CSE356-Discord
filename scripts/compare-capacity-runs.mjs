@@ -97,6 +97,8 @@ function extract(run) {
     channelsP95: metric(summary, 'channels_req_duration', 'p(95)'),
     conversationsP95: metric(summary, 'conversations_req_duration', 'p(95)'),
     loginP95: metric(summary, 'auth_login_req_duration', 'p(95)'),
+    wsDeliveryP95: metric(summary, 'message_ws_delivery_after_post_ms', 'p(95)'),
+    wsDeliveryMisses: metric(summary, 'optimization_ws_message_delivery_miss_total', 'count'),
     s0: metric(summary, 'http_res_status_0_total', 'count'),
     s503: metric(summary, 'http_res_status_503_total', 'count'),
     s5xxOther: metric(summary, 'http_res_status_5xx_other_total', 'count'),
@@ -106,6 +108,8 @@ function extract(run) {
     fiveXxIncrease15m: promScalar(after, 'five_xx_increase_15m'),
     abortedIncrease15m: promScalar(after, 'http_aborted_increase_15m'),
     eventLoopPeakMs: promScalar(after, 'eventloop_peak_ms'),
+    authBcryptActivePeak: promScalar(after, 'auth_bcrypt_active_peak'),
+    authBcryptWaitersPeak: promScalar(after, 'auth_bcrypt_waiters_peak'),
     cpuPeakRate: promScalar(after, 'cpu_peak_rate'),
   };
 }
@@ -141,6 +145,8 @@ lines.push(renderMetricRow('Communities p95 (ms)', b.communitiesP95, c.communiti
 lines.push(renderMetricRow('Channels p95 (ms)', b.channelsP95, c.channelsP95, { format: (x) => n(x), delta: { inverseBetter: true } }));
 lines.push(renderMetricRow('Conversations p95 (ms)', b.conversationsP95, c.conversationsP95, { format: (x) => n(x), delta: { inverseBetter: true } }));
 lines.push(renderMetricRow('Auth login p95 (ms)', b.loginP95, c.loginP95, { format: (x) => n(x), delta: { inverseBetter: true } }));
+lines.push(renderMetricRow('WS delivery p95 (ms)', b.wsDeliveryP95, c.wsDeliveryP95, { format: (x) => n(x), delta: { inverseBetter: true } }));
+lines.push(renderMetricRow('WS delivery misses', b.wsDeliveryMisses, c.wsDeliveryMisses, { format: (x) => n(x, 0), delta: { inverseBetter: true } }));
 lines.push(renderMetricRow('Status 0 count', b.s0, c.s0, { format: (x) => n(x, 0), delta: { inverseBetter: true } }));
 lines.push(renderMetricRow('Status 503 count', b.s503, c.s503, { format: (x) => n(x, 0), delta: { inverseBetter: true } }));
 lines.push(renderMetricRow('Status 5xx-other count', b.s5xxOther, c.s5xxOther, { format: (x) => n(x, 0), delta: { inverseBetter: true } }));
@@ -150,6 +156,8 @@ lines.push(renderMetricRow('5xx peak rate', b.fiveXxPeakRate, c.fiveXxPeakRate, 
 lines.push(renderMetricRow('5xx increase (15m)', b.fiveXxIncrease15m, c.fiveXxIncrease15m, { format: (x) => n(x), delta: { inverseBetter: true } }));
 lines.push(renderMetricRow('HTTP aborted increase (15m)', b.abortedIncrease15m, c.abortedIncrease15m, { format: (x) => n(x), delta: { inverseBetter: true } }));
 lines.push(renderMetricRow('Event loop peak (ms)', b.eventLoopPeakMs, c.eventLoopPeakMs, { format: (x) => n(x), delta: { inverseBetter: true } }));
+lines.push(renderMetricRow('Auth bcrypt active peak', b.authBcryptActivePeak, c.authBcryptActivePeak, { format: (x) => n(x), delta: { inverseBetter: true } }));
+lines.push(renderMetricRow('Auth bcrypt waiters peak', b.authBcryptWaitersPeak, c.authBcryptWaitersPeak, { format: (x) => n(x), delta: { inverseBetter: true } }));
 lines.push(renderMetricRow('CPU peak rate (cores)', b.cpuPeakRate, c.cpuPeakRate, { format: (x) => n(x), delta: { inverseBetter: false } }));
 lines.push('');
 lines.push('## Notes');

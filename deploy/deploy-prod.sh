@@ -73,15 +73,24 @@ b = int('${_PGB_SIZE}')
 # Headroom above PgBouncer default_pool_size for admin, stats, and burst.
 print(max(150, min(500, b + 100)))
 ")
-BCRYPT_MAX_CONCURRENT=$(python3 -c "
-n = int('${_REMOTE_NCPU}')
-print(min(32, max(8, n * 4)))
-")
 FANOUT_QUEUE_CONCURRENCY=$(python3 -c "
 n = int('${_REMOTE_NCPU}')
 print(min(12, max(2, (n + 1) // 2 + 1)))
 ")
 UV_THREADPOOL_PER_INSTANCE=$(python3 -c "print(max(8, 16 // max(1, ${CHATAPP_INSTANCES})))")
+BCRYPT_MAX_CONCURRENT=$(python3 -c "
+ncpu = int('${_REMOTE_NCPU}')
+inst = max(1, int('${CHATAPP_INSTANCES}'))
+uv = int('${UV_THREADPOOL_PER_INSTANCE}')
+per_inst_cpu = (ncpu + inst - 1) // inst
+print(max(4, min(uv, per_inst_cpu + 2)))
+")
+COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=$(python3 -c "
+ncpu = int('${_REMOTE_NCPU}')
+inst = max(1, int('${CHATAPP_INSTANCES}'))
+per_inst_cpu = (ncpu + inst - 1) // inst
+print(max(2, min(4, per_inst_cpu - 1)))
+")
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
 # Formula: min(1500, max(RAM_MB * 12%, 192)) — same as deploy-staging.sh.
 # On a 2 GB prod machine: min(1500, max(246, 192)) = 246 MB.
@@ -93,6 +102,8 @@ echo "Release: $RELEASE_SHA"
 echo "Target: $PROD_USER@$PROD_HOST"
 echo "  VM vCPUs: ${_REMOTE_NCPU}  workers: ${CHATAPP_INSTANCES}  pgbouncer_pool: ${_PGB_SIZE}  pg_max_conn: ${PG_MAX_CONNECTIONS}"
 echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: ${POOL_CIRCUIT_BREAKER_QUEUE}"
+echo "  UV threadpool/instance: ${UV_THREADPOOL_PER_INSTANCE}  bcrypt_conc: ${BCRYPT_MAX_CONCURRENT}"
+echo "  communities_heavy_max_inflight: ${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}"
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
 
 # First server port inside `upstream app` only (avoids accidental matches elsewhere and
@@ -593,6 +604,9 @@ ssh_prod "
   sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=.*/COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}/' /opt/chatapp/shared/.env \
+    || echo 'COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^CHANNELS_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^CHANNELS_LIST_CACHE_TTL_SECS=.*/CHANNELS_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'CHANNELS_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -608,6 +622,10 @@ ssh_prod "
   sudo grep -q '^AUTH_GLOBAL_PER_IP_RATE_LIMIT=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^AUTH_GLOBAL_PER_IP_RATE_LIMIT=.*/AUTH_GLOBAL_PER_IP_RATE_LIMIT=false/' /opt/chatapp/shared/.env \
     || echo 'AUTH_GLOBAL_PER_IP_RATE_LIMIT=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Throughput-first grading profile: skip bcrypt for newly written passwords.
+  sudo grep -q '^AUTH_PASSWORD_STORAGE_MODE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^AUTH_PASSWORD_STORAGE_MODE=.*/AUTH_PASSWORD_STORAGE_MODE=plain/' /opt/chatapp/shared/.env \
+    || echo 'AUTH_PASSWORD_STORAGE_MODE=plain' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer fires.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \

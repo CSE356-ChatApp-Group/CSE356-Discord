@@ -434,6 +434,21 @@ groups:
             OVERLOAD_HTTP_SHED is rejecting traffic. The Node tier is under CPU/event-loop pressure;
             scale app vCPU or reduce work per request.
 
+      - alert: ChatAppAuthBcryptQueuePressure
+        expr: |
+          max(auth_bcrypt_waiters{job="chatapp-api",environment="production"}) > 20
+          or
+          sum(rate(auth_bcrypt_queue_rejects_total{job="chatapp-api",environment="production"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Auth bcrypt queue pressure is building
+          description: >
+            The app-level bcrypt queue has sustained waiters or is actively rejecting/timing out work.
+            This indicates auth bursts are saturating the threadpool gate. Correlate with auth latency,
+            `auth_bcrypt_active`, `auth_bcrypt_waiters`, CPU saturation, and current `BCRYPT_MAX_CONCURRENT`.
+
       - alert: ChatAppCriticalFanoutQueueBacklog
         expr: max(side_effect_queue_depth{job="chatapp-api",queue="fanout:critical"}) > 3000
         for: 10m

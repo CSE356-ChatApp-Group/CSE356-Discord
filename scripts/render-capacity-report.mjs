@@ -272,6 +272,12 @@ lines.push(`- Auth login p95: ${fmt(metric(summary, 'auth_login_req_duration', '
 lines.push(
   `- WebSocket success rate: ${fmt((metric(summary, 'ws_connect_success', 'rate') ?? metric(summary, 'ws_connect_success', 'value') ?? 0) * 100, '%')}`,
 );
+const wsDeliveryP95 = metric(summary, 'message_ws_delivery_after_post_ms', 'p(95)');
+const wsDeliveryMiss = metricCounter(summary, 'optimization_ws_message_delivery_miss_total');
+if (wsDeliveryP95 !== null || wsDeliveryMiss !== null) {
+  lines.push(`- WS post→delivery p95: ${fmt(wsDeliveryP95, ' ms')}`);
+  lines.push(`- WS delivery misses (>15s or no frame): ${fmt(wsDeliveryMiss ?? 0)}`);
+}
 const dropped = metric(summary, 'dropped_iterations', 'count');
 const iters = metric(summary, 'iterations', 'count');
 const iterRateFromMetric = metric(summary, 'iterations', 'rate');
@@ -335,13 +341,27 @@ lines.push(
 lines.push(
   `| **HTTP outage signals** | ${fmt(outageCnt ?? 0)} | responses with status **0** or **≥500** |`,
 );
+if (wsDeliveryP95 !== null || wsDeliveryMiss !== null) {
+  lines.push(
+    `| **WS delivery misses** (15s SLA) | ${fmt(wsDeliveryMiss ?? 0)} | \`optimization_ws_message_delivery_miss_total\` |`,
+  );
+  lines.push(
+    `| **WS post→delivery p95** | ${fmt(wsDeliveryP95, ' ms')} | \`message_ws_delivery_after_post_ms\` |`,
+  );
+}
 lines.push('');
 lines.push(
   '_**Peak connections** — target concurrent WS load is profile `wsVUs`; HTTP parallelism is capped by `maxVUs` in `load-tests/staging-capacity.js`. Compare `vus.max` and `ws_sessions` run-over-run._',
 );
-lines.push(
-  '_Real-time message **fan-out** to other clients is not asserted in this script; extend WS scenarios to subscribe to a channel and await `message:created` if you need end-to-end delivery proof._',
-);
+if (wsDeliveryP95 !== null || wsDeliveryMiss !== null) {
+  lines.push(
+    '_This run **did** assert realtime delivery: a WS client subscribed to the target channel, then measured time from successful `POST /messages` to the matching `message:created` frame._',
+  );
+} else {
+  lines.push(
+    '_Real-time message **fan-out** to other clients was **not** asserted in this profile; use `slo` or set `LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1` if you need end-to-end delivery proof._',
+  );
+}
 lines.push('');
 const breaches = collectThresholdBreaches(summary);
 if (breaches.length) {
@@ -410,6 +430,8 @@ if (cpuByInstance.length > 1) {
 }
 lines.push(`- Event loop p99 (post-run): ${fmt(promScalar(after, 'eventloop_p99_ms'), ' ms')}`);
 lines.push(`- Event loop p99 peak: ${fmt(promScalar(after, 'eventloop_peak_ms'), ' ms')}`);
+lines.push(`- Auth bcrypt active peak: ${fmt(promScalar(after, 'auth_bcrypt_active_peak'))}`);
+lines.push(`- Auth bcrypt waiters peak: ${fmt(promScalar(after, 'auth_bcrypt_waiters_peak'))}`);
 lines.push(`- 5xx rate (post-run instant): ${fmt(promScalar(after, 'five_xx_rate', 0), ' req/s')}`);
 lines.push(`- 5xx rate peak during run: ${fmt(promScalar(after, 'five_xx_peak_rate', 0), ' req/s')}`);
 const fiveXxInc = promScalar(after, 'five_xx_increase_15m', null);
@@ -491,6 +513,20 @@ if (queueDepth.length) {
   lines.push('### Side-effect queue depth');
   for (const item of queueDepth) {
     lines.push(`- ${item.metric?.queue || 'unknown'}: ${item.value?.[1] ?? 'n/a'}`);
+  }
+  lines.push('');
+}
+
+const authRejects = promResult(after, 'auth_bcrypt_rejects_increase_15m')
+  .map((item) => ({
+    reason: item.metric?.reason || 'unknown',
+    value: Number(item.value?.[1]),
+  }))
+  .filter((item) => Number.isFinite(item.value) && item.value > 0);
+if (authRejects.length) {
+  lines.push('### Auth bcrypt queue rejects (∆15m)');
+  for (const item of authRejects) {
+    lines.push(`- ${item.reason}: ${fmt(item.value)}`);
   }
   lines.push('');
 }

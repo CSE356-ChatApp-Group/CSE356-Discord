@@ -26,7 +26,7 @@ const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
 const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
 const { invalidateCommunityChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
-const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
+const { recordEndpointListCache, recordEndpointListCacheBypass } = require('../utils/endpointCacheMetrics');
 
 const router = express.Router();
 router.use(authenticate);
@@ -55,7 +55,13 @@ const COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS =
   Number.isFinite(_communitiesHeavyTimeout) && _communitiesHeavyTimeout > 100
     ? _communitiesHeavyTimeout
     : 2500;
+const _communitiesHeavyInflight = parseInt(process.env.COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT || '4', 10);
+const COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT =
+  Number.isFinite(_communitiesHeavyInflight) && _communitiesHeavyInflight > 0
+    ? _communitiesHeavyInflight
+    : 4;
 const PUBLIC_COMMUNITIES_VERSION_KEY = 'communities:list:public_version';
+let communitiesHeavyQueriesInFlight = 0;
 
 function communitiesCacheKey(userId, publicVersion = '0') {
   return `communities:list:${userId}:v${publicVersion}`;
@@ -182,6 +188,19 @@ function isCommunitiesTimeout(err) {
 async function queryCommunitiesListWithFallback(baseSql, params, orderAndLimitSql) {
   const fullSql = `${baseSql}
        ${orderAndLimitSql}`;
+  const fallbackSql = `${COMMUNITIES_LIST_FALLBACK_CORE}
+       ${orderAndLimitSql}`;
+
+  if (communitiesHeavyQueriesInFlight >= COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT) {
+    recordEndpointListCacheBypass('communities', 'pressure');
+    return query({
+      text: fallbackSql,
+      values: params,
+      query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
+    });
+  }
+
+  communitiesHeavyQueriesInFlight += 1;
   try {
     return await query({
       text: fullSql,
@@ -192,13 +211,14 @@ async function queryCommunitiesListWithFallback(baseSql, params, orderAndLimitSq
   } catch (err) {
     if (!isCommunitiesTimeout(err)) throw err;
     logger.warn({ err }, 'Communities heavy query timed out; using fallback');
-    const fallbackSql = `${COMMUNITIES_LIST_FALLBACK_CORE}
-       ${orderAndLimitSql}`;
+    recordEndpointListCacheBypass('communities', 'timeout');
     return query({
       text: fallbackSql,
       values: params,
       query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
     });
+  } finally {
+    communitiesHeavyQueriesInFlight = Math.max(0, communitiesHeavyQueriesInFlight - 1);
   }
 }
 
