@@ -8,6 +8,7 @@
 const { query } = require('../db/pool');
 const redis = require('../db/redis');
 const fanout = require('../websocket/fanout');
+const { publishUserFeedTargets } = require('../websocket/userFeed');
 const sideEffects = require('./sideEffects');
 const { wsRecentConnectKey } = require('../websocket/recentConnect');
 const logger = require('../utils/logger');
@@ -151,13 +152,9 @@ async function publishUserTopicTargets(
 ) {
   if (!targets.length) return;
   const publishStartedAt = process.hrtime.bigint();
-  const batchSize = 100;
   fanoutPublishTargetsHistogram.observe({ path }, targets.length);
   fanoutRecipientsHistogram.observe({ channel_type: 'user' }, targets.length);
-  for (let i = 0; i < targets.length; i += batchSize) {
-    const batch = targets.slice(i, i + batchSize);
-    await Promise.all(batch.map((target) => fanout.publish(target, envelope)));
-  }
+  await publishUserFeedTargets(targets, envelope);
   fanoutPublishDurationMs.observe(
     { path, stage: 'publish' },
     Number(process.hrtime.bigint() - publishStartedAt) / 1e6,

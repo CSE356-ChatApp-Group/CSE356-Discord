@@ -38,8 +38,8 @@ PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-true}"
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 
 # Number of Node.js HTTP workers (systemd chatapp@ ports).
-# Default to 2 so prod uses both ports on multi-core hosts unless explicitly overridden.
-CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-2}
+# Production runs four workers by default (chatapp@4000..@4003) unless explicitly overridden.
+CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-4}
 _REMOTE_NCPU=$(ssh_prod 'nproc --all' 2>/dev/null || echo 2)
 # PgBouncer pool + Node pool math matches deploy-staging.sh (same caps, different host).
 # Scale default_pool_size with **host vCPU** so 8 vCPU (etc.) actually gets more real PG
@@ -603,8 +603,8 @@ ssh_prod "
     && sudo sed -i 's/^AUTH_BYPASS=.*/AUTH_BYPASS=false/' /opt/chatapp/shared/.env \
     || echo 'AUTH_BYPASS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # FANOUT_QUEUE_CONCURRENCY: parallel fanout:critical workers per instance.
-  # Prod has 1 CPU so 2 concurrent fanout jobs is enough — keeps queue latency
-  # low without over-parallelising on a single core.
+  # This is computed from remote CPU count above so each deploy keeps queue
+  # latency low without blindly over-parallelising the host.
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
     || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -629,6 +629,12 @@ ssh_prod "
   sudo grep -q '^MESSAGE_USER_FANOUT_HTTP_BLOCKING=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=true/' /opt/chatapp/shared/.env \
     || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^WS_AUTO_SUBSCRIBE_MODE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^WS_AUTO_SUBSCRIBE_MODE=.*/WS_AUTO_SUBSCRIBE_MODE=user_only/' /opt/chatapp/shared/.env \
+    || echo 'WS_AUTO_SUBSCRIBE_MODE=user_only' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^USER_FEED_SHARD_COUNT=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=64/' /opt/chatapp/shared/.env \
+    || echo 'USER_FEED_SHARD_COUNT=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null

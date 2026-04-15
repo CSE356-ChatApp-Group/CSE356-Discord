@@ -33,6 +33,10 @@ const redis = require('../src/db/redis') as {
   del: jest.Mock;
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { userFeedRedisChannelForUserId } = require('../src/websocket/userFeed') as {
+  userFeedRedisChannelForUserId: (userId: string) => string;
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   publishChannelMessageCreated,
   getChannelUserFanoutTargetKeys,
@@ -112,12 +116,13 @@ describe('channelRealtimeFanout', () => {
     redis.get.mockResolvedValueOnce(null);
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
-    expect(fanout.publish).toHaveBeenCalledTimes(3);
-    expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+    const expectedChannels = [
       'channel:c1',
-      'user:a',
-      'user:b',
-    ]);
+      userFeedRedisChannelForUserId('a'),
+      userFeedRedisChannelForUserId('b'),
+    ].sort();
+    expect(fanout.publish).toHaveBeenCalledTimes(new Set(expectedChannels).size);
+    expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
   });
 
   it('publishChannelMessageCreated fast-paths only recent-connect user targets when opted in', async () => {
@@ -128,11 +133,12 @@ describe('channelRealtimeFanout', () => {
       redis.mget.mockResolvedValueOnce(['1', null]);
       query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
       await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
-      expect(fanout.publish).toHaveBeenCalledTimes(2);
-      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+      const expectedChannels = [
         'channel:c1',
-        'user:a',
-      ]);
+        userFeedRedisChannelForUserId('a'),
+      ].sort();
+      expect(fanout.publish).toHaveBeenCalledTimes(new Set(expectedChannels).size);
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
     } finally {
       if (prev === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
       else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prev;
@@ -144,12 +150,13 @@ describe('channelRealtimeFanout', () => {
     redis.mget.mockRejectedValueOnce(new Error('redis mget failed'));
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
-    expect(fanout.publish).toHaveBeenCalledTimes(3);
-    expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+    const expectedChannels = [
       'channel:c1',
-      'user:a',
-      'user:b',
-    ]);
+      userFeedRedisChannelForUserId('a'),
+      userFeedRedisChannelForUserId('b'),
+    ].sort();
+    expect(fanout.publish).toHaveBeenCalledTimes(new Set(expectedChannels).size);
+    expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
   });
 
   it('publishChannelMessageCreated skips user topics when CHANNEL_MESSAGE_USER_FANOUT=0', async () => {

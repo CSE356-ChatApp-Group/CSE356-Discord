@@ -17,6 +17,7 @@ const sideEffects      = require('../messages/sideEffects');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
 const fanout           = require('../websocket/fanout');
+const { publishUserFeedTargets } = require('../websocket/userFeed');
 const {
   invalidateWsAclCache,
   invalidateWsBootstrapCache,
@@ -137,16 +138,14 @@ async function publishChannelLifecycleEvent(communityId, event, data) {
 
   if (event === 'channel:deleted') {
     const userIds = await listCommunityUserIds(communityId);
-    await Promise.allSettled(
-      userIds.map((userId) => fanout.publish(`user:${userId}`, { event, data }))
-    );
+    await Promise.allSettled([publishUserFeedTargets(userIds, { event, data })]);
     return;
   }
 
   const audience = await listChannelLifecycleAudience(communityId, data.id);
   await Promise.allSettled(
     audience.map((entry) =>
-      fanout.publish(`user:${entry.user_id}`, {
+      publishUserFeedTargets([entry.user_id], {
         event,
         data: {
           ...data,

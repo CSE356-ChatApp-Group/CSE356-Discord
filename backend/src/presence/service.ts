@@ -14,6 +14,7 @@
 
 const redis = require("../db/redis");
 const fanout = require("../websocket/fanout");
+const { publishUserFeedTargets } = require("../websocket/userFeed");
 const { query } = require("../db/pool");
 const overload = require("../utils/overload");
 const logger = require("../utils/logger");
@@ -196,7 +197,7 @@ async function setPresence(userId, status, awayMessage) {
       fanoutSpan.setAttributes({ userId, status });
       try {
         // Publish to the user's personal channel first.
-        await fanout.publish(`user:${userId}`, payload);
+        await publishUserFeedTargets([userId], payload);
 
         // Reuse a short-lived Redis cache for fanout targets so high-frequency
         // presence updates do not hammer Postgres as traffic grows.

@@ -14,6 +14,7 @@ const { query, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
+const { publishUserFeedTargets, splitUserTargets } = require('../websocket/userFeed');
 const presenceService  = require('../presence/service');
 const { invalidateWsBootstrapCache } = require('../websocket/server');
 const { bustConversationMessagesCache } = require('./messageCacheBust');
@@ -27,7 +28,11 @@ router.use(authenticate);
 function publishConversationEvents(targets, event, data) {
   const uniqueTargets = [...new Set(targets.filter(Boolean))];
   const payload = wrapFanoutPayload(event, data);
-  return Promise.allSettled(uniqueTargets.map((target) => fanout.publish(target, payload)));
+  const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
+  return Promise.allSettled([
+    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
+    ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
+  ]);
 }
 
 async function publishConversationInviteNotifications(targets, data) {

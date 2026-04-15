@@ -74,6 +74,7 @@ describe('DM realtime delivery', () => {
       const messageId = createMessageRes.body.message.id;
       const createdEvent = await createdEventPromise;
       expect(createdEvent.data.id).toBe(messageId);
+      expect(createdEvent.channel).toBe(`user:${recipient.user.id}`);
 
       // message:updated
       const updatedEventPromise = waitForWsEvent(
@@ -374,6 +375,10 @@ describe('Channel realtime delivery', () => {
       expect(sendRes.status).toBe(201);
       const event = await createdEventPromise;
       expect(event.data.content).toBe('channel ws auto-sub check');
+      expect([
+        `user:${member.user.id}`,
+        `channel:${channelId}`,
+      ]).toContain(event.channel);
     } finally {
       await closeWebSocket(memberSocket);
     }

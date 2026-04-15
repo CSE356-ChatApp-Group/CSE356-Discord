@@ -59,6 +59,7 @@ const { appendChannelMessageIngested } = require('./messageIngestLog');
 const {
   getConversationFanoutTargets,
 } = require('./conversationFanoutTargets');
+const { publishUserFeedTargets, splitUserTargets } = require('../websocket/userFeed');
 
 const router = express.Router();
 router.use(authenticate);
@@ -209,17 +210,23 @@ async function publishConversationEventNow(conversationId, event, data) {
     Number(process.hrtime.bigint() - lookupStartedAt) / 1e6,
   );
   let uniqueTargets: string[] = [...new Set(targets)];
-
   if (event === 'read:updated') {
     uniqueTargets = uniqueTargets.filter((target) => target.startsWith('user:'));
   }
+  const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
 
   // Any partial Redis failure must not return HTTP success while a participant
   // misses message:* / read — mirrors single-target await for channel posts.
   const payload = wrapFanoutPayload(event, data);
-  fanoutPublishTargetsHistogram.observe({ path: 'conversation_event' }, uniqueTargets.length);
+  fanoutPublishTargetsHistogram.observe(
+    { path: 'conversation_event' },
+    passthroughTargets.length + userIds.length,
+  );
   const publishStartedAt = process.hrtime.bigint();
-  await Promise.all(uniqueTargets.map((target) => fanout.publish(target, payload)));
+  await Promise.all([
+    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
+    ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
+  ]);
   fanoutPublishDurationMs.observe(
     { path: 'conversation_event', stage: 'publish' },
     Number(process.hrtime.bigint() - publishStartedAt) / 1e6,
@@ -231,9 +238,6 @@ async function publishConversationEventNow(conversationId, event, data) {
 
   if (event === 'read:updated') return undefined;
 
-  const userIds = uniqueTargets
-    .filter((target) => target.startsWith('user:'))
-    .map((target) => target.slice(5));
   Promise.allSettled(userIds.map((uid) => redis.del(`conversations:list:${uid}`))).catch(() => {});
 
   return fanoutPublishedAt(payload);
@@ -1402,7 +1406,7 @@ router.put('/:id/read',
         // Channel read cursors are private: fan out only to the reader's user topic
         // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
         // which would leak other members' read positions to WebSocket clients.
-        await fanout.publish(`user:${uid}`, { event: 'read:updated', data: payload });
+        await publishUserFeedTargets([uid], { event: 'read:updated', data: payload });
       }
 
       // Reset the user's unread watermark in Redis to the current channel message count

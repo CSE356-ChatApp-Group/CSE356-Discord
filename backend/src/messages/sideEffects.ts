@@ -1,6 +1,7 @@
 'use strict';
 
 const fanout = require('../websocket/fanout');
+const { publishUserFeedTargets, userIdFromTarget } = require('../websocket/userFeed');
 const logger = require('../utils/logger');
 const redis = require('../db/redis');
 const {
@@ -134,12 +135,22 @@ refreshQueueMetrics('fanout:background');
 
 function publishMessageEvent(target, event, data) {
   enqueue('fanout.publish', async () => {
+    const userId = userIdFromTarget(target);
+    if (typeof target === 'string' && target.startsWith('user:') && userId) {
+      await publishUserFeedTargets([userId], { event, data });
+      return;
+    }
     await fanout.publish(target, { event, data });
   });
 }
 
 function publishBackgroundEvent(target, event, data) {
   enqueue('fanout:background.publish', async () => {
+    const userId = userIdFromTarget(target);
+    if (typeof target === 'string' && target.startsWith('user:') && userId) {
+      await publishUserFeedTargets([userId], { event, data });
+      return;
+    }
     await fanout.publish(target, { event, data });
   });
 }

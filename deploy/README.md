@@ -221,7 +221,7 @@ Production deploys are designed for **no hard cut** while old and new binaries b
 1. **Ship code** — merge to `main`, wait for **CI Build & Package** + **`release-<sha>`** on GitHub Releases (same artifact staging and prod use).
 2. **Prove staging** — `./deploy/deploy-staging.sh <sha>` (or Actions auto-deploy) until green; run smoke / e2e / capacity scripts you rely on.
 3. **Preflight prod** — `./deploy/preflight-check.sh prod <sha> <PROD_USER> <PROD_HOST> <GITHUB_REPO>` from a host that can SSH and reach the artifact (VPN/firewall as needed).
-4. **Run prod deploy** — `CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <sha>` (or **Manual Deploy** → `production` in GitHub Actions). The script: **pg_dump backup** → candidate on **alternate port** → health + smoke **before** nginx sends live traffic → **pin candidate → roll non-candidate workers → restore upstream** so users keep an upstream during the swap.
+4. **Run prod deploy** — `CHATAPP_INSTANCES=4 ./deploy/deploy-prod.sh <sha>` (or **Manual Deploy** → `production` in GitHub Actions). The script: **pg_dump backup** → candidate on **alternate port** → health + smoke **before** nginx sends live traffic → **pin candidate → roll non-candidate workers → restore upstream** so users keep an upstream during the swap.
 5. **Migrations** — keep changes **backward compatible** across the window where both versions may answer (see step 9 narrative below). Destructive DDL only with a separate maintenance plan.
 6. **After cutover** — `./scripts/prod-nginx-audit.sh`, watch Grafana/Prometheus, keep old release on disk for rollback.
 7. **Rollback** — re-run `deploy-prod.sh` with the **previous SHA**, or use the script’s rollback path / nginx upstream fix (see **Immediate Rollback** below); do not blind-`sed` nginx ports.
@@ -229,14 +229,14 @@ Production deploys are designed for **no hard cut** while old and new binaries b
 **Not touched by this process:** DNS (same VM), Postgres availability (brief pool pressure only if migrations are heavy). **Downtime risk** is usually mis-nginx or bad migration, not the Node swap itself.
 
 ```bash
-# Default is dual-worker (CHATAPP_INSTANCES=2). Override only if you intentionally
-# run single-worker on a very small host:
-CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <commit-sha>
+# Production defaults to four workers (CHATAPP_INSTANCES=4). Override only if you intentionally
+# run fewer workers on a smaller host:
+CHATAPP_INSTANCES=4 ./deploy/deploy-prod.sh <commit-sha>
 ```
 
 `deploy-prod.sh` rewrites the whole `upstream app { ... }` block (no fragile global `sed` on ports). When **`CHATAPP_INSTANCES>=2`**, step **9** only applies **listen backlog / `nginx.conf` / sysctl** tuning and leaves current upstreams in place while the candidate warms up. Step **9a** pins nginx to the **candidate port only** before **9b** restarts non-candidate workers (**`PIN_CANDIDATE_BEFORE_COMPANION`** defaults **`true`** so POST traffic is not routed to a restarting peer; set `false` only if you accept brief 502s or rely on **`proxy_next_upstream … non_idempotent`** in `/api/`). **9c** restores `least_conn` across all target worker ports (`4000..4000+CHATAPP_INSTANCES-1`) with **`max_fails=0`** so transient 5xx bursts do not drain every peer and trigger `no live upstreams`. There is still a **shared-traffic window** before **9a** where **old and new code** may both serve requests; keep DB migrations and API responses **backward compatible** across that window. After **9a**, capacity is on the candidate only until **9c** completes.
 
-**GitHub Actions:** manual prod deploy passes `chatapp_instances` (default **2** via `CHATAPP_INSTANCES_PROD` repo variable or literal `2` in `deploy-manual.yml`). Set repo variable `CHATAPP_INSTANCES_PROD` to `1` only if you intentionally run a single worker.
+**GitHub Actions:** manual prod deploy passes `chatapp_instances` (default **4** via `CHATAPP_INSTANCES_PROD` repo variable or literal `4` in `deploy-manual.yml`). Set repo variable `CHATAPP_INSTANCES_PROD` lower only if you intentionally run a smaller worker pool.
 
 This:
 1. Confirms you want to deploy to production (interactive prompt)
@@ -286,8 +286,8 @@ Promote pool / `FANOUT_QUEUE_CONCURRENCY` / `OVERLOAD_*` changes to prod only af
 ### Scaling up (8 vCPU) or moving Postgres off-box
 
 **Vertical scale (recommended first step)**  
-1. Resize the production VM to **8 vCPU** (and **≥16 GiB RAM** if the platform allows — you still run **PostgreSQL + PgBouncer + two Node workers + nginx + Redis** on one host).  
-2. Run a normal prod deploy (`CHATAPP_INSTANCES=2`). [`deploy-prod.sh`](./deploy-prod.sh) probes **`nproc`** and **`MemTotal`** on the VM and recomputes **PgBouncer `default_pool_size`**, **`PG_POOL_MAX` per instance**, **`max_connections`**, **`FANOUT_QUEUE_CONCURRENCY`**, **`BCRYPT_MAX_CONCURRENT`**, heap caps, etc. You do **not** hand-edit pool sizes for a larger SKU unless you are doing something special.  
+1. Resize the production VM to **8 vCPU** (and **≥16 GiB RAM** if the platform allows — you still run **PostgreSQL + PgBouncer + four Node workers on the current prod layout + nginx + Redis** on one host).
+2. Run a normal prod deploy (`CHATAPP_INSTANCES=4` on the current host layout unless you are intentionally scaling down). [`deploy-prod.sh`](./deploy-prod.sh) probes **`nproc`** and **`MemTotal`** on the VM and recomputes **PgBouncer `default_pool_size`**, **`PG_POOL_MAX` per instance**, **`max_connections`**, **`FANOUT_QUEUE_CONCURRENCY`**, **`BCRYPT_MAX_CONCURRENT`**, heap caps, etc. You do **not** hand-edit pool sizes for a larger SKU unless you are doing something special.
 3. If PostgreSQL needs a restart to apply a higher `max_connections`, either set **`ALLOW_DB_RESTART=true`** for that one deploy (see script header / postgres tuning block) or restart Postgres once after deploy when maintenance allows.
 
 **Why this matters:** older sizing used a term that **capped** the PgBouncer pool at **170** for any **two-worker** host with **≥4 vCPU**, so **going from 4→8 vCPU did not increase DB backend headroom**. The current formula scales **`ncpu * 50`** (plus a small multi-worker bump), up to **320** real backends — e.g. **8 vCPU / 2 workers** → **320** pool, **~170** virtual clients per Node cap (see deploy log line at start of run).
@@ -520,7 +520,7 @@ Create `/opt/chatapp/shared/.env` on production VM:
 
 **Fanout:** `FANOUT_QUEUE_CONCURRENCY` is written by `deploy-prod.sh` from VM shape; raise only after staging load tests show headroom.
 
-**Channel `message:created`:** the app **defaults to** duplicate Redis publish to each member’s **`user:<id>`** (see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md)). **`deploy-staging.sh`** and **`deploy-prod.sh`** both re-apply recommended **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`**, **`WS_BOOTSTRAP_BATCH_SIZE=64`**, **`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`**, and list-cache TTLs (`COMMUNITIES_LIST_CACHE_TTL_SECS=300`, `CHANNELS_LIST_CACHE_TTL_SECS=300`) on every deploy so shared `.env` cannot drift. To **permanently** opt back into the lighter `recent_connect` experiment or disable user-topic fanout entirely, edit those lines in **`deploy-prod.sh`** / **`deploy-staging.sh`** — editing only `/opt/chatapp/shared/.env` is overwritten on the next deploy.
+**Channel `message:created`:** the app **defaults to** logical per-member user delivery, implemented internally via sharded Redis **`userfeed:<n>`** publishes that route to each socket’s **`user:<id>`** stream (see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md)). **`deploy-staging.sh`** and **`deploy-prod.sh`** both re-apply recommended **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`**, **`WS_AUTO_SUBSCRIBE_MODE=user_only`**, **`USER_FEED_SHARD_COUNT=64`**, **`WS_BOOTSTRAP_BATCH_SIZE=64`**, **`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`**, and list-cache TTLs (`COMMUNITIES_LIST_CACHE_TTL_SECS=300`, `CHANNELS_LIST_CACHE_TTL_SECS=300`) on every deploy so shared `.env` cannot drift. To **permanently** opt back into the lighter `recent_connect` experiment, restore full websocket bootstrap, or disable logical user fanout entirely, edit those lines in **`deploy-prod.sh`** / **`deploy-staging.sh`** — editing only `/opt/chatapp/shared/.env` is overwritten on the next deploy.
 
 ### Course grader: “delivery fails” vs HTTP 403
 

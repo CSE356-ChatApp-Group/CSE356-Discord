@@ -24,15 +24,16 @@
  *                  │  WS clients │       │  WS clients │
  *                  └─────────────┘       └─────────────┘
  *
- * Phase 2 (heavier fan-out) — engineering note
- * --------------------------------------------
- * Today each browser subscribes to many Redis channels (per DM, per community
- * channel, per user inbox). Under large guilds + many open DMs, pub/sub fan-in
- * and per-socket delivery become the bottleneck before Postgres.
+ * Realtime throughput notes
+ * -------------------------
+ * The current design keeps explicit `channel:` / `conversation:` subscriptions
+ * for rich clients, but now applies two important server-side reductions:
+ *   • Logical `user:<id>` delivery is backed by shared Redis `userfeed:<shard>`
+ *     channels, so one publish can cover many recipients on the same shard.
+ *   • The default connect path auto-subscribes only `user:<self>`; richer topic
+ *     subscriptions happen explicitly from the client after it loads state.
  *
- * Planned mitigations (not all implemented here):
- *   • Collapse subscriptions: e.g. one “bootstrap” stream per user plus targeted
- *     refetches instead of N parallel channel topics.
+ * Remaining future work, if we need another step up:
  *   • Aggregate presence/notifications server-side before WS push.
  *   • Prefer server-initiated delta sync when backpressure fires instead of
  *     unbounded frame queues.
@@ -62,6 +63,11 @@ const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { markWsRecentConnect } = require("./recentConnect");
+const {
+  isUserFeedEnvelope,
+  userFeedRedisChannelForUserId,
+  userIdFromTarget,
+} = require("./userFeed");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -404,6 +410,8 @@ async function reconcileAllConnectedUsers() {
  * This map is LOCAL to this process (node).
  */
 const channelClients = new Map(); // key → Set<WebSocket>
+const localUserClients = new Map(); // userId → Set<WebSocket>
+const localUserFeedShardCounts = new Map(); // shard channel → count
 
 /**
  * Keep track of which Redis channels this process has subscribed to.
@@ -414,39 +422,34 @@ const redisSubscribed = new Set();
 const redisSubscribeInFlight = new Map();
 
 // ── Redis subscriber listener ──────────────────────────────────────────────────
-function deliverPubsubMessage(channel, message) {
-  const clients = channelClients.get(channel);
-  const recipientCount = clients ? clients.size : 0;
+function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
+  if (
+    !logicalChannel.startsWith("user:")
+    || !parsed
+    || typeof parsed !== "object"
+    || Array.isArray(parsed)
+  ) {
+    return false;
+  }
 
-  // Record recipient distribution by channel type (user / channel / conversation)
-  const channelType = channel.split(":")[0] || "unknown";
-  fanoutRecipientsHistogram.observe(
-    { channel_type: channelType },
-    recipientCount,
+  const ev = (parsed as { event?: unknown }).event;
+  if (typeof ev !== "string" || !ev.startsWith("message:")) return false;
+
+  const data = (parsed as { data?: { channel_id?: string; channelId?: string } }).data;
+  const chId = data?.channel_id || data?.channelId;
+  return !!(
+    chId
+    && (ws as { _explicitChannelUnsub?: Set<string> })._explicitChannelUnsub?.has(`channel:${chId}`)
   );
+}
 
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(message);
-  } catch {
-    // non-JSON payload — deliver raw string below
-  }
+function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
+  if (ws.readyState !== WebSocket.OPEN) return false;
+  if (shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) return false;
 
-  // Keep this at debug level to avoid log floods during high presence churn.
-  if (channelType === "user" && recipientCount > 0 && parsed !== null) {
-    logger.debug({
-      event: "presence.fanout.delivered",
-      channel,
-      recipientCount,
-      payload: parsed,
-    });
-  }
-
-  if (!clients || recipientCount === 0) return;
-
-  let outbound = message;
+  let payloadEventName;
   let skipDropForBackpressure = false;
-  let payloadEventName: string | undefined;
+  let outbound = rawMessage;
   if (
     parsed &&
     typeof parsed === "object" &&
@@ -460,67 +463,110 @@ function deliverPubsubMessage(channel, message) {
         skipDropForBackpressure = true;
       }
     }
-    outbound = JSON.stringify({ ...parsed, channel });
+    outbound = JSON.stringify({ ...parsed, channel: logicalChannel });
   }
 
+  const buffered = (ws as any).bufferedAmount ?? 0;
+  if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
+    wsBackpressureEventsTotal.inc({ action: "kill" });
+    logger.warn(
+      {
+        event: "ws.slow_consumer.killed",
+        userId: (ws as any)._userId,
+        buffered,
+        redisChannel: logicalChannel,
+        payloadEvent: payloadEventName,
+        gradingNote: "correlate_with_failed_deliveries",
+      },
+      "WS slow consumer: terminating connection due to excessive backpressure",
+    );
+    ws.terminate();
+    return false;
+  }
+  if (!skipDropForBackpressure && buffered >= WS_BACKPRESSURE_DROP_BYTES) {
+    wsBackpressureEventsTotal.inc({ action: "drop" });
+    logger.warn(
+      {
+        event: "ws.slow_consumer.frame_dropped",
+        userId: (ws as any)._userId,
+        buffered,
+        redisChannel: logicalChannel,
+        payloadEvent: payloadEventName,
+        gradingNote: "correlate_with_failed_deliveries",
+      },
+      "WS slow consumer: dropping frame due to backpressure",
+    );
+    return false;
+  }
+
+  ws.send(outbound);
+  return true;
+}
+
+function recipientClientsForChannel(channel) {
+  const userId = userIdFromTarget(channel);
+  if (channel.startsWith("user:") && userId) {
+    return localUserClients.get(userId) || null;
+  }
+  return channelClients.get(channel) || null;
+}
+
+function deliverUserFeedMessage(channel, routed) {
+  const payload = routed.payload;
+  const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
+  if (!userIds.length) return;
+
+  let recipientCount = 0;
+  for (const userId of userIds) {
+    recipientCount += localUserClients.get(userId)?.size || 0;
+  }
+  fanoutRecipientsHistogram.observe({ channel_type: "user" }, recipientCount);
+  if (recipientCount === 0) return;
+
+  for (const userId of userIds) {
+    const clients = localUserClients.get(userId);
+    if (!clients || clients.size === 0) continue;
+    const logicalChannel = `user:${userId}`;
+    clients.forEach((ws) => {
+      sendPayloadToSocket(ws, logicalChannel, payload, JSON.stringify(payload));
+    });
+  }
+}
+
+function deliverPubsubMessage(channel, message) {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+    // non-JSON payload — deliver raw string below
+  }
+
+  if (isUserFeedEnvelope(parsed)) {
+    deliverUserFeedMessage(channel, parsed);
+    return;
+  }
+
+  const clients = recipientClientsForChannel(channel);
+  const recipientCount = clients ? clients.size : 0;
+  const channelType = channel.split(":")[0] || "unknown";
+  fanoutRecipientsHistogram.observe(
+    { channel_type: channelType },
+    recipientCount,
+  );
+
+  if (channelType === "user" && recipientCount > 0 && parsed !== null) {
+    logger.debug({
+      event: "presence.fanout.delivered",
+      channel,
+      recipientCount,
+      payload: parsed,
+    });
+  }
+
+  if (!clients || recipientCount === 0) return;
+
   clients.forEach((ws) => {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    if (
-      channel.startsWith("user:")
-      && parsed
-      && typeof parsed === "object"
-      && !Array.isArray(parsed)
-    ) {
-      const ev = (parsed as { event?: unknown }).event;
-      if (typeof ev === "string" && ev.startsWith("message:")) {
-        const data = (parsed as { data?: { channel_id?: string; channelId?: string } }).data;
-        const chId = data?.channel_id || data?.channelId;
-        if (
-          chId
-          && (ws as { _explicitChannelUnsub?: Set<string> })._explicitChannelUnsub?.has(
-            `channel:${chId}`,
-          )
-        ) {
-          return;
-        }
-      }
-    }
-    const buffered: number = (ws as any).bufferedAmount ?? 0;
-    if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
-      wsBackpressureEventsTotal.inc({ action: "kill" });
-      logger.warn(
-        {
-          event: "ws.slow_consumer.killed",
-          userId: (ws as any)._userId,
-          buffered,
-          redisChannel: channel,
-          payloadEvent: payloadEventName,
-          gradingNote: "correlate_with_failed_deliveries",
-        },
-        "WS slow consumer: terminating connection due to excessive backpressure",
-      );
-      ws.terminate();
-      return;
-    }
-    if (
-      !skipDropForBackpressure &&
-      buffered >= WS_BACKPRESSURE_DROP_BYTES
-    ) {
-      wsBackpressureEventsTotal.inc({ action: "drop" });
-      logger.warn(
-        {
-          event: "ws.slow_consumer.frame_dropped",
-          userId: (ws as any)._userId,
-          buffered,
-          redisChannel: channel,
-          payloadEvent: payloadEventName,
-          gradingNote: "correlate_with_failed_deliveries",
-        },
-        "WS slow consumer: dropping frame due to backpressure",
-      );
-      return;
-    }
-    ws.send(outbound);
+    sendPayloadToSocket(ws, channel, parsed, message);
   });
 }
 
@@ -626,6 +672,8 @@ async function listAutoSubscriptionChannels(userId) {
 }
 
 async function bootstrapUserSubscriptions(ws, userId) {
+  const mode = String(process.env.WS_AUTO_SUBSCRIBE_MODE || 'user_only').trim().toLowerCase();
+  if (mode !== 'full') return;
   const channels = await listAutoSubscriptionChannels(userId);
   warmWsAclCacheFromChannelList(userId, channels);
   for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
@@ -970,6 +1018,22 @@ async function _isAllowedChannelDb(user, channel) {
 async function subscribeClient(ws, redisChannel) {
   if (ws._subscriptions.has(redisChannel)) return;
 
+  const userId = userIdFromTarget(redisChannel);
+  if (redisChannel.startsWith("user:") && userId) {
+    const shardChannel = userFeedRedisChannelForUserId(userId);
+    await ensureRedisChannelSubscribed(shardChannel);
+    if (!localUserClients.has(userId)) {
+      localUserClients.set(userId, new Set());
+    }
+    localUserClients.get(userId).add(ws);
+    localUserFeedShardCounts.set(
+      shardChannel,
+      (localUserFeedShardCounts.get(shardChannel) || 0) + 1,
+    );
+    ws._subscriptions.add(redisChannel);
+    return;
+  }
+
   await ensureRedisChannelSubscribed(redisChannel);
 
   if (!channelClients.has(redisChannel)) {
@@ -983,6 +1047,29 @@ async function subscribeClient(ws, redisChannel) {
 }
 
 async function unsubscribeClient(ws, redisChannel) {
+  const userId = userIdFromTarget(redisChannel);
+  if (redisChannel.startsWith("user:") && userId) {
+    const clients = localUserClients.get(userId);
+    clients?.delete(ws);
+    if ((clients?.size || 0) === 0) {
+      localUserClients.delete(userId);
+    }
+    ws._subscriptions.delete(redisChannel);
+
+    const shardChannel = userFeedRedisChannelForUserId(userId);
+    const nextCount = Math.max(0, (localUserFeedShardCounts.get(shardChannel) || 0) - 1);
+    if (nextCount === 0) {
+      localUserFeedShardCounts.delete(shardChannel);
+      if (redisSubscribed.has(shardChannel) && isRedisOperational(redisSub)) {
+        redisSubscribed.delete(shardChannel);
+        redisSub.unsubscribe(shardChannel).catch(() => {});
+      }
+    } else {
+      localUserFeedShardCounts.set(shardChannel, nextCount);
+    }
+    return;
+  }
+
   channelClients.get(redisChannel)?.delete(ws);
   ws._subscriptions.delete(redisChannel);
   if (redisChannel.startsWith("channel:")) {

@@ -415,8 +415,9 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
     || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # COMPAS-style throughput: duplicate channel message:created to user:<id> (default in app;
-  # pin here so shared .env on long-lived staging VMs stays aligned after manual edits).
+  # COMPAS-style throughput: keep logical per-user message delivery enabled
+  # (implemented internally via sharded user feeds in the app); pin here so
+  # shared .env on long-lived staging VMs stays aligned after manual edits.
   sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT=.*/CHANNEL_MESSAGE_USER_FANOUT=true/' /opt/chatapp/shared/.env \
     || echo 'CHANNEL_MESSAGE_USER_FANOUT=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -435,6 +436,12 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^MESSAGE_USER_FANOUT_HTTP_BLOCKING=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=true/' /opt/chatapp/shared/.env \
     || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^WS_AUTO_SUBSCRIBE_MODE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^WS_AUTO_SUBSCRIBE_MODE=.*/WS_AUTO_SUBSCRIBE_MODE=user_only/' /opt/chatapp/shared/.env \
+    || echo 'WS_AUTO_SUBSCRIBE_MODE=user_only' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^USER_FEED_SHARD_COUNT=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=64/' /opt/chatapp/shared/.env \
+    || echo 'USER_FEED_SHARD_COUNT=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null

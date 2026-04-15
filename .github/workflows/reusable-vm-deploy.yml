@@ -39,7 +39,7 @@ on:
         default: false
         type: boolean
       chatapp_instances:
-        description: Node HTTP worker count (deploy-prod CHATAPP_INSTANCES); use 2 when nginx load-balances chatapp@4000 and @4001
+        description: Node HTTP worker count (deploy-prod CHATAPP_INSTANCES); production currently defaults to 4 (chatapp@4000..@4003)
         required: false
         default: ''
         type: string
