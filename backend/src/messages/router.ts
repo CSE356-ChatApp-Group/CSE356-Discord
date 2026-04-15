@@ -72,6 +72,8 @@ const _idemSuccessTtl = parseInt(process.env.MSG_IDEM_SUCCESS_TTL_SECS || '86400
 /** How long to remember a successful idempotent POST /messages (seconds). */
 const MSG_IDEM_SUCCESS_TTL_SECS =
   Number.isFinite(_idemSuccessTtl) && _idemSuccessTtl > 0 ? _idemSuccessTtl : 86400;
+// When unset, keep historical default (defer only under heavy pool wait).
+// `0` disables the pool-wait defer branch entirely (see PUT /messages/:id/read).
 const _readReceiptDeferWaiting = parseInt(process.env.READ_RECEIPT_DEFER_POOL_WAITING || '8', 10);
 const READ_RECEIPT_DEFER_POOL_WAITING =
   Number.isFinite(_readReceiptDeferWaiting) && _readReceiptDeferWaiting >= 0
