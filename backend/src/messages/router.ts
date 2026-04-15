@@ -1365,7 +1365,11 @@ router.put('/:id/read',
   async (req, res, next) => {
     if (!validate(req, res)) return;
     const pool = poolStats();
-    if (pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING) {
+    // `READ_RECEIPT_DEFER_POOL_WAITING=0` means "disable pool-wait defer".
+    if (
+      READ_RECEIPT_DEFER_POOL_WAITING > 0
+      && pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
+    ) {
       return res.json({ success: true, deferred: true, reason: 'pool_waiting' });
     }
     // Grader reliability first: under sustained pressure (stage 2), skip DB-heavy
