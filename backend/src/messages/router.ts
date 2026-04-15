@@ -1314,16 +1314,40 @@ router.put('/:id/read',
       );
 
       let applied;
+      let currentReadId = existingRows[0]?.last_read_message_id || null;
       if (!existingRows.length) {
-        const { rows: insertedRows } = await query(
-          `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
-           VALUES ($1,$2,$3,$4,NOW())
-           RETURNING last_read_message_id, last_read_at`,
-          [uid, channel_id, conversation_id, messageId],
-        );
-        applied = insertedRows[0];
-      } else {
-        const currentReadId = existingRows[0].last_read_message_id;
+        try {
+          const { rows: insertedRows } = await query(
+            `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
+             VALUES ($1,$2,$3,$4,NOW())
+             RETURNING last_read_message_id, last_read_at`,
+            [uid, channel_id, conversation_id, messageId],
+          );
+          applied = insertedRows[0];
+        } catch (err) {
+          // Concurrent read-mark requests can race between SELECT and INSERT.
+          // Treat uniqueness collisions as idempotent and continue with UPDATE path.
+          const detail = String(err?.detail || err?.message || '');
+          const readStateRace =
+            err?.code === '23505' &&
+            (err?.constraint === 'idx_read_states_user_target' ||
+              /idx_read_states_user_target/i.test(detail));
+          if (!readStateRace) {
+            throw err;
+          }
+          const { rows: racedRows } = await query(
+            `SELECT last_read_message_id
+             FROM read_states
+             WHERE user_id = $1
+               AND ${scopeColumn} = $2
+             LIMIT 1`,
+            [uid, scopeValue],
+          );
+          currentReadId = racedRows[0]?.last_read_message_id || null;
+        }
+      }
+
+      if (!applied) {
         let shouldAdvance = !currentReadId;
         if (!shouldAdvance && String(currentReadId) === String(messageId)) {
           shouldAdvance = false;

@@ -142,6 +142,31 @@ fi
 echo "Current live port: $OLD_PORT"
 echo "Candidate port: $NEW_PORT"
 
+if ! [[ "${CHATAPP_INSTANCES}" =~ ^[0-9]+$ ]] || [ "${CHATAPP_INSTANCES}" -lt 1 ]; then
+  echo "ERROR: CHATAPP_INSTANCES must be a positive integer (got '${CHATAPP_INSTANCES}')."
+  exit 1
+fi
+if [ "${CHATAPP_INSTANCES}" -gt 8 ]; then
+  echo "ERROR: CHATAPP_INSTANCES=${CHATAPP_INSTANCES} is unexpectedly high; refusing deploy."
+  exit 1
+fi
+
+BASE_APP_PORT=4000
+TARGET_PORTS=()
+for ((idx=0; idx<CHATAPP_INSTANCES; idx++)); do
+  TARGET_PORTS+=( "$((BASE_APP_PORT + idx))" )
+done
+
+ADDITIONAL_PORTS=()
+for p in "${TARGET_PORTS[@]}"; do
+  if [ "$p" != "$OLD_PORT" ] && [ "$p" != "$NEW_PORT" ]; then
+    ADDITIONAL_PORTS+=( "$p" )
+  fi
+done
+
+TARGET_PORTS_CSV=$(IFS=,; echo "${TARGET_PORTS[*]}")
+echo "Target app worker ports: ${TARGET_PORTS[*]}"
+
 stop_chatapp_port() {
   local p="${1:?port required}"
   ssh_prod "sudo systemctl stop chatapp@${p} 2>/dev/null || true"
@@ -1022,7 +1047,7 @@ echo "9.075: patched auth proxy_next_upstream (non_idempotent) + reloaded nginx"
 REMOTE
 echo "✓ Nginx auth POST retry OK"
 
-# 9b–9c. Dual-worker prod: roll the companion to this release, then restore both backends in nginx.
+# 9b–9c. Multi-worker prod: roll non-candidate workers to this release, then restore full upstream.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
   if [ "${PIN_CANDIDATE_BEFORE_COMPANION}" = "true" ]; then
     echo "9a. Pinning nginx to candidate (${NEW_PORT}) before companion restart..."
@@ -1096,7 +1121,7 @@ PY
     exit 1
   fi
 
-  echo "9b. Rolling companion on port ${OLD_PORT} to ${RELEASE_SHA} (dual-worker)..."
+  echo "9b. Rolling companion on port ${OLD_PORT} to ${RELEASE_SHA}..."
   ssh_prod "
     set -euo pipefail
     RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
@@ -1146,11 +1171,51 @@ PY
     exit 1
   fi
 
-  echo "9c. Restoring nginx upstream (least_conn, both workers; passive health on upstream)..."
+  if [ "${#ADDITIONAL_PORTS[@]}" -gt 0 ]; then
+    echo "9b.5. Rolling additional worker ports (${ADDITIONAL_PORTS[*]}) to ${RELEASE_SHA}..."
+    for extra_port in "${ADDITIONAL_PORTS[@]}"; do
+      ssh_prod "
+        set -euo pipefail
+        RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
+        PORT='${extra_port}'
+        DROPIN_DIR=/etc/systemd/system/chatapp@\${PORT}.service.d
+        sudo mkdir -p \"\$DROPIN_DIR\"
+        printf '[Service]\\nWorkingDirectory=%s/backend\\n' \"\$RELEASE_PATH\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
+        sudo systemctl daemon-reload
+        sudo systemctl reset-failed chatapp@\${PORT} 2>/dev/null || true
+        ok=0
+        for attempt in 1 2 3; do
+          sudo systemctl restart chatapp@\${PORT}
+          sleep 2
+          if systemctl is-active --quiet chatapp@\${PORT}; then
+            ok=1
+            break
+          fi
+          echo 'chatapp@'\"\${PORT}\"' restart attempt' \"\$attempt\" 'failed; retrying in 3s'
+          sleep 3
+        done
+        if [ \"\$ok\" -ne 1 ]; then
+          echo 'ERROR: chatapp@'\"\${PORT}\"' failed to become active after retries'
+          sudo journalctl -u chatapp@\${PORT} --no-pager -n 60 || true
+          exit 1
+        fi
+      " || {
+        echo "ERROR: Rolling additional worker port ${extra_port} failed."
+        rollback_cutover
+        exit 1
+      }
+      if ! ssh_prod "/tmp/health-check.sh ${extra_port} http://127.0.0.1:${extra_port}"; then
+        echo "ERROR: Health check failed on additional worker port ${extra_port}."
+        rollback_cutover
+        exit 1
+      fi
+    done
+  fi
+
+  echo "9c. Restoring nginx upstream (least_conn, all ${CHATAPP_INSTANCES} workers)..."
   ssh_prod "
     set -euo pipefail
-    export NEW_PORT='${NEW_PORT}'
-    export OLD_PORT='${OLD_PORT}'
+    export TARGET_PORTS_CSV='${TARGET_PORTS_CSV}'
     export SITE='${CHATAPP_NGINX_SITE_PATH}'
     TMP_SITE=\$(mktemp)
     sudo cp \"\$SITE\" \"\$TMP_SITE\"
@@ -1158,17 +1223,18 @@ PY
     python3 <<'PY'
 import os, re
 cfg_path = os.environ['TMP_SITE']
-newp, oldp = os.environ['NEW_PORT'], os.environ['OLD_PORT']
+ports = [p.strip() for p in os.environ['TARGET_PORTS_CSV'].split(',') if p.strip()]
+if not ports:
+    raise SystemExit('step 9c: no target ports provided')
 keepalive = '''  keepalive 512;
   keepalive_requests 100000;
   keepalive_timeout 75s;
 '''
-srv = '  server localhost:%s max_fails=0;\\n'
+servers = ''.join(f'  server localhost:{p} max_fails=0;\\n' for p in ports)
 block = (
     'upstream app {\\n'
     '  least_conn;\\n'
-    + (srv % newp)
-    + (srv % oldp)
+    + servers
     + keepalive
     + '}'
 )
@@ -1182,14 +1248,16 @@ PY
     rm -f \"\$TMP_SITE\"
     sudo nginx -t >/dev/null
     sudo systemctl reload nginx
-    sudo systemctl enable chatapp@${OLD_PORT} 2>/dev/null || true
-    echo 'Nginx: load-balanced '${NEW_PORT}' + '${OLD_PORT}''
+    for p in ${TARGET_PORTS_CSV//,/ }; do
+      sudo systemctl enable chatapp@\$p 2>/dev/null || true
+    done
+    echo 'Nginx: load-balanced ports ${TARGET_PORTS_CSV}'
   " || {
-    echo "ERROR: Dual-upstream nginx rewrite failed."
+    echo "ERROR: Nginx upstream rewrite failed (multi-worker restore)."
     rollback_cutover
     exit 1
   }
-  echo "✓ Dual-worker nginx upstream restored"
+  echo "✓ Multi-worker nginx upstream restored"
 fi
 
 # 9.5. Enable new service for auto-start on reboot

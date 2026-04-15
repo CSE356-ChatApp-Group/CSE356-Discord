@@ -18,5 +18,5 @@ This is the source of truth for current environment shape. Update this file when
 ## Notes for deploy/ops guidance
 
 - Capacity comparisons should use staging app VM (8 vCPU) vs production app VM (8 vCPU).
-- Keep staging dual-worker shape (`CHATAPP_INSTANCES=2`) when validating production-facing capacity changes.
+- Staging default shape is dual-worker (`CHATAPP_INSTANCES=2`); for production worker-scaling experiments, temporarily match the intended prod worker count.
 - If infra changes, update this file and mention the date in the "Last updated" line.

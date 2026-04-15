@@ -63,6 +63,27 @@ function canManageChannels(role) {
   return ['owner', 'admin'].includes(role);
 }
 
+function isBtreeTupleTooLargeError(err) {
+  return err?.code === '54000' && err?.routine === 'index_form_tuple_context';
+}
+
+async function hasExactChannelNameConflict(communityId, name, excludeChannelId = null) {
+  const normalizedName = typeof name === 'string' ? name.trim() : '';
+  if (!communityId || !normalizedName) return false;
+  const params = [communityId, normalizedName];
+  let sql = `SELECT 1
+             FROM channels
+             WHERE community_id = $1
+               AND name = $2`;
+  if (excludeChannelId) {
+    params.push(excludeChannelId);
+    sql += ` AND id <> $3`;
+  }
+  sql += ' LIMIT 1';
+  const { rows } = await query(sql, params);
+  return rows.length > 0;
+}
+
 async function listCommunityUserIds(communityId, client = { query }) {
   const { rows } = await client.query(
     'SELECT user_id::text AS user_id FROM community_members WHERE community_id = $1',
@@ -351,7 +372,13 @@ router.post('/',
         }
         client.release();
       }
-      if (err.code === '23505') return res.status(409).json({ error: 'Channel name already exists' });
+      if (err?.code === '23505') {
+        const exactConflict = await hasExactChannelNameConflict(req.body.communityId, req.body.name).catch(() => false);
+        if (exactConflict) return res.status(409).json({ error: 'Channel name already exists' });
+      }
+      if (isBtreeTupleTooLargeError(err)) {
+        return res.status(400).json({ error: 'Channel name is too large for indexed storage' });
+      }
       next(err);
     }
   }
@@ -503,6 +530,7 @@ router.patch('/:id',
   async (req, res, next) => {
     if (!v(req, res)) return;
     let client;
+    let updateCommunityId = null;
     try {
       client = await getClient();
       const channel = await loadChannelContext(req.params.id, req.user.id);
@@ -516,6 +544,7 @@ router.patch('/:id',
         client = null;
         return res.status(403).json({ error: 'Insufficient permissions' });
       }
+      updateCommunityId = channel.community_id;
 
       await client.query('BEGIN');
       const updates = [];
@@ -577,6 +606,20 @@ router.patch('/:id',
           // Ignore rollback failures and surface original error.
         }
         client.release();
+      }
+      if (err?.code === '23505' && Object.prototype.hasOwnProperty.call(req.body, 'name')) {
+        const exactConflict = await hasExactChannelNameConflict(
+          updateCommunityId,
+          req.body.name,
+          req.params.id,
+        ).catch(() => false);
+        if (exactConflict) return res.status(409).json({ error: 'Channel name already exists' });
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(req.body, 'name') &&
+        isBtreeTupleTooLargeError(err)
+      ) {
+        return res.status(400).json({ error: 'Channel name is too large for indexed storage' });
       }
       next(err);
     }

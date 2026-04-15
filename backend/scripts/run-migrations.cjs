@@ -9,10 +9,20 @@
 
 'use strict';
 
-require('dotenv').config();
-
 const path = require('path');
 const fs = require('fs');
+
+// When you run `npm run migrate` from `backend/`, dotenv's default only loads `backend/.env`.
+// This repo keeps secrets in the repo-root `.env`; load it if `backend/.env` is missing.
+const backendEnv = path.join(__dirname, '..', '.env');
+const rootEnv = path.join(__dirname, '..', '..', '.env');
+if (fs.existsSync(backendEnv)) {
+  require('dotenv').config({ path: backendEnv });
+} else if (fs.existsSync(rootEnv)) {
+  require('dotenv').config({ path: rootEnv });
+} else {
+  require('dotenv').config();
+}
 const { Pool } = require('pg');
 
 const MIGRATIONS_DIR = process.env.MIGRATIONS_DIR

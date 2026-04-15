@@ -221,7 +221,7 @@ Production deploys are designed for **no hard cut** while old and new binaries b
 1. **Ship code** — merge to `main`, wait for **CI Build & Package** + **`release-<sha>`** on GitHub Releases (same artifact staging and prod use).
 2. **Prove staging** — `./deploy/deploy-staging.sh <sha>` (or Actions auto-deploy) until green; run smoke / e2e / capacity scripts you rely on.
 3. **Preflight prod** — `./deploy/preflight-check.sh prod <sha> <PROD_USER> <PROD_HOST> <GITHUB_REPO>` from a host that can SSH and reach the artifact (VPN/firewall as needed).
-4. **Run prod deploy** — `CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <sha>` (or **Manual Deploy** → `production` in GitHub Actions). The script: **pg_dump backup** → candidate on **alternate port** → health + smoke **before** nginx sends live traffic → dual-worker **pin candidate → roll companion → restore upstream** so users keep an upstream during the swap.
+4. **Run prod deploy** — `CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <sha>` (or **Manual Deploy** → `production` in GitHub Actions). The script: **pg_dump backup** → candidate on **alternate port** → health + smoke **before** nginx sends live traffic → **pin candidate → roll non-candidate workers → restore upstream** so users keep an upstream during the swap.
 5. **Migrations** — keep changes **backward compatible** across the window where both versions may answer (see step 9 narrative below). Destructive DDL only with a separate maintenance plan.
 6. **After cutover** — `./scripts/prod-nginx-audit.sh`, watch Grafana/Prometheus, keep old release on disk for rollback.
 7. **Rollback** — re-run `deploy-prod.sh` with the **previous SHA**, or use the script’s rollback path / nginx upstream fix (see **Immediate Rollback** below); do not blind-`sed` nginx ports.
@@ -234,7 +234,7 @@ Production deploys are designed for **no hard cut** while old and new binaries b
 CHATAPP_INSTANCES=2 ./deploy/deploy-prod.sh <commit-sha>
 ```
 
-`deploy-prod.sh` rewrites the whole `upstream app { ... }` block (no fragile global `sed` on ports). When **`CHATAPP_INSTANCES>=2`**, step **9** only applies **listen backlog / `nginx.conf` / sysctl** tuning and leaves **both** upstreams in place while the candidate warms up. Step **9a** pins nginx to the **candidate port only** before **9b** restarts the companion (**`PIN_CANDIDATE_BEFORE_COMPANION`** defaults **`true`** so POST traffic is not routed to a restarting peer; set `false` only if you accept brief 502s or rely on **`proxy_next_upstream … non_idempotent`** in `/api/`). **9c** restores `least_conn` across both ports with **`max_fails=0`** so transient 5xx bursts do not drain every peer and trigger `no live upstreams`. There is still a **shared-traffic window** before **9a** where **old and new code** may both serve requests; keep DB migrations and API responses **backward compatible** across that window. After **9a**, capacity is on the candidate only until **9c** completes.
+`deploy-prod.sh` rewrites the whole `upstream app { ... }` block (no fragile global `sed` on ports). When **`CHATAPP_INSTANCES>=2`**, step **9** only applies **listen backlog / `nginx.conf` / sysctl** tuning and leaves current upstreams in place while the candidate warms up. Step **9a** pins nginx to the **candidate port only** before **9b** restarts non-candidate workers (**`PIN_CANDIDATE_BEFORE_COMPANION`** defaults **`true`** so POST traffic is not routed to a restarting peer; set `false` only if you accept brief 502s or rely on **`proxy_next_upstream … non_idempotent`** in `/api/`). **9c** restores `least_conn` across all target worker ports (`4000..4000+CHATAPP_INSTANCES-1`) with **`max_fails=0`** so transient 5xx bursts do not drain every peer and trigger `no live upstreams`. There is still a **shared-traffic window** before **9a** where **old and new code** may both serve requests; keep DB migrations and API responses **backward compatible** across that window. After **9a**, capacity is on the candidate only until **9c** completes.
 
 **GitHub Actions:** manual prod deploy passes `chatapp_instances` (default **2** via `CHATAPP_INSTANCES_PROD` repo variable or literal `2` in `deploy-manual.yml`). Set repo variable `CHATAPP_INSTANCES_PROD` to `1` only if you intentionally run a single worker.
 
@@ -246,12 +246,12 @@ This:
 5. Unpacks candidate release
 6. Starts on alternate port (4001) **without touching running traffic**
 7. Runs health checks + smoke tests against candidate
-8. **Only if healthy**, updates Nginx: **single-worker** → traffic to candidate only; **dual-worker** → tune only with both upstreams, pin to candidate (**9a**), roll companion (**9b**), restore dual upstream (**9c**)
+8. **Only if healthy**, updates Nginx: **single-worker** → traffic to candidate only; **multi-worker** → tune only with existing upstreams, pin to candidate (**9a**), roll non-candidate workers (**9b/9b.5**), restore full upstream (**9c**)
 9. Monitors for 60 seconds
 10. Updates `current` symlink
 11. Keeps old version running on original port for instant rollback
 
-### Production nginx audit (dual upstream)
+### Production nginx audit (multi-upstream)
 
 After any hand-edited nginx config or if you see `no live upstreams` in `error.log`:
 
@@ -259,7 +259,15 @@ After any hand-edited nginx config or if you see `no live upstreams` in `error.l
 ./scripts/prod-nginx-audit.sh
 ```
 
-This fails if **both** `chatapp@4000` and `chatapp@4001` are active but `upstream app` does not list **both** ports (a common mis-cutover symptom).
+This fails if active `chatapp@` workers are missing from `upstream app` (for example `4000/4001` in dual-worker mode, or `4000..4003` in 4-worker mode).
+
+**Abusive client IP (nginx `deny`)** — after confirming the address is not a grader or shared NAT, run on the VM (or copy `deploy/patch-nginx-deny-ip.sh` and execute with sudo):
+
+```bash
+sudo CHATAPP_NGINX_SITE_PATH=/etc/nginx/sites-available/chatapp ./deploy/patch-nginx-deny-ip.sh 203.0.113.10
+```
+
+Idempotent: safe to re-run. Prefer updating `deploy/nginx/staging.conf` / prod bootstrap templates in-repo too so the next full nginx rewrite keeps the rule.
 
 ### Capacity gate before tuning prod
 
@@ -293,7 +301,7 @@ Useful when the **database** is the bottleneck or you want RAM/IO isolated from 
 - **Security groups / firewall**: allow **outbound 5432** (or provider port) from the app VM to the DB; restrict DB ingress to that VM’s IP.  
 - Ensure the DB **tier connection limit** is **≥** the deploy-time **`max_connections`** target (upper hundreds after scale-up — check the deploy banner line `pg_max_conn=...`).
 
-**Not covered in-repo:** running **extra Node HTTP workers** beyond **4000+4001** (third port) would need **nginx + systemd + CI** changes; ask course staff before doing that.
+**Worker scaling:** `deploy-prod.sh` can now roll and re-add ports **`4000..(4000 + CHATAPP_INSTANCES - 1)`**. Keep `CHATAPP_INSTANCES_PROD` aligned with host CPU and memory headroom, and verify with staging load runs before increasing production worker count.
 
 ### Immediate Rollback
 
