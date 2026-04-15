@@ -737,6 +737,8 @@ echo "5.5. Installing/updating systemd unit..."
 # Use ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
 # subsystem which misparses '@' in remote paths, causing "Permission denied".
 ssh_prod 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
+scp "${SCRIPT_DIR}/apply-env-profile.py" "${PROD_USER}@${PROD_HOST}:/tmp/apply-env-profile.py"
+scp "${SCRIPT_DIR}/env/prod.required.env" "${PROD_USER}@${PROD_HOST}:/tmp/prod.required.env"
 ssh_prod "
   set -e
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
@@ -859,6 +861,11 @@ ssh_prod "
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}/' /opt/chatapp/shared/.env \
     || echo 'NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Enforce git-tracked realtime profile so deploys cannot drift.
+  sudo python3 /tmp/apply-env-profile.py \
+    --target /opt/chatapp/shared/.env \
+    --required /tmp/prod.required.env
+  rm -f /tmp/apply-env-profile.py /tmp/prod.required.env
   sudo systemctl daemon-reload
   echo 'systemd unit installed'"
 echo "✓ systemd unit ready"
