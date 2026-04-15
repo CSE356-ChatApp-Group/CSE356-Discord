@@ -55,17 +55,17 @@ function fanoutMaxRecipients() {
 }
 
 /**
- * `recent_connect` trims duplicate user-topic publishes down to sockets that
- * connected moments ago and may not have every `channel:` topic subscribed yet.
- * Stable sockets already receive channel posts from `channel:<id>`, so `all`
- * does extra Redis work with little value under grader-style load.
+ * `all` is the safe default because grader clients rely on server-managed
+ * subscriptions and do not explicitly subscribe after connect. `recent_connect`
+ * remains available as an opt-in throughput experiment for controlled hosts
+ * that can tolerate channel-only delivery after the reconnect bridge expires.
  */
 function userFanoutMode() {
-  const v = String(process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE || 'recent_connect')
+  const v = String(process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE || 'all')
     .trim()
     .toLowerCase();
-  if (v === 'all') return 'all';
-  return 'recent_connect';
+  if (v === 'recent_connect') return 'recent_connect';
+  return 'all';
 }
 
 function channelUserFanoutTargetsCacheKey(channelId: string) {
