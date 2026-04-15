@@ -22,6 +22,15 @@ function testContainerSuffix() {
 const PG_CONTAINER = `chatapp-test-postgres${testContainerSuffix()}`;
 const REDIS_CONTAINER = `chatapp-test-redis${testContainerSuffix()}`;
 
+function parsePositiveIntEnv(name, fallback) {
+  const value = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function ciTmpfsMountArgs(destination, sizeMb) {
+  return ['--mount', `type=tmpfs,destination=${destination},tmpfs-size=${sizeMb * 1024 * 1024}`];
+}
+
 function hasArg(args, flag) {
   return args.includes(flag) || args.some((arg) => arg.startsWith(`${flag}=`));
 }
@@ -127,23 +136,35 @@ function startContainers() {
   // GitHub-hosted runners sometimes have fixed ports (55432/56379) still bound from a
   // leaked process or overlapping job — publish random ports via -P and read mappings.
   const useDynamicHostPorts = isCiEnvironment && !envPg && !envRedis;
+  // Self-hosted CI runners can accumulate overlay-disk pressure from concurrent jobs.
+  // Keep ephemeral test DB state in tmpfs so Postgres initdb does not fail with
+  // "No space left on device" while bootstrapping.
+  const useTmpfsData = isCiEnvironment && process.env.TEST_RUNNER_DISABLE_TMPFS !== '1';
+  const pgTmpfsMb = parsePositiveIntEnv('TEST_PG_TMPFS_MB', 512);
+  const redisTmpfsMb = parsePositiveIntEnv('TEST_REDIS_TMPFS_MB', 128);
+  const pgTmpfsArgs = useTmpfsData ? ciTmpfsMountArgs('/var/lib/postgresql/data', pgTmpfsMb) : [];
+  const redisTmpfsArgs = useTmpfsData ? ciTmpfsMountArgs('/data', redisTmpfsMb) : [];
 
   const pgRunArgs = useDynamicHostPorts
     ? [
       'run', '-d',
       '--name', PG_CONTAINER,
+      ...pgTmpfsArgs,
       '-P',
       '-e', 'POSTGRES_DB=chatapp_test',
       '-e', 'POSTGRES_USER=chatapp',
       '-e', 'POSTGRES_PASSWORD=test',
+      '-e', 'POSTGRES_INITDB_ARGS=--no-sync',
       'postgres:16-alpine',
     ]
     : [
       'run', '-d',
       '--name', PG_CONTAINER,
+      ...pgTmpfsArgs,
       '-e', 'POSTGRES_DB=chatapp_test',
       '-e', 'POSTGRES_USER=chatapp',
       '-e', 'POSTGRES_PASSWORD=test',
+      '-e', 'POSTGRES_INITDB_ARGS=--no-sync',
       '-p', `${envPg || '55432'}:5432`,
       'postgres:16-alpine',
     ];
@@ -152,8 +173,8 @@ function startContainers() {
   if (code !== 0) process.exit(code);
 
   const redisRunArgs = useDynamicHostPorts
-    ? ['run', '-d', '--name', REDIS_CONTAINER, '-P', 'redis:7-alpine']
-    : ['run', '-d', '--name', REDIS_CONTAINER, '-p', `${envRedis || '56379'}:6379`, 'redis:7-alpine'];
+    ? ['run', '-d', '--name', REDIS_CONTAINER, ...redisTmpfsArgs, '-P', 'redis:7-alpine']
+    : ['run', '-d', '--name', REDIS_CONTAINER, ...redisTmpfsArgs, '-p', `${envRedis || '56379'}:6379`, 'redis:7-alpine'];
 
   code = run('docker', redisRunArgs);
   if (code !== 0) process.exit(code);
