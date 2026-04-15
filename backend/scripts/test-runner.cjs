@@ -4,10 +4,23 @@
 
 const { spawnSync } = require('node:child_process');
 
-const PG_CONTAINER = 'chatapp-test-postgres';
-const REDIS_CONTAINER = 'chatapp-test-redis';
 const jestArgs = process.argv.slice(2);
 const isCiEnvironment = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
+
+/**
+ * Fixed names locally; unique per workflow run on GitHub so parallel jobs on the
+ * same self-hosted runner do not docker rm -f each other's test DB.
+ */
+function testContainerSuffix() {
+  if (!isCiEnvironment) return '';
+  const runId = process.env.GITHUB_RUN_ID;
+  const attempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+  if (runId) return `-${runId}-${attempt}`;
+  return `-${process.pid}`;
+}
+
+const PG_CONTAINER = `chatapp-test-postgres${testContainerSuffix()}`;
+const REDIS_CONTAINER = `chatapp-test-redis${testContainerSuffix()}`;
 
 function hasArg(args, flag) {
   return args.includes(flag) || args.some((arg) => arg.startsWith(`${flag}=`));
@@ -71,7 +84,17 @@ function waitFor(command, args, timeoutMs, intervalMs, label) {
     }
   }
 
-  throw new Error(`Timed out waiting for ${label}`);
+  const err = new Error(`Timed out waiting for ${label}`);
+  err.label = label;
+  throw err;
+}
+
+function dockerLogsTail(container, lines = 120) {
+  spawnSync('docker', ['logs', '--tail', String(lines), container], { stdio: 'inherit' });
+}
+
+function dockerInspectState(container) {
+  spawnSync('docker', ['inspect', '-f', '{{json .State}}', container], { stdio: 'inherit' });
 }
 
 /**
@@ -135,7 +158,23 @@ function startContainers() {
   code = run('docker', redisRunArgs);
   if (code !== 0) process.exit(code);
 
-  waitFor('docker', ['exec', PG_CONTAINER, 'pg_isready', '-U', 'chatapp', '-d', 'chatapp_test'], 45_000, 1_000, 'Postgres');
+  // CI: cold image pull + Postgres init can exceed 45s on busy self-hosted runners.
+  const pgWaitMs = isCiEnvironment ? 120_000 : 45_000;
+  try {
+    waitFor(
+      'docker',
+      ['exec', PG_CONTAINER, 'pg_isready', '-U', 'chatapp', '-d', 'chatapp_test'],
+      pgWaitMs,
+      1_000,
+      'Postgres',
+    );
+  } catch (e) {
+    console.error(`--- docker logs ${PG_CONTAINER} (Postgres wait failed) ---`);
+    dockerLogsTail(PG_CONTAINER);
+    console.error(`--- docker inspect State ${PG_CONTAINER} ---`);
+    dockerInspectState(PG_CONTAINER);
+    throw e;
+  }
   waitFor('docker', ['exec', REDIS_CONTAINER, 'redis-cli', 'ping'], 20_000, 1_000, 'Redis');
 
   if (useDynamicHostPorts) {
