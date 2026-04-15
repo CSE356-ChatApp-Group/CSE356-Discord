@@ -1,6 +1,6 @@
 # Infrastructure Inventory
 
-Last updated: 2026-04-14
+Last updated: 2026-04-15
 
 This is the source of truth for current environment shape. Update this file whenever VM sizing, hosts, or provider layout changes.
 
@@ -19,4 +19,5 @@ This is the source of truth for current environment shape. Update this file when
 
 - Capacity comparisons should use staging app VM (8 vCPU) vs production app VM (8 vCPU).
 - Staging default shape is dual-worker (`CHATAPP_INSTANCES=2`); for production worker-scaling experiments, temporarily match the intended prod worker count.
+- Production app VM: Node HTTP workers may run as **four** processes (`chatapp@4000`–`4003`) when `CHATAPP_INSTANCES=4` / `CHATAPP_INSTANCES_PROD=4`; nginx `upstream app` lists all active ports.
 - If infra changes, update this file and mention the date in the "Last updated" line.

@@ -17,9 +17,7 @@ scrape_configs:
   - job_name: 'chatapp-api'
     metrics_path: '/metrics'
     static_configs:
-      # Staging: both instances always run. deploy-staging.sh does not modify this.
-      # Prod: deploy-prod.sh copies this template and restarts Prometheus; it does not
-      # rewrite ports (dual-upstream prod must keep both scrape targets).
+      # Staging: both instances always run. Prod: deploy-prod.sh may append 4002/4003 when CHATAPP_INSTANCES>=4.
       - targets: ['127.0.0.1:4000']
         labels:
           node: live-4000

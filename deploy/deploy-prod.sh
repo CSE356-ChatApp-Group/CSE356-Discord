@@ -1204,8 +1204,17 @@ PY
         rollback_cutover
         exit 1
       }
-      if ! ssh_prod "/tmp/health-check.sh ${extra_port} http://127.0.0.1:${extra_port}"; then
-        echo "ERROR: Health check failed on additional worker port ${extra_port}."
+      hc_ok=0
+      for attempt in 1 2 3 4 5; do
+        if ssh_prod "/tmp/health-check.sh ${extra_port} http://127.0.0.1:${extra_port}"; then
+          hc_ok=1
+          break
+        fi
+        echo "WARN: health-check on :${extra_port} attempt ${attempt} failed (SSH flake or slow start); retrying in 3s..."
+        sleep 3
+      done
+      if [ "${hc_ok}" -ne 1 ]; then
+        echo "ERROR: Health check failed on additional worker port ${extra_port} after retries."
         rollback_cutover
         exit 1
       fi
@@ -1310,9 +1319,28 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # 10.55. Copy repo Prometheus template so the `redis` scrape job exists; 10.6 restarts
 # Prometheus to pick up the template (no port rewriting — dual targets stay intact).
 echo "10.55. Syncing prometheus-host.yml from repo (includes redis job)..."
-scp -q "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "$PROD_USER@$PROD_HOST:/tmp/prometheus-host.yml.deploy" || true
+PROM_BUILD="$(mktemp)"
+cp "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "${PROM_BUILD}"
+if [ "${CHATAPP_INSTANCES}" -ge 4 ]; then
+  python3 - "${PROM_BUILD}" <<'PY'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+t = p.read_text()
+if '127.0.0.1:4002' in t:
+    sys.exit(0)
+old = """      - targets: ['127.0.0.1:4001']\n        labels:\n          node: candidate-4001\n\n  - job_name: 'minio'"""
+new = """      - targets: ['127.0.0.1:4001']\n        labels:\n          node: candidate-4001\n      - targets: ['127.0.0.1:4002']\n        labels:\n          node: worker-4002\n      - targets: ['127.0.0.1:4003']\n        labels:\n          node: worker-4003\n\n  - job_name: 'minio'"""
+if old not in t:
+    print('ERROR: prometheus-host.yml template mismatch — cannot inject 4002/4003', file=sys.stderr)
+    sys.exit(1)
+p.write_text(t.replace(old, new, 1))
+PY
+fi
+scp -q "${PROM_BUILD}" "$PROD_USER@$PROD_HOST:/tmp/prometheus-host.yml.deploy" || true
+rm -f "${PROM_BUILD}"
 
-# 10.6. Refresh Prometheus host template (scrapes 4000 + 4001).
+# 10.6. Refresh Prometheus host template (scrapes 4000–4003 when CHATAPP_INSTANCES>=4).
 # Do **not** global-sed replace ports here: that collapses dual targets to one
 # port when nginx load-balances two Node workers.
 echo "10.6. Refreshing Prometheus scrape config..."
@@ -1327,7 +1355,7 @@ ssh_prod "
     # Restart the container so its entrypoint re-renders the template into
     # /tmp/prometheus.yml with ALERT_ENVIRONMENT substitution.
     if sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1; then
-      echo 'Prometheus restarted (template unchanged — chatapp-api targets 4000 + 4001)'
+      echo 'Prometheus restarted (chatapp-api scrape list in prometheus-host.yml)'
     else
       echo 'WARN: Prometheus restart failed (non-fatal)'
     fi
