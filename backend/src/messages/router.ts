@@ -19,7 +19,12 @@ const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
 const { query, queryRead, readPool, getClient, withTransaction, poolStats } = require('../db/pool');
-const { messagePostAccessDeniedTotal, messageCacheBustFailuresTotal } = require('../utils/metrics');
+const {
+  messagePostAccessDeniedTotal,
+  messageCacheBustFailuresTotal,
+  fanoutPublishDurationMs,
+  fanoutPublishTargetsHistogram,
+} = require('../utils/metrics');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
 const fanout           = require('../websocket/fanout');
@@ -51,6 +56,9 @@ const {
 } = require('./repointLastMessage');
 const { publishChannelMessageCreated } = require('./channelRealtimeFanout');
 const { appendChannelMessageIngested } = require('./messageIngestLog');
+const {
+  getConversationFanoutTargets,
+} = require('./conversationFanoutTargets');
 
 const router = express.Router();
 router.use(authenticate);
@@ -192,23 +200,15 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
   return rows[0]?.id ?? null;
 }
 
-async function getConversationFanoutTargets(conversationId) {
-  const { rows } = await query(
-    `SELECT user_id::text AS user_id
-     FROM conversation_participants
-     WHERE conversation_id = $1 AND left_at IS NULL`,
-    [conversationId]
-  );
-
-  return [
-    `conversation:${conversationId}`,
-    ...rows.map((row) => `user:${row.user_id}`),
-  ];
-}
-
 async function publishConversationEventNow(conversationId, event, data) {
-  const targets = await getConversationFanoutTargets(conversationId);
-  let uniqueTargets = [...new Set(targets)];
+  const startedAt = process.hrtime.bigint();
+  const lookupStartedAt = startedAt;
+  const targets: string[] = await getConversationFanoutTargets(conversationId);
+  fanoutPublishDurationMs.observe(
+    { path: 'conversation_event', stage: 'target_lookup' },
+    Number(process.hrtime.bigint() - lookupStartedAt) / 1e6,
+  );
+  let uniqueTargets: string[] = [...new Set(targets)];
 
   if (event === 'read:updated') {
     uniqueTargets = uniqueTargets.filter((target) => target.startsWith('user:'));
@@ -217,7 +217,17 @@ async function publishConversationEventNow(conversationId, event, data) {
   // Any partial Redis failure must not return HTTP success while a participant
   // misses message:* / read — mirrors single-target await for channel posts.
   const payload = wrapFanoutPayload(event, data);
+  fanoutPublishTargetsHistogram.observe({ path: 'conversation_event' }, uniqueTargets.length);
+  const publishStartedAt = process.hrtime.bigint();
   await Promise.all(uniqueTargets.map((target) => fanout.publish(target, payload)));
+  fanoutPublishDurationMs.observe(
+    { path: 'conversation_event', stage: 'publish' },
+    Number(process.hrtime.bigint() - publishStartedAt) / 1e6,
+  );
+  fanoutPublishDurationMs.observe(
+    { path: 'conversation_event', stage: 'total' },
+    Number(process.hrtime.bigint() - startedAt) / 1e6,
+  );
 
   if (event === 'read:updated') return undefined;
 

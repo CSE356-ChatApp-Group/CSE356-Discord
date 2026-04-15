@@ -499,6 +499,50 @@ groups:
             Slow WS clients are hitting DROP/KILL thresholds — realtime events may be missed for those sockets.
             Check client read loops, `WS_BACKPRESSURE_*` env, or CPU/event-loop saturation.
 
+      - alert: ChatAppWsBootstrapSlow
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(ws_bootstrap_wall_duration_ms_bucket{job="chatapp-api"}[5m]))
+          ) > 5000
+          and
+          sum(rate(ws_connection_result_total{job="chatapp-api",result="accepted"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: WebSocket bootstrap is persistently slow
+          description: >
+            WS bootstrap p95 exceeded 5s while connections are still being accepted. Correlate with
+            `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, DB pool wait, and Redis fanout health
+            to determine whether the cost is bootstrap breadth, cache misses, or backend pressure.
+
+      - alert: ChatAppRealtimeFanoutSlow
+        expr: |
+          (
+            histogram_quantile(
+              0.95,
+              sum by (le, path, stage) (
+                rate(fanout_publish_duration_ms_bucket{job="chatapp-api",stage=~"publish|total"}[5m])
+              )
+            ) > 1000
+          )
+          and on (path, stage)
+          (
+            sum by (path, stage) (
+              rate(fanout_publish_duration_ms_count{job="chatapp-api",stage=~"publish|total"}[5m])
+            ) > 0.05
+          )
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Realtime fanout stage is persistently slow
+          description: >
+            Fanout stage {{ $labels.path }}/{{ $labels.stage }} exceeded 1s p95 with sustained activity.
+            Correlate with `fanout_publish_targets`, `fanout_target_cache_total`, Redis publish failures,
+            and WS backpressure to see whether the bottleneck is audience size, cache misses, or Redis delivery.
+
       - alert: ChatAppDeliveryFailsWarning
         expr: |
           (

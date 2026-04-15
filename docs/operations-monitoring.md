@@ -10,6 +10,8 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Incident steps | [`RUNBOOKS.md`](RUNBOOKS.md) |
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
 | Grafana dashboard (repo copy) | [`infrastructure/monitoring/grafana-provisioning-remote/dashboards/chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/chatapp-overview.json) |
+| Instant Prometheus triage | [`scripts/metrics-snapshot.sh`](../scripts/metrics-snapshot.sh) |
+| Top normalized SQL (`pg_stat_statements`) | [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) |
 
 ## Giving the agent usable telemetry
 
@@ -27,11 +29,30 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 
    Paste the **stdout** or the contents of `var/metrics-snapshot.txt` into the chat. The `var/` directory is gitignored.
 
+   The snapshot now includes:
+   - route p95 latency and request rate
+   - p95 business-SQL round-trips per request
+   - realtime fanout cache hit/miss/coalesced rates
+   - realtime fanout stage/target p95
+   - websocket bootstrap wall-time, breadth, and cache-hit rate
+
 2. **Grafana / Prometheus UI** — export panel data or run the same PromQL as in the snapshot script and paste results.
 
 3. **`/metrics` on an app instance** — for a single process view only; use for debugging, not cluster-wide SLOs.
 
 4. **On-VM host + pool lines (no Prometheus)** — [`scripts/prod-capacity-snapshot.sh`](../scripts/prod-capacity-snapshot.sh) curls `/health`, `diagnostic=1`, and key lines from `:4000` / `:4001` `/metrics`; run over SSH and paste the file.
+
+5. **DB fingerprint snapshot** — when p95 moves but route-level metrics are too coarse, capture the top normalized statements from `pg_stat_statements`:
+
+   ```bash
+   DATABASE_URL='postgresql://...' ./scripts/pg-stat-statements-snapshot.sh
+   DB_SSH='root@db-host' DB_NAME='chatapp_prod' ./scripts/pg-stat-statements-snapshot.sh
+   ```
+
+   This prints three ranked views:
+   - highest total execution time
+   - slowest mean execution time among frequently called statements
+   - most IO-heavy statements
 
 ## Core metric families (labels often include `job="chatapp-api"`)
 
@@ -42,7 +63,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 | DB / handler | `pg_queries_per_http_request` | N+1 or heavy handlers (histogram by `route`). |
 | Cache | `endpoint_list_cache_total` | Redis list cache `hit` / `miss` / `coalesced` by `endpoint`. |
 | Overload | `chatapp_overload_stage`, `http_overload_shed_total` | Stage 0–3; early 503s when shedding enabled. |
-| Realtime | `redis_fanout_publish_failures_total`, `ws_bootstrap_wall_duration_ms`, `ws_backpressure_events_total` | Fanout health, WS bootstrap cost, slow clients. |
+| Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_cache_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total` | Fanout health, Redis publish multiplier, target-cache effectiveness, WS bootstrap breadth, and slow clients. |
 | Messages | `message_post_response_total`, `message_cache_bust_failures_total` | POST outcomes and cache bust issues. |
 | Optional RUM | `client_web_vital_*`, `client_rum_batches_total` | Browser-side; requires `ENABLE_CLIENT_RUM` + built frontend flags. |
 | Memory | `process_resident_memory_bytes{job="chatapp-api"}` | **Per Node process** (each `chatapp@` port is a target). **`ChatAppHighMemoryUsage`** in [`alerts.yml`](../infrastructure/monitoring/alerts.yml) fires when RSS **> ~650 MiB for 10m** per target — tune if VM RAM or worker count changes. Grafana overview panel overlays the same threshold. |
@@ -63,6 +84,12 @@ sum by (route) (rate(http_server_requests_total{job="chatapp-api"}[5m]))
 
 # Overload
 max(chatapp_overload_stage{job="chatapp-api"})
+
+# Realtime fanout stage p95
+histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job="chatapp-api"}[5m])))
+
+# WS bootstrap breadth p95
+histogram_quantile(0.95, sum by (le) (rate(ws_bootstrap_channels_bucket{job="chatapp-api"}[5m])))
 ```
 
 ## Auth login/register stampede

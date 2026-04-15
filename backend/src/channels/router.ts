@@ -22,6 +22,7 @@ const {
   invalidateWsBootstrapCache,
   evictUnauthorizedChannelSubscribers,
 } = require('../websocket/server');
+const { invalidateChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 
 const router = express.Router();
@@ -458,6 +459,12 @@ router.post('/:id/members',
       await client.query('COMMIT');
       client.release();
 
+      await invalidateChannelUserFanoutTargetsCache(req.params.id).catch((err) => {
+        logger.warn(
+          { err, channelId: req.params.id },
+          'Failed to invalidate channel user fanout targets cache after member add',
+        );
+      });
       for (const { user_id } of insertedRows) {
         sideEffects.publishMessageEvent(`user:${user_id}`, 'channel:membership_updated', {
           channelId: req.params.id,
@@ -554,6 +561,7 @@ router.patch('/:id',
 
       const affectedUserIds = await listCommunityUserIds(updatedChannel.community_id);
       await Promise.allSettled([
+        invalidateChannelUserFanoutTargetsCache(updatedChannel.id),
         ...affectedUserIds.map((userId) => invalidateWsAclCache(userId, `channel:${updatedChannel.id}`)),
         ...affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId)),
       ]);
@@ -592,9 +600,10 @@ router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
     if (rows.length) {
       const communityId = rows[0].community_id;
       const affectedUserIds = await listCommunityUserIds(communityId);
-      await Promise.allSettled(
-        affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId))
-      );
+      await Promise.allSettled([
+        invalidateChannelUserFanoutTargetsCache(rows[0].id),
+        ...affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId)),
+      ]);
       await evictUnauthorizedChannelSubscribers(rows[0].id);
       await publishChannelLifecycleEvent(communityId, 'channel:deleted', {
         id: rows[0].id,

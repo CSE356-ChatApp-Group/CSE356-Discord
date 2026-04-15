@@ -25,6 +25,7 @@ const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
 const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
+const { invalidateCommunityChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 
 const router = express.Router();
@@ -464,6 +465,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
       [req.params.id, req.user.id]
     );
     await Promise.allSettled([
+      invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),
       presenceService.invalidatePresenceFanoutTargets(req.user.id),
       invalidateWsBootstrapCache(req.user.id),
     ]);
@@ -509,6 +511,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     const publicVersion = await getPublicCommunitiesVersion();
 
     await Promise.allSettled([
+      invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),
       redis.del(communitiesCacheKey(req.user.id, publicVersion)),
       redis.del(membersCacheKey(req.params.id)),
       ...remainingMembers.map((member) => redis.del(communitiesCacheKey(member.user_id, publicVersion))),

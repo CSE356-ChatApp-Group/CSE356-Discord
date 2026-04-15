@@ -4,7 +4,13 @@ Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool s
 
 ## Grading / autograder hosts
 
-If the VM is **only** hit by course autograders (no general public) and you do not care about auth brute-force or spam, set **`DISABLE_RATE_LIMITS=true`** in `/opt/chatapp/shared/.env`, then restart the API (`sudo systemctl restart 'chatapp@*'` or your usual rollout). That removes throttling on register, login, and OAuth connect ([`backend/src/auth/router.ts`](../backend/src/auth/router.ts)), and also disables the optional **`POST /api/v1/rum`** rate limiter when browser RUM is enabled ([`backend/src/rum/router.ts`](../backend/src/rum/router.ts)). Omit or set to `false` when you want limits back.
+If the VM is **only** hit by course autograders (no general public) and you do not care about auth brute-force or spam, the deploy scripts now pin a grading profile on staging/prod:
+
+1. **`DISABLE_RATE_LIMITS=true`** — removes throttling on register, login, OAuth connect, and the optional **`POST /api/v1/rum`** limiter.
+2. **`AUTH_GLOBAL_PER_IP_RATE_LIMIT=false`** — avoids extra 429s for many bot users behind one source IP.
+3. **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=false`** — keeps `POST /messages` from waiting on every per-user duplicate Redis publish.
+
+Those settings maximize success rate and shorten the hottest request path for trusted bot traffic. If you later run the same deploy scripts against a public-facing host, override them deliberately.
 
 **POST `/api/v1/messages`:** **201** includes explicit realtime fields — not one ambiguous “complete” flag. **Channel** posts: `realtimeChannelFanoutComplete: true` after the `channel:<uuid>` Redis publish; `realtimeUserFanoutDeferred: true|false` states whether per-member `user:` duplicates finished before **201** (`MESSAGE_USER_FANOUT_HTTP_BLOCKING`). **Conversation/DM** posts: `realtimeConversationFanoutComplete: true`. End-to-end browser delivery is still asynchronous; graders often allow **~15s** per listener.
 
@@ -31,7 +37,7 @@ On the production host, inspect `/opt/chatapp/shared/.env` (used by systemd `cha
 6. **`NODE_ENV`** — should be **`production`** on the API host; **`deploy-prod.sh`** enforces it.
 7. **`OVERLOAD_LAG_SHED_MS`** — **`deploy-prod.sh`** sets **`250`** (matches code default when HTTP shedding is enabled). **`OVERLOAD_HTTP_SHED_ENABLED`** remains **`false`** on prod unless you opt in.
 
-**Repository audit (no server access):** `DISABLE_RATE_LIMITS` and `AUTH_*_RATE_LIMIT_*` do not appear in deploy scripts (set manually on grading-only hosts if desired). [`docker-compose.yml`](../docker-compose.yml) sets high register/login limits (500) **only** for the local `api` service to support parallel E2E; production does not use that compose stack as-is. Channel **`message:created`** per-user Redis fanout is **on by default in code**; compose and [`deploy/deploy-staging.sh`](../deploy/deploy-staging.sh) / [`deploy/deploy-prod.sh`](../deploy/deploy-prod.sh) **re-apply on every deploy** **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, **`WS_BOOTSTRAP_BATCH_SIZE=64`**, **`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`**, **`COMMUNITIES_LIST_CACHE_TTL_SECS=300`**, and **`CHANNELS_LIST_CACHE_TTL_SECS=300`**, plus prod-only **`NODE_ENV=production`**, **`AUTH_BYPASS=false`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`**, and **`OVERLOAD_LAG_SHED_MS=250`** (see script block in `deploy-prod.sh`).
+**Repository audit (no server access):** [`docker-compose.yml`](../docker-compose.yml) sets high register/login limits (500) **only** for the local `api` service to support parallel E2E; production does not use that compose stack as-is. Channel **`message:created`** per-user Redis fanout is **on by default in code**; compose and [`deploy/deploy-staging.sh`](../deploy/deploy-staging.sh) / [`deploy/deploy-prod.sh`](../deploy/deploy-prod.sh) **re-apply on every deploy** **`DISABLE_RATE_LIMITS=true`**, **`AUTH_GLOBAL_PER_IP_RATE_LIMIT=false`**, **`CHANNEL_MESSAGE_USER_FANOUT=true`**, **`CHANNEL_MESSAGE_USER_FANOUT_MAX=10000`**, **`CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180`**, **`CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180`**, **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=false`**, **`WS_BOOTSTRAP_BATCH_SIZE=64`**, **`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`**, **`COMMUNITIES_LIST_CACHE_TTL_SECS=300`**, and **`CHANNELS_LIST_CACHE_TTL_SECS=300`**, plus prod-only **`NODE_ENV=production`**, **`AUTH_BYPASS=false`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`**, and **`OVERLOAD_LAG_SHED_MS=250`** (see script block in `deploy-prod.sh`).
 
 ## Backend API (`backend/src`) — optional tunables
 
@@ -93,14 +99,16 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS` | Per-query timeout (ms) for heavy `GET /communities` unread-count SQL before falling back to a lightweight member-count response (default `2500`) |
 | `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST` | When `true` (default), `message:created` is published to `channel:<uuid>` before per-member `user:` duplicates |
 | `CHANNEL_MESSAGE_USER_FANOUT_MAX` | Max per-message **`user:`** duplicate publishes (default **10000**, cap **10000**). Members beyond this rely on **`channel:`** delivery only — intentional for mega-channels; clients must listen on `channel:` or accept missing `user:` duplicate. |
-| `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | When `true` (default), `POST /messages` awaits all `user:` Redis publishes; when `false`, enqueue after `channel:` publish (`realtimeUserFanoutDeferred: true` on **201**) |
+| `CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS` | Redis TTL for cached per-channel `user:` fanout audiences used by channel message publishes (default `180`) |
+| `CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS` | Redis TTL for cached conversation participant fanout audiences used by DM/group-DM realtime publishes (default `180`) |
+| `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | When `true`, `POST /messages` awaits all `user:` Redis publishes; when `false`, enqueue after `channel:` publish (`realtimeUserFanoutDeferred: true` on **201**). Deploy scripts now pin `false` for grading-style throughput. |
 | `MESSAGE_INGEST_STREAM_ENABLED`, `MESSAGE_INGEST_STREAM_CONSUMER` | `1`/`true` to append channel message metadata to Redis Stream `MESSAGE_INGEST_STREAM_KEY` and run an ACK consumer (pipeline hook before Kafka/NATS) |
 | `MESSAGE_INGEST_STREAM_KEY`, `MESSAGE_INGEST_STREAM_GROUP`, `MESSAGE_INGEST_STREAM_MAXLEN` | Stream name, consumer group, approximate max stream length |
 | `PG_READ_REPLICA_URL`, `PG_READ_POOL_MAX` | Optional read replica for `GET /api/v1/messages` list `SELECT`s ([`docs/db-scaling-messages.md`](db-scaling-messages.md)). Request **`X-ChatApp-Read-Consistency: primary`** on that GET to force the primary when you need read-your-writes after a POST. |
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
-| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS` | WS tuning (deploy defaults: `64` and `180`) |
+| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS` | WS tuning (code/deploy defaults: bootstrap TTL `180`; deploy batch size `64`) |
 | **Observability** | |
 | `OTEL_ENABLED` | Set `false` to disable tracing |
 | `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio (production default 0.1) |

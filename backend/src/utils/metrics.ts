@@ -179,6 +179,43 @@ const wsBootstrapWallDurationMs = new client.Histogram({
   buckets: [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 30000],
 });
 
+/** Cache outcomes for Redis-backed realtime fanout target lists. */
+const fanoutTargetCacheTotal = new client.Counter({
+  name: 'fanout_target_cache_total',
+  help: 'Cache outcomes for Redis-backed realtime fanout target lists',
+  labelNames: ['path', 'result'],
+});
+
+/** Wall-clock duration of realtime fanout stages (lookup, publish, total). */
+const fanoutPublishDurationMs = new client.Histogram({
+  name: 'fanout_publish_duration_ms',
+  help: 'Wall-clock duration of realtime fanout stages in milliseconds',
+  labelNames: ['path', 'stage'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+/** Number of Redis publish targets per realtime fanout operation. */
+const fanoutPublishTargetsHistogram = new client.Histogram({
+  name: 'fanout_publish_targets',
+  help: 'Number of Redis publish targets per realtime fanout operation',
+  labelNames: ['path'],
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+/** Cache outcomes for WS bootstrap subscription lists. */
+const wsBootstrapListCacheTotal = new client.Counter({
+  name: 'ws_bootstrap_list_cache_total',
+  help: 'Cache outcomes for websocket auto-subscribe channel lists',
+  labelNames: ['result'],
+});
+
+/** How many channels a websocket auto-subscribes to on connect. */
+const wsBootstrapChannelsHistogram = new client.Histogram({
+  name: 'ws_bootstrap_channels',
+  help: 'Number of websocket auto-subscribe channels per successful bootstrap list load',
+  buckets: [0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
 /** Redis message-list first-page bust failed after POST/PATCH/DELETE (TTL backstop applies). */
 const messageCacheBustFailuresTotal = new client.Counter({
   name: 'message_cache_bust_failures_total',
@@ -381,6 +418,26 @@ function startPgPoolMetrics(pool) {
     endpointListCacheBypassTotal.inc({ endpoint: 'messages_conversation', reason: 'pagination' }, 0);
     endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_channel', reason: 'write' }, 0);
     endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_conversation', reason: 'write' }, 0);
+    fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'hit' }, 0);
+    fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'miss' }, 0);
+    fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'coalesced' }, 0);
+    fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'hit' }, 0);
+    fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'miss' }, 0);
+    fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'coalesced' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'channel_message', stage: 'channel_topic' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'channel_message', stage: 'total' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'channel_message_user_topics', stage: 'target_lookup' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'channel_message_user_topics', stage: 'publish' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'channel_message_user_topics', stage: 'total' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'target_lookup' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'publish' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'total' }, 0);
+    fanoutPublishTargetsHistogram.observe({ path: 'channel_message_user_topics' }, 0);
+    fanoutPublishTargetsHistogram.observe({ path: 'conversation_event' }, 0);
+    wsBootstrapListCacheTotal.inc({ result: 'hit' }, 0);
+    wsBootstrapListCacheTotal.inc({ result: 'miss' }, 0);
+    wsBootstrapListCacheTotal.inc({ result: 'coalesced' }, 0);
+    wsBootstrapChannelsHistogram.observe(0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
     pgBusinessSqlQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
@@ -419,6 +476,11 @@ module.exports = {
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,
   wsBootstrapWallDurationMs,
+  fanoutTargetCacheTotal,
+  fanoutPublishDurationMs,
+  fanoutPublishTargetsHistogram,
+  wsBootstrapListCacheTotal,
+  wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,
   startPgPoolMetrics,
   pgPoolCircuitBreakerRejectsTotal,

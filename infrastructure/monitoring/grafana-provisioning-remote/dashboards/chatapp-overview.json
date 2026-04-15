@@ -569,6 +569,101 @@
       "title": "",
       "transparent": true,
       "type": "text"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 89 },
+      "id": 32,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (path, result) (rate(fanout_target_cache_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{path}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Fanout target cache (rate by path + result)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 89 },
+      "id": 33,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job=\"chatapp-api\"}[5m])))",
+          "legendFormat": "{{path}} {{stage}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Realtime fanout stage p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 95 },
+      "id": 34,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(fanout_publish_targets_bucket{job=\"chatapp-api\"}[5m])))",
+          "legendFormat": "{{path}} p95",
+          "refId": "A"
+        }
+      ],
+      "title": "Realtime fanout targets p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 95 },
+      "id": 35,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ws_bootstrap_channels_bucket{job=\"chatapp-api\"}[5m])))",
+          "legendFormat": "bootstrap channels p95",
+          "refId": "A"
+        }
+      ],
+      "title": "WS bootstrap channel count p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 101 },
+      "id": 36,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(ws_bootstrap_list_cache_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "WS bootstrap list cache (rate by result)",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -581,6 +676,6 @@
   "timezone": "America/New_York",
   "title": "ChatApp Overview",
   "uid": "chatapp-overview",
-  "version": 8,
+  "version": 9,
   "weekStart": ""
 }

@@ -66,6 +66,8 @@ const {
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
   wsBootstrapWallDurationMs,
+  wsBootstrapListCacheTotal,
+  wsBootstrapChannelsHistogram,
 } = require("../utils/metrics");
 const { tracer, context, trace } = require("../utils/tracer");
 
@@ -526,7 +528,7 @@ redisSub.on("message", (channel, message) => {
 });
 
 const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
-  process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '30',
+  process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '180',
   10,
 );
 const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
@@ -552,16 +554,26 @@ async function listAutoSubscriptionChannels(userId) {
   const cached = await redis.get(cacheKey).catch(() => null);
   if (cached) {
     try {
-      return JSON.parse(cached);
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed)) {
+        wsBootstrapListCacheTotal.inc({ result: 'hit' });
+        wsBootstrapChannelsHistogram.observe(parsed.length);
+        return parsed.filter((value) => typeof value === 'string');
+      }
     } catch {
-      await redis.del(cacheKey);
+      // Fall through to invalidate + rebuild from Postgres below.
     }
+    await redis.del(cacheKey).catch(() => {});
   }
 
   if (wsBootstrapListInFlight.has(cacheKey)) {
-    return wsBootstrapListInFlight.get(cacheKey);
+    wsBootstrapListCacheTotal.inc({ result: 'coalesced' });
+    const channels = await wsBootstrapListInFlight.get(cacheKey);
+    wsBootstrapChannelsHistogram.observe(channels.length);
+    return channels;
   }
 
+  wsBootstrapListCacheTotal.inc({ result: 'miss' });
   const load = (async () => {
     const [conversationRes, communityRes, channelRes] = await Promise.all([
       query(
@@ -597,6 +609,7 @@ async function listAutoSubscriptionChannels(userId) {
       ...conversationRes.rows.map((row) => `conversation:${row.id}`),
       ...communityRes.rows.map((row) => `community:${row.id}`),
     ];
+    wsBootstrapChannelsHistogram.observe(channels.length);
 
     // Cache for a short TTL. Invalidated explicitly on membership changes.
     redis

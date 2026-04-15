@@ -54,6 +54,9 @@ jobs:
             prom/prometheus:v2.53.1 \
             check rules /rules/alerts.yml
 
+      - name: Validate Grafana dashboards
+        run: node scripts/validate-grafana-dashboards.mjs
+
       - name: Validate Ansible playbooks (syntax)
         run: |
           if ! command -v ansible-playbook >/dev/null 2>&1; then

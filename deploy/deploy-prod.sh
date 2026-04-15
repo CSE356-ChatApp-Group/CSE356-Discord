@@ -581,6 +581,15 @@ ssh_prod "
   sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MAX=.*/CHANNEL_MESSAGE_USER_FANOUT_MAX=10000/' /opt/chatapp/shared/.env \
     || echo 'CHANNEL_MESSAGE_USER_FANOUT_MAX=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=.*/CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180/' /opt/chatapp/shared/.env \
+    || echo 'CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=.*/CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180/' /opt/chatapp/shared/.env \
+    || echo 'CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^MESSAGE_USER_FANOUT_HTTP_BLOCKING=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=false/' /opt/chatapp/shared/.env \
+    || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -593,6 +602,12 @@ ssh_prod "
   sudo grep -q '^WS_BOOTSTRAP_CACHE_TTL_SECONDS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^WS_BOOTSTRAP_CACHE_TTL_SECONDS=.*/WS_BOOTSTRAP_CACHE_TTL_SECONDS=180/' /opt/chatapp/shared/.env \
     || echo 'WS_BOOTSTRAP_CACHE_TTL_SECONDS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^DISABLE_RATE_LIMITS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^DISABLE_RATE_LIMITS=.*/DISABLE_RATE_LIMITS=true/' /opt/chatapp/shared/.env \
+    || echo 'DISABLE_RATE_LIMITS=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^AUTH_GLOBAL_PER_IP_RATE_LIMIT=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^AUTH_GLOBAL_PER_IP_RATE_LIMIT=.*/AUTH_GLOBAL_PER_IP_RATE_LIMIT=false/' /opt/chatapp/shared/.env \
+    || echo 'AUTH_GLOBAL_PER_IP_RATE_LIMIT=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer fires.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \

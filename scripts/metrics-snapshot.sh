@@ -34,7 +34,14 @@ queries=(
   'sum(rate(pg_pool_operation_errors_total{job="chatapp-api"}[5m])) by (reason)'
   'histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api"}[5m])))'
   'sum by (route) (rate(http_server_requests_total{job="chatapp-api"}[5m]))'
+  'histogram_quantile(0.95, sum by (le, route) (rate(pg_business_sql_queries_per_http_request_bucket{job="chatapp-api"}[5m])))'
   'sum(rate(redis_fanout_publish_failures_total{job="chatapp-api"}[5m]))'
+  'sum by (path, result) (rate(fanout_target_cache_total{job="chatapp-api"}[5m]))'
+  'histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job="chatapp-api"}[5m])))'
+  'histogram_quantile(0.95, sum by (le, path) (rate(fanout_publish_targets_bucket{job="chatapp-api"}[5m])))'
+  'histogram_quantile(0.95, sum by (le) (rate(ws_bootstrap_wall_duration_ms_bucket{job="chatapp-api"}[5m])))'
+  'histogram_quantile(0.95, sum by (le) (rate(ws_bootstrap_channels_bucket{job="chatapp-api"}[5m])))'
+  'sum by (result) (rate(ws_bootstrap_list_cache_total{job="chatapp-api"}[5m]))'
   'sum(rate(endpoint_list_cache_total{job="chatapp-api"}[5m])) by (endpoint, result)'
 )
 

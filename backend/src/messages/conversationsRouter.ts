@@ -17,6 +17,7 @@ const fanout           = require('../websocket/fanout');
 const presenceService  = require('../presence/service');
 const { invalidateWsBootstrapCache } = require('../websocket/server');
 const { bustConversationMessagesCache } = require('./messageCacheBust');
+const { invalidateConversationFanoutTargetsCache } = require('./conversationFanoutTargets');
 const { wrapFanoutPayload } = require('./realtimePayload');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 
@@ -547,6 +548,7 @@ async function addParticipantsHandler(req, res, next) {
     await client.query('COMMIT');
     if (participantIdsToAdd.length > 0) {
       await Promise.allSettled([
+        invalidateConversationFanoutTargetsCache(req.params.id),
         ...participantIdsToAdd.map((participantId) =>
           presenceService.invalidatePresenceFanoutTargets(participantId)
         ),
@@ -668,6 +670,7 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     }
     await client.query('COMMIT');
     await Promise.allSettled([
+      invalidateConversationFanoutTargetsCache(req.params.id),
       presenceService.invalidatePresenceFanoutTargets(req.user.id),
       invalidateWsBootstrapCache(req.user.id),
     ]);
