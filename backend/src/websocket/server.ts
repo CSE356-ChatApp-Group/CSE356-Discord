@@ -61,6 +61,7 @@ const { query } = require("../db/pool");
 const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
+const { markWsRecentConnect } = require("./recentConnect");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -719,6 +720,10 @@ wss.on("connection", async (ws, req) => {
   ws._presenceStatus = "idle";
   ws._lastActivityAt = 0;
   ws._awayMessage = null;
+
+  // Mark freshly connected users for a short window so channel fanout can send
+  // a targeted user-topic duplicate while channel auto-subscribe warms up.
+  markWsRecentConnect(user.id).catch(() => {});
 
   ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
     .then(() => {

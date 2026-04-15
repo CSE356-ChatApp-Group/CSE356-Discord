@@ -61,7 +61,7 @@ const COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT =
     ? _communitiesHeavyInflight
     : 4;
 const PUBLIC_COMMUNITIES_VERSION_KEY = 'communities:list:public_version';
-let communitiesHeavyQueriesInFlight = 0;
+let communitiesUnreadQueriesInFlight = 0;
 
 function communitiesCacheKey(userId, publicVersion = '0') {
   return `communities:list:${userId}:v${publicVersion}`;
@@ -94,57 +94,7 @@ async function cleanupCommunityUnreadCounterKeys(communityId) {
 }
 
 /** Shared list body (full list + keyset pages use the same SELECT list). */
-const COMMUNITIES_LIST_CORE = `
-       WITH visible_communities AS (
-         SELECT c.*, cm.role AS my_role
-         FROM communities c
-         LEFT JOIN community_members cm
-           ON cm.community_id = c.id
-          AND cm.user_id = $1
-         WHERE c.is_public = TRUE OR cm.user_id IS NOT NULL
-       ),
-       member_counts AS (
-         SELECT cm.community_id, COUNT(*)::int AS member_count
-         FROM community_members cm
-         JOIN visible_communities vc ON vc.id = cm.community_id
-         GROUP BY cm.community_id
-       ),
-       unread_counts AS (
-         SELECT ch.community_id, COUNT(*)::int AS unread_channel_count
-         FROM channels ch
-         JOIN visible_communities vc ON vc.id = ch.community_id
-         LEFT JOIN channel_members chm
-           ON chm.channel_id = ch.id
-          AND chm.user_id = $1
-         LEFT JOIN read_states rs
-           ON rs.channel_id = ch.id
-          AND rs.user_id = $1
-         WHERE (ch.is_private = FALSE OR chm.user_id IS NOT NULL)
-           AND ch.last_message_id IS NOT NULL
-           AND ch.last_message_author_id IS DISTINCT FROM $1
-           AND rs.last_read_message_id IS DISTINCT FROM ch.last_message_id
-         GROUP BY ch.community_id
-       )
-       SELECT vc.id,
-              vc.slug,
-              vc.name,
-              vc.description,
-              vc.icon_url,
-              vc.is_public,
-              vc.owner_id,
-              vc.created_at,
-              vc.updated_at,
-              vc.my_role,
-              COALESCE(mc.member_count, 0) AS member_count,
-              COALESCE(uc.unread_channel_count, 0) AS unread_channel_count,
-              (COALESCE(uc.unread_channel_count, 0) > 0) AS has_unread_channels
-       FROM visible_communities vc
-       LEFT JOIN member_counts mc ON mc.community_id = vc.id
-       LEFT JOIN unread_counts uc ON uc.community_id = vc.id`;
-
-// Fallback used when the heavy unread-count query times out under burst load.
-// Keeps the route available with member_count while setting unread fields to 0.
-const COMMUNITIES_LIST_FALLBACK_CORE = `
+const COMMUNITIES_LIST_BASE_CORE = `
        WITH visible_communities AS (
          SELECT c.*, cm.role AS my_role
          FROM communities c
@@ -169,9 +119,7 @@ const COMMUNITIES_LIST_FALLBACK_CORE = `
               vc.created_at,
               vc.updated_at,
               vc.my_role,
-              COALESCE(mc.member_count, 0) AS member_count,
-              0::int AS unread_channel_count,
-              FALSE AS has_unread_channels
+              COALESCE(mc.member_count, 0) AS member_count
        FROM visible_communities vc
        LEFT JOIN member_counts mc ON mc.community_id = vc.id`;
 
@@ -185,41 +133,72 @@ function isCommunitiesTimeout(err) {
   );
 }
 
-async function queryCommunitiesListWithFallback(baseSql, params, orderAndLimitSql) {
+async function queryCommunitiesListBase(baseSql, params, orderAndLimitSql) {
   const fullSql = `${baseSql}
        ${orderAndLimitSql}`;
-  const fallbackSql = `${COMMUNITIES_LIST_FALLBACK_CORE}
-       ${orderAndLimitSql}`;
+  return query({
+    text: fullSql,
+    values: params,
+  });
+}
 
-  if (communitiesHeavyQueriesInFlight >= COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT) {
+async function fetchUnreadCountsForCommunities(userId, communityIds) {
+  if (!communityIds.length) return new Map();
+  if (communitiesUnreadQueriesInFlight >= COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT) {
     recordEndpointListCacheBypass('communities', 'pressure');
-    return query({
-      text: fallbackSql,
-      values: params,
-      query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
-    });
+    return new Map();
   }
 
-  communitiesHeavyQueriesInFlight += 1;
+  communitiesUnreadQueriesInFlight += 1;
   try {
-    return await query({
-      text: fullSql,
-      values: params,
-      // Keep communities list responsive under burst; fallback omits unread scan.
+    const { rows } = await query({
+      text: `
+        SELECT ch.community_id, COUNT(*)::int AS unread_channel_count
+        FROM channels ch
+        LEFT JOIN channel_members chm
+          ON chm.channel_id = ch.id
+         AND chm.user_id = $1
+        LEFT JOIN read_states rs
+          ON rs.channel_id = ch.id
+         AND rs.user_id = $1
+        WHERE ch.community_id = ANY($2::uuid[])
+          AND (ch.is_private = FALSE OR chm.user_id IS NOT NULL)
+          AND ch.last_message_id IS NOT NULL
+          AND ch.last_message_author_id IS DISTINCT FROM $1
+          AND rs.last_read_message_id IS DISTINCT FROM ch.last_message_id
+        GROUP BY ch.community_id`,
+      values: [userId, communityIds],
+      // Keep unread calculation bounded; route remains available with zero unread fallback.
       query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
     });
+    return new Map(rows.map((row) => [row.community_id, Number(row.unread_channel_count || 0)]));
   } catch (err) {
-    if (!isCommunitiesTimeout(err)) throw err;
-    logger.warn({ err }, 'Communities heavy query timed out; using fallback');
-    recordEndpointListCacheBypass('communities', 'timeout');
-    return query({
-      text: fallbackSql,
-      values: params,
-      query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
-    });
+    if (isCommunitiesTimeout(err)) {
+      logger.warn({ err }, 'Communities unread-count query timed out; using unread=0 fallback');
+      recordEndpointListCacheBypass('communities', 'timeout');
+      return new Map();
+    }
+    throw err;
   } finally {
-    communitiesHeavyQueriesInFlight = Math.max(0, communitiesHeavyQueriesInFlight - 1);
+    communitiesUnreadQueriesInFlight = Math.max(0, communitiesUnreadQueriesInFlight - 1);
   }
+}
+
+async function buildCommunitiesListPayload(userId, rows) {
+  const unreadByCommunity = await fetchUnreadCountsForCommunities(
+    userId,
+    rows.map((row) => row.id),
+  );
+  return {
+    communities: rows.map((row) => {
+      const unread = unreadByCommunity.get(row.id) || 0;
+      return {
+        ...row,
+        unread_channel_count: unread,
+        has_unread_channels: unread > 0,
+      };
+    }),
+  };
 }
 
 function parseCommunitiesPageQuery(req) {
@@ -270,8 +249,8 @@ router.get('/', async (req, res, next) => {
       }
 
       const fetchLimit = page.limit + 1;
-      const { rows } = await queryCommunitiesListWithFallback(
-        COMMUNITIES_LIST_CORE,
+      const { rows } = await queryCommunitiesListBase(
+        COMMUNITIES_LIST_BASE_CORE,
         [req.user.id, cursorName, cursorId, fetchLimit],
         `WHERE (($2::text IS NULL AND $3::uuid IS NULL) OR (vc.name, vc.id) > ($2::text, $3::uuid))
        ORDER BY vc.name, vc.id
@@ -280,7 +259,7 @@ router.get('/', async (req, res, next) => {
 
       const hasMore = rows.length > page.limit;
       const slice = hasMore ? rows.slice(0, page.limit) : rows;
-      const body: any = { communities: slice };
+      const body: any = await buildCommunitiesListPayload(req.user.id, slice);
       if (hasMore) body.nextAfter = slice[slice.length - 1].id;
       return res.json(body);
     } catch (err) {
@@ -313,12 +292,12 @@ router.get('/', async (req, res, next) => {
 
   recordEndpointListCache('communities', 'miss');
   const promise: Promise<{ communities: any[] }> = (async () => {
-    const { rows } = await queryCommunitiesListWithFallback(
-      COMMUNITIES_LIST_CORE,
+    const { rows } = await queryCommunitiesListBase(
+      COMMUNITIES_LIST_BASE_CORE,
       [req.user.id],
       `ORDER BY vc.name, vc.id`,
     );
-    const payload = { communities: rows };
+    const payload = await buildCommunitiesListPayload(req.user.id, rows);
     redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
     return payload;
   })();

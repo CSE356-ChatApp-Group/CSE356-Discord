@@ -186,6 +186,52 @@ describe('GET /messages first-page cache vs POST', () => {
   });
 });
 
+describe('GET /messages empty accessible histories', () => {
+  it('returns 200 with an empty list for an accessible channel that has no messages', async () => {
+    const owner = await createAuthenticatedUser('emptymessageschan');
+    const slug = `empty-chan-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'empty channel history' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `empty-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const getRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=30`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(getRes.status).toBe(200);
+    expect(getRes.body).toEqual({ messages: [] });
+  });
+
+  it('returns 200 with an empty list for an accessible DM that has no messages', async () => {
+    const owner = await createAuthenticatedUser('emptymessagesdmown');
+    const other = await createAuthenticatedUser('emptymessagesdmoth');
+
+    const dmRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [other.user.id] });
+    expect(dmRes.status).toBe(201);
+    const conversationId = dmRes.body.conversation.id;
+
+    const getRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=30`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(getRes.status).toBe(200);
+    expect(getRes.body).toEqual({ messages: [] });
+  });
+});
+
 describe('GET /messages channel id as conversationId (generated-client compatibility)', () => {
   it('returns channel history when only conversationId= is set to the channel UUID', async () => {
     const owner = await createAuthenticatedUser('convparamchan');

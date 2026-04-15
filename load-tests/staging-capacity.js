@@ -147,6 +147,10 @@ const PROFILES = {
   // ramp to full peak to get a stable failure rate comparable to break-fast.
   // Use this when iterating on config (pool sizes, circuit breaker) to get a quick
   // signal on failure rate without waiting 6+ minutes per run.
+  //
+  // VU headroom must match peak arrival rate × iteration duration (see break-fast).
+  // Previously maxVUs=600 caused large dropped_iterations under peak — raised toward
+  // break-fast so the bottleneck read is mostly staging, not the k6 scheduler.
   tune: {
     httpStages: [
       { target: 20,  duration: '45s' },  // cache warmup
@@ -154,8 +158,8 @@ const PROFILES = {
       { target: 500, duration: '1m' },   // sustained peak
       { target: 0,   duration: '15s' },  // drain
     ],
-    preAllocatedVUs: 100,
-    maxVUs: 600,
+    preAllocatedVUs: 400,
+    maxVUs: 2000,
     wsVUs: 60,
     wsDuration: '2m45s',
   },

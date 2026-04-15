@@ -97,8 +97,9 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | Credentials |
 | **HTTP / caches** | |
 | `COMMUNITIES_LIST_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS` | List route cache TTLs (deploy default: `300`) |
-| `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS`, `COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT` | Heavy `GET /communities` unread-count timeout plus concurrency cap before serving the lightweight member-count fallback; watch route p95 and `endpoint_list_cache_bypass_total{endpoint="communities",reason=~"pressure|timeout"}` |
+| `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS`, `COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT` | `GET /communities` unread-count hydration timeout plus concurrency cap before serving the normal base list with `unread_channel_count=0`; watch route p95 and `endpoint_list_cache_bypass_total{endpoint="communities",reason=~"pressure|timeout"}` |
 | `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST` | When `true` (default), `message:created` is published to `channel:<uuid>` before per-member `user:` duplicates |
+| `CHANNEL_MESSAGE_USER_FANOUT_MODE` | `recent_connect` (default) duplicates channel `message:created` only to users who connected very recently, which closes the bootstrap race without paying a per-member publish cost on every send. Set `all` to restore legacy duplicate fanout to every visible member. |
 | `CHANNEL_MESSAGE_USER_FANOUT_MAX` | Max per-message **`user:`** duplicate publishes (default **10000**, cap **10000**). Members beyond this rely on **`channel:`** delivery only — intentional for mega-channels; clients must listen on `channel:` or accept missing `user:` duplicate. |
 | `CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS` | Redis TTL for cached per-channel `user:` fanout audiences used by channel message publishes (default `180`) |
 | `CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS` | Redis TTL for cached conversation participant fanout audiences used by DM/group-DM realtime publishes (default `180`) |
@@ -109,7 +110,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
-| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS` | WS tuning (code/deploy defaults: bootstrap TTL `180`; deploy batch size `64`) |
+| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning (code/deploy defaults: bootstrap TTL `180`; deploy batch size `64`; recent-connect bridge window `20`) |
 | **Observability** | |
 | `OTEL_ENABLED` | Set `false` to disable tracing |
 | `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio (production default 0.1) |

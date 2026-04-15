@@ -260,31 +260,36 @@ groups:
             >92% of pool slots are busy for 10m. You are at effective connection capacity even
             if the wait queue is still small — scale or tune pool/PgBouncer before waiters spike.
 
-      # pool.query + wrapped client.query counts per finished HTTP request (AsyncLocalStorage).
-      # NOTE: A single POST /messages uses BEGIN + CTE + COMMIT (3+ round-trips); list/hydration paths
-      # often land in dozens. A fixed p99>25 fired constantly in production (noise). Use sustained
-      # *mean* queries/request vs traffic floor; tune threshold from Grafana
-      # sum(rate(..._sum))/sum(rate(..._count)) after a baseline week.
+      # Business-SQL round-trips per finished HTTP request (AsyncLocalStorage).
+      # Use the business-SQL histogram here, not the raw pg_queries_per_http_request view:
+      # the raw metric includes BEGIN/COMMIT/ROLLBACK and is useful for engineering/debugging,
+      # but it is too noisy to page on by itself for healthy transactional routes.
+      # Also require the route's own latency to be elevated so "busy but healthy" does not alert.
       - alert: ChatAppHighDbQueriesPerRequest
         expr: |
           (
-            sum(rate(pg_queries_per_http_request_sum{job="chatapp-api",route=~"/api/v1/messages/?"}[15m]))
+            sum(rate(pg_business_sql_queries_per_http_request_sum{job="chatapp-api",route=~"/api/v1/messages/?"}[15m]))
             /
-            clamp_min(sum(rate(pg_queries_per_http_request_count{job="chatapp-api",route=~"/api/v1/messages/?"}[15m])), 1e-9)
-          ) > 105
+            clamp_min(sum(rate(pg_business_sql_queries_per_http_request_count{job="chatapp-api",route=~"/api/v1/messages/?"}[15m])), 1e-9)
+          ) > 90
           and
-          sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages/?"}[15m])) > 0.05
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",route=~"/api/v1/messages/?"}[15m]))
+          ) > 250
+          and
+          sum(rate(http_server_requests_total{job="chatapp-api",route=~"/api/v1/messages/?"}[15m])) > 0.2
         for: 20m
         labels:
           severity: warning
         annotations:
-          summary: Elevated mean Postgres round-trips per /api/v1/messages request
+          summary: Elevated business-SQL round-trips per /api/v1/messages request
           description: >
-            Sustained mean successful `query()`/wrapped `client.query()` count per HTTP request to
-            /api/v1/messages (including BEGIN/COMMIT) is above ~105 for 20m while traffic is non-trivial.
-            Typical warm load is often ~50–90 depending on mix of GET vs POST and cache hits — raise the
-            threshold in alerts.yml if you have verified a new healthy baseline after optimizations.
-            Correlate with deploys, `PG_SLOW_QUERY_MS` logs, and Grafana mean (sum/count) for this route.
+            Sustained mean successful business-SQL round-trips per HTTP request to /api/v1/messages
+            is above ~90 for 20m, while that route's own p95 latency is above 250 ms and traffic is non-trivial.
+            The raw `pg_queries_per_http_request` metric includes BEGIN/COMMIT/ROLLBACK and is intentionally
+            not paged on by itself. Correlate with deploys, `PG_SLOW_QUERY_MS` logs, and the Grafana
+            business-SQL mean/p95 panel for this route.
 
       - alert: ChatAppListCacheMissDominates
         expr: |

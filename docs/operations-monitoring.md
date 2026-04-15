@@ -60,7 +60,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 |------|---------|------------------|
 | HTTP | `http_server_request_duration_ms`, `http_server_requests_total` | Tail latency and volume by `route`, `method`, `status_class`. |
 | Pool | `pg_pool_waiting`, `pg_pool_idle`, `pg_pool_total`, `pg_pool_circuit_breaker_rejects_total`, `pg_pool_operation_errors_total` | Queueing vs saturation vs checkout/DB errors. |
-| DB / handler | `pg_queries_per_http_request` | N+1 or heavy handlers (histogram by `route`). |
+| DB / handler | `pg_business_sql_queries_per_http_request`, `pg_queries_per_http_request` | Primary operator view is the business-SQL histogram by `route`; raw `pg_queries_per_http_request` also counts BEGIN/COMMIT/ROLLBACK and is mainly for engineering/debugging. |
 | Cache | `endpoint_list_cache_total` | Redis list cache `hit` / `miss` / `coalesced` by `endpoint`. |
 | Overload | `chatapp_overload_stage`, `http_overload_shed_total` | Stage 0–3; early 503s when shedding enabled. |
 | Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_cache_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total` | Fanout health, Redis publish multiplier, target-cache effectiveness, WS bootstrap breadth, and slow clients. |

@@ -16,6 +16,7 @@ jest.mock('../src/messages/sideEffects', () => ({
 
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(() => Promise.resolve(null)),
+  mget: jest.fn(() => Promise.resolve([])),
   set: jest.fn(() => Promise.resolve('OK')),
   del: jest.fn(() => Promise.resolve(1)),
 }));
@@ -27,6 +28,7 @@ const fanout = require('../src/websocket/fanout') as { publish: jest.Mock };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const redis = require('../src/db/redis') as {
   get: jest.Mock;
+  mget: jest.Mock;
   set: jest.Mock;
   del: jest.Mock;
 };
@@ -48,11 +50,14 @@ describe('channelRealtimeFanout', () => {
     query.mockReset();
     fanout.publish.mockReset();
     redis.get.mockReset();
+    redis.mget.mockReset();
     redis.set.mockReset();
     redis.del.mockReset();
     redis.get.mockResolvedValue(null);
+    redis.mget.mockResolvedValue([]);
     redis.set.mockResolvedValue('OK');
     redis.del.mockResolvedValue(1);
+    delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
   });
 
   it('getChannelUserFanoutTargetKeys returns distinct user: keys from query rows', async () => {
@@ -103,8 +108,40 @@ describe('channelRealtimeFanout', () => {
     );
   });
 
-  it('publishChannelMessageCreated publishes channel topic then all visible member user targets', async () => {
+  it('publishChannelMessageCreated fast-paths only recent-connect user targets by default', async () => {
     redis.get.mockResolvedValueOnce(null);
+    redis.mget.mockResolvedValueOnce(['1', null]);
+    query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
+    await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
+    expect(fanout.publish).toHaveBeenCalledTimes(2);
+    expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+      'channel:c1',
+      'user:a',
+    ]);
+  });
+
+  it('publishChannelMessageCreated publishes all visible member user targets in all-members mode', async () => {
+    const prev = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'all';
+    try {
+      redis.get.mockResolvedValueOnce(null);
+      query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
+      await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
+      expect(fanout.publish).toHaveBeenCalledTimes(3);
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+        'channel:c1',
+        'user:a',
+        'user:b',
+      ]);
+    } finally {
+      if (prev === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prev;
+    }
+  });
+
+  it('publishChannelMessageCreated falls back to full user fanout when recent-connect lookup fails', async () => {
+    redis.get.mockResolvedValueOnce(null);
+    redis.mget.mockRejectedValueOnce(new Error('redis mget failed'));
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
     expect(fanout.publish).toHaveBeenCalledTimes(3);
