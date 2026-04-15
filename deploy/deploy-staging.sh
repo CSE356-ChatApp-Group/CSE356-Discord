@@ -397,9 +397,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
     || echo 'PG_CONNECTION_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Preserve stable rollout tuning across deploys.
+  # Only set these keys when missing; do not clobber operator-pinned values.
   sudo grep -q '^READ_RECEIPT_DEFER_POOL_WAITING=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^READ_RECEIPT_DEFER_POOL_WAITING=.*/READ_RECEIPT_DEFER_POOL_WAITING=8/' /opt/chatapp/shared/.env \
-    || echo 'READ_RECEIPT_DEFER_POOL_WAITING=8' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    || echo 'READ_RECEIPT_DEFER_POOL_WAITING=0' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Keep search DB statements bounded so a slow query cannot monopolize a pool
   # slot for too long during burst load.
   sudo grep -q '^SEARCH_STATEMENT_TIMEOUT_MS=' /opt/chatapp/shared/.env \
@@ -437,8 +438,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=true/' /opt/chatapp/shared/.env \
     || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^WS_AUTO_SUBSCRIBE_MODE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_AUTO_SUBSCRIBE_MODE=.*/WS_AUTO_SUBSCRIBE_MODE=user_only/' /opt/chatapp/shared/.env \
-    || echo 'WS_AUTO_SUBSCRIBE_MODE=user_only' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    || echo 'WS_AUTO_SUBSCRIBE_MODE=full' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^USER_FEED_SHARD_COUNT=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=64/' /opt/chatapp/shared/.env \
     || echo 'USER_FEED_SHARD_COUNT=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
