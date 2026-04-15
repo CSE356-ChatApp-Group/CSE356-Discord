@@ -82,24 +82,24 @@ jobs:
           ls -la "./${ARTIFACT}"
 
       - name: Build fallback release artifact
-        if: steps.download_release.outcome != 'success'
+        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
         uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'
 
       - name: Install dependencies for fallback build
-        if: steps.download_release.outcome != 'success'
+        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
         run: npm ci
 
       - name: Build app for fallback artifact
-        if: steps.download_release.outcome != 'success'
+        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
         run: |
           npm run build --workspace=backend
           npm run build --workspace=frontend
 
       - name: Package fallback release artifact
-        if: steps.download_release.outcome != 'success'
+        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
         env:
           TARGET_SHA: ${{ needs.resolve-target.outputs.resolved_sha }}
         run: |
@@ -117,6 +117,13 @@ jobs:
             package*.json \
             .env.example
           ls -lh "releases/chatapp-${TARGET_SHA}.tar.gz"
+
+      - name: Fail production when release artifact is missing
+        if: steps.download_release.outcome != 'success' && inputs.environment == 'prod'
+        run: |
+          echo "ERROR: release-${{ needs.resolve-target.outputs.resolved_sha }} artifact not found."
+          echo "Production manual deploy requires the tested release artifact; fallback build is disabled."
+          exit 1
 
       - name: Normalize artifact path
         env:

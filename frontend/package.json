@@ -34,7 +34,10 @@
     "e2e:dm-first-open": "vite build && npx playwright test e2e/dm-first-open-after-send.spec.ts",
     "e2e:dm-realtime": "vite build && npx playwright test e2e/dm-realtime-delivery.spec.ts",
     "e2e:headed": "vite build && npx playwright test --headed",
-    "e2e:ui": "vite build && npx playwright test --ui"
+    "e2e:ui": "vite build && npx playwright test --ui",
+    "grader:watch": "node scripts/grader-watch.mjs",
+    "grader:watch:headed": "node scripts/grader-watch.mjs --headed --require-login",
+    "grader:watch:cdp": "node scripts/grader-watch.mjs --cdp-url http://127.0.0.1:9222"
   },
   "devDependencies": {
     "@playwright/test": "^1.54.2",

@@ -72,6 +72,8 @@ RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
 # Default true — nginx otherwise may pick the restarting peer for POST; without
 # `non_idempotent` on proxy_next_upstream, POST is not retried and clients see 502 HTML.
 PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-true}"
+INGRESS_CANARY_SECONDS="${INGRESS_CANARY_SECONDS:-45}"
+ALL_WORKER_HEALTH_PASSES="${ALL_WORKER_HEALTH_PASSES:-3}"
 # PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
@@ -211,10 +213,155 @@ done
 
 TARGET_PORTS_CSV=$(IFS=,; echo "${TARGET_PORTS[*]}")
 echo "Target app worker ports: ${TARGET_PORTS[*]}"
+PREV_RELEASE_MAP=()
 
 stop_chatapp_port() {
   local p="${1:?port required}"
   ssh_prod "sudo systemctl stop chatapp@${p} 2>/dev/null || true"
+}
+
+capture_previous_release_map() {
+  PREV_RELEASE_MAP=()
+  for p in "${TARGET_PORTS[@]}"; do
+    local release_path
+    release_path="$(ssh_prod "
+      set -euo pipefail
+      if ! systemctl is-active --quiet chatapp@${p}; then
+        exit 0
+      fi
+      pid=\$(systemctl show -p MainPID --value chatapp@${p} || true)
+      if [ -z \"\${pid}\" ] || [ \"\${pid}\" = \"0\" ]; then
+        exit 0
+      fi
+      cwd=\$(readlink -f /proc/\${pid}/cwd 2>/dev/null || true)
+      if [ -z \"\${cwd}\" ]; then
+        exit 0
+      fi
+      case \"\${cwd}\" in
+        */backend) echo \"\${cwd%/backend}\" ;;
+        *) echo \"\${cwd}\" ;;
+      esac
+    " || true)"
+    if [ -n "${release_path}" ]; then
+      PREV_RELEASE_MAP+=( "${p}:${release_path}" )
+    fi
+  done
+  if [ "${#PREV_RELEASE_MAP[@]}" -gt 0 ]; then
+    echo "Captured previous worker release map: ${PREV_RELEASE_MAP[*]}"
+  else
+    echo "WARN: previous worker release map is empty (fresh host or inactive units)"
+  fi
+}
+
+restore_previous_release_map() {
+  if [ "${#PREV_RELEASE_MAP[@]}" -eq 0 ]; then
+    echo "↩ No previous release map captured; skipping worker release restoration."
+    return 0
+  fi
+  echo "↩ Restoring prior worker release map..."
+  for entry in "${PREV_RELEASE_MAP[@]}"; do
+    local port="${entry%%:*}"
+    local release_path="${entry#*:}"
+    ssh_prod "
+      set -euo pipefail
+      DROPIN_DIR=/etc/systemd/system/chatapp@${port}.service.d
+      sudo mkdir -p \"\$DROPIN_DIR\"
+      printf '[Service]\nWorkingDirectory=%s/backend\n' '${release_path}' | sudo tee \"\$DROPIN_DIR/release.conf\" >/dev/null
+      sudo systemctl daemon-reload
+      sudo systemctl restart chatapp@${port}
+      /tmp/health-check.sh ${port} http://127.0.0.1:${port} >/dev/null
+    " || {
+      echo "WARN: could not fully restore chatapp@${port} to ${release_path}"
+    }
+  done
+}
+
+gate_same_release() {
+  echo "Gate: same-release parity across target workers..."
+  local expected="${RELEASE_DIR}/${RELEASE_SHA}/backend"
+  if ! ssh_prod "
+    set -euo pipefail
+    expected='${expected}'
+    for p in ${TARGET_PORTS_CSV//,/ }; do
+      systemctl is-active --quiet chatapp@\${p} || { echo \"inactive chatapp@\${p}\"; exit 1; }
+      pid=\$(systemctl show -p MainPID --value chatapp@\${p})
+      [ -n \"\${pid}\" ] && [ \"\${pid}\" != \"0\" ] || { echo \"missing pid chatapp@\${p}\"; exit 1; }
+      cwd=\$(readlink -f /proc/\${pid}/cwd 2>/dev/null || true)
+      [ \"\${cwd}\" = \"\${expected}\" ] || { echo \"release mismatch chatapp@\${p}: \${cwd} != \${expected}\"; exit 1; }
+    done
+  "; then
+    echo "ERROR: same-release parity gate failed."
+    return 1
+  fi
+  echo "✓ Same-release parity gate passed"
+}
+
+gate_all_worker_health() {
+  echo "Gate: all-worker health (${ALL_WORKER_HEALTH_PASSES} consecutive passes per port)..."
+  if ! ssh_prod "
+    set -euo pipefail
+    passes='${ALL_WORKER_HEALTH_PASSES}'
+    for p in ${TARGET_PORTS_CSV//,/ }; do
+      ok=0
+      for _i in \$(seq 1 \"\${passes}\"); do
+        if /tmp/health-check.sh \${p} http://127.0.0.1:\${p} >/dev/null 2>&1; then
+          ok=\$((ok+1))
+        else
+          ok=0
+        fi
+        sleep 1
+      done
+      [ \"\${ok}\" -ge \"\${passes}\" ] || { echo \"health gate failed on :\${p}\"; exit 1; }
+    done
+  "; then
+    echo "ERROR: all-worker health gate failed."
+    return 1
+  fi
+  echo "✓ All-worker health gate passed"
+}
+
+gate_upstream_parity() {
+  echo "Gate: nginx upstream parity with active workers..."
+  if ! ssh_prod "
+    set -euo pipefail
+    cfg=/etc/nginx/sites-available/chatapp
+    [ -f \"\${cfg}\" ] || { echo 'missing nginx site config'; exit 1; }
+    upstream=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\${cfg}\")
+    ports_up=\$(echo \"\${upstream}\" | grep -oE 'localhost:[0-9]+|127\\.0\\.0\\.1:[0-9]+' | sed 's/.*://' | sort -u)
+    [ -n \"\${ports_up}\" ] || { echo 'no upstream ports'; exit 1; }
+    for p in ${TARGET_PORTS_CSV//,/ }; do
+      systemctl is-active --quiet chatapp@\${p} || { echo \"inactive chatapp@\${p}\"; exit 1; }
+      echo \"\${ports_up}\" | grep -qx \"\${p}\" || { echo \"upstream missing :\${p}\"; exit 1; }
+    done
+    for p in \${ports_up}; do
+      case ',${TARGET_PORTS_CSV},' in
+        *\",\${p},\"*) ;;
+        *) echo \"unexpected upstream port :\${p}\"; exit 1 ;;
+      esac
+    done
+    sudo nginx -t >/dev/null
+  "; then
+    echo "ERROR: upstream parity gate failed."
+    return 1
+  fi
+  echo "✓ Upstream parity gate passed"
+}
+
+gate_ingress_canary() {
+  echo "Gate: ingress canary (${INGRESS_CANARY_SECONDS}s on nginx path)..."
+  if ! ssh_prod "
+    set -euo pipefail
+    total='${INGRESS_CANARY_SECONDS}'
+    [ \"\${total}\" -gt 0 ] || exit 0
+    for _i in \$(seq 1 \"\${total}\"); do
+      curl -fsS -m 3 http://127.0.0.1/health >/dev/null || exit 1
+      sleep 1
+    done
+  "; then
+    echo "ERROR: ingress canary gate failed."
+    return 1
+  fi
+  echo "✓ Ingress canary gate passed"
 }
 
 ssh_prod "sudo logger -t chatapp-deploy \"event=start sha=${RELEASE_SHA} old_port=${OLD_PORT} new_port=${NEW_PORT} instances=${CHATAPP_INSTANCES}\"" || true
@@ -254,6 +401,7 @@ PY
     sudo systemctl reload nginx
     sudo systemctl start chatapp@${OLD_PORT} 2>/dev/null || true
   "
+  restore_previous_release_map || true
 }
 
 echo ""
@@ -582,6 +730,7 @@ const { Client } = require('pg');
   echo 'Release unpacked and verified'
 "
 echo "✓ Candidate release ready"
+capture_previous_release_map
 
 # 5.5. Install/update systemd unit
 echo "5.5. Installing/updating systemd unit..."
@@ -1143,6 +1292,10 @@ PY
       exit 1
     }
     echo "✓ Nginx pinned to candidate"
+    gate_ingress_canary || {
+      rollback_cutover
+      exit 1
+    }
   else
     echo "9a. Skipping nginx pin (PIN_CANDIDATE_BEFORE_COMPANION=false) — ensure /api/ proxy_next_upstream includes non_idempotent."
     echo "✓ Companion restart may briefly 502 POST if an upstream is down"
@@ -1276,6 +1429,10 @@ PY
   fi
 
   echo "9c. Restoring nginx upstream (least_conn, all ${CHATAPP_INSTANCES} workers)..."
+  gate_same_release || {
+    rollback_cutover
+    exit 1
+  }
   ssh_prod "
     set -euo pipefail
     export TARGET_PORTS_CSV='${TARGET_PORTS_CSV}'
@@ -1320,6 +1477,14 @@ PY
     rollback_cutover
     exit 1
   }
+  gate_all_worker_health || {
+    rollback_cutover
+    exit 1
+  }
+  gate_upstream_parity || {
+    rollback_cutover
+    exit 1
+  }
   echo "✓ Multi-worker nginx upstream restored"
 fi
 
@@ -1338,10 +1503,10 @@ echo "10. Monitoring for ${MONITOR_SECONDS} seconds..."
 MONITOR_FAILS=0
 for i in $(seq 1 "$MONITOR_CHECKS"); do
   sleep 5
-  if ssh_prod "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
+  if gate_all_worker_health >/dev/null 2>&1; then
     echo "  ✓ Check $i/$MONITOR_CHECKS passed"
   else
-    echo "  ✗ Check $i/$MONITOR_CHECKS: health check failed"
+    echo "  ✗ Check $i/$MONITOR_CHECKS: all-worker health gate failed"
     MONITOR_FAILS=$((MONITOR_FAILS + 1))
   fi
 done
@@ -1529,7 +1694,7 @@ fi
 
 # 12. Final health check
 echo "12. Final verification..."
-if ssh_prod "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" >/dev/null 2>&1; then
+if gate_same_release && gate_all_worker_health && gate_upstream_parity; then
   echo "✓ Production deployment SUCCESSFUL"
 else
   echo "ERROR: Final health check failed after cutover."

@@ -125,6 +125,50 @@ Grafana **ChatApp Overview** ([`infrastructure/monitoring/grafana-provisioning/d
 
 **Before release / after delivery changes:** run `cd backend && npm test` (full suite). For a staging grader-style load, compare **POST `/messages` p95/p99** (synchronous fanout adds latency) with **`ws_backpressure_events_total`** and fanout queue depth above.
 
+## Automated grader dashboard watcher (rollout gate)
+
+Use a local authenticated watcher to detect grader-side delivery regressions within seconds during rollout soak windows.
+
+1. One-time browser login bootstrap (headed):
+
+   ```bash
+   cd frontend
+   npm run grader:watch:headed
+   ```
+
+   Sign in to the grader dashboard in the opened browser window, then stop the watcher (`Ctrl+C`). The session is stored in `frontend/.playwright/grader-user-data`.
+
+2. Continuous monitor during rollout:
+
+   ```bash
+   cd frontend
+   npm run grader:watch
+   ```
+
+   If campus SSO/2FA blocks the isolated Playwright profile, attach to your own logged-in Chrome session:
+
+   ```bash
+   open -na "Google Chrome" --args --remote-debugging-port=9222
+   npm run grader:watch:cdp
+   ```
+
+   This polls the dashboard every 15s and writes:
+   - `artifacts/rollout-monitoring/grader-watch-events.jsonl` (append-only timeline)
+   - `artifacts/rollout-monitoring/grader-watch-latest.txt` (current error block snapshot)
+
+3. Use for gated 1->2->4 scale-up:
+   - Keep watcher running during each soak window.
+   - Treat any new `sendMessage failed: 5xx`, `Delivery timeout`, or repeated 403 bursts as an abort signal.
+   - Correlate event timestamps with `scripts/prod-harness-window.sh`, `scripts/prod-nginx-audit.sh`, and Prometheus snapshots.
+
+4. Enforce watcher as a rollout gate:
+
+   ```bash
+   ./scripts/grader-watch-gate.sh --window-seconds 900
+   ```
+
+   Exit code is non-zero when recent watcher events include critical delivery errors (`Delivery timeout` or `sendMessage failed: 5xx`) or repeated 403s.
+
 ## Harness outage — correlate a specific time window (minute-level)
 
 COMPAS **outage** bands are often **short**. Repo-wide HTTP **5xx%** panels can stay flat while the harness reports **failed deliveries** (WS SLA), so triage needs **logs + journals** on the exact minutes.
