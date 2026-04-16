@@ -73,8 +73,22 @@ function channelUserFanoutTargetsCacheKey(channelId: string) {
   return `channel:${channelId}:user_fanout_targets`;
 }
 
+function channelUserFanoutTargetsVersionKey(channelId: string) {
+  return `channel:${channelId}:user_fanout_targets_v`;
+}
+
 async function invalidateChannelUserFanoutTargetsCache(channelId: string) {
-  await redis.del(channelUserFanoutTargetsCacheKey(channelId));
+  const cacheKey = channelUserFanoutTargetsCacheKey(channelId);
+  const versionKey = channelUserFanoutTargetsVersionKey(channelId);
+  try {
+    const pipeline = redis.pipeline();
+    pipeline.del(cacheKey);
+    pipeline.incr(versionKey);
+    await pipeline.exec();
+  } catch {
+    await redis.del(cacheKey).catch(() => {});
+    await redis.incr(versionKey).catch(() => {});
+  }
 }
 
 async function invalidateCommunityChannelUserFanoutTargetsCache(communityId: string) {
@@ -85,9 +99,20 @@ async function invalidateCommunityChannelUserFanoutTargetsCache(communityId: str
     [communityId],
   );
 
-  const keys = rows.map((row: { id: string }) => channelUserFanoutTargetsCacheKey(row.id));
-  if (!keys.length) return;
-  await redis.del(...keys);
+  if (!rows.length) return;
+
+  try {
+    const pipeline = redis.pipeline();
+    rows.forEach((row: { id: string }) => {
+      pipeline.del(channelUserFanoutTargetsCacheKey(row.id));
+      pipeline.incr(channelUserFanoutTargetsVersionKey(row.id));
+    });
+    await pipeline.exec();
+  } catch {
+    await Promise.allSettled(
+      rows.map((row: { id: string }) => invalidateChannelUserFanoutTargetsCache(row.id)),
+    );
+  }
 }
 
 /**
@@ -116,7 +141,38 @@ async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string
   }
 
   fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'miss' });
-  const load = (async () => {
+  const versionKey = channelUserFanoutTargetsVersionKey(channelId);
+  const maxVersionRetries = 8;
+  const load: Promise<string[]> = (async (): Promise<string[]> => {
+    for (let attempt = 0; attempt < maxVersionRetries; attempt += 1) {
+      const vBeforeQuery = Number((await redis.get(versionKey).catch(() => null)) || 0);
+      const { rows } = await query(
+        `SELECT DISTINCT cm.user_id::text AS user_id
+         FROM channels c
+         JOIN community_members cm ON cm.community_id = c.community_id
+         WHERE c.id = $1
+           AND (
+             c.is_private = FALSE
+             OR EXISTS (
+               SELECT 1 FROM channel_members chm
+               WHERE chm.channel_id = c.id AND chm.user_id = cm.user_id
+             )
+           )`,
+        [channelId],
+      );
+      const vAfterQuery = Number((await redis.get(versionKey).catch(() => null)) || 0);
+      if (vBeforeQuery !== vAfterQuery) {
+        continue;
+      }
+
+      const keys: string[] = rows.map((r: { user_id: string }) => `user:${r.user_id}`);
+      const uniqueKeys = Array.from(new Set(keys));
+      redis
+        .set(cacheKey, JSON.stringify(uniqueKeys), 'EX', CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS)
+        .catch(() => {});
+      return uniqueKeys;
+    }
+
     const { rows } = await query(
       `SELECT DISTINCT cm.user_id::text AS user_id
        FROM channels c
@@ -131,12 +187,7 @@ async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string
          )`,
       [channelId],
     );
-    const keys: string[] = rows.map((r: { user_id: string }) => `user:${r.user_id}`);
-    const uniqueKeys = [...new Set(keys)];
-    redis
-      .set(cacheKey, JSON.stringify(uniqueKeys), 'EX', CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS)
-      .catch(() => {});
-    return uniqueKeys;
+    return Array.from(new Set(rows.map((r: { user_id: string }) => `user:${r.user_id}`)));
   })().finally(() => {
     channelUserFanoutTargetsInflight.delete(cacheKey);
   });

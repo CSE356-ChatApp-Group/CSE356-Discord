@@ -24,6 +24,7 @@ const logger           = require('../utils/logger');
 const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
+const { publishUserFeedTargets } = require('../websocket/userFeed');
 const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
 const { invalidateCommunityChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
 const { recordEndpointListCache, recordEndpointListCacheBypass } = require('../utils/endpointCacheMetrics');
@@ -77,6 +78,25 @@ async function bumpPublicCommunitiesVersion() {
 
 const MEMBERS_CACHE_TTL_SECS = 30;
 function membersCacheKey(communityId) { return `community:${communityId}:members`; }
+
+async function listCommunityRealtimeTargets(communityId, userId) {
+  const { rows } = await query(
+    `SELECT c.id::text AS id
+     FROM channels c
+     LEFT JOIN channel_members chm
+       ON chm.channel_id = c.id
+      AND chm.user_id = $2
+     WHERE c.community_id = $1
+       AND (c.is_private = FALSE OR chm.user_id IS NOT NULL)
+     ORDER BY c.id`,
+    [communityId, userId],
+  );
+
+  return [
+    `community:${communityId}`,
+    ...rows.map((row) => `channel:${row.id}`),
+  ];
+}
 
 // In-process singleflight: prevents thundering-herd when cache expires.
 // All concurrent requests for the same key share one DB query in flight.
@@ -463,10 +483,17 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
       `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
       [req.params.id, req.user.id]
     );
+    const realtimeTargets = await listCommunityRealtimeTargets(req.params.id, req.user.id);
     await Promise.allSettled([
       invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),
       presenceService.invalidatePresenceFanoutTargets(req.user.id),
       invalidateWsBootstrapCache(req.user.id),
+      publishUserFeedTargets([req.user.id], {
+        __wsInternal: {
+          kind: 'subscribe_channels',
+          channels: realtimeTargets,
+        },
+      }),
     ]);
     invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
     {

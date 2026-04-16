@@ -496,6 +496,12 @@ router.post('/:id/members',
           channelId: req.params.id,
           communityId: channel.community_id,
         });
+        publishUserFeedTargets([user_id], {
+          __wsInternal: {
+            kind: 'subscribe_channels',
+            channels: [`channel:${req.params.id}`],
+          },
+        }).catch(() => {});
         // Bust the newly-invited user's channel list cache so the private
         // channel appears immediately on their next GET /channels request.
         redis.del(`channels:list:${channel.community_id}:${user_id}`).catch(() => {});

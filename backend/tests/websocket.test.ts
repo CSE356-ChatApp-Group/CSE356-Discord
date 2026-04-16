@@ -519,6 +519,74 @@ describe('Channel realtime delivery', () => {
     }
   });
 
+  it('delivers channel messages after a user joins a community with an already-open websocket', async () => {
+    const owner = await createAuthenticatedUser('wsjoinliveowner');
+    const joiningMember = await createAuthenticatedUser('wsjoinlivemember');
+
+    const slug = `ws-join-live-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'ws join live delivery test' });
+
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelName = `join-live-${uniqueSuffix()}`;
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: channelName, isPrivate: false, description: 'join live channel' });
+
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const memberSocket = await connectWebSocket(port, joiningMember.accessToken);
+
+    try {
+      const noPreJoinMessage = waitForNoWsEvent(
+        memberSocket,
+        (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
+        1000,
+      );
+
+      const preJoinSendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'pre-join cache primer' });
+
+      expect(preJoinSendRes.status).toBe(201);
+      await noPreJoinMessage;
+
+      const joinRes = await request(app)
+        .post(`/api/v1/communities/${communityId}/join`)
+        .set('Authorization', `Bearer ${joiningMember.accessToken}`)
+        .send({});
+
+      expect(joinRes.status).toBe(200);
+
+      const createdEventPromise = waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
+      );
+
+      const postJoinSendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'post-join live delivery' });
+
+      expect(postJoinSendRes.status).toBe(201);
+      const event = await createdEventPromise;
+      expect(event.data.content).toBe('post-join live delivery');
+      expect([
+        `user:${joiningMember.user.id}`,
+        `channel:${channelId}`,
+      ]).toContain(event.channel);
+    } finally {
+      await closeWebSocket(memberSocket);
+    }
+  });
+
   it('does not deliver channel read:updated to other channel members', async () => {
     const owner = await createAuthenticatedUser('wsreadprivowner');
     const member = await createAuthenticatedUser('wsreadprivmember');
@@ -773,6 +841,90 @@ describe('Channel realtime delivery', () => {
       expect(sendRes.status).toBe(201);
 
       await createdEventPromise;
+    } finally {
+      await closeWebSocket(memberSocket);
+    }
+  });
+
+  it('delivers private-channel messages to already-connected invited members without manual subscribe', async () => {
+    const owner = await createAuthenticatedUser('wsprivliveowner');
+    const communityMember = await createAuthenticatedUser('wsprivlivemember');
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        slug: `ws-pl-${uniqueSuffix()}`,
+        name: 'ws-private-live',
+        description: 'ws private live invite test',
+      });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${communityMember.accessToken}`)
+      .send({});
+    expect(joinRes.status).toBe(200);
+
+    const privateChannelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        communityId,
+        name: `ws-priv-live-${uniqueSuffix()}`,
+        isPrivate: true,
+        description: 'private channel live invite',
+      });
+    expect(privateChannelRes.status).toBe(201);
+    const privateChannelId = privateChannelRes.body.channel.id;
+
+    const memberSocket = await connectWebSocket(port, communityMember.accessToken);
+    try {
+      const noPreInviteMessage = waitForNoWsEvent(
+        memberSocket,
+        (event) => event.event === 'message:created' && event.data?.channel_id === privateChannelId,
+        1000,
+      );
+
+      const preInviteSendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId: privateChannelId, content: `pre-invite cache primer ${uniqueSuffix()}` });
+      expect(preInviteSendRes.status).toBe(201);
+      await noPreInviteMessage;
+
+      const membershipUpdatedPromise = waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'channel:membership_updated' && event.data?.channelId === privateChannelId,
+      );
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/channels/${privateChannelId}/members`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ userIds: [communityMember.user.id] });
+      expect(inviteRes.status).toBe(200);
+
+      await membershipUpdatedPromise;
+
+      const createdEventPromise = waitForWsEvent(
+        memberSocket,
+        (event) => event.event === 'message:created' && event.data?.channel_id === privateChannelId,
+      );
+
+      const postInviteSendRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId: privateChannelId, content: `post-invite live delivery ${uniqueSuffix()}` });
+      expect(postInviteSendRes.status).toBe(201);
+
+      const event = await createdEventPromise;
+      expect(event.data.channel_id).toBe(privateChannelId);
+      expect(String(event.data.content || '')).toContain('post-invite live delivery');
+      expect([
+        `user:${communityMember.user.id}`,
+        `channel:${privateChannelId}`,
+      ]).toContain(event.channel);
     } finally {
       await closeWebSocket(memberSocket);
     }

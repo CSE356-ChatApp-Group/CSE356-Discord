@@ -139,6 +139,11 @@ const WS_RECENT_DISCONNECT_TTL_SECONDS =
   Number.isFinite(rawRecentDisconnectTtlSeconds) && rawRecentDisconnectTtlSeconds > 0
     ? Math.floor(rawRecentDisconnectTtlSeconds)
     : 180;
+const rawHeartbeatIntervalMs = Number(process.env.WS_HEARTBEAT_INTERVAL_MS || 20_000);
+const WS_HEARTBEAT_INTERVAL_MS =
+  Number.isFinite(rawHeartbeatIntervalMs) && rawHeartbeatIntervalMs >= 5_000
+    ? Math.floor(rawHeartbeatIntervalMs)
+    : 20_000;
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -514,6 +519,28 @@ function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
   );
 }
 
+function extractInternalUserFeedCommand(payload) {
+  if (
+    !payload
+    || typeof payload !== "object"
+    || Array.isArray(payload)
+  ) {
+    return null;
+  }
+
+  const internal = (payload as { __wsInternal?: unknown }).__wsInternal;
+  if (
+    !internal
+    || typeof internal !== "object"
+    || Array.isArray(internal)
+    || typeof (internal as { kind?: unknown }).kind !== "string"
+  ) {
+    return null;
+  }
+
+  return internal as { kind: string; channels?: unknown };
+}
+
 function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
   if (ws.readyState !== WebSocket.OPEN) return false;
   if (shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) return false;
@@ -570,7 +597,26 @@ function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
     return false;
   }
 
-  ws.send(outbound);
+  ws.send(outbound, (err) => {
+    if (!err) return;
+    ws._sawError = true;
+    logger.warn(
+      {
+        err,
+        event: "ws.send_failed",
+        userId: (ws as any)._userId,
+        redisChannel: logicalChannel,
+        payloadEvent: payloadEventName,
+        gradingNote: "correlate_with_failed_deliveries",
+      },
+      "WS send failed; terminating socket",
+    );
+    try {
+      ws.terminate();
+    } catch {
+      // Ignore termination failures after send errors.
+    }
+  });
   return true;
 }
 
@@ -586,6 +632,7 @@ function deliverUserFeedMessage(channel, routed) {
   const payload = routed.payload;
   const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
   if (!userIds.length) return;
+  const internalCommand = extractInternalUserFeedCommand(payload);
 
   let recipientCount = 0;
   for (const userId of userIds) {
@@ -599,6 +646,24 @@ function deliverUserFeedMessage(channel, routed) {
     if (!clients || clients.size === 0) continue;
     const logicalChannel = `user:${userId}`;
     clients.forEach((ws) => {
+      if (internalCommand?.kind === "subscribe_channels") {
+        const channels = [...new Set(
+          (Array.isArray(internalCommand.channels) ? internalCommand.channels : [])
+            .filter((value) => typeof value === "string")
+            .filter((value) => parseChannelKey(value)),
+        )];
+        if (!channels.length) return;
+        Promise.allSettled(
+          channels.map((targetChannel) => subscribeClient(ws, targetChannel)),
+        ).catch((err) => {
+          logger.warn(
+            { err, userId, channelCount: channels.length },
+            "WS internal auto-subscribe command failed",
+          );
+        });
+        return;
+      }
+
       sendPayloadToSocket(ws, logicalChannel, payload, JSON.stringify(payload));
     });
   }
@@ -1286,7 +1351,7 @@ const heartbeatInterval = setInterval(() => {
     ws.isAlive = false;
     ws.ping();
   });
-}, 60_000);
+}, WS_HEARTBEAT_INTERVAL_MS);
 
 // Periodically reconcile global user presence from client-reported connection state.
 const presenceSweepInterval = setInterval(() => {
