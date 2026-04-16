@@ -24,17 +24,51 @@ import {
 /** Align with grading SLA: each listener must observe the message within this window. */
 const GRADING_DELIVERY_MS = 15_000;
 
+/**
+ * Opening a community kicks off async `fetchChannels` + auto-select; under CI / many
+ * parallel browsers the sidebar can lag. Use generous waits, scroll, and a short
+ * community re-click before failing.
+ */
+const SIDEBAR_NAV_MS = 35_000;
+
 async function openPublicChannel(
   p: Page,
   communityId: string,
   channelId: string,
 ): Promise<void> {
-  await p.getByTestId(`community-item-${communityId}`).click();
-  await expect(p.getByTestId(`channel-item-${channelId}`)).toBeVisible({
-    timeout: 15_000,
+  const communityBtn = p.getByTestId(`community-item-${communityId}`);
+  await expect(communityBtn, 'community should appear in rail after bootstrap').toBeVisible({
+    timeout: SIDEBAR_NAV_MS,
   });
-  await p.getByTestId(`channel-item-${channelId}`).click();
-  await expect(p.getByTestId('message-pane')).toBeVisible({ timeout: 10_000 });
+  await communityBtn.scrollIntoViewIfNeeded();
+
+  const channelRow = p.getByTestId(`channel-item-${channelId}`);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await communityBtn.click();
+    try {
+      await channelRow.waitFor({ state: 'visible', timeout: 28_000 });
+      break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+    }
+  }
+
+  await channelRow.scrollIntoViewIfNeeded();
+  await channelRow.click({ timeout: SIDEBAR_NAV_MS, force: false });
+  await expect(p.getByTestId('message-pane')).toBeVisible({ timeout: SIDEBAR_NAV_MS });
+}
+
+/** Avoid stampeding the host when many pages open the same community at once. */
+async function openPublicChannelSequential(
+  pages: Page[],
+  communityId: string,
+  channelId: string,
+): Promise<void> {
+  for (const page of pages) {
+    await openPublicChannel(page, communityId, channelId);
+  }
 }
 
 async function userIdFromMe(request: APIRequestContext, token: string): Promise<string> {
@@ -108,12 +142,11 @@ test.describe('channel delivery fanout (grader-shaped)', () => {
           bootstrapPageWithToken(pageD, tokenD),
         ]);
 
-        await Promise.all([
-          openPublicChannel(pageA, communityId, channelId),
-          openPublicChannel(pageB, communityId, channelId),
-          openPublicChannel(pageC, communityId, channelId),
-          openPublicChannel(pageD, communityId, channelId),
-        ]);
+        await openPublicChannelSequential(
+          [pageA, pageB, pageC, pageD],
+          communityId,
+          channelId,
+        );
 
         const messageContent = `fanout ${Date.now()}`;
         const msgRes = await ctxA.request.post('/api/v1/messages', {
@@ -180,9 +213,7 @@ test.describe('channel delivery fanout (grader-shaped)', () => {
         await Promise.all(
           pages.map((p, i) => bootstrapPageWithToken(p, tokens[i])),
         );
-        await Promise.all(
-          pages.map((p) => openPublicChannel(p, communityId, channelId)),
-        );
+        await openPublicChannelSequential(pages, communityId, channelId);
 
         const messageContent = `fanout7 ${Date.now()}`;
         const msgRes = await contexts[0].request.post('/api/v1/messages', {
@@ -345,12 +376,11 @@ test.describe('channel delivery fanout (grader-shaped)', () => {
           bootstrapPageWithToken(pageD, tokenD),
         ]);
 
-        await Promise.all([
-          openPublicChannel(pageA, communityId, channelId),
-          openPublicChannel(pageB, communityId, channelId),
-          openPublicChannel(pageC, communityId, channelId),
-          openPublicChannel(pageD, communityId, channelId),
-        ]);
+        await openPublicChannelSequential(
+          [pageA, pageB, pageC, pageD],
+          communityId,
+          channelId,
+        );
 
         const messageContent = `priv-fanout ${Date.now()}`;
         const msgRes = await ctxA.request.post('/api/v1/messages', {

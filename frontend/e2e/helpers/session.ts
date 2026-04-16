@@ -161,7 +161,8 @@ export async function bootstrapPageWithToken(page: Page, token: string) {
   // Under rapid sequential tests that endpoint can still be briefly throttled
   // (503), causing RequireAuth to redirect to /login before user state is set.
   // Retrying the navigation gives the rate-limiter time to clear.
-  const BOOTSTRAP_ATTEMPTS = 2;
+  const BOOTSTRAP_ATTEMPTS = 3;
+  const shellWaitMs = 24_000;
   for (let attempt = 1; attempt <= BOOTSTRAP_ATTEMPTS; attempt++) {
     await page.goto(`/oauth-callback?token=${encodeURIComponent(token)}`);
     // Include route-login: a bad or rejected token redirects to /login before chat mounts.
@@ -170,22 +171,22 @@ export async function bootstrapPageWithToken(page: Page, token: string) {
       page,
       ['route-chat', 'app-loader', 'route-oauth-callback', 'route-login'],
       'OAuth bootstrap: nothing rendered (wrong baseURL or JS error)',
-      15_000,
+      shellWaitMs,
     );
     const chatRoute = page.getByTestId('route-chat');
-    const ok = await chatRoute.isVisible({ timeout: 10_000 }).catch(() => false);
+    const ok = await chatRoute.isVisible({ timeout: 15_000 }).catch(() => false);
     if (ok) return;
     const onLogin = await page.getByTestId('route-login').isVisible({ timeout: 2_000 }).catch(() => false);
     if (onLogin) break;
     if (attempt < BOOTSTRAP_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 1_200 * attempt));
+      await new Promise((r) => setTimeout(r, 1_800 * attempt));
     }
   }
   // Final assert to produce a clear failure message if still not visible.
   await expect(
     page.getByTestId('route-chat'),
     'OAuth token bootstrap did not reach chat — check /api and auth init',
-  ).toBeVisible({ timeout: 15_000 });
+  ).toBeVisible({ timeout: 22_000 });
 }
 
 export async function loginViaUiWithRetry(page: Page, user: TestUser) {
