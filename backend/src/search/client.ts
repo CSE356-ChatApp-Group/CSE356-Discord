@@ -8,8 +8,7 @@
  *                 infix queries like "hel" matching "hello")
  *
  * Access control is built into the query:
- *   - Scoped (channelId / conversationId): verified by the router before this
- *     function is called; the scope param is used as a direct WHERE filter.
+ *   - Scoped: a `scope_access` CTE preserves 403 behavior without a second DB trip.
  *   - Unscoped: the query restricts results to channels/conversations the
  *     requesting user belongs to.
  */
@@ -64,6 +63,71 @@ const FROM_CLAUSE = `
   FROM messages m
   JOIN users u ON u.id = m.author_id
   LEFT JOIN channels ch ON ch.id = m.channel_id`;
+
+function buildScopedAccessParts(params: any[], opts: Record<string, any>) {
+  if (opts.channelId) {
+    const channelId = p(params, opts.channelId);
+    const userId = p(params, opts.userId);
+    return {
+      cte: `
+        scope_access AS (
+          SELECT EXISTS (
+            SELECT 1
+            FROM channels ch
+            JOIN community_members community_member
+              ON community_member.community_id = ch.community_id
+             AND community_member.user_id = ${userId}
+            LEFT JOIN channel_members cm
+              ON cm.channel_id = ch.id
+             AND cm.user_id = ${userId}
+            WHERE ch.id = ${channelId}
+              AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
+          ) AS has_access
+        )`,
+      fromClause: 'FROM scope_access',
+      onClause: 'ON scope_access.has_access = TRUE',
+    };
+  }
+
+  if (opts.conversationId) {
+    const conversationId = p(params, opts.conversationId);
+    const userId = p(params, opts.userId);
+    return {
+      cte: `
+        scope_access AS (
+          SELECT EXISTS (
+            SELECT 1
+            FROM conversation_participants cp
+            WHERE cp.conversation_id = ${conversationId}
+              AND cp.user_id = ${userId}
+              AND cp.left_at IS NULL
+          ) AS has_access
+        )`,
+      fromClause: 'FROM scope_access',
+      onClause: 'ON scope_access.has_access = TRUE',
+    };
+  }
+
+  if (opts.communityId) {
+    const communityId = p(params, opts.communityId);
+    const userId = p(params, opts.userId);
+    return {
+      cte: `
+        scope_access AS (
+          SELECT EXISTS (
+            SELECT 1
+            FROM community_members
+            WHERE community_id = ${communityId}
+              AND user_id = ${userId}
+          ) AS has_access
+        )`,
+      fromClause: 'FROM scope_access',
+      onClause: 'ON scope_access.has_access = TRUE',
+    };
+  }
+
+  return null;
+}
 
 /**
  * Push a value onto params and return its positional placeholder ($N).
@@ -168,8 +232,9 @@ function highlightIlike(content: string, q: string): string {
 }
 
 function buildResult(rows: any[], q: string, offset: number, limit: number) {
+  const materializedRows = rows.filter((row) => row && row.id);
   return {
-    hits: rows.map(row => ({
+    hits: materializedRows.map(row => ({
       id:                row.id,
       content:           row.content,
       authorId:          row.authorId,
@@ -187,7 +252,7 @@ function buildResult(rows: any[], q: string, offset: number, limit: number) {
     })),
     offset,
     limit,
-    estimatedTotalHits: rows.length,
+    estimatedTotalHits: materializedRows.length,
     processingTimeMs: 0,
     query: q,
   };
@@ -196,6 +261,7 @@ function buildResult(rows: any[], q: string, offset: number, limit: number) {
 /** Statement + paging metadata for FTS (content_tsv GIN). */
 function buildFtsParts(q: string, opts: Record<string, any>) {
   const params: any[] = [q]; // $1 reserved for the query string
+  const scope = buildScopedAccessParts(params, opts);
   const filters = buildFilters(params, opts);
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
@@ -203,20 +269,26 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   const offsetPh = p(params, offset);
 
   const sql = `
-    SELECT ${SELECT_COLS},
-      ts_headline(
-        'english',
-        coalesce(m.content, ''),
-        websearch_to_tsquery('english', $1),
-        'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
-      ) AS highlight,
-      ts_rank(m.content_tsv, websearch_to_tsquery('english', $1)) AS _rank
-    ${FROM_CLAUSE}
-    WHERE m.deleted_at IS NULL
-      AND m.content_tsv @@ websearch_to_tsquery('english', $1)
-      ${filters}
-    ORDER BY m.created_at DESC
-    LIMIT ${limitPh} OFFSET ${offsetPh}`;
+    ${scope ? `WITH ${scope.cte}` : ''}
+    SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+      search_rows.*
+    ${scope ? scope.fromClause : 'FROM'}
+    ${scope ? 'LEFT JOIN LATERAL (' : '('}
+      SELECT ${SELECT_COLS},
+        ts_headline(
+          'english',
+          coalesce(m.content, ''),
+          websearch_to_tsquery('english', $1),
+          'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
+        ) AS highlight,
+        ts_rank(m.content_tsv, websearch_to_tsquery('english', $1)) AS _rank
+      ${FROM_CLAUSE}
+      WHERE m.deleted_at IS NULL
+        AND m.content_tsv @@ websearch_to_tsquery('english', $1)
+        ${filters}
+      ORDER BY m.created_at DESC
+      LIMIT ${limitPh} OFFSET ${offsetPh}
+    ) search_rows ${scope ? scope.onClause : ''}`;
 
   return { sql, params, limit, offset, q };
 }
@@ -224,6 +296,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
 /** Statement + paging metadata for trigram ILIKE fallback. */
 function buildTrigramParts(q: string, opts: Record<string, any>) {
   const params: any[] = [`%${q}%`]; // $1 reserved for the ILIKE pattern
+  const scope = buildScopedAccessParts(params, opts);
   const filters = buildFilters(params, opts);
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
@@ -231,13 +304,19 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
   const offsetPh = p(params, offset);
 
   const sql = `
-    SELECT ${SELECT_COLS}
-    ${FROM_CLAUSE}
-    WHERE m.deleted_at IS NULL
-      AND m.content ILIKE $1
-      ${filters}
-    ORDER BY m.created_at DESC
-    LIMIT ${limitPh} OFFSET ${offsetPh}`;
+    ${scope ? `WITH ${scope.cte}` : ''}
+    SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+      search_rows.*
+    ${scope ? scope.fromClause : 'FROM'}
+    ${scope ? 'LEFT JOIN LATERAL (' : '('}
+      SELECT ${SELECT_COLS}
+      ${FROM_CLAUSE}
+      WHERE m.deleted_at IS NULL
+        AND m.content ILIKE $1
+        ${filters}
+      ORDER BY m.created_at DESC
+      LIMIT ${limitPh} OFFSET ${offsetPh}
+    ) search_rows ${scope ? scope.onClause : ''}`;
 
   return { sql, params, limit, offset, q };
 }
@@ -249,12 +328,18 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
 async function searchTrigram(q: string, opts: Record<string, any>): Promise<any> {
   const b = buildTrigramParts(q, opts);
   const rows = await runSearchQuery(b.sql, b.params);
+  if ((opts.channelId || opts.conversationId || opts.communityId) && rows[0]?.__scopeAccess === false) {
+    const err: any = new Error('Access denied');
+    err.statusCode = 403;
+    throw err;
+  }
   const processed = rows.map((row) => ({ ...row, highlight: highlightIlike(row.content, q) }));
   return buildResult(processed, b.q, b.offset, b.limit);
 }
 
 async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
   const params: any[] = [];
+  const scope = buildScopedAccessParts(params, opts);
   const filters  = buildFilters(params, opts);
   const limit    = Number(opts.limit)  || 20;
   const offset   = Number(opts.offset) || 0;
@@ -262,14 +347,25 @@ async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
   const offsetPh = p(params, offset);
 
   const sql = `
-    SELECT ${SELECT_COLS}
-    ${FROM_CLAUSE}
-    WHERE m.deleted_at IS NULL
-      ${filters}
-    ORDER BY m.created_at DESC
-    LIMIT ${limitPh} OFFSET ${offsetPh}`;
+    ${scope ? `WITH ${scope.cte}` : ''}
+    SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+      search_rows.*
+    ${scope ? scope.fromClause : 'FROM'}
+    ${scope ? 'LEFT JOIN LATERAL (' : '('}
+      SELECT ${SELECT_COLS}
+      ${FROM_CLAUSE}
+      WHERE m.deleted_at IS NULL
+        ${filters}
+      ORDER BY m.created_at DESC
+      LIMIT ${limitPh} OFFSET ${offsetPh}
+    ) search_rows ${scope ? scope.onClause : ''}`;
 
   const rows = await runSearchQuery(sql, params);
+  if (scope && rows[0]?.__scopeAccess === false) {
+    const err: any = new Error('Access denied');
+    err.statusCode = 403;
+    throw err;
+  }
   return buildResult(rows, '', offset, limit);
 }
 
@@ -307,13 +403,23 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
     const triMeta = buildTrigramParts(trimmed, opts);
     return await runSearchTransaction(async (client) => {
       const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
-      if (ftsRes.rows.length > 0) {
+      if (scoped && ftsRes.rows[0]?.__scopeAccess === false) {
+        const err: any = new Error('Access denied');
+        err.statusCode = 403;
+        throw err;
+      }
+      if (ftsRes.rows.some((row) => row?.id)) {
         return buildResult(ftsRes.rows, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
       }
       if (!allowTrigramFallback) {
         return buildResult([], ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
       }
       const triRes = await client.query(triMeta.sql, triMeta.params);
+      if (scoped && triRes.rows[0]?.__scopeAccess === false) {
+        const err: any = new Error('Access denied');
+        err.statusCode = 403;
+        throw err;
+      }
       const processed = triRes.rows.map((row) => ({
         ...row,
         highlight: highlightIlike(row.content, trimmed),

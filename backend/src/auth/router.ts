@@ -249,6 +249,32 @@ const COURSE_CLIENT_ID = process.env.COURSE_OIDC_CLIENT_ID || 'web-service';
 const COURSE_CLIENT_SECRET = process.env.COURSE_OIDC_CLIENT_SECRET || 'web-service-secret';
 let courseDiscoveryCache;
 
+function decodeJwtPayloadWithoutVerify(token) {
+  if (typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function fastCourseOidcClaims(tokenBody) {
+  const preferred = decodeJwtPayloadWithoutVerify(tokenBody?.id_token)
+    || decodeJwtPayloadWithoutVerify(tokenBody?.access_token);
+  if (!preferred || typeof preferred !== 'object') return null;
+  const subject = typeof preferred.sub === 'string' ? preferred.sub : null;
+  if (!subject) return null;
+  return {
+    sub: subject,
+    email: typeof preferred.email === 'string' ? preferred.email : null,
+    preferred_username:
+      typeof preferred.preferred_username === 'string' ? preferred.preferred_username : null,
+    name: typeof preferred.name === 'string' ? preferred.name : null,
+  };
+}
+
 function isTransientOidcFetchFailure(err) {
   return Boolean(
     err
@@ -714,14 +740,16 @@ router.get('/course/callback', async (req, res, next) => {
       return res.redirect(buildFrontendUrl('/login', { error: 'OIDC access token missing' }));
     }
 
-    const userInfoRes = await fetch(discovery.userinfo_endpoint, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!userInfoRes.ok) {
-      return res.redirect(buildFrontendUrl('/login', { error: 'OIDC userinfo fetch failed' }));
+    let userinfo = fastCourseOidcClaims(tokenBody);
+    if (!userinfo) {
+      const userInfoRes = await fetch(discovery.userinfo_endpoint, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!userInfoRes.ok) {
+        return res.redirect(buildFrontendUrl('/login', { error: 'OIDC userinfo fetch failed' }));
+      }
+      userinfo = await userInfoRes.json();
     }
-
-    const userinfo = await userInfoRes.json();
     const providerId = userinfo.sub;
     const email = userinfo.email || null;
     const kcUsername = userinfo.preferred_username || null;

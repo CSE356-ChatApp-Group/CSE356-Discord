@@ -213,20 +213,26 @@ router.get('/',
 
       recordEndpointListCache('channels', 'miss');
       const promise = (async () => {
-        const { rows: membership } = await query(
-          `SELECT 1
-           FROM community_members
-           WHERE community_id = $1 AND user_id = $2`,
-          [communityId, userId]
-        );
-        if (!membership.length) {
-          return { ok: false };
-        }
-
         // Return all visible channel names. Private-channel metadata/content pointers
         // are redacted for users who are not invited to that private channel.
         const { rows } = await query(
-          `WITH visible_channels AS (
+          `WITH membership AS (
+             SELECT EXISTS (
+               SELECT 1
+               FROM community_members
+               WHERE community_id = $1 AND user_id = $2
+             ) AS is_member
+           )
+           SELECT membership.is_member,
+                  vc.*,
+                  vc.can_access,
+                  CASE WHEN vc.can_access THEN vc.last_message_id ELSE NULL END AS last_message_id,
+                  CASE WHEN vc.can_access THEN vc.last_message_author_id ELSE NULL END AS last_message_author_id,
+                  CASE WHEN vc.can_access THEN vc.last_message_at ELSE NULL END AS last_message_at,
+                  CASE WHEN vc.can_access THEN rs.last_read_message_id ELSE NULL END AS my_last_read_message_id,
+                  CASE WHEN vc.can_access THEN rs.last_read_at ELSE NULL END AS my_last_read_at
+           FROM membership
+           LEFT JOIN LATERAL (
              SELECT ch.*,
                     (ch.is_private = FALSE
                      OR EXISTS (
@@ -235,15 +241,8 @@ router.get('/',
                      )) AS can_access
              FROM channels ch
              WHERE ch.community_id = $1
-           )
-           SELECT vc.*,
-                  vc.can_access,
-                  CASE WHEN vc.can_access THEN vc.last_message_id ELSE NULL END AS last_message_id,
-                  CASE WHEN vc.can_access THEN vc.last_message_author_id ELSE NULL END AS last_message_author_id,
-                  CASE WHEN vc.can_access THEN vc.last_message_at ELSE NULL END AS last_message_at,
-                  CASE WHEN vc.can_access THEN rs.last_read_message_id ELSE NULL END AS my_last_read_message_id,
-                  CASE WHEN vc.can_access THEN rs.last_read_at ELSE NULL END AS my_last_read_at
-           FROM   visible_channels vc
+             ORDER BY ch.position, ch.name
+           ) vc ON membership.is_member = TRUE
            LEFT JOIN read_states rs
                   ON vc.can_access
                  AND rs.channel_id = vc.id
@@ -252,8 +251,12 @@ router.get('/',
           [communityId, userId]
         );
 
+        if (rows[0] && rows[0].is_member === false) {
+          return { ok: false };
+        }
+
         // Attach Redis-backed unread_message_count to each accessible channel
-        const accessibleRows = rows.filter(ch => ch.can_access);
+        const accessibleRows = rows.filter(ch => ch.id && ch.can_access);
         if (accessibleRows.length > 0) {
           try {
             const pipeline = redis.pipeline();
@@ -295,7 +298,7 @@ router.get('/',
           }
         }
 
-        const response = { channels: rows };
+        const response = { channels: rows.filter((row) => row.id) };
         redis.set(cacheKey, JSON.stringify(response), 'EX', CHANNELS_LIST_CACHE_TTL_SECS).catch(() => {});
         return { ok: true, body: response };
       })();

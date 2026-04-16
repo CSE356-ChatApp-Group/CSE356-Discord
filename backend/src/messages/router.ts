@@ -703,45 +703,35 @@ router.get('/',
       }
 
       const sql = `
-        SELECT m.*,
-               CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
-               COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
-        FROM   messages m
-        LEFT JOIN users u ON u.id = m.author_id
-        LEFT JOIN attachments a ON a.message_id = m.id
-        WHERE  ${targetWhere} AND m.deleted_at IS NULL
-          AND  ${accessWhere}
-        GROUP  BY m.id, u.id
-        ORDER  BY m.created_at ${orderDirection}
-        LIMIT  $1
+        WITH access AS (
+          SELECT ${accessWhere} AS has_access
+        )
+        SELECT access.has_access,
+               msg.*
+        FROM access
+        LEFT JOIN LATERAL (
+          SELECT m.*,
+                 CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+                 COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
+          FROM   messages m
+          LEFT JOIN users u ON u.id = m.author_id
+          LEFT JOIN attachments a ON a.message_id = m.id
+          WHERE  ${targetWhere}
+            AND  m.deleted_at IS NULL
+          GROUP  BY m.id, u.id
+          ORDER  BY m.created_at ${orderDirection}
+          LIMIT  $1
+        ) AS msg ON access.has_access = TRUE
       `;
 
       const { rows } = await messagesListQuery(req, sql, params);
 
-      if (rows.length === 0) {
-        // Distinguish "no messages" from "access denied" with a lightweight check.
-        const accessCheck = await query(
-          channelId
-            ? `SELECT 1
-               FROM channels c
-               JOIN community_members community_member
-                 ON community_member.community_id = c.community_id
-                AND community_member.user_id = $2
-               WHERE c.id = $1
-                 AND (
-                   c.is_private = FALSE
-                   OR EXISTS (
-                     SELECT 1 FROM channel_members
-                     WHERE channel_id = c.id AND user_id = $2
-                   )
-                 )`
-            : `SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
-          [channelId ?? conversationId, req.user.id]
-        );
-        if (!accessCheck.rows.length) return res.status(403).json({ error: channelId ? 'Access denied' : 'Not a participant' });
+      if (!rows[0]?.has_access) {
+        return res.status(403).json({ error: channelId ? 'Access denied' : 'Not a participant' });
       }
 
-      const orderedRows = after ? rows : rows.reverse();
+      const messageRows = rows.filter((row) => row.id);
+      const orderedRows = after ? messageRows : messageRows.reverse();
       const body = { messages: orderedRows };
       res.json(body);
     } catch (err) { next(err); }
