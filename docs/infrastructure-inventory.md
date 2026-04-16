@@ -10,6 +10,8 @@ This is the source of truth for current environment shape. Update this file when
 - GitHub Actions runner VM #1 (`github-actions-runner`, GCP Compute Engine): `c3-standard-4` (4 vCPU, 16 GB RAM)
 - GitHub Actions runner VM #2 (GCP Compute Engine): `e2-standard-4` (4 vCPU, 16 GB RAM)
 
+**Runner maintenance:** External IPs and SSH users live in GCP (not committed here). When CI logs show **low disk** or Chromium **Target crashed**, SSH to each runner VM as the runner user and run `scripts/self-hosted-actions-runner-disk-cleanup.sh` (report), then `RUNNER_PRUNE_CONFIRM=yes` between jobs. Staging app VM (`136.114.103.71`) is **not** the Actions runner; it has separate disk headroom.
+
 ## Production hosts
 
 - App/proxy VM (`ubuntu-intelbroadwell`, Linode): `130.245.136.44`, 8 vCPU, 16 GB RAM
