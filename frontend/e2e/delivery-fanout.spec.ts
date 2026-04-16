@@ -18,6 +18,7 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 import {
   buildUser,
   bootstrapPageWithToken,
+  bootstrapPagesInOrder,
   registerOrLogin,
 } from './helpers/session';
 
@@ -55,7 +56,7 @@ async function openPublicChannel(
     }
   }
 
-  await channelRow.scrollIntoViewIfNeeded();
+  await channelRow.scrollIntoViewIfNeeded().catch(() => {});
   await channelRow.click({ timeout: SIDEBAR_NAV_MS, force: false });
   await expect(p.getByTestId('message-pane')).toBeVisible({ timeout: SIDEBAR_NAV_MS });
 }
@@ -135,12 +136,10 @@ test.describe('channel delivery fanout (grader-shaped)', () => {
           expect(joinRes.ok(), `join community: ${joinRes.status()}`).toBeTruthy();
         }
 
-        await Promise.all([
-          bootstrapPageWithToken(pageA, tokenA),
-          bootstrapPageWithToken(pageB, tokenB),
-          bootstrapPageWithToken(pageC, tokenC),
-          bootstrapPageWithToken(pageD, tokenD),
-        ]);
+        await bootstrapPagesInOrder(
+          [pageA, pageB, pageC, pageD],
+          [tokenA, tokenB, tokenC, tokenD],
+        );
 
         await openPublicChannelSequential(
           [pageA, pageB, pageC, pageD],
@@ -210,9 +209,7 @@ test.describe('channel delivery fanout (grader-shaped)', () => {
           expect(joinRes.ok(), `join ${i}: ${joinRes.status()}`).toBeTruthy();
         }
 
-        await Promise.all(
-          pages.map((p, i) => bootstrapPageWithToken(p, tokens[i])),
-        );
+        await bootstrapPagesInOrder(pages, tokens);
         await openPublicChannelSequential(pages, communityId, channelId);
 
         const messageContent = `fanout7 ${Date.now()}`;
@@ -369,12 +366,10 @@ test.describe('channel delivery fanout (grader-shaped)', () => {
         });
         expect(addRes.ok(), `add members: ${addRes.status()}`).toBeTruthy();
 
-        await Promise.all([
-          bootstrapPageWithToken(pageA, tokenA),
-          bootstrapPageWithToken(pageB, tokenB),
-          bootstrapPageWithToken(pageC, tokenC),
-          bootstrapPageWithToken(pageD, tokenD),
-        ]);
+        await bootstrapPagesInOrder(
+          [pageA, pageB, pageC, pageD],
+          [tokenA, tokenB, tokenC, tokenD],
+        );
 
         await openPublicChannelSequential(
           [pageA, pageB, pageC, pageD],

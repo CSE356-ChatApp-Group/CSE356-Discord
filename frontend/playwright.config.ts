@@ -52,7 +52,17 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        // Self-hosted CI often has tiny /dev/shm; parallel Chromium tabs OOM without this.
+        ...(process.env.CI
+          ? {
+              launchOptions: {
+                args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu'],
+              },
+            }
+          : {}),
+      },
     },
   ],
 });

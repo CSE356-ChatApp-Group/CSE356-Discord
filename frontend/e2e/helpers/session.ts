@@ -189,6 +189,16 @@ export async function bootstrapPageWithToken(page: Page, token: string) {
   ).toBeVisible({ timeout: 22_000 });
 }
 
+/** Serial bootstrap to cap peak Chromium memory on CI (many contexts + Target crashed). */
+export async function bootstrapPagesInOrder(pages: Page[], tokens: string[]): Promise<void> {
+  if (pages.length !== tokens.length) {
+    throw new Error(`bootstrapPagesInOrder: length mismatch (${pages.length} vs ${tokens.length})`);
+  }
+  for (let i = 0; i < pages.length; i += 1) {
+    await bootstrapPageWithToken(pages[i], tokens[i]);
+  }
+}
+
 export async function loginViaUiWithRetry(page: Page, user: TestUser) {
   const identifiers = [user.username, user.email].filter(Boolean);
 

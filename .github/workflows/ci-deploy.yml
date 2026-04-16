@@ -243,7 +243,8 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      max-parallel: 2
+      # One shard at a time on shared self-hosted runners avoids Chromium OOM / disk pressure.
+      max-parallel: 1
       matrix:
         shard_index: [1, 2]
     env:
