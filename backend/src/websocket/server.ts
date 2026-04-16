@@ -1011,6 +1011,21 @@ async function handleClientMessage(ws, user, msg) {
       break;
     }
 
+    case "away_message": {
+      const nextAwayMessage = msg.message || null;
+      if (nextAwayMessage === (ws._awayMessage || null)) {
+        break;
+      }
+
+      ws._awayMessage = nextAwayMessage;
+      if (ws._presenceStatus === "away") {
+        presenceService.setPresence(user.id, "away", nextAwayMessage).catch(() => {});
+      } else {
+        presenceService.setAwayMessage(user.id, nextAwayMessage).catch(() => {});
+      }
+      break;
+    }
+
     case "activity": {
       const now = Date.now();
       const needsRefresh = shouldRefreshOnlinePresence(ws);

@@ -124,6 +124,56 @@ describe('Grader parity: profile & presence', () => {
       // Closed by afterEach cleanup.
     }
   });
+
+  it('accepts presence updates through PATCH /api/v1/users/me for generated clients', async () => {
+    const user = await createAuthenticatedUser('graderpatchpresence');
+    const observerSocket = trackSocket(await connectWebSocket(port, user.accessToken));
+
+    try {
+      observerSocket.send(JSON.stringify({ type: 'subscribe', channel: `user:${user.user.id}` }));
+      await waitForWsEvent(
+        observerSocket,
+        (event) => event.event === 'subscribed' && event.data?.channel === `user:${user.user.id}`,
+      );
+
+      const awayEventPromise = waitForWsEvent(
+        observerSocket,
+        (event) =>
+          event.event === 'presence:updated'
+          && event.data?.userId === user.user.id
+          && event.data?.status === 'away'
+          && event.data?.awayMessage === 'Patch away message',
+      );
+
+      const patchRes = await request(app)
+        .patch('/api/v1/users/me')
+        .set('Authorization', `Bearer ${user.accessToken}`)
+        .send({
+          displayName: 'Patched Presence User',
+          status: 'away',
+          awayMessage: 'Patch away message',
+        });
+
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.user.display_name).toBe('Patched Presence User');
+      expect(patchRes.body.user.status).toBe('away');
+      expect(patchRes.body.user.away_message).toBe('Patch away message');
+
+      const awayEvent = await awayEventPromise;
+      expect(awayEvent.data.awayMessage).toBe('Patch away message');
+
+      const meRes = await request(app)
+        .get('/api/v1/users/me')
+        .set('Authorization', `Bearer ${user.accessToken}`);
+
+      expect(meRes.status).toBe(200);
+      expect(meRes.body.user.display_name).toBe('Patched Presence User');
+      expect(meRes.body.user.status).toBe('away');
+      expect(meRes.body.user.away_message).toBe('Patch away message');
+    } finally {
+      // Closed by afterEach cleanup.
+    }
+  });
 });
 
 describe('Grader parity: communities and channels', () => {

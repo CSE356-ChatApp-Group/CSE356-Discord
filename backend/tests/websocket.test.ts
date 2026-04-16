@@ -124,6 +124,59 @@ describe('DM realtime delivery', () => {
     }
   });
 
+  it('updates away messages sent through websocket frames used by generated clients', async () => {
+    const user = await createAuthenticatedUser('wsawaymessage');
+    const socket = await connectWebSocket(port, user.accessToken);
+
+    try {
+      socket.send(JSON.stringify({ type: 'subscribe', channel: `user:${user.user.id}` }));
+      await waitForWsEvent(
+        socket,
+        (event) => event.event === 'subscribed' && event.data?.channel === `user:${user.user.id}`,
+      );
+
+      const initialAwayPromise = waitForWsEvent(
+        socket,
+        (event) =>
+          event.event === 'presence:updated'
+          && event.data?.userId === user.user.id
+          && event.data?.status === 'away'
+          && event.data?.awayMessage === 'Initial away message',
+      );
+
+      socket.send(JSON.stringify({
+        type: 'presence',
+        status: 'away',
+        awayMessage: 'Initial away message',
+      }));
+
+      await initialAwayPromise;
+
+      const updatedAwayPromise = waitForWsEvent(
+        socket,
+        (event) =>
+          event.event === 'presence:updated'
+          && event.data?.userId === user.user.id
+          && event.data?.status === 'away'
+          && event.data?.awayMessage === 'Updated away message',
+      );
+
+      socket.send(JSON.stringify({ type: 'away_message', message: 'Updated away message' }));
+
+      await updatedAwayPromise;
+
+      const meRes = await request(app)
+        .get('/api/v1/users/me')
+        .set('Authorization', `Bearer ${user.accessToken}`);
+
+      expect(meRes.status).toBe(200);
+      expect(meRes.body.user.status).toBe('away');
+      expect(meRes.body.user.away_message).toBe('Updated away message');
+    } finally {
+      await closeWebSocket(socket);
+    }
+  });
+
   it('delivers DM message and read events on user websocket channels', async () => {
     const sender = await createAuthenticatedUser('dmsender');
     const recipient = await createAuthenticatedUser('dmrecipient');
@@ -528,6 +581,69 @@ describe('Channel realtime delivery', () => {
     } finally {
       await closeWebSocket(ownerSocket);
       await closeWebSocket(memberSocket);
+    }
+  });
+
+  it('does not emit duplicate read:updated events for repeated exact mark-read requests', async () => {
+    const owner = await createAuthenticatedUser('wsreaddedupeowner');
+
+    const slug = `ws-read-dedupe-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'channel read dedupe' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `read-dedupe-${uniqueSuffix()}`, isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const ownerSocket = await connectWebSocket(port, owner.accessToken);
+
+    try {
+      const msgRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'read cursor dedupe target' });
+      expect(msgRes.status).toBe(201);
+      const messageId = msgRes.body.message.id;
+
+      const firstReadPromise = waitForWsEvent(
+        ownerSocket,
+        (e) =>
+          e.event === 'read:updated'
+          && e.data?.channelId === channelId
+          && e.data?.lastReadMessageId === messageId,
+      );
+
+      const firstReadRes = await request(app)
+        .put(`/api/v1/messages/${messageId}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`);
+
+      expect(firstReadRes.status).toBe(200);
+      await firstReadPromise;
+
+      const noDuplicateRead = waitForNoWsEvent(
+        ownerSocket,
+        (e) =>
+          e.event === 'read:updated'
+          && e.data?.channelId === channelId
+          && e.data?.lastReadMessageId === messageId,
+        750,
+      );
+
+      const duplicateReadRes = await request(app)
+        .put(`/api/v1/messages/${messageId}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`);
+
+      expect(duplicateReadRes.status).toBe(200);
+      await noDuplicateRead;
+    } finally {
+      await closeWebSocket(ownerSocket);
     }
   });
 

@@ -79,6 +79,11 @@ const READ_RECEIPT_DEFER_POOL_WAITING =
   Number.isFinite(_readReceiptDeferWaiting) && _readReceiptDeferWaiting >= 0
     ? _readReceiptDeferWaiting
     : 8;
+const _readReceiptDedupeTtl = parseInt(process.env.READ_RECEIPT_DEDUPE_TTL_SECS || '604800', 10);
+const READ_RECEIPT_DEDUPE_TTL_SECS =
+  Number.isFinite(_readReceiptDedupeTtl) && _readReceiptDedupeTtl > 0
+    ? _readReceiptDedupeTtl
+    : 604800;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +91,33 @@ function validate(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) { res.status(400).json({ errors: errors.array() }); return false; }
   return true;
+}
+
+function readReceiptDedupeKey(userId, channelId, conversationId) {
+  if (channelId) return `read_receipt:last:${userId}:channel:${channelId}`;
+  if (conversationId) return `read_receipt:last:${userId}:conversation:${conversationId}`;
+  throw new Error('read receipt scope required');
+}
+
+async function getCachedReadReceiptMessageId(userId, channelId, conversationId) {
+  try {
+    return await redis.get(readReceiptDedupeKey(userId, channelId, conversationId));
+  } catch {
+    return null;
+  }
+}
+
+async function rememberReadReceiptMessageId(userId, channelId, conversationId, messageId) {
+  try {
+    await redis.set(
+      readReceiptDedupeKey(userId, channelId, conversationId),
+      String(messageId),
+      'EX',
+      READ_RECEIPT_DEDUPE_TTL_SECS,
+    );
+  } catch {
+    // Fail open: dedupe cache is an optimization only.
+  }
 }
 
 /**
@@ -1394,6 +1426,15 @@ router.put('/:id/read',
       const uid = req.user.id;
       const messageId = req.params.id;
       const messageCreatedAt = target.created_at;
+      const cachedMessageId = await getCachedReadReceiptMessageId(
+        uid,
+        channel_id,
+        conversation_id,
+      );
+
+      if (cachedMessageId && String(cachedMessageId) === String(messageId)) {
+        return res.json({ success: true });
+      }
 
       const { applied, didAdvanceCursor } = await advanceReadStateCursor({
         userId: uid,
@@ -1404,6 +1445,9 @@ router.put('/:id/read',
       });
 
       if (!didAdvanceCursor) {
+        if (String(applied?.last_read_message_id || '') === String(messageId)) {
+          await rememberReadReceiptMessageId(uid, channel_id, conversation_id, messageId);
+        }
         return res.json({ success: true });
       }
 
@@ -1444,6 +1488,8 @@ router.put('/:id/read',
           logger.warn({ err, channel_id }, 'Failed to reset user:last_read_count in Redis');
         }
       }
+
+      await rememberReadReceiptMessageId(uid, channel_id, conversation_id, messageId);
 
       res.json({ success: true });
     } catch (err) { next(err); }

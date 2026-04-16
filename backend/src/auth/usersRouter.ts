@@ -199,14 +199,47 @@ router.patch('/me',
   body('displayName').optional().isString(),
   body('bio').optional().isString(),
   body('password').optional().isString(),
+  body('status').optional().isString(),
   async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
     try {
       const updates: Record<string, unknown> = {};
+      const allowedPresenceStatuses = ['online', 'idle', 'away'];
+      const nextStatus = req.body.status;
+      const hasStatusUpdate = nextStatus !== undefined;
+      const hasAwayMessageUpdate = req.body.awayMessage !== undefined;
+
+      if (hasStatusUpdate && !allowedPresenceStatuses.includes(nextStatus)) {
+        return res.status(400).json({ error: `status must be one of ${allowedPresenceStatuses.join(', ')}` });
+      }
+      if (
+        hasAwayMessageUpdate
+        && typeof req.body.awayMessage !== 'string'
+        && req.body.awayMessage !== null
+      ) {
+        return res.status(400).json({ error: 'awayMessage must be a string or null' });
+      }
+
       if (req.body.displayName) updates.display_name = req.body.displayName;
       if (req.body.bio !== undefined) updates.bio = req.body.bio;
       if (req.body.password) updates.password_hash = await hashPassword(req.body.password, 'user_update_hash');
+
+      if (hasStatusUpdate) {
+        await presenceService.syncConnectionStatuses(req.user.id, nextStatus);
+        await presenceService.setPresence(
+          req.user.id,
+          nextStatus,
+          nextStatus === 'away' ? req.body.awayMessage : null,
+        );
+      } else if (hasAwayMessageUpdate) {
+        const currentStatus = await presenceService.getPresence(req.user.id);
+        if (currentStatus === 'away') {
+          await presenceService.setPresence(req.user.id, 'away', req.body.awayMessage);
+        } else {
+          await presenceService.setAwayMessage(req.user.id, req.body.awayMessage);
+        }
+      }
 
       if (!Object.keys(updates).length) {
         const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
@@ -220,7 +253,8 @@ router.patch('/me',
         `UPDATE users SET ${setClauses}, updated_at=NOW() WHERE id=$1 RETURNING ${PUBLIC_FIELDS}, email`,
         [req.user.id, ...Object.values(updates)]
       );
-      res.json({ user: rows[0] });
+      const { status, awayMessage } = await presenceService.getPresenceDetails(req.user.id);
+      res.json({ user: { ...rows[0], status, away_message: awayMessage } });
     } catch (err) { next(err); }
   }
 );
