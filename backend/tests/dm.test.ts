@@ -138,6 +138,51 @@ describe('DM participant resolution', () => {
       ]),
     );
   });
+
+  it('resolves participant ids through the indexed UUID hot path used by generated clients', async () => {
+    const owner = await createAuthenticatedUser('dmuuidowner');
+    const other = await createAuthenticatedUser('dmuuidother');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [other.user.id] });
+
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.created).toBe(true);
+    expect(createRes.body.conversation?.participants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: owner.user.id }),
+        expect.objectContaining({ id: other.user.id }),
+      ]),
+    );
+  });
+
+  it('preserves case-insensitive username and email participant resolution', async () => {
+    const owner = await createAuthenticatedUser('dmcaseowner');
+    const usernameUser = await createAuthenticatedUser('dmcaseusername');
+    const emailUser = await createAuthenticatedUser('dmcaseemail');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        participantIds: [
+          usernameUser.user.username.toUpperCase(),
+          emailUser.email!.toUpperCase(),
+        ],
+      });
+
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.created).toBe(true);
+    expect(createRes.body.conversation?.participants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: owner.user.id }),
+        expect.objectContaining({ id: usernameUser.user.id }),
+        expect.objectContaining({ id: emailUser.user.id }),
+      ]),
+    );
+  });
 });
 
 // ── Leave / guard rails ───────────────────────────────────────────────────────

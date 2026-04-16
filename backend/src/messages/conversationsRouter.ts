@@ -25,6 +25,8 @@ const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 const router = express.Router();
 router.use(authenticate);
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function publishConversationEvents(targets, event, data) {
   const uniqueTargets = [...new Set(targets.filter(Boolean))];
   const payload = wrapFanoutPayload(event, data);
@@ -104,27 +106,81 @@ async function resolveParticipantIds(client, rawParticipants) {
   const uniqueValues = [...new Set(raw.map(v => (v || '').toString().trim()).filter(Boolean))];
   if (!uniqueValues.length) return [];
 
-  const { rows } = await client.query(
-    `SELECT id::text, username, email
-     FROM users
-     WHERE id::text = ANY($1::text[])
-        OR username = ANY($1::text[])
-        OR email = ANY($1::text[])
-        OR lower(username) = ANY($2::text[])
-        OR lower(email) = ANY($2::text[])`,
-    [uniqueValues, uniqueValues.map(v => v.toLowerCase())]
+  const uuidValues = uniqueValues.filter((value) => UUID_RE.test(value));
+  const textValues = uniqueValues.filter((value) => !UUID_RE.test(value));
+  const byAny = new Map();
+
+  if (uuidValues.length) {
+    const { rows } = await client.query(
+      `SELECT id::text AS id, username, email
+       FROM users
+       WHERE id = ANY($1::uuid[])`,
+      [uuidValues]
+    );
+
+    rows.forEach((row) => {
+      byAny.set(row.id, row.id);
+      if (row.username) {
+        byAny.set(row.username, row.id);
+        byAny.set(row.username.toLowerCase(), row.id);
+      }
+      if (row.email) {
+        byAny.set(row.email, row.id);
+        byAny.set(row.email.toLowerCase(), row.id);
+      }
+    });
+  }
+
+  let unresolvedTextValues = textValues.filter(
+    (value) => !byAny.has(value) && !byAny.has(value.toLowerCase())
   );
 
-  const byAny = new Map();
-  rows.forEach((row) => {
-    byAny.set(row.id, row.id);
-    byAny.set(row.username, row.id);
-    byAny.set(row.username.toLowerCase(), row.id);
-    if (row.email) {
-      byAny.set(row.email, row.id);
-      byAny.set(row.email.toLowerCase(), row.id);
-    }
-  });
+  if (unresolvedTextValues.length) {
+    const { rows } = await client.query(
+      `SELECT id::text AS id, username, email
+       FROM users
+       WHERE username = ANY($1::text[])
+          OR email = ANY($1::text[])`,
+      [unresolvedTextValues]
+    );
+
+    rows.forEach((row) => {
+      if (row.username) {
+        byAny.set(row.username, row.id);
+        byAny.set(row.username.toLowerCase(), row.id);
+      }
+      if (row.email) {
+        byAny.set(row.email, row.id);
+        byAny.set(row.email.toLowerCase(), row.id);
+      }
+    });
+
+    unresolvedTextValues = unresolvedTextValues.filter(
+      (value) => !byAny.has(value) && !byAny.has(value.toLowerCase())
+    );
+  }
+
+  if (unresolvedTextValues.length) {
+    const unresolvedLowerValues = [...new Set(unresolvedTextValues.map((value) => value.toLowerCase()))];
+    const { rows } = await client.query(
+      `SELECT id::text AS id, username, email
+       FROM users
+       WHERE lower(username) = ANY($1::text[])
+          OR lower(email) = ANY($1::text[])`,
+      [unresolvedLowerValues]
+    );
+
+    rows.forEach((row) => {
+      if (row.username) {
+        byAny.set(row.username, row.id);
+        byAny.set(row.username.toLowerCase(), row.id);
+      }
+      if (row.email) {
+        byAny.set(row.email, row.id);
+        byAny.set(row.email.toLowerCase(), row.id);
+      }
+    });
+  }
 
   const resolved = [];
   for (const value of uniqueValues) {
