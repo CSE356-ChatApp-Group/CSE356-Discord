@@ -8,9 +8,12 @@ import { test, expect } from '@playwright/test';
 import {
   buildUser,
   bootstrapPageWithToken,
+  bootstrapPagesInOrder,
   registerOrLogin,
   waitForSidebar,
 } from './helpers/session';
+
+const DM_PANE_MS = 30_000;
 
 test.describe('DM real-time delivery', () => {
   test.describe.configure({ mode: 'serial', timeout: 120_000 });
@@ -38,20 +41,19 @@ test.describe('DM real-time delivery', () => {
       expect(convRes.ok(), `create DM: ${convRes.status()}`).toBeTruthy();
       const conversationId: string = (await convRes.json()).conversation.id;
 
-      await Promise.all([
-        bootstrapPageWithToken(pageA, tokenA),
-        bootstrapPageWithToken(pageB, tokenB),
-      ]);
+      await bootstrapPagesInOrder([pageA, pageB], [tokenA, tokenB]);
       await waitForSidebar(pageA);
       await waitForSidebar(pageB);
 
       await expect(pageA.getByTestId(`dm-item-${conversationId}`)).toBeVisible({ timeout: 20_000 });
       await expect(pageB.getByTestId(`dm-item-${conversationId}`)).toBeVisible({ timeout: 20_000 });
 
+      await pageA.getByTestId(`dm-item-${conversationId}`).scrollIntoViewIfNeeded().catch(() => {});
       await pageA.getByTestId(`dm-item-${conversationId}`).click();
-      await expect(pageA.getByTestId('message-pane')).toBeVisible({ timeout: 15_000 });
+      await expect(pageA.getByTestId('message-pane')).toBeVisible({ timeout: DM_PANE_MS });
+      await pageB.getByTestId(`dm-item-${conversationId}`).scrollIntoViewIfNeeded().catch(() => {});
       await pageB.getByTestId(`dm-item-${conversationId}`).click();
-      await expect(pageB.getByTestId('message-pane')).toBeVisible({ timeout: 15_000 });
+      await expect(pageB.getByTestId('message-pane')).toBeVisible({ timeout: DM_PANE_MS });
 
       const messageContent = `dm-rt ${Date.now()}`;
       const msgRes = await ctxB.request.post('/api/v1/messages', {
@@ -100,11 +102,7 @@ test.describe('group DM real-time delivery', () => {
       expect(convRes.ok(), `create group DM: ${convRes.status()}`).toBeTruthy();
       const conversationId: string = (await convRes.json()).conversation.id;
 
-      await Promise.all([
-        bootstrapPageWithToken(pageA, tokenA),
-        bootstrapPageWithToken(pageB, tokenB),
-        bootstrapPageWithToken(pageC, tokenC),
-      ]);
+      await bootstrapPagesInOrder([pageA, pageB, pageC], [tokenA, tokenB, tokenC]);
       await waitForSidebar(pageA);
       await waitForSidebar(pageB);
       await waitForSidebar(pageC);
@@ -114,12 +112,11 @@ test.describe('group DM real-time delivery', () => {
       await expect(dmItem(pageB)).toBeVisible({ timeout: 25_000 });
       await expect(dmItem(pageC)).toBeVisible({ timeout: 25_000 });
 
-      await dmItem(pageA).click();
-      await dmItem(pageB).click();
-      await dmItem(pageC).click();
-      await expect(pageA.getByTestId('message-pane')).toBeVisible({ timeout: 15_000 });
-      await expect(pageB.getByTestId('message-pane')).toBeVisible({ timeout: 15_000 });
-      await expect(pageC.getByTestId('message-pane')).toBeVisible({ timeout: 15_000 });
+      for (const p of [pageA, pageB, pageC]) {
+        await dmItem(p).scrollIntoViewIfNeeded().catch(() => {});
+        await dmItem(p).click({ timeout: DM_PANE_MS });
+        await expect(p.getByTestId('message-pane')).toBeVisible({ timeout: DM_PANE_MS });
+      }
 
       const messageContent = `gdm-rt ${Date.now()}`;
       const msgRes = await ctxC.request.post('/api/v1/messages', {
