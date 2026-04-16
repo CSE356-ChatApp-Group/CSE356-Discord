@@ -171,6 +171,35 @@ const wsBackpressureEventsTotal = new client.Counter({
   labelNames: ['action'],
 });
 
+/** WebSocket disconnects by close code and whether bootstrap had completed. */
+const wsDisconnectsTotal = new client.Counter({
+  name: 'ws_disconnects_total',
+  help: 'WebSocket disconnects by close code and bootstrap state',
+  labelNames: ['code', 'clean', 'bootstrap_ready'],
+});
+
+/** WebSocket connection lifetime before close. */
+const wsConnectionLifetimeMs = new client.Histogram({
+  name: 'ws_connection_lifetime_ms',
+  help: 'WebSocket connection lifetime in milliseconds before the socket closed',
+  labelNames: ['close_code', 'bootstrap_ready'],
+  buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000, 900000],
+});
+
+/** User reconnected shortly after a prior disconnect (helps correlate isolated delivery misses). */
+const wsReconnectsTotal = new client.Counter({
+  name: 'ws_reconnects_total',
+  help: 'WebSocket reconnects that occurred shortly after a prior disconnect',
+  labelNames: ['window'],
+});
+
+/** Gap between the last known disconnect and a subsequent reconnect for the same user. */
+const wsReconnectGapMs = new client.Histogram({
+  name: 'ws_reconnect_gap_ms',
+  help: 'Milliseconds between a recent websocket disconnect and the next reconnect for the same user',
+  buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000],
+});
+
 /**
  * Redis PUBLISH failures from realtime fanout (correlate with DM/channel delivery
  * gaps when HTTP 201 still returned before hardening, or with infra issues).
@@ -405,6 +434,13 @@ function startPgPoolMetrics(pool) {
   try {
     wsBackpressureEventsTotal.inc({ action: 'drop' }, 0);
     wsBackpressureEventsTotal.inc({ action: 'kill' }, 0);
+    wsDisconnectsTotal.inc({ code: '1000', clean: 'true', bootstrap_ready: 'true' }, 0);
+    wsDisconnectsTotal.inc({ code: '1006', clean: 'false', bootstrap_ready: 'false' }, 0);
+    wsConnectionLifetimeMs.observe({ close_code: '1000', bootstrap_ready: 'true' }, 0);
+    wsReconnectsTotal.inc({ window: 'le_5s' }, 0);
+    wsReconnectsTotal.inc({ window: 'le_30s' }, 0);
+    wsReconnectsTotal.inc({ window: 'le_120s' }, 0);
+    wsReconnectGapMs.observe(0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'channel' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'conversation' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'user' }, 0);
@@ -506,6 +542,10 @@ module.exports = {
   messagePostResponseTotal,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
+  wsDisconnectsTotal,
+  wsConnectionLifetimeMs,
+  wsReconnectsTotal,
+  wsReconnectGapMs,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,
   wsBootstrapWallDurationMs,

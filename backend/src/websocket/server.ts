@@ -72,6 +72,10 @@ const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
+  wsDisconnectsTotal,
+  wsConnectionLifetimeMs,
+  wsReconnectsTotal,
+  wsReconnectGapMs,
   wsBootstrapWallDurationMs,
   wsBootstrapListCacheTotal,
   wsBootstrapChannelsHistogram,
@@ -128,6 +132,13 @@ const WS_BOOTSTRAP_BATCH_SIZE =
   Number.isFinite(rawBootstrapBatchSize) && rawBootstrapBatchSize > 0
     ? Math.floor(rawBootstrapBatchSize)
     : 96;
+const rawRecentDisconnectTtlSeconds = Number(
+  process.env.WS_RECENT_DISCONNECT_TTL_SECONDS || 180,
+);
+const WS_RECENT_DISCONNECT_TTL_SECONDS =
+  Number.isFinite(rawRecentDisconnectTtlSeconds) && rawRecentDisconnectTtlSeconds > 0
+    ? Math.floor(rawRecentDisconnectTtlSeconds)
+    : 180;
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -211,6 +222,65 @@ function connectionAliveKey(userId, connectionId) {
 
 function connectedUsersKey() {
   return "presence:connected_users";
+}
+
+function recentDisconnectKey(userId) {
+  return `ws:recent_disconnect:${userId}`;
+}
+
+function reconnectWindowLabel(gapMs) {
+  if (gapMs <= 5_000) return "le_5s";
+  if (gapMs <= 30_000) return "le_30s";
+  return "le_120s";
+}
+
+async function recordRecentDisconnect(userId, payload) {
+  if (!isRedisOperational(redis)) return;
+  await redis.set(
+    recentDisconnectKey(userId),
+    JSON.stringify(payload),
+    "EX",
+    WS_RECENT_DISCONNECT_TTL_SECONDS,
+  );
+}
+
+async function observeRecentReconnect(userId, connectionId) {
+  if (!isRedisOperational(redis)) return;
+
+  const key = recentDisconnectKey(userId);
+  const raw = await redis.get(key);
+  if (!raw) return;
+
+  let previous;
+  try {
+    previous = JSON.parse(raw);
+  } catch {
+    await redis.del(key).catch(() => {});
+    return;
+  }
+
+  await redis.del(key).catch(() => {});
+
+  const disconnectedAt = Number(previous?.disconnectedAt || 0);
+  if (!Number.isFinite(disconnectedAt) || disconnectedAt <= 0) return;
+
+  const gapMs = Math.max(0, Date.now() - disconnectedAt);
+  if (gapMs > WS_RECENT_DISCONNECT_TTL_SECONDS * 1000) return;
+
+  wsReconnectsTotal.inc({ window: reconnectWindowLabel(gapMs) });
+  wsReconnectGapMs.observe(gapMs);
+  logger.info(
+    {
+      event: "ws.reconnected_after_gap",
+      userId,
+      connectionId,
+      gapMs,
+      previousCloseCode: previous?.closeCode ?? null,
+      previousBootstrapReady: previous?.bootstrapReady === true,
+      previousLifetimeMs: Number(previous?.lifetimeMs || 0) || 0,
+    },
+    "WS reconnect observed shortly after disconnect",
+  );
 }
 
 async function markConnectionAlive(userId, connectionId) {
@@ -788,10 +858,14 @@ wss.on("connection", async (ws, req) => {
   ws._explicitChannelUnsub = new Set();
   ws._userId = user.id;
   ws._connectionId = randomUUID();
+  ws._connectedAt = Date.now();
   ws._bootstrapReady = false;
   ws._presenceStatus = "idle";
   ws._lastActivityAt = 0;
   ws._awayMessage = null;
+  ws._sawError = false;
+
+  observeRecentReconnect(user.id, ws._connectionId).catch(() => {});
 
   // Mark freshly connected users for a short window so channel fanout can send
   // a targeted user-topic duplicate while channel auto-subscribe warms up.
@@ -818,11 +892,14 @@ wss.on("connection", async (ws, req) => {
     }
   });
 
-  ws.on("close", () => {
-    cleanup(ws, user.id);
+  ws.on("close", (code, reasonBuffer) => {
+    const reason =
+      typeof reasonBuffer?.toString === "function" ? reasonBuffer.toString() : "";
+    cleanup(ws, user.id, code, reason);
   });
 
   ws.on("error", (err) => {
+    ws._sawError = true;
     logger.warn({ err, userId: user.id }, "WS error");
   });
 
@@ -1104,19 +1181,67 @@ async function unsubscribeClient(ws, redisChannel) {
   }
 }
 
-function cleanup(ws, userId) {
+function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
   const subscriptions = [...ws._subscriptions];
+  const bootstrapReady = ws._bootstrapReady === true;
+  const lifetimeMs = Math.max(0, Date.now() - Number(ws._connectedAt || Date.now()));
+  const clean = closeCode !== 1006;
+  const subscriptionCount = subscriptions.length;
+  const closeCodeLabel = String(closeCode || 1005);
+
+  wsDisconnectsTotal.inc({
+    code: closeCodeLabel,
+    clean: clean ? "true" : "false",
+    bootstrap_ready: bootstrapReady ? "true" : "false",
+  });
+  wsConnectionLifetimeMs.observe(
+    {
+      close_code: closeCodeLabel,
+      bootstrap_ready: bootstrapReady ? "true" : "false",
+    },
+    lifetimeMs,
+  );
+
   Promise.allSettled(
     subscriptions.map((ch) => unsubscribeClient(ws, ch)),
   ).catch(() => {});
 
+  recordRecentDisconnect(userId, {
+    disconnectedAt: Date.now(),
+    closeCode,
+    closeReason: closeReason || null,
+    bootstrapReady,
+    lifetimeMs,
+    sawError: ws._sawError === true,
+    subscriptionCount,
+  }).catch(() => {});
+
+  const logPayload = {
+    event: "ws.disconnected",
+    userId,
+    connectionId: ws._connectionId,
+    closeCode,
+    closeReason: closeReason || null,
+    clean,
+    bootstrapReady,
+    lifetimeMs,
+    sawError: ws._sawError === true,
+    subscriptionCount,
+  };
+
+  const abnormalClose =
+    !clean
+    || ws._sawError === true
+    || closeCode === 1011
+    || closeCode === 4001;
+
   if (shuttingDown) {
-    logger.info({ userId }, "WS disconnected");
+    logger.info({ ...logPayload, shuttingDown: true }, "WS disconnected");
     return;
   }
 
   if (!isRedisOperational(redis)) {
-    logger.info({ userId }, "WS disconnected");
+    logger.info({ ...logPayload, redisOperational: false }, "WS disconnected");
     return;
   }
 
@@ -1124,12 +1249,16 @@ function cleanup(ws, userId) {
     .then(() => recomputeUserPresence(userId))
     .catch((err) => {
       if (/Connection is closed/i.test(String(err?.message || err))) {
-        logger.info({ userId }, "WS disconnected");
+        logger.info(logPayload, "WS disconnected");
         return;
       }
       logger.warn({ err, userId }, "WS cleanup presence update failed");
     });
-  logger.info({ userId }, "WS disconnected");
+  if (abnormalClose) {
+    logger.warn(logPayload, "WS disconnected abnormally");
+  } else {
+    logger.info(logPayload, "WS disconnected");
+  }
 }
 
 // ── Heartbeat loop (60 s) ──────────────────────────────────────────────────────

@@ -8,6 +8,7 @@
 
 import http from 'http';
 import { request, app, wsServer, wsServerReady, pool, closeRedisConnections } from './runtime';
+const { wsReconnectsTotal } = require('../src/utils/metrics');
 
 import {
   uniqueSuffix,
@@ -22,6 +23,36 @@ import {
 
 let server: any;
 let port: number;
+
+async function counterTotal(metric: { get?: () => any; hashMap?: Record<string, { value?: number }> }): Promise<number> {
+  const hashMap = metric?.hashMap;
+  if (hashMap && typeof hashMap === 'object') {
+    return Object.values(hashMap).reduce(
+      (sum: number, entry: { value?: number }) => sum + Number(entry?.value || 0),
+      0,
+    );
+  }
+
+  const snapshot = await Promise.resolve(metric.get?.());
+  const values = Array.isArray(snapshot?.values) ? snapshot.values : [];
+  return values.reduce((sum: number, entry: { value?: number }) => sum + Number(entry?.value || 0), 0);
+}
+
+async function waitForCounterTotal(
+  metric: { get?: () => any; hashMap?: Record<string, { value?: number }> },
+  expected: number,
+  timeoutMs = 1500,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const total = await counterTotal(metric);
+    if (total >= expected) return total;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  return counterTotal(metric);
+}
 
 beforeAll(async () => {
   await wsServerReady;
@@ -785,10 +816,13 @@ describe('Multi-socket fanout', () => {
     const base = await createAuthenticatedUser('wsreconnectbase');
     const invitee = await createAuthenticatedUser('wsreconnectinvitee');
 
+    const reconnectsBefore = await counterTotal(wsReconnectsTotal);
     const firstSocket = await connectWebSocket(port, invitee.accessToken);
     await closeWebSocket(firstSocket);
 
     const secondSocket = await connectWebSocket(port, invitee.accessToken);
+    const reconnectsAfter = await waitForCounterTotal(wsReconnectsTotal, reconnectsBefore + 1);
+    expect(reconnectsAfter).toBe(reconnectsBefore + 1);
 
     try {
       const createRes = await request(app)
