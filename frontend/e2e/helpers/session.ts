@@ -163,8 +163,20 @@ export async function bootstrapPageWithToken(page: Page, token: string) {
   // Retrying the navigation gives the rate-limiter time to clear.
   const BOOTSTRAP_ATTEMPTS = 3;
   const shellWaitMs = 24_000;
+  const gotoTimeoutMs = 60_000;
   for (let attempt = 1; attempt <= BOOTSTRAP_ATTEMPTS; attempt++) {
-    await page.goto(`/oauth-callback?token=${encodeURIComponent(token)}`);
+    for (let navTry = 0; navTry < 3; navTry += 1) {
+      try {
+        await page.goto(`/oauth-callback?token=${encodeURIComponent(token)}`, {
+          timeout: gotoTimeoutMs,
+          waitUntil: 'domcontentloaded',
+        });
+        break;
+      } catch (err) {
+        if (navTry === 2) throw err;
+        await new Promise((r) => setTimeout(r, 900 * (navTry + 1)));
+      }
+    }
     // Include route-login: a bad or rejected token redirects to /login before chat mounts.
     // Loader + oauth-callback can both be visible; a single OR-selector hits strict mode.
     await waitForAnyShellByTestId(

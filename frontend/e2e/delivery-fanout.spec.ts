@@ -173,10 +173,11 @@ test.describe('channel delivery fanout (grader-shaped)', () => {
   );
 
   test(
-    'author plus six peers all see channel message within 15s @full @staging @heavy-auth',
+    'author plus four peers all see channel message within 15s @full @staging @heavy-auth',
     async ({ browser }) => {
       test.setTimeout(360_000);
-      const labels = ['nf7a', 'nf7b', 'nf7c', 'nf7d', 'nf7e', 'nf7f', 'nf7g'] as const;
+      // Five isolated Chromium profiles (was seven): staging CI runners often OOM with seven.
+      const labels = ['nf7a', 'nf7b', 'nf7c', 'nf7d', 'nf7e'] as const;
       const users = labels.map((l) => buildUser(l));
       const contexts = await Promise.all(labels.map(() => browser.newContext()));
 

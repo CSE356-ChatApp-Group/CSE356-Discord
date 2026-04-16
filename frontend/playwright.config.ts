@@ -37,9 +37,10 @@ export default defineConfig({
   use: {
     // Avoid localhost → ::1; match docker-published nginx on port 80.
     baseURL: process.env.E2E_BASE_URL || 'http://127.0.0.1',
-    trace: 'on-first-retry',
+    // Staging CI self-hosted runners are often disk-starved; traces/video blow /tmp.
+    trace: process.env.CI ? 'off' : 'on-first-retry',
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    video: process.env.CI ? 'off' : 'retain-on-failure',
     // Default navigation / action timeout.
     actionTimeout: 10_000,
     navigationTimeout: 30_000,
