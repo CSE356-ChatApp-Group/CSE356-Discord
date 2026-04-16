@@ -62,6 +62,7 @@ const { query } = require("../db/pool");
 const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
+const { loadReplayableMessagesForUser } = require("../messages/reconnectReplay");
 const { markWsRecentConnect } = require("./recentConnect");
 const {
   allUserFeedRedisChannels,
@@ -249,23 +250,52 @@ async function recordRecentDisconnect(userId, payload) {
   );
 }
 
-async function observeRecentReconnect(userId, connectionId) {
-  if (!isRedisOperational(redis)) return;
+function recentDisconnectPayloadForSocket(ws, closeCode = 1005, closeReason = "") {
+  const subscriptions = ws?._subscriptions instanceof Set
+    ? ws._subscriptions.size
+    : Number(ws?._subscriptions?.size || 0) || 0;
+  return {
+    disconnectedAt: Date.now(),
+    closeCode,
+    closeReason: closeReason || null,
+    bootstrapReady: ws?._bootstrapReady === true,
+    lifetimeMs: Math.max(0, Date.now() - Number(ws?._connectedAt || Date.now())),
+    sawError: ws?._sawError === true,
+    subscriptionCount: subscriptions,
+  };
+}
 
+function noteRecentDisconnectForSocket(ws, closeCode = 1005, closeReason = "") {
+  const userId = typeof ws?._userId === "string" ? ws._userId : null;
+  if (!userId) return;
+  if (ws._recentDisconnectRecorded === true) return;
+  ws._recentDisconnectRecorded = true;
+  recordRecentDisconnect(
+    userId,
+    recentDisconnectPayloadForSocket(ws, closeCode, closeReason),
+  ).catch(() => {});
+}
+
+async function consumeRecentDisconnect(userId) {
+  if (!isRedisOperational(redis)) return null;
   const key = recentDisconnectKey(userId);
   const raw = await redis.get(key);
-  if (!raw) return;
+  if (!raw) return null;
 
   let previous;
   try {
     previous = JSON.parse(raw);
   } catch {
     await redis.del(key).catch(() => {});
-    return;
+    return null;
   }
 
   await redis.del(key).catch(() => {});
+  return previous;
+}
 
+function observeRecentReconnect(userId, connectionId, previous) {
+  if (!previous) return;
   const disconnectedAt = Number(previous?.disconnectedAt || 0);
   if (!Number.isFinite(disconnectedAt) || disconnectedAt <= 0) return;
 
@@ -286,6 +316,43 @@ async function observeRecentReconnect(userId, connectionId) {
     },
     "WS reconnect observed shortly after disconnect",
   );
+}
+
+async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reconnectObservedAtMs) {
+  const disconnectedAt = Number(previousDisconnect?.disconnectedAt || 0);
+  const reconnectObservedAt = Number(reconnectObservedAtMs || 0);
+  if (!Number.isFinite(disconnectedAt) || disconnectedAt <= 0) return;
+  if (!Number.isFinite(reconnectObservedAt) || reconnectObservedAt <= disconnectedAt) return;
+  if (ws.readyState !== WebSocket.OPEN) return;
+
+  const messages = await loadReplayableMessagesForUser(
+    userId,
+    disconnectedAt,
+    reconnectObservedAt,
+  );
+  if (!messages.length) return;
+
+  logger.info(
+    {
+      event: "ws.replay.missed_messages",
+      userId,
+      connectionId: ws._connectionId,
+      disconnectedAt,
+      reconnectObservedAt,
+      replayedMessages: messages.length,
+    },
+    "Replaying missed websocket messages after reconnect gap",
+  );
+
+  for (const message of messages) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const payload = {
+      event: "message:created",
+      data: message,
+      publishedAt: new Date().toISOString(),
+    };
+    sendPayloadToSocket(ws, `user:${userId}`, payload, JSON.stringify(payload));
+  }
 }
 
 async function markConnectionAlive(userId, connectionId) {
@@ -578,6 +645,7 @@ function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
       },
       "WS slow consumer: terminating connection due to excessive backpressure",
     );
+    noteRecentDisconnectForSocket(ws, 1006, "backpressure_kill");
     ws.terminate();
     return false;
   }
@@ -612,6 +680,7 @@ function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
       "WS send failed; terminating socket",
     );
     try {
+      noteRecentDisconnectForSocket(ws, 1006, "send_failed");
       ws.terminate();
     } catch {
       // Ignore termination failures after send errors.
@@ -929,20 +998,41 @@ wss.on("connection", async (ws, req) => {
   ws._lastActivityAt = 0;
   ws._awayMessage = null;
   ws._sawError = false;
+  ws._recentDisconnectRecorded = false;
 
-  observeRecentReconnect(user.id, ws._connectionId).catch(() => {});
+  const reconnectObservedAtMs = Date.now();
+  const recentDisconnectPromise = consumeRecentDisconnect(user.id).catch(() => null);
+  recentDisconnectPromise
+    .then((recentDisconnect) => {
+      observeRecentReconnect(user.id, ws._connectionId, recentDisconnect);
+    })
+    .catch(() => {});
 
   // Mark freshly connected users for a short window so channel fanout can send
   // a targeted user-topic duplicate while channel auto-subscribe warms up.
   markWsRecentConnect(user.id).catch(() => {});
 
   ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
-    .then(() => {
+    .then(async () => {
+      const recentDisconnect = await recentDisconnectPromise;
+      if (recentDisconnect) {
+        try {
+          await replayMissedMessagesToSocket(
+            ws,
+            user.id,
+            recentDisconnect,
+            reconnectObservedAtMs,
+          );
+        } catch (err) {
+          logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
+        }
+      }
       ws._bootstrapReady = true;
     })
     .catch((err) => {
       wsConnectionResultTotal.inc({ result: "user_subscribe_failed" });
       logger.warn({ err, userId: user.id }, "WS user-channel subscribe failed");
+      noteRecentDisconnectForSocket(ws, 1011, "user_subscribe_failed");
       ws.close(1011, "Subscription failed");
     });
 
@@ -1286,15 +1376,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
     subscriptions.map((ch) => unsubscribeClient(ws, ch)),
   ).catch(() => {});
 
-  recordRecentDisconnect(userId, {
-    disconnectedAt: Date.now(),
-    closeCode,
-    closeReason: closeReason || null,
-    bootstrapReady,
-    lifetimeMs,
-    sawError: ws._sawError === true,
-    subscriptionCount,
-  }).catch(() => {});
+  noteRecentDisconnectForSocket(ws, closeCode, closeReason);
 
   const logPayload = {
     event: "ws.disconnected",
@@ -1345,6 +1427,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
 const heartbeatInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) {
+      noteRecentDisconnectForSocket(ws, 1006, "heartbeat_timeout");
       ws.terminate();
       return;
     }
@@ -1383,6 +1466,7 @@ function shutdown() {
   return new Promise<void>((resolve) => {
     wss.clients.forEach((ws) => {
       try {
+        noteRecentDisconnectForSocket(ws, 1001, "shutdown");
         ws.terminate();
       } catch {
         // Ignore termination errors during shutdown.

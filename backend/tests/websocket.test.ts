@@ -7,7 +7,7 @@
  */
 
 import http from 'http';
-import { request, app, wsServer, wsServerReady, pool, closeRedisConnections } from './runtime';
+import { request, app, wsServer, wsServerReady, pool, redis, closeRedisConnections } from './runtime';
 const { wsReconnectsTotal } = require('../src/utils/metrics');
 
 import {
@@ -52,6 +52,60 @@ async function waitForCounterTotal(
   }
 
   return counterTotal(metric);
+}
+
+async function waitForLoggedWsEvent(
+  ws: any,
+  frames: any[],
+  predicate: (event: any) => boolean,
+  timeoutMs = 4000,
+): Promise<any> {
+  const existing = frames.find(predicate);
+  if (existing) return existing;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off('message', onMessage);
+      reject(new Error('Timed out waiting for websocket event'));
+    }, timeoutMs);
+
+    const onMessage = () => {
+      const match = frames.find(predicate);
+      if (!match) return;
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      resolve(match);
+    };
+
+    ws.on('message', onMessage);
+  });
+}
+
+async function waitForServerSideSocket(
+  userId: string,
+  timeoutMs = 2000,
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const sockets = Array.from(wsServer.wss.clients || []);
+    const match = sockets.find((candidate: any) => candidate?._userId === userId);
+    if (match) return match;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for server-side websocket for user ${userId}`);
+}
+
+async function waitForRedisValue(
+  key: string,
+  timeoutMs = 1500,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await redis.get(key);
+    if (typeof value === 'string' && value.length) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for redis key ${key}`);
 }
 
 beforeAll(async () => {
@@ -1119,6 +1173,227 @@ describe('Multi-socket fanout', () => {
       expect(inviteEvent.data.invitedBy).toBe(owner.user.id);
     } finally {
       await closeWebSocket(secondSocket);
+    }
+  });
+
+  it('replays DM messages created while the recipient is briefly disconnected', async () => {
+    const sender = await createAuthenticatedUser('wsreplaydmsender');
+    const recipient = await createAuthenticatedUser('wsreplaydmrecipient');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${sender.accessToken}`)
+      .send({ participantIds: [recipient.user.id] });
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const firstSocket = await connectWebSocket(port, recipient.accessToken);
+    await closeWebSocket(firstSocket);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const sendRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${sender.accessToken}`)
+      .send({ conversationId, content: 'dm reconnect replay target' });
+    expect(sendRes.status).toBe(201);
+
+    const { WebSocket } = require('ws');
+    const replaySocket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(recipient.accessToken)}`);
+    const frames: any[] = [];
+    replaySocket.on('message', (raw: any) => {
+      try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for websocket open')), 3000);
+      replaySocket.once('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      replaySocket.once('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+
+    try {
+      const replayEvent = await waitForLoggedWsEvent(
+        replaySocket,
+        frames,
+        (event) =>
+          event.event === 'message:created'
+          && event.data?.conversation_id === conversationId
+          && event.data?.content === 'dm reconnect replay target',
+      );
+      expect(replayEvent.data.author_id).toBe(sender.user.id);
+
+      const readyEvent = await waitForLoggedWsEvent(
+        replaySocket,
+        frames,
+        (event) => event.event === 'ready',
+      );
+      expect(readyEvent.event).toBe('ready');
+    } finally {
+      await closeWebSocket(replaySocket);
+    }
+  });
+
+  it('replays channel messages created while a member is briefly disconnected', async () => {
+    const owner = await createAuthenticatedUser('wsreplaychowner');
+    const member = await createAuthenticatedUser('wsreplaychmember');
+
+    const slug = `ws-replay-channel-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'channel reconnect replay test' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .send({});
+    expect(joinRes.status).toBe(200);
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `ws-replay-${uniqueSuffix()}`, isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const firstSocket = await connectWebSocket(port, member.accessToken);
+    await closeWebSocket(firstSocket);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const sendRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'channel reconnect replay target' });
+    expect(sendRes.status).toBe(201);
+
+    const { WebSocket } = require('ws');
+    const replaySocket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(member.accessToken)}`);
+    const frames: any[] = [];
+    replaySocket.on('message', (raw: any) => {
+      try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for websocket open')), 3000);
+      replaySocket.once('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      replaySocket.once('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+
+    try {
+      const replayEvent = await waitForLoggedWsEvent(
+        replaySocket,
+        frames,
+        (event) =>
+          event.event === 'message:created'
+          && event.data?.channel_id === channelId
+          && event.data?.content === 'channel reconnect replay target',
+      );
+      expect(replayEvent.data.author_id).toBe(owner.user.id);
+
+      const readyEvent = await waitForLoggedWsEvent(
+        replaySocket,
+        frames,
+        (event) => event.event === 'ready',
+      );
+      expect(readyEvent.event).toBe('ready');
+    } finally {
+      await closeWebSocket(replaySocket);
+    }
+  });
+
+  it('records a reconnect replay marker before server-initiated terminate cleanup completes', async () => {
+    const sender = await createAuthenticatedUser('wsraceearlysend');
+    const recipient = await createAuthenticatedUser('wsraceearlyrecv');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${sender.accessToken}`)
+      .send({ participantIds: [recipient.user.id] });
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const recipientSocket = await connectWebSocket(port, recipient.accessToken);
+    const serverSocket = await waitForServerSideSocket(recipient.user.id);
+    const originalEmit = serverSocket.emit.bind(serverSocket);
+    const delayedCloseMs = 120;
+    serverSocket.emit = ((event: string, ...args: any[]) => {
+      if (event === 'close') {
+        setTimeout(() => originalEmit(event, ...args), delayedCloseMs);
+        return true;
+      }
+      return originalEmit(event, ...args);
+    }) as any;
+    Object.defineProperty(serverSocket, 'bufferedAmount', {
+      configurable: true,
+      get: () => (2 * 1024 * 1024) + 1,
+    });
+
+    const closePromise = new Promise<void>((resolve) => {
+      recipientSocket.once('close', () => resolve());
+    });
+
+    const sendRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${sender.accessToken}`)
+      .send({ conversationId, content: 'server terminate trigger' });
+    expect(sendRes.status).toBe(201);
+
+    await closePromise;
+    const disconnectKey = `ws:recent_disconnect:${recipient.user.id}`;
+    const disconnectRaw = await waitForRedisValue(disconnectKey);
+    const disconnectPayload = JSON.parse(disconnectRaw);
+    expect(disconnectPayload.closeReason).toBe('backpressure_kill');
+
+    const replayTargetRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${sender.accessToken}`)
+      .send({ conversationId, content: 'server terminate replay bridge' });
+    expect(replayTargetRes.status).toBe(201);
+
+    const { WebSocket } = require('ws');
+    const replaySocket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(recipient.accessToken)}`);
+    const frames: any[] = [];
+    replaySocket.on('message', (raw: any) => {
+      try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for websocket open')), 3000);
+      replaySocket.once('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      replaySocket.once('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+
+    try {
+      const replayEvent = await waitForLoggedWsEvent(
+        replaySocket,
+        frames,
+        (event) =>
+          event.event === 'message:created'
+          && event.data?.conversation_id === conversationId
+          && event.data?.content === 'server terminate replay bridge',
+      );
+      expect(replayEvent.data.author_id).toBe(sender.user.id);
+    } finally {
+      await closeWebSocket(replaySocket);
     }
   });
 });
