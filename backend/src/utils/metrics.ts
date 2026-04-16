@@ -202,6 +202,16 @@ const fanoutTargetCacheTotal = new client.Counter({
   labelNames: ['path', 'result'],
 });
 
+/**
+ * Conversation fanout target cache load saw a version bump during the PG round-trip
+ * (membership invalidation raced the in-flight loader), or gave up caching after max retries.
+ */
+const conversationFanoutTargetsCacheVersionRetryTotal = new client.Counter({
+  name: 'conversation_fanout_targets_cache_version_retry_total',
+  help: 'Conversation fanout cache load retried or returned uncached after version races with invalidation',
+  labelNames: ['outcome'],
+});
+
 /** Wall-clock duration of realtime fanout stages (lookup, publish, total). */
 const fanoutPublishDurationMs = new client.Histogram({
   name: 'fanout_publish_duration_ms',
@@ -440,6 +450,8 @@ function startPgPoolMetrics(pool) {
     fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'hit' }, 0);
     fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'miss' }, 0);
     fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'coalesced' }, 0);
+    conversationFanoutTargetsCacheVersionRetryTotal.inc({ outcome: 'retry' }, 0);
+    conversationFanoutTargetsCacheVersionRetryTotal.inc({ outcome: 'uncached_return' }, 0);
     fanoutPublishDurationMs.observe({ path: 'channel_message', stage: 'channel_topic' }, 0);
     fanoutPublishDurationMs.observe({ path: 'channel_message', stage: 'total' }, 0);
     fanoutPublishDurationMs.observe({ path: 'channel_message_user_topics', stage: 'target_lookup' }, 0);
@@ -498,6 +510,7 @@ module.exports = {
   messageLastMessageRepointFkRetryTotal,
   wsBootstrapWallDurationMs,
   fanoutTargetCacheTotal,
+  conversationFanoutTargetsCacheVersionRetryTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
   wsBootstrapListCacheTotal,

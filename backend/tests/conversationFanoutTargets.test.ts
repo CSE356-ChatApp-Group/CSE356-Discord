@@ -6,10 +6,18 @@ jest.mock('../src/db/redis', () => ({
   get: jest.fn(() => Promise.resolve(null)),
   set: jest.fn(() => Promise.resolve('OK')),
   del: jest.fn(() => Promise.resolve(1)),
+  pipeline: jest.fn(() => ({
+    del: jest.fn().mockReturnThis(),
+    incr: jest.fn().mockReturnThis(),
+    exec: jest.fn(() => Promise.resolve([[null, 1], [null, 1]])),
+  })),
 }));
 
 jest.mock('../src/utils/metrics', () => ({
   fanoutTargetCacheTotal: {
+    inc: jest.fn(),
+  },
+  conversationFanoutTargetsCacheVersionRetryTotal: {
     inc: jest.fn(),
   },
 }));
@@ -21,6 +29,7 @@ const redis = require('../src/db/redis') as {
   get: jest.Mock;
   set: jest.Mock;
   del: jest.Mock;
+  pipeline: jest.Mock;
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
@@ -30,6 +39,11 @@ const {
   getConversationFanoutTargets: (conversationId: string) => Promise<string[]>;
   invalidateConversationFanoutTargetsCache: (conversationId: string) => Promise<void>;
 };
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const metrics = require('../src/utils/metrics') as {
+  fanoutTargetCacheTotal: { inc: jest.Mock };
+  conversationFanoutTargetsCacheVersionRetryTotal: { inc: jest.Mock };
+};
 
 describe('conversationFanoutTargets', () => {
   afterEach(() => {
@@ -37,9 +51,17 @@ describe('conversationFanoutTargets', () => {
     redis.get.mockReset();
     redis.set.mockReset();
     redis.del.mockReset();
+    redis.pipeline.mockReset();
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     redis.del.mockResolvedValue(1);
+    redis.pipeline.mockImplementation(() => ({
+      del: jest.fn().mockReturnThis(),
+      incr: jest.fn().mockReturnThis(),
+      exec: jest.fn(() => Promise.resolve([[null, 1], [null, 1]])),
+    }));
+    metrics.fanoutTargetCacheTotal.inc.mockReset();
+    metrics.conversationFanoutTargetsCacheVersionRetryTotal.inc.mockReset();
   });
 
   it('returns conversation plus distinct user targets from query rows', async () => {
@@ -58,6 +80,8 @@ describe('conversationFanoutTargets', () => {
 
   it('reuses cached conversation fanout targets', async () => {
     redis.get
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(JSON.stringify(['conversation:conv-2', 'user:a', 'user:b']));
     query.mockResolvedValueOnce({
@@ -80,6 +104,31 @@ describe('conversationFanoutTargets', () => {
 
   it('invalidates the cached conversation audience', async () => {
     await invalidateConversationFanoutTargetsCache('conv-3');
-    expect(redis.del).toHaveBeenCalledWith('conversation:conv-3:fanout_targets');
+    expect(redis.pipeline).toHaveBeenCalled();
+    const pipe = redis.pipeline.mock.results[0].value;
+    expect(pipe.del).toHaveBeenCalledWith('conversation:conv-3:fanout_targets');
+    expect(pipe.incr).toHaveBeenCalledWith('conversation:conv-3:fanout_targets_v');
+    expect(pipe.exec).toHaveBeenCalled();
+  });
+
+  it('retries load when fanout version changes during the PG round-trip', async () => {
+    redis.get
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('1')
+      .mockResolvedValueOnce('1')
+      .mockResolvedValueOnce('1');
+    query
+      .mockResolvedValueOnce({ rows: [{ user_id: 'a' }] })
+      .mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
+
+    const targets = await getConversationFanoutTargets('conv-4');
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(targets).toEqual(['conversation:conv-4', 'user:a', 'user:b']);
+    expect(redis.set).toHaveBeenCalledTimes(1);
+    expect(metrics.conversationFanoutTargetsCacheVersionRetryTotal.inc).toHaveBeenCalledWith({
+      outcome: 'retry',
+    });
   });
 });
