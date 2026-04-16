@@ -153,6 +153,21 @@ echo "✓ Remote deploy lock acquired"
 
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
 
+if ! [[ "${CHATAPP_INSTANCES}" =~ ^[0-9]+$ ]] || [ "${CHATAPP_INSTANCES}" -lt 1 ]; then
+  echo "ERROR: CHATAPP_INSTANCES must be a positive integer (got '${CHATAPP_INSTANCES}')."
+  exit 1
+fi
+if [ "${CHATAPP_INSTANCES}" -gt 8 ]; then
+  echo "ERROR: CHATAPP_INSTANCES=${CHATAPP_INSTANCES} is unexpectedly high; refusing deploy."
+  exit 1
+fi
+
+BASE_APP_PORT=4000
+TARGET_PORTS=()
+for ((idx=0; idx<CHATAPP_INSTANCES; idx++)); do
+  TARGET_PORTS+=( "$((BASE_APP_PORT + idx))" )
+done
+
 # First server port inside `upstream app` only (avoids accidental matches elsewhere and
 # duplicate-line collapse where a naive grep | head picked an arbitrary port).
 CURRENT_UPSTREAM_PORT=$(ssh_prod "SITE='${CHATAPP_NGINX_SITE_PATH}' python3 <<'PY'
@@ -172,37 +187,34 @@ ports = re.findall(r'server\\s+(?:127\\.0\\.0\\.1|localhost):(\\d+)', m.group(1)
 print(ports[0] if ports else '')
 PY" || true)
 if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
-  CURRENT_UPSTREAM_PORT="${OLD_PORT}"
+  CURRENT_UPSTREAM_PORT="${TARGET_PORTS[0]}"
 fi
 
-if [[ "${CURRENT_UPSTREAM_PORT}" == "4000" ]]; then
-  OLD_PORT=4000
-  NEW_PORT=4001
-elif [[ "${CURRENT_UPSTREAM_PORT}" == "4001" ]]; then
-  OLD_PORT=4001
-  NEW_PORT=4000
+if [ "${CHATAPP_INSTANCES}" -ge 3 ]; then
+  # Four-worker prod has no safe "flip" port inside 4000..4003 because every worker
+  # is already live. Use a spare candidate port outside the nginx upstream so deploys
+  # never restart a worker while nginx can still route traffic to it.
+  if ! printf '%s\n' "${TARGET_PORTS[@]}" | grep -qx "${CURRENT_UPSTREAM_PORT}"; then
+    echo "ERROR: Unexpected upstream port '${CURRENT_UPSTREAM_PORT}' in nginx config."
+    exit 1
+  fi
+  OLD_PORT="${CURRENT_UPSTREAM_PORT}"
+  NEW_PORT="$((BASE_APP_PORT + CHATAPP_INSTANCES))"
 else
-  echo "ERROR: Unexpected upstream port '${CURRENT_UPSTREAM_PORT}' in nginx config."
-  exit 1
+  if [[ "${CURRENT_UPSTREAM_PORT}" == "4000" ]]; then
+    OLD_PORT=4000
+    NEW_PORT=4001
+  elif [[ "${CURRENT_UPSTREAM_PORT}" == "4001" ]]; then
+    OLD_PORT=4001
+    NEW_PORT=4000
+  else
+    echo "ERROR: Unexpected upstream port '${CURRENT_UPSTREAM_PORT}' in nginx config."
+    exit 1
+  fi
 fi
 
 echo "Current live port: $OLD_PORT"
 echo "Candidate port: $NEW_PORT"
-
-if ! [[ "${CHATAPP_INSTANCES}" =~ ^[0-9]+$ ]] || [ "${CHATAPP_INSTANCES}" -lt 1 ]; then
-  echo "ERROR: CHATAPP_INSTANCES must be a positive integer (got '${CHATAPP_INSTANCES}')."
-  exit 1
-fi
-if [ "${CHATAPP_INSTANCES}" -gt 8 ]; then
-  echo "ERROR: CHATAPP_INSTANCES=${CHATAPP_INSTANCES} is unexpectedly high; refusing deploy."
-  exit 1
-fi
-
-BASE_APP_PORT=4000
-TARGET_PORTS=()
-for ((idx=0; idx<CHATAPP_INSTANCES; idx++)); do
-  TARGET_PORTS+=( "$((BASE_APP_PORT + idx))" )
-done
 
 ADDITIONAL_PORTS=()
 for p in "${TARGET_PORTS[@]}"; do
@@ -1496,9 +1508,13 @@ PY
 fi
 
 # 9.5. Enable new service for auto-start on reboot
-echo "9.5 Enabling candidate service for auto-start on reboot..."
-ssh_prod "sudo systemctl enable chatapp@${NEW_PORT} 2>/dev/null || true"
-echo "✓ Service enabled"
+if printf '%s\n' "${TARGET_PORTS[@]}" | grep -qx "${NEW_PORT}"; then
+  echo "9.5 Enabling candidate service for auto-start on reboot..."
+  ssh_prod "sudo systemctl enable chatapp@${NEW_PORT} 2>/dev/null || true"
+  echo "✓ Service enabled"
+else
+  echo "9.5 Skipping auto-enable for spare candidate port ${NEW_PORT}."
+fi
 
 # 10. Monitor briefly
 MONITOR_CHECKS=$((MONITOR_SECONDS / 5))
@@ -1523,6 +1539,16 @@ if [ "$MONITOR_FAILS" -gt 0 ]; then
   exit 1
 fi
 echo "✓ Monitoring window complete"
+
+if ! printf '%s\n' "${TARGET_PORTS[@]}" | grep -qx "${NEW_PORT}"; then
+  echo "10.45. Stopping spare candidate instance on port ${NEW_PORT}..."
+  ssh_prod "
+    sudo systemctl stop chatapp@${NEW_PORT} 2>/dev/null || true
+    sudo systemctl disable chatapp@${NEW_PORT} 2>/dev/null || true
+    echo 'Spare candidate stopped'
+  "
+  echo "✓ Spare candidate reclaimed"
+fi
 
 # 10.5. Stop old port to reclaim memory.
 # Prod runs a single instance (CHATAPP_INSTANCES=1); the old port stays running
