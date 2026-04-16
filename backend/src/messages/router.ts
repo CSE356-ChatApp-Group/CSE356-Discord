@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
-const { query, queryRead, readPool, getClient, withTransaction, poolStats } = require('../db/pool');
+const { query, queryRead, readPool, withTransaction, poolStats } = require('../db/pool');
 const {
   messagePostAccessDeniedTotal,
   messageCacheBustFailuresTotal,
@@ -323,84 +323,70 @@ async function advanceReadStateCursor({
 }) {
   const scopeColumn = channelId ? 'channel_id' : 'conversation_id';
   const scopeValue = channelId || conversationId;
-  const client = await getClient();
-
-  try {
-    await client.query('BEGIN');
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const { rows: existingRows } = await client.query(
-        `SELECT last_read_message_id, last_read_at
-         FROM read_states
-         WHERE user_id = $1
-           AND ${scopeColumn} = $2
-         LIMIT 1
-         FOR UPDATE`,
-        [userId, scopeValue],
-      );
-
-      if (!existingRows.length) {
-        const { rows: insertedRows } = await client.query(
-          `INSERT INTO read_states (user_id, channel_id, conversation_id, last_read_message_id, last_read_at)
-           VALUES ($1,$2,$3,$4,NOW())
-           ON CONFLICT DO NOTHING
-           RETURNING last_read_message_id, last_read_at`,
-          [userId, channelId, conversationId, messageId],
-        );
-
-        if (insertedRows[0]) {
-          await client.query('COMMIT');
-          return { applied: insertedRows[0], didAdvanceCursor: true };
-        }
-        continue;
-      }
-
-      const existing = existingRows[0];
-      const currentReadId = existing.last_read_message_id || null;
-      if (currentReadId && String(currentReadId) === String(messageId)) {
-        await client.query('COMMIT');
-        return { applied: existing, didAdvanceCursor: false };
-      }
-
-      let shouldAdvance = !currentReadId;
-      if (!shouldAdvance) {
-        const { rows: currentRows } = await client.query(
-          `SELECT created_at
-           FROM messages
-           WHERE id = $1
-             AND deleted_at IS NULL`,
-          [currentReadId],
-        );
-        const currentCreatedAt = currentRows[0]?.created_at;
-        shouldAdvance = !currentCreatedAt || currentCreatedAt <= messageCreatedAt;
-      }
-
-      if (!shouldAdvance) {
-        await client.query('COMMIT');
-        return { applied: existing, didAdvanceCursor: false };
-      }
-
-      const { rows: updatedRows } = await client.query(
-        `UPDATE read_states
-         SET last_read_message_id = $3,
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { rows } = await query(
+      `WITH inserted AS (
+         INSERT INTO read_states (
+           user_id,
+           channel_id,
+           conversation_id,
+           last_read_message_id,
+           last_read_at
+         )
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT DO NOTHING
+         RETURNING last_read_message_id, last_read_at, TRUE AS did_advance_cursor
+       ),
+       updated AS (
+         UPDATE read_states rs
+         SET last_read_message_id = $4,
              last_read_at = NOW()
-         WHERE user_id = $1
-           AND ${scopeColumn} = $2
-         RETURNING last_read_message_id, last_read_at`,
-        [userId, scopeValue, messageId],
-      );
+         WHERE NOT EXISTS (SELECT 1 FROM inserted)
+           AND rs.user_id = $1
+           AND ${scopeColumn} = $5
+           AND rs.last_read_message_id IS DISTINCT FROM $4
+           AND (
+             rs.last_read_message_id IS NULL
+             OR NOT EXISTS (
+               SELECT 1
+               FROM messages current_read
+               WHERE current_read.id = rs.last_read_message_id
+                 AND current_read.deleted_at IS NULL
+                 AND current_read.created_at > $6
+             )
+           )
+         RETURNING rs.last_read_message_id, rs.last_read_at, TRUE AS did_advance_cursor
+       ),
+       current_state AS (
+         SELECT last_read_message_id, last_read_at, FALSE AS did_advance_cursor
+         FROM read_states
+         WHERE NOT EXISTS (SELECT 1 FROM inserted)
+           AND NOT EXISTS (SELECT 1 FROM updated)
+           AND user_id = $1
+           AND ${scopeColumn} = $5
+         LIMIT 1
+       )
+       SELECT last_read_message_id, last_read_at, did_advance_cursor
+       FROM inserted
+       UNION ALL
+       SELECT last_read_message_id, last_read_at, did_advance_cursor
+       FROM updated
+       UNION ALL
+       SELECT last_read_message_id, last_read_at, did_advance_cursor
+       FROM current_state
+       LIMIT 1`,
+      [userId, channelId, conversationId, messageId, scopeValue, messageCreatedAt],
+    );
 
-      await client.query('COMMIT');
-      return { applied: updatedRows[0], didAdvanceCursor: true };
+    if (rows[0]) {
+      return {
+        applied: rows[0],
+        didAdvanceCursor: !!rows[0].did_advance_cursor,
+      };
     }
-
-    throw new Error('read_state_advance_failed_after_retries');
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
   }
+
+  throw new Error('read_state_advance_failed_after_retries');
 }
 
 async function loadMessageTarget(messageId) {
