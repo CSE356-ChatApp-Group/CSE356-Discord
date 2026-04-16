@@ -271,6 +271,58 @@ const wsBootstrapChannelsHistogram = new client.Histogram({
   buckets: [0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 });
 
+/** Request-path timing for the realtime-critical portions of hot endpoints. */
+const realtimeRequestLifecycleDurationMs = new client.Histogram({
+  name: 'realtime_request_lifecycle_duration_ms',
+  help: 'Wall-clock timing for realtime-critical phases of hot request paths',
+  labelNames: ['operation', 'phase'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000],
+});
+
+/** Messages replayed to a socket immediately after reconnect. */
+const wsReconnectReplayMessagesHistogram = new client.Histogram({
+  name: 'ws_reconnect_replay_messages',
+  help: 'Number of replayed websocket message:created events delivered after reconnect',
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 200, 500],
+});
+
+/** Time spent loading and replaying missed messages after reconnect. */
+const wsReconnectReplayDurationMs = new client.Histogram({
+  name: 'ws_reconnect_replay_duration_ms',
+  help: 'Milliseconds spent loading and replaying websocket messages after reconnect',
+  labelNames: ['phase'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+/** Topic subscription breadth per websocket at bootstrap and close. */
+const wsSocketSubscriptionCountHistogram = new client.Histogram({
+  name: 'ws_socket_subscription_count',
+  help: 'Number of websocket subscriptions tracked per socket',
+  labelNames: ['scope'],
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Explicit topic subscribe/unsubscribe commands received from clients. */
+const wsTopicSubscriptionsTotal = new client.Counter({
+  name: 'ws_topic_subscriptions_total',
+  help: 'Explicit websocket subscribe and unsubscribe commands by topic type and connection mode',
+  labelNames: ['action', 'channel_type', 'mode'],
+});
+
+/** Duplicate delivery work performed while we still shadow channel+user paths. */
+const realtimeDuplicateDeliveryPathsTotal = new client.Counter({
+  name: 'realtime_duplicate_delivery_paths_total',
+  help: 'Potential duplicate recipient delivery paths emitted for the same logical realtime event',
+  labelNames: ['event', 'reason'],
+});
+
+/** Non-user topic deliveries still used by sockets marked for canonical user-feed mode. */
+const realtimeCanonicalFallbackDeliveriesTotal = new client.Counter({
+  name: 'realtime_canonical_fallback_deliveries_total',
+  help: 'Deliveries sent over non-user topics to canonical user-feed sockets that did not explicitly request that topic',
+  labelNames: ['channel_type', 'event'],
+});
+
 /** Redis message-list first-page bust failed after POST/PATCH/DELETE (TTL backstop applies). */
 const messageCacheBustFailuresTotal = new client.Counter({
   name: 'message_cache_bust_failures_total',
@@ -502,6 +554,33 @@ function startPgPoolMetrics(pool) {
     wsBootstrapListCacheTotal.inc({ result: 'miss' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'coalesced' }, 0);
     wsBootstrapChannelsHistogram.observe(0);
+    realtimeRequestLifecycleDurationMs.observe({ operation: 'post_message', phase: 'db_txn' }, 0);
+    realtimeRequestLifecycleDurationMs.observe({ operation: 'post_message', phase: 'realtime' }, 0);
+    realtimeRequestLifecycleDurationMs.observe({ operation: 'post_message', phase: 'total' }, 0);
+    realtimeRequestLifecycleDurationMs.observe({ operation: 'mark_read', phase: 'lookup_and_advance' }, 0);
+    realtimeRequestLifecycleDurationMs.observe({ operation: 'mark_read', phase: 'realtime' }, 0);
+    realtimeRequestLifecycleDurationMs.observe({ operation: 'mark_read', phase: 'total' }, 0);
+    wsReconnectReplayMessagesHistogram.observe(0);
+    wsReconnectReplayDurationMs.observe({ phase: 'load' }, 0);
+    wsReconnectReplayDurationMs.observe({ phase: 'send' }, 0);
+    wsReconnectReplayDurationMs.observe({ phase: 'total' }, 0);
+    wsSocketSubscriptionCountHistogram.observe({ scope: 'bootstrap_total' }, 0);
+    wsSocketSubscriptionCountHistogram.observe({ scope: 'bootstrap_explicit' }, 0);
+    wsSocketSubscriptionCountHistogram.observe({ scope: 'close_total' }, 0);
+    wsSocketSubscriptionCountHistogram.observe({ scope: 'close_explicit' }, 0);
+    wsTopicSubscriptionsTotal.inc({ action: 'subscribe', channel_type: 'channel', mode: 'legacy' }, 0);
+    wsTopicSubscriptionsTotal.inc({ action: 'unsubscribe', channel_type: 'channel', mode: 'legacy' }, 0);
+    wsTopicSubscriptionsTotal.inc({ action: 'subscribe', channel_type: 'conversation', mode: 'legacy' }, 0);
+    wsTopicSubscriptionsTotal.inc({ action: 'unsubscribe', channel_type: 'conversation', mode: 'legacy' }, 0);
+    wsTopicSubscriptionsTotal.inc({ action: 'subscribe', channel_type: 'community', mode: 'legacy' }, 0);
+    wsTopicSubscriptionsTotal.inc({ action: 'unsubscribe', channel_type: 'community', mode: 'legacy' }, 0);
+    wsTopicSubscriptionsTotal.inc({ action: 'subscribe', channel_type: 'channel', mode: 'canonical' }, 0);
+    wsTopicSubscriptionsTotal.inc({ action: 'unsubscribe', channel_type: 'channel', mode: 'canonical' }, 0);
+    realtimeDuplicateDeliveryPathsTotal.inc({ event: 'message:created', reason: 'compat_dual_path' }, 0);
+    realtimeDuplicateDeliveryPathsTotal.inc({ event: 'message:created', reason: 'canonical_shadow' }, 0);
+    realtimeCanonicalFallbackDeliveriesTotal.inc({ channel_type: 'channel', event: 'message:created' }, 0);
+    realtimeCanonicalFallbackDeliveriesTotal.inc({ channel_type: 'conversation', event: 'message:created' }, 0);
+    realtimeCanonicalFallbackDeliveriesTotal.inc({ channel_type: 'community', event: 'message:created' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
     pgBusinessSqlQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
@@ -555,6 +634,13 @@ module.exports = {
   fanoutPublishTargetsHistogram,
   wsBootstrapListCacheTotal,
   wsBootstrapChannelsHistogram,
+  realtimeRequestLifecycleDurationMs,
+  wsReconnectReplayMessagesHistogram,
+  wsReconnectReplayDurationMs,
+  wsSocketSubscriptionCountHistogram,
+  wsTopicSubscriptionsTotal,
+  realtimeDuplicateDeliveryPathsTotal,
+  realtimeCanonicalFallbackDeliveriesTotal,
   messageCacheBustFailuresTotal,
   startPgPoolMetrics,
   pgPoolCircuitBreakerRejectsTotal,

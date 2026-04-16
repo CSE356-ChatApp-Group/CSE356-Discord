@@ -24,6 +24,7 @@ const {
   messageCacheBustFailuresTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
+  realtimeRequestLifecycleDurationMs,
 } = require('../utils/metrics');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('./sideEffects');
@@ -94,6 +95,13 @@ function validate(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) { res.status(400).json({ errors: errors.array() }); return false; }
   return true;
+}
+
+function observeRealtimeLifecycle(operation, phase, startedAtNs) {
+  realtimeRequestLifecycleDurationMs.observe(
+    { operation, phase },
+    Number(process.hrtime.bigint() - startedAtNs) / 1e6,
+  );
 }
 
 function readReceiptDedupeKey(userId, channelId, conversationId) {
@@ -882,6 +890,7 @@ router.post('/',
     let idemRedisKey: string | null = null;
     let idemLease = false;
     try {
+      const totalStartedAt = process.hrtime.bigint();
       const { content, channelId, conversationId, threadId } = req.body;
       const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
 
@@ -992,6 +1001,7 @@ router.post('/',
       // of the prior 5 (access-check, BEGIN, INSERT, COMMIT, hydrated-SELECT),
       // cutting connection hold time ~40% and improving throughput under contention.
       let communityId: string | null = null;
+      const dbTxnStartedAt = process.hrtime.bigint();
       const baseMessage = await withTransaction(async (client) => {
         let rows: any[];
 
@@ -1120,20 +1130,26 @@ router.post('/',
 
         return row;
       });
+      observeRealtimeLifecycle('post_message', 'db_txn', dbTxnStartedAt);
 
       // Re-hydrate only when attachments were inserted so the response includes
       // them. For the common no-attachment path the CTE result is already fully
       // hydrated (author joined, attachments = []).
+      const rehydrateStartedAt = process.hrtime.bigint();
       const message = attachments.length > 0
         ? (await loadHydratedMessageById(baseMessage.id) ?? baseMessage)
         : baseMessage;
+      observeRealtimeLifecycle('post_message', 'rehydrate', rehydrateStartedAt);
 
       // Bust the shared Redis cache for the latest page so a follow-up GET /messages
       // (e.g. opening a DM) returns rows that include this write. Await DEL so a
       // client cannot GET stale JSON between commit and eviction (grader polling).
+      const cacheBustStartedAt = process.hrtime.bigint();
       await bustMessagesCacheSafe({ channelId, conversationId });
+      observeRealtimeLifecycle('post_message', 'cache_bust', cacheBustStartedAt);
 
       let realtimePublishedAtForHttp;
+      const realtimeStartedAt = process.hrtime.bigint();
       if (channelId) {
         try {
           await incrementChannelMessageCount(channelId);
@@ -1161,6 +1177,7 @@ router.post('/',
           message,
         );
       }
+      observeRealtimeLifecycle('post_message', 'realtime', realtimeStartedAt);
       if (!realtimePublishedAtForHttp) {
         realtimePublishedAtForHttp = new Date().toISOString();
       }
@@ -1211,6 +1228,7 @@ router.post('/',
       } else {
         httpBody.realtimeConversationFanoutComplete = true;
       }
+      observeRealtimeLifecycle('post_message', 'total', totalStartedAt);
       res.status(201).json(httpBody);
     } catch (err: any) {
       if (idemRedisKey && idemLease) {
@@ -1401,6 +1419,8 @@ router.put('/:id/read',
       return res.status(503).json({ error: 'Read receipts temporarily delayed under high load' });
     }
     try {
+      const totalStartedAt = process.hrtime.bigint();
+      const lookupStartedAt = process.hrtime.bigint();
       const target = await loadMessageTargetForUser(req.params.id, req.user.id);
       if (!target) return res.status(404).json({ error: 'Message not found' });
       if (!target.has_access) {
@@ -1418,6 +1438,8 @@ router.put('/:id/read',
       );
 
       if (cachedMessageId && String(cachedMessageId) === String(messageId)) {
+        observeRealtimeLifecycle('mark_read', 'lookup_and_advance', lookupStartedAt);
+        observeRealtimeLifecycle('mark_read', 'total', totalStartedAt);
         return res.json({ success: true });
       }
 
@@ -1428,11 +1450,13 @@ router.put('/:id/read',
         messageId,
         messageCreatedAt,
       });
+      observeRealtimeLifecycle('mark_read', 'lookup_and_advance', lookupStartedAt);
 
       if (!didAdvanceCursor) {
         if (String(applied?.last_read_message_id || '') === String(messageId)) {
           await rememberReadReceiptMessageId(uid, channel_id, conversation_id, messageId);
         }
+        observeRealtimeLifecycle('mark_read', 'total', totalStartedAt);
         return res.json({ success: true });
       }
 
@@ -1451,6 +1475,7 @@ router.put('/:id/read',
 
       // Await Redis fanout before HTTP 200 so strict graders (delivery-after-success)
       // do not observe a race; mirrors POST /messages awaiting publish before 201.
+      const realtimeStartedAt = process.hrtime.bigint();
       if (conversation_id) {
         await publishConversationEventNow(conversation_id, 'read:updated', payload);
       } else {
@@ -1459,6 +1484,7 @@ router.put('/:id/read',
         // which would leak other members' read positions to WebSocket clients.
         await publishUserFeedTargets([uid], { event: 'read:updated', data: payload });
       }
+      observeRealtimeLifecycle('mark_read', 'realtime', realtimeStartedAt);
 
       // Reset the user's unread watermark in Redis to the current channel message count
       if (channel_id) {
@@ -1476,6 +1502,7 @@ router.put('/:id/read',
 
       await rememberReadReceiptMessageId(uid, channel_id, conversation_id, messageId);
 
+      observeRealtimeLifecycle('mark_read', 'total', totalStartedAt);
       res.json({ success: true });
     } catch (err) { next(err); }
   }

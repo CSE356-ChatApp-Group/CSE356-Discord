@@ -17,6 +17,7 @@ const {
   fanoutTargetCacheTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
+  realtimeDuplicateDeliveryPathsTotal,
 } = require('../utils/metrics');
 
 const rawUserFanoutTargetsCacheTtl = Number(process.env.CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS || '180');
@@ -67,6 +68,15 @@ function userFanoutMode() {
     .toLowerCase();
   if (v === 'recent_connect') return 'recent_connect';
   return 'all';
+}
+
+function canonicalUserFeedEnabled() {
+  const value = String(process.env.REALTIME_CANONICAL_USER_FEED || '').trim().toLowerCase();
+  return value === '1' || value === 'true';
+}
+
+function envelopeEventName(envelope: Record<string, unknown>) {
+  return typeof envelope?.event === 'string' ? envelope.event : 'unknown';
 }
 
 function channelUserFanoutTargetsCacheKey(channelId: string) {
@@ -312,6 +322,16 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
     mode === 'all' && !blocking
       ? allTargets.filter((target) => !recentTargetSet.has(target))
       : [];
+  const duplicatePathCount = inlineTargets.length + deferredTargets.length;
+  if (duplicatePathCount > 0) {
+    realtimeDuplicateDeliveryPathsTotal.inc(
+      {
+        event: envelopeEventName(envelope),
+        reason: canonicalUserFeedEnabled() ? 'canonical_shadow' : 'compat_dual_path',
+      },
+      duplicatePathCount,
+    );
+  }
 
   if (inlineTargets.length > 0) {
     await publishUserTopicTargets(

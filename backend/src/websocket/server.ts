@@ -80,6 +80,11 @@ const {
   wsBootstrapWallDurationMs,
   wsBootstrapListCacheTotal,
   wsBootstrapChannelsHistogram,
+  wsReconnectReplayMessagesHistogram,
+  wsReconnectReplayDurationMs,
+  wsSocketSubscriptionCountHistogram,
+  wsTopicSubscriptionsTotal,
+  realtimeCanonicalFallbackDeliveriesTotal,
 } = require("../utils/metrics");
 const { tracer, context, trace } = require("../utils/tracer");
 
@@ -151,6 +156,45 @@ function testUserSubscribeDelayMs() {
   const raw = Number(process.env.WS_TEST_USER_SUBSCRIBE_DELAY_MS || '0');
   if (!Number.isFinite(raw) || raw <= 0) return 0;
   return Math.min(5_000, Math.floor(raw));
+}
+
+function canonicalUserFeedEnabled() {
+  const value = String(process.env.REALTIME_CANONICAL_USER_FEED || '').trim().toLowerCase();
+  return value === '1' || value === 'true';
+}
+
+function logicalChannelType(channel) {
+  const parsed = parseChannelKey(channel);
+  return parsed?.type || 'unknown';
+}
+
+function connectionModeLabel(ws) {
+  return ws?._canonicalUserFeed === true ? 'canonical' : 'legacy';
+}
+
+function trackExplicitTopicSubscription(ws, redisChannel, action) {
+  const parsed = parseChannelKey(redisChannel);
+  if (!parsed || parsed.type === 'user') return;
+  if (!ws._explicitSubscriptions) {
+    ws._explicitSubscriptions = new Set();
+  }
+  if (action === 'subscribe') {
+    ws._explicitSubscriptions.add(redisChannel);
+  } else if (action === 'unsubscribe') {
+    ws._explicitSubscriptions.delete(redisChannel);
+  }
+  wsTopicSubscriptionsTotal.inc({
+    action,
+    channel_type: parsed.type,
+    mode: connectionModeLabel(ws),
+  });
+}
+
+function observeSocketSubscriptionCounts(ws, scope) {
+  const totalCount = Array.isArray(ws?._subscriptions) ? ws._subscriptions.length : ws?._subscriptions?.size || 0;
+  const explicitCount = ws?._explicitSubscriptions?.size || 0;
+  wsSocketSubscriptionCountHistogram.observe({ scope: `${scope}_total` }, totalCount);
+  wsSocketSubscriptionCountHistogram.observe({ scope: `${scope}_explicit` }, explicitCount);
 }
 
 function aclCacheKey(userId: string, channel: string) {
@@ -326,18 +370,25 @@ function observeRecentReconnect(userId, connectionId, previous) {
 }
 
 async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reconnectObservedAtMs) {
+  const replayStartedAt = process.hrtime.bigint();
   const disconnectedAt = Number(previousDisconnect?.disconnectedAt || 0);
   const reconnectObservedAt = Number(reconnectObservedAtMs || 0);
   if (!Number.isFinite(disconnectedAt) || disconnectedAt <= 0) return;
   if (!Number.isFinite(reconnectObservedAt) || reconnectObservedAt <= disconnectedAt) return;
   if (ws.readyState !== WebSocket.OPEN) return;
 
+  const loadStartedAt = process.hrtime.bigint();
   const messages = await loadReplayableMessagesForUser(
     userId,
     disconnectedAt,
     reconnectObservedAt,
   );
+  wsReconnectReplayDurationMs.observe(
+    { phase: 'load' },
+    Number(process.hrtime.bigint() - loadStartedAt) / 1e6,
+  );
   if (!messages.length) return;
+  wsReconnectReplayMessagesHistogram.observe(messages.length);
 
   logger.info(
     {
@@ -351,6 +402,7 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
     "Replaying missed websocket messages after reconnect gap",
   );
 
+  const sendStartedAt = process.hrtime.bigint();
   for (const message of messages) {
     if (ws.readyState !== WebSocket.OPEN) return;
     const payload = {
@@ -360,6 +412,14 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
     };
     sendPayloadToSocket(ws, `user:${userId}`, payload, JSON.stringify(payload));
   }
+  wsReconnectReplayDurationMs.observe(
+    { phase: 'send' },
+    Number(process.hrtime.bigint() - sendStartedAt) / 1e6,
+  );
+  wsReconnectReplayDurationMs.observe(
+    { phase: 'total' },
+    Number(process.hrtime.bigint() - replayStartedAt) / 1e6,
+  );
 }
 
 async function replayInitialConnectGapToSocket(ws, userId, connectedAtMs, subscribedAtMs) {
@@ -659,6 +719,7 @@ function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
   let payloadEventName;
   let skipDropForBackpressure = false;
   let outbound = rawMessage;
+  const channelType = logicalChannelType(logicalChannel);
   if (
     parsed &&
     typeof parsed === "object" &&
@@ -673,6 +734,17 @@ function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
       }
     }
     outbound = JSON.stringify({ ...parsed, channel: logicalChannel });
+  }
+
+  if (
+    ws?._canonicalUserFeed === true
+    && channelType !== 'user'
+    && !(ws?._explicitSubscriptions?.has(logicalChannel))
+  ) {
+    realtimeCanonicalFallbackDeliveriesTotal.inc({
+      channel_type: channelType,
+      event: payloadEventName || 'raw',
+    });
   }
 
   const buffered = (ws as any).bufferedAmount ?? 0;
@@ -1039,6 +1111,8 @@ wss.on("connection", async (ws, req) => {
   ws._connectionId = randomUUID();
   ws._connectedAt = Date.now();
   ws._bootstrapReady = false;
+  ws._canonicalUserFeed = canonicalUserFeedEnabled();
+  ws._explicitSubscriptions = new Set();
   ws._presenceStatus = "idle";
   ws._lastActivityAt = 0;
   ws._awayMessage = null;
@@ -1140,6 +1214,7 @@ wss.on("connection", async (ws, req) => {
   bootstrapWithRetry(ws, user.id)
     .then(() => {
       if (ws.readyState === WebSocket.OPEN) {
+        observeSocketSubscriptionCounts(ws, 'bootstrap');
         ws.send(JSON.stringify({ event: 'ready' }));
       }
     })
@@ -1168,6 +1243,7 @@ async function handleClientMessage(ws, user, msg) {
       if (await isAllowedChannel(user, msg.channel)) {
         try {
           await subscribeClient(ws, msg.channel);
+          trackExplicitTopicSubscription(ws, msg.channel, 'subscribe');
           ws.send(
             JSON.stringify({
               event: "subscribed",
@@ -1186,6 +1262,7 @@ async function handleClientMessage(ws, user, msg) {
 
     case "unsubscribe":
       await unsubscribeClient(ws, msg.channel);
+      trackExplicitTopicSubscription(ws, msg.channel, 'unsubscribe');
       break;
 
     case "ping":
@@ -1421,6 +1498,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
   const lifetimeMs = Math.max(0, Date.now() - Number(ws._connectedAt || Date.now()));
   const clean = closeCode !== 1006;
   const subscriptionCount = subscriptions.length;
+  const explicitSubscriptionCount = ws._explicitSubscriptions?.size || 0;
   const closeCodeLabel = String(closeCode || 1005);
 
   wsDisconnectsTotal.inc({
@@ -1435,6 +1513,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
     },
     lifetimeMs,
   );
+  observeSocketSubscriptionCounts(ws, 'close');
 
   Promise.allSettled(
     subscriptions.map((ch) => unsubscribeClient(ws, ch)),
@@ -1453,6 +1532,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
     lifetimeMs,
     sawError: ws._sawError === true,
     subscriptionCount,
+    explicitSubscriptionCount,
   };
 
   const abnormalClose =
