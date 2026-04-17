@@ -1,4 +1,3 @@
--- no-transaction
 -- Migration 017: Indexes to accelerate reconnect-replay time-range scans
 --
 -- Context:
@@ -20,17 +19,16 @@
 --   Two partial indexes that lead with created_at so the planner can seek
 --   directly into the time window and scan only the rows it needs.
 --
--- These indexes are created CONCURRENTLY so they do not take an AccessExclusiveLock
--- and do not block live reads or writes. The migrate.ts runner wraps each
--- migration in a transaction, but CONCURRENTLY is incompatible with explicit
--- transactions; the -- no-transaction header above tells the runner to execute
--- this file outside any transaction block. The IF NOT EXISTS guard makes
--- re-runs idempotent.
+-- IF NOT EXISTS makes re-runs idempotent. On prod both indexes already exist
+-- (built CONCURRENTLY on the live instance); this migration is a no-op there.
+-- On fresh environments (CI, staging) the table has no live traffic during
+-- migrations so a regular CREATE INDEX is safe and avoids the CONCURRENTLY
+-- transaction-block restriction.
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_channel_created_at_replay
+CREATE INDEX IF NOT EXISTS idx_messages_channel_created_at_replay
     ON messages (created_at DESC)
     WHERE deleted_at IS NULL AND channel_id IS NOT NULL;
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_conv_created_at_replay
+CREATE INDEX IF NOT EXISTS idx_messages_conv_created_at_replay
     ON messages (created_at DESC)
     WHERE deleted_at IS NULL AND conversation_id IS NOT NULL;
