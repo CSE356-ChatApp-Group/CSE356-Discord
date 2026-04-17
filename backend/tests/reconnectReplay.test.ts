@@ -29,7 +29,7 @@ const metrics = require('../src/utils/metrics') as {
 const {
   loadReplayableMessagesForUser,
   WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
-  WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED,
+  WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS,
 } = require('../src/messages/reconnectReplay') as {
   loadReplayableMessagesForUser: (
     userId: string,
@@ -37,7 +37,7 @@ const {
     reconnectObservedAtMs: number,
   ) => Promise<any[]>;
   WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS: number;
-  WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED: number;
+  WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS: number;
 };
 
 describe('reconnectReplay bounds', () => {
@@ -78,14 +78,14 @@ describe('reconnectReplay bounds', () => {
     expect(withTransaction).toHaveBeenCalledTimes(1);
     expect(recordedClient?.query).toHaveBeenNthCalledWith(
       1,
-      `SET LOCAL statement_timeout TO '${WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED}ms'`,
+      `SET LOCAL statement_timeout = ${WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS}`,
     );
     const replayQueryArgs = recordedClient?.query.mock.calls[1];
     expect(replayQueryArgs?.[1]).toEqual([
       'user-2',
       disconnectedAtMs - WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
-      disconnectedAtMs + 12_000,
-      25,
+      disconnectedAtMs + 15_000,
+      40,
     ]);
     expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'ok' });
   });

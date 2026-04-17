@@ -27,35 +27,21 @@ const WS_MESSAGE_REPLAY_MAX_WINDOW_MS =
 // the disconnect on heartbeat. Looking back slightly prevents messages created
 // in that blind window from being skipped during reconnect replay.
 const rawReplayDisconnectGraceMs = Number(
-  process.env.WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS || '15000',
+  process.env.WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS || '30000',
 );
 const WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS =
   Number.isFinite(rawReplayDisconnectGraceMs) && rawReplayDisconnectGraceMs >= 0
     ? Math.floor(rawReplayDisconnectGraceMs)
-    : 15000;
+    : 30000;
 
 // Replay should yield to primary writes quickly if the DB is already busy.
 const rawReplayStatementTimeoutMs = Number(
-  process.env.WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS || '1200',
+  process.env.WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS || '1500',
 );
 const WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS =
   Number.isFinite(rawReplayStatementTimeoutMs) && rawReplayStatementTimeoutMs >= 100
     ? Math.floor(rawReplayStatementTimeoutMs)
-    : 1200;
-
-/** Hard cap so mis-set env cannot match PG role default (e.g. 15s) and starve the pool. */
-const WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED = Math.min(
-  2500,
-  Math.max(200, WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS),
-);
-
-const rawReplayMaxConcurrent = Number(process.env.WS_MESSAGE_REPLAY_MAX_CONCURRENT || '6');
-const WS_MESSAGE_REPLAY_MAX_CONCURRENT =
-  Number.isFinite(rawReplayMaxConcurrent) && rawReplayMaxConcurrent >= 1
-    ? Math.min(32, Math.floor(rawReplayMaxConcurrent))
-    : 6;
-
-let replayDbInFlight = 0;
+    : 1500;
 
 function replayQueryProfile(gapMs, stage = overload.getStage()) {
   let windowMs = WS_MESSAGE_REPLAY_MAX_WINDOW_MS;
@@ -70,12 +56,12 @@ function replayQueryProfile(gapMs, stage = overload.getStage()) {
   }
 
   if (stage >= 1) {
-    windowMs = Math.min(windowMs, 20_000);
-    limit = Math.min(limit, 35);
+    windowMs = Math.min(windowMs, 45_000);
+    limit = Math.min(limit, 90);
   }
   if (stage >= 2) {
-    windowMs = Math.min(windowMs, 12_000);
-    limit = Math.min(limit, 25);
+    windowMs = Math.min(windowMs, 15_000);
+    limit = Math.min(limit, 40);
   }
 
   return {
@@ -109,17 +95,6 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   if (lowerBoundMs <= 0 || reconnectObservedMs <= lowerBoundMs) return [];
 
   const gapMs = reconnectObservedMs - lowerBoundMs;
-
-  if (replayDbInFlight >= WS_MESSAGE_REPLAY_MAX_CONCURRENT) {
-    wsReplayQueryTotal.inc({ result: 'skipped' });
-    wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
-    logger.warn(
-      { userId, gapMs, inFlight: replayDbInFlight, max: WS_MESSAGE_REPLAY_MAX_CONCURRENT },
-      'WS reconnect replay skipped: concurrency cap',
-    );
-    return [];
-  }
-
   const profile = replayQueryProfile(gapMs);
   if (profile.stage >= 3 || profile.limit <= 0 || profile.windowMs <= 0) {
     wsReplayQueryTotal.inc({ result: 'skipped' });
@@ -139,12 +114,9 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   if (upperBoundMs <= lowerBoundMs) return [];
 
   const startedAt = Date.now();
-  replayDbInFlight += 1;
   try {
     const rows = await withTransaction(async (client) => {
-      const toMs = WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED;
-      // Use explicit ms string — some hosts/PgBouncer stacks treat bare integers oddly vs role default.
-      await client.query(`SET LOCAL statement_timeout TO '${toMs}ms'`);
+      await client.query(`SET LOCAL statement_timeout = ${WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS}`);
       const result = await client.query(
         `WITH accessible AS (
            SELECT m.id, m.created_at
@@ -224,8 +196,6 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
       return [];
     }
     throw err;
-  } finally {
-    replayDbInFlight -= 1;
   }
 }
 
@@ -237,6 +207,4 @@ module.exports = {
   WS_MESSAGE_REPLAY_LIMIT,
   WS_MESSAGE_REPLAY_MAX_WINDOW_MS,
   WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS,
-  WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED,
-  WS_MESSAGE_REPLAY_MAX_CONCURRENT,
 };
