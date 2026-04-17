@@ -237,6 +237,7 @@ jobs:
       user: ${{ vars.STAGING_USER || 'ssperrottet' }}
       script_path: deploy/deploy-staging.sh
       artifact_name: release-${{ github.sha }}
+      clear_prod_deploy_lock: false
 
   # Playwright @staging is slow (~35–45m) and blocks the CI run after staging deploy.
   # Skipped on push unless repo variable RUN_STAGING_E2E_ON_PUSH=true (Settings → Variables).

@@ -14,6 +14,11 @@ on:
         description: "Commit SHA or ref to deploy (defaults to current ref SHA)"
         required: false
         type: string
+      clear_prod_deploy_lock:
+        description: "Prod only — remove /opt/chatapp/.deploy-lock-prod before deploy if a prior run left it stuck"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -154,6 +159,7 @@ jobs:
       user: ${{ vars.STAGING_USER || 'ssperrottet' }}
       script_path: deploy/deploy-staging.sh
       artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
+      clear_prod_deploy_lock: false
 
   deploy-prod:
     needs: [resolve-target, fetch-release]
@@ -169,6 +175,7 @@ jobs:
       verify_public_host: true
       auto_confirm: true
       artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
+      clear_prod_deploy_lock: ${{ inputs.clear_prod_deploy_lock }}
       # Prod runs four app workers by default (chatapp@4000..@4003) unless the repo/org
       # variable overrides it explicitly for a smaller recovery footprint.
       chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '4' }}

@@ -43,6 +43,11 @@ on:
         required: false
         default: ''
         type: string
+      clear_prod_deploy_lock:
+        description: "Production only — sudo rm -rf /opt/chatapp/.deploy-lock-prod before deploy (stale lock after cancelled CI)"
+        required: false
+        default: false
+        type: boolean
     secrets:
       DEPLOY_SSH_KEY:
         required: true
@@ -197,6 +202,7 @@ jobs:
           DEPLOY_USER: ${{ inputs.user }}
           LOCAL_ARTIFACT_PATH: ${{ steps.artifact.outputs.local_path }}
           CHATAPP_INSTANCES_INPUT: ${{ inputs.chatapp_instances }}
+          CLEAR_PROD_DEPLOY_LOCK: ${{ inputs.clear_prod_deploy_lock }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           DEPLOY_ENV: ${{ inputs.environment }}
         run: |
@@ -230,6 +236,9 @@ jobs:
           fi
           if [[ "$DEPLOY_ENV" == "production" ]] && [[ -n "${CHATAPP_INSTANCES_INPUT:-}" ]]; then
             EXTRA_ARGS+=(-e "chatapp_instances=${CHATAPP_INSTANCES_INPUT}")
+          fi
+          if [[ "$DEPLOY_ENV" == "production" ]] && [[ "${CLEAR_PROD_DEPLOY_LOCK:-false}" == "true" ]]; then
+            EXTRA_ARGS+=(-e "clear_prod_deploy_lock=true")
           fi
 
           cd "${GITHUB_WORKSPACE}"
