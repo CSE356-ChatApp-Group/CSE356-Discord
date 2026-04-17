@@ -169,6 +169,14 @@ Use a local authenticated watcher to detect grader-side delivery regressions wit
 
    Exit code is non-zero when recent watcher events include critical delivery errors (`Delivery timeout` or `sendMessage failed: 5xx`) or repeated 403s.
 
+   For post-deploy soak monitoring against a long-lived watcher file, prefer anchored novel-only mode so a stale "Last error — 27m ago" refresh does not count as a new regression:
+
+   ```bash
+   ./scripts/grader-watch-gate.sh --since "2026-04-17T14:10:40Z" --novel-only
+   ```
+
+   `--novel-only` only fails on critical signatures that did not already exist before the anchor time.
+
 5. One-shot bundle (local, before prod or after a risky merge): from repo root run `npm run verify:release` — backend tests, staging API contract, deploy script checks, and the grader gate when `artifacts/rollout-monitoring/grader-watch-events.jsonl` exists (use `SKIP_GRADER_WATCH_GATE=1` outside an active soak, or archive a stale events file so the gate reflects the current window only).
 
 ## Harness outage — correlate a specific time window (minute-level)

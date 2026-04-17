@@ -46,6 +46,16 @@ function normalizeText(value) {
   return value.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+function deriveErrorSignature(text) {
+  const lines = normalizeText(text)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^Last error\b/i.test(line))
+    .filter((line) => !/^View history\b/i.test(line));
+  return lines.join('\n').trim();
+}
+
 function truncateAtKnownSection(text) {
   const endIdx = text.search(
     /\n(?:API Test Submission|API Test Results|Feedback|Working|Authentication|Profile & Presence|Communities|Channels|Direct Conversations|Messaging|Search|Read State)\b/i
@@ -124,6 +134,7 @@ async function main() {
 
     const first = await waitForFirstSignal(page, timeoutMs);
     let previous = first;
+    let previousSignature = first ? deriveErrorSignature(first) : '';
     let emptyPolls = first ? 0 : 1;
 
     if (first) {
@@ -131,6 +142,7 @@ async function main() {
         ts: nowIso(),
         kind: 'snapshot',
         change: 'initial',
+        signature: previousSignature,
         text: first,
       };
       appendEvent(event);
@@ -183,11 +195,13 @@ async function main() {
         }
       } else {
         emptyPolls = 0;
-        if (current !== previous) {
+        const currentSignature = deriveErrorSignature(current);
+        if (currentSignature !== previousSignature) {
           const event = {
             ts: nowIso(),
             kind: 'update',
             change: 'error_block_changed',
+            signature: currentSignature,
             text: current,
           };
           appendEvent(event);
@@ -195,8 +209,10 @@ async function main() {
           console.log(`[${event.ts}] dashboard error block changed`);
           console.log(current);
           previous = current;
+          previousSignature = currentSignature;
         } else {
           console.log(`[${nowIso()}] no change`);
+          previous = current;
         }
       }
 

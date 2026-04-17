@@ -6,11 +6,13 @@ set -euo pipefail
 #   ./scripts/grader-watch-gate.sh
 #   ./scripts/grader-watch-gate.sh --since "2026-04-15T16:49:00Z"
 #   ./scripts/grader-watch-gate.sh --window-seconds 900
+#   ./scripts/grader-watch-gate.sh --since "2026-04-17T14:10:40Z" --novel-only
 
 EVENTS_FILE="${EVENTS_FILE:-artifacts/rollout-monitoring/grader-watch-events.jsonl}"
 WINDOW_SECONDS="${WINDOW_SECONDS:-600}"
 SINCE_TS="${SINCE_TS:-}"
 MAX_403="${MAX_403:-3}"
+NOVEL_ONLY="${NOVEL_ONLY:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,6 +23,10 @@ while [[ $# -gt 0 ]]; do
     --window-seconds)
       WINDOW_SECONDS="${2:?--window-seconds requires integer}"
       shift 2
+      ;;
+    --novel-only)
+      NOVEL_ONLY="1"
+      shift
       ;;
     *)
       echo "Unknown arg: $1" >&2
@@ -39,19 +45,39 @@ if [[ -z "${SINCE_TS}" ]]; then
 fi
 
 set +e
-PAYLOAD="$(python3 - "$EVENTS_FILE" "$SINCE_TS" "$MAX_403" <<'PY'
+PAYLOAD="$(python3 - "$EVENTS_FILE" "$SINCE_TS" "$MAX_403" "$NOVEL_ONLY" <<'PY'
 import json
 import sys
 from datetime import datetime
 
-path, since_raw, max_403_raw = sys.argv[1], sys.argv[2], sys.argv[3]
+path, since_raw, max_403_raw, novel_only_raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 max_403 = int(max_403_raw)
+novel_only = novel_only_raw == "1"
 
 def parse_iso(v):
     try:
         return datetime.fromisoformat(v.replace('Z', '+00:00'))
     except Exception:
         return None
+
+def derive_signature(obj):
+    signature = str(obj.get("signature", "")).strip()
+    if signature:
+        return signature
+
+    text = str(obj.get("text", ""))
+    lines = []
+    for raw_line in text.replace("\r", "").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if lower.startswith("last error"):
+            continue
+        if lower == "view history":
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 since = parse_iso(since_raw)
 if since is None:
@@ -61,6 +87,7 @@ if since is None:
 critical = []
 warn_403 = []
 latest = None
+critical_before_since = set()
 
 with open(path, "r", encoding="utf-8", errors="replace") as f:
     for line in f:
@@ -72,13 +99,22 @@ with open(path, "r", encoding="utf-8", errors="replace") as f:
         except Exception:
             continue
         ts = parse_iso(str(obj.get("ts", "")))
-        if ts is None or ts < since:
+        if ts is None:
             continue
         text = str(obj.get("text", ""))
-        latest = obj
         lower = text.lower()
+        if ts < since:
+            if "delivery timeout" in lower or "sendmessage failed: 5" in lower:
+                sig = derive_signature(obj)
+                if sig:
+                    critical_before_since.add(sig)
+            continue
+        latest = obj
         if "delivery timeout" in lower or "sendmessage failed: 5" in lower:
-            critical.append(obj)
+            sig = derive_signature(obj)
+            obj["derived_signature"] = sig
+            if not novel_only or sig not in critical_before_since:
+                critical.append(obj)
         if "sendmessage failed: 403" in lower:
             warn_403.append(obj)
 
@@ -86,9 +122,10 @@ if critical:
     last = critical[-1]
     print(json.dumps({
         "status": "fail",
-        "reason": "critical_grader_error",
+        "reason": "novel_critical_grader_error" if novel_only else "critical_grader_error",
         "count": len(critical),
         "last_ts": last.get("ts"),
+        "last_signature": last.get("derived_signature"),
         "last_text": last.get("text", "")[:500],
     }))
     sys.exit(1)
@@ -107,6 +144,7 @@ if len(warn_403) >= max_403:
 print(json.dumps({
     "status": "pass",
     "since": since_raw,
+    "novel_only": novel_only,
     "recent_events": 0 if latest is None else 1,
     "last_ts": None if latest is None else latest.get("ts"),
     "last_text": None if latest is None else str(latest.get("text", ""))[:250],
