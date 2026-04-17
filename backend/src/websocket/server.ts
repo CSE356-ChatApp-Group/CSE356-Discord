@@ -78,8 +78,6 @@ const {
   wsReconnectsTotal,
   wsReconnectGapMs,
   wsBootstrapWallDurationMs,
-  wsBootstrapListCacheTotal,
-  wsBootstrapChannelsHistogram,
   wsReconnectReplayMessagesHistogram,
   wsReconnectReplayDurationMs,
   wsSocketSubscriptionCountHistogram,
@@ -120,8 +118,7 @@ let shuttingDown = false;
 // because membership changes (join/leave/delete) explicitly call
 // invalidateWsAclCache() before the client is notified.
 //
-// Bursty clients (e.g. automation that spams subscribe) are handled by (1)
-// warming this cache from the same list used for auto-bootstrap, and (2)
+// Bursty clients (e.g. automation that spams subscribe) are handled by
 // coalescing concurrent isAllowedChannel calls for the same key so only one
 // DB query runs per cache miss.
 const ACL_CACHE_TTL_MS = 30_000;
@@ -133,11 +130,6 @@ const ACL_CACHE_MAX_ENTRIES =
   Number.isFinite(rawAclCacheMaxEntries) && rawAclCacheMaxEntries > 0
     ? Math.floor(rawAclCacheMaxEntries)
     : 20_000;
-const rawBootstrapBatchSize = Number(process.env.WS_BOOTSTRAP_BATCH_SIZE || 96);
-const WS_BOOTSTRAP_BATCH_SIZE =
-  Number.isFinite(rawBootstrapBatchSize) && rawBootstrapBatchSize > 0
-    ? Math.floor(rawBootstrapBatchSize)
-    : 96;
 const rawRecentDisconnectTtlSeconds = Number(
   process.env.WS_RECENT_DISCONNECT_TTL_SECONDS || 300,
 );
@@ -159,8 +151,8 @@ function testUserSubscribeDelayMs() {
 }
 
 function canonicalUserFeedEnabled() {
-  const value = String(process.env.REALTIME_CANONICAL_USER_FEED || '').trim().toLowerCase();
-  return value === '1' || value === 'true';
+  const value = String(process.env.REALTIME_CANONICAL_USER_FEED || 'true').trim().toLowerCase();
+  return value !== '0' && value !== 'false';
 }
 
 function logicalChannelType(channel) {
@@ -208,13 +200,6 @@ function storeAclCacheEntry(userId: string, channel: string, allowed: boolean) {
     if (oldestKey) aclCache.delete(oldestKey);
   }
   aclCache.set(key, { allowed, expiresAt: Date.now() + ACL_CACHE_TTL_MS });
-}
-
-/** Mark channels as allowed — same membership projection as listAutoSubscriptionChannels. */
-function warmWsAclCacheFromChannelList(userId: string, channels: string[]) {
-  for (const channel of channels) {
-    storeAclCacheEntry(userId, channel, true);
-  }
 }
 
 function invalidateWsAclCache(userId: string, channel: string) {
@@ -895,113 +880,30 @@ redisSub.on("message", (channel, message) => {
   deliverPubsubMessage(channel, message);
 });
 
-const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
-  process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '180',
-  10,
-);
-const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
-
 function wsBootstrapCacheKey(userId) {
   return `ws:bootstrap:${userId}`;
 }
 
-/** Invalidate the cached WS subscription list for a user. Call this whenever
- *  their community membership, channel access, or conversation list changes. */
+/** Invalidate legacy Redis key `ws:bootstrap:<userId>` (no longer populated). */
 async function invalidateWsBootstrapCache(userId) {
   await redis.del(wsBootstrapCacheKey(userId));
 }
 
-/**
- * Lists every community, channel, and DM for Redis SUBSCRIBE on connect — fine at
- * class scale. If load tests show Redis CPU or pub/sub delivery dominating as
- * membership grows, revisit with aggregated feeds, lazy subscribe, or
- * server-side filtering (phase-2).
- */
-async function listAutoSubscriptionChannels(userId) {
-  const cacheKey = wsBootstrapCacheKey(userId);
-  const cached = await redis.get(cacheKey).catch(() => null);
-  if (cached) {
-    try {
-      const parsed = JSON.parse(cached);
-      if (Array.isArray(parsed)) {
-        wsBootstrapListCacheTotal.inc({ result: 'hit' });
-        wsBootstrapChannelsHistogram.observe(parsed.length);
-        return parsed.filter((value) => typeof value === 'string');
-      }
-    } catch {
-      // Fall through to invalidate + rebuild from Postgres below.
-    }
-    await redis.del(cacheKey).catch(() => {});
+let legacyFullAutoSubscribeWarned = false;
+function warnLegacyWsAutoSubscribeModeIgnored() {
+  const mode = String(process.env.WS_AUTO_SUBSCRIBE_MODE || 'user_only').trim().toLowerCase();
+  if (mode === 'full' && !legacyFullAutoSubscribeWarned) {
+    legacyFullAutoSubscribeWarned = true;
+    logger.warn(
+      { mode },
+      'WS_AUTO_SUBSCRIBE_MODE=full is ignored; connect subscribes only user:<self> (use explicit client subscribe for channel topics)',
+    );
   }
-
-  if (wsBootstrapListInFlight.has(cacheKey)) {
-    wsBootstrapListCacheTotal.inc({ result: 'coalesced' });
-    const channels = await wsBootstrapListInFlight.get(cacheKey);
-    wsBootstrapChannelsHistogram.observe(channels.length);
-    return channels;
-  }
-
-  wsBootstrapListCacheTotal.inc({ result: 'miss' });
-  const load = (async () => {
-    const [conversationRes, communityRes, channelRes] = await Promise.all([
-      query(
-        `SELECT conversation_id::text AS id
-         FROM conversation_participants
-         WHERE user_id = $1 AND left_at IS NULL`,
-        [userId],
-      ),
-      query(
-        `SELECT community_id::text AS id
-         FROM community_members
-         WHERE user_id = $1`,
-        [userId],
-      ),
-      query(
-        `SELECT c.id::text AS id
-         FROM channels c
-         JOIN community_members cm
-           ON cm.community_id = c.community_id
-          AND cm.user_id = $1
-         LEFT JOIN channel_members chm
-           ON chm.channel_id = c.id
-          AND chm.user_id = $1
-         WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
-        [userId],
-      ),
-    ]);
-
-    // Subscribe channel topics first so message fanout can arrive before the tail
-    // of community/conversation Redis topics finishes (grading: many listeners).
-    const channels = [
-      ...channelRes.rows.map((row) => `channel:${row.id}`),
-      ...conversationRes.rows.map((row) => `conversation:${row.id}`),
-      ...communityRes.rows.map((row) => `community:${row.id}`),
-    ];
-    wsBootstrapChannelsHistogram.observe(channels.length);
-
-    // Cache for a short TTL. Invalidated explicitly on membership changes.
-    redis
-      .set(cacheKey, JSON.stringify(channels), 'EX', WS_BOOTSTRAP_CACHE_TTL_SECONDS)
-      .catch(() => {}); // fire-and-forget, non-critical
-
-    return channels;
-  })().finally(() => {
-    wsBootstrapListInFlight.delete(cacheKey);
-  });
-  wsBootstrapListInFlight.set(cacheKey, load);
-  return load;
 }
 
-async function bootstrapUserSubscriptions(ws, userId) {
-  const mode = String(process.env.WS_AUTO_SUBSCRIBE_MODE || 'user_only').trim().toLowerCase();
-  if (mode !== 'full') return;
-  const channels = await listAutoSubscriptionChannels(userId);
-  warmWsAclCacheFromChannelList(userId, channels);
-  for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-    const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-    await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
-    if (ws.readyState !== WebSocket.OPEN) return;
-  }
+/** Connect-time eager subscribe of every channel/conversation/community was removed. */
+async function bootstrapUserSubscriptions(_ws, _userId) {
+  warnLegacyWsAutoSubscribeModeIgnored();
 }
 
 // Retry bootstrap on pool circuit-breaker fires (transient under burst load).

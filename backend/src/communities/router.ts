@@ -459,7 +459,7 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
       fanout.publish(`community:${req.params.id}`, {
         event: 'community:deleted',
         data: { communityId: req.params.id },
-      }),
+      }, { skipIfNoSubscribers: true }),
     ]);
 
     res.json({ success: true });
@@ -505,7 +505,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
     await fanout.publish(`community:${req.params.id}`, {
       event: 'community:member_joined',
       data: { userId: req.user.id, communityId: req.params.id },
-    });
+    }, { skipIfNoSubscribers: true });
 
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -544,7 +544,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       fanout.publish(`community:${req.params.id}`, {
         event: 'community:member_left',
         data: { userId: req.user.id, leftUserId: req.user.id, communityId: req.params.id },
-      }),
+      }, { skipIfNoSubscribers: true }),
     ]);
 
     res.json({ success: true });

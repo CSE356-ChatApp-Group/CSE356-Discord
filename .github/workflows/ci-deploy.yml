@@ -45,6 +45,7 @@ jobs:
           bash -n scripts/self-hosted-actions-runner-disk-cleanup.sh
           bash -n scripts/recommended-release-verify.sh
           bash -n scripts/measure-fanout-baseline.sh
+          bash -n scripts/wave2-rollout-operator-steps.sh
           python3 -m py_compile deploy/ensure-pgdump-env.py
           python3 -m py_compile deploy/apply-env-profile.py
           python3 -m py_compile deploy/prometheus-db-file-sd.py

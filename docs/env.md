@@ -111,8 +111,11 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
-| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning (code/deploy defaults: bootstrap TTL `180`; deploy batch size `64` when `WS_AUTO_SUBSCRIBE_MODE=full`; recent-connect bridge window `20`) |
-| `WS_AUTO_SUBSCRIBE_MODE` | `user_only` (default) subscribes only **`user:<self>`** during connect; set `full` to restore eager server-side subscribe of every accessible channel/conversation/community topic. |
+| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning: ACL cache size; legacy bootstrap keys still in deploy profiles (`WS_BOOTSTRAP_*`) for older releases; **connect no longer runs eager channel bootstrap** in current server code. **`WS_RECENT_CONNECT_TTL_SECONDS`** controls the reconnect delivery bridge window (default `20`). |
+| `WS_AUTO_SUBSCRIBE_MODE` | **`user_only`** is the only effective behavior: each socket subscribes to **`user:<self>`** on connect; clients use explicit **`subscribe`** frames for `channel:` / `conversation:` / `community:` topics. If set to **`full`**, the server logs a one-time warning and still uses **`user_only`** (legacy eager subscribe was removed). |
+| `REALTIME_CANONICAL_USER_FEED` | When not `false`/`0` (default), passthrough fanout can skip redundant Redis publishes when no subscribers exist and delivery is via the canonical user feed path. |
+| `REALTIME_SKIP_EMPTY_TOPIC_PUBLISH` | When not `false`/`0` (default), enables `PUBSUB NUMSUB` gating for skipping empty `channel:` / `conversation:` / `community:` publishes when combined with `skipIfNoSubscribers` call sites. |
+| `REALTIME_TOPIC_SUBSCRIBER_CACHE_TTL_MS` | TTL for in-process cache of Redis subscriber counts used by the skip-empty path (default `1000`). |
 | `USER_FEED_SHARD_COUNT` | Number of shared Redis **`userfeed:<n>`** channels backing logical user delivery (default `64`, cap `256`). Higher values trade more Redis subscriptions for fewer recipients per shard publish. |
 | **Observability** | |
 | `OTEL_ENABLED` | Set `false` to disable tracing |

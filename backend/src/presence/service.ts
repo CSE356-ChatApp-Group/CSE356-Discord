@@ -212,11 +212,11 @@ async function setPresence(userId, status, awayMessage) {
                 },
               );
               return fanout
-                .publish(`community:${communityId}`, payload)
+                .publish(`community:${communityId}`, payload, { skipIfNoSubscribers: true })
                 .finally(() => communitySpan.end());
             }),
             ...conversationIds.map((conversationId) =>
-              fanout.publish(`conversation:${conversationId}`, payload),
+              fanout.publish(`conversation:${conversationId}`, payload, { skipIfNoSubscribers: true }),
             ),
           ]);
         } catch (err) {

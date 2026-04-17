@@ -71,8 +71,8 @@ function userFanoutMode() {
 }
 
 function canonicalUserFeedEnabled() {
-  const value = String(process.env.REALTIME_CANONICAL_USER_FEED || '').trim().toLowerCase();
-  return value === '1' || value === 'true';
+  const value = String(process.env.REALTIME_CANONICAL_USER_FEED || 'true').trim().toLowerCase();
+  return value !== '0' && value !== 'false';
 }
 
 function envelopeEventName(envelope: Record<string, unknown>) {
@@ -289,8 +289,10 @@ async function publishDeferredUserTopics(
 }
 
 /**
- * Publishes message:created for a channel. Order: optional `channel:<id>` first,
- * then user topics (blocking or via side-effect queue).
+ * Publishes message:* for a channel. Order: optional `channel:<id>` first,
+ * then user topics (blocking or via side-effect queue). In canonical user-feed
+ * mode we can skip the channel-topic publish entirely when there are no
+ * explicit subscribers anywhere in Redis.
  */
 async function publishChannelMessageEvent(channelId: string, envelope: Record<string, unknown>) {
   const chKey = `channel:${channelId}`;
@@ -301,7 +303,7 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
 
   if (firstChannel) {
     const channelPublishStartedAt = process.hrtime.bigint();
-    await fanout.publish(chKey, envelope);
+    await fanout.publish(chKey, envelope, { skipIfNoSubscribers: canonicalUserFeedEnabled() });
     fanoutPublishDurationMs.observe(
       { path: 'channel_message', stage: 'channel_topic' },
       Number(process.hrtime.bigint() - channelPublishStartedAt) / 1e6,
@@ -351,7 +353,7 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
 
   if (!firstChannel) {
     const channelPublishStartedAt = process.hrtime.bigint();
-    await fanout.publish(chKey, envelope);
+    await fanout.publish(chKey, envelope, { skipIfNoSubscribers: canonicalUserFeedEnabled() });
     fanoutPublishDurationMs.observe(
       { path: 'channel_message', stage: 'channel_topic' },
       Number(process.hrtime.bigint() - channelPublishStartedAt) / 1e6,

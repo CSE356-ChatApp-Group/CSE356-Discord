@@ -210,6 +210,13 @@ const redisFanoutPublishFailuresTotal = new client.Counter({
   labelNames: ['channel_prefix'],
 });
 
+/** Passthrough topic publishes skipped because no explicit subscribers existed anywhere. */
+const realtimePassthroughPublishSkippedTotal = new client.Counter({
+  name: 'realtime_passthrough_publish_skipped_total',
+  help: 'Realtime passthrough topic publishes skipped because Redis reported zero subscribers',
+  labelNames: ['channel_prefix'],
+});
+
 /** Concurrent hard-deletes caused FK violation on last_message_id; cleared and retried. */
 const messageLastMessageRepointFkRetryTotal = new client.Counter({
   name: 'message_last_message_repoint_fk_retry_total',
@@ -581,6 +588,9 @@ function startPgPoolMetrics(pool) {
     realtimeCanonicalFallbackDeliveriesTotal.inc({ channel_type: 'channel', event: 'message:created' }, 0);
     realtimeCanonicalFallbackDeliveriesTotal.inc({ channel_type: 'conversation', event: 'message:created' }, 0);
     realtimeCanonicalFallbackDeliveriesTotal.inc({ channel_type: 'community', event: 'message:created' }, 0);
+    realtimePassthroughPublishSkippedTotal.inc({ channel_prefix: 'channel' }, 0);
+    realtimePassthroughPublishSkippedTotal.inc({ channel_prefix: 'conversation' }, 0);
+    realtimePassthroughPublishSkippedTotal.inc({ channel_prefix: 'community' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
     pgBusinessSqlQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
@@ -641,6 +651,7 @@ module.exports = {
   wsTopicSubscriptionsTotal,
   realtimeDuplicateDeliveryPathsTotal,
   realtimeCanonicalFallbackDeliveriesTotal,
+  realtimePassthroughPublishSkippedTotal,
   messageCacheBustFailuresTotal,
   startPgPoolMetrics,
   pgPoolCircuitBreakerRejectsTotal,

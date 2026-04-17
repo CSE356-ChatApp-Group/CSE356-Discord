@@ -269,7 +269,8 @@ async function publishConversationEventNow(conversationId, event, data) {
   );
   const publishStartedAt = process.hrtime.bigint();
   await Promise.all([
-    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
+    ...passthroughTargets.map((target) =>
+      fanout.publish(target, payload, { skipIfNoSubscribers: true })),
     ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
   ]);
   fanoutPublishDurationMs.observe(

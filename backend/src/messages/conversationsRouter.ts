@@ -32,7 +32,8 @@ function publishConversationEvents(targets, event, data) {
   const payload = wrapFanoutPayload(event, data);
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
   return Promise.allSettled([
-    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
+    ...passthroughTargets.map((target) =>
+      fanout.publish(target, payload, { skipIfNoSubscribers: true })),
     ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
   ]);
 }
