@@ -520,13 +520,13 @@ gate_upstream_parity() {
     done
     for p in \${ports_up}; do
       case ',${TARGET_PORTS_CSV},' in
-        *\",\${p},\"*) ;;
+        *,\${p},*) ;;
         *) echo \"unexpected upstream port :\${p}\"; exit 1 ;;
       esac
     done
     for p in \${active_ports}; do
       case ',${TARGET_PORTS_CSV},' in
-        *\",\${p},\"*) ;;
+        *,\${p},*) ;;
         *) echo \"unexpected active worker :\${p}\"; exit 1 ;;
       esac
     done
