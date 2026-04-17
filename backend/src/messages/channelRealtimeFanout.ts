@@ -1,5 +1,5 @@
 /**
- * Channel message:created fanout — publish to `channel:<id>` (primary path for scale),
+ * Channel message fanout — publish to `channel:<id>` (primary path for scale),
  * then optionally duplicate to each visible member's `user:<id>` (grading / legacy).
  */
 
@@ -282,7 +282,7 @@ async function publishDeferredUserTopics(
  * Publishes message:created for a channel. Order: optional `channel:<id>` first,
  * then user topics (blocking or via side-effect queue).
  */
-async function publishChannelMessageCreated(channelId: string, envelope: Record<string, unknown>) {
+async function publishChannelMessageEvent(channelId: string, envelope: Record<string, unknown>) {
   const chKey = `channel:${channelId}`;
   const firstChannel = channelPublishFirst();
   const startedAt = process.hrtime.bigint();
@@ -344,7 +344,12 @@ async function publishChannelMessageCreated(channelId: string, envelope: Record<
   );
 }
 
+async function publishChannelMessageCreated(channelId: string, envelope: Record<string, unknown>) {
+  return publishChannelMessageEvent(channelId, envelope);
+}
+
 module.exports = {
+  publishChannelMessageEvent,
   publishChannelMessageCreated,
   getChannelUserFanoutTargetKeys,
   invalidateChannelUserFanoutTargetsCache,

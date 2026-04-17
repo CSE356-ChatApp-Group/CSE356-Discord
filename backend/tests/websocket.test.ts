@@ -108,6 +108,29 @@ async function waitForRedisValue(
   throw new Error(`Timed out waiting for redis key ${key}`);
 }
 
+async function withEnv<T>(
+  key: string,
+  value: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = process.env[key];
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = previous;
+    }
+  }
+}
+
 beforeAll(async () => {
   await wsServerReady;
   server = http.createServer(app);
@@ -520,125 +543,211 @@ describe('Bootstrap ready event', () => {
 
 describe('Channel realtime delivery', () => {
   it('delivers channel messages to community members without manual websocket subscribe', async () => {
-    const owner = await createAuthenticatedUser('wsautosubowner');
-    const member = await createAuthenticatedUser('wsautosubmember');
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      const owner = await createAuthenticatedUser('wsautosubowner');
+      const member = await createAuthenticatedUser('wsautosubmember');
 
-    const slug = `ws-auto-${uniqueSuffix()}`;
-    const communityRes = await request(app)
-      .post('/api/v1/communities')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ slug, name: slug, description: 'ws auto subscribe test' });
-
-    expect(communityRes.status).toBe(201);
-    const communityId = communityRes.body.community.id;
-
-    const joinRes = await request(app)
-      .post(`/api/v1/communities/${communityId}/join`)
-      .set('Authorization', `Bearer ${member.accessToken}`)
-      .send({});
-
-    expect(joinRes.status).toBe(200);
-
-    const channelName = `auto-sub-${uniqueSuffix()}`;
-    const channelRes = await request(app)
-      .post('/api/v1/channels')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ communityId, name: channelName, isPrivate: false, description: 'auto-sub channel' });
-
-    expect(channelRes.status).toBe(201);
-    const channelId = channelRes.body.channel.id;
-
-    const memberSocket = await connectWebSocket(port, member.accessToken);
-
-    try {
-      const createdEventPromise = waitForWsEvent(
-        memberSocket,
-        (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
-      );
-
-      const sendRes = await request(app)
-        .post('/api/v1/messages')
+      const slug = `ws-auto-${uniqueSuffix()}`;
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
         .set('Authorization', `Bearer ${owner.accessToken}`)
-        .send({ channelId, content: 'channel ws auto-sub check' });
+        .send({ slug, name: slug, description: 'ws auto subscribe test' });
 
-      expect(sendRes.status).toBe(201);
-      const event = await createdEventPromise;
-      expect(event.data.content).toBe('channel ws auto-sub check');
-      expect([
-        `user:${member.user.id}`,
-        `channel:${channelId}`,
-      ]).toContain(event.channel);
-    } finally {
-      await closeWebSocket(memberSocket);
-    }
-  });
-
-  it('delivers channel messages after a user joins a community with an already-open websocket', async () => {
-    const owner = await createAuthenticatedUser('wsjoinliveowner');
-    const joiningMember = await createAuthenticatedUser('wsjoinlivemember');
-
-    const slug = `ws-join-live-${uniqueSuffix()}`;
-    const communityRes = await request(app)
-      .post('/api/v1/communities')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ slug, name: slug, description: 'ws join live delivery test' });
-
-    expect(communityRes.status).toBe(201);
-    const communityId = communityRes.body.community.id;
-
-    const channelName = `join-live-${uniqueSuffix()}`;
-    const channelRes = await request(app)
-      .post('/api/v1/channels')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ communityId, name: channelName, isPrivate: false, description: 'join live channel' });
-
-    expect(channelRes.status).toBe(201);
-    const channelId = channelRes.body.channel.id;
-
-    const memberSocket = await connectWebSocket(port, joiningMember.accessToken);
-
-    try {
-      const noPreJoinMessage = waitForNoWsEvent(
-        memberSocket,
-        (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
-        1000,
-      );
-
-      const preJoinSendRes = await request(app)
-        .post('/api/v1/messages')
-        .set('Authorization', `Bearer ${owner.accessToken}`)
-        .send({ channelId, content: 'pre-join cache primer' });
-
-      expect(preJoinSendRes.status).toBe(201);
-      await noPreJoinMessage;
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
 
       const joinRes = await request(app)
         .post(`/api/v1/communities/${communityId}/join`)
-        .set('Authorization', `Bearer ${joiningMember.accessToken}`)
+        .set('Authorization', `Bearer ${member.accessToken}`)
         .send({});
 
       expect(joinRes.status).toBe(200);
 
-      const createdEventPromise = waitForWsEvent(
-        memberSocket,
-        (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
-      );
-
-      const postJoinSendRes = await request(app)
-        .post('/api/v1/messages')
+      const channelName = `auto-sub-${uniqueSuffix()}`;
+      const channelRes = await request(app)
+        .post('/api/v1/channels')
         .set('Authorization', `Bearer ${owner.accessToken}`)
-        .send({ channelId, content: 'post-join live delivery' });
+        .send({ communityId, name: channelName, isPrivate: false, description: 'auto-sub channel' });
 
-      expect(postJoinSendRes.status).toBe(201);
-      const event = await createdEventPromise;
-      expect(event.data.content).toBe('post-join live delivery');
-      expect([
-        `user:${joiningMember.user.id}`,
-        `channel:${channelId}`,
-      ]).toContain(event.channel);
-    } finally {
-      await closeWebSocket(memberSocket);
-    }
+      expect(channelRes.status).toBe(201);
+      const channelId = channelRes.body.channel.id;
+
+      const memberSocket = await connectWebSocket(port, member.accessToken);
+
+      try {
+        const createdEventPromise = waitForWsEvent(
+          memberSocket,
+          (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
+        );
+
+        const sendRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content: 'channel ws auto-sub check' });
+
+        expect(sendRes.status).toBe(201);
+        const event = await createdEventPromise;
+        expect(event.data.content).toBe('channel ws auto-sub check');
+        expect([
+          `user:${member.user.id}`,
+          `channel:${channelId}`,
+        ]).toContain(event.channel);
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
+  });
+
+  it('delivers channel message updates and deletes without full auto-subscribe', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      const owner = await createAuthenticatedUser('wschanneleditowner');
+      const member = await createAuthenticatedUser('wschanneleditmember');
+
+      const slug = `ws-edit-${uniqueSuffix()}`;
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ slug, name: slug, description: 'ws channel edit/delete test' });
+
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const joinRes = await request(app)
+        .post(`/api/v1/communities/${communityId}/join`)
+        .set('Authorization', `Bearer ${member.accessToken}`)
+        .send({});
+      expect(joinRes.status).toBe(200);
+
+      const channelRes = await request(app)
+        .post('/api/v1/channels')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({
+          communityId,
+          name: `edit-del-${uniqueSuffix()}`,
+          isPrivate: false,
+          description: 'channel edit delete delivery',
+        });
+      expect(channelRes.status).toBe(201);
+      const channelId = channelRes.body.channel.id;
+
+      const memberSocket = await connectWebSocket(port, member.accessToken);
+
+      try {
+        const createdEventPromise = waitForWsEvent(
+          memberSocket,
+          (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
+        );
+
+        const createRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content: 'channel edit/delete target' });
+
+        expect(createRes.status).toBe(201);
+        const messageId = createRes.body.message.id;
+        await createdEventPromise;
+
+        const updatedEventPromise = waitForWsEvent(
+          memberSocket,
+          (event) => event.event === 'message:updated' && event.data?.id === messageId,
+        );
+
+        const updateRes = await request(app)
+          .patch(`/api/v1/messages/${messageId}`)
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ content: 'channel edit/delete updated' });
+
+        expect(updateRes.status).toBe(200);
+        const updatedEvent = await updatedEventPromise;
+        expect(updatedEvent.data.channel_id || updatedEvent.data.channelId).toBe(channelId);
+        expect(updatedEvent.data.content).toBe('channel edit/delete updated');
+
+        const deletedEventPromise = waitForWsEvent(
+          memberSocket,
+          (event) => event.event === 'message:deleted' && event.data?.id === messageId,
+        );
+
+        const deleteRes = await request(app)
+          .delete(`/api/v1/messages/${messageId}`)
+          .set('Authorization', `Bearer ${owner.accessToken}`);
+
+        expect(deleteRes.status).toBe(200);
+        const deletedEvent = await deletedEventPromise;
+        expect(deletedEvent.data.channel_id || deletedEvent.data.channelId).toBe(channelId);
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
+  });
+
+  it('delivers channel messages after a user joins a community with an already-open websocket', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      const owner = await createAuthenticatedUser('wsjoinliveowner');
+      const joiningMember = await createAuthenticatedUser('wsjoinlivemember');
+
+      const slug = `ws-join-live-${uniqueSuffix()}`;
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ slug, name: slug, description: 'ws join live delivery test' });
+
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const channelName = `join-live-${uniqueSuffix()}`;
+      const channelRes = await request(app)
+        .post('/api/v1/channels')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ communityId, name: channelName, isPrivate: false, description: 'join live channel' });
+
+      expect(channelRes.status).toBe(201);
+      const channelId = channelRes.body.channel.id;
+
+      const memberSocket = await connectWebSocket(port, joiningMember.accessToken);
+
+      try {
+        const noPreJoinMessage = waitForNoWsEvent(
+          memberSocket,
+          (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
+          1000,
+        );
+
+        const preJoinSendRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content: 'pre-join cache primer' });
+
+        expect(preJoinSendRes.status).toBe(201);
+        await noPreJoinMessage;
+
+        const joinRes = await request(app)
+          .post(`/api/v1/communities/${communityId}/join`)
+          .set('Authorization', `Bearer ${joiningMember.accessToken}`)
+          .send({});
+
+        expect(joinRes.status).toBe(200);
+
+        const createdEventPromise = waitForWsEvent(
+          memberSocket,
+          (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
+        );
+
+        const postJoinSendRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content: 'post-join live delivery' });
+
+        expect(postJoinSendRes.status).toBe(201);
+        const event = await createdEventPromise;
+        expect(event.data.content).toBe('post-join live delivery');
+        expect([
+          `user:${joiningMember.user.id}`,
+          `channel:${channelId}`,
+        ]).toContain(event.channel);
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
   });
 
   it('does not deliver channel read:updated to other channel members', async () => {

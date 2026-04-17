@@ -54,7 +54,10 @@ const {
   repointChannelLastMessage,
   repointConversationLastMessage,
 } = require('./repointLastMessage');
-const { publishChannelMessageCreated } = require('./channelRealtimeFanout');
+const {
+  publishChannelMessageCreated,
+  publishChannelMessageEvent,
+} = require('./channelRealtimeFanout');
 const { appendChannelMessageIngested } = require('./messageIngestLog');
 const {
   getConversationFanoutTargets,
@@ -1291,9 +1294,8 @@ router.patch('/:id',
           message || baseMessage,
         );
       } else {
-        const key = targetKey(baseMessage.channel_id, baseMessage.conversation_id);
-        await fanout.publish(
-          key,
+        await publishChannelMessageEvent(
+          baseMessage.channel_id,
           messageFanoutEnvelope('message:updated', message || baseMessage),
         );
       }
@@ -1355,12 +1357,19 @@ router.delete('/:id',
         await bustMessagesCacheSafe({ conversationId: message.conversation_id });
       }
       if (message.conversation_id) {
-        await publishConversationEventNow(message.conversation_id, 'message:deleted', { id: message.id });
+        await publishConversationEventNow(message.conversation_id, 'message:deleted', {
+          id: message.id,
+          conversation_id: message.conversation_id,
+          conversationId: message.conversation_id,
+        });
       } else {
-        const key = targetKey(message.channel_id, message.conversation_id);
-        await fanout.publish(
-          key,
-          messageFanoutEnvelope('message:deleted', { id: message.id }),
+        await publishChannelMessageEvent(
+          message.channel_id,
+          messageFanoutEnvelope('message:deleted', {
+            id: message.id,
+            channel_id: message.channel_id,
+            channelId: message.channel_id,
+          }),
         );
       }
 

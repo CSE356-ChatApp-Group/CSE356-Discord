@@ -2,13 +2,19 @@
 
 const { query } = require('../db/pool');
 
-const rawReplayLimit = Number(process.env.WS_MESSAGE_REPLAY_LIMIT || '200');
+// Reconnect replay is our safety net for brief WS gaps. Keep the default large
+// enough that a short disconnect under grader bursts does not silently skip a
+// handful of committed message:created events.
+const rawReplayLimit = Number(process.env.WS_MESSAGE_REPLAY_LIMIT || '500');
 const WS_MESSAGE_REPLAY_LIMIT =
   Number.isFinite(rawReplayLimit) && rawReplayLimit > 0
     ? Math.floor(rawReplayLimit)
     : 200;
 
-const rawReplayMaxWindowMs = Number(process.env.WS_MESSAGE_REPLAY_MAX_WINDOW_MS || '120000');
+// Five minutes is still a bounded query window, but it covers deploy blips,
+// transient reconnect churn, and slower client recovery much better than the
+// earlier two-minute default.
+const rawReplayMaxWindowMs = Number(process.env.WS_MESSAGE_REPLAY_MAX_WINDOW_MS || '300000');
 const WS_MESSAGE_REPLAY_MAX_WINDOW_MS =
   Number.isFinite(rawReplayMaxWindowMs) && rawReplayMaxWindowMs > 0
     ? Math.floor(rawReplayMaxWindowMs)

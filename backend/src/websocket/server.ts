@@ -134,7 +134,7 @@ const WS_BOOTSTRAP_BATCH_SIZE =
     ? Math.floor(rawBootstrapBatchSize)
     : 96;
 const rawRecentDisconnectTtlSeconds = Number(
-  process.env.WS_RECENT_DISCONNECT_TTL_SECONDS || 180,
+  process.env.WS_RECENT_DISCONNECT_TTL_SECONDS || 300,
 );
 const WS_RECENT_DISCONNECT_TTL_SECONDS =
   Number.isFinite(rawRecentDisconnectTtlSeconds) && rawRecentDisconnectTtlSeconds > 0
