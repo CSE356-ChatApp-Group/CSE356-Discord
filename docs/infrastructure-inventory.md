@@ -9,11 +9,11 @@ This is the source of truth for current environment shape. Update this file when
 | | **Staging** | **Production** |
 |---|-------------|------------------|
 | **App + nginx + Redis** | One GCP VM: **`136.114.103.71`** (`e2-standard-8`, 8 vCPU, **32 GiB** RAM) | One Linode VM: **`130.245.136.44`** (8 vCPU, **16 GiB** RAM) — app, nginx, Redis, PgBouncer |
-| **Postgres** | Staging DB URL in **`/opt/chatapp/shared/.env`** on **`136.114.103.71`** (often local/small layout; confirm on host) | **Dedicated** DB VM: **`130.245.136.21`** (PgBouncer on app VM pools to it) |
+| **Postgres** | **Co-located on the staging app VM** (verified **2026-04-17**): `DATABASE_URL` uses **`127.0.0.1:6432`** (PgBouncer) → **`127.0.0.1:5432`** (local `postgresql` active). **No separate staging DB VM** in the current layout. | **Dedicated** DB VM: **`130.245.136.21`** — PgBouncer on **`130.245.136.44:6432`** pools to Postgres on **`.21`** |
 | **Default worker count** | Often **2** (`CHATAPP_INSTANCES=2`) — match prod when comparing capacity | **4** Node workers (`chatapp@4000`–`4003`) when `CHATAPP_INSTANCES=4` / `CHATAPP_INSTANCES_PROD=4` |
 | **HTTP for smoke / k6** | `http://136.114.103.71/api/v1`, `ws://136.114.103.71/ws` | **`https://`** / your prod hostname (not the staging IP) |
 | **SSH (typical)** | `ssperrottet@136.114.103.71` (or `gcloud compute ssh chatapp-staging` if using that name) | `ubuntu@130.245.136.44` (app); DB work on **`130.245.136.21`** |
-| **Load / SLO** | `npm run load:staging:*` / `run-staging-capacity.sh` hit **staging only** | **Do not** infer prod behavior from staging; different **RAM**, **DB layout**, **network path**, and **traffic**. Prove prod with its own metrics and `preflight-check` / deploy smoke. |
+| **Load / SLO** | `npm run load:staging:*` / `run-staging-capacity.sh` hit **staging only** | **Do not** infer prod behavior from staging: prod uses a **remote DB VM** (network + `max_connections` split across hosts); staging DB is **on-box**. Match **worker count** when possible; RAM and DB topology still differ. Prove prod with its own metrics and `preflight-check` / deploy smoke. |
 | **Risk** | Safe to churn, break-fix, load-test | **`deploy-prod.sh` requires `pg_dump`**; rollbacks and nginx upstream are prod-specific (see `deploy/README.md`). |
 
 **Remember:** same **git artifact** can deploy to both; **runtime** is not interchangeable—tune and gate **per environment**.
