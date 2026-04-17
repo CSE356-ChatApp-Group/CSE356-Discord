@@ -511,7 +511,7 @@ gate_upstream_parity() {
     upstream=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\${cfg}\")
     ports_up=\$(echo \"\${upstream}\" | grep -oE 'localhost:[0-9]+|127\\.0\\.0\\.1:[0-9]+' | sed 's/.*://' | sort -u)
     [ -n \"\${ports_up}\" ] || { echo 'no upstream ports'; exit 1; }
-    active_ports=\$(for p in \$(seq 4000 4007); do systemctl is-active --quiet chatapp@\${p} 2>/dev/null && echo \${p}; done | sort -u)
+    active_ports=\$(for p in \$(seq 4000 4007); do systemctl is-active --quiet chatapp@\${p} 2>/dev/null && echo \${p} || true; done | sort -u)
     [ -n \"\${active_ports}\" ] || { echo 'no active chatapp workers'; exit 1; }
     for p in ${TARGET_PORTS_CSV//,/ }; do
       systemctl is-active --quiet chatapp@\${p} || { echo \"inactive chatapp@\${p}\"; exit 1; }
