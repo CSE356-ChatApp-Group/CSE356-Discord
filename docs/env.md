@@ -115,6 +115,9 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning (code/deploy defaults: bootstrap TTL `180`; deploy batch size `64` when `WS_AUTO_SUBSCRIBE_MODE` is not `user_only`; recent-connect bridge window `20`) |
 | `WS_AUTO_SUBSCRIBE_MODE` | `messages` (default) subscribes **`channel:`** + **`conversation:`** + **`user:<self>`** during connect; `user_only` keeps just **`user:<self>`**; `full` also eager-subscribes accessible **`community:`** topics. |
 | `WS_APP_KEEPALIVE_INTERVAL_MS` | When `>=5000`, sends a tiny `{"event":"keepalive"}` data frame to otherwise-idle sockets on that cadence. Leave `0` to disable. Useful when intermediaries churn idle WebSocket upgrades despite normal control ping/pong. |
+| `WS_MESSAGE_REPLAY_LIMIT`, `WS_MESSAGE_REPLAY_MAX_WINDOW_MS`, `WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS` | Reconnect replay scan bounds (defaults **150** rows, **60000** ms window, **15000** ms grace before `disconnectedAt`). |
+| `WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS` | Per-replay transaction uses `SET LOCAL statement_timeout` with this value in ms (default **1200**; code **clamps to 200–2500ms** so replay cannot inherit a long Postgres role default and hold the pool for seconds). |
+| `WS_MESSAGE_REPLAY_MAX_CONCURRENT` | Max replay DB transactions per Node process at once (default **6**, cap **32**). Additional reconnects skip replay (metric `ws_replay_query_total{result="skipped"}`) instead of stacking expensive queries. |
 | `USER_FEED_SHARD_COUNT` | Number of shared Redis **`userfeed:<n>`** channels backing logical user delivery (default `64`, cap `256`). Higher values trade more Redis subscriptions for fewer recipients per shard publish. |
 | **Observability** | |
 | `OTEL_ENABLED` | Set `false` to disable tracing |
