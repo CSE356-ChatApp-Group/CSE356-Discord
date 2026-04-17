@@ -63,11 +63,7 @@ const {
   getConversationFanoutTargets,
 } = require('./conversationFanoutTargets');
 const { publishUserFeedTargets, splitUserTargets } = require('../websocket/userFeed');
-const {
-  MESSAGE_RETURNING_FIELDS,
-  MESSAGE_SELECT_FIELDS,
-  MESSAGE_AUTHOR_JSON,
-} = require('./sqlFragments');
+import { MESSAGE_RETURNING_FIELDS, MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 const router = express.Router();
 router.use(authenticate);

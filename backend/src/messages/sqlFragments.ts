@@ -1,6 +1,4 @@
-'use strict';
-
-const MESSAGE_RETURNING_FIELDS = `
+export const MESSAGE_RETURNING_FIELDS = `
   id,
   channel_id,
   conversation_id,
@@ -13,7 +11,7 @@ const MESSAGE_RETURNING_FIELDS = `
   created_at,
   updated_at`;
 
-const MESSAGE_SELECT_FIELDS = `
+export const MESSAGE_SELECT_FIELDS = `
   m.id,
   m.channel_id,
   m.conversation_id,
@@ -26,7 +24,7 @@ const MESSAGE_SELECT_FIELDS = `
   m.created_at,
   m.updated_at`;
 
-const MESSAGE_AUTHOR_JSON = `
+export const MESSAGE_AUTHOR_JSON = `
   CASE
     WHEN u.id IS NULL THEN NULL
     ELSE json_build_object(
@@ -37,9 +35,3 @@ const MESSAGE_AUTHOR_JSON = `
       'avatar_url', u.avatar_url
     )
   END AS author`;
-
-module.exports = {
-  MESSAGE_RETURNING_FIELDS,
-  MESSAGE_SELECT_FIELDS,
-  MESSAGE_AUTHOR_JSON,
-};

@@ -4,7 +4,7 @@ const { withTransaction } = require('../db/pool');
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
 const { wsReplayQueryTotal, wsReplayQueryDurationMs } = require('../utils/metrics');
-const { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } = require('./sqlFragments');
+import { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 // Reconnect replay is our safety net for brief WS gaps. Keep the default large
 // enough that a short disconnect under grader bursts does not silently skip a
