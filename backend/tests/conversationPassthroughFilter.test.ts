@@ -1,7 +1,5 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const {
-  conversationPassthroughTargetsForPublish,
-} = require('../src/messages/conversationPassthroughFilter') as {
+const { conversationPassthroughTargetsForPublish } = require('../src/messages/conversationPassthroughFilter') as {
   conversationPassthroughTargetsForPublish: (
     event: string,
     passthroughTargets: string[],

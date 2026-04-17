@@ -296,6 +296,8 @@ TMPFILES
 echo "0b) Tuning PostgreSQL for available RAM and CPU..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
+  # postgres cannot chdir into the deploy user's \$HOME (mode 700); avoid noisy errors.
+  cd /
   if python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py\" 2>/dev/null; then
     echo 'Skipping local PostgreSQL tuning — PgBouncer backend is off-host.'
     echo 'On the database VM run: DB_SSH=user@db-host ./deploy/tune-remote-db-postgres.sh'

@@ -7,25 +7,23 @@
  * NUMSUB / skip-empty edge cases on that duplicate path.
  */
 
-function canonicalUserFeedEnabled() {
+function canonicalUserFeedEnabled(): boolean {
   const value = String(process.env.REALTIME_CANONICAL_USER_FEED || 'true').trim().toLowerCase();
   return value !== '0' && value !== 'false';
 }
 
-function skipConversationTopicForMessageCreatedEnabled() {
+function skipConversationTopicForMessageCreatedEnabled(): boolean {
   const v = String(process.env.REALTIME_SKIP_CONVERSATION_TOPIC_FOR_MESSAGE_CREATED || 'false')
     .trim()
     .toLowerCase();
   return v === 'true' || v === '1' || v === 'on';
 }
 
-/**
- * @param {string} event
- * @param {string[]} passthroughTargets
- * @param {string[]} userIds
- * @returns {string[]}
- */
-function conversationPassthroughTargetsForPublish(event, passthroughTargets, userIds) {
+export function conversationPassthroughTargetsForPublish(
+  event: string,
+  passthroughTargets: string[],
+  userIds: string[],
+): string[] {
   if (event !== 'message:created') return passthroughTargets;
   if (!canonicalUserFeedEnabled() || !skipConversationTopicForMessageCreatedEnabled()) {
     return passthroughTargets;
@@ -35,7 +33,3 @@ function conversationPassthroughTargetsForPublish(event, passthroughTargets, use
     (t) => typeof t !== 'string' || !t.startsWith('conversation:'),
   );
 }
-
-module.exports = {
-  conversationPassthroughTargetsForPublish,
-};
