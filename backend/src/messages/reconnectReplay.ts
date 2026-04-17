@@ -19,6 +19,16 @@ const WS_MESSAGE_REPLAY_MAX_WINDOW_MS =
   Number.isFinite(rawReplayMaxWindowMs) && rawReplayMaxWindowMs > 0
     ? Math.floor(rawReplayMaxWindowMs)
     : 120000;
+// A socket can die on the client/intermediary side before the server records
+// the disconnect on heartbeat. Looking back slightly prevents messages created
+// in that blind window from being skipped during reconnect replay.
+const rawReplayDisconnectGraceMs = Number(
+  process.env.WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS || '30000',
+);
+const WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS =
+  Number.isFinite(rawReplayDisconnectGraceMs) && rawReplayDisconnectGraceMs >= 0
+    ? Math.floor(rawReplayDisconnectGraceMs)
+    : 30000;
 
 async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnectObservedAtMs) {
   if (!userId) return [];
@@ -27,6 +37,11 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   const reconnectObservedMs = Number(reconnectObservedAtMs || 0);
   if (!Number.isFinite(lowerBoundMs) || !Number.isFinite(reconnectObservedMs)) return [];
   if (lowerBoundMs <= 0 || reconnectObservedMs <= lowerBoundMs) return [];
+
+  const replayLowerBoundMs = Math.max(
+    0,
+    lowerBoundMs - WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
+  );
 
   const upperBoundMs = Math.min(
     reconnectObservedMs,
@@ -86,7 +101,7 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
      LEFT JOIN attachments a ON a.message_id = m.id
      GROUP BY accessible.created_at, m.id, u.id
      ORDER BY accessible.created_at ASC, m.id ASC`,
-    [userId, lowerBoundMs, upperBoundMs, WS_MESSAGE_REPLAY_LIMIT],
+    [userId, replayLowerBoundMs, upperBoundMs, WS_MESSAGE_REPLAY_LIMIT],
   );
 
   return rows;
@@ -94,6 +109,7 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
 
 module.exports = {
   loadReplayableMessagesForUser,
+  WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
   WS_MESSAGE_REPLAY_LIMIT,
   WS_MESSAGE_REPLAY_MAX_WINDOW_MS,
 };

@@ -702,11 +702,13 @@ ssh_prod "
   set -a
   source /opt/chatapp/shared/.env
   set +a
+  MIGRATE_DATABASE_URL=\${PGDUMP_DATABASE_URL:-\$DATABASE_URL}
+  export DATABASE_URL=\"\$MIGRATE_DATABASE_URL\"
   node \$RELEASE_PATH/backend/dist/db/migrate.js
 
   # Fail fast if migrations did not create core tables (wrong DB, broken artifact, etc.).
   cd \$RELEASE_PATH/backend
-  node -e \"
+  DATABASE_URL=\"\$MIGRATE_DATABASE_URL\" node -e \"
 const { Client } = require('pg');
 (async () => {
   const url = process.env.DATABASE_URL;

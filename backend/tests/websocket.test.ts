@@ -1670,6 +1670,78 @@ describe('Multi-socket fanout', () => {
     }
   });
 
+  it('replays messages created just before the disconnect marker is recorded', async () => {
+    const sender = await createAuthenticatedUser('wsreplaygracesender');
+    const recipient = await createAuthenticatedUser('wsreplaygracerecipient');
+
+    const createRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${sender.accessToken}`)
+      .send({ participantIds: [recipient.user.id] });
+    expect(createRes.status).toBe(201);
+    const conversationId = createRes.body.conversation.id;
+
+    const firstSocket = await connectWebSocket(port, recipient.accessToken);
+    await closeWebSocket(firstSocket);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const sendRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${sender.accessToken}`)
+      .send({ conversationId, content: 'replay late-disconnect marker target' });
+    expect(sendRes.status).toBe(201);
+
+    const disconnectLagMs = 500;
+    await redis.set(
+      `ws:recent_disconnect:${recipient.user.id}`,
+      JSON.stringify({
+        disconnectedAt: Date.now() + disconnectLagMs,
+        closeCode: 1005,
+        closeReason: null,
+        bootstrapReady: true,
+        lifetimeMs: 1000,
+        sawError: false,
+        subscriptionCount: 1,
+      }),
+      'EX',
+      300,
+    );
+    await new Promise((resolve) => setTimeout(resolve, disconnectLagMs + 50));
+
+    const { WebSocket } = require('ws');
+    const replaySocket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(recipient.accessToken)}`);
+    const frames: any[] = [];
+    replaySocket.on('message', (raw: any) => {
+      try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out waiting for websocket open')), 3000);
+      replaySocket.once('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      replaySocket.once('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+
+    try {
+      const replayEvent = await waitForLoggedWsEvent(
+        replaySocket,
+        frames,
+        (event) =>
+          event.event === 'message:created'
+          && event.data?.conversation_id === conversationId
+          && event.data?.content === 'replay late-disconnect marker target',
+      );
+      expect(replayEvent.data.author_id).toBe(sender.user.id);
+    } finally {
+      await closeWebSocket(replaySocket);
+    }
+  });
+
   it('records a reconnect replay marker before server-initiated terminate cleanup completes', async () => {
     const sender = await createAuthenticatedUser('wsraceearlysend');
     const recipient = await createAuthenticatedUser('wsraceearlyrecv');

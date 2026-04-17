@@ -509,6 +509,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -a
   source /opt/chatapp/shared/.env
   set +a
+  MIGRATE_DATABASE_URL=\${PGDUMP_DATABASE_URL:-\$DATABASE_URL}
+  export DATABASE_URL=\"\$MIGRATE_DATABASE_URL\"
   node "\${RELEASE_PATH}/backend/dist/db/migrate.js"
 
   chmod +x /tmp/health-check.sh /tmp/smoke-test.sh

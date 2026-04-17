@@ -37,6 +37,11 @@ const pool = new Pool({
 async function migrate() {
   const client = await pool.connect();
   try {
+    // Production deploys run with a low role-level statement_timeout on the
+    // app user. Disable it for the migration session before we touch the
+    // schema_migrations table or advisory lock so deploys do not fail before
+    // reaching the per-migration transaction guard below.
+    await client.query('SET statement_timeout = 0');
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         filename   TEXT PRIMARY KEY,
