@@ -17,6 +17,7 @@ artifacts/load-tests/*
 !artifacts/load-tests/.gitkeep
 artifacts/rollout-monitoring/*
 !artifacts/rollout-monitoring/.gitkeep
+.playwright/
 frontend/.playwright/
 
 # Local Prometheus snapshots (paste into chat for agent triage; may contain internal IPs)
