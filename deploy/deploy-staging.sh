@@ -258,7 +258,9 @@ d /var/run/pgbouncer 0755 postgres postgres -
 TMPFILES
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgbouncer-chatapp.conf 2>/dev/null || true
   sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
-  sudo systemctl enable pgbouncer
+  # systemd-sysv-install may try to chdir to the invoking user's HOME; use root's
+  # HOME so enable does not warn/fail when /home/ssperrottet is not root-accessible.
+  sudo env HOME=/root systemctl enable pgbouncer 2>/dev/null || true
   # pgbouncer is a sysv service on Ubuntu 22.04 — use the init.d script for
   # reliable stop/start (handles PID file cleanup correctly).  systemctl restart
   # fails when a process lives outside systemd's cgroup tracking.
@@ -272,6 +274,22 @@ TMPFILES
   sleep 1
   sudo systemctl is-active pgbouncer \
     || { echo 'ERROR: pgbouncer failed to start'; sudo journalctl -u pgbouncer --no-pager -n 30; exit 1; }
+  # is-active can race before the pooler accepts TCP (same as chatapp ExecStartPre).
+  wait_tcp() {
+    local host=\"\$1\" port=\"\$2\" label=\"\$3\" max=\"\${4:-90}\"
+    local n=0
+    while [ \"\$n\" -lt \"\$max\" ]; do
+      if { echo > /dev/tcp/\${host}/\${port}; } >/dev/null 2>&1; then
+        echo \"\${label} accepting connections on \${host}:\${port}\"
+        return 0
+      fi
+      sleep 1
+      n=\$((n+1))
+    done
+    echo \"ERROR: \${label} not reachable at \${host}:\${port} after \${max}s\"
+    return 1
+  }
+  wait_tcp 127.0.0.1 6432 PgBouncer 90
   echo 'PgBouncer running on 127.0.0.1:6432 in transaction-pooling mode.'
 "
 

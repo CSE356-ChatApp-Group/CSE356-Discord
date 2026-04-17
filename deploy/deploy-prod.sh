@@ -513,7 +513,7 @@ d /var/run/pgbouncer 0755 postgres postgres -
 TMPFILES
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgbouncer-chatapp.conf 2>/dev/null || true
   sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
-  sudo systemctl enable pgbouncer
+  sudo env HOME=/root systemctl enable pgbouncer 2>/dev/null || true
   if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then
     sudo service pgbouncer stop 2>/dev/null || true
     sudo pkill -x pgbouncer 2>/dev/null || true
