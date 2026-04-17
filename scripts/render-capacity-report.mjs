@@ -274,9 +274,15 @@ lines.push(
 );
 const wsDeliveryP95 = metric(summary, 'message_ws_delivery_after_post_ms', 'p(95)');
 const wsDeliveryMiss = metricCounter(summary, 'optimization_ws_message_delivery_miss_total');
+const wsUserfeedP95 = metric(summary, 'message_ws_userfeed_delivery_after_post_ms', 'p(95)');
+const wsUserfeedMiss = metricCounter(summary, 'optimization_ws_userfeed_delivery_miss_total');
 if (wsDeliveryP95 !== null || wsDeliveryMiss !== null) {
-  lines.push(`- WS post→delivery p95: ${fmt(wsDeliveryP95, ' ms')}`);
-  lines.push(`- WS delivery misses (>15s or no frame): ${fmt(wsDeliveryMiss ?? 0)}`);
+  lines.push(`- WS post→delivery p95 (channel subscribe probe): ${fmt(wsDeliveryP95, ' ms')}`);
+  lines.push(`- WS delivery misses (channel probe, >15s or no frame): ${fmt(wsDeliveryMiss ?? 0)}`);
+}
+if (wsUserfeedP95 !== null || wsUserfeedMiss !== null) {
+  lines.push(`- WS post→delivery p95 (user-feed-only probe): ${fmt(wsUserfeedP95, ' ms')}`);
+  lines.push(`- WS user-feed-only misses: ${fmt(wsUserfeedMiss ?? 0)}`);
 }
 const dropped = metric(summary, 'dropped_iterations', 'count');
 const iters = metric(summary, 'iterations', 'count');
@@ -343,19 +349,27 @@ lines.push(
 );
 if (wsDeliveryP95 !== null || wsDeliveryMiss !== null) {
   lines.push(
-    `| **WS delivery misses** (15s SLA) | ${fmt(wsDeliveryMiss ?? 0)} | \`optimization_ws_message_delivery_miss_total\` |`,
+    `| **WS delivery misses** (channel probe, 15s SLA) | ${fmt(wsDeliveryMiss ?? 0)} | \`optimization_ws_message_delivery_miss_total\` |`,
   );
   lines.push(
-    `| **WS post→delivery p95** | ${fmt(wsDeliveryP95, ' ms')} | \`message_ws_delivery_after_post_ms\` |`,
+    `| **WS post→delivery p95** (channel probe) | ${fmt(wsDeliveryP95, ' ms')} | \`message_ws_delivery_after_post_ms\` |`,
+  );
+}
+if (wsUserfeedP95 !== null || wsUserfeedMiss !== null) {
+  lines.push(
+    `| **WS user-feed-only misses** | ${fmt(wsUserfeedMiss ?? 0)} | \`optimization_ws_userfeed_delivery_miss_total\` |`,
+  );
+  lines.push(
+    `| **WS user-feed-only post→delivery p95** | ${fmt(wsUserfeedP95, ' ms')} | \`message_ws_userfeed_delivery_after_post_ms\` |`,
   );
 }
 lines.push('');
 lines.push(
   '_**Peak connections** — target concurrent WS load is profile `wsVUs`; HTTP parallelism is capped by `maxVUs` in `load-tests/staging-capacity.js`. Compare `vus.max` and `ws_sessions` run-over-run._',
 );
-if (wsDeliveryP95 !== null || wsDeliveryMiss !== null) {
+if (wsDeliveryP95 !== null || wsDeliveryMiss !== null || wsUserfeedP95 !== null || wsUserfeedMiss !== null) {
   lines.push(
-    '_This run **did** assert realtime delivery: a WS client subscribed to the target channel, then measured time from successful `POST /messages` to the matching `message:created` frame._',
+    '_This run **did** assert realtime delivery: (1) a WS client subscribed to the target `channel:` and measured post→`message:created`; (2) a **grader-shaped** peer with **no** `channel:` subscribe must still receive the same within 15s on `user:<id>` / user-feed routing._',
   );
 } else {
   lines.push(

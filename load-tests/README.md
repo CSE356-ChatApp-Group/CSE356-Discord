@@ -11,7 +11,9 @@ This folder contains a repeatable **staging-only** load test that ramps traffic 
 - `PUT /api/v1/messages/:id/read`
 - `POST /api/v1/messages`
 - WebSocket presence/activity churn
-- Optional WebSocket post-to-delivery probe (`message:created` after `POST /messages`)
+- Optional WebSocket post-to-delivery probes after `POST /messages`:
+  - **Channel probe:** client explicitly subscribes to `channel:<id>`.
+  - **User-feed-only probe (grader-shaped):** peer opens WS with **no** `channel:` subscribe; must still receive `message:created` within 15s (canonical user-feed path).
 
 ## Run profiles
 

@@ -17,11 +17,13 @@ import { Counter, Rate, Trend } from 'k6/metrics';
  * - **smoke** — Post-deploy sanity.
  * Peak connections ≈ configured `wsVUs` (WS) + HTTP `maxVUs` ceiling; see `summary.json` → `vus.max`, `ws_sessions`.
  *
- * **Grading-shaped delivery (optional)** — `ws_message_delivery` scenario approximates
- * instructor “receive within 15s of send” using WS: HTTP 201 on POST /messages, then
- * time until `message:created` on the same channel subscription. Enabled for `slo`
- * (constant-arrival profile) or when `LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1`. Metrics:
- * `message_ws_delivery_after_post_ms`, `optimization_ws_message_delivery_miss_total`.
+ * **Grading-shaped delivery (optional)** — when enabled, runs two scenarios:
+ * `ws_message_delivery` (explicit `channel:` subscribe) and `ws_userfeed_delivery`
+ * (peer never subscribes to `channel:` — user-feed-only). Both: HTTP 201 on POST /messages,
+ * then time until matching `message:created` within 15s. Enabled for `slo` (constant-arrival)
+ * or when `LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1`. Metrics:
+ * `message_ws_delivery_after_post_ms`, `optimization_ws_message_delivery_miss_total`,
+ * `message_ws_userfeed_delivery_after_post_ms`, `optimization_ws_userfeed_delivery_miss_total`.
  *
  * **Multi-listener (N members must all see the event)** — k6’s single-VU probe does not
  * model “every listener counts separately.” For that, run backend integration:
@@ -46,6 +48,9 @@ const optimizationHttpOutageTotal = new Counter('optimization_http_outage_total'
 const messageWsDeliveryAfterPostMs = new Trend('message_ws_delivery_after_post_ms', true);
 /** WS probe: no matching frame within SLA or HTTP post / upgrade failure. */
 const optimizationWsMessageDeliveryMissTotal = new Counter('optimization_ws_message_delivery_miss_total');
+/** Same as channel subscribe probe, but peer never subscribes to `channel:` (user:<self> only). */
+const messageWsUserfeedDeliveryAfterPostMs = new Trend('message_ws_userfeed_delivery_after_post_ms', true);
+const optimizationWsUserfeedDeliveryMissTotal = new Counter('optimization_ws_userfeed_delivery_miss_total');
 
 function recordHttpStatus(res, endpoint = 'unknown') {
   if (!res) return;
@@ -224,6 +229,7 @@ const PROFILES = {
       optimization_ws_handshake_fail_total: ['count<6'],
       optimization_http_outage_total: ['count<80'],
       optimization_ws_message_delivery_miss_total: ['count<5'],
+      optimization_ws_userfeed_delivery_miss_total: ['count<5'],
     },
   },
 };
@@ -308,6 +314,13 @@ if (wsMessageDeliveryProbeEnabled) {
   scenarioTable.ws_message_delivery = {
     executor: 'constant-vus',
     exec: 'channelMessageDeliveryProbe',
+    vus: 1,
+    duration: wsMessageDeliveryScenarioDuration,
+    gracefulStop: '25s',
+  };
+  scenarioTable.ws_userfeed_delivery = {
+    executor: 'constant-vus',
+    exec: 'channelMessageUserFeedOnlyDeliveryProbe',
     vus: 1,
     duration: wsMessageDeliveryScenarioDuration,
     gracefulStop: '25s',
@@ -769,6 +782,98 @@ export function channelMessageDeliveryProbe(data) {
   });
   checksRate.add(ok);
   if (!ok) optimizationWsMessageDeliveryMissTotal.add(1);
+
+  sleep(2);
+}
+
+/**
+ * Grader-shaped: peer opens WS (user:<self> only; no `channel:` subscribe).
+ * Owner POSTs to channel; peer must still observe `message:created` within SLA.
+ */
+export function channelMessageUserFeedOnlyDeliveryProbe(data) {
+  if (!data || !data.ownerToken || !data.peerToken || !data.channelId || !data.peerUserId) {
+    sleep(1);
+    return;
+  }
+
+  const ownerToken = data.ownerToken;
+  const peerToken = data.peerToken;
+  const peerUserId = data.peerUserId;
+  const channelId = data.channelId;
+  const url = `${WS_URL}?token=${encodeURIComponent(peerToken)}`;
+  const content = `userfeed-probe-${RUN_ID}-${exec.vu.idInTest}-${Date.now()}`;
+
+  let postT0 = 0;
+  let deliveredWithinSla = false;
+  let finished = false;
+
+  const response = ws.connect(
+    url,
+    { tags: { endpoint: 'ws_userfeed_delivery_probe' } },
+    (socket) => {
+      socket.on('message', (raw) => {
+        if (finished) return;
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.event !== 'message:created' || !msg.data) return;
+          if (String(msg.data.content) !== content) return;
+          const ch = typeof msg.channel === 'string' ? msg.channel : '';
+          const onUserFeed =
+            ch === `user:${peerUserId}`
+            || ch === `channel:${channelId}`
+            || String(msg.data.channel_id) === String(channelId)
+            || String(msg.data.channelId) === String(channelId);
+          if (!onUserFeed) return;
+          if (postT0 <= 0) return;
+          const ms = Date.now() - postT0;
+          finished = true;
+          if (ms <= 15000) {
+            messageWsUserfeedDeliveryAfterPostMs.add(ms);
+            deliveredWithinSla = true;
+          } else {
+            optimizationWsUserfeedDeliveryMissTotal.add(1);
+          }
+          socket.close();
+        } catch (_err) {
+          /* ignore */
+        }
+      });
+
+      socket.setTimeout(() => {
+        if (finished) return;
+        const res = http.post(
+          `${BASE_URL}/messages`,
+          JSON.stringify({ channelId, content }),
+          jsonParams(ownerToken, { endpoint: 'messages_post_userfeed_probe' }),
+        );
+        recordHttpStatus(res, 'messages_post_userfeed_probe');
+        if (res.status !== 201) {
+          optimizationWsUserfeedDeliveryMissTotal.add(1);
+          finished = true;
+          socket.close();
+          return;
+        }
+        postT0 = Date.now();
+      }, 1500);
+
+      socket.setTimeout(() => {
+        if (finished) return;
+        finished = true;
+        if (postT0 <= 0) {
+          optimizationWsUserfeedDeliveryMissTotal.add(1);
+        } else if (!deliveredWithinSla) {
+          optimizationWsUserfeedDeliveryMissTotal.add(1);
+        }
+        socket.close();
+      }, 22000);
+    },
+  );
+
+  const ok = check(response, {
+    'ws userfeed delivery probe upgraded': (r) => r && r.status === 101,
+  });
+  checksRate.add(ok);
+  if (!ok) optimizationWsUserfeedDeliveryMissTotal.add(1);
 
   sleep(2);
 }
