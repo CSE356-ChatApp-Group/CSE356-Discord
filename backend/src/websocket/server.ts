@@ -561,6 +561,7 @@ async function reconcileAllConnectedUsers() {
  */
 const channelClients = new Map(); // key → Set<WebSocket>
 const localUserClients = new Map(); // userId → Set<WebSocket>
+const WS_SOCKET_MESSAGE_DEDUPE_MAX = 512;
 
 /**
  * Keep track of which Redis channels this process has subscribed to.
@@ -595,15 +596,59 @@ function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
     };
   }).data;
   const chId = data?.channel_id || data?.channelId;
-  const conversationId = data?.conversation_id || data?.conversationId;
   return !!(
-    (chId && (
-      (ws as { _explicitChannelUnsub?: Set<string> })._explicitChannelUnsub?.has(`channel:${chId}`)
-      || (ws as { _subscriptions?: Set<string> })._subscriptions?.has(`channel:${chId}`)
-    ))
-    || (conversationId
-      && (ws as { _subscriptions?: Set<string> })._subscriptions?.has(`conversation:${conversationId}`))
+    chId
+    && (ws as { _explicitChannelUnsub?: Set<string> })._explicitChannelUnsub?.has(`channel:${chId}`)
   );
+}
+
+function socketMessageDedupeKey(parsed) {
+  if (
+    !parsed
+    || typeof parsed !== "object"
+    || Array.isArray(parsed)
+  ) {
+    return null;
+  }
+
+  const eventName = (parsed as { event?: unknown }).event;
+  if (typeof eventName !== "string" || !eventName.startsWith("message:")) {
+    return null;
+  }
+
+  const data = (parsed as {
+    data?: {
+      id?: unknown;
+      messageId?: unknown;
+      message_id?: unknown;
+    };
+  }).data;
+  const messageId = data?.id || data?.messageId || data?.message_id;
+  if (typeof messageId !== "string" || !messageId) {
+    return null;
+  }
+
+  return `${eventName}:${messageId}`;
+}
+
+function wasSocketMessageRecentlyDelivered(ws, dedupeKey) {
+  if (!dedupeKey) return false;
+  const recent = (ws as { _recentMessageKeys?: Map<string, number> })._recentMessageKeys;
+  return !!recent?.has(dedupeKey);
+}
+
+function markSocketMessageDelivered(ws, dedupeKey) {
+  if (!dedupeKey) return;
+  if (!(ws as { _recentMessageKeys?: Map<string, number> })._recentMessageKeys) {
+    (ws as { _recentMessageKeys?: Map<string, number> })._recentMessageKeys = new Map();
+  }
+  const recent = (ws as { _recentMessageKeys: Map<string, number> })._recentMessageKeys;
+  recent.set(dedupeKey, Date.now());
+  while (recent.size > WS_SOCKET_MESSAGE_DEDUPE_MAX) {
+    const oldestKey = recent.keys().next().value;
+    if (!oldestKey) break;
+    recent.delete(oldestKey);
+  }
 }
 
 function extractInternalUserFeedCommand(payload) {
@@ -637,6 +682,11 @@ function sendPayloadToSocket(
 ) {
   if (ws.readyState !== WebSocket.OPEN) return false;
   if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
+    return false;
+  }
+
+  const dedupeKey = socketMessageDedupeKey(parsed);
+  if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
     return false;
   }
 
@@ -693,6 +743,7 @@ function sendPayloadToSocket(
     return false;
   }
 
+  markSocketMessageDelivered(ws, dedupeKey);
   ws.send(outbound, (err) => {
     if (!err) return;
     ws._sawError = true;
@@ -1041,6 +1092,7 @@ wss.on("connection", async (ws, req) => {
   ws._awayMessage = null;
   ws._sawError = false;
   ws._recentDisconnectRecorded = false;
+  ws._recentMessageKeys = new Map();
 
   const reconnectObservedAtMs = Date.now();
   const recentDisconnectPromise = consumeRecentDisconnect(user.id).catch(() => null);
