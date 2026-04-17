@@ -145,6 +145,13 @@ const WS_HEARTBEAT_INTERVAL_MS =
   Number.isFinite(rawHeartbeatIntervalMs) && rawHeartbeatIntervalMs >= 5_000
     ? Math.floor(rawHeartbeatIntervalMs)
     : 20_000;
+// Test-only hook: widen the post-upgrade, pre-user-subscribe window so we can
+// exercise the initial-connect replay bridge deterministically in integration tests.
+function testUserSubscribeDelayMs() {
+  const raw = Number(process.env.WS_TEST_USER_SUBSCRIBE_DELAY_MS || '0');
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.min(5_000, Math.floor(raw));
+}
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -342,6 +349,43 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
       replayedMessages: messages.length,
     },
     "Replaying missed websocket messages after reconnect gap",
+  );
+
+  for (const message of messages) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const payload = {
+      event: "message:created",
+      data: message,
+      publishedAt: new Date().toISOString(),
+    };
+    sendPayloadToSocket(ws, `user:${userId}`, payload, JSON.stringify(payload));
+  }
+}
+
+async function replayInitialConnectGapToSocket(ws, userId, connectedAtMs, subscribedAtMs) {
+  const lowerBoundMs = Number(connectedAtMs || 0);
+  const upperBoundMs = Number(subscribedAtMs || 0);
+  if (!Number.isFinite(lowerBoundMs) || !Number.isFinite(upperBoundMs)) return;
+  if (lowerBoundMs <= 0 || upperBoundMs <= lowerBoundMs) return;
+  if (ws.readyState !== WebSocket.OPEN) return;
+
+  const messages = await loadReplayableMessagesForUser(
+    userId,
+    lowerBoundMs,
+    upperBoundMs,
+  );
+  if (!messages.length) return;
+
+  logger.info(
+    {
+      event: "ws.replay.initial_connect_gap",
+      userId,
+      connectionId: ws._connectionId,
+      connectedAt: lowerBoundMs,
+      subscribedAt: upperBoundMs,
+      replayedMessages: messages.length,
+    },
+    "Replaying websocket messages created before initial user-route registration",
   );
 
   for (const message of messages) {
@@ -968,6 +1012,7 @@ function ready() {
 
 // ── Connection handling ────────────────────────────────────────────────────────
 wss.on("connection", async (ws, req) => {
+  const transportAcceptedAtMs = Date.now();
   // Authenticate
   let user;
   try {
@@ -1012,7 +1057,14 @@ wss.on("connection", async (ws, req) => {
   // a targeted user-topic duplicate while channel auto-subscribe warms up.
   markWsRecentConnect(user.id).catch(() => {});
 
-  ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
+  ws._bootstrapPromise = Promise.resolve()
+    .then(async () => {
+      const delayMs = testUserSubscribeDelayMs();
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+      return subscribeClient(ws, `user:${user.id}`);
+    })
     .then(async () => {
       const recentDisconnect = await recentDisconnectPromise;
       if (recentDisconnect) {
@@ -1025,6 +1077,17 @@ wss.on("connection", async (ws, req) => {
           );
         } catch (err) {
           logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
+        }
+      } else {
+        try {
+          await replayInitialConnectGapToSocket(
+            ws,
+            user.id,
+            transportAcceptedAtMs,
+            ws._userChannelSubscribedAt,
+          );
+        } catch (err) {
+          logger.warn({ err, userId: user.id }, "WS initial-connect replay failed");
         }
       }
       ws._bootstrapReady = true;
@@ -1291,6 +1354,7 @@ async function subscribeClient(ws, redisChannel) {
 
   const userId = userIdFromTarget(redisChannel);
   if (redisChannel.startsWith("user:") && userId) {
+    ws._userChannelSubscribedAt = Date.now();
     if (!localUserClients.has(userId)) {
       localUserClients.set(userId, new Set());
     }

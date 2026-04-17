@@ -598,6 +598,87 @@ describe('Channel realtime delivery', () => {
     });
   });
 
+  it('replays channel messages created between websocket open and initial user-route registration', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      await withEnv('WS_TEST_USER_SUBSCRIBE_DELAY_MS', '200', async () => {
+        const owner = await createAuthenticatedUser('wsinitgapowner');
+        const member = await createAuthenticatedUser('wsinitgapmember');
+
+        const slug = `ws-init-gap-${uniqueSuffix()}`;
+        const communityRes = await request(app)
+          .post('/api/v1/communities')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ slug, name: slug, description: 'ws initial connect gap replay test' });
+        expect(communityRes.status).toBe(201);
+        const communityId = communityRes.body.community.id;
+
+        const joinRes = await request(app)
+          .post(`/api/v1/communities/${communityId}/join`)
+          .set('Authorization', `Bearer ${member.accessToken}`)
+          .send({});
+        expect(joinRes.status).toBe(200);
+
+        const channelRes = await request(app)
+          .post('/api/v1/channels')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({
+            communityId,
+            name: `init-gap-${uniqueSuffix()}`,
+            isPrivate: false,
+            description: 'channel initial connect gap',
+          });
+        expect(channelRes.status).toBe(201);
+        const channelId = channelRes.body.channel.id;
+
+        const { WebSocket } = require('ws');
+        const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(member.accessToken)}`);
+        const frames: any[] = [];
+        socket.on('message', (raw: any) => {
+          try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+        });
+
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Timed out waiting for websocket open')), 3000);
+          socket.once('open', () => {
+            clearTimeout(timer);
+            resolve();
+          });
+          socket.once('error', (err: Error) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+        });
+
+        try {
+          const sendRes = await request(app)
+            .post('/api/v1/messages')
+            .set('Authorization', `Bearer ${owner.accessToken}`)
+            .send({ channelId, content: 'initial connect channel replay target' });
+          expect(sendRes.status).toBe(201);
+
+          const replayEvent = await waitForLoggedWsEvent(
+            socket,
+            frames,
+            (event) =>
+              event.event === 'message:created'
+              && event.data?.channel_id === channelId
+              && event.data?.content === 'initial connect channel replay target',
+          );
+          expect(replayEvent.channel).toBe(`user:${member.user.id}`);
+
+          const readyEvent = await waitForLoggedWsEvent(
+            socket,
+            frames,
+            (event) => event.event === 'ready',
+          );
+          expect(readyEvent.event).toBe('ready');
+        } finally {
+          await closeWebSocket(socket);
+        }
+      });
+    });
+  });
+
   it('delivers channel message updates and deletes without full auto-subscribe', async () => {
     await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
       const owner = await createAuthenticatedUser('wschanneleditowner');
