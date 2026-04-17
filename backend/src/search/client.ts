@@ -17,10 +17,36 @@
 
 const { withTransaction } = require('../db/pool');
 const logger = require('../utils/logger');
+const overload = require('../utils/overload');
 
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
-  return Math.min(Math.max(parseInt(rawMs || '8000', 10), 1000), 120000);
+  const configuredMs = Math.min(Math.max(parseInt(rawMs || '4000', 10), 1000), 120000);
+  const stage = overload.getStage();
+  if (stage >= 2) return Math.min(configuredMs, 2000);
+  if (stage >= 1) return Math.min(configuredMs, 3000);
+  return configuredMs;
+}
+
+function shouldAllowTrigramFallback(opts: Record<string, any>, queryLength: number) {
+  const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
+  const minTrigramScoped = Math.min(
+    Math.max(parseInt(process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED || '2', 10), 1),
+    32,
+  );
+  const minTrigramUnscoped = Math.min(
+    Math.max(parseInt(process.env.SEARCH_TRIGRAM_MIN_LEN_UNSCOPED || '4', 10), 1),
+    32,
+  );
+  const longEnough = scoped
+    ? queryLength >= minTrigramScoped
+    : queryLength >= minTrigramUnscoped;
+  if (!longEnough) return false;
+
+  const stage = overload.getStage();
+  if (stage >= 2) return false;
+  if (stage >= 1 && !opts.channelId && !opts.conversationId) return false;
+  return true;
 }
 
 /**
@@ -386,17 +412,7 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
 
   const trimmed = String(q).trim();
   const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
-  const minTrigramScoped = Math.min(
-    Math.max(parseInt(process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED || '2', 10), 1),
-    32,
-  );
-  const minTrigramUnscoped = Math.min(
-    Math.max(parseInt(process.env.SEARCH_TRIGRAM_MIN_LEN_UNSCOPED || '4', 10), 1),
-    32,
-  );
-  const allowTrigramFallback = scoped
-    ? trimmed.length >= minTrigramScoped
-    : trimmed.length >= minTrigramUnscoped;
+  const allowTrigramFallback = shouldAllowTrigramFallback(opts, trimmed.length);
 
   try {
     const ftsMeta = buildFtsParts(trimmed, opts);

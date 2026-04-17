@@ -200,6 +200,21 @@ const wsReconnectGapMs = new client.Histogram({
   buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000],
 });
 
+/** Reconnect replay query outcomes so we can verify replay is bounded under load. */
+const wsReplayQueryTotal = new client.Counter({
+  name: 'ws_replay_query_total',
+  help: 'Reconnect replay query outcomes for websocket missed-message backfill',
+  labelNames: ['result'],
+});
+
+/** Wall-clock duration for reconnect replay DB work (successful or failed-open). */
+const wsReplayQueryDurationMs = new client.Histogram({
+  name: 'ws_replay_query_duration_ms',
+  help: 'Milliseconds spent loading reconnect replay messages from Postgres',
+  labelNames: ['result'],
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 1500, 2500, 5000, 10000],
+});
+
 /**
  * Redis PUBLISH failures from realtime fanout (correlate with DM/channel delivery
  * gaps when HTTP 201 still returned before hardening, or with infra issues).
@@ -441,6 +456,14 @@ function startPgPoolMetrics(pool) {
     wsReconnectsTotal.inc({ window: 'le_30s' }, 0);
     wsReconnectsTotal.inc({ window: 'le_120s' }, 0);
     wsReconnectGapMs.observe(0);
+    wsReplayQueryTotal.inc({ result: 'ok' }, 0);
+    wsReplayQueryTotal.inc({ result: 'skipped' }, 0);
+    wsReplayQueryTotal.inc({ result: 'timeout' }, 0);
+    wsReplayQueryTotal.inc({ result: 'pool_busy' }, 0);
+    wsReplayQueryDurationMs.observe({ result: 'ok' }, 0);
+    wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
+    wsReplayQueryDurationMs.observe({ result: 'timeout' }, 0);
+    wsReplayQueryDurationMs.observe({ result: 'pool_busy' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'channel' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'conversation' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'user' }, 0);
@@ -546,6 +569,8 @@ module.exports = {
   wsConnectionLifetimeMs,
   wsReconnectsTotal,
   wsReconnectGapMs,
+  wsReplayQueryTotal,
+  wsReplayQueryDurationMs,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,
   wsBootstrapWallDurationMs,
