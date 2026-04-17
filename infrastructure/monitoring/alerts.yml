@@ -409,6 +409,45 @@ groups:
           summary: Host disk space is running low
           description: Less than 15% disk space remains on the root filesystem for 30 minutes.
 
+      # DB VM uses a separate node_exporter job label. The messages table grows
+      # continuously (grader COPY loads); warn early enough to act.
+      - alert: ChatAppDbDiskSpaceLow
+        expr: |
+          (
+            node_filesystem_avail_bytes{job="db-node",mountpoint="/",fstype!~"tmpfs|overlay"}
+              /
+            node_filesystem_size_bytes{job="db-node",mountpoint="/",fstype!~"tmpfs|overlay"}
+          ) < 0.25
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Database host disk space is running low
+          description: >
+            Less than 25% disk space remains on the DB host root filesystem for 30 minutes.
+            The messages table grows continuously; at current growth rates this gives advance
+            warning before the disk fills. Plan to expand the volume or archive old data.
+            Check: ssh ubuntu@<db-host> 'df -h / && sudo -u postgres psql chatapp_prod -c
+            "SELECT pg_size_pretty(pg_total_relation_size('"'"'messages'"'"'))"'
+
+      - alert: ChatAppDbDiskSpaceCritical
+        expr: |
+          (
+            node_filesystem_avail_bytes{job="db-node",mountpoint="/",fstype!~"tmpfs|overlay"}
+              /
+            node_filesystem_size_bytes{job="db-node",mountpoint="/",fstype!~"tmpfs|overlay"}
+          ) < 0.10
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: Database host disk space is critically low
+          description: >
+            Less than 10% disk space remains on the DB host. Postgres may stop accepting
+            writes imminently. Expand the volume immediately or DROP large indexes / tables.
+            Emergency: ssh ubuntu@<db-host> 'sudo -u postgres psql chatapp_prod -c
+            "\di+" && df -h /'
+
   # HTTP behaviour under stress — complements raw 5xx% (timeouts often abort before 5xx).
   - name: chatapp-capacity-edge
     rules:

@@ -306,3 +306,54 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run api-contract
+
+  # Fires after staging deploy + API contract both pass — tells the team a SHA
+  # is fully vetted and ready to promote to prod with a one-click link.
+  # Requires the DISCORD_WEBHOOK_URL GitHub Actions secret to be set.
+  # If the secret is absent the step skips gracefully without failing CI.
+  notify-prod-ready:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs:
+      - deploy-staging
+      - api-contract-staging
+    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
+    timeout-minutes: 5
+    steps:
+      - name: Notify Discord — staging green, prod ready to deploy
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SHA: ${{ github.sha }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPLOY_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/deploy-manual.yml
+        run: |
+          python3 - <<'PYEOF'
+          import os, json, urllib.request, sys
+
+          webhook_url = os.environ.get('DISCORD_WEBHOOK_URL', '').strip()
+          if not webhook_url:
+              print("DISCORD_WEBHOOK_URL secret not set — skipping Discord notification")
+              sys.exit(0)
+
+          sha          = os.environ.get('SHA', '')[:8]
+          commit_msg   = os.environ.get('COMMIT_MSG', '').split('\n')[0][:200]
+          run_url      = os.environ.get('RUN_URL', '')
+          deploy_url   = os.environ.get('DEPLOY_URL', '')
+
+          content = (
+              f"✅ **Staging green** — `{sha}` is ready to deploy to prod\n"
+              f"> {commit_msg}\n\n"
+              f"🚀 **Trigger prod deploy:** <{deploy_url}>\n"
+              f"CI run: <{run_url}>"
+          )
+
+          payload = json.dumps({"username": "ChatApp CI", "content": content}).encode()
+          req = urllib.request.Request(
+              webhook_url,
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=10) as resp:
+              print(f"Discord notified — HTTP {resp.status}")
+          PYEOF
