@@ -72,7 +72,6 @@ const COMMUNITY_RETURNING_FIELDS = `
   icon_url,
   owner_id,
   is_public,
-  invite_code,
   created_at,
   updated_at`;
 
@@ -84,7 +83,6 @@ const COMMUNITY_SELECT_FIELDS = `
   c.icon_url,
   c.owner_id,
   c.is_public,
-  c.invite_code,
   c.created_at,
   c.updated_at`;
 
