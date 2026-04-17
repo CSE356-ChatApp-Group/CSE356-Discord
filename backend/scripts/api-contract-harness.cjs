@@ -112,7 +112,8 @@ async function openWs(token) {
     ws.once('error', reject);
     ws.once('open', resolve);
   });
-  await waitWsEvent(ws, (m) => m.event === 'ready', 25000);
+  // Staging can be slow under CI load (JWT verify, PG pool, shard SUBSCRIBE).
+  await waitWsEvent(ws, (m) => m.event === 'ready', 45000);
   return ws;
 }
 

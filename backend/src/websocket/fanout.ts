@@ -80,7 +80,11 @@ async function topicSubscriberCount(channel) {
       }
     }
     if (!Number.isFinite(count) || count < 0) count = 0;
-    setCachedSubscriberCount(channel, count, now);
+    // Never cache zero: a subscriber may attach immediately after; caching 0
+    // caused skipped passthrough publishes (e.g. presence on community:).
+    if (count > 0) {
+      setCachedSubscriberCount(channel, count, now);
+    }
     return count;
   })().finally(() => {
     passthroughSubscriberCountInflight.delete(channel);
@@ -162,4 +166,10 @@ async function publish(channel, payload, options = {}) {
   throw lastErr;
 }
 
-module.exports = { publish };
+function invalidatePassthroughSubscriberCountCache(channel) {
+  if (typeof channel === 'string' && channel.length > 0) {
+    passthroughSubscriberCountCache.delete(channel);
+  }
+}
+
+module.exports = { publish, invalidatePassthroughSubscriberCountCache };

@@ -726,10 +726,17 @@ function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
     && channelType !== 'user'
     && !(ws?._explicitSubscriptions?.has(logicalChannel))
   ) {
-    realtimeCanonicalFallbackDeliveriesTotal.inc({
-      channel_type: channelType,
-      event: payloadEventName || 'raw',
-    });
+    try {
+      realtimeCanonicalFallbackDeliveriesTotal.inc({
+        channel_type: channelType,
+        event: payloadEventName || 'raw',
+      });
+    } catch (err) {
+      logger.debug(
+        { err, channelType, event: payloadEventName || 'raw' },
+        'realtime_canonical_fallback_deliveries_total increment skipped',
+      );
+    }
   }
 
   const buffered = (ws as any).bufferedAmount ?? 0;
@@ -824,7 +831,11 @@ function deliverUserFeedMessage(channel, routed) {
         )];
         if (!channels.length) return;
         Promise.allSettled(
-          channels.map((targetChannel) => subscribeClient(ws, targetChannel)),
+          channels.map((targetChannel) =>
+            subscribeClient(ws, targetChannel).then(() => {
+              trackExplicitTopicSubscription(ws, targetChannel, 'subscribe');
+            }),
+          ),
         ).catch((err) => {
           logger.warn(
             { err, userId, channelCount: channels.length },
@@ -952,6 +963,12 @@ async function ensureRedisChannelSubscribed(redisChannel) {
   const op = Promise.resolve(redisSub.subscribe(redisChannel))
     .then(() => {
       redisSubscribed.add(redisChannel);
+      try {
+        const { invalidatePassthroughSubscriberCountCache } = require('./fanout');
+        invalidatePassthroughSubscriberCountCache(redisChannel);
+      } catch {
+        // ignore circular or test harness load edge cases
+      }
     })
     .finally(() => {
       redisSubscribeInFlight.delete(redisChannel);
@@ -1116,7 +1133,11 @@ wss.on("connection", async (ws, req) => {
   bootstrapWithRetry(ws, user.id)
     .then(() => {
       if (ws.readyState === WebSocket.OPEN) {
-        observeSocketSubscriptionCounts(ws, 'bootstrap');
+        try {
+          observeSocketSubscriptionCounts(ws, 'bootstrap');
+        } catch (err) {
+          logger.warn({ err, userId: user.id }, 'WS bootstrap subscription metrics failed');
+        }
         ws.send(JSON.stringify({ event: 'ready' }));
       }
     })
@@ -1415,7 +1436,11 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
     },
     lifetimeMs,
   );
-  observeSocketSubscriptionCounts(ws, 'close');
+  try {
+    observeSocketSubscriptionCounts(ws, 'close');
+  } catch (err) {
+    logger.debug({ err, userId }, 'WS close subscription metrics failed');
+  }
 
   Promise.allSettled(
     subscriptions.map((ch) => unsubscribeClient(ws, ch)),
