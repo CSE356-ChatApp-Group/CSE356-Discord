@@ -11,8 +11,8 @@ const { wsReplayQueryTotal, wsReplayQueryDurationMs } = require('../utils/metric
 // traffic cannot starve live writes during reconnect storms.
 const rawReplayLimit = Number(process.env.WS_MESSAGE_REPLAY_LIMIT || '150');
 const WS_MESSAGE_REPLAY_LIMIT =
-  Number.isFinite(rawReplayLimit) && rawReplayLimit > 0
-    ? Math.floor(rawReplayLimit)
+  Number.isFinite(rawReplayLimit) && rawReplayLimit >= 0
+    ? Math.min(10_000, Math.floor(rawReplayLimit))
     : 150;
 
 // Replay is primarily for brief websocket gaps, not long offline catch-up.
