@@ -19,6 +19,7 @@ const presenceService  = require('../presence/service');
 const { invalidateWsBootstrapCache } = require('../websocket/server');
 const { bustConversationMessagesCache } = require('./messageCacheBust');
 const { invalidateConversationFanoutTargetsCache } = require('./conversationFanoutTargets');
+const { conversationPassthroughTargetsForPublish } = require('./conversationPassthroughFilter');
 const { wrapFanoutPayload } = require('./realtimePayload');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 
@@ -31,8 +32,13 @@ function publishConversationEvents(targets, event, data) {
   const uniqueTargets = [...new Set(targets.filter(Boolean))];
   const payload = wrapFanoutPayload(event, data);
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
+  const passthroughForPublish = conversationPassthroughTargetsForPublish(
+    event,
+    passthroughTargets,
+    userIds,
+  );
   return Promise.allSettled([
-    ...passthroughTargets.map((target) =>
+    ...passthroughForPublish.map((target) =>
       fanout.publish(target, payload, { skipIfNoSubscribers: true })),
     ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
   ]);

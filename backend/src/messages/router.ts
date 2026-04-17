@@ -62,7 +62,9 @@ const {
 const { appendChannelMessageIngested } = require('./messageIngestLog');
 const {
   getConversationFanoutTargets,
+  invalidateConversationFanoutTargetsCache,
 } = require('./conversationFanoutTargets');
+const { conversationPassthroughTargetsForPublish } = require('./conversationPassthroughFilter');
 const { publishUserFeedTargets, splitUserTargets } = require('../websocket/userFeed');
 
 const router = express.Router();
@@ -259,17 +261,22 @@ async function publishConversationEventNow(conversationId, event, data) {
     uniqueTargets = uniqueTargets.filter((target) => target.startsWith('user:'));
   }
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
+  const passthroughForPublish = conversationPassthroughTargetsForPublish(
+    event,
+    passthroughTargets,
+    userIds,
+  );
 
   // Any partial Redis failure must not return HTTP success while a participant
   // misses message:* / read — mirrors single-target await for channel posts.
   const payload = wrapFanoutPayload(event, data);
   fanoutPublishTargetsHistogram.observe(
     { path: 'conversation_event' },
-    passthroughTargets.length + userIds.length,
+    passthroughForPublish.length + userIds.length,
   );
   const publishStartedAt = process.hrtime.bigint();
   await Promise.all([
-    ...passthroughTargets.map((target) =>
+    ...passthroughForPublish.map((target) =>
       fanout.publish(target, payload, { skipIfNoSubscribers: true })),
     ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
   ]);
@@ -1147,6 +1154,13 @@ router.post('/',
       // client cannot GET stale JSON between commit and eviction (grader polling).
       const cacheBustStartedAt = process.hrtime.bigint();
       await bustMessagesCacheSafe({ channelId, conversationId });
+      if (conversationId) {
+        try {
+          await invalidateConversationFanoutTargetsCache(conversationId);
+        } catch (err) {
+          logger.warn({ err, conversationId }, 'conversation fanout targets invalidate failed');
+        }
+      }
       observeRealtimeLifecycle('post_message', 'cache_bust', cacheBustStartedAt);
 
       let realtimePublishedAtForHttp;

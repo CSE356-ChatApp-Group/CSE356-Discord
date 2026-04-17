@@ -445,6 +445,9 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^USER_FEED_SHARD_COUNT=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=64/' /opt/chatapp/shared/.env \
     || echo 'USER_FEED_SHARD_COUNT=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^REALTIME_SKIP_CONVERSATION_TOPIC_FOR_MESSAGE_CREATED=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^REALTIME_SKIP_CONVERSATION_TOPIC_FOR_MESSAGE_CREATED=.*/REALTIME_SKIP_CONVERSATION_TOPIC_FOR_MESSAGE_CREATED=true/' /opt/chatapp/shared/.env \
+    || echo 'REALTIME_SKIP_CONVERSATION_TOPIC_FOR_MESSAGE_CREATED=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
