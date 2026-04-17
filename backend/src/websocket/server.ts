@@ -30,8 +30,10 @@
  * for rich clients, but now applies two important server-side reductions:
  *   • Logical `user:<id>` delivery is backed by shared Redis `userfeed:<shard>`
  *     channels, so one publish can cover many recipients on the same shard.
- *   • The default connect path auto-subscribes only `user:<self>`; richer topic
- *     subscriptions happen explicitly from the client after it loads state.
+ *   • The default connect path auto-subscribes message-bearing `channel:` /
+ *     `conversation:` topics in addition to `user:<self>`; richer
+ *     `community:` subscriptions still happen explicitly from the client after
+ *     it loads state.
  *
  * Remaining future work, if we need another step up:
  *   • Aggregate presence/notifications server-side before WS push.
@@ -351,7 +353,13 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
       data: message,
       publishedAt: new Date().toISOString(),
     };
-    sendPayloadToSocket(ws, `user:${userId}`, payload, JSON.stringify(payload));
+    sendPayloadToSocket(
+      ws,
+      `user:${userId}`,
+      payload,
+      JSON.stringify(payload),
+      { bypassLogicalDuplicateSuppression: true },
+    );
   }
 }
 
@@ -578,11 +586,23 @@ function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
   const ev = (parsed as { event?: unknown }).event;
   if (typeof ev !== "string" || !ev.startsWith("message:")) return false;
 
-  const data = (parsed as { data?: { channel_id?: string; channelId?: string } }).data;
+  const data = (parsed as {
+    data?: {
+      channel_id?: string;
+      channelId?: string;
+      conversation_id?: string;
+      conversationId?: string;
+    };
+  }).data;
   const chId = data?.channel_id || data?.channelId;
+  const conversationId = data?.conversation_id || data?.conversationId;
   return !!(
-    chId
-    && (ws as { _explicitChannelUnsub?: Set<string> })._explicitChannelUnsub?.has(`channel:${chId}`)
+    (chId && (
+      (ws as { _explicitChannelUnsub?: Set<string> })._explicitChannelUnsub?.has(`channel:${chId}`)
+      || (ws as { _subscriptions?: Set<string> })._subscriptions?.has(`channel:${chId}`)
+    ))
+    || (conversationId
+      && (ws as { _subscriptions?: Set<string> })._subscriptions?.has(`conversation:${conversationId}`))
   );
 }
 
@@ -608,9 +628,17 @@ function extractInternalUserFeedCommand(payload) {
   return internal as { kind: string; channels?: unknown };
 }
 
-function sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage) {
+function sendPayloadToSocket(
+  ws,
+  logicalChannel,
+  parsed,
+  rawMessage,
+  { bypassLogicalDuplicateSuppression = false } = {},
+) {
   if (ws.readyState !== WebSocket.OPEN) return false;
-  if (shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) return false;
+  if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
+    return false;
+  }
 
   let payloadEventName;
   let skipDropForBackpressure = false;
@@ -785,14 +813,25 @@ const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
 );
 const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
 
-function wsBootstrapCacheKey(userId) {
-  return `ws:bootstrap:${userId}`;
+function wsBootstrapCacheKey(userId, scope = 'full') {
+  return `ws:bootstrap:${userId}:${scope}`;
 }
 
 /** Invalidate the cached WS subscription list for a user. Call this whenever
  *  their community membership, channel access, or conversation list changes. */
 async function invalidateWsBootstrapCache(userId) {
-  await redis.del(wsBootstrapCacheKey(userId));
+  await redis.del(
+    wsBootstrapCacheKey(userId, 'messages'),
+    wsBootstrapCacheKey(userId, 'full'),
+  );
+}
+
+function wsAutoSubscribeMode() {
+  const mode = String(process.env.WS_AUTO_SUBSCRIBE_MODE || 'messages')
+    .trim()
+    .toLowerCase();
+  if (mode === 'user_only' || mode === 'full') return mode;
+  return 'messages';
 }
 
 /**
@@ -801,8 +840,9 @@ async function invalidateWsBootstrapCache(userId) {
  * membership grows, revisit with aggregated feeds, lazy subscribe, or
  * server-side filtering (phase-2).
  */
-async function listAutoSubscriptionChannels(userId) {
-  const cacheKey = wsBootstrapCacheKey(userId);
+async function listAutoSubscriptionChannels(userId, mode = 'full') {
+  const scope = mode === 'full' ? 'full' : 'messages';
+  const cacheKey = wsBootstrapCacheKey(userId, scope);
   const cached = await redis.get(cacheKey).catch(() => null);
   if (cached) {
     try {
@@ -834,12 +874,14 @@ async function listAutoSubscriptionChannels(userId) {
          WHERE user_id = $1 AND left_at IS NULL`,
         [userId],
       ),
-      query(
-        `SELECT community_id::text AS id
-         FROM community_members
-         WHERE user_id = $1`,
-        [userId],
-      ),
+      scope === 'full'
+        ? query(
+          `SELECT community_id::text AS id
+           FROM community_members
+           WHERE user_id = $1`,
+          [userId],
+        )
+        : Promise.resolve({ rows: [] }),
       query(
         `SELECT c.id::text AS id
          FROM channels c
@@ -877,9 +919,9 @@ async function listAutoSubscriptionChannels(userId) {
 }
 
 async function bootstrapUserSubscriptions(ws, userId) {
-  const mode = String(process.env.WS_AUTO_SUBSCRIBE_MODE || 'user_only').trim().toLowerCase();
-  if (mode !== 'full') return;
-  const channels = await listAutoSubscriptionChannels(userId);
+  const mode = wsAutoSubscribeMode();
+  if (mode === 'user_only') return;
+  const channels = await listAutoSubscriptionChannels(userId, mode);
   warmWsAclCacheFromChannelList(userId, channels);
   for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
     const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);

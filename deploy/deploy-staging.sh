@@ -440,8 +440,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=true/' /opt/chatapp/shared/.env \
     || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^WS_AUTO_SUBSCRIBE_MODE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_AUTO_SUBSCRIBE_MODE=.*/WS_AUTO_SUBSCRIBE_MODE=user_only/' /opt/chatapp/shared/.env \
-    || echo 'WS_AUTO_SUBSCRIBE_MODE=user_only' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^WS_AUTO_SUBSCRIBE_MODE=.*/WS_AUTO_SUBSCRIBE_MODE=messages/' /opt/chatapp/shared/.env \
+    || echo 'WS_AUTO_SUBSCRIBE_MODE=messages' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^USER_FEED_SHARD_COUNT=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=64/' /opt/chatapp/shared/.env \
     || echo 'USER_FEED_SHARD_COUNT=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null

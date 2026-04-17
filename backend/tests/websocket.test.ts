@@ -187,6 +187,61 @@ describe('DM realtime delivery', () => {
     }
   });
 
+  it('delivers exactly one DM event to an open-only socket under the default bootstrap mode', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', undefined, async () => {
+      const sender = await createAuthenticatedUser('dmmessagesdefaultsend');
+      const recipient = await createAuthenticatedUser('dmmessagesdefaultrecv');
+
+      const createConversationRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${sender.accessToken}`)
+        .send({ participantIds: [recipient.user.id] });
+
+      expect(createConversationRes.status).toBe(201);
+      const conversationId = createConversationRes.body.conversation.id;
+
+      const recipientSocket = await connectWebSocketOpenOnly(port, recipient.accessToken);
+      const frames: any[] = [];
+      recipientSocket.on('message', (raw: any) => {
+        try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+      });
+
+      try {
+        const createdEventPromise = waitForLoggedWsEvent(
+          recipientSocket,
+          frames,
+          (event) =>
+            event.event === 'message:created'
+            && event.data?.conversation_id === conversationId
+            && event.data?.content === 'default-mode dm delivery',
+          15_000,
+        );
+
+        const createMessageRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${sender.accessToken}`)
+          .send({ conversationId, content: 'default-mode dm delivery' });
+
+        expect(createMessageRes.status).toBe(201);
+        const messageId = createMessageRes.body.message.id;
+
+        const createdEvent = await createdEventPromise;
+        expect(createdEvent.channel).toBe(`conversation:${conversationId}`);
+
+        await new Promise((resolve) => setTimeout(resolve, 150));
+
+        const matchingFrames = frames.filter(
+          (event) =>
+            event.event === 'message:created'
+            && event.data?.id === messageId,
+        );
+        expect(matchingFrames).toHaveLength(1);
+      } finally {
+        await closeWebSocket(recipientSocket);
+      }
+    });
+  });
+
   it('updates away messages sent through websocket frames used by generated clients', async () => {
     const user = await createAuthenticatedUser('wsawaymessage');
     const socket = await connectWebSocket(port, user.accessToken);
@@ -580,6 +635,80 @@ describe('Channel realtime delivery', () => {
         expect(sendRes.status).toBe(201);
         const event = await createdEventPromise;
         expect(event.channel).toBe(`user:${member.user.id}`);
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
+  });
+
+  it('delivers exactly one public-channel event to an open-only socket under the default bootstrap mode', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', undefined, async () => {
+      const owner = await createAuthenticatedUser('wsdefaultchanowner');
+      const member = await createAuthenticatedUser('wsdefaultchanmember');
+
+      const slug = `ws-default-chan-${uniqueSuffix()}`;
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ slug, name: slug, description: 'default-mode public channel delivery' });
+
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const joinRes = await request(app)
+        .post(`/api/v1/communities/${communityId}/join`)
+        .set('Authorization', `Bearer ${member.accessToken}`)
+        .send({});
+      expect(joinRes.status).toBe(200);
+
+      const channelRes = await request(app)
+        .post('/api/v1/channels')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({
+          communityId,
+          name: `default-open-${uniqueSuffix()}`,
+          isPrivate: false,
+          description: 'default-mode public channel',
+        });
+      expect(channelRes.status).toBe(201);
+      const channelId = channelRes.body.channel.id;
+
+      const memberSocket = await connectWebSocketOpenOnly(port, member.accessToken);
+      const frames: any[] = [];
+      memberSocket.on('message', (raw: any) => {
+        try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+      });
+
+      try {
+        const createdEventPromise = waitForLoggedWsEvent(
+          memberSocket,
+          frames,
+          (event) =>
+            event.event === 'message:created'
+            && event.data?.channel_id === channelId
+            && event.data?.content === 'default-mode public channel delivery',
+          15_000,
+        );
+
+        const sendRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content: 'default-mode public channel delivery' });
+
+        expect(sendRes.status).toBe(201);
+        const messageId = sendRes.body.message.id;
+
+        const event = await createdEventPromise;
+        expect(event.channel).toBe(`channel:${channelId}`);
+
+        await new Promise((resolve) => setTimeout(resolve, 150));
+
+        const matchingFrames = frames.filter(
+          (candidate) =>
+            candidate.event === 'message:created'
+            && candidate.data?.id === messageId,
+        );
+        expect(matchingFrames).toHaveLength(1);
       } finally {
         await closeWebSocket(memberSocket);
       }
