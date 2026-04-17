@@ -287,7 +287,13 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
   const firstChannel = channelPublishFirst();
   const startedAt = process.hrtime.bigint();
   const mode = userFanoutMode();
-  const { allTargets, recentTargets: hintedRecentTargets } = await resolveUserTopicTargets(channelId);
+  // Start resolving the logical user audience immediately, but don't make the
+  // explicit `channel:` publish wait for that lookup when channel-first mode is
+  // enabled. This preserves the existing payload contract while reducing
+  // avoidable latency for rich clients already listening on `channel:<id>`.
+  const userTargetsPromise = resolveUserTopicTargets(channelId);
+  let allTargets: string[] = [];
+  let hintedRecentTargets: string[] = [];
 
   if (firstChannel) {
     const channelPublishStartedAt = process.hrtime.bigint();
@@ -297,6 +303,8 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
       Number(process.hrtime.bigint() - channelPublishStartedAt) / 1e6,
     );
   }
+
+  ({ allTargets, recentTargets: hintedRecentTargets } = await userTargetsPromise);
 
   const blocking = userFanoutHttpBlocking();
   const recentTargets =

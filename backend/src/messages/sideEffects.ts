@@ -144,6 +144,17 @@ function publishMessageEvent(target, event, data) {
   });
 }
 
+function publishMessageEventsToUsers(userIds, event, data) {
+  const targets = Array.isArray(userIds)
+    ? [...new Set(userIds.filter((value) => typeof value === 'string' && value.trim()))]
+    : [];
+  if (!targets.length) return false;
+
+  return enqueue('fanout.publish', async () => {
+    await publishUserFeedTargets(targets, { event, data });
+  });
+}
+
 function publishBackgroundEvent(target, event, data) {
   enqueue('fanout:background.publish', async () => {
     const userId = userIdFromTarget(target);
@@ -196,6 +207,7 @@ function enqueueFanoutJob(name, fn) {
 
 module.exports = {
   publishMessageEvent,
+  publishMessageEventsToUsers,
   publishBackgroundEvent,
   deleteAttachmentObjects,
   getQueueDepth,

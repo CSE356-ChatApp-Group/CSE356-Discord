@@ -105,6 +105,34 @@ export function connectWebSocket(
 }
 
 /**
+ * Connect a WebSocket and resolve on the first `open` event without waiting for
+ * the server's `{ event: "ready" }` bootstrap signal. This mirrors the grading
+ * harness client, which only enables realtime and then listens for events.
+ */
+export function connectWebSocketOpenOnly(
+  port: number,
+  token: string,
+  timeoutMs = 3000,
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(token)}`);
+    const timer = setTimeout(() => {
+      ws.terminate();
+      reject(new Error('Timed out waiting for websocket open'));
+    }, timeoutMs);
+
+    ws.once('open', () => {
+      clearTimeout(timer);
+      resolve(ws);
+    });
+    ws.once('error', (err: Error) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+/**
  * Connect a WebSocket and immediately send `frame` in the `open` handler.
  * Used to exercise the subscribe-on-open race condition fix.
  */

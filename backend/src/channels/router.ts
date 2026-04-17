@@ -138,23 +138,49 @@ async function publishChannelLifecycleEvent(communityId, event, data) {
 
   if (event === 'channel:deleted') {
     const userIds = await listCommunityUserIds(communityId);
-    await Promise.allSettled([publishUserFeedTargets(userIds, { event, data })]);
+    if (userIds.length > 0) {
+      await publishUserFeedTargets(userIds, { event, data });
+    }
     return;
   }
 
   const audience = await listChannelLifecycleAudience(communityId, data.id);
-  await Promise.allSettled(
-    audience.map((entry) =>
-      publishUserFeedTargets([entry.user_id], {
+  const accessibleUserIds = [];
+  const inaccessibleUserIds = [];
+
+  for (const entry of audience) {
+    if (entry.can_access) accessibleUserIds.push(entry.user_id);
+    else inaccessibleUserIds.push(entry.user_id);
+  }
+
+  const publishTasks = [];
+  if (accessibleUserIds.length > 0) {
+    publishTasks.push(
+      publishUserFeedTargets(accessibleUserIds, {
         event,
         data: {
           ...data,
-          can_access: Boolean(entry.can_access),
-          canAccess: Boolean(entry.can_access),
+          can_access: true,
+          canAccess: true,
         },
-      })
-    )
-  );
+      }),
+    );
+  }
+  if (inaccessibleUserIds.length > 0) {
+    publishTasks.push(
+      publishUserFeedTargets(inaccessibleUserIds, {
+        event,
+        data: {
+          ...data,
+          can_access: false,
+          canAccess: false,
+        },
+      }),
+    );
+  }
+  if (publishTasks.length > 0) {
+    await Promise.all(publishTasks);
+  }
 }
 
 /**
@@ -494,17 +520,20 @@ router.post('/:id/members',
           'Failed to invalidate channel user fanout targets cache after member add',
         );
       });
-      for (const { user_id } of insertedRows) {
-        sideEffects.publishMessageEvent(`user:${user_id}`, 'channel:membership_updated', {
+      const insertedUserIds = insertedRows.map((row) => row.user_id);
+      if (insertedUserIds.length > 0) {
+        sideEffects.publishMessageEventsToUsers(insertedUserIds, 'channel:membership_updated', {
           channelId: req.params.id,
           communityId: channel.community_id,
         });
-        publishUserFeedTargets([user_id], {
+        publishUserFeedTargets(insertedUserIds, {
           __wsInternal: {
             kind: 'subscribe_channels',
             channels: [`channel:${req.params.id}`],
           },
         }).catch(() => {});
+      }
+      for (const { user_id } of insertedRows) {
         // Bust the newly-invited user's channel list cache so the private
         // channel appears immediately on their next GET /channels request.
         redis.del(`channels:list:${channel.community_id}:${user_id}`).catch(() => {});

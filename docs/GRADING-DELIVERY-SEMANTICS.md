@@ -28,11 +28,12 @@ For **public and private channels**, the server publishes **`message:created`** 
 
 ## Listener scope (confirm with rubric)
 
-Our **Playwright** grader-shaped test assumes “should receive” means **users who have that channel open** (subscribed on the WebSocket), not merely “joined the community” on paper:
+There are two slightly different listener models in this repo today:
 
-- [`frontend/e2e/delivery-fanout.spec.ts`](../frontend/e2e/delivery-fanout.spec.ts) — multiple browsers on the same public channel, **15s** window, documents this assumption in the file header.
+- The **web UI / Playwright fanout tests** often model “should receive” as **users who have that channel open** (explicit `channel:<id>` WebSocket subscribe). See [`frontend/e2e/delivery-fanout.spec.ts`](../frontend/e2e/delivery-fanout.spec.ts).
+- The **generated grading client** is looser: it calls `enableRealtime()`, listens on global message callbacks, does **not** wait for the server's `ready` event, and does **not** explicitly subscribe to `channel:` or `conversation:` topics. In that client, channel compatibility depends primarily on the default logical **`user:<self>`** duplicate fanout.
 
-With default logical **`user:`** fanout for channel messages, any member who has completed the initial **`user:<self>`** WebSocket subscribe is a candidate to receive **`message:created`** without waiting for server-side enumeration of every accessible **`channel:`** topic. If the official grader still disagrees with local counts, compare **listener scope** (e.g. only clients with an open WS) and **duplicate dedupe** on the harness side.
+So for grading-style investigations, treat **“open WS subscribed to `user:<self>`”** as the first compatibility bar, not “channel pane open.” The repo now has backend websocket coverage for **open-only** sockets on DMs, public channels, join-live channel delivery, and invited private-channel delivery. If the official grader still disagrees with local counts, compare **listener scope** (for example, open WebSocket vs. channel-specific subscribe) and **duplicate dedupe** on the harness side before assuming a core fanout bug.
 
 ## Common patterns behind “sustained failed deliveries”
 

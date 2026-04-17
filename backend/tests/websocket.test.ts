@@ -14,6 +14,7 @@ import {
   uniqueSuffix,
   createAuthenticatedUser,
   connectWebSocket,
+  connectWebSocketOpenOnly,
   connectWebSocketWithOpenFrame,
   closeWebSocket,
   waitForWsEvent,
@@ -155,22 +156,7 @@ describe('DM realtime delivery', () => {
     const sender = await createAuthenticatedUser('dmopenonlysend');
     const recipient = await createAuthenticatedUser('dmopenonlyrecv');
 
-    const recipientSocket = await new Promise<any>((resolve, reject) => {
-      const { WebSocket } = require('ws');
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(recipient.accessToken)}`);
-      const timer = setTimeout(() => {
-        socket.terminate();
-        reject(new Error('Timed out waiting for websocket open'));
-      }, 3000);
-      socket.once('open', () => {
-        clearTimeout(timer);
-        resolve(socket);
-      });
-      socket.once('error', (err: Error) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-    });
+    const recipientSocket = await connectWebSocketOpenOnly(port, recipient.accessToken);
 
     try {
       const createConversationRes = await request(app)
@@ -542,6 +528,64 @@ describe('Bootstrap ready event', () => {
 // ── Channel realtime delivery ────────────────────────────────────────────────
 
 describe('Channel realtime delivery', () => {
+  it('delivers a public-channel message to a socket that only waited for websocket open', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      const owner = await createAuthenticatedUser('wsopenchanowner');
+      const member = await createAuthenticatedUser('wsopenchanmember');
+
+      const slug = `ws-open-chan-${uniqueSuffix()}`;
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ slug, name: slug, description: 'open-only public channel delivery' });
+
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const joinRes = await request(app)
+        .post(`/api/v1/communities/${communityId}/join`)
+        .set('Authorization', `Bearer ${member.accessToken}`)
+        .send({});
+      expect(joinRes.status).toBe(200);
+
+      const channelRes = await request(app)
+        .post('/api/v1/channels')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({
+          communityId,
+          name: `open-only-${uniqueSuffix()}`,
+          isPrivate: false,
+          description: 'open-only public channel',
+        });
+      expect(channelRes.status).toBe(201);
+      const channelId = channelRes.body.channel.id;
+
+      const memberSocket = await connectWebSocketOpenOnly(port, member.accessToken);
+
+      try {
+        const createdEventPromise = waitForWsEvent(
+          memberSocket,
+          (event) =>
+            event.event === 'message:created'
+            && event.data?.channel_id === channelId
+            && event.data?.content === 'open-only public channel delivery',
+          15_000,
+        );
+
+        const sendRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content: 'open-only public channel delivery' });
+
+        expect(sendRes.status).toBe(201);
+        const event = await createdEventPromise;
+        expect(event.channel).toBe(`user:${member.user.id}`);
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
+  });
+
   it('delivers channel messages to community members without manual websocket subscribe', async () => {
     await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
       const owner = await createAuthenticatedUser('wsautosubowner');
@@ -703,7 +747,7 @@ describe('Channel realtime delivery', () => {
       expect(channelRes.status).toBe(201);
       const channelId = channelRes.body.channel.id;
 
-      const memberSocket = await connectWebSocket(port, joiningMember.accessToken);
+      const memberSocket = await connectWebSocketOpenOnly(port, joiningMember.accessToken);
 
       try {
         const noPreJoinMessage = waitForNoWsEvent(
@@ -730,6 +774,7 @@ describe('Channel realtime delivery', () => {
         const createdEventPromise = waitForWsEvent(
           memberSocket,
           (event) => event.event === 'message:created' && event.data?.channel_id === channelId,
+          15_000,
         );
 
         const postJoinSendRes = await request(app)
@@ -742,6 +787,79 @@ describe('Channel realtime delivery', () => {
         expect(event.data.content).toBe('post-join live delivery');
         expect([
           `user:${joiningMember.user.id}`,
+          `channel:${channelId}`,
+        ]).toContain(event.channel);
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
+  });
+
+  it('delivers a private-channel message to an invited socket that only waited for websocket open', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      const owner = await createAuthenticatedUser('wsopenprivowner');
+      const member = await createAuthenticatedUser('wsopenprivmember');
+
+      const slug = `ws-open-priv-${uniqueSuffix()}`;
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ slug, name: slug, description: 'open-only private channel delivery' });
+
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const joinRes = await request(app)
+        .post(`/api/v1/communities/${communityId}/join`)
+        .set('Authorization', `Bearer ${member.accessToken}`)
+        .send({});
+      expect(joinRes.status).toBe(200);
+
+      const channelRes = await request(app)
+        .post('/api/v1/channels')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({
+          communityId,
+          name: `open-priv-${uniqueSuffix()}`,
+          isPrivate: true,
+          description: 'open-only private channel',
+        });
+      expect(channelRes.status).toBe(201);
+      const channelId = channelRes.body.channel.id;
+
+      const preInvitePrimeRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: `pre-invite private cache primer ${uniqueSuffix()}` });
+      expect(preInvitePrimeRes.status).toBe(201);
+
+      const memberSocket = await connectWebSocketOpenOnly(port, member.accessToken);
+
+      try {
+        const inviteRes = await request(app)
+          .post(`/api/v1/channels/${channelId}/members`)
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ userIds: [member.user.id] });
+        expect(inviteRes.status).toBe(200);
+
+        const createdEventPromise = waitForWsEvent(
+          memberSocket,
+          (event) =>
+            event.event === 'message:created'
+            && event.data?.channel_id === channelId
+            && event.data?.content === 'open-only private channel delivery',
+          15_000,
+        );
+
+        const sendRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content: 'open-only private channel delivery' });
+
+        expect(sendRes.status).toBe(201);
+        const event = await createdEventPromise;
+        expect([
+          `user:${member.user.id}`,
           `channel:${channelId}`,
         ]).toContain(event.channel);
       } finally {

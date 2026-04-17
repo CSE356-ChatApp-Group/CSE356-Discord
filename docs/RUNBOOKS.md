@@ -106,7 +106,7 @@ Automated graders (browser clients) should treat **HTTP as the source of truth**
 2. **If checking the UI only:** For **`POST /messages`** (`message:created`) and for **`PATCH` / `DELETE` on a message**, the server **awaits `fanout.publish`** before returning, so the UI can update immediately after success on those routes. **`read:updated`** and some other paths may still use the in-process fanout queue — for those, a **short wait** or **GET** assertion is safer than WS-only zero-wait.
 3. **Do not** rely solely on WebSocket delivery for grading unless you accept occasional false negatives under normal load.
 
-**Throughput harnesses:** channel **`message:created`** is duplicated to **`user:<member>`** by default so listeners receive it as soon as the **`user:`** Redis subscription is live (before full **`channel:`** bootstrap). See [`GRADING-DELIVERY-SEMANTICS.md`](GRADING-DELIVERY-SEMANTICS.md). Watch **`ws_bootstrap_wall_duration_ms`** if accounts have extreme community counts.
+**Throughput harnesses:** channel **`message:created`** is duplicated to **`user:<member>`** by default so listeners receive it as soon as the **`user:`** Redis subscription is live (before full **`channel:`** bootstrap). The generated grading client currently does **not** wait for WS `ready` and does **not** explicitly subscribe to `channel:` / `conversation:` topics, so when you debug “delivery timeout” reports, first reason about **`user:<self>` compatibility** rather than rich-client pane state. See [`GRADING-DELIVERY-SEMANTICS.md`](GRADING-DELIVERY-SEMANTICS.md). Watch **`ws_bootstrap_wall_duration_ms`** if accounts have extreme community counts.
 
 ## Metrics during grader or load-test runs
 
