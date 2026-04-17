@@ -18,6 +18,12 @@
           - (deploy_sha | string | length) > 0
         fail_msg: "Pass -e deploy_sha=<git-commit-sha> (GitHub release artifact tag)."
 
+    - name: Deploy banner (script stdout is buffered until the task finishes)
+      ansible.builtin.debug:
+        msg:
+          - "Running deploy-staging.sh for SHA {{ deploy_sha }}"
+          - "Ansible shows deploy script output after the process exits; long gaps usually mean remote unpack/npm."
+
     - name: Run deploy-staging.sh
       ansible.builtin.command:
         argv:

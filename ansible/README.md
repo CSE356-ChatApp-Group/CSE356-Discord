@@ -7,10 +7,20 @@ This directory drives **inventory** and optional **playbooks** around the existi
 - [Ansible](https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html) 2.14+ on the machine that runs playbooks (your laptop or CI).
 - SSH keys for `ansible_user` on each host (same as manual deploys).
 - Repository checkout at any path — playbooks resolve `deploy/*.sh` relative to this `ansible/` tree.
+- **GitHub Actions VM deploys** install the [`ansible.posix`](https://docs.ansible.com/ansible/latest/collections/ansible/posix/index.html) collection from [`collections/requirements.yml`](collections/requirements.yml) and set **`ANSIBLE_CONFIG=ansible/ci-ansible.cfg`** so `profile_tasks` / `timer` callbacks summarize time after the run. For the same behavior locally:  
+  `ansible-galaxy collection install -r collections/requirements.yml`  
+  then prefix runs with `ANSIBLE_CONFIG="$PWD/ci-ansible.cfg"`.
+
+## Why the “Deploy via Ansible” log goes quiet for a long time
+
+Ansible’s `command` module **buffers the deploy script’s stdout until the script exits**, then prints it in one block. Slow phases (Postgres backup, `scp`, remote `npm ci`, health loops) therefore look like a hang even though work is in progress. Mitigations in this repo:
+
+- **Actions:** [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml) runs `ansible-playbook -v` from **`ansible/`**, uses **`ci-ansible.cfg`** (callbacks above), and passes **`-e deploy_non_interactive=true`** so production never blocks on the `read` prompt.
+- **Streaming logs:** run `./deploy/deploy-prod.sh <sha>` or `./deploy/deploy-staging.sh <sha>` directly in a shell (same behavior as Ansible, but you see each `echo` immediately).
 
 ## Parity with GitHub Actions deploys
 
-**CI deploys use Ansible:** [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml) writes a temporary INI inventory from workflow inputs (`host`, `user`, `environment`) and runs **`ansible/playbooks/deploy-staging.yml`** or **`deploy-prod.yml`**, which invoke the same **`deploy/deploy-*.sh`** scripts with the same environment variables (`STAGING_*` / `PROD_*`, **`GITHUB_REPO`** = `github.repository`, optional **`LOCAL_ARTIFACT_PATH`** from the workflow artifact). Deploy tasks use **`chdir`** to the **repository root** so relative paths like **`.artifacts/chatapp-<sha>.tar.gz`** match the pre-Ansible CI behavior.
+**CI deploys use Ansible:** [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml) writes a temporary INI inventory from workflow inputs (`host`, `user`, `environment`) and runs **`playbooks/deploy-staging.yml`** or **`deploy-prod.yml`** from the **`ansible/`** directory (so `ansible.cfg` / `ci-ansible.cfg` apply). Playbooks invoke the same **`deploy/deploy-*.sh`** scripts with the same environment variables (`STAGING_*` / `PROD_*`, **`GITHUB_REPO`** = `github.repository`, optional **`LOCAL_ARTIFACT_PATH`** from the workflow artifact). Deploy tasks use **`chdir`** to the **repository root** so relative paths like **`.artifacts/chatapp-<sha>.tar.gz`** match the pre-Ansible CI behavior.
 
 Keep **`ansible/inventory/hosts.yml`** aligned with repo variables **`STAGING_HOST`**, **`STAGING_USER`**, **`PROD_HOST`**, **`PROD_USER`** so **manual** `ansible-playbook` runs target the same hosts as Actions (CI does not read the committed inventory file).
 

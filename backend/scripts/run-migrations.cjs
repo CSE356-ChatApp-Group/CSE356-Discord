@@ -69,13 +69,28 @@ async function migrate() {
       const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
       console.log(`[apply] ${file}`);
 
-      await client.query('BEGIN');
-      await client.query('SET LOCAL statement_timeout = 0');
-      await client.query(sql);
-      await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
-      await client.query('COMMIT');
+      // Files starting with `-- no-transaction` contain statements that are
+      // incompatible with an explicit transaction block (e.g. CREATE INDEX
+      // CONCURRENTLY). Run them directly on the connection without BEGIN/COMMIT.
+      // The schema_migrations insert is still done inside its own short
+      // transaction immediately after so the record is atomic.
+      const noTx = /^--\s*no-transaction\b/i.test(sql.trimStart());
+      if (noTx) {
+        await client.query('SET statement_timeout = 0');
+        await client.query(sql);
+        await client.query('BEGIN');
+        await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
+        await client.query('COMMIT');
+      } else {
+        await client.query('BEGIN');
+        await client.query('SET LOCAL statement_timeout = 0');
+        await client.query(sql);
+        await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
+        await client.query('COMMIT');
+      }
 
       console.log(`[done]  ${file}`);
+      if (noTx) console.log(`        (ran outside transaction — contained CONCURRENTLY or DDL incompatible with tx)`);
     }
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

@@ -20,4 +20,4 @@ artifacts/rollout-monitoring/*
 frontend/.playwright/
 
 # Local Prometheus snapshots (paste into chat for agent triage; may contain internal IPs)
-var/
+var/.playwright/

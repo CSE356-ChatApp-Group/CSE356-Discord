@@ -68,7 +68,7 @@ env:
 jobs:
   deploy:
     runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_DEPLOY != '' && vars.RUNNER_LABEL_DEPLOY || 'deploy-prod' }}"]
-    timeout-minutes: 25
+    timeout-minutes: 45
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
@@ -205,6 +205,16 @@ jobs:
           ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" \
             'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
 
+      - name: Install Ansible collections (VM deploy profiling)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v ansible-playbook >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ansible-core
+          fi
+          ansible-galaxy collection install -r "${GITHUB_WORKSPACE}/ansible/collections/requirements.yml"
+
       - name: Deploy via Ansible
         shell: bash
         env:
@@ -216,28 +226,25 @@ jobs:
           CHATAPP_INSTANCES_INPUT: ${{ inputs.chatapp_instances }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           DEPLOY_ENV: ${{ inputs.environment }}
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ansible/ci-ansible.cfg
         run: |
           set -euo pipefail
-          if ! command -v ansible-playbook >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y ansible-core
-          fi
 
           INV="${RUNNER_TEMP}/vm-deploy-inventory.ini"
           if [[ "$DEPLOY_ENV" == "staging" ]]; then
             printf '%s\n' '[staging]' \
               "staging-vm ansible_host=${DEPLOY_HOST} ansible_user=${DEPLOY_USER} github_repo=${GITHUB_REPOSITORY}" > "$INV"
-            PLAYBOOK="ansible/playbooks/deploy-staging.yml"
+            PLAYBOOK="playbooks/deploy-staging.yml"
           elif [[ "$DEPLOY_ENV" == "production" ]]; then
             printf '%s\n' '[production]' \
               "prod-app ansible_host=${DEPLOY_HOST} ansible_user=${DEPLOY_USER} github_repo=${GITHUB_REPOSITORY}" > "$INV"
-            PLAYBOOK="ansible/playbooks/deploy-prod.yml"
+            PLAYBOOK="playbooks/deploy-prod.yml"
           else
             echo "Unknown environment: $DEPLOY_ENV (expected staging or production)"
             exit 1
           fi
 
-          EXTRA_ARGS=(-e "deploy_sha=${TARGET_SHA}")
+          EXTRA_ARGS=(-e "deploy_sha=${TARGET_SHA}" -e "deploy_non_interactive=true")
           if [[ -n "${LOCAL_ARTIFACT_PATH:-}" ]]; then
             LP="${LOCAL_ARTIFACT_PATH}"
             if [[ "${LP}" != /* ]]; then
@@ -248,13 +255,9 @@ jobs:
           if [[ "$DEPLOY_ENV" == "production" ]] && [[ -n "${CHATAPP_INSTANCES_INPUT:-}" ]]; then
             EXTRA_ARGS+=(-e "chatapp_instances=${CHATAPP_INSTANCES_INPUT}")
           fi
-          cd "${GITHUB_WORKSPACE}"
 
-          if [[ "${{ inputs.auto_confirm }}" == "true" ]] && [[ "$DEPLOY_ENV" == "production" ]]; then
-            printf 'y\n' | ansible-playbook -i "$INV" "$PLAYBOOK" "${EXTRA_ARGS[@]}"
-          else
-            ansible-playbook -i "$INV" "$PLAYBOOK" "${EXTRA_ARGS[@]}"
-          fi
+          cd "${GITHUB_WORKSPACE}/ansible"
+          ansible-playbook -v -i "$INV" "$PLAYBOOK" "${EXTRA_ARGS[@]}"
 
       - name: Audit prod nginx parity after deploy
         if: ${{ always() && inputs.environment == 'production' }}

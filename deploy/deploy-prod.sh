@@ -173,7 +173,15 @@ acquire_remote_deploy_lock
 trap cleanup_on_exit EXIT
 echo "✓ Remote deploy lock acquired"
 
+_DEPLOY_T0=$(date +%s)
+deploy_log_phase() {
+  local now
+  now=$(date +%s)
+  printf '%s deploy +%ss: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((now - _DEPLOY_T0))" "$1"
+}
+
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
+deploy_log_phase "preflight OK"
 if [ "${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT}" = "true" ]; then
   echo "Running prod nginx parity audit before deploy..."
   run_local_prod_nginx_audit
@@ -422,12 +430,52 @@ gate_same_release() {
       [ -n \"\${pid}\" ] && [ \"\${pid}\" != \"0\" ] || { echo \"missing pid chatapp@\${p}\"; exit 1; }
       cwd=\$(readlink -f /proc/\${pid}/cwd 2>/dev/null || true)
       [ \"\${cwd}\" = \"\${expected}\" ] || { echo \"release mismatch chatapp@\${p}: \${cwd} != \${expected}\"; exit 1; }
+      drop=/etc/systemd/system/chatapp@\${p}.service.d/release.conf
+      if [ -f \"\${drop}\" ]; then
+        line=\$(grep '^WorkingDirectory=' \"\${drop}\" | head -1)
+        want=\"WorkingDirectory=\${expected}\"
+        [ \"\${line}\" = \"\${want}\" ] || { echo \"systemd drop-in mismatch chatapp@\${p}: \${line} (want \${want})\"; exit 1; }
+      fi
     done
   "; then
     echo "ERROR: same-release parity gate failed."
     return 1
   fi
   echo "✓ Same-release parity gate passed"
+}
+
+gate_current_symlink_ok() {
+  echo "Gate: /opt/chatapp/current points at this release..."
+  local exp="${RELEASE_DIR}/${RELEASE_SHA}"
+  if ! ssh_prod "
+    set -euo pipefail
+    exp='${exp}'
+    cur=\$(readlink -f /opt/chatapp/current 2>/dev/null || true)
+    [ -n \"\${cur}\" ] || { echo 'missing /opt/chatapp/current'; exit 1; }
+    [ \"\${cur}\" = \"\${exp}\" ] || { echo \"current symlink mismatch: \${cur} != \${exp}\"; exit 1; }
+  "; then
+    echo "ERROR: current symlink gate failed."
+    return 1
+  fi
+  echo "✓ Current symlink gate passed"
+}
+
+gate_ingress_post_deploy() {
+  local secs="${INGRESS_POST_DEPLOY_SECONDS:-20}"
+  echo "Gate: ingress /health burst (${secs}s via nginx :80)..."
+  if ! ssh_prod "
+    set -euo pipefail
+    total='${secs}'
+    [ \"\${total}\" -gt 0 ] || exit 0
+    for _i in \$(seq 1 \"\${total}\"); do
+      curl -fsS -m 4 http://127.0.0.1/health >/dev/null || exit 1
+      sleep 1
+    done
+  "; then
+    echo "ERROR: ingress post-deploy health burst failed."
+    return 1
+  fi
+  echo "✓ Ingress post-deploy health burst passed"
 }
 
 gate_all_worker_health() {
@@ -520,16 +568,16 @@ echo ""
 echo "⚠️  This will deploy to PRODUCTION. Verify staging is working first."
 echo ""
 
-# In CI environments (GitHub Actions), skip interactive prompt
-if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+# Skip confirmation in GitHub Actions, or when Ansible/CI sets DEPLOY_NON_INTERACTIVE=true
+if [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${DEPLOY_NON_INTERACTIVE:-}" = "true" ]; then
+  echo "(Non-interactive deploy: proceeding without confirmation)"
+else
   read -p "Continue? (y/N) " -n 1 -r
   echo
   if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Aborted."
     exit 1
   fi
-else
-  echo "(CI environment detected, proceeding without confirmation)"
 fi
 
 # 1. Verify artifact exists
@@ -594,6 +642,7 @@ ls -lh "$BACKUP_FILE"
 echo "Backup OK: $BACKUP_FILE"
 REMOTE_BACKUP
 echo "✓ Backup prepared"
+deploy_log_phase "database backup complete"
 
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
 echo "2b) Installing and configuring PgBouncer..."
@@ -844,6 +893,7 @@ const { Client } = require('pg');
   echo 'Release unpacked and verified'
 "
 echo "✓ Candidate release ready"
+deploy_log_phase "candidate release unpacked on VM"
 capture_previous_release_map
 
 # 5.5. Install/update systemd unit
@@ -1039,6 +1089,7 @@ ssh_prod "
   exit 1
 }
 echo "✓ Candidate WS smoke passed"
+deploy_log_phase "candidate WS smoke OK"
 
 # 8c. Nginx access.log: append request_time + upstream_response_time (idempotent).
 echo "8c. Nginx access log timing fields (idempotent)..."
@@ -1601,6 +1652,19 @@ PY
     exit 1
   }
   NGINX_CANDIDATE_PIN_ACTIVE=0
+
+  # Spare candidate (e.g. :4004 when CHATAPP_INSTANCES=4) must not stay running — it breaks
+  # gate_upstream_parity (unexpected active worker) and wastes RAM.
+  if ! printf '%s\n' "${TARGET_PORTS[@]}" | grep -qx "${NEW_PORT}"; then
+    echo "9c.1 Stopping spare candidate chatapp@${NEW_PORT} before upstream parity gates..."
+    ssh_prod "
+      set -euo pipefail
+      sudo systemctl stop chatapp@${NEW_PORT} 2>/dev/null || true
+      sudo systemctl disable chatapp@${NEW_PORT} 2>/dev/null || true
+    " || true
+    echo "✓ Spare candidate stopped"
+  fi
+
   gate_all_worker_health || {
     rollback_cutover
     exit 1
@@ -1609,6 +1673,7 @@ PY
     rollback_cutover
     exit 1
   }
+  deploy_log_phase "multi-worker cutover (9c) + parity gates OK"
   echo "✓ Multi-worker nginx upstream restored"
 fi
 
@@ -1645,15 +1710,7 @@ if [ "$MONITOR_FAILS" -gt 0 ]; then
 fi
 echo "✓ Monitoring window complete"
 
-if ! printf '%s\n' "${TARGET_PORTS[@]}" | grep -qx "${NEW_PORT}"; then
-  echo "10.45. Stopping spare candidate instance on port ${NEW_PORT}..."
-  ssh_prod "
-    sudo systemctl stop chatapp@${NEW_PORT} 2>/dev/null || true
-    sudo systemctl disable chatapp@${NEW_PORT} 2>/dev/null || true
-    echo 'Spare candidate stopped'
-  "
-  echo "✓ Spare candidate reclaimed"
-fi
+# 10.45. Spare candidate is reclaimed in 9c.1 (multi-worker). Single-worker uses NEW_PORT in TARGET.
 
 # 10.5. Stop old port to reclaim memory.
 # Prod runs a single instance (CHATAPP_INSTANCES=1); the old port stays running
@@ -1832,7 +1889,7 @@ fi
 
 # 12. Final health check
 echo "12. Final verification..."
-if gate_same_release && gate_all_worker_health && gate_upstream_parity; then
+if gate_same_release && gate_all_worker_health && gate_upstream_parity && gate_current_symlink_ok && gate_ingress_post_deploy; then
   echo "Running prod nginx parity audit after deploy..."
   if ! run_local_prod_nginx_audit; then
     echo "ERROR: post-deploy prod nginx parity audit failed."
@@ -1840,6 +1897,7 @@ if gate_same_release && gate_all_worker_health && gate_upstream_parity; then
     exit 1
   fi
   echo "✓ Prod nginx parity audit passed"
+  deploy_log_phase "final gates + nginx audit OK"
   echo "✓ Production deployment SUCCESSFUL"
 else
   echo "ERROR: Final health check failed after cutover."

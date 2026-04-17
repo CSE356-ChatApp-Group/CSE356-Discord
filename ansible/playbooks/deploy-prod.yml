@@ -20,6 +20,13 @@
           - (deploy_sha | string | length) > 0
         fail_msg: "Pass -e deploy_sha=<git-commit-sha> (GitHub release artifact tag)."
 
+    - name: Deploy banner (script stdout is buffered until the task finishes)
+      ansible.builtin.debug:
+        msg:
+          - "Running deploy-prod.sh for SHA {{ deploy_sha }}"
+          - "Long gaps are normal while the script backs up the DB, copies the artifact, and runs npm on the VM."
+          - "After completion, profile_tasks/timer lines summarize where time went."
+
     - name: Run deploy-prod.sh
       ansible.builtin.command:
         argv:
@@ -32,3 +39,4 @@
         GITHUB_REPO: "{{ _github }}"
         CHATAPP_INSTANCES: "{{ chatapp_instances | default(_instances) | string }}"
         LOCAL_ARTIFACT_PATH: "{{ local_artifact_path | default('') }}"
+        DEPLOY_NON_INTERACTIVE: "{{ 'true' if (deploy_non_interactive | default(false)) | bool else 'false' }}"

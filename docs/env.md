@@ -2,6 +2,8 @@
 
 Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool sizing on staging/production VMs (`deploy/deploy-staging.sh`, `deploy/deploy-prod.sh`).
 
+**Deploy script (runner environment, not app `.env`):** `INGRESS_POST_DEPLOY_SECONDS` (default **20**) controls how long `deploy-prod.sh` hammers **`http://127.0.0.1/health`** through nginx after cutover. **`DEPLOY_NON_INTERACTIVE=true`** skips the production confirmation prompt (Ansible / CI); **`GITHUB_ACTIONS=true`** does the same.
+
 ## Grading / autograder hosts
 
 If the VM is **only** hit by course autograders (no general public) and you do not care about auth brute-force or spam, the deploy scripts now pin a grading profile on staging/prod:

@@ -1,0 +1,4 @@
+---
+collections:
+  # Used by ci-ansible.cfg for profile_tasks / timer in GitHub Actions VM deploys.
+  - name: ansible.posix
