@@ -31,8 +31,19 @@ function createClient(name) {
 // General-purpose client
 const redis = createClient('main');
 
-// Dedicated subscriber – used by ws/fanout; cannot issue normal commands
-const redisSub = createClient('subscriber');
+// Dedicated subscriber – used by ws/fanout; cannot issue normal commands.
+// enableReadyCheck must be false: ioredis runs INFO as its ready-check, but
+// INFO is not allowed on a connection that is (or has previously been) in
+// subscriber mode, causing an immediate error that transitions the client to
+// a broken state and prevents startup.
+const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+  enableReadyCheck: false,
+  maxRetriesPerRequest: null,
+  retryStrategy: (times) => Math.min(times * 100, 3000),
+});
+redisSub.on('connect',      () => logger.info({ client: 'subscriber' }, 'Redis connected'));
+redisSub.on('reconnecting', () => logger.warn({ client: 'subscriber' }, 'Redis reconnecting'));
+redisSub.on('error', (err) => logger.error({ err, client: 'subscriber' }, 'Redis error'));
 
 async function closeRedisConnections() {
   await Promise.allSettled([
