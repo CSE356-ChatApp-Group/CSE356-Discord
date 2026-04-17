@@ -168,6 +168,14 @@ jobs:
           fi
           chmod 600 ~/.ssh/known_hosts
 
+      - name: Audit prod nginx parity before deploy
+        if: ${{ inputs.environment == 'production' }}
+        shell: bash
+        env:
+          PROD_HOST: ${{ inputs.host }}
+          PROD_USER: ${{ inputs.user }}
+        run: ./scripts/prod-nginx-audit.sh
+
       - name: Deploy via Ansible
         shell: bash
         env:
@@ -219,6 +227,14 @@ jobs:
           else
             ansible-playbook -i "$INV" "$PLAYBOOK" "${EXTRA_ARGS[@]}"
           fi
+
+      - name: Audit prod nginx parity after deploy
+        if: ${{ always() && inputs.environment == 'production' }}
+        shell: bash
+        env:
+          PROD_HOST: ${{ inputs.host }}
+          PROD_USER: ${{ inputs.user }}
+        run: ./scripts/prod-nginx-audit.sh
 
       - name: Verify public endpoints
         if: ${{ inputs.verify_public_host }}

@@ -74,8 +74,25 @@ for p in "${ACTIVE_PORTS[@]}"; do
   fi
 done
 
+# Every upstream port must also correspond to an active worker; otherwise nginx
+# can route traffic into a dead candidate or stale instance.
+while IFS= read -r p; do
+  [[ -n "$p" ]] || continue
+  found=0
+  for active in "${ACTIVE_PORTS[@]}"; do
+    if [[ "$active" == "$p" ]]; then
+      found=1
+      break
+    fi
+  done
+  if [[ "$found" -ne 1 ]]; then
+    echo "FAIL: upstream app lists port ${p} but chatapp@${p} is not active (active ports: ${ACTIVE_PORTS[*]:-none})"
+    exit 1
+  fi
+done <<< "$PORTS_UP"
+
 if [[ "${#ACTIVE_PORTS[@]}" -ge 2 ]]; then
-  echo "OK: ${#ACTIVE_PORTS[@]} workers active and nginx upstream lists each port (${ACTIVE_PORTS[*]})"
+  echo "OK: ${#ACTIVE_PORTS[@]} workers active and nginx upstream matches them exactly (${ACTIVE_PORTS[*]})"
 fi
 
 echo "=== nginx -t ==="

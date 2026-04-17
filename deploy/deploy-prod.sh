@@ -19,8 +19,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/deploy-common.sh"
 
+ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT="${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT:-true}"
+
 ssh_prod() {
   ssh "${PROD_USER}@${PROD_HOST}" "$@"
+}
+
+run_local_prod_nginx_audit() {
+  if [ ! -x "${SCRIPT_DIR}/../scripts/prod-nginx-audit.sh" ]; then
+    echo "WARN: prod-nginx-audit.sh not found or not executable; skipping local audit."
+    return 0
+  fi
+  PROD_HOST="${PROD_HOST}" PROD_USER="${PROD_USER}" "${SCRIPT_DIR}/../scripts/prod-nginx-audit.sh"
+}
+
+cleanup_on_exit() {
+  local status=$?
+  set +e
+  if [ "${status}" -ne 0 ] && [ "${NGINX_CANDIDATE_PIN_ACTIVE:-0}" -eq 1 ] && [ "${ROLLBACK_ALREADY_ATTEMPTED:-0}" -eq 0 ]; then
+    ROLLBACK_ALREADY_ATTEMPTED=1
+    echo "↩ Exit trap: deploy failed after nginx was pinned to candidate; attempting recovery..."
+    rollback_cutover
+  fi
+  release_remote_deploy_lock
+  exit "${status}"
 }
 
 DEPLOY_LOCK_DIR="/opt/chatapp/.deploy-lock-prod"
@@ -148,10 +170,17 @@ echo "  communities_heavy_max_inflight: ${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}"
 
 echo "Acquiring remote deploy lock..."
 acquire_remote_deploy_lock
-trap release_remote_deploy_lock EXIT
+trap cleanup_on_exit EXIT
 echo "✓ Remote deploy lock acquired"
 
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
+if [ "${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT}" = "true" ]; then
+  echo "Running prod nginx parity audit before deploy..."
+  run_local_prod_nginx_audit
+  echo "✓ Prod nginx parity audit passed"
+else
+  echo "WARN: skipping prod nginx parity audit preflight (ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT=false)"
+fi
 
 if ! [[ "${CHATAPP_INSTANCES}" =~ ^[0-9]+$ ]] || [ "${CHATAPP_INSTANCES}" -lt 1 ]; then
   echo "ERROR: CHATAPP_INSTANCES must be a positive integer (got '${CHATAPP_INSTANCES}')."
@@ -226,6 +255,76 @@ done
 TARGET_PORTS_CSV=$(IFS=,; echo "${TARGET_PORTS[*]}")
 echo "Target app worker ports: ${TARGET_PORTS[*]}"
 PREV_RELEASE_MAP=()
+PREV_ACTIVE_PORTS=()
+PREV_ACTIVE_PORTS_CSV=""
+NGINX_CANDIDATE_PIN_ACTIVE=0
+ROLLBACK_ALREADY_ATTEMPTED=0
+
+csv_has_port() {
+  local csv="${1:-}"
+  local port="${2:-}"
+  case ",${csv}," in
+    *",${port},"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+rewrite_nginx_upstream() {
+  local ports_csv="${1:?ports csv required}"
+  local context="${2:-upstream rewrite}"
+  ssh_prod "
+    set -euo pipefail
+    export PORTS_CSV='${ports_csv}'
+    export SITE='${CHATAPP_NGINX_SITE_PATH}'
+    TMP_SITE=\$(mktemp)
+    sudo cp \"\$SITE\" \"\$TMP_SITE\"
+    export TMP_SITE
+    python3 <<'PY'
+import os
+import re
+
+cfg_path = os.environ['TMP_SITE']
+ports = [p.strip() for p in os.environ['PORTS_CSV'].split(',') if p.strip()]
+if not ports:
+    raise SystemExit('no upstream ports provided')
+
+keepalive = '''  keepalive 512;
+  keepalive_requests 100000;
+  keepalive_timeout 75s;
+'''
+if len(ports) == 1:
+    servers = f'  server localhost:{ports[0]} max_fails=0;\\n'
+    balance = ''
+else:
+    servers = ''.join(
+        f'  server localhost:{port} max_fails=2 fail_timeout=10s;\\n'
+        for port in ports
+    )
+    balance = '  least_conn;\\n'
+
+block = (
+    'upstream app {\\n'
+    + balance
+    + servers
+    + keepalive
+    + '}'
+)
+
+text = open(cfg_path).read()
+text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
+if n != 1:
+    raise SystemExit('upstream app block not replaced (n=%d)' % n)
+open(cfg_path, 'w').write(text)
+PY
+    sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
+    rm -f \"\$TMP_SITE\"
+    sudo nginx -t >/dev/null
+    sudo systemctl reload nginx
+  " || {
+    echo "ERROR: ${context} failed."
+    return 1
+  }
+}
 
 stop_chatapp_port() {
   local p="${1:?port required}"
@@ -234,6 +333,7 @@ stop_chatapp_port() {
 
 capture_previous_release_map() {
   PREV_RELEASE_MAP=()
+  PREV_ACTIVE_PORTS=()
   for p in "${TARGET_PORTS[@]}"; do
     local release_path
     release_path="$(ssh_prod "
@@ -256,8 +356,10 @@ capture_previous_release_map() {
     " || true)"
     if [ -n "${release_path}" ]; then
       PREV_RELEASE_MAP+=( "${p}:${release_path}" )
+      PREV_ACTIVE_PORTS+=( "${p}" )
     fi
   done
+  PREV_ACTIVE_PORTS_CSV=$(IFS=,; echo "${PREV_ACTIVE_PORTS[*]:-}")
   if [ "${#PREV_RELEASE_MAP[@]}" -gt 0 ]; then
     echo "Captured previous worker release map: ${PREV_RELEASE_MAP[*]}"
   else
@@ -286,6 +388,26 @@ restore_previous_release_map() {
       echo "WARN: could not fully restore chatapp@${port} to ${release_path}"
     }
   done
+}
+
+restore_previous_upstream_topology() {
+  local ports_csv="${PREV_ACTIVE_PORTS_CSV:-}"
+  if [ -z "${ports_csv}" ]; then
+    ports_csv="${OLD_PORT}"
+  fi
+  echo "↩ Restoring nginx upstream topology to ports: ${ports_csv}"
+  rewrite_nginx_upstream "${ports_csv}" "restore previous nginx upstream topology"
+}
+
+reclaim_spare_candidate_on_rollback() {
+  if csv_has_port "${PREV_ACTIVE_PORTS_CSV}" "${NEW_PORT}"; then
+    return 0
+  fi
+  echo "↩ Reclaiming candidate port ${NEW_PORT} during rollback..."
+  ssh_prod "
+    sudo systemctl stop chatapp@${NEW_PORT} 2>/dev/null || true
+    sudo systemctl disable chatapp@${NEW_PORT} 2>/dev/null || true
+  " >/dev/null 2>&1 || true
 }
 
 gate_same_release() {
@@ -341,14 +463,23 @@ gate_upstream_parity() {
     upstream=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\${cfg}\")
     ports_up=\$(echo \"\${upstream}\" | grep -oE 'localhost:[0-9]+|127\\.0\\.0\\.1:[0-9]+' | sed 's/.*://' | sort -u)
     [ -n \"\${ports_up}\" ] || { echo 'no upstream ports'; exit 1; }
+    active_ports=\$(for p in \$(seq 4000 4007); do systemctl is-active --quiet chatapp@\${p} 2>/dev/null && echo \${p}; done | sort -u)
+    [ -n \"\${active_ports}\" ] || { echo 'no active chatapp workers'; exit 1; }
     for p in ${TARGET_PORTS_CSV//,/ }; do
       systemctl is-active --quiet chatapp@\${p} || { echo \"inactive chatapp@\${p}\"; exit 1; }
       echo \"\${ports_up}\" | grep -qx \"\${p}\" || { echo \"upstream missing :\${p}\"; exit 1; }
+      echo \"\${active_ports}\" | grep -qx \"\${p}\" || { echo \"unexpected inactive target :\${p}\"; exit 1; }
     done
     for p in \${ports_up}; do
       case ',${TARGET_PORTS_CSV},' in
         *\",\${p},\"*) ;;
         *) echo \"unexpected upstream port :\${p}\"; exit 1 ;;
+      esac
+    done
+    for p in \${active_ports}; do
+      case ',${TARGET_PORTS_CSV},' in
+        *\",\${p},\"*) ;;
+        *) echo \"unexpected active worker :\${p}\"; exit 1 ;;
       esac
     done
     sudo nginx -t >/dev/null
@@ -379,41 +510,10 @@ gate_ingress_canary() {
 ssh_prod "sudo logger -t chatapp-deploy \"event=start sha=${RELEASE_SHA} old_port=${OLD_PORT} new_port=${NEW_PORT} instances=${CHATAPP_INSTANCES}\"" || true
 
 rollback_cutover() {
-  echo "↩ Rolling back nginx upstream to prior live port ${OLD_PORT} (single upstream)..."
-  ssh_prod "
-    set -euo pipefail
-    export ROLLBACK_PORT='${OLD_PORT}'
-    export SITE='${CHATAPP_NGINX_SITE_PATH}'
-    TMP_SITE=\$(mktemp)
-    sudo cp \"\$SITE\" \"\$TMP_SITE\"
-    export TMP_SITE
-    python3 <<'PY'
-import os, re
-cfg_path = os.environ['TMP_SITE']
-old = os.environ['ROLLBACK_PORT']
-keepalive = '''  keepalive 512;
-  keepalive_requests 100000;
-  keepalive_timeout 75s;
-'''
-block = (
-    'upstream app {\\n'
-    f'  server localhost:{old} max_fails=0;\\n'
-    + keepalive
-    + '}'
-)
-text = open(cfg_path).read()
-text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
-if n != 1:
-    raise SystemExit('rollback: upstream app block not replaced (n=%d)' % (n,))
-open(cfg_path, 'w').write(text)
-PY
-    sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
-    rm -f \"\$TMP_SITE\"
-    sudo nginx -t >/dev/null
-    sudo systemctl reload nginx
-    sudo systemctl start chatapp@${OLD_PORT} 2>/dev/null || true
-  "
   restore_previous_release_map || true
+  restore_previous_upstream_topology || true
+  reclaim_spare_candidate_on_rollback || true
+  NGINX_CANDIDATE_PIN_ACTIVE=0
 }
 
 echo ""
@@ -1313,6 +1413,7 @@ PY
       rollback_cutover
       exit 1
     }
+    NGINX_CANDIDATE_PIN_ACTIVE=1
     echo "✓ Nginx pinned to candidate"
     gate_ingress_canary || {
       rollback_cutover
@@ -1499,6 +1600,7 @@ PY
     rollback_cutover
     exit 1
   }
+  NGINX_CANDIDATE_PIN_ACTIVE=0
   gate_all_worker_health || {
     rollback_cutover
     exit 1
@@ -1731,6 +1833,13 @@ fi
 # 12. Final health check
 echo "12. Final verification..."
 if gate_same_release && gate_all_worker_health && gate_upstream_parity; then
+  echo "Running prod nginx parity audit after deploy..."
+  if ! run_local_prod_nginx_audit; then
+    echo "ERROR: post-deploy prod nginx parity audit failed."
+    rollback_cutover
+    exit 1
+  fi
+  echo "✓ Prod nginx parity audit passed"
   echo "✓ Production deployment SUCCESSFUL"
 else
   echo "ERROR: Final health check failed after cutover."
