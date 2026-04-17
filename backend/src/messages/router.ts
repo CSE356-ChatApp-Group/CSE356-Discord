@@ -253,6 +253,20 @@ async function publishConversationEventNow(conversationId, event, data) {
   }
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
 
+  if (event.startsWith('message:')) {
+    logger.info(
+      {
+        conversationId,
+        event,
+        messageId: (data as any)?.id,
+        userIdCount: userIds.length,
+        userIds,
+        gradingNote: 'conversation_fanout_targets',
+      },
+      'conversation fanout: publishing to targets',
+    );
+  }
+
   // Any partial Redis failure must not return HTTP success while a participant
   // misses message:* / read — mirrors single-target await for channel posts.
   const payload = wrapFanoutPayload(event, data);

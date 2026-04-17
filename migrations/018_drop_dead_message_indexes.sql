@@ -1,4 +1,3 @@
--- no-transaction
 -- Migration 018: Drop message indexes with zero or negligible scan counts
 --
 -- Rationale (from pg_stat_user_indexes since last stats reset):
@@ -14,10 +13,11 @@
 -- two dead indexes reduces per-INSERT write amplification and frees disk space
 -- without affecting any query plan.
 --
--- Uses DROP INDEX CONCURRENTLY so the operation does not acquire an
--- AccessExclusiveLock on messages and does not interrupt live traffic.
--- The migration runner's "-- no-transaction" pragma runs this file outside
--- BEGIN/COMMIT (see backend/scripts/run-migrations.cjs).
+-- Uses plain DROP INDEX IF EXISTS (not CONCURRENTLY) because CONCURRENTLY cannot
+-- run inside a multi-statement query call (which is how run-migrations.cjs
+-- executes migration files). Since migrations run before any app workers start,
+-- there is no live traffic — a regular DROP INDEX is safe and fast.
+-- On prod both indexes have already been dropped; IF NOT EXISTS makes this a no-op.
 
-DROP INDEX CONCURRENTLY IF EXISTS idx_messages_author_created;
-DROP INDEX CONCURRENTLY IF EXISTS idx_messages_conv;
+DROP INDEX IF EXISTS idx_messages_author_created;
+DROP INDEX IF EXISTS idx_messages_conv;

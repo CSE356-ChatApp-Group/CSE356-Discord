@@ -850,6 +850,24 @@ function deliverUserFeedMessage(channel, routed) {
     recipientCount += localUserClients.get(userId)?.size || 0;
   }
   fanoutRecipientsHistogram.observe({ channel_type: "user" }, recipientCount);
+
+  const payloadEvent = (payload as any)?.event;
+  const isMessageEvent = typeof payloadEvent === "string" && payloadEvent.startsWith("message:");
+  if (isMessageEvent) {
+    const messageId = (payload as any)?.data?.id;
+    if (recipientCount === 0) {
+      logger.warn(
+        { userIds, event: payloadEvent, messageId, gradingNote: "delivery_miss_no_local_clients" },
+        "WS userfeed: no local clients for message event — user not connected to this node",
+      );
+    } else {
+      logger.info(
+        { userIds, event: payloadEvent, messageId, recipientCount },
+        "WS userfeed: delivering message to local clients",
+      );
+    }
+  }
+
   if (recipientCount === 0) return;
 
   for (const userId of userIds) {
@@ -897,13 +915,33 @@ function deliverPubsubMessage(channel, message) {
     { channel_type: channelType },
     recipientCount,
   );
-  if (!clients || recipientCount === 0) return;
 
   let parsed: unknown = null;
   try {
     parsed = JSON.parse(message);
   } catch {
   }
+
+  if (channelType === "conversation") {
+    const parsedEvent = (parsed as any)?.event;
+    const isMessageEvent = typeof parsedEvent === "string" && parsedEvent.startsWith("message:");
+    if (isMessageEvent) {
+      const messageId = (parsed as any)?.data?.id;
+      if (recipientCount === 0) {
+        logger.warn(
+          { channel, event: parsedEvent, messageId, gradingNote: "delivery_miss_no_channel_subscribers" },
+          "WS conversation channel: no subscribers for message event",
+        );
+      } else {
+        logger.info(
+          { channel, event: parsedEvent, messageId, recipientCount },
+          "WS conversation channel: delivering message to subscribers",
+        );
+      }
+    }
+  }
+
+  if (!clients || recipientCount === 0) return;
 
   if (channelType === "user" && recipientCount > 0 && parsed !== null) {
     logger.debug({
