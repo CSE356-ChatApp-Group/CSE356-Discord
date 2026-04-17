@@ -20,21 +20,6 @@
           - (deploy_sha | string | length) > 0
         fail_msg: "Pass -e deploy_sha=<git-commit-sha> (GitHub release artifact tag)."
 
-    - name: Clear stale prod deploy lock (optional)
-      when: clear_prod_deploy_lock | default(false) | bool
-      ansible.builtin.command:
-        argv:
-          - ssh
-          - -o
-          - BatchMode=yes
-          - -o
-          - ConnectTimeout=15
-          - "{{ prod_user }}@{{ prod_host }}"
-          - sudo
-          - rm
-          - -rf
-          - /opt/chatapp/.deploy-lock-prod
-
     - name: Run deploy-prod.sh
       ansible.builtin.command:
         argv:

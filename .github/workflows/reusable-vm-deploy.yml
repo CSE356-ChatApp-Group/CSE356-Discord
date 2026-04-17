@@ -193,6 +193,18 @@ jobs:
           PROD_USER: ${{ inputs.user }}
         run: ./.nginx-audit/prod-nginx-audit.sh
 
+      # Rollback jobs checkout an old SHA; do not rely on that tree's Ansible for this.
+      - name: Clear stale prod deploy lock on VM
+        if: ${{ inputs.environment == 'production' && inputs.clear_prod_deploy_lock }}
+        shell: bash
+        env:
+          PROD_HOST: ${{ inputs.host }}
+          PROD_USER: ${{ inputs.user }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" \
+            'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
+
       - name: Deploy via Ansible
         shell: bash
         env:
@@ -202,7 +214,6 @@ jobs:
           DEPLOY_USER: ${{ inputs.user }}
           LOCAL_ARTIFACT_PATH: ${{ steps.artifact.outputs.local_path }}
           CHATAPP_INSTANCES_INPUT: ${{ inputs.chatapp_instances }}
-          CLEAR_PROD_DEPLOY_LOCK: ${{ inputs.clear_prod_deploy_lock }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           DEPLOY_ENV: ${{ inputs.environment }}
         run: |
@@ -237,10 +248,6 @@ jobs:
           if [[ "$DEPLOY_ENV" == "production" ]] && [[ -n "${CHATAPP_INSTANCES_INPUT:-}" ]]; then
             EXTRA_ARGS+=(-e "chatapp_instances=${CHATAPP_INSTANCES_INPUT}")
           fi
-          if [[ "$DEPLOY_ENV" == "production" ]] && [[ "${CLEAR_PROD_DEPLOY_LOCK:-false}" == "true" ]]; then
-            EXTRA_ARGS+=(-e "clear_prod_deploy_lock=true")
-          fi
-
           cd "${GITHUB_WORKSPACE}"
 
           if [[ "${{ inputs.auto_confirm }}" == "true" ]] && [[ "$DEPLOY_ENV" == "production" ]]; then
