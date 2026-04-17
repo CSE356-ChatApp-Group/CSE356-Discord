@@ -4,6 +4,7 @@ const { withTransaction } = require('../db/pool');
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
 const { wsReplayQueryTotal, wsReplayQueryDurationMs } = require('../utils/metrics');
+const { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } = require('./sqlFragments');
 
 // Reconnect replay is our safety net for brief WS gaps. Keep the default large
 // enough that a short disconnect under grader bursts does not silently skip a
@@ -187,8 +188,8 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
            ORDER BY m.created_at ASC, m.id ASC
            LIMIT $4
          )
-         SELECT m.*,
-                CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+         SELECT ${MESSAGE_SELECT_FIELDS},
+                ${MESSAGE_AUTHOR_JSON},
                 COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments,
                 accessible.created_at AS replay_created_at
          FROM accessible

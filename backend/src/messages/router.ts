@@ -63,6 +63,11 @@ const {
   getConversationFanoutTargets,
 } = require('./conversationFanoutTargets');
 const { publishUserFeedTargets, splitUserTargets } = require('../websocket/userFeed');
+const {
+  MESSAGE_RETURNING_FIELDS,
+  MESSAGE_SELECT_FIELDS,
+  MESSAGE_AUTHOR_JSON,
+} = require('./sqlFragments');
 
 const router = express.Router();
 router.use(authenticate);
@@ -304,8 +309,8 @@ async function incrementChannelMessageCount(channelId) {
 
 async function loadHydratedMessageById(messageId) {
   const { rows } = await query(
-    `SELECT m.*,
-            CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+    `SELECT ${MESSAGE_SELECT_FIELDS},
+            ${MESSAGE_AUTHOR_JSON},
             COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
      FROM messages m
      LEFT JOIN users u ON u.id = m.author_id
@@ -541,8 +546,8 @@ router.get('/',
                    msg.*
             FROM access
             LEFT JOIN LATERAL (
-              SELECT m.*,
-                     CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+              SELECT ${MESSAGE_SELECT_FIELDS},
+                     ${MESSAGE_AUTHOR_JSON},
                      COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
               FROM messages m
               LEFT JOIN users u ON u.id = m.author_id
@@ -623,8 +628,8 @@ router.get('/',
                    msg.*
             FROM access
             LEFT JOIN LATERAL (
-              SELECT m.*,
-                     CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+              SELECT ${MESSAGE_SELECT_FIELDS},
+                     ${MESSAGE_AUTHOR_JSON},
                      COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
               FROM messages m
               LEFT JOIN users u ON u.id = m.author_id
@@ -713,8 +718,8 @@ router.get('/',
                msg.*
         FROM access
         LEFT JOIN LATERAL (
-          SELECT m.*,
-                 CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+          SELECT ${MESSAGE_SELECT_FIELDS},
+                 ${MESSAGE_AUTHOR_JSON},
                  COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
           FROM   messages m
           LEFT JOIN users u ON u.id = m.author_id
@@ -804,8 +809,8 @@ router.get('/context/:messageId',
            UNION ALL
            SELECT id, created_at FROM after_ids
          )
-         SELECT m.*,
-                CASE WHEN u.id IS NULL THEN NULL ELSE row_to_json(u.*) END AS author,
+         SELECT ${MESSAGE_SELECT_FIELDS},
+                ${MESSAGE_AUTHOR_JSON},
                 COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments,
                 (SELECT COUNT(*) FROM before_ids)::int AS before_count,
                 (SELECT COUNT(*) FROM after_ids)::int AS after_count
@@ -1013,7 +1018,7 @@ router.post('/',
              ), ins AS (
                INSERT INTO messages (channel_id, author_id, content, thread_id)
                SELECT $1, $2, $3, $4 FROM access
-               RETURNING *
+               RETURNING ${MESSAGE_RETURNING_FIELDS}
              ), ch_last AS (
                UPDATE channels ch
                SET last_message_id = ins.id,
@@ -1028,9 +1033,18 @@ router.post('/',
                (SELECT EXISTS(SELECT 1 FROM users WHERE id = $2)) AS author_exists,
                (SELECT COUNT(*) FROM access)::int             AS has_access,
                (SELECT community_id FROM access LIMIT 1)      AS community_id,
-               ins.*,
-               CASE WHEN u.id IS NULL THEN NULL
-                    ELSE row_to_json(u.*) END                 AS author,
+               ins.id,
+               ins.channel_id,
+               ins.conversation_id,
+               ins.author_id,
+               ins.content,
+               ins.type,
+               ins.thread_id,
+               ins.edited_at,
+               ins.deleted_at,
+               ins.created_at,
+               ins.updated_at,
+               ${MESSAGE_AUTHOR_JSON},
                '[]'::json                                     AS attachments
              FROM   (VALUES (1)) dummy
              LEFT   JOIN ins ON TRUE
@@ -1047,7 +1061,7 @@ router.post('/',
              ), ins AS (
                INSERT INTO messages (conversation_id, author_id, content, thread_id)
                SELECT $1, $2, $3, $4 FROM access
-               RETURNING *
+               RETURNING ${MESSAGE_RETURNING_FIELDS}
              ), conv_last AS (
                UPDATE conversations conv
                SET last_message_id = ins.id,
@@ -1062,9 +1076,18 @@ router.post('/',
              SELECT
                (SELECT EXISTS(SELECT 1 FROM users WHERE id = $2)) AS author_exists,
                (SELECT COUNT(*) FROM access)::int             AS has_access,
-               ins.*,
-               CASE WHEN u.id IS NULL THEN NULL
-                    ELSE row_to_json(u.*) END                 AS author,
+               ins.id,
+               ins.channel_id,
+               ins.conversation_id,
+               ins.author_id,
+               ins.content,
+               ins.type,
+               ins.thread_id,
+               ins.edited_at,
+               ins.deleted_at,
+               ins.created_at,
+               ins.updated_at,
+               ${MESSAGE_AUTHOR_JSON},
                '[]'::json                                     AS attachments
              FROM   (VALUES (1)) dummy
              LEFT   JOIN ins ON TRUE
@@ -1275,7 +1298,7 @@ router.patch('/:id',
         `UPDATE messages
          SET content=$1, edited_at=NOW(), updated_at=NOW()
          WHERE id=$2 AND author_id=$3 AND deleted_at IS NULL
-         RETURNING *`,
+         RETURNING ${MESSAGE_RETURNING_FIELDS}`,
         [req.body.content, req.params.id, req.user.id]
       );
       if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });

@@ -29,6 +29,48 @@ const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 const router = express.Router();
 router.use(authenticate);
 
+const CHANNEL_RETURNING_FIELDS = `
+  id,
+  community_id,
+  name,
+  description,
+  is_private,
+  type,
+  position,
+  created_by,
+  created_at,
+  updated_at,
+  last_message_id,
+  last_message_author_id,
+  last_message_at`;
+
+const CHANNEL_SELECT_FIELDS = `
+  ch.id,
+  ch.community_id,
+  ch.name,
+  ch.description,
+  ch.is_private,
+  ch.type,
+  ch.position,
+  ch.created_by,
+  ch.created_at,
+  ch.updated_at,
+  ch.last_message_id,
+  ch.last_message_author_id,
+  ch.last_message_at`;
+
+const VISIBLE_CHANNEL_FIELDS = `
+  vc.id,
+  vc.community_id,
+  vc.name,
+  vc.description,
+  vc.is_private,
+  vc.type,
+  vc.position,
+  vc.created_by,
+  vc.created_at,
+  vc.updated_at`;
+
 function v(req, res) {
   const e = validationResult(req);
   if (!e.isEmpty()) { res.status(400).json({ errors: e.array() }); return false; }
@@ -250,7 +292,7 @@ router.get('/',
              ) AS is_member
            )
            SELECT membership.is_member,
-                  vc.*,
+                  ${VISIBLE_CHANNEL_FIELDS},
                   vc.can_access,
                   CASE WHEN vc.can_access THEN vc.last_message_id ELSE NULL END AS last_message_id,
                   CASE WHEN vc.can_access THEN vc.last_message_author_id ELSE NULL END AS last_message_author_id,
@@ -259,7 +301,7 @@ router.get('/',
                   CASE WHEN vc.can_access THEN rs.last_read_at ELSE NULL END AS my_last_read_at
            FROM membership
            LEFT JOIN LATERAL (
-             SELECT ch.*,
+             SELECT ${CHANNEL_SELECT_FIELDS},
                     (ch.is_private = FALSE
                      OR EXISTS (
                        SELECT 1 FROM channel_members cm
@@ -285,19 +327,19 @@ router.get('/',
         const accessibleRows = rows.filter(ch => ch.id && ch.can_access);
         if (accessibleRows.length > 0) {
           try {
-            const pipeline = redis.pipeline();
-            for (const ch of accessibleRows) {
-              pipeline.get(`channel:msg_count:${ch.id}`);
-              pipeline.get(`user:last_read_count:${ch.id}:${userId}`);
-            }
-            const results = await pipeline.exec();
+            const countKeys = accessibleRows.map((ch) => `channel:msg_count:${ch.id}`);
+            const readKeys = accessibleRows.map((ch) => `user:last_read_count:${ch.id}:${userId}`);
+            const [rawCounts, rawReads] = await Promise.all([
+              redis.mget(...countKeys),
+              redis.mget(...readKeys),
+            ]);
 
             const missingChannels = [];
             for (let i = 0; i < accessibleRows.length; i++) {
               const ch = accessibleRows[i];
-              const [errCount, rawCount] = results[i * 2];
-              const [errRead, rawRead]   = results[i * 2 + 1];
-              if (errCount || errRead || rawCount === null || rawRead === null) {
+              const rawCount = rawCounts[i];
+              const rawRead = rawReads[i];
+              if (rawCount === null || rawRead === null) {
                 missingChannels.push(ch);
               } else {
                 ch.unread_message_count = Math.max(0, parseInt(rawCount, 10) - parseInt(rawRead, 10));
@@ -367,7 +409,7 @@ router.post('/',
       await client.query('BEGIN');
       const { rows } = await client.query(
         `INSERT INTO channels (community_id, name, is_private, description, created_by)
-         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+         VALUES ($1,$2,$3,$4,$5) RETURNING ${CHANNEL_RETURNING_FIELDS}`,
         [communityId, name.trim(), isPrivate, description || null, req.user.id]
       );
       const channel = rows[0];
@@ -612,7 +654,7 @@ router.patch('/:id',
         `UPDATE channels
          SET ${updates.join(', ')}, updated_at = NOW()
          WHERE id = $${params.length}
-         RETURNING *`,
+         RETURNING ${CHANNEL_RETURNING_FIELDS}`,
         params
       );
       const updatedChannel = rows[0];

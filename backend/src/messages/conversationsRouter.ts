@@ -26,6 +26,10 @@ const router = express.Router();
 router.use(authenticate);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CONVERSATION_FIELDS =
+  'c.id, c.name, c.created_by, c.created_at, c.updated_at, c.is_group, c.last_message_id, c.last_message_author_id, c.last_message_at';
+const CONVERSATION_LIST_FIELDS =
+  'c.id, c.name, c.created_by, c.created_at, c.updated_at, c.is_group';
 
 function publishConversationEvents(targets, event, data) {
   const uniqueTargets = [...new Set(targets.filter(Boolean))];
@@ -80,7 +84,7 @@ async function requireActiveConversationParticipant(client, conversationId, user
 
 async function loadConversationWithParticipants(client, conversationId) {
   const { rows } = await client.query(
-    `SELECT c.*,
+    `SELECT ${CONVERSATION_FIELDS},
             json_agg(
               json_build_object(
                 'id', u.id,
@@ -304,7 +308,7 @@ router.get('/', async (req, res, next) => {
   recordEndpointListCache('conversations', 'miss');
   const promise: Promise<{ conversations: any[] }> = (async () => {
     const { rows } = await query(
-      `SELECT c.*,
+      `SELECT ${CONVERSATION_LIST_FIELDS},
               COALESCE(m_denorm.id, lm.id) AS last_message_id,
               COALESCE(m_denorm.author_id, lm.author_id) AS last_message_author_id,
               COALESCE(m_denorm.created_at, lm.created_at) AS last_message_at,
@@ -400,7 +404,7 @@ router.post('/',
       if (!isGroup) {
         const otherId = allIds.find(id => id !== req.user.id);
         const { rows } = await client.query(
-          `SELECT c.* FROM conversations c
+          `SELECT ${CONVERSATION_FIELDS} FROM conversations c
            JOIN conversation_participants cp1 ON cp1.conversation_id = c.id AND cp1.user_id = $1
            JOIN conversation_participants cp2 ON cp2.conversation_id = c.id AND cp2.user_id = $2
            WHERE c.name IS NULL
@@ -420,7 +424,9 @@ router.post('/',
       }
 
       const { rows: [conv] } = await client.query(
-        `INSERT INTO conversations (name, created_by, is_group) VALUES ($1, $2, $3) RETURNING *`,
+        `INSERT INTO conversations (name, created_by, is_group)
+         VALUES ($1, $2, $3)
+         RETURNING id, name, created_by, created_at, updated_at, is_group, last_message_id, last_message_author_id, last_message_at`,
         [req.body.name || null, req.user.id, isGroup]
       );
 
@@ -459,7 +465,7 @@ router.post('/',
 router.get('/:id', async (req, res, next) => {
   try {
     const { rows } = await query(
-      `SELECT c.*,
+      `SELECT ${CONVERSATION_FIELDS},
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name))
                 AS participants
        FROM conversations c

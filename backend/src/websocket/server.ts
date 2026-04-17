@@ -837,6 +837,13 @@ function deliverUserFeedMessage(channel, routed) {
   const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
   if (!userIds.length) return;
   const internalCommand = extractInternalUserFeedCommand(payload);
+  const internalSubscribeChannels = internalCommand?.kind === "subscribe_channels"
+    ? [...new Set(
+      (Array.isArray(internalCommand.channels) ? internalCommand.channels : [])
+        .filter((value) => typeof value === "string")
+        .filter((value) => parseChannelKey(value)),
+    )]
+    : null;
 
   let recipientCount = 0;
   for (const userId of userIds) {
@@ -851,18 +858,13 @@ function deliverUserFeedMessage(channel, routed) {
     const logicalChannel = `user:${userId}`;
     const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
     clients.forEach((ws) => {
-      if (internalCommand?.kind === "subscribe_channels") {
-        const channels = [...new Set(
-          (Array.isArray(internalCommand.channels) ? internalCommand.channels : [])
-            .filter((value) => typeof value === "string")
-            .filter((value) => parseChannelKey(value)),
-        )];
-        if (!channels.length) return;
+      if (internalSubscribeChannels) {
+        if (!internalSubscribeChannels.length) return;
         Promise.allSettled(
-          channels.map((targetChannel) => subscribeClient(ws, targetChannel)),
+          internalSubscribeChannels.map((targetChannel) => subscribeClient(ws, targetChannel)),
         ).catch((err) => {
           logger.warn(
-            { err, userId, channelCount: channels.length },
+            { err, userId, channelCount: internalSubscribeChannels.length },
             "WS internal auto-subscribe command failed",
           );
         });

@@ -41,7 +41,7 @@ function validate(req, res) {
 /** Middleware: load caller's community membership into req.membership */
 async function loadMembership(req, res, next) {
   const { rows } = await query(
-    'SELECT * FROM community_members WHERE community_id=$1 AND user_id=$2',
+    'SELECT role FROM community_members WHERE community_id=$1 AND user_id=$2',
     [req.params.id, req.user.id]
   );
   req.membership = rows[0] || null;
@@ -63,6 +63,48 @@ const COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT =
     : 4;
 const PUBLIC_COMMUNITIES_VERSION_KEY = 'communities:list:public_version';
 let communitiesUnreadQueriesInFlight = 0;
+
+const COMMUNITY_RETURNING_FIELDS = `
+  id,
+  slug,
+  name,
+  description,
+  icon_url,
+  owner_id,
+  is_public,
+  invite_code,
+  created_at,
+  updated_at`;
+
+const COMMUNITY_SELECT_FIELDS = `
+  c.id,
+  c.slug,
+  c.name,
+  c.description,
+  c.icon_url,
+  c.owner_id,
+  c.is_public,
+  c.invite_code,
+  c.created_at,
+  c.updated_at`;
+
+const COMMUNITY_DETAIL_CHANNEL_JSON = `
+  json_build_object(
+    'id', ch.id,
+    'community_id', ch.community_id,
+    'name', ch.name,
+    'description', ch.description,
+    'is_private', ch.is_private,
+    'type', ch.type,
+    'position', ch.position,
+    'created_by', ch.created_by,
+    'created_at', ch.created_at,
+    'updated_at', ch.updated_at,
+    'last_message_id', ch.last_message_id,
+    'last_message_author_id', ch.last_message_author_id,
+    'last_message_at', ch.last_message_at
+  )
+  ORDER BY ch.position`;
 
 function communitiesCacheKey(userId, publicVersion = '0') {
   return `communities:list:${userId}:v${publicVersion}`;
@@ -116,7 +158,16 @@ async function cleanupCommunityUnreadCounterKeys(communityId) {
 /** Shared list body (full list + keyset pages use the same SELECT list). */
 const COMMUNITIES_LIST_BASE_CORE = `
        WITH visible_communities AS (
-         SELECT c.*, cm.role AS my_role
+         SELECT c.id,
+                c.slug,
+                c.name,
+                c.description,
+                c.icon_url,
+                c.is_public,
+                c.owner_id,
+                c.created_at,
+                c.updated_at,
+                cm.role AS my_role
          FROM communities c
          LEFT JOIN community_members cm
            ON cm.community_id = c.id
@@ -358,7 +409,7 @@ router.post('/',
       }
       const { rows } = await client.query(
         `INSERT INTO communities (slug, name, description, is_public, owner_id)
-         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+         VALUES ($1,$2,$3,$4,$5) RETURNING ${COMMUNITY_RETURNING_FIELDS}`,
         [slug, name, description || null, isPublic, req.user.id]
       );
       const community = rows[0];
@@ -398,10 +449,10 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
     const { rows } = await query(
-      `SELECT c.*,
+      `SELECT ${COMMUNITY_SELECT_FIELDS},
               (SELECT COUNT(*) FROM community_members WHERE community_id = c.id) AS member_count,
               json_agg(
-                ch.* ORDER BY ch.position
+                ${COMMUNITY_DETAIL_CHANNEL_JSON}
               ) FILTER (
                 WHERE ch.id IS NOT NULL
                   AND (
@@ -471,7 +522,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
     const { rows: [community] } = await query(
-      'SELECT * FROM communities WHERE id=$1', [req.params.id]
+      'SELECT id, is_public FROM communities WHERE id=$1', [req.params.id]
     );
     if (!community) return res.status(404).json({ error: 'Community not found' });
 

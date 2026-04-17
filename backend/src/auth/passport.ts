@@ -19,6 +19,7 @@ const GitHubStrategy   = require('passport-github2').Strategy;
 const { query, getClient } = require('../db/pool');
 const { comparePassword, hashPassword, getBcryptRounds, getRoundsFromHash } = require('./passwords');
 const { signOAuthPending, verifyOAuthLinkIntent } = require('./oauthTokens');
+const AUTH_USER_SELECT = 'id, username, email, display_name, avatar_url, updated_at';
 
 // ── Local ──────────────────────────────────────────────────────────────────────
 // The 'email' field also accepts a plain username so that accounts registered
@@ -70,7 +71,10 @@ async function processOAuthLogin(provider, profileId, email, displayName, stateT
 
     // Existing linked provider login: return mapped user.
     let { rows } = await client.query(
-      'SELECT u.* FROM users u JOIN oauth_accounts oa ON oa.user_id = u.id WHERE oa.provider=$1 AND oa.provider_id=$2',
+      `SELECT u.${AUTH_USER_SELECT.split(', ').join(', u.')}
+         FROM users u
+         JOIN oauth_accounts oa ON oa.user_id = u.id
+        WHERE oa.provider=$1 AND oa.provider_id=$2`,
       [provider, profileId]
     );
 
@@ -95,7 +99,12 @@ async function processOAuthLogin(provider, profileId, email, displayName, stateT
         return done(null, false, { message: 'Invalid link intent payload' });
       }
 
-      const owner = await client.query('SELECT * FROM users WHERE id = $1 AND is_active = TRUE', [linkUserId]);
+      const owner = await client.query(
+        `SELECT ${AUTH_USER_SELECT}
+           FROM users
+          WHERE id = $1 AND is_active = TRUE`,
+        [linkUserId],
+      );
       if (!owner.rows.length) {
         await client.query('ROLLBACK');
         return done(null, false, { message: 'Link target account not found' });
@@ -134,7 +143,10 @@ async function processOAuthLogin(provider, profileId, email, displayName, stateT
     if (err?.code === '23505') {
       try {
         const linked = await client.query(
-          'SELECT u.* FROM users u JOIN oauth_accounts oa ON oa.user_id = u.id WHERE oa.provider=$1 AND oa.provider_id=$2',
+          `SELECT u.${AUTH_USER_SELECT.split(', ').join(', u.')}
+             FROM users u
+             JOIN oauth_accounts oa ON oa.user_id = u.id
+            WHERE oa.provider=$1 AND oa.provider_id=$2`,
           [provider, profileId]
         );
         if (linked.rows.length) {

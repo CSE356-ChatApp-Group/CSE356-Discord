@@ -30,6 +30,8 @@ const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLi
 
 const router = express.Router();
 const REFRESH_COOKIE = 'refreshToken';
+const AUTH_USER_SELECT = 'id, username, email, display_name, avatar_url, updated_at';
+const AUTH_USER_SELECT_WITH_PASSWORD = `${AUTH_USER_SELECT}, password_hash`;
 
 function parseBooleanEnv(value) {
   if (typeof value !== 'string') return null;
@@ -314,7 +316,10 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
     await client.query('BEGIN');
 
     const existing = await client.query(
-      'SELECT u.* FROM users u JOIN oauth_accounts oa ON oa.user_id = u.id WHERE oa.provider=$1 AND oa.provider_id=$2',
+      `SELECT u.${AUTH_USER_SELECT.split(', ').join(', u.')}
+         FROM users u
+         JOIN oauth_accounts oa ON oa.user_id = u.id
+        WHERE oa.provider=$1 AND oa.provider_id=$2`,
       [provider, providerId]
     );
     if (existing.rows.length) {
@@ -331,7 +336,12 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
         return { error: 'Invalid link intent token' };
       }
 
-      const target = await client.query('SELECT * FROM users WHERE id = $1 AND is_active = TRUE', [payload.userId]);
+      const target = await client.query(
+        `SELECT ${AUTH_USER_SELECT}
+           FROM users
+          WHERE id = $1 AND is_active = TRUE`,
+        [payload.userId],
+      );
       if (!target.rows.length) {
         await client.query('ROLLBACK');
         return { error: 'Link target account not found' };
@@ -363,7 +373,10 @@ async function resolveOAuthAccount(provider, providerId, email, displayName, lin
     await client.query('ROLLBACK');
     if (err.code === '23505') {
       const linked = await client.query(
-        'SELECT u.* FROM users u JOIN oauth_accounts oa ON oa.user_id = u.id WHERE oa.provider=$1 AND oa.provider_id=$2',
+        `SELECT u.${AUTH_USER_SELECT.split(', ').join(', u.')}
+           FROM users u
+           JOIN oauth_accounts oa ON oa.user_id = u.id
+          WHERE oa.provider=$1 AND oa.provider_id=$2`,
         [provider, providerId]
       );
       if (linked.rows.length) {
@@ -402,7 +415,7 @@ router.post('/register',
         `INSERT INTO users (email, username, password_hash, display_name)
          VALUES ($1,$2,$3,$4)
          ON CONFLICT DO NOTHING
-         RETURNING *`,
+         RETURNING ${AUTH_USER_SELECT}`,
         [normalizedEmail, normalizedUsername, hash, displayName || normalizedUsername]
       );
       if (!rows.length) {
@@ -519,7 +532,10 @@ router.post('/oauth/complete-create',
       await client.query('BEGIN');
 
       const existingProvider = await client.query(
-        'SELECT u.* FROM users u JOIN oauth_accounts oa ON oa.user_id = u.id WHERE oa.provider=$1 AND oa.provider_id=$2',
+        `SELECT u.${AUTH_USER_SELECT.split(', ').join(', u.')}
+           FROM users u
+           JOIN oauth_accounts oa ON oa.user_id = u.id
+          WHERE oa.provider=$1 AND oa.provider_id=$2`,
         [pending.provider, pending.providerId]
       );
       if (existingProvider.rows.length) {
@@ -537,7 +553,7 @@ router.post('/oauth/complete-create',
       const created = await client.query(
         `INSERT INTO users (email, username, display_name, password_hash)
          VALUES ($1, $2, $3, $4)
-         RETURNING *`,
+         RETURNING ${AUTH_USER_SELECT}`,
         [email, username, displayName, passwordHash]
       );
 
@@ -583,7 +599,10 @@ router.post('/oauth/complete-connect',
       await client.query('BEGIN');
 
       const existingProvider = await client.query(
-        'SELECT u.* FROM users u JOIN oauth_accounts oa ON oa.user_id = u.id WHERE oa.provider=$1 AND oa.provider_id=$2',
+        `SELECT u.${AUTH_USER_SELECT.split(', ').join(', u.')}
+           FROM users u
+           JOIN oauth_accounts oa ON oa.user_id = u.id
+          WHERE oa.provider=$1 AND oa.provider_id=$2`,
         [pending.provider, pending.providerId]
       );
       if (existingProvider.rows.length) {
@@ -591,7 +610,12 @@ router.post('/oauth/complete-connect',
         return res.json(issueTokens(res, existingProvider.rows[0]));
       }
 
-      const account = await client.query('SELECT * FROM users WHERE email=$1 AND is_active=TRUE', [req.body.email]);
+      const account = await client.query(
+        `SELECT ${AUTH_USER_SELECT_WITH_PASSWORD}
+           FROM users
+          WHERE email=$1 AND is_active=TRUE`,
+        [req.body.email],
+      );
       if (!account.rows.length) {
         await client.query('ROLLBACK');
         return res.status(401).json({ error: 'Invalid credentials for existing account' });

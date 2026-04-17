@@ -28,6 +28,18 @@ const router = express.Router();
 router.use(authenticate);
 
 const MAX_IMAGES_PER_MESSAGE = 4;
+const ATTACHMENT_RETURNING_FIELDS = `
+  id,
+  message_id,
+  uploader_id,
+  type,
+  filename,
+  content_type,
+  size_bytes,
+  storage_key,
+  width,
+  height,
+  created_at`;
 
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
@@ -120,7 +132,7 @@ router.post('/',
 
       const { rows } = await query(
         `INSERT INTO attachments (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
-         VALUES ($1,$2,'image',$3,$4,$5,$6,$7,$8) RETURNING *`,
+         VALUES ($1,$2,'image',$3,$4,$5,$6,$7,$8) RETURNING ${ATTACHMENT_RETURNING_FIELDS}`,
         [messageId, req.user.id, filename, contentType, sizeBytes, storageKey, width || null, height || null]
       );
 

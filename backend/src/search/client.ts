@@ -90,6 +90,12 @@ const FROM_CLAUSE = `
   JOIN users u ON u.id = m.author_id
   LEFT JOIN channels ch ON ch.id = m.channel_id`;
 
+const FTS_FROM_CLAUSE = `
+  FROM messages m
+  CROSS JOIN search_query sq
+  JOIN users u ON u.id = m.author_id
+  LEFT JOIN channels ch ON ch.id = m.channel_id`;
+
 function buildScopedAccessParts(params: any[], opts: Record<string, any>) {
   if (opts.channelId) {
     const channelId = p(params, opts.channelId);
@@ -293,9 +299,11 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   const offset = Number(opts.offset) || 0;
   const limitPh = p(params, limit);
   const offsetPh = p(params, offset);
+  const ctes = [`search_query AS (SELECT websearch_to_tsquery('english', $1) AS q)`];
+  if (scope) ctes.push(scope.cte.trim());
 
   const sql = `
-    ${scope ? `WITH ${scope.cte}` : ''}
+    WITH ${ctes.join(',\n')}
     SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
       search_rows.*
     ${scope ? scope.fromClause : 'FROM'}
@@ -304,13 +312,13 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
         ts_headline(
           'english',
           coalesce(m.content, ''),
-          websearch_to_tsquery('english', $1),
+          sq.q,
           'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
         ) AS highlight,
-        ts_rank(m.content_tsv, websearch_to_tsquery('english', $1)) AS _rank
-      ${FROM_CLAUSE}
+        ts_rank(m.content_tsv, sq.q) AS _rank
+      ${FTS_FROM_CLAUSE}
       WHERE m.deleted_at IS NULL
-        AND m.content_tsv @@ websearch_to_tsquery('english', $1)
+        AND m.content_tsv @@ sq.q
         ${filters}
       ORDER BY m.created_at DESC
       LIMIT ${limitPh} OFFSET ${offsetPh}
