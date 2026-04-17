@@ -83,7 +83,6 @@ const {
   wsBootstrapListCacheTotal,
   wsBootstrapChannelsHistogram,
 } = require("../utils/metrics");
-const { tracer, context, trace } = require("../utils/tracer");
 
 const wss = new WebSocketServer({ noServer: true });
 const IDLE_TTL_SECONDS = 60;
@@ -363,7 +362,7 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
       ws,
       `user:${userId}`,
       payload,
-      JSON.stringify(payload),
+      null,
       { bypassLogicalDuplicateSuppression: true },
     );
   }
@@ -466,7 +465,6 @@ async function recomputeUserPresence(userId) {
 
   const stateByConn = [];
   const staleConnIds = [];
-  let idleSpan = null;
   for (let i = 0; i < connIds.length; i += 1) {
     const statusRes = results[i * 3];
     const activityRes = results[i * 3 + 1];
@@ -493,12 +491,6 @@ async function recomputeUserPresence(userId) {
           userId,
           connectionId: connId,
         });
-        // Start a root span that will parent the fanout spans below
-        if (!idleSpan) {
-          idleSpan = tracer.startSpan("presence.idle_transition", {
-            attributes: { userId, connectionId: connId },
-          });
-        }
       }
       stateByConn.push(isActive ? "online" : "idle");
     }
@@ -519,7 +511,6 @@ async function recomputeUserPresence(userId) {
     await redis.srem(connectedUsersKey(), userId);
     await presenceService.setPresence(userId, "offline");
     lastPresenceComputedAt.delete(userId); // no longer connected; free the Map entry
-    idleSpan?.end();
     return;
   }
 
@@ -528,18 +519,7 @@ async function recomputeUserPresence(userId) {
     await presenceService.setPresence(userId, "away", undefined);
     return;
   } else {
-    if (idleSpan) {
-      idleSpan.setAttribute("resolved_status", aggregateStatus);
-      // Run setPresence inside the span's context so fanout spans are children
-      const ctx = trace.setSpan(context.active(), idleSpan);
-      await context.with(ctx, () =>
-        presenceService.setPresence(userId, aggregateStatus, null),
-      );
-      idleSpan.end();
-    } else {
-      // online
-      await presenceService.setPresence(userId, aggregateStatus, null);
-    }
+    await presenceService.setPresence(userId, aggregateStatus, null);
   }
 }
 
@@ -577,6 +557,7 @@ const WS_SOCKET_MESSAGE_DEDUPE_MAX = 512;
 const redisSubscribed = new Set();
 const redisSubscribeInFlight = new Map();
 const USER_FEED_SHARD_CHANNELS = allUserFeedRedisChannels();
+const USER_FEED_SHARD_CHANNEL_SET = new Set(USER_FEED_SHARD_CHANNELS);
 let wsStartupPromise: Promise<void> | null = null;
 
 // ── Redis subscriber listener ──────────────────────────────────────────────────
@@ -679,23 +660,8 @@ function extractInternalUserFeedCommand(payload) {
   return internal as { kind: string; channels?: unknown };
 }
 
-function sendPayloadToSocket(
-  ws,
-  logicalChannel,
-  parsed,
-  rawMessage,
-  { bypassLogicalDuplicateSuppression = false } = {},
-) {
-  if (ws.readyState !== WebSocket.OPEN) return false;
-  if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
-    return false;
-  }
-
+function prepareSocketPayload(logicalChannel, parsed, rawMessage) {
   const dedupeKey = socketMessageDedupeKey(parsed);
-  if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
-    return false;
-  }
-
   let payloadEventName;
   let skipDropForBackpressure = false;
   let outbound = rawMessage;
@@ -713,6 +679,31 @@ function sendPayloadToSocket(
       }
     }
     outbound = JSON.stringify({ ...parsed, channel: logicalChannel });
+  }
+
+  return { dedupeKey, outbound, payloadEventName, skipDropForBackpressure };
+}
+
+function sendPayloadToSocket(
+  ws,
+  logicalChannel,
+  parsed,
+  rawMessage,
+  { bypassLogicalDuplicateSuppression = false, preparedPayload = null } = {},
+) {
+  if (ws.readyState !== WebSocket.OPEN) return false;
+  if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
+    return false;
+  }
+
+  const {
+    dedupeKey,
+    outbound,
+    payloadEventName,
+    skipDropForBackpressure,
+  } = preparedPayload || prepareSocketPayload(logicalChannel, parsed, rawMessage);
+  if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
+    return false;
   }
 
   const buffered = (ws as any).bufferedAmount ?? 0;
@@ -858,6 +849,7 @@ function deliverUserFeedMessage(channel, routed) {
     const clients = localUserClients.get(userId);
     if (!clients || clients.size === 0) continue;
     const logicalChannel = `user:${userId}`;
+    const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
     clients.forEach((ws) => {
       if (internalCommand?.kind === "subscribe_channels") {
         const channels = [...new Set(
@@ -877,21 +869,22 @@ function deliverUserFeedMessage(channel, routed) {
         return;
       }
 
-      sendPayloadToSocket(ws, logicalChannel, payload, JSON.stringify(payload));
+      sendPayloadToSocket(ws, logicalChannel, payload, null, { preparedPayload });
     });
   }
 }
 
 function deliverPubsubMessage(channel, message) {
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(message);
-  } catch {
-    // non-JSON payload — deliver raw string below
-  }
-
-  if (isUserFeedEnvelope(parsed)) {
-    deliverUserFeedMessage(channel, parsed);
+  if (USER_FEED_SHARD_CHANNEL_SET.has(channel)) {
+    let routed: unknown = null;
+    try {
+      routed = JSON.parse(message);
+    } catch {
+      return;
+    }
+    if (isUserFeedEnvelope(routed)) {
+      deliverUserFeedMessage(channel, routed);
+    }
     return;
   }
 
@@ -902,6 +895,13 @@ function deliverPubsubMessage(channel, message) {
     { channel_type: channelType },
     recipientCount,
   );
+  if (!clients || recipientCount === 0) return;
+
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+  }
 
   if (channelType === "user" && recipientCount > 0 && parsed !== null) {
     logger.debug({
@@ -912,10 +912,9 @@ function deliverPubsubMessage(channel, message) {
     });
   }
 
-  if (!clients || recipientCount === 0) return;
-
+  const preparedPayload = prepareSocketPayload(channel, parsed, message);
   clients.forEach((ws) => {
-    sendPayloadToSocket(ws, channel, parsed, message);
+    sendPayloadToSocket(ws, channel, parsed, message, { preparedPayload });
   });
 }
 

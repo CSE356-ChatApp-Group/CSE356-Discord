@@ -28,7 +28,9 @@ passport.use(new LocalStrategy(
   async (emailOrUsername, password, done) => {
     try {
       const { rows } = await query(
-        'SELECT * FROM users WHERE (email = $1 OR username = $1) AND is_active = TRUE',
+        `SELECT id, username, email, display_name, avatar_url, updated_at, password_hash
+         FROM users
+         WHERE (email = $1 OR username = $1) AND is_active = TRUE`,
         [emailOrUsername]
       );
       const user = rows[0];
@@ -175,4 +177,3 @@ if (process.env.GITHUB_CLIENT_ID) {
     await processOAuthLogin('github', profile.id, email, profile.displayName, req.query?.state, done);
   }));
 }
-

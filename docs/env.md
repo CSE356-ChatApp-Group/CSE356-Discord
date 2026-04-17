@@ -52,6 +52,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PORT` | HTTP port |
 | `LOG_LEVEL` | Pino level (production default `info`) |
 | `LOG_SERVICE_NAME` | Service name in logs / tracing |
+| `HTTP_COMPRESSION_ENABLED` | Enable Express gzip compression. Default on outside production, off in production because repo nginx already gzips API responses. |
 | `DATABASE_URL` | Postgres connection string |
 | `REDIS_URL` | Redis connection string |
 | `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Signing secrets |
@@ -120,8 +121,8 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `WS_MESSAGE_REPLAY_MAX_CONCURRENT` | Max replay DB transactions per Node process at once (default **6**, cap **32**). Additional reconnects skip replay (metric `ws_replay_query_total{result="skipped"}`) instead of stacking expensive queries. |
 | `USER_FEED_SHARD_COUNT` | Number of shared Redis **`userfeed:<n>`** channels backing logical user delivery (default `64`, cap `256`). Higher values trade more Redis subscriptions for fewer recipients per shard publish. |
 | **Observability** | |
-| `OTEL_ENABLED` | Set `false` to disable tracing |
-| `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio (production default 0.1) |
+| `OTEL_ENABLED` | Set `true` to enable tracing |
+| `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio when tracing is enabled (production default 0.1) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP endpoint |
 | **Startup** | |
 | `STARTUP_DEPENDENCY_MAX_WAIT_MS` | Max wait for dependencies on boot |

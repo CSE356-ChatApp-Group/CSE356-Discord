@@ -29,13 +29,14 @@ async function publish(channel, payload) {
     payload && typeof payload === 'object' && !Array.isArray(payload) && typeof payload.event === 'string'
       ? payload.event
       : undefined;
+  const serializedPayload = JSON.stringify(payload);
   const rawMax = Number(process.env.REDIS_FANOUT_PUBLISH_MAX_ATTEMPTS || '4');
   const maxAttempts = Number.isFinite(rawMax) ? Math.min(8, Math.max(1, Math.floor(rawMax))) : 4;
 
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      await redis.publish(channel, JSON.stringify(payload));
+      await redis.publish(channel, serializedPayload);
       if (attempt > 1) {
         logger.info(
           { channel, event: eventName, attempt, maxAttempts },

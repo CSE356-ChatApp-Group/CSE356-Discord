@@ -9,9 +9,9 @@
 'use strict';
 
 const express   = require('express');
+const { randomUUID } = require('crypto');
 const { PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { v4: uuidv4 }  = require('uuid');
 const { body, param, validationResult } = require('express-validator');
 
 const { query } = require('../db/pool');
@@ -55,7 +55,7 @@ router.post('/presign',
     try {
       const { filename, contentType, sizeBytes } = req.body;
       const ext = filename.split('.').pop().toLowerCase();
-      const key = `uploads/${req.user.id}/${uuidv4()}.${ext}`;
+      const key = `uploads/${req.user.id}/${randomUUID()}.${ext}`;
 
       // No Metadata: presigned PUT would require matching x-amz-meta-* headers (403 otherwise).
       // Omit ContentLength: SigV4 binds content-length; Node fetch / some proxies send a length

@@ -12,9 +12,9 @@
 'use strict';
 
 const express  = require('express');
+const { randomUUID } = require('crypto');
 const multer   = require('multer');
 const { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
@@ -67,7 +67,7 @@ async function bodyToBuffer(body) {
 }
 
 async function uploadAvatarObject(userId, file) {
-  const storageKey = `avatars/${userId}/${uuidv4()}.${fileExtension(file)}`;
+  const storageKey = `avatars/${userId}/${randomUUID()}.${fileExtension(file)}`;
 
   await s3.send(new PutObjectCommand({
     Bucket: BUCKET,

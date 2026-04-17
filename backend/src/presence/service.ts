@@ -19,7 +19,6 @@ const { query } = require("../db/pool");
 const overload = require("../utils/overload");
 const logger = require("../utils/logger");
 const { presenceFanoutTotal } = require("../utils/metrics");
-const { tracer } = require("../utils/tracer");
 
 const TTL_SECONDS = 90;
 const rawFanoutCacheTtl = Number(process.env.PRESENCE_FANOUT_CACHE_TTL_SECONDS || 120);
@@ -130,10 +129,7 @@ async function syncConnectionStatuses(userId, status) {
 async function setPresence(userId, status, awayMessage) {
   const key = presenceStatusKey(userId);
   const awayKey = awayMessageKey(userId);
-  const [previousStatus, previousAwayMessage] = await Promise.all([
-    redis.get(key),
-    redis.get(awayKey),
-  ]);
+  const [previousStatus, previousAwayMessage] = await redis.mget(key, awayKey);
 
   let nextAwayMessage = null;
 
@@ -141,23 +137,25 @@ async function setPresence(userId, status, awayMessage) {
     if (!previousStatus && !previousAwayMessage) {
       return;
     }
-    await Promise.all([redis.del(key), redis.del(awayKey)]);
+    await redis.del(key, awayKey);
   } else {
-    await redis.set(key, status, "EX", TTL_SECONDS);
+    const pipeline = redis.pipeline();
+    pipeline.set(key, status, "EX", TTL_SECONDS);
     if (status === "away") {
       if (awayMessage === undefined) {
         nextAwayMessage = previousAwayMessage || null;
       } else {
         nextAwayMessage = normalizeAwayMessage(awayMessage);
         if (nextAwayMessage) {
-          await redis.set(awayKey, nextAwayMessage);
+          pipeline.set(awayKey, nextAwayMessage);
         } else {
-          await redis.del(awayKey);
+          pipeline.del(awayKey);
         }
       }
     } else {
-      await redis.del(awayKey);
+      pipeline.del(awayKey);
     }
+    await pipeline.exec();
 
     const unchangedStatus = previousStatus === status;
     const unchangedAwayMessage = status === "away"
@@ -193,39 +191,22 @@ async function setPresence(userId, status, awayMessage) {
       },
     };
 
-    await tracer.startActiveSpan("presence.fanout", async (fanoutSpan) => {
-      fanoutSpan.setAttributes({ userId, status });
-      try {
-        // Publish to the user's personal channel first.
-        await publishUserFeedTargets([userId], payload);
+    // Publish to the user's personal channel first.
+    await publishUserFeedTargets([userId], payload);
 
-        // Reuse a short-lived Redis cache for fanout targets so high-frequency
-        // presence updates do not hammer Postgres as traffic grows.
-        try {
-          const { communityIds, conversationIds } = await getPresenceFanoutTargets(userId);
-          await Promise.allSettled([
-            ...communityIds.map((communityId) => {
-              const communitySpan = tracer.startSpan(
-                "presence.community_fanout",
-                {
-                  attributes: { communityId, userId, status },
-                },
-              );
-              return fanout
-                .publish(`community:${communityId}`, payload)
-                .finally(() => communitySpan.end());
-            }),
-            ...conversationIds.map((conversationId) =>
-              fanout.publish(`conversation:${conversationId}`, payload),
-            ),
-          ]);
-        } catch (err) {
-          logger.debug({ err, userId }, 'Presence secondary fanout lookup failed');
-        }
-      } finally {
-        fanoutSpan.end();
-      }
-    });
+    try {
+      const { communityIds, conversationIds } = await getPresenceFanoutTargets(userId);
+      await Promise.allSettled([
+        ...communityIds.map((communityId) =>
+          fanout.publish(`community:${communityId}`, payload),
+        ),
+        ...conversationIds.map((conversationId) =>
+          fanout.publish(`conversation:${conversationId}`, payload),
+        ),
+      ]);
+    } catch (err) {
+      logger.debug({ err, userId }, 'Presence secondary fanout lookup failed');
+    }
   }
 
   if (!overload.shouldSkipPresenceMirror()) {

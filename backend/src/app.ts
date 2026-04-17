@@ -9,7 +9,6 @@ const crypto       = require('crypto');
 const express      = require('express');
 const helmet       = require('helmet');
 const cors         = require('cors');
-const compression  = require('compression');
 const cookieParser = require('cookie-parser');
 const pinoHttp     = require('pino-http');
 const passport     = require('passport');
@@ -33,6 +32,14 @@ const app = express();
 app.set('trust proxy', 1);
 const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal, pgQueriesPerRequestHistogram, pgBusinessSqlQueriesPerRequestHistogram } = require('./utils/metrics');
 const { run: runDbContext } = require('./utils/requestDbContext');
+
+function parseBooleanEnv(value, fallback) {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
 
 // Optional fail-fast when event-loop lag is extreme (OVERLOAD_HTTP_SHED_ENABLED=true).
 app.use((req, res, next) => {
@@ -88,6 +95,17 @@ function classifyRoute(req) {
   return 'unmatched';
 }
 
+function getRouteLabel(req) {
+  if (req._routeLabel) return req._routeLabel;
+  const routePath = Array.isArray(req.route?.path) ? req.route.path[0] : req.route?.path;
+  const rawPath = (req.originalUrl || req.url || '').split('?')[0];
+  const routeLabel = classifyRoute(req);
+  if (routePath || isQuietPath(rawPath)) {
+    req._routeLabel = routeLabel;
+  }
+  return routeLabel;
+}
+
 // Attribute successful `pool.query` calls to this HTTP request for `pg_queries_per_http_request`.
 app.use((req, res, next) => {
   const pathOnly = (req.path || '').split('?')[0];
@@ -98,8 +116,9 @@ app.use((req, res, next) => {
     const observePgQueries = () => {
       if (observed) return;
       observed = true;
-      pgQueriesPerRequestHistogram.observe({ route: classifyRoute(req) }, store.count);
-      pgBusinessSqlQueriesPerRequestHistogram.observe({ route: classifyRoute(req) }, store.sqlCount);
+      const route = getRouteLabel(req);
+      pgQueriesPerRequestHistogram.observe({ route }, store.count);
+      pgBusinessSqlQueriesPerRequestHistogram.observe({ route }, store.sqlCount);
     };
     res.on('finish', observePgQueries);
     res.on('close', observePgQueries);
@@ -113,7 +132,10 @@ app.use(cors({
   origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
   credentials: true,
 }));
-app.use(compression());
+if (parseBooleanEnv(process.env.HTTP_COMPRESSION_ENABLED, process.env.NODE_ENV !== 'production')) {
+  const compression = require('compression');
+  app.use(compression());
+}
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 app.use(pinoHttp({
@@ -158,7 +180,7 @@ app.use(pinoHttp({
   customProps(req, res) {
     return {
       requestId: req.id,
-      route: classifyRoute(req),
+      route: getRouteLabel(req),
       statusCode: res.statusCode,
       userId: req.user?.id,
     };
@@ -178,7 +200,7 @@ app.use((req, res, next) => {
     const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
     const labels = {
       method: req.method,
-      route: classifyRoute(req),
+      route: getRouteLabel(req),
       status_class: `${Math.floor(res.statusCode / 100)}xx`,
     };
     httpRequestsTotal.inc(labels);
@@ -192,7 +214,7 @@ app.use((req, res, next) => {
   });
   res.on('close', () => {
     if (finished || res.writableEnded) return;
-    httpRequestsAbortedTotal.inc({ method: req.method, route: classifyRoute(req) });
+    httpRequestsAbortedTotal.inc({ method: req.method, route: getRouteLabel(req) });
   });
   next();
 });

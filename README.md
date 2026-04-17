@@ -156,13 +156,13 @@ To avoid slowing down a busy server:
 - successful, fast requests are mostly **suppressed in production**
 - **4xx**, **5xx**, and **slow requests** are still logged
 - sensitive fields like tokens, cookies, and passwords are **redacted**
-- tracing is **sampled** by default in production (`OTEL_TRACES_SAMPLE_RATIO=0.1` unless overridden)
+- tracing is **off by default**; when enabled, production sampling defaults to `OTEL_TRACES_SAMPLE_RATIO=0.1`
 
 Useful env knobs:
 
 ```bash
 LOG_LEVEL=info
-OTEL_ENABLED=true
+OTEL_ENABLED=false
 OTEL_TRACES_SAMPLE_RATIO=0.1
 ```
 
