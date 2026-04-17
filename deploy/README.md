@@ -46,6 +46,8 @@ This document describes the staged deployment pipeline for ChatApp:
 ### Trigger
 Every push to `main` runs full CI.
 
+**Staging Playwright on `main` pushes:** off by default. After auto-deploy to staging, CI still runs the lightweight **API contract** job; the slow **Playwright `@staging` shards** run only when repository variable **`RUN_STAGING_E2E_ON_PUSH`** is set to **`true`** (Settings → Secrets and variables → Actions → Variables). Nightly and manual Playwright coverage uses the **Staging E2E** workflow (`.github/workflows/staging-e2e-nightly.yml`).
+
 ### Steps
 1. Install dependencies (from `package-lock.json`)
 2. TypeScript check

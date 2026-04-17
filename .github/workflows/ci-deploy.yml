@@ -238,8 +238,11 @@ jobs:
       script_path: deploy/deploy-staging.sh
       artifact_name: release-${{ github.sha }}
 
+  # Playwright @staging is slow (~35–45m) and blocks the CI run after staging deploy.
+  # Skipped on push unless repo variable RUN_STAGING_E2E_ON_PUSH=true (Settings → Variables).
+  # Scheduled / manual Playwright: workflow staging-e2e-nightly.yml ("Staging E2E").
   e2e-staging:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.RUN_STAGING_E2E_ON_PUSH == 'true'
     needs:
       - deploy-staging
     runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
