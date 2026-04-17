@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Production nginx + chatapp upstream audit (run from laptop with SSH).
-# Checks: every *active* chatapp@4000+ unit appears in upstream app; nginx -t.
-# Supports dual-worker (4000+4001) and multi-worker (e.g. 4000–4003).
+# Checks: every upstream server line targets an *active* chatapp@ port; nginx -t.
+# Warns (does not fail) when active units exist that are missing from upstream — deploy
+# realigns nginx from CHATAPP_INSTANCES, and pre-audit must not block that repair.
 #
 # Usage:
 #   ./scripts/prod-nginx-audit.sh
@@ -66,16 +67,7 @@ if [[ -n "$DUP" ]]; then
   exit 1
 fi
 
-# Every active Node worker must be listed in upstream (steady state after deploy).
-for p in "${ACTIVE_PORTS[@]}"; do
-  if ! echo "$PORTS_UP" | grep -qx "$p"; then
-    echo "FAIL: chatapp@${p} is active but upstream app does not list port ${p} (upstream ports: $(echo "$PORTS_UP" | tr '\n' ' '))"
-    exit 1
-  fi
-done
-
-# Every upstream port must also correspond to an active worker; otherwise nginx
-# can route traffic into a dead candidate or stale instance.
+# Upstream must only reference active workers (otherwise nginx sends traffic to a dead port).
 while IFS= read -r p; do
   [[ -n "$p" ]] || continue
   found=0
@@ -91,8 +83,16 @@ while IFS= read -r p; do
   fi
 done <<< "$PORTS_UP"
 
-if [[ "${#ACTIVE_PORTS[@]}" -ge 2 ]]; then
-  echo "OK: ${#ACTIVE_PORTS[@]} workers active and nginx upstream matches them exactly (${ACTIVE_PORTS[*]})"
+# Active workers missing from upstream is drift (e.g. mid-cutover or manual edits).
+# Do not block deploy: deploy-prod.sh rewrites this block from CHATAPP_INSTANCES.
+for p in "${ACTIVE_PORTS[@]}"; do
+  if ! echo "$PORTS_UP" | grep -qx "$p"; then
+    echo "WARN: chatapp@${p} is active but upstream app does not list port ${p} (upstream ports: $(echo "$PORTS_UP" | tr '\n' ' '))"
+  fi
+done
+
+if [[ "${#ACTIVE_PORTS[@]}" -ge 1 ]] && [[ -n "$PORTS_UP" ]]; then
+  echo "OK: upstream only lists active worker port(s); ${#ACTIVE_PORTS[@]} chatapp unit(s) running"
 fi
 
 echo "=== nginx -t ==="
