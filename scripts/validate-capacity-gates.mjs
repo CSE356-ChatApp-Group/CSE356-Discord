@@ -53,6 +53,20 @@ if (!summary) {
   if (Number.isFinite(p99) && p99 > Number(process.env.SLO_GATE_MAX_P99_MS || 3000)) {
     errors.push(`p99 too high: ${p99}ms`);
   }
+
+  // Mirror k6 SLO thresholds on WS post→delivery probes (only when exported in this run).
+  const missLimit = Number(process.env.SLO_GATE_WS_DELIVERY_MISS_LIMIT ?? 5);
+  for (const name of [
+    'optimization_ws_message_delivery_miss_total',
+    'optimization_ws_userfeed_delivery_miss_total',
+  ]) {
+    if (!summary.metrics || !Object.prototype.hasOwnProperty.call(summary.metrics, name)) continue;
+    const c = metric(summary, name, 'count');
+    if (c == null || !Number.isFinite(c)) continue;
+    if (c >= missLimit) {
+      errors.push(`${name} too high: ${c} (require count < ${missLimit}, same as k6 slo profile)`);
+    }
+  }
 }
 
 if (after) {

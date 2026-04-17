@@ -2,6 +2,8 @@
 set -euo pipefail
 
 # Fails fast when grader watcher reports critical regressions.
+# Ignores stale dashboard lines ("Last error — 45m ago" with age > GRADER_ERROR_MAX_AGE_MINUTES)
+# and dedupes repeated polls of the same incident (same conversation / same 403 body).
 # Usage:
 #   ./scripts/grader-watch-gate.sh
 #   ./scripts/grader-watch-gate.sh --since "2026-04-15T16:49:00Z"
@@ -11,6 +13,8 @@ EVENTS_FILE="${EVENTS_FILE:-artifacts/rollout-monitoring/grader-watch-events.jso
 WINDOW_SECONDS="${WINDOW_SECONDS:-600}"
 SINCE_TS="${SINCE_TS:-}"
 MAX_403="${MAX_403:-3}"
+# Dashboard polls rewrite "Last error — Nm ago"; ignore lines where N exceeds this (stale last error).
+GRADER_ERROR_MAX_AGE_MINUTES="${GRADER_ERROR_MAX_AGE_MINUTES:-15}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,13 +43,15 @@ if [[ -z "${SINCE_TS}" ]]; then
 fi
 
 set +e
-PAYLOAD="$(python3 - "$EVENTS_FILE" "$SINCE_TS" "$MAX_403" <<'PY'
+PAYLOAD="$(python3 - "$EVENTS_FILE" "$SINCE_TS" "$MAX_403" "$GRADER_ERROR_MAX_AGE_MINUTES" <<'PY'
 import json
+import re
 import sys
 from datetime import datetime
 
-path, since_raw, max_403_raw = sys.argv[1], sys.argv[2], sys.argv[3]
+path, since_raw, max_403_raw, max_age_raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 max_403 = int(max_403_raw)
+max_age_min = int(max_age_raw)
 
 def parse_iso(v):
     try:
@@ -53,13 +59,37 @@ def parse_iso(v):
     except Exception:
         return None
 
+def dashboard_error_age_minutes(text):
+    """Parse 'Last error — 12m ago' / em dash variants; None if not matched."""
+    m = re.search(r"Last error[^\d]{0,8}(\d+)\s*m\s*ago", text, re.I)
+    if not m:
+        return None
+    return int(m.group(1))
+
+def is_fresh_dashboard_error(text):
+    age = dashboard_error_age_minutes(text)
+    if age is None:
+        return True
+    return age <= max_age_min
+
+def delivery_timeout_fingerprint(text):
+    m = re.search(r"conversation=([0-9a-f-]+)", text, re.I)
+    if m:
+        return ("conv", m.group(1).lower())
+    stripped = re.sub(r"Last error[^\n]*\n+", "", text, flags=re.I).strip()
+    return ("raw", stripped)
+
+def fingerprint_403(text):
+    body = re.sub(r"Last error[^\n]*\n+", "", text, flags=re.I).strip()
+    return body
+
 since = parse_iso(since_raw)
 if since is None:
     print("ERROR: invalid --since timestamp", file=sys.stderr)
     sys.exit(2)
 
-critical = []
-warn_403 = []
+critical_by_fp = {}
+warn_403_by_fp = {}
 latest = None
 
 with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -77,10 +107,17 @@ with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = str(obj.get("text", ""))
         latest = obj
         lower = text.lower()
+        if not is_fresh_dashboard_error(text):
+            continue
         if "delivery timeout" in lower or "sendmessage failed: 5" in lower:
-            critical.append(obj)
+            fp = delivery_timeout_fingerprint(text)
+            critical_by_fp[fp] = obj
         if "sendmessage failed: 403" in lower:
-            warn_403.append(obj)
+            fp = fingerprint_403(text)
+            warn_403_by_fp[fp] = obj
+
+critical = list(critical_by_fp.values())
+warn_403 = list(warn_403_by_fp.values())
 
 if critical:
     last = critical[-1]
