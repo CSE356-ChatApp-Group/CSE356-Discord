@@ -147,6 +147,12 @@ const WS_HEARTBEAT_INTERVAL_MS =
   Number.isFinite(rawHeartbeatIntervalMs) && rawHeartbeatIntervalMs >= 5_000
     ? Math.floor(rawHeartbeatIntervalMs)
     : 20_000;
+const rawAppKeepaliveIntervalMs = Number(process.env.WS_APP_KEEPALIVE_INTERVAL_MS || 0);
+const WS_APP_KEEPALIVE_INTERVAL_MS =
+  Number.isFinite(rawAppKeepaliveIntervalMs) && rawAppKeepaliveIntervalMs >= 5_000
+    ? Math.floor(rawAppKeepaliveIntervalMs)
+    : 0;
+const WS_APP_KEEPALIVE_FRAME = JSON.stringify({ event: "keepalive" });
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -744,6 +750,7 @@ function sendPayloadToSocket(
   }
 
   markSocketMessageDelivered(ws, dedupeKey);
+  ws._lastDataFrameAt = Date.now();
   ws.send(outbound, (err) => {
     if (!err) return;
     ws._sawError = true;
@@ -766,6 +773,64 @@ function sendPayloadToSocket(
     }
   });
   return true;
+}
+
+function maybeSendAppKeepaliveFrame(ws) {
+  if (WS_APP_KEEPALIVE_INTERVAL_MS <= 0) return false;
+  if (ws.readyState !== WebSocket.OPEN) return false;
+
+  const now = Date.now();
+  const lastFrameAt = Number(ws._lastDataFrameAt || ws._connectedAt || 0);
+  if (!Number.isFinite(lastFrameAt) || now - lastFrameAt < WS_APP_KEEPALIVE_INTERVAL_MS) {
+    return false;
+  }
+
+  const buffered = (ws as any).bufferedAmount ?? 0;
+  if (buffered >= WS_BACKPRESSURE_DROP_BYTES) {
+    return false;
+  }
+
+  ws._lastDataFrameAt = now;
+  try {
+    ws.send(WS_APP_KEEPALIVE_FRAME, (err) => {
+      if (!err) return;
+      ws._sawError = true;
+      logger.warn(
+        {
+          err,
+          event: "ws.keepalive_send_failed",
+          userId: (ws as any)._userId,
+          gradingNote: "correlate_with_failed_deliveries",
+        },
+        "WS keepalive send failed; terminating socket",
+      );
+      try {
+        noteRecentDisconnectForSocket(ws, 1006, "keepalive_send_failed");
+        ws.terminate();
+      } catch {
+        // Ignore termination failures after send errors.
+      }
+    });
+    return true;
+  } catch (err) {
+    ws._sawError = true;
+    logger.warn(
+      {
+        err,
+        event: "ws.keepalive_send_failed",
+        userId: (ws as any)._userId,
+        gradingNote: "correlate_with_failed_deliveries",
+      },
+      "WS keepalive send failed; terminating socket",
+    );
+    try {
+      noteRecentDisconnectForSocket(ws, 1006, "keepalive_send_failed");
+      ws.terminate();
+    } catch {
+      // Ignore termination failures after send errors.
+    }
+    return false;
+  }
 }
 
 function recipientClientsForChannel(channel) {
@@ -1086,6 +1151,7 @@ wss.on("connection", async (ws, req) => {
   ws._userId = user.id;
   ws._connectionId = randomUUID();
   ws._connectedAt = Date.now();
+  ws._lastDataFrameAt = ws._connectedAt;
   ws._bootstrapReady = false;
   ws._presenceStatus = "idle";
   ws._lastActivityAt = 0;
@@ -1171,6 +1237,7 @@ wss.on("connection", async (ws, req) => {
   bootstrapWithRetry(ws, user.id)
     .then(() => {
       if (ws.readyState === WebSocket.OPEN) {
+        ws._lastDataFrameAt = Date.now();
         ws.send(JSON.stringify({ event: 'ready' }));
       }
     })
@@ -1527,6 +1594,7 @@ const heartbeatInterval = setInterval(() => {
     }
     ws.isAlive = false;
     ws.ping();
+    maybeSendAppKeepaliveFrame(ws);
   });
 }, WS_HEARTBEAT_INTERVAL_MS);
 
