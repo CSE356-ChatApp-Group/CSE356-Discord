@@ -85,7 +85,17 @@ async function main() {
   const readyP = waitFor(ws, (m) => m.event === 'ready', 20000);
   await opened;
   await readyP;
-  ws.send(JSON.stringify({ type: 'subscribe', channel: `channel:${general.id}` }));
+  const channelTopic = `channel:${general.id}`;
+  ws.send(JSON.stringify({ type: 'subscribe', channel: channelTopic }));
+  // Must wait for server ack: publishChannelMessageEvent uses skipIfNoSubscribers on
+  // channel:<id> when REALTIME_CANONICAL_USER_FEED is on. If we POST before Redis
+  // SUBSCRIBE completes, NUMSUB is still 0 and the channel passthrough is skipped;
+  // user-feed delivery can also race with target cache population for a new channel.
+  await waitFor(
+    ws,
+    (m) => m.event === 'subscribed' && String(m.data?.channel || '') === channelTopic,
+    15000,
+  );
 
   const evtP = waitFor(
     ws,
