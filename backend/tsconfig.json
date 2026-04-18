@@ -3,7 +3,6 @@
     "target": "ES2022",
     "module": "CommonJS",
     "moduleResolution": "Node",
-    "ignoreDeprecations": "6.0",
     "moduleDetection": "force",
     "esModuleInterop": true,
     "resolveJsonModule": true,
