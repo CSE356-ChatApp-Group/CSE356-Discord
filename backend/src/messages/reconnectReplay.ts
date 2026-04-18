@@ -61,10 +61,20 @@ let replayDbInFlight = 0;
 function replayQueryProfile(gapMs, stage = overload.getStage()) {
   let windowMs = WS_MESSAGE_REPLAY_MAX_WINDOW_MS;
   let limit = WS_MESSAGE_REPLAY_LIMIT;
+  // Grace period: how far before disconnectedAt to extend the scan lower bound.
+  // For very short gaps the server records disconnect precisely (clean 1005 close),
+  // so a large lookback wastes index scans. Use a tight window for short gaps and
+  // the full 15 s default only for long/abnormal disconnects.
+  let gracePeriodMs = WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS;
 
-  if (gapMs <= 5_000) {
+  if (gapMs <= 1_000) {
+    windowMs = Math.min(windowMs, 5_000);
+    limit = Math.min(limit, 15);
+    gracePeriodMs = 500; // clean close: disconnectedAt is accurate to <100 ms
+  } else if (gapMs <= 5_000) {
     windowMs = Math.min(windowMs, 15_000);
     limit = Math.min(limit, 60);
+    gracePeriodMs = 3_000;
   } else if (gapMs <= 30_000) {
     windowMs = Math.min(windowMs, 45_000);
     limit = Math.min(limit, 100);
@@ -83,6 +93,7 @@ function replayQueryProfile(gapMs, stage = overload.getStage()) {
     stage,
     limit: Math.max(0, limit),
     windowMs: Math.max(0, windowMs),
+    gracePeriodMs: Math.max(0, gracePeriodMs),
   };
 }
 
@@ -130,7 +141,7 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
 
   const replayLowerBoundMs = Math.max(
     0,
-    lowerBoundMs - WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
+    lowerBoundMs - profile.gracePeriodMs,
   );
 
   const upperBoundMs = Math.min(
