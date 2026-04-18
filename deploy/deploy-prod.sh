@@ -994,6 +994,12 @@ ssh_prod "
   sudo grep -q '^AUTH_BYPASS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^AUTH_BYPASS=.*/AUTH_BYPASS=false/' /opt/chatapp/shared/.env \
     || echo 'AUTH_BYPASS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # LOG_LEVEL=warn: keeps delivery_miss traces (logger.warn) visible without the
+  # volume of info-level request logs. 'error' was set manually on the prod VM and
+  # silenced all delivery miss diagnostics added in commit b89face.
+  sudo grep -q '^LOG_LEVEL=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^LOG_LEVEL=.*/LOG_LEVEL=warn/' /opt/chatapp/shared/.env \
+    || echo 'LOG_LEVEL=warn' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # FANOUT_QUEUE_CONCURRENCY: parallel fanout:critical workers per instance.
   # This is computed from remote CPU count above so each deploy keeps queue
   # latency low without blindly over-parallelising the host.

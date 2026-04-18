@@ -1213,6 +1213,14 @@ wss.on("connection", async (ws, req) => {
 
   ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
     .then(async () => {
+      // Capture the replay upper bound AFTER the user-topic subscribe completes.
+      // Using reconnectObservedAtMs (set at connection start, before subscribe)
+      // created a race: messages arriving between T0 and T0+subscribe_latency
+      // were neither delivered live (subscribe not yet active) nor caught by
+      // replay (created_at > upper bound). Capturing now means the replay window
+      // covers the full subscribe latency gap, at the cost of a few extra DB rows
+      // scanned (~5-20ms of messages) — acceptable given replay limit=60.
+      const replayUpperBoundMs = Date.now();
       const recentDisconnect = await recentDisconnectPromise;
       if (recentDisconnect) {
         try {
@@ -1220,7 +1228,7 @@ wss.on("connection", async (ws, req) => {
             ws,
             user.id,
             recentDisconnect,
-            reconnectObservedAtMs,
+            replayUpperBoundMs,
           );
         } catch (err) {
           logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
