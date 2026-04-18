@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   e2e-staging-nightly:
-    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       E2E_BASE_URL: ${{ vars.STAGING_E2E_BASE_URL || format('http://{0}', vars.STAGING_HOST || '136.114.103.71') }}

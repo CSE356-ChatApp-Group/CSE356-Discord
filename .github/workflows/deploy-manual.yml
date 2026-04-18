@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   resolve-target:
-    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
+    runs-on: ubuntu-latest
     outputs:
       resolved_sha: ${{ steps.resolve.outputs.resolved_sha }}
     steps:
@@ -56,7 +56,7 @@ jobs:
   # published, build/package the artifact in this run as a fallback.
   fetch-release:
     needs: resolve-target
-    runs-on: [self-hosted, Linux, X64, "${{ vars.RUNNER_LABEL_CI != '' && vars.RUNNER_LABEL_CI || 'gcp' }}"]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout target SHA
