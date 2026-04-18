@@ -197,6 +197,7 @@ echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: $
 echo "  UV threadpool/instance: ${UV_THREADPOOL_PER_INSTANCE}  bcrypt_conc: ${BCRYPT_MAX_CONCURRENT}"
 echo "  communities_heavy_max_inflight: ${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}"
 notify_discord_prod ":rocket: **Prod deploy starting** \`${RELEASE_SHA:0:7}\` · ${CHATAPP_INSTANCES} workers · SKIP_BACKUP=${SKIP_BACKUP:-false}"
+_DEPLOY_T0=$(date +%s)
 deploy_log_phase() {
   local now
   now=$(date +%s)
