@@ -121,14 +121,26 @@ pool_mode = transaction
 ; 1000 virtual clients; real PG backends = default_pool_size (deploy sets via PGBOUNCER_POOL_SIZE).
 max_client_conn     = 1000
 default_pool_size   = {PGBOUNCER_POOL_SIZE}
+; Keep a warm floor of connections so the first burst after an idle period does not
+; pay the cost of establishing new PG connections (~100-300 ms each on a remote DB).
+min_pool_size       = 20
 reserve_pool_size   = {PGBOUNCER_RESERVE_SIZE}
-reserve_pool_timeout = 3.0
+; 0.5 s instead of the 3.0 s default: activate reserve connections almost immediately
+; when the main pool is saturated instead of waiting 3 idle seconds.
+reserve_pool_timeout = 0.5
 
 ; Timeouts (seconds)
 server_connect_timeout  = 5
 server_idle_timeout     = 30
-query_timeout           = 20
+; 16 s: slightly above the PG role statement_timeout=15 s so PG always cancels the
+; query first; PgBouncer then cleans up the server connection 1 s later.
+query_timeout           = 16
 client_idle_timeout     = 60
+
+; Allow monitoring tools (and the chatapp user itself) to run SHOW POOLS / SHOW STATS
+; without a separate admin password.  auth_type=trust is already in effect for
+; loopback connections, so this adds no new authentication surface.
+stats_users = {pg_user}
 
 ; Allow common pg-client startup parameters PgBouncer doesn't track.
 ignore_startup_parameters = extra_float_digits,search_path

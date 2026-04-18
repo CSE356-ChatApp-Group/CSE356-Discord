@@ -121,15 +121,18 @@ PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
 p = int('${_PGB_SIZE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
 ncpu = int('${_REMOTE_NCPU}')
-# Per-process virtual pool to PgBouncer; scales with vCPU (was capped at 170 @ 8 cores).
-pool_cap = min(240, 70 + ncpu * 20)
+# Cap at 80: each Node worker drives at most ~15 concurrent queries usefully (event-loop
+# limit). 80 slots = 5x headroom and keeps total virtual conns (inst*80) under the
+# PgBouncer default_pool_size (real PG backends), eliminating PgBouncer-side queuing.
+pool_cap = min(80, 70 + ncpu * 20)
 print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 ")
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-# Keep queue bounded so overload fails fast instead of long timeout buildup.
-print(max(64, min(300, pmi * 3 + inst * 60)))
+# Cap at 100: fail fast (immediate 503) rather than queuing 300 requests for up to 7 s
+# each. Lower queue = faster load-shedding and faster pool recovery under burst.
+print(max(64, min(100, pmi * 3 + inst * 60)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
