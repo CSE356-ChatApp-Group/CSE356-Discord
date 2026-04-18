@@ -260,6 +260,52 @@ const PROFILES = {
    * concurrent WS connections per worker × 4 workers at steady state plus headroom
    * for reconnect churn (~30% extra).  maxVUs is high so k6 isn't the bottleneck.
    */
+  /**
+   * 5-worker break profile — arrival-rate stepped staircase to reveal the collapse shape.
+   *
+   * Uses ramping-arrival-rate so k6 keeps offering load at the target rate regardless
+   * of server response time.  When the server falls behind, dropped_iterations climbs,
+   * p95 latency rises, 503s appear, and the DB pool queue forms — in that order.
+   * Each step dwells 2 minutes so metrics stabilise before the next step.
+   *
+   * Design targets (5 workers × 8 vCPU staging = prod equivalent):
+   *   200 iter/s  — prod baseline (grader steady-state)
+   *   400 iter/s  — 2× prod (comfortable headroom check)
+   *   600 iter/s  — CPU approaches single-worker saturation
+   *   800 iter/s  — event loop lag expected to emerge (~20ms stage 1)
+   *   1100 iter/s — DB pool queue forms, overload stage 2 likely
+   *   1500 iter/s — deliberate overshoot; collapse / 503 cascade visible here
+   *
+   * wsVUs=200: 5 workers × ~40 concurrent WS per worker at high load.
+   * maxVUs=10000: at 1500 iter/s × 10s response under collapse = 15000 needed;
+   *   cap at 10000 to keep k6 runner memory sane — dropped iterations above this
+   *   are expected and are themselves signal (server can't drain fast enough).
+   *
+   * Run with:  npm run load:staging:break-5w
+   * Requires:  staging deployed with CHATAPP_INSTANCES=5
+   */
+  'break-5w': {
+    httpStages: [
+      { target: 20,   duration: '30s' },  // cache warmup
+      { target: 200,  duration: '2m' },   // prod baseline
+      { target: 400,  duration: '2m' },   // 2× headroom
+      { target: 600,  duration: '2m' },   // CPU pressure begins
+      { target: 800,  duration: '2m' },   // event-loop lag zone
+      { target: 1100, duration: '2m' },   // pool queue / overload stage 2
+      { target: 1500, duration: '2m' },   // overshoot — collapse visible
+      { target: 0,    duration: '30s' },  // drain
+    ],
+    preAllocatedVUs: 1200,
+    maxVUs: 10000,
+    wsVUs: 200,
+    wsDuration: '13m',
+    // Thresholds are intentionally loose — we WANT to breach them to see where.
+    // The report timeline and Prometheus snapshot tell the real story.
+    maxFailureRate: 0.50,
+    httpP95Ms: 10000,
+    httpP99Ms: 20000,
+  },
+
   'prod-replica': {
     arrivalMode: 'constant',
     constantRate: 200,
