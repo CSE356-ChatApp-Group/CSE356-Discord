@@ -1006,12 +1006,13 @@ ssh_prod "
   sudo grep -q '^AUTH_BYPASS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^AUTH_BYPASS=.*/AUTH_BYPASS=false/' /opt/chatapp/shared/.env \
     || echo 'AUTH_BYPASS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # LOG_LEVEL=warn: keeps delivery_miss traces (logger.warn) visible without the
-  # volume of info-level request logs. 'error' was set manually on the prod VM and
-  # silenced all delivery miss diagnostics added in commit b89face.
+  # LOG_LEVEL=info: per-message delivery logs are now debug-level (commit 6c6bc36),
+  # so info no longer causes log-storm CPU waste. info preserves WS connect/disconnect
+  # and other operational visibility. warn silenced too much after delivery_miss
+  # traces were downgraded to debug.
   sudo grep -q '^LOG_LEVEL=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^LOG_LEVEL=.*/LOG_LEVEL=warn/' /opt/chatapp/shared/.env \
-    || echo 'LOG_LEVEL=warn' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^LOG_LEVEL=.*/LOG_LEVEL=info/' /opt/chatapp/shared/.env \
+    || echo 'LOG_LEVEL=info' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # FANOUT_QUEUE_CONCURRENCY: parallel fanout:critical workers per instance.
   # This is computed from remote CPU count above so each deploy keeps queue
   # latency low without blindly over-parallelising the host.
