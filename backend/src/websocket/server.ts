@@ -1695,6 +1695,32 @@ async function subscribeClient(ws, redisChannel) {
   if (redisChannel.startsWith("channel:")) {
     ws._explicitChannelUnsub?.delete(redisChannel);
   }
+
+  // Drain any message parked during a cold-channel reconnect window.
+  // When a DM message arrived while this conversation had 0 Redis subscribers,
+  // publishConversationEventNow wrote a short-TTL dm_pending key. Deliver it now.
+  if (redisChannel.startsWith("conversation:") && ws.readyState === WebSocket.OPEN) {
+    const conversationId = redisChannel.slice("conversation:".length);
+    const pendingKey = `dm_pending:${conversationId}`;
+    try {
+      const results = await redis.pipeline().get(pendingKey).del(pendingKey).exec();
+      const pendingRaw = results?.[0]?.[1] as string | null;
+      if (pendingRaw) {
+        try {
+          const parsed = JSON.parse(pendingRaw);
+          sendPayloadToSocket(ws, redisChannel, parsed, pendingRaw);
+          logger.debug(
+            { event: "ws.dm_pending.drained", conversationId, userId: ws._userId },
+            "Drained pending DM message to reconnecting recipient",
+          );
+        } catch {
+          // Ignore malformed pending payloads
+        }
+      }
+    } catch {
+      // Best-effort; ring buffer replay provides the fallback
+    }
+  }
 }
 
 async function unsubscribeClient(ws, redisChannel) {

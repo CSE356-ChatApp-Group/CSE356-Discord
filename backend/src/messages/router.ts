@@ -275,10 +275,25 @@ async function publishConversationEventNow(conversationId, event, data) {
     passthroughTargets.length + userIds.length,
   );
   const publishStartedAt = process.hrtime.bigint();
+  let conversationSubCount: number | null = null;
   await Promise.all([
-    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
+    ...passthroughTargets.map(async (target) => {
+      const count = await fanout.publish(target, payload);
+      if (event === 'message:created' && target === `conversation:${conversationId}`) {
+        conversationSubCount = count;
+      }
+    }),
     ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
   ]);
+  // Park message for reconnecting recipients when conversation channel had 0 Redis subscribers.
+  if (event === 'message:created' && conversationSubCount === 0) {
+    const pendingKey = `dm_pending:${conversationId}`;
+    redis.set(pendingKey, JSON.stringify(payload), 'EX', 10).catch(() => {});
+    logger.debug(
+      { conversationId, messageId: (data as any)?.id, gradingNote: 'dm_pending_write' },
+      'DM fanout: 0 conversation channel subscribers; parked payload for reconnecting recipient',
+    );
+  }
   fanoutPublishDurationMs.observe(
     { path: 'conversation_event', stage: 'publish' },
     Number(process.hrtime.bigint() - publishStartedAt) / 1e6,

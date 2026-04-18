@@ -81,7 +81,7 @@ async function publish(channel, payload) {
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      await redis.publish(channel, serializedPayload);
+      const subscriberCount = await redis.publish(channel, serializedPayload);
       if (attempt > 1) {
         logger.info(
           { channel, event: eventName, attempt, maxAttempts },
@@ -90,7 +90,7 @@ async function publish(channel, payload) {
       }
       // Fire ring buffer write after successful publish.
       bufferMessage(channel, payload);
-      return;
+      return typeof subscriberCount === 'number' ? subscriberCount : 0;
     } catch (err) {
       lastErr = err;
       if (attempt >= maxAttempts) break;
