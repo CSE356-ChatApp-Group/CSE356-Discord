@@ -23,6 +23,7 @@
     "load:staging:peak": "./scripts/run-staging-capacity.sh peak",
     "load:staging:break": "./scripts/run-staging-capacity.sh break",
     "load:staging:slo": "./scripts/run-staging-capacity.sh slo",
+    "load:staging:prod-replica": "./scripts/run-staging-capacity.sh prod-replica",
     "load:staging:tune": "./scripts/run-staging-capacity.sh tune",
     "load:staging:break-fast": "./scripts/run-staging-capacity.sh break-fast",
     "e2e:install": "npm --prefix frontend run e2e:install",

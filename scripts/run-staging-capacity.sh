@@ -69,6 +69,19 @@ fi
 
 echo "[2/4] Running k6 profile '$PROFILE'..."
 set +e
+# For the prod-replica profile, default the HTTP mix to match the prod traffic snapshot
+# (overridable via env). All other profiles inherit whatever LOADTEST_MIX_* is set.
+if [[ "$PROFILE" == "prod-replica" ]]; then
+  : "${LOADTEST_MIX_MESSAGE_READ:=0.80}"
+  : "${LOADTEST_MIX_POST_CHANNEL:=0.08}"
+  : "${LOADTEST_MIX_COMMUNITIES:=0.03}"
+  : "${LOADTEST_MIX_MESSAGES_LIST:=0.03}"
+  : "${LOADTEST_MIX_CONVERSATIONS:=0.02}"
+  : "${LOADTEST_MIX_POST_CONVERSATION:=0.01}"
+  : "${LOADTEST_MIX_CHANNELS:=0.01}"
+  : "${LOADTEST_MIX_REAUTH:=0.02}"
+fi
+
 docker run --rm \
   -v "$ROOT_DIR:/work" \
   -w /work \
@@ -79,6 +92,14 @@ docker run --rm \
   -e LOADTEST_PASSWORD="${LOADTEST_PASSWORD:-LoadTest!12345}" \
   -e MESSAGE_SIZE="${MESSAGE_SIZE:-96}" \
   -e LOADTEST_HTTP_TIMEOUT_MS="${LOADTEST_HTTP_TIMEOUT_MS:-}" \
+  -e LOADTEST_MIX_MESSAGE_READ="${LOADTEST_MIX_MESSAGE_READ:-}" \
+  -e LOADTEST_MIX_POST_CHANNEL="${LOADTEST_MIX_POST_CHANNEL:-}" \
+  -e LOADTEST_MIX_COMMUNITIES="${LOADTEST_MIX_COMMUNITIES:-}" \
+  -e LOADTEST_MIX_MESSAGES_LIST="${LOADTEST_MIX_MESSAGES_LIST:-}" \
+  -e LOADTEST_MIX_CONVERSATIONS="${LOADTEST_MIX_CONVERSATIONS:-}" \
+  -e LOADTEST_MIX_POST_CONVERSATION="${LOADTEST_MIX_POST_CONVERSATION:-}" \
+  -e LOADTEST_MIX_CHANNELS="${LOADTEST_MIX_CHANNELS:-}" \
+  -e LOADTEST_MIX_REAUTH="${LOADTEST_MIX_REAUTH:-}" \
   "$K6_IMAGE" run \
     --summary-export "/work/artifacts/load-tests/$RUN_ID/summary.json" \
     --out "json=/work/artifacts/load-tests/$RUN_ID/metrics.ndjson" \

@@ -86,16 +86,21 @@ function parseRatioEnv(name, fallback) {
 }
 
 const HTTP_MIX = (() => {
-  // Defaults are intentionally read-heavy to mirror production where
-  // `/messages/:id/read` dominates request volume.
+  // Defaults match observed prod traffic (2026-04-18, 5000-request nginx sample):
+  //   80.2% PUT /messages/:id/read
+  //    7.7% POST /messages (channel)
+  //    1.9% PATCH /users/me  → baked into reauth
+  //    1.6% POST /auth/login → baked into reauth
+  //    ~2%  communities/conversations/channels/search (misc)
+  // Override any ratio via LOADTEST_MIX_* env vars (values are re-normalised to sum=1).
   const mix = {
-    communities: parseRatioEnv('LOADTEST_MIX_COMMUNITIES', 0.12),
-    conversations: parseRatioEnv('LOADTEST_MIX_CONVERSATIONS', 0.08),
-    messagesList: parseRatioEnv('LOADTEST_MIX_MESSAGES_LIST', 0.10),
-    channels: parseRatioEnv('LOADTEST_MIX_CHANNELS', 0.05),
-    messageRead: parseRatioEnv('LOADTEST_MIX_MESSAGE_READ', 0.50),
-    postChannel: parseRatioEnv('LOADTEST_MIX_POST_CHANNEL', 0.10),
-    postConversation: parseRatioEnv('LOADTEST_MIX_POST_CONVERSATION', 0.03),
+    communities: parseRatioEnv('LOADTEST_MIX_COMMUNITIES', 0.03),
+    conversations: parseRatioEnv('LOADTEST_MIX_CONVERSATIONS', 0.02),
+    messagesList: parseRatioEnv('LOADTEST_MIX_MESSAGES_LIST', 0.03),
+    channels: parseRatioEnv('LOADTEST_MIX_CHANNELS', 0.01),
+    messageRead: parseRatioEnv('LOADTEST_MIX_MESSAGE_READ', 0.80),
+    postChannel: parseRatioEnv('LOADTEST_MIX_POST_CHANNEL', 0.08),
+    postConversation: parseRatioEnv('LOADTEST_MIX_POST_CONVERSATION', 0.01),
     reauth: parseRatioEnv('LOADTEST_MIX_REAUTH', 0.02),
   };
   const total = Object.values(mix).reduce((sum, v) => sum + v, 0);
@@ -224,6 +229,55 @@ const PROFILES = {
       optimization_ws_handshake_fail_total: ['count<6'],
       optimization_http_outage_total: ['count<80'],
       optimization_ws_message_delivery_miss_total: ['count<5'],
+    },
+  },
+
+  /**
+   * Prod-replica profile — mirrors observed prod traffic as of 2026-04-18.
+   *
+   * Observed from last 5000 nginx access log lines:
+   *   RPS:  median=196  p95=296  max=297
+   *   Mix:  80.2% PUT /messages/:id/read
+   *          7.7% POST /messages
+   *          7.8% GET /ws (WS upgrades — modelled as wsVUs)
+   *          1.9% PATCH /users/me
+   *          1.6% POST /auth/login
+   *          0.8% other (join community, register, search, conversations)
+   *   Latency (p50/p95): read=30ms/67ms  post=40ms/82ms  login=12ms/36ms
+   *   Pool:  ~23/80 active per worker, 0 waiting
+   *   CPU:   load avg 2.8–3.4 on 8 vCPU (~35–42% utilised)
+   *
+   * Run with: LOAD_PROFILE=prod-replica npm run load:staging:slo
+   * Or:       k6 run -e LOAD_PROFILE=prod-replica load-tests/staging-capacity.js
+   *
+   * Tune the HTTP_MIX env vars to match the prod snapshot:
+   *   LOADTEST_MIX_MESSAGE_READ=0.80 LOADTEST_MIX_POST_CHANNEL=0.08
+   *   LOADTEST_MIX_REAUTH=0.02       LOADTEST_MIX_COMMUNITIES=0.03
+   *   LOADTEST_MIX_CONVERSATIONS=0.02 LOADTEST_MIX_MESSAGES_LIST=0.03
+   *   LOADTEST_MIX_CHANNELS=0.01     LOADTEST_MIX_POST_CONVERSATION=0.01
+   *
+   * Constant arrival rate of 200 iter/s ≈ prod median; wsVUs=120 models the ~23
+   * concurrent WS connections per worker × 4 workers at steady state plus headroom
+   * for reconnect churn (~30% extra).  maxVUs is high so k6 isn't the bottleneck.
+   */
+  'prod-replica': {
+    arrivalMode: 'constant',
+    constantRate: 200,
+    timeUnit: '1s',
+    constantDuration: '8m',
+    preAllocatedVUs: 600,
+    maxVUs: 1600,
+    wsVUs: 120,
+    wsDuration: '8m30s',
+    maxFailureRate: 0.01,
+    httpP95Ms: 200,
+    httpP99Ms: 500,
+    optimizationKpiThresholds: {
+      optimization_login_fail_total: ['count<20'],
+      optimization_message_post_fail_total: ['count<30'],
+      optimization_ws_handshake_fail_total: ['count<15'],
+      optimization_http_outage_total: ['count<100'],
+      optimization_ws_message_delivery_miss_total: ['count<10'],
     },
   },
 };

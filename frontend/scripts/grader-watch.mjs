@@ -42,6 +42,21 @@ function writeLatest(message) {
   fs.writeFileSync(latestPath, message, 'utf8');
 }
 
+async function notifyDiscord(title, body) {
+  const url = process.env.DISCORD_WEBHOOK_URL_PROD || process.env.DISCORD_WEBHOOK_URL;
+  if (!url) return;
+  const content = `${title}\n\`\`\`\n${body.slice(0, 1800)}\n\`\`\``;
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+  } catch {
+    // Silent — never let alerting break the watcher
+  }
+}
+
 function normalizeText(value) {
   return value.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -208,6 +223,7 @@ async function main() {
           writeLatest(current);
           console.log(`[${event.ts}] dashboard error block changed`);
           console.log(current);
+          await notifyDiscord(':rotating_light: **Grader error changed**', currentSignature);
           previous = current;
           previousSignature = currentSignature;
         } else {

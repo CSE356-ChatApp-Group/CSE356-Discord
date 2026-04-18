@@ -22,7 +22,23 @@ source "${SCRIPT_DIR}/deploy-common.sh"
 ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT="${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT:-true}"
 
 ssh_prod() {
-  ssh "${PROD_USER}@${PROD_HOST}" "$@"
+  ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+      -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+      "${PROD_USER}@${PROD_HOST}" "$@"
+}
+
+# Send a Discord notification to the prod ops webhook (DISCORD_WEBHOOK_URL_PROD env var).
+# Silently skips if the variable is unset or curl fails — never blocks the deploy.
+notify_discord_prod() {
+  local msg="$1"
+  local webhook="${DISCORD_WEBHOOK_URL_PROD:-}"
+  if [[ -z "$webhook" ]]; then
+    return 0
+  fi
+  curl -fsS -m 10 -X POST "$webhook" \
+    -H 'Content-Type: application/json' \
+    -d "{\"content\": $(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" \
+    >/dev/null 2>&1 || true
 }
 
 run_local_prod_nginx_audit() {
@@ -39,7 +55,10 @@ cleanup_on_exit() {
   if [ "${status}" -ne 0 ] && [ "${NGINX_CANDIDATE_PIN_ACTIVE:-0}" -eq 1 ] && [ "${ROLLBACK_ALREADY_ATTEMPTED:-0}" -eq 0 ]; then
     ROLLBACK_ALREADY_ATTEMPTED=1
     echo "↩ Exit trap: deploy failed after nginx was pinned to candidate; attempting recovery..."
+    notify_discord_prod ":x: **Prod deploy FAILED** \`${RELEASE_SHA:0:7}\` — rollback triggered"
     rollback_cutover
+  elif [ "${status}" -ne 0 ]; then
+    notify_discord_prod ":x: **Prod deploy FAILED** \`${RELEASE_SHA:0:7}\` (pre-cutover)"
   fi
   release_remote_deploy_lock
   exit "${status}"
@@ -96,6 +115,9 @@ RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
 PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-true}"
 INGRESS_CANARY_SECONDS="${INGRESS_CANARY_SECONDS:-45}"
 ALL_WORKER_HEALTH_PASSES="${ALL_WORKER_HEALTH_PASSES:-3}"
+# Seconds to wait after a worker restarts and passes health checks before killing the next one.
+# Gives WebSocket clients time to reconnect + replay before the next worker is taken down.
+WORKER_SETTLE_SECS="${WORKER_SETTLE_SECS:-10}"
 # PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
@@ -174,13 +196,7 @@ echo "  VM vCPUs: ${_REMOTE_NCPU}  workers: ${CHATAPP_INSTANCES}  pgbouncer_pool
 echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: ${POOL_CIRCUIT_BREAKER_QUEUE}"
 echo "  UV threadpool/instance: ${UV_THREADPOOL_PER_INSTANCE}  bcrypt_conc: ${BCRYPT_MAX_CONCURRENT}"
 echo "  communities_heavy_max_inflight: ${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}"
-
-echo "Acquiring remote deploy lock..."
-acquire_remote_deploy_lock
-trap cleanup_on_exit EXIT
-echo "✓ Remote deploy lock acquired"
-
-_DEPLOY_T0=$(date +%s)
+notify_discord_prod ":rocket: **Prod deploy starting** \`${RELEASE_SHA:0:7}\` · ${CHATAPP_INSTANCES} workers · SKIP_BACKUP=${SKIP_BACKUP:-false}"
 deploy_log_phase() {
   local now
   now=$(date +%s)
@@ -606,6 +622,12 @@ fi
 
 # 2. Backup database before risky deploy (strict — deploy aborts if backup fails).
 # Never pg_dump through PgBouncer transaction pool (unreliable COPY); use PGDUMP_DATABASE_URL.
+# Set SKIP_BACKUP=true for config-only deploys (same SHA, env-var change only) to avoid
+# running gzip compression on the app VM while the grader is live.
+if [[ "${SKIP_BACKUP:-false}" == "true" ]]; then
+  echo "2. Skipping database backup (SKIP_BACKUP=true)"
+  deploy_log_phase "database backup skipped"
+else
 echo "2. Backing up database..."
 ssh_prod bash -s <<'REMOTE_BACKUP'
 set -euo pipefail
@@ -631,7 +653,8 @@ case "${DATABASE_URL:-}" in
 esac
 ok=0
 for attempt in 1 2 3; do
-  if pg_dump "$DUMP_URL" | gzip -c >"${BACKUP_FILE}.part"; then
+  # Run pg_dump and gzip at low priority (nice 15) so app workers always get CPU first.
+  if nice -n 15 pg_dump "$DUMP_URL" | nice -n 15 gzip -c >"${BACKUP_FILE}.part"; then
     mv -f "${BACKUP_FILE}.part" "$BACKUP_FILE"
     ok=1
     break
@@ -650,6 +673,7 @@ echo "Backup OK: $BACKUP_FILE"
 REMOTE_BACKUP
 echo "✓ Backup prepared"
 deploy_log_phase "database backup complete"
+fi  # end SKIP_BACKUP check
 
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
 echo "2b) Installing and configuring PgBouncer..."
@@ -1561,6 +1585,8 @@ PY
 
   if [ "${#ADDITIONAL_PORTS[@]}" -gt 0 ]; then
     echo "9b.5. Rolling additional worker ports (${ADDITIONAL_PORTS[*]}) to ${RELEASE_SHA}..."
+    echo "  Settling ${WORKER_SETTLE_SECS}s after OLD_PORT restart before rolling additional workers..."
+    sleep "${WORKER_SETTLE_SECS}"
     for extra_port in "${ADDITIONAL_PORTS[@]}"; do
       ssh_prod "
         set -euo pipefail
@@ -1606,6 +1632,8 @@ PY
         rollback_cutover
         exit 1
       fi
+      echo "  Settling ${WORKER_SETTLE_SECS}s for WS clients to reconnect before next worker restart..."
+      sleep "${WORKER_SETTLE_SECS}"
     done
   fi
 
@@ -1905,6 +1933,7 @@ if gate_same_release && gate_all_worker_health && gate_upstream_parity && gate_c
   fi
   echo "✓ Prod nginx parity audit passed"
   deploy_log_phase "final gates + nginx audit OK"
+  notify_discord_prod ":white_check_mark: **Prod deploy succeeded** \`${RELEASE_SHA:0:7}\` · ${CHATAPP_INSTANCES} workers"
   echo "✓ Production deployment SUCCESSFUL"
 else
   echo "ERROR: Final health check failed after cutover."

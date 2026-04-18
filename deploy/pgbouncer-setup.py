@@ -135,7 +135,10 @@ server_idle_timeout     = 30
 ; 16 s: slightly above the PG role statement_timeout=15 s so PG always cancels the
 ; query first; PgBouncer then cleans up the server connection 1 s later.
 query_timeout           = 16
-client_idle_timeout     = 60
+; 300 s: keep Node→PgBouncer connections alive through grader quiet periods (lulls can
+; reach 60–90 s). Prevents all workers simultaneously recycling their connections and
+; creating a thundering-herd reconnection storm when traffic resumes.
+client_idle_timeout     = 300
 
 ; Allow monitoring tools (and the chatapp user itself) to run SHOW POOLS / SHOW STATS
 ; without a separate admin password.  auth_type=trust is already in effect for
