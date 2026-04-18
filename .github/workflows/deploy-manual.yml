@@ -81,8 +81,19 @@ jobs:
         run: |
           set -euo pipefail
           ARTIFACT="chatapp-${TARGET_SHA}.tar.gz"
-          echo "Downloading release-${TARGET_SHA} from ${{ github.repository }}"
-          gh release download "release-${TARGET_SHA}" -R "${{ github.repository }}" -p "${ARTIFACT}" -D .
+          echo "Waiting for release-${TARGET_SHA} from ${{ github.repository }}..."
+          for attempt in $(seq 1 15); do
+            if gh release download "release-${TARGET_SHA}" -R "${{ github.repository }}" -p "${ARTIFACT}" -D . 2>/dev/null; then
+              echo "Downloaded on attempt ${attempt}"
+              break
+            fi
+            if [[ "${attempt}" == "15" ]]; then
+              echo "Release artifact not available after 15 attempts."
+              exit 1
+            fi
+            echo "Attempt ${attempt}/15 failed — waiting 30s for CI to finish packaging..."
+            sleep 30
+          done
           test -f "${ARTIFACT}"
           ls -la "./${ARTIFACT}"
 
