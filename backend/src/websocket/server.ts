@@ -856,10 +856,15 @@ function deliverUserFeedMessage(channel, routed) {
   if (isMessageEvent) {
     const messageId = (payload as any)?.data?.id;
     if (recipientCount === 0) {
-      logger.warn(
-        { userIds, event: payloadEvent, messageId, gradingNote: "delivery_miss_no_local_clients" },
-        "WS userfeed: no local clients for message event — user not connected to this node",
-      );
+      // Only warn for single-recipient (DM) delivery — missing one specific user is suspicious.
+      // For channel fanout (many userIds), no local clients on this node is normal; the user
+      // is simply connected to a different worker.
+      if (userIds.length === 1) {
+        logger.warn(
+          { userIds, event: payloadEvent, messageId, gradingNote: "delivery_miss_no_local_clients" },
+          "WS userfeed: no local clients for message event — user not connected to this node",
+        );
+      }
     } else {
       logger.info(
         { userIds, event: payloadEvent, messageId, recipientCount },
