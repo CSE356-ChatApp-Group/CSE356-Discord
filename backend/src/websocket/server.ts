@@ -1205,12 +1205,6 @@ wss.on("connection", async (ws, req) => {
   ws._recentMessageKeys = new Map();
 
   const reconnectObservedAtMs = Date.now();
-  const recentDisconnectPromise = consumeRecentDisconnect(user.id).catch(() => null);
-  recentDisconnectPromise
-    .then((recentDisconnect) => {
-      observeRecentReconnect(user.id, ws._connectionId, recentDisconnect);
-    })
-    .catch(() => {});
 
   // Mark freshly connected users for a short window so channel fanout can send
   // a targeted user-topic duplicate while channel auto-subscribe warms up.
@@ -1226,7 +1220,13 @@ wss.on("connection", async (ws, req) => {
       // covers the full subscribe latency gap, at the cost of a few extra DB rows
       // scanned (~5-20ms of messages) — acceptable given replay limit=60.
       const replayUpperBoundMs = Date.now();
-      const recentDisconnect = await recentDisconnectPromise;
+      // Consume the recent-disconnect key AFTER subscribe succeeds, not at
+      // connect-start. If we consumed it eagerly and this connection died before
+      // bootstrap completed (bootstrapReady:false, lifetimeMs<100ms), the key
+      // would be deleted but replay would never fire — the next reconnect attempt
+      // would then have no key and silently skip replay.
+      const recentDisconnect = await consumeRecentDisconnect(user.id).catch(() => null);
+      observeRecentReconnect(user.id, ws._connectionId, recentDisconnect);
       if (recentDisconnect) {
         try {
           await replayMissedMessagesToSocket(
