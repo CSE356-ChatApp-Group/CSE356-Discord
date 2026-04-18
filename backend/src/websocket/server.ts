@@ -327,17 +327,20 @@ async function recordRecentDisconnect(userId, payload) {
   );
 }
 
-function recentDisconnectPayloadForSocket(ws, closeCode = 1005, closeReason = "") {
+function recentDisconnectPayloadForSocket(ws, closeCode = 1005, closeReason = "", channelTopicsSnapshot?: string[]) {
   const subscriptions = ws?._subscriptions instanceof Set
     ? ws._subscriptions.size
     : Number(ws?._subscriptions?.size || 0) || 0;
   // Capture channel/conversation topic keys so reconnect replay can query the
   // Redis ring buffer instead of falling back to the expensive DB CTE.
-  const channelTopics: string[] = ws?._subscriptions instanceof Set
-    ? [...ws._subscriptions].filter(
-        (s) => typeof s === "string" && (s.startsWith("channel:") || s.startsWith("conversation:")),
-      )
-    : [];
+  // channelTopicsSnapshot is pre-captured before unsubscribeClient clears _subscriptions.
+  const channelTopics: string[] = channelTopicsSnapshot ?? (
+    ws?._subscriptions instanceof Set
+      ? [...ws._subscriptions].filter(
+          (s) => typeof s === "string" && (s.startsWith("channel:") || s.startsWith("conversation:")),
+        )
+      : []
+  );
   return {
     disconnectedAt: Date.now(),
     closeCode,
@@ -350,14 +353,14 @@ function recentDisconnectPayloadForSocket(ws, closeCode = 1005, closeReason = ""
   };
 }
 
-function noteRecentDisconnectForSocket(ws, closeCode = 1005, closeReason = "") {
+function noteRecentDisconnectForSocket(ws, closeCode = 1005, closeReason = "", channelTopicsSnapshot?: string[]) {
   const userId = typeof ws?._userId === "string" ? ws._userId : null;
   if (!userId) return;
   if (ws._recentDisconnectRecorded === true) return;
   ws._recentDisconnectRecorded = true;
   recordRecentDisconnect(
     userId,
-    recentDisconnectPayloadForSocket(ws, closeCode, closeReason),
+    recentDisconnectPayloadForSocket(ws, closeCode, closeReason, channelTopicsSnapshot),
   ).catch(() => {});
 }
 
@@ -1731,6 +1734,11 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
   const subscriptionCount = subscriptions.length;
   const closeCodeLabel = String(closeCode || 1005);
 
+  // Snapshot channel/conversation topics BEFORE unsubscribeClient deletes them from _subscriptions.
+  const channelTopicsSnapshot = subscriptions.filter(
+    (s) => typeof s === "string" && (s.startsWith("channel:") || s.startsWith("conversation:")),
+  );
+
   wsDisconnectsTotal.inc({
     code: closeCodeLabel,
     clean: clean ? "true" : "false",
@@ -1748,7 +1756,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
     subscriptions.map((ch) => unsubscribeClient(ws, ch)),
   ).catch(() => {});
 
-  noteRecentDisconnectForSocket(ws, closeCode, closeReason);
+  noteRecentDisconnectForSocket(ws, closeCode, closeReason, channelTopicsSnapshot);
 
   const logPayload = {
     event: "ws.disconnected",
