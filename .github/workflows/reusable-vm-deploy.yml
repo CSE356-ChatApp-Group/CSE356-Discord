@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       script_path:
-        description: "Deprecated — ignored. Deploy uses Ansible (playbooks/deploy-staging.yml or deploy-prod.yml). Kept for workflow_call compatibility."
+        description: "Deprecated — ignored. Kept for workflow_call compatibility."
         required: true
         type: string
       artifact_name:
@@ -205,17 +205,7 @@ jobs:
           ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" \
             'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
 
-      - name: Install Ansible collections (VM deploy profiling)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v ansible-playbook >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y ansible-core
-          fi
-          ansible-galaxy collection install -r "${GITHUB_WORKSPACE}/ansible/collections/requirements.yml"
-
-      - name: Deploy via Ansible
+      - name: Deploy
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -226,38 +216,36 @@ jobs:
           CHATAPP_INSTANCES_INPUT: ${{ inputs.chatapp_instances }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           DEPLOY_ENV: ${{ inputs.environment }}
-          ANSIBLE_CONFIG: ${{ github.workspace }}/ansible/ci-ansible.cfg
         run: |
           set -euo pipefail
 
-          INV="${RUNNER_TEMP}/vm-deploy-inventory.ini"
-          if [[ "$DEPLOY_ENV" == "staging" ]]; then
-            printf '%s\n' '[staging]' \
-              "staging-vm ansible_host=${DEPLOY_HOST} ansible_user=${DEPLOY_USER} github_repo=${GITHUB_REPOSITORY}" > "$INV"
-            PLAYBOOK="playbooks/deploy-staging.yml"
-          elif [[ "$DEPLOY_ENV" == "production" ]]; then
-            printf '%s\n' '[production]' \
-              "prod-app ansible_host=${DEPLOY_HOST} ansible_user=${DEPLOY_USER} github_repo=${GITHUB_REPOSITORY}" > "$INV"
-            PLAYBOOK="playbooks/deploy-prod.yml"
+          if [[ "$DEPLOY_ENV" == "production" ]]; then
+            SCRIPT="${GITHUB_WORKSPACE}/deploy/deploy-prod.sh"
+            export PROD_HOST="${DEPLOY_HOST}"
+            export PROD_USER="${DEPLOY_USER}"
+          elif [[ "$DEPLOY_ENV" == "staging" ]]; then
+            SCRIPT="${GITHUB_WORKSPACE}/deploy/deploy-staging.sh"
+            export STAGING_HOST="${DEPLOY_HOST}"
+            export STAGING_USER="${DEPLOY_USER}"
           else
-            echo "Unknown environment: $DEPLOY_ENV (expected staging or production)"
+            echo "Unknown environment: $DEPLOY_ENV"
             exit 1
           fi
 
-          EXTRA_ARGS=(-e "deploy_sha=${TARGET_SHA}" -e "deploy_non_interactive=true")
+          export GITHUB_REPO="${GITHUB_REPOSITORY}"
+          export DEPLOY_NON_INTERACTIVE=true
+
           if [[ -n "${LOCAL_ARTIFACT_PATH:-}" ]]; then
             LP="${LOCAL_ARTIFACT_PATH}"
-            if [[ "${LP}" != /* ]]; then
-              LP="${GITHUB_WORKSPACE}/${LP}"
-            fi
-            EXTRA_ARGS+=(-e "local_artifact_path=${LP}")
-          fi
-          if [[ "$DEPLOY_ENV" == "production" ]] && [[ -n "${CHATAPP_INSTANCES_INPUT:-}" ]]; then
-            EXTRA_ARGS+=(-e "chatapp_instances=${CHATAPP_INSTANCES_INPUT}")
+            [[ "${LP}" != /* ]] && LP="${GITHUB_WORKSPACE}/${LP}"
+            export LOCAL_ARTIFACT_PATH="${LP}"
           fi
 
-          cd "${GITHUB_WORKSPACE}/ansible"
-          ansible-playbook -v -i "$INV" "$PLAYBOOK" "${EXTRA_ARGS[@]}"
+          if [[ -n "${CHATAPP_INSTANCES_INPUT:-}" ]]; then
+            export CHATAPP_INSTANCES="${CHATAPP_INSTANCES_INPUT}"
+          fi
+
+          bash "${SCRIPT}" "${TARGET_SHA}"
 
       - name: Audit prod nginx parity after deploy
         if: ${{ always() && inputs.environment == 'production' }}

@@ -135,8 +135,11 @@ ncpu = int('${_REMOTE_NCPU}')
 inst = int('${CHATAPP_INSTANCES}')
 cpu_part = ncpu * 50
 extra = max(0, inst - 1) * 30
-# Cap raised from 320 → 400 so 8 vCPU+ hosts get more real PG backends after resize.
-x = max(60, min(400, cpu_part + extra))
+# Cap raised from 400 → 500: blue-green cutover temporarily spins inst+1 workers
+# (e.g. 5 during a 4-worker deploy). At PG_POOL_MAX=80 that is 5*80=400 virtual
+# connections — exactly the old cap, leaving zero PgBouncer headroom and triggering
+# circuit breaker storms. 500 gives a 20% buffer over the peak cutover load.
+x = max(60, min(500, cpu_part + extra))
 print(x)
 ")
 PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
