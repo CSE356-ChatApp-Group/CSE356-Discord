@@ -64,7 +64,7 @@ const { query } = require("../db/pool");
 const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
-const { loadReplayableMessagesForUser } = require("../messages/reconnectReplay");
+const { loadReplayableMessagesForUser, loadReplayFromRingBuffers } = require("../messages/reconnectReplay");
 const { markWsRecentConnect } = require("./recentConnect");
 const {
   allUserFeedRedisChannels,
@@ -331,6 +331,13 @@ function recentDisconnectPayloadForSocket(ws, closeCode = 1005, closeReason = ""
   const subscriptions = ws?._subscriptions instanceof Set
     ? ws._subscriptions.size
     : Number(ws?._subscriptions?.size || 0) || 0;
+  // Capture channel/conversation topic keys so reconnect replay can query the
+  // Redis ring buffer instead of falling back to the expensive DB CTE.
+  const channelTopics: string[] = ws?._subscriptions instanceof Set
+    ? [...ws._subscriptions].filter(
+        (s) => typeof s === "string" && (s.startsWith("channel:") || s.startsWith("conversation:")),
+      )
+    : [];
   return {
     disconnectedAt: Date.now(),
     closeCode,
@@ -339,6 +346,7 @@ function recentDisconnectPayloadForSocket(ws, closeCode = 1005, closeReason = ""
     lifetimeMs: Math.max(0, Date.now() - Number(ws?._connectedAt || Date.now())),
     sawError: ws?._sawError === true,
     subscriptionCount: subscriptions,
+    channelTopics,
   };
 }
 
@@ -402,6 +410,72 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
   if (!Number.isFinite(reconnectObservedAt) || reconnectObservedAt <= disconnectedAt) return;
   if (ws.readyState !== WebSocket.OPEN) return;
 
+  const channelTopics: string[] = Array.isArray(previousDisconnect?.channelTopics)
+    ? previousDisconnect.channelTopics
+    : [];
+  const gapMs = reconnectObservedAt - disconnectedAt;
+
+  // Fast path: query per-channel Redis ring buffers instead of the DB CTE.
+  // The ring buffer only covers RING_BUFFER_WINDOW_MS; for longer gaps or
+  // when the user had no topic subscriptions (unlikely) we fall through to DB.
+  if (channelTopics.length > 0) {
+    // Use the same grace period as the DB path for the ring lower bound.
+    const gracePeriodMs = gapMs <= 1_000 ? 500 : gapMs <= 5_000 ? 3_000 : 15_000;
+    const ringLower = Math.max(0, disconnectedAt - gracePeriodMs);
+    const ringPayloads = await loadReplayFromRingBuffers(channelTopics, ringLower, reconnectObservedAt)
+      .catch(() => null);
+
+    if (ringPayloads !== null) {
+      // Ring buffer was readable. Use it regardless of how many messages came back —
+      // an empty ring means nothing was missed in this window.
+      logger.debug(
+        {
+          event: "ws.replay.ring_buffer_result",
+          userId,
+          connectionId: ws._connectionId,
+          replayedMessages: ringPayloads.length,
+          channelTopicCount: channelTopics.length,
+          gapMs,
+          source: "ring",
+        },
+        ringPayloads.length > 0
+          ? "Replaying missed messages from ring buffer"
+          : "Ring buffer: no missed messages in window",
+      );
+      if (ringPayloads.length > 0) {
+        logger.info(
+          {
+            event: "ws.replay.missed_messages",
+            userId,
+            connectionId: ws._connectionId,
+            disconnectedAt,
+            reconnectObservedAt,
+            replayedMessages: ringPayloads.length,
+            source: "ring",
+          },
+          "Replaying missed websocket messages after reconnect gap (ring buffer)",
+        );
+        for (const payload of ringPayloads) {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          sendPayloadToSocket(
+            ws,
+            `user:${userId}`,
+            payload,
+            null,
+            { bypassLogicalDuplicateSuppression: true },
+          );
+        }
+      }
+      return;
+    }
+
+    // Ring returned null → Redis error or window too wide; fall through to DB.
+    logger.debug(
+      { event: "ws.replay.ring_buffer_miss", userId, gapMs, channelTopicCount: channelTopics.length },
+      "Ring buffer miss; falling back to DB replay",
+    );
+  }
+
   const messages = await loadReplayableMessagesForUser(
     userId,
     disconnectedAt,
@@ -417,6 +491,7 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
       disconnectedAt,
       reconnectObservedAt,
       replayedMessages: messages.length,
+      source: "db",
     },
     "Replaying missed websocket messages after reconnect gap",
   );
