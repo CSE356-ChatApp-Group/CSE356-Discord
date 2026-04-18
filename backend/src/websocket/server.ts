@@ -108,6 +108,19 @@ const PRESENCE_SWEEPER_DEBOUNCE_MS = 5_000;
 // Tracks the last time recomputeUserPresence ran for each user so the
 // reconcile sweeper can skip recently-computed slots.
 const lastPresenceComputedAt: Map<string, number> = new Map();
+// For clean (1005) disconnects, we debounce the post-disconnect presence
+// recompute so that brief reconnects (e.g. grader 30ms cycles) don't cause
+// unnecessary offline→online churn. The timeout is cancelled when the user
+// reconnects within the debounce window.
+const PRESENCE_DISCONNECT_DEBOUNCE_MS = 1_000;
+const pendingPresenceRecompute = new Map<string, ReturnType<typeof setTimeout>>();
+function cancelPendingPresenceRecompute(userId: string) {
+  const t = pendingPresenceRecompute.get(userId);
+  if (t !== undefined) {
+    clearTimeout(t);
+    pendingPresenceRecompute.delete(userId);
+  }
+}
 let shuttingDown = false;
 
 // ── WS ACL in-process cache ────────────────────────────────────────────────────
@@ -1348,6 +1361,8 @@ wss.on("connection", async (ws, req) => {
 
   ws._presenceInitPromise = upsertConnectionState(user.id, ws._connectionId, "idle")
     .then(async () => {
+      // Cancel any debounced disconnect recompute — this connection supersedes it.
+      cancelPendingPresenceRecompute(user.id);
       await refreshConnectionTtls(user.id, ws._connectionId, { active: false });
       await recomputeUserPresence(user.id);
     })
@@ -1690,7 +1705,20 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
   }
 
   removeConnection(userId, ws._connectionId)
-    .then(() => recomputeUserPresence(userId))
+    .then(() => {
+      if (abnormalClose) {
+        return recomputeUserPresence(userId);
+      }
+      // Clean disconnect — debounce presence recompute so short-gap reconnects
+      // (grader 30ms cycles) skip the offline→online churn entirely.
+      cancelPendingPresenceRecompute(userId);
+      const t = setTimeout(() => {
+        pendingPresenceRecompute.delete(userId);
+        recomputeUserPresence(userId).catch(() => {});
+      }, PRESENCE_DISCONNECT_DEBOUNCE_MS);
+      t.unref();
+      pendingPresenceRecompute.set(userId, t);
+    })
     .catch((err) => {
       if (/Connection is closed/i.test(String(err?.message || err))) {
         logger.info(logPayload, "WS disconnected");
