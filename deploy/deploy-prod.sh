@@ -946,6 +946,11 @@ ssh_prod "
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
+  # CHATAPP_INSTANCES: persist worker count so monitoring and health endpoints
+  # can report the expected topology without re-deriving from systemd.
+  sudo grep -q '^CHATAPP_INSTANCES=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^CHATAPP_INSTANCES=.*/CHATAPP_INSTANCES=${CHATAPP_INSTANCES}/' /opt/chatapp/shared/.env \
+    || echo 'CHATAPP_INSTANCES=${CHATAPP_INSTANCES}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Ensure performance-critical env vars are set for this deployment.
   sudo grep -q '^BCRYPT_ROUNDS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=1/' /opt/chatapp/shared/.env \

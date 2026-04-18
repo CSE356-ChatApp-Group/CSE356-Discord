@@ -241,6 +241,63 @@ function recentDisconnectKey(userId) {
   return `ws:recent_disconnect:${userId}`;
 }
 
+// Hot pending delivery queue — catches messages that arrived while a user was
+// transiently disconnected. TTL is slightly longer than the grader window (15s)
+// so messages survive through a reconnect cycle.
+const PENDING_DELIVERY_TTL_MS = 25_000;
+
+function pendingDeliveryKey(userId: string) {
+  return `ws:pending:${userId}`;
+}
+
+// Called when a message:* event had no local clients on this node for a single
+// target user — user may be disconnected everywhere. HSETNX is idempotent across
+// all 4 workers firing for the same message.
+function pushPendingDelivery(userId: string, messageId: string, payload: unknown) {
+  if (!isRedisOperational(redis)) return;
+  const key = pendingDeliveryKey(userId);
+  const serialized = JSON.stringify(payload);
+  redis.hsetnx(key, messageId, serialized)
+    .then((set) => { if (set) redis.pexpire(key, PENDING_DELIVERY_TTL_MS).catch(() => {}); })
+    .catch(() => {});
+}
+
+// Called when this node successfully delivered the message to a local client —
+// remove from pending so reconnect drain doesn't double-deliver.
+function cleanPendingDelivery(userId: string, messageId: string) {
+  if (!isRedisOperational(redis)) return;
+  redis.hdel(pendingDeliveryKey(userId), messageId).catch(() => {});
+}
+
+// Drain and deliver all hot-pending messages for a user on reconnect.
+// Returns the number of messages delivered.
+async function drainPendingDelivery(ws, userId: string): Promise<number> {
+  if (!isRedisOperational(redis)) return 0;
+  const key = pendingDeliveryKey(userId);
+  const entries = await redis.hgetall(key).catch(() => null);
+  if (!entries || Object.keys(entries).length === 0) return 0;
+  await redis.del(key).catch(() => {});
+  const logicalChannel = `user:${userId}`;
+  let delivered = 0;
+  for (const [, rawPayload] of Object.entries(entries)) {
+    try {
+      const payload = JSON.parse(rawPayload as string);
+      if (ws.readyState !== WebSocket.OPEN) break;
+      sendPayloadToSocket(ws, logicalChannel, payload, null, { bypassLogicalDuplicateSuppression: true });
+      delivered++;
+    } catch {
+      // malformed entry — skip
+    }
+  }
+  if (delivered > 0) {
+    logger.info(
+      { event: "ws.pending_drain", userId, delivered },
+      "WS pending delivery: drained hot-pending messages on reconnect",
+    );
+  }
+  return delivered;
+}
+
 function reconnectWindowLabel(gapMs) {
   if (gapMs <= 5_000) return "le_5s";
   if (gapMs <= 30_000) return "le_30s";
@@ -853,8 +910,8 @@ function deliverUserFeedMessage(channel, routed) {
 
   const payloadEvent = (payload as any)?.event;
   const isMessageEvent = typeof payloadEvent === "string" && payloadEvent.startsWith("message:");
+  const messageId: string | undefined = isMessageEvent ? (payload as any)?.data?.id : undefined;
   if (isMessageEvent) {
-    const messageId = (payload as any)?.data?.id;
     if (recipientCount === 0) {
       // Only warn for single-recipient (DM) delivery — missing one specific user is suspicious.
       // For channel fanout (many userIds), no local clients on this node is normal; the user
@@ -864,12 +921,22 @@ function deliverUserFeedMessage(channel, routed) {
           { userIds, event: payloadEvent, messageId, gradingNote: "delivery_miss_no_local_clients" },
           "WS userfeed: no local clients for message event — user not connected to this node",
         );
+        // Push to hot-pending queue so it can be drained immediately on reconnect,
+        // faster than the DB replay path. HSETNX is idempotent — only the first
+        // of the 4 workers to fire this actually writes.
+        if (typeof messageId === "string") {
+          pushPendingDelivery(userIds[0] as string, messageId, payload);
+        }
       }
     } else {
       logger.info(
         { userIds, event: payloadEvent, messageId, recipientCount },
         "WS userfeed: delivering message to local clients",
       );
+      // Remove from pending — this node delivered it, so drain on reconnect won't double-deliver.
+      if (userIds.length === 1 && typeof messageId === "string") {
+        cleanPendingDelivery(userIds[0] as string, messageId);
+      }
     }
   }
 
@@ -1210,6 +1277,12 @@ wss.on("connection", async (ws, req) => {
 
   ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
     .then(async () => {
+      // Drain hot-pending delivery queue first — any messages that arrived while
+      // the user was disconnected are cached in Redis and can be delivered in
+      // <1ms without a DB round-trip. This is the fast path for the common case
+      // of a brief reconnect gap during normal grader operation.
+      await drainPendingDelivery(ws, user.id).catch(() => {});
+
       // Capture the replay upper bound AFTER the user-topic subscribe completes.
       // This closes the race where messages arriving during subscribe latency (~5-20ms)
       // would be missed by both live delivery (subscribe not yet active) and replay

@@ -23,12 +23,16 @@ DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 # Remote VM shape (used for Postgres / PgBouncer — independent of HTTP worker count).
 _REMOTE_NPROC=$(ssh "${STAGING_USER}@${STAGING_HOST}" 'nproc --all' 2>/dev/null || echo 2)
 
-# HTTP workers: staging nginx + systemd only ever load-balance **two** fixed ports
-# (4000 + 4001).  Do **not** use nproc as CHATAPP_INSTANCES — that made pool math
-# assume 3–4 Node processes while only 2 were running, starving each worker.
-# Override CHATAPP_INSTANCES=1 for single-worker staging if desired.
+# HTTP workers: scale with VM vCPUs so larger staging instances automatically
+# exercise the same worker topology as prod.
+# Formula: floor(nproc / 2), clamped to [2, 4].
+#   2 vCPU → 2 workers (minimum to exercise multi-worker Redis fanout)
+#   4 vCPU → 2 workers
+#   8 vCPU → 4 workers  (matches prod default — best baseline for load tests)
+#  16 vCPU → 4 workers  (same cap as prod)
+# Override: CHATAPP_INSTANCES=1 for single-worker debugging.
 if [[ -z "${CHATAPP_INSTANCES+x}" ]]; then
-  CHATAPP_INSTANCES=$(python3 -c "n=int('${_REMOTE_NPROC}'); print(2 if n >= 2 else 1)")
+  CHATAPP_INSTANCES=$(python3 -c "n=int('${_REMOTE_NPROC}'); print(max(2, min(4, n // 2)))")
 fi
 
 # PgBouncer **real** backends: scale with VM vCPUs so larger instances get more
@@ -380,6 +384,11 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sed 's/__DEPLOY_USER__/${STAGING_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
+  # CHATAPP_INSTANCES: persist worker count so monitoring scripts and health endpoints
+  # can report the expected topology without re-deriving it from systemd.
+  sudo grep -q '^CHATAPP_INSTANCES=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^CHATAPP_INSTANCES=.*/CHATAPP_INSTANCES=${CHATAPP_INSTANCES}/' /opt/chatapp/shared/.env \
+    || echo 'CHATAPP_INSTANCES=${CHATAPP_INSTANCES}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Ensure performance-critical env vars are set for this deployment.
   # BCRYPT_ROUNDS=1: minimal configured cost; bcrypt@6 floors <4 to cost 4 in the hash.
   sudo grep -q '^BCRYPT_ROUNDS=' /opt/chatapp/shared/.env \
