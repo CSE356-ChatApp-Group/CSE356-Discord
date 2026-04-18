@@ -87,7 +87,7 @@ const {
 const wss = new WebSocketServer({ noServer: true });
 const IDLE_TTL_SECONDS = 60;
 const CONNECTION_ALIVE_TTL_SECONDS = 120;
-const PRESENCE_SWEEPER_MS = 15_000;
+const PRESENCE_SWEEPER_MS = parseInt(process.env.PRESENCE_SWEEPER_MS || '15000', 10);
 // Backpressure thresholds for slow WS consumers.
 // DROP: skip this frame if the client's write buffer exceeds 64 KB (except
 //   message:* fanout frames — those still send until KILL to avoid silent loss).

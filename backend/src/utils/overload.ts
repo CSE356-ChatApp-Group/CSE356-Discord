@@ -6,6 +6,10 @@ const { overloadStageGauge } = require('./metrics');
 
 const lag = monitorEventLoopDelay({ resolution: 20 });
 lag.enable();
+// Reset the histogram periodically so p99 reflects a recent window rather
+// than the lifetime average (which accumulates low-lag samples from startup
+// and prevents the stage-based throttle from ever firing under load).
+setInterval(() => lag.reset(), 30_000).unref();
 
 /*
  * SKU tuning (all values are optional env overrides of the defaults below):
