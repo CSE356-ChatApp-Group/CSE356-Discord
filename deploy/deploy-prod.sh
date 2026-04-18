@@ -115,9 +115,10 @@ RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
 PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-true}"
 INGRESS_CANARY_SECONDS="${INGRESS_CANARY_SECONDS:-45}"
 ALL_WORKER_HEALTH_PASSES="${ALL_WORKER_HEALTH_PASSES:-3}"
-# Seconds to wait after a worker restarts and passes health checks before killing the next one.
+# Seconds to wait after a worker restarts and passes health checks before rolling the next one.
 # Gives WebSocket clients time to reconnect + replay before the next worker is taken down.
-WORKER_SETTLE_SECS="${WORKER_SETTLE_SECS:-10}"
+# 15s: WS_APP_KEEPALIVE_INTERVAL_MS=10s means most clients reconnect within 10s; 15s adds margin.
+WORKER_SETTLE_SECS="${WORKER_SETTLE_SECS:-15}"
 # PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
@@ -255,16 +256,18 @@ if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
 fi
 
 if [ "${CHATAPP_INSTANCES}" -ge 3 ]; then
-  # Four-worker prod has no safe "flip" port inside 4000..4003 because every worker
-  # is already live. Use a spare candidate port outside the nginx upstream so deploys
-  # never restart a worker while nginx can still route traffic to it.
   if ! printf '%s\n' "${TARGET_PORTS[@]}" | grep -qx "${CURRENT_UPSTREAM_PORT}"; then
     echo "ERROR: Unexpected upstream port '${CURRENT_UPSTREAM_PORT}' in nginx config."
     exit 1
   fi
   OLD_PORT="${CURRENT_UPSTREAM_PORT}"
-  NEW_PORT="$((BASE_APP_PORT + CHATAPP_INSTANCES))"
+  # Rolling restart: first-to-roll = last TARGET_PORT (e.g. 4003 for 4 workers).
+  # No spare port outside TARGET_PORTS — workers never exceed CHATAPP_INSTANCES simultaneously,
+  # so PgBouncer pool stays bounded at inst×PG_POOL_MAX with zero overrun risk on cutover.
+  NEW_PORT="${TARGET_PORTS[-1]}"
+  ROLLING_RESTART=true
 else
+  ROLLING_RESTART=false
   if [[ "${CURRENT_UPSTREAM_PORT}" == "4000" ]]; then
     OLD_PORT=4000
     NEW_PORT=4001
@@ -1076,6 +1079,22 @@ ssh_prod "
   echo 'systemd unit installed'"
 echo "✓ systemd unit ready"
 
+# 6-pre. Rolling restart: remove first-to-roll worker from nginx before updating it.
+# This ensures the worker is never restarted while nginx still routes live traffic to it.
+if [ "${ROLLING_RESTART:-false}" = "true" ]; then
+  echo "6-pre. Removing :${NEW_PORT} from nginx upstream (N-1 workers absorb traffic while candidate is updated)..."
+  _ROLL_PRE_REMAINING_CSV=""
+  for _p in "${TARGET_PORTS[@]}"; do
+    [ "$_p" != "${NEW_PORT}" ] && _ROLL_PRE_REMAINING_CSV="${_ROLL_PRE_REMAINING_CSV:+${_ROLL_PRE_REMAINING_CSV},}${_p}"
+  done
+  rewrite_nginx_upstream "${_ROLL_PRE_REMAINING_CSV}" "pre-roll remove :${NEW_PORT}" || {
+    echo "ERROR: failed to remove :${NEW_PORT} from nginx for rolling restart"
+    exit 1
+  }
+  NGINX_CANDIDATE_PIN_ACTIVE=1
+  echo "✓ :${NEW_PORT} removed from nginx (${_ROLL_PRE_REMAINING_CSV} still serving)"
+fi
+
 # 6. Start candidate on alternate port via systemd
 echo "6. Starting candidate process via systemd..."
 ssh_prod "
@@ -1131,6 +1150,20 @@ ssh_prod "
 }
 echo "✓ Candidate WS smoke passed"
 deploy_log_phase "candidate WS smoke OK"
+
+# 8b.5. Rolling restart: re-add validated first-rolled worker to nginx before rolling the rest.
+# At this point NEW_PORT has passed HC + smoke on the new release (isolated from traffic).
+# Restore it to the upstream so all CHATAPP_INSTANCES workers serve while we roll the others.
+if [ "${ROLLING_RESTART:-false}" = "true" ]; then
+  echo "8b.5 Restoring :${NEW_PORT} to nginx upstream (validated on ${RELEASE_SHA})..."
+  rewrite_nginx_upstream "${TARGET_PORTS_CSV}" "restore first rolled worker :${NEW_PORT}" || {
+    echo "ERROR: failed to restore :${NEW_PORT} to nginx after smoke validation"
+    rollback_cutover; exit 1
+  }
+  echo "✓ :${NEW_PORT} back in nginx upstream (all ${CHATAPP_INSTANCES} workers active)"
+  echo "  Settling ${WORKER_SETTLE_SECS}s before rolling remaining workers..."
+  sleep "${WORKER_SETTLE_SECS}"
+fi
 
 # 8c. Nginx access.log: append request_time + upstream_response_time (idempotent).
 echo "8c. Nginx access log timing fields (idempotent)..."
@@ -1464,8 +1497,90 @@ echo "9.075: patched auth proxy_next_upstream (non_idempotent) + reloaded nginx"
 REMOTE
 echo "✓ Nginx auth POST retry OK"
 
-# 9b–9c. Multi-worker prod: roll non-candidate workers to this release, then restore full upstream.
+# 9b–9c. Multi-worker: roll all workers to this release, then verify parity.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
+  if [ "${ROLLING_RESTART:-false}" = "true" ]; then
+    # ---- Rolling restart (CHATAPP_INSTANCES >= 3) ----
+    # NEW_PORT was already rolled in step 6 and re-added to nginx in step 8b.5.
+    # Roll remaining workers one at a time: remove from nginx → restart → HC → re-add → settle.
+    # At every moment N-1 workers serve production traffic — no single-worker window.
+    REMAINING_ROLL=()
+    for _p in "${TARGET_PORTS[@]}"; do
+      [ "$_p" != "${NEW_PORT}" ] && REMAINING_ROLL+=("$_p")
+    done
+    # Reverse order: roll highest-numbered non-canonical ports first, OLD_PORT (canonical) last.
+    REMAINING_ROLL_REV=()
+    for (( _ri=${#REMAINING_ROLL[@]}-1; _ri>=0; _ri-- )); do
+      REMAINING_ROLL_REV+=("${REMAINING_ROLL[$_ri]}")
+    done
+
+    for roll_port in "${REMAINING_ROLL_REV[@]}"; do
+      echo "--- Rolling worker :${roll_port} to ${RELEASE_SHA} ---"
+
+      # 1. Build upstream CSV without this port (N-1 workers serve).
+      _ROLL_EXCL_CSV=""
+      for _p in "${TARGET_PORTS[@]}"; do
+        [ "$_p" != "${roll_port}" ] && _ROLL_EXCL_CSV="${_ROLL_EXCL_CSV:+${_ROLL_EXCL_CSV},}${_p}"
+      done
+
+      # 2. Remove roll_port from nginx — remaining N-1 workers absorb all traffic.
+      rewrite_nginx_upstream "${_ROLL_EXCL_CSV}" "remove :${roll_port} before roll" || {
+        echo "ERROR: failed to remove :${roll_port} from nginx"; rollback_cutover; exit 1
+      }
+
+      # 3. Stop, update systemd dropin, start on new release.
+      ssh_prod "
+        set -euo pipefail
+        RELEASE_PATH=${RELEASE_DIR}/${RELEASE_SHA}
+        DROPIN_DIR=/etc/systemd/system/chatapp@${roll_port}.service.d
+        sudo mkdir -p \"\$DROPIN_DIR\"
+        printf '[Service]\\nWorkingDirectory=%s/backend\\n' \"\$RELEASE_PATH\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
+        sudo systemctl daemon-reload
+        sudo systemctl reset-failed chatapp@${roll_port} 2>/dev/null || true
+        ok=0
+        for attempt in 1 2 3; do
+          sudo systemctl restart chatapp@${roll_port}
+          sleep 2
+          if systemctl is-active --quiet chatapp@${roll_port}; then
+            ok=1; break
+          fi
+          echo \"chatapp@${roll_port} restart attempt \$attempt failed; retrying in 3s\"
+          sleep 3
+        done
+        if [ \"\$ok\" -ne 1 ]; then
+          echo 'ERROR: chatapp@${roll_port} failed to become active after retries'
+          sudo journalctl -u chatapp@${roll_port} --no-pager -n 60 || true
+          exit 1
+        fi
+        echo 'chatapp@${roll_port} restarted on ${RELEASE_SHA}'
+      " || { echo "ERROR: roll failed on :${roll_port}"; rollback_cutover; exit 1; }
+
+      # 4. Health check isolated worker (not yet in nginx upstream).
+      if ! ssh_prod "/tmp/health-check.sh ${roll_port} http://127.0.0.1:${roll_port}"; then
+        echo "ERROR: health check failed on :${roll_port}"
+        rollback_cutover; exit 1
+      fi
+
+      # 5. Re-add roll_port to nginx (N workers active again).
+      rewrite_nginx_upstream "${TARGET_PORTS_CSV}" "restore :${roll_port} after roll" || {
+        echo "ERROR: failed to restore :${roll_port} to nginx"; rollback_cutover; exit 1
+      }
+
+      # 6. Settle: let WS clients reconnect to updated worker before rolling the next.
+      echo "  Settling ${WORKER_SETTLE_SECS}s for WS reconnects..."
+      sleep "${WORKER_SETTLE_SECS}"
+      deploy_log_phase "rolled :${roll_port}"
+    done
+
+    NGINX_CANDIDATE_PIN_ACTIVE=0
+    gate_same_release || { rollback_cutover; exit 1; }
+    gate_all_worker_health || { rollback_cutover; exit 1; }
+    gate_upstream_parity || { rollback_cutover; exit 1; }
+    deploy_log_phase "rolling restart complete (all ${CHATAPP_INSTANCES} workers) + parity gates OK"
+    echo "✓ Rolling restart complete"
+
+  else
+  # ---- Spare-port cutover (CHATAPP_INSTANCES == 2 / staging) ----
   if [ "${PIN_CANDIDATE_BEFORE_COMPANION}" = "true" ]; then
     echo "9a. Pinning nginx to candidate (${NEW_PORT}) before companion restart..."
     ssh_prod "
@@ -1720,6 +1835,7 @@ PY
   }
   deploy_log_phase "multi-worker cutover (9c) + parity gates OK"
   echo "✓ Multi-worker nginx upstream restored"
+  fi  # end else (spare-port)
 fi
 
 # 9.5. Enable new service for auto-start on reboot
