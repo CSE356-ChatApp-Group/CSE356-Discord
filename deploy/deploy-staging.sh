@@ -266,7 +266,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 d /var/run/pgbouncer 0755 postgres postgres -
 TMPFILES
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgbouncer-chatapp.conf 2>/dev/null || true
-  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
+  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
   sudo systemctl enable pgbouncer
   # pgbouncer is a sysv service on Ubuntu 22.04 — use the init.d script for
   # reliable stop/start (handles PID file cleanup correctly).  systemctl restart
@@ -329,6 +329,11 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     -c \"ALTER SYSTEM SET checkpoint_completion_target = '0.9';\" \
     -c \"ALTER SYSTEM SET random_page_cost       = '1.1';\" \
     -c \"ALTER SYSTEM SET pg_stat_statements.track = 'all';\" \
+    2>&1 | grep -v 'change directory' || true
+  # statement_timeout on the app role: 15s kills runaway queries at the PG level so
+  # they do not hold a backend slot after PgBouncer's query_timeout fires (16s).
+  sudo -u postgres psql -qAt \
+    -c \"ALTER ROLE chatapp SET statement_timeout = '15s';\" \
     2>&1 | grep -v 'change directory' || true
 
   sudo -u postgres psql -qAt -c \"SELECT pg_reload_conf();\" > /dev/null || true

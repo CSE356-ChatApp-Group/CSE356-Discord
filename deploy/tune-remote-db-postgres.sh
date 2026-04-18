@@ -38,6 +38,15 @@ sudo -u postgres psql -qAt \
   -c "ALTER SYSTEM SET max_connections = '${TARGET_MAX}';" \
   -c "ALTER SYSTEM SET work_mem = '\${WRK_MB}MB';" \
   2>&1 | grep -v 'change directory' || true
+# Set statement_timeout on the app role so long-running queries are killed at the
+# PG level.  PgBouncer query_timeout=16s kills the PgBouncer→PG connection but
+# without this the underlying PG statement continues holding a backend slot and
+# consuming CPU until it finishes naturally.  15s leaves 1s before PgBouncer acts.
+STMT_TIMEOUT="${STATEMENT_TIMEOUT:-15s}"
+sudo -u postgres psql -qAt \
+  -c "ALTER ROLE chatapp SET statement_timeout = '\${STMT_TIMEOUT}';" \
+  2>&1 | grep -v 'change directory' || true
+echo "statement_timeout for chatapp role set to \${STMT_TIMEOUT}."
 sudo -u postgres psql -qAt -c "SELECT pg_reload_conf();" >/dev/null || true
 PENDING=\$(sudo -u postgres psql -qAt -c "SELECT EXISTS (SELECT 1 FROM pg_settings WHERE pending_restart)")
 if [ "\${PENDING}" = "t" ]; then

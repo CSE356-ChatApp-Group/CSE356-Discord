@@ -80,19 +80,31 @@ def _pgbouncer_conn_value(val: str) -> str:
 # ── PgBouncer pool sizing ───────────────────────────────────────────────────────
 # Deploy passes PGBOUNCER_POOL_SIZE from the release host so pool size matches
 # CHATAPP_INSTANCES and vCPU (see deploy-prod.sh / deploy-staging.sh).  Standalone
-# runs use min(nCPU×50, 120) capped by PGBOUNCER_POOL_HARD_CAP (default 400).
+# runs use min(nCPU×50, 120) capped by PGBOUNCER_POOL_HARD_CAP.
+#
+# PGBOUNCER_POOL_HARD_CAP default is 600:
+#   - deploy formula caps _PGB_SIZE at 500 (for any CPU count + instance combo)
+#   - 600 gives a safety margin without clipping the deploy-computed value
+#   - the old default of 400 silently clipped the 490-500 values the deploy was
+#     trying to write — leaving PgBouncer under-provisioned vs PG max_connections
 import multiprocessing
 _ncpu = multiprocessing.cpu_count()
 _default_pool_size = min(_ncpu * 50, 120)
 # When deploy passes PGBOUNCER_POOL_SIZE (VM-aware), honour it up to HARD_CAP.
 # Standalone runs still use the conservative _default_pool_size.
-_HARD_CAP = int(os.environ.get('PGBOUNCER_POOL_HARD_CAP', '400'))
+_HARD_CAP = int(os.environ.get('PGBOUNCER_POOL_HARD_CAP', '600'))
 if os.environ.get('PGBOUNCER_POOL_SIZE'):
     PGBOUNCER_POOL_SIZE = min(int(os.environ['PGBOUNCER_POOL_SIZE']), _HARD_CAP)
 else:
     PGBOUNCER_POOL_SIZE = _default_pool_size
 PGBOUNCER_RESERVE_SIZE = max(5, _ncpu * 5)
-print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} (PGBOUNCER_POOL_SIZE env={os.environ.get("PGBOUNCER_POOL_SIZE", "not set")})')
+# max_db_connections: cap total PgBouncer→PG connections per database so a bug in
+# pool-size math can never cause PgBouncer to exceed PG's max_connections.
+# Deploy passes PG_MAX_CONNECTIONS; standalone defaults to pool_size + 100.
+_pg_max_conn = int(os.environ.get('PG_MAX_CONNECTIONS', str(PGBOUNCER_POOL_SIZE + 100)))
+# Leave 10 connections for superuser / monitoring / pg_stat_activity overhead.
+PGBOUNCER_MAX_DB_CONNECTIONS = max(PGBOUNCER_POOL_SIZE, _pg_max_conn - 10)
+print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} max_db_connections={PGBOUNCER_MAX_DB_CONNECTIONS} (PGBOUNCER_POOL_SIZE env={os.environ.get("PGBOUNCER_POOL_SIZE", "not set")})')
 
 # ── Write pgbouncer.ini ─────────────────────────────────────────────────────────
 ini = f"""\
@@ -121,6 +133,11 @@ pool_mode = transaction
 ; 1000 virtual clients; real PG backends = default_pool_size (deploy sets via PGBOUNCER_POOL_SIZE).
 max_client_conn     = 1000
 default_pool_size   = {PGBOUNCER_POOL_SIZE}
+; Safety cap: PgBouncer will never open more than this many real PG connections for
+; this database.  Prevents pool-size formula bugs from exceeding PG max_connections.
+; Value = min(PG_MAX_CONNECTIONS - 10, ...) — set by deploy; leaves headroom for
+; superuser / monitoring / pg_stat_activity connections.
+max_db_connections  = {PGBOUNCER_MAX_DB_CONNECTIONS}
 ; Keep a warm floor of connections so the first burst after an idle period does not
 ; pay the cost of establishing new PG connections (~100-300 ms each on a remote DB).
 min_pool_size       = 20

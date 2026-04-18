@@ -699,7 +699,7 @@ ssh_prod "
 d /var/run/pgbouncer 0755 postgres postgres -
 TMPFILES
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgbouncer-chatapp.conf 2>/dev/null || true
-  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
+  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
   sudo systemctl enable pgbouncer
   if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then
     sudo service pgbouncer stop 2>/dev/null || true
