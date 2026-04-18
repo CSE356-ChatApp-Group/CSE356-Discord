@@ -357,6 +357,8 @@ if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
   echo "1) Using local CI artifact for ${RELEASE_SHA}..."
 else
   echo "1) Downloading CI-built artifact for ${RELEASE_SHA}..."
+  # Remove stale partial downloads before fetching; gh exits non-zero if the file exists.
+  rm -f "${DOWNLOADED_ARTIFACT}"
   gh release download "release-${RELEASE_SHA}" -R "${GITHUB_REPO}" -p "${ARTIFACT}" -O "${DOWNLOADED_ARTIFACT}"
 fi
 
@@ -744,6 +746,73 @@ PYEOF
   echo "7b.3) Enabling companion service for auto-start on reboot..."
   ssh "${STAGING_USER}@${STAGING_HOST}" \
     "sudo systemctl enable chatapp@${LIVE_PORT} 2>/dev/null || true"
+fi
+
+# When CHATAPP_INSTANCES > 2, spin up extra workers on ports 4002, 4003, 4004 ...
+# These are started after the blue-green cutover so they never gate the main deploy.
+ADDITIONAL_PORTS=()
+if [[ ${CHATAPP_INSTANCES} -gt 2 ]]; then
+  for _i in $(seq 2 $((CHATAPP_INSTANCES - 1))); do
+    ADDITIONAL_PORTS+=($((4000 + _i)))
+  done
+fi
+
+if [[ ${#ADDITIONAL_PORTS[@]} -gt 0 ]]; then
+  echo "7c) Starting ${#ADDITIONAL_PORTS[@]} additional worker(s): ${ADDITIONAL_PORTS[*]}..."
+  for extra_port in "${ADDITIONAL_PORTS[@]}"; do
+    ssh "${STAGING_USER}@${STAGING_HOST}" "
+      set -euo pipefail
+      RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
+      DROPIN_DIR=/etc/systemd/system/chatapp@${extra_port}.service.d
+      sudo mkdir -p \"\${DROPIN_DIR}\"
+      printf '[Service]\nWorkingDirectory=%s/backend\n' \"\${RELEASE_PATH}\" \
+        | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
+      sudo systemctl daemon-reload
+      sudo systemctl stop chatapp@${extra_port} 2>/dev/null || true
+      sleep 1
+      sudo systemctl start chatapp@${extra_port}
+      sudo systemctl enable chatapp@${extra_port} 2>/dev/null || true
+      echo 'Worker started on port ${extra_port}'
+    "
+    ssh "${STAGING_USER}@${STAGING_HOST}" \
+      "/tmp/health-check.sh ${extra_port} http://127.0.0.1:${extra_port}"
+  done
+
+  echo "7c.1) Adding extra workers to nginx upstream..."
+  # Build the complete upstream server list: CANDIDATE + LIVE + ADDITIONAL
+  _ALL_PORTS="${CANDIDATE_PORT} ${LIVE_PORT} ${ADDITIONAL_PORTS[*]}"
+  ssh "${STAGING_USER}@${STAGING_HOST}" "
+    set -euo pipefail
+    sudo python3 - <<'PYEOF'
+import re
+
+cfg_path = '/etc/nginx/sites-available/chatapp'
+config = open(cfg_path).read()
+server_lines = '\n'.join(
+    f'  server 127.0.0.1:{p} max_fails=0;'
+    for p in '${_ALL_PORTS}'.split()
+)
+new_upstream = (
+    'upstream chatapp_upstream {\n'
+    '  least_conn;\n'
+    + server_lines + '\n'
+    '  keepalive 256;\n'
+    '  keepalive_requests 10000;\n'
+    '  keepalive_timeout 75s;\n'
+    '}'
+)
+config = re.sub(
+    r'upstream chatapp_upstream \{[^}]+\}',
+    new_upstream,
+    config,
+    flags=re.DOTALL,
+)
+open(cfg_path, 'w').write(config)
+PYEOF
+    sudo nginx -t
+    sudo systemctl reload nginx
+    echo 'nginx upstream updated: ${_ALL_PORTS}'
+  "
 fi
 
 echo "8) Enabling candidate service for auto-start on reboot..."
