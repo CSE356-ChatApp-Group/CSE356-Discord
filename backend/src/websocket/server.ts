@@ -1659,21 +1659,38 @@ function getLocalWebSocketClientCount() {
   }
 }
 
-function shutdown() {
+async function shutdown() {
   shuttingDown = true;
   clearInterval(heartbeatInterval);
   clearInterval(presenceSweepInterval);
 
-  return new Promise<void>((resolve) => {
-    wss.clients.forEach((ws) => {
-      try {
-        noteRecentDisconnectForSocket(ws, 1001, "shutdown");
-        ws.terminate();
-      } catch {
-        // Ignore termination errors during shutdown.
+  // Collect all Redis disconnect-record writes before closing connections.
+  // noteRecentDisconnectForSocket is fire-and-forget; if we call wss.close()
+  // immediately the Redis writes may race against redis.closeRedisConnections()
+  // in index.ts, silently dropping the reconnect-replay keys and causing
+  // delivery misses when clients reconnect to a new worker.
+  const disconnectWrites: Promise<unknown>[] = [];
+  wss.clients.forEach((ws) => {
+    try {
+      const userId = typeof ws?._userId === "string" ? ws._userId : null;
+      if (userId && !ws._recentDisconnectRecorded) {
+        ws._recentDisconnectRecorded = true;
+        disconnectWrites.push(
+          recordRecentDisconnect(
+            userId,
+            recentDisconnectPayloadForSocket(ws, 1001, "shutdown"),
+          ).catch(() => {}),
+        );
       }
-    });
+      ws.terminate();
+    } catch {
+      // Ignore termination errors during shutdown.
+    }
+  });
 
+  await Promise.allSettled(disconnectWrites);
+
+  await new Promise<void>((resolve) => {
     wss.close(() => resolve());
   });
 }
