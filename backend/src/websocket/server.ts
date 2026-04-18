@@ -917,7 +917,7 @@ function deliverUserFeedMessage(channel, routed) {
       // For channel fanout (many userIds), no local clients on this node is normal; the user
       // is simply connected to a different worker.
       if (userIds.length === 1) {
-        logger.warn(
+        logger.debug(
           { userIds, event: payloadEvent, messageId, gradingNote: "delivery_miss_no_local_clients" },
           "WS userfeed: no local clients for message event — user not connected to this node",
         );
@@ -929,7 +929,7 @@ function deliverUserFeedMessage(channel, routed) {
         }
       }
     } else {
-      logger.info(
+      logger.debug(
         { userIds, event: payloadEvent, messageId, recipientCount },
         "WS userfeed: delivering message to local clients",
       );
@@ -1000,12 +1000,12 @@ function deliverPubsubMessage(channel, message) {
     if (isMessageEvent) {
       const messageId = (parsed as any)?.data?.id;
       if (recipientCount === 0) {
-        logger.warn(
+        logger.debug(
           { channel, event: parsedEvent, messageId, gradingNote: "delivery_miss_no_channel_subscribers" },
           "WS conversation channel: no subscribers for message event",
         );
       } else {
-        logger.info(
+        logger.debug(
           { channel, event: parsedEvent, messageId, recipientCount },
           "WS conversation channel: delivering message to subscribers",
         );

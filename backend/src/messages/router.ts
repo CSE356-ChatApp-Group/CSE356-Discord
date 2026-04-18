@@ -254,7 +254,7 @@ async function publishConversationEventNow(conversationId, event, data) {
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
 
   if (event.startsWith('message:')) {
-    logger.info(
+    logger.debug(
       {
         conversationId,
         event,
