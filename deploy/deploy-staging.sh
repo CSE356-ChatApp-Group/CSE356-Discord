@@ -779,8 +779,10 @@ if [[ ${#ADDITIONAL_PORTS[@]} -gt 0 ]]; then
   done
 
   echo "7c.1) Adding extra workers to nginx upstream..."
-  # Build the complete upstream server list: CANDIDATE + LIVE + ADDITIONAL
-  _ALL_PORTS="${CANDIDATE_PORT} ${LIVE_PORT} ${ADDITIONAL_PORTS[*]}"
+  # Build the complete upstream port list as a plain space-separated string.
+  # Use a simple range (4000..4000+N-1) — no dependency on CANDIDATE/LIVE vars
+  # and no risk of duplicates.
+  _ALL_PORTS="$(seq -s ' ' 4000 $((4000 + CHATAPP_INSTANCES - 1)))"
   ssh "${STAGING_USER}@${STAGING_HOST}" "
     set -euo pipefail
     sudo python3 - <<'PYEOF'
@@ -801,12 +803,15 @@ new_upstream = (
     '  keepalive_timeout 75s;\n'
     '}'
 )
-config = re.sub(
+config, n = re.subn(
     r'upstream chatapp_upstream \{[^}]+\}',
     new_upstream,
     config,
+    count=1,
     flags=re.DOTALL,
 )
+if n != 1:
+    raise SystemExit(f'step 7c: upstream chatapp_upstream block not replaced (n={n})')
 open(cfg_path, 'w').write(config)
 PYEOF
     sudo nginx -t
