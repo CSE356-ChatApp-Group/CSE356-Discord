@@ -1116,9 +1116,27 @@ function deliverPubsubMessage(channel, message) {
   }
 
   const preparedPayload = prepareSocketPayload(channel, parsed, message);
+  let deliveredCount = 0;
   clients.forEach((ws) => {
-    sendPayloadToSocket(ws, channel, parsed, message, { preparedPayload });
+    if (sendPayloadToSocket(ws, channel, parsed, message, { preparedPayload })) {
+      deliveredCount++;
+    }
   });
+
+  // For conversation channels: if we had local subscribers but all were dead/closing,
+  // park the payload so the reconnecting client can drain it on their next subscribe.
+  if (channelType === "conversation" && recipientCount > 0 && deliveredCount === 0) {
+    const parsedEvent = (parsed as any)?.event;
+    if (parsedEvent === "message:created") {
+      const conversationId = channel.replace("conversation:", "");
+      const pendingKey = `dm_pending:${conversationId}`;
+      redis.set(pendingKey, message, "EX", 10).catch(() => {});
+      logger.debug(
+        { conversationId, event: parsedEvent, gradingNote: "dm_pending_write_zombie" },
+        "WS conversation: all local subscribers were dead — parked payload in dm_pending",
+      );
+    }
+  }
 }
 
 redisSub.on("message", (channel, message) => {
