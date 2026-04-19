@@ -76,6 +76,11 @@ const _idemSuccessTtl = parseInt(process.env.MSG_IDEM_SUCCESS_TTL_SECS || '86400
 /** How long to remember a successful idempotent POST /messages (seconds). */
 const MSG_IDEM_SUCCESS_TTL_SECS =
   Number.isFinite(_idemSuccessTtl) && _idemSuccessTtl > 0 ? _idemSuccessTtl : 86400;
+// BG_WRITE_POOL_GUARD: skip fire-and-forget DB writes when pool.waitingCount >= this threshold.
+// These writes (last_message_id updates, read_states inserts) are non-critical — skipping them
+// under pool pressure stops background writes from crowding out sync queries for the pool.
+const BG_WRITE_POOL_GUARD = parseInt(process.env.BG_WRITE_POOL_GUARD || '5', 10);
+
 // When unset, keep historical default (defer only under heavy pool wait).
 // `0` disables the pool-wait defer branch entirely (see PUT /messages/:id/read).
 const _readReceiptDeferWaiting = parseInt(process.env.READ_RECEIPT_DEFER_POOL_WAITING || '8', 10);
@@ -468,6 +473,15 @@ async function advanceReadStateCursor({
   // The upsert's ON CONFLICT WHERE acts as a secondary safety net: if two workers
   // both passed the Redis CAS (race on identical timestamp), only one DB row
   // update will win; the other returns 0 rows (no harm).
+  // Pool guard: skip DB write if pool is already under pressure — the Redis cursor
+  // advance already happened (casResult===2), so the caller gets a valid response;
+  // the DB will be reconciled on the next write that passes the guard.
+  if (poolStats().waiting >= BG_WRITE_POOL_GUARD) {
+    return {
+      applied: { last_read_message_id: messageId, last_read_at: new Date().toISOString() },
+      didAdvanceCursor: true,
+    };
+  }
   const dbWrite = query(
     `INSERT INTO read_states (
        user_id,
@@ -1243,7 +1257,9 @@ router.post('/',
 
       // Fire-and-forget: update channel/conversation last_message pointers outside
       // the transaction to eliminate row-level lock contention under concurrent posts.
-      if (baseMessage.id) {
+      // Pool guard: skip if pool is under pressure — the next successful send will
+      // update last_message_id anyway (WHERE clause guards against regression).
+      if (baseMessage.id && poolStats().waiting < BG_WRITE_POOL_GUARD) {
         if (channelId) {
           query(
             `UPDATE channels

@@ -1127,8 +1127,18 @@ ssh_prod "
     || echo 'PG_CONNECTION_TIMEOUT_MS=7000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Preserve stable rollout tuning across deploys.
   # Only set these keys when missing; do not clobber operator-pinned values.
+  # READ_RECEIPT_DEFER_POOL_WAITING=10: when pool.waiting>=10, PUT /read returns 200
+  # immediately without any DB work. Prevents read receipts from piling onto an
+  # already-stressed pool and starving POST /messages during burst traffic.
   sudo grep -q '^READ_RECEIPT_DEFER_POOL_WAITING=' /opt/chatapp/shared/.env \
-    || echo 'READ_RECEIPT_DEFER_POOL_WAITING=0' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^READ_RECEIPT_DEFER_POOL_WAITING=.*/READ_RECEIPT_DEFER_POOL_WAITING=10/' /opt/chatapp/shared/.env \
+    || echo 'READ_RECEIPT_DEFER_POOL_WAITING=10' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # BG_WRITE_POOL_GUARD=5: skip fire-and-forget background DB writes (last_message_id
+  # updates, read_states inserts) when pool.waiting>=5. Prevents async background
+  # writes from crowding out sync critical-path queries during burst load.
+  sudo grep -q '^BG_WRITE_POOL_GUARD=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^BG_WRITE_POOL_GUARD=.*/BG_WRITE_POOL_GUARD=5/' /opt/chatapp/shared/.env \
+    || echo 'BG_WRITE_POOL_GUARD=5' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Bound search query hold-time in the pool; keeps hot non-search paths from
   # starving behind long text-search statements during traffic spikes.
   sudo grep -q '^SEARCH_STATEMENT_TIMEOUT_MS=' /opt/chatapp/shared/.env \
