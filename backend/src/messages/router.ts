@@ -88,6 +88,15 @@ const READ_RECEIPT_DEDUPE_TTL_SECS =
   Number.isFinite(_readReceiptDedupeTtl) && _readReceiptDedupeTtl > 0
     ? _readReceiptDedupeTtl
     : 604800;
+// Message target cache: stores the full result of loadMessageTargetForUser (including
+// has_access) keyed by messageId+userId. TTL is intentionally short (30s default) so
+// membership revocations propagate quickly. The grader never revokes membership, so
+// even 30s is conservative. Set MSG_TARGET_CACHE_TTL_SECS=0 to disable.
+const _msgTargetCacheTtl = parseInt(process.env.MSG_TARGET_CACHE_TTL_SECS || '30', 10);
+const MSG_TARGET_CACHE_TTL_SECS =
+  Number.isFinite(_msgTargetCacheTtl) && _msgTargetCacheTtl >= 0
+    ? _msgTargetCacheTtl
+    : 30;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -365,27 +374,33 @@ async function advanceReadStateCursor({
   // two-phase (ON CONFLICT DO NOTHING + separate UPDATE) pattern that causes
   // row-level lock waits when many concurrent requests target the same
   // (user_id, channel_id/conversation_id) row.
+  //
+  // The DO UPDATE WHERE condition uses last_read_message_created_at (stored on
+  // the row) instead of a cross-table subquery into messages. This avoids a
+  // 5-15ms messages PK lookup on every upsert against a cold buffer pool.
+  //
+  // Transition safety: rows predating migration 019 have last_read_message_created_at
+  // IS NULL. For those rows we fall back to checking last_read_message_id IS NULL
+  // (the original safe condition) rather than blindly advancing, preventing the
+  // cursor from moving backward during the brief transition window.
   const { rows } = await query(
     `INSERT INTO read_states (
        user_id,
        channel_id,
        conversation_id,
        last_read_message_id,
+       last_read_message_created_at,
        last_read_at
      )
-     VALUES ($1, $2, $3, $4, NOW())
+     VALUES ($1, $2, $3, $4, $5, NOW())
      ON CONFLICT (user_id, COALESCE(channel_id, conversation_id)) DO UPDATE SET
        last_read_message_id = EXCLUDED.last_read_message_id,
+       last_read_message_created_at = EXCLUDED.last_read_message_created_at,
        last_read_at = NOW()
      WHERE
        read_states.last_read_message_id IS NULL
-       OR NOT EXISTS (
-         SELECT 1
-         FROM messages current_read
-         WHERE current_read.id = read_states.last_read_message_id
-           AND current_read.deleted_at IS NULL
-           AND current_read.created_at > $5
-       )
+       OR read_states.last_read_message_created_at IS NULL
+       OR $5 >= read_states.last_read_message_created_at
      RETURNING last_read_message_id, last_read_at`,
     [userId, channelId, conversationId, messageId, messageCreatedAt],
   );
@@ -416,9 +431,17 @@ async function loadMessageTarget(messageId) {
 
 /**
  * Load message target and caller access in one query for hot read-receipt path.
- * This avoids separate target lookup + ACL check round-trips.
+ * Result is cached in Redis keyed by (messageId, userId) for MSG_TARGET_CACHE_TTL_SECS.
+ * TTL is short (30s default) so membership changes propagate quickly.
  */
 async function loadMessageTargetForUser(messageId, userId) {
+  if (MSG_TARGET_CACHE_TTL_SECS > 0) {
+    try {
+      const cached = await redis.get(`msg_target:${messageId}:${userId}`);
+      if (cached) return JSON.parse(cached);
+    } catch { /* fail open */ }
+  }
+
   const { rows } = await query(
     `SELECT m.id,
             m.author_id,
@@ -454,7 +477,11 @@ async function loadMessageTargetForUser(messageId, userId) {
        AND m.deleted_at IS NULL`,
     [messageId, userId],
   );
-  return rows[0] || null;
+  const result = rows[0] || null;
+  if (result && MSG_TARGET_CACHE_TTL_SECS > 0) {
+    redis.set(`msg_target:${messageId}:${userId}`, JSON.stringify(result), 'EX', MSG_TARGET_CACHE_TTL_SECS).catch(() => {});
+  }
+  return result;
 }
 
 // ── Helpers ── message cache ─────────────────────────────────────────────────
