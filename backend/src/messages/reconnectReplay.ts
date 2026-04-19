@@ -79,7 +79,10 @@ function replayQueryProfile(gapMs, stage = overload.getStage(), closeCode?: numb
     // For clean closes, disconnectedAt is accurate. For 1006 (zombie detected
     // by heartbeat), the socket may have been dead for up to the heartbeat
     // interval before the server noticed — look back far enough to cover that.
-    gracePeriodMs = isAbnormalClose ? 25_000 : 500;
+    // Use 2000ms (up from 500ms) to cover cases where the disconnect marker is
+    // recorded slightly after the actual close — messages sent in that window
+    // would otherwise fall just before the lower bound and be missed.
+    gracePeriodMs = isAbnormalClose ? 25_000 : 2_000;
   } else if (gapMs <= 5_000) {
     windowMs = Math.min(windowMs, 15_000);
     limit = Math.min(limit, 60);
