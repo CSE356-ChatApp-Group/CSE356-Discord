@@ -43,6 +43,8 @@ queries=(
   'histogram_quantile(0.95, sum by (le) (rate(ws_bootstrap_channels_bucket{job="chatapp-api"}[5m])))'
   'sum by (result) (rate(ws_bootstrap_list_cache_total{job="chatapp-api"}[5m]))'
   'sum(rate(endpoint_list_cache_total{job="chatapp-api"}[5m])) by (endpoint, result)'
+  'sum by (outcome) (rate(message_post_idempotency_poll_total{job="chatapp-api"}[5m]))'
+  'histogram_quantile(0.95, sum by (le, outcome) (rate(message_post_idempotency_poll_wait_ms_bucket{job="chatapp-api"}[5m])))'
 )
 
 run() {

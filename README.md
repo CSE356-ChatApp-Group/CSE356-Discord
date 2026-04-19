@@ -290,7 +290,7 @@ All protected endpoints require: `Authorization: Bearer <accessToken>`
 | DELETE | /messages/:id             | Soft-delete own message            |
 | PUT    | /messages/:id/read        | Update read cursor                 |
 
-**POST /messages — retries:** send header `Idempotency-Key: <opaque string>` (≤200 chars, same user). While the key is held in Redis, duplicate posts return the same created message with **201** instead of creating twice. Optional env: `MSG_IDEM_PENDING_TTL_SECS` (in-flight lease, default 120), `MSG_IDEM_SUCCESS_TTL_SECS` (stored result, default 86400). If Redis is unavailable, idempotency is skipped so messaging still works.
+**POST /messages — retries:** send header `Idempotency-Key: <opaque string>` (≤200 chars, same user). While the key is held in Redis, duplicate posts return the same created message with **201** instead of creating twice. Optional env: `MSG_IDEM_PENDING_TTL_SECS` (in-flight lease, default 120), `MSG_IDEM_SUCCESS_TTL_SECS` (stored result, default 86400), `MSG_IDEM_POLL_DEADLINE_MS` / `MSG_IDEM_POLL_MAX_SLEEP_MS` (duplicate-lease wait: exponential backoff, default deadline 5000ms). If Redis is unavailable, idempotency is skipped so messaging still works.
 
 ### Communities
 

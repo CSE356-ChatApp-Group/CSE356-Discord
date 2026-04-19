@@ -157,6 +157,23 @@ const messagePostResponseTotal = new client.Counter({
   labelNames: ['status_code'],
 });
 
+/**
+ * Second POST /messages with the same Idempotency-Key while the first holds the
+ * Redis NX lease: polls until replay or deadline (see router exponential backoff).
+ */
+const messagePostIdempotencyPollTotal = new client.Counter({
+  name: 'message_post_idempotency_poll_total',
+  help: 'POST /messages idempotency duplicate-lease poll outcomes',
+  labelNames: ['outcome'],
+});
+
+const messagePostIdempotencyPollWaitMs = new client.Histogram({
+  name: 'message_post_idempotency_poll_wait_ms',
+  help: 'Milliseconds spent in duplicate-lease wait loop before 201 replay or 409',
+  labelNames: ['outcome'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
 /** WebSocket connection outcomes (upgrade + auth + bootstrap failures). */
 const wsConnectionResultTotal = new client.Counter({
   name: 'ws_connection_result_total',
@@ -475,6 +492,10 @@ function startPgPoolMetrics(pool) {
     messageCacheBustFailuresTotal.inc({ target: 'conversation' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
+    messagePostIdempotencyPollTotal.inc({ outcome: 'replay_201' }, 0);
+    messagePostIdempotencyPollTotal.inc({ outcome: 'exhausted_409' }, 0);
+    messagePostIdempotencyPollWaitMs.observe({ outcome: 'replay_201' }, 0);
+    messagePostIdempotencyPollWaitMs.observe({ outcome: 'exhausted_409' }, 0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
     messageIngestStreamAppendedTotal.inc({ result: 'error' }, 0);
     messageIngestStreamConsumedTotal.inc({ result: 'ack' }, 0);
@@ -563,6 +584,8 @@ module.exports = {
   messageIngestStreamAppendedTotal,
   messageIngestStreamConsumedTotal,
   messagePostResponseTotal,
+  messagePostIdempotencyPollTotal,
+  messagePostIdempotencyPollWaitMs,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
   wsDisconnectsTotal,
