@@ -1285,6 +1285,8 @@ router.post('/',
       // of the prior 5 (access-check, BEGIN, INSERT, COMMIT, hydrated-SELECT),
       // cutting connection hold time ~40% and improving throughput under contention.
       let communityId: string | null = null;
+      const txPhases = { t0: 0, t_cte: 0, t_attach: 0 };
+      txPhases.t0 = Date.now();
       const baseMessage = await withTransaction(async (client) => {
         await client.query(`SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`);
         let rows: any[];
@@ -1366,6 +1368,7 @@ router.post('/',
           ));
         }
 
+        txPhases.t_cte = Date.now();
         const row = rows[0];
         if (row && row.author_exists === false) {
           const err: any = new Error('Session no longer valid');
@@ -1411,8 +1414,35 @@ router.post('/',
           );
         }
 
+        txPhases.t_attach = Date.now();
         return row;
       });
+      const t_tx_done = Date.now();
+      {
+        const tx_total_ms = t_tx_done - txPhases.t0;
+        if (tx_total_ms > 500) {
+          const tx_begin_to_cte_ms = txPhases.t_cte - txPhases.t0;
+          const had_attachments = attachments.length > 0;
+          const tx_cte_to_attachments_ms = had_attachments ? txPhases.t_attach - txPhases.t_cte : 0;
+          const tx_attachments_to_commit_ms = had_attachments
+            ? t_tx_done - txPhases.t_attach
+            : 0;
+          const tx_commit_ms = t_tx_done - (had_attachments ? txPhases.t_attach : txPhases.t_cte);
+          logger.info({
+            event: 'post_messages_tx_phases',
+            gradingNote: 'correlate_with_post_messages_timeout',
+            requestId: req.id,
+            channelId: channelId ?? undefined,
+            conversationId: conversationId ?? undefined,
+            tx_begin_to_cte_ms,
+            tx_cte_to_attachments_ms,
+            tx_attachments_to_commit_ms,
+            tx_commit_ms,
+            tx_total_ms,
+            had_attachments,
+          }, 'POST /messages tx phase timing');
+        }
+      }
 
       // Fire-and-forget: update channel/conversation last_message pointers outside
       // the transaction so the response does not wait on denormalized metadata writes.
