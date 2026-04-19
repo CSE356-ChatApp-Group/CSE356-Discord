@@ -50,20 +50,9 @@ services:
     ports:
       - "127.0.0.1:9093:9093"
 
-  node-exporter:
-    image: prom/node-exporter:v1.8.2
-    restart: unless-stopped
-    network_mode: host
-    pid: host
-    command:
-      - --path.procfs=/host/proc
-      - --path.sysfs=/host/sys
-      - --path.rootfs=/rootfs
-      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/storage/.+)($|/)
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
+  # Host metrics on :9100 come from systemd prometheus-node-exporter (see
+  # deploy/install-db-metrics-exporters.sh). A duplicate container here binds
+  # the same port and crash-loops.
 
   grafana:
     image: grafana/grafana:11.1.0

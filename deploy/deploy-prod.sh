@@ -20,6 +20,7 @@ if [[ "${2:-}" == "--rollback" ]]; then
   FAST_ROLLBACK="true"
 fi
 PROD_HOST="${PROD_HOST:-130.245.136.44}"
+PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
 PROD_USER="${PROD_USER:-ubuntu}"
 GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
 LOCAL_ARTIFACT_PATH="${LOCAL_ARTIFACT_PATH:-}"
@@ -38,6 +39,12 @@ ssh_prod() {
   ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
       -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
       "${PROD_USER}@${PROD_HOST}" "$@"
+}
+
+ssh_prod_db() {
+  ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+      -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+      "${PROD_USER}@${PROD_DB_HOST}" "$@"
 }
 
 # Send a Discord notification to the prod ops webhook (DISCORD_WEBHOOK_URL_PROD env var).
@@ -2116,14 +2123,14 @@ if old not in t:
 p.write_text(t.replace(old, new, 1))
 PY
 fi
-scp -q "${PROM_BUILD}" "$PROD_USER@$PROD_HOST:/tmp/prometheus-host.yml.deploy" || true
+scp -q "${PROM_BUILD}" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-host.yml.deploy" || true
 rm -f "${PROM_BUILD}"
 
-# 10.6. Refresh Prometheus host template (scrapes 4000–4003 when CHATAPP_INSTANCES>=4).
+# 10.6. Refresh Prometheus on the DB VM (scrapes app VM private IP; see prometheus-host.yml).
 # Do **not** global-sed replace ports here: that collapses dual targets to one
 # port when nginx load-balances two Node workers.
-echo "10.6. Refreshing Prometheus scrape config..."
-ssh_prod "
+echo "10.6. Refreshing Prometheus scrape config on DB VM..."
+ssh_prod_db "
   if [ -f /tmp/prometheus-host.yml.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
     sudo cp /tmp/prometheus-host.yml.deploy /opt/chatapp-monitoring/prometheus-host.yml
@@ -2131,52 +2138,54 @@ ssh_prod "
   fi
   PROM_TMPL=/opt/chatapp-monitoring/prometheus-host.yml
   if [ -f \"\$PROM_TMPL\" ]; then
-    # Restart the container so its entrypoint re-renders the template into
-    # /tmp/prometheus.yml with ALERT_ENVIRONMENT substitution.
     if sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1; then
-      echo 'Prometheus restarted (chatapp-api scrape list in prometheus-host.yml)'
+      echo 'Prometheus restarted on DB VM (chatapp-api scrape list in prometheus-host.yml)'
     else
-      echo 'WARN: Prometheus restart failed (non-fatal)'
+      echo 'WARN: Prometheus restart failed on DB VM (non-fatal)'
     fi
   else
-    echo 'WARN: prometheus-host.yml not found, skipping Prometheus update'
+    echo 'WARN: prometheus-host.yml not found on DB VM, skipping Prometheus update'
   fi
 " || echo "⚠ Prometheus target update failed (non-fatal)"
 
-echo "10.65. Sync alert rules + Alertmanager + redis_exporter (Discord / Redis alerts)..."
-scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_HOST:/tmp/alerts.yml.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_HOST:/tmp/alertmanager.yml.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
-scp -qr "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "$PROD_USER@$PROD_HOST:/tmp/grafana-provisioning-remote.deploy" || true
-scp -q "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
-scp -q "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "$PROD_USER@$PROD_HOST:/tmp/prometheus-db-file-sd.py.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "$PROD_USER@$PROD_HOST:/tmp/db-node.json.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "$PROD_USER@$PROD_HOST:/tmp/db-postgres.json.deploy" || true
-ssh_prod "
+echo "10.65. Sync monitoring: DB VM (Prometheus, Alertmanager, Grafana, Loki, Tempo) + app VM (node-exporter, promtail, redis_exporter)..."
+ENV_PULL="$(mktemp)"
+scp -q "${PROD_USER}@${PROD_HOST}:/opt/chatapp/shared/.env" "${ENV_PULL}" || true
+
+scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/alerts.yml.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/alertmanager.yml.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/db-compose.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/db-compose.yml.deploy" || true
+scp -qr "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "$PROD_USER@$PROD_DB_HOST:/tmp/grafana-provisioning-remote.deploy" || true
+scp -q "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-db-file-sd.py.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "$PROD_USER@$PROD_DB_HOST:/tmp/db-node.json.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "$PROD_USER@$PROD_DB_HOST:/tmp/db-postgres.json.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/loki-config.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/loki-config.yml.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/tempo-config.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/tempo-config.yml.deploy" || true
+if [ -f "${ENV_PULL}" ]; then
+  scp -q "${ENV_PULL}" "$PROD_USER@$PROD_DB_HOST:/tmp/chatapp-monitoring.env.deploy" || true
+fi
+rm -f "${ENV_PULL}"
+
+ssh_prod_db "
   set -euo pipefail
-  if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ] || [ -d /tmp/grafana-provisioning-remote.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ]; then
+  if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/db-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ] || [ -d /tmp/grafana-provisioning-remote.deploy ] || [ -f /tmp/loki-config.yml.deploy ] || [ -f /tmp/tempo-config.yml.deploy ] || [ -f /tmp/chatapp-monitoring.env.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
   fi
-  sudo mkdir -p /opt/chatapp-monitoring/node_exporter_textfile
-  sudo chown ${PROD_USER}:${PROD_USER} /opt/chatapp-monitoring/node_exporter_textfile
   if [ -d /tmp/grafana-provisioning-remote.deploy ]; then
     sudo rm -rf /opt/chatapp-monitoring/grafana-provisioning-remote
     sudo mv /tmp/grafana-provisioning-remote.deploy /opt/chatapp-monitoring/grafana-provisioning-remote
   fi
-  if [ -f /tmp/synthetic-probe.sh.deploy ]; then
-    sudo install -m 755 /tmp/synthetic-probe.sh.deploy /opt/chatapp-monitoring/synthetic-probe.sh
-    rm -f /tmp/synthetic-probe.sh.deploy
+  if [ -f /tmp/db-compose.yml.deploy ]; then
+    sudo cp /tmp/db-compose.yml.deploy /opt/chatapp-monitoring/db-compose.yml
+    rm -f /tmp/db-compose.yml.deploy
   fi
-  # Host-local probe → node_exporter textfile (ChatAppSyntheticProbeFailed). Idempotent.
-  if [ -x /opt/chatapp-monitoring/synthetic-probe.sh ]; then
-    (
-      crontab -l 2>/dev/null | grep -v '/opt/chatapp-monitoring/synthetic-probe.sh' || true
-      echo '*/2 * * * * TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile CURL_MAX_TIME=12 /opt/chatapp-monitoring/synthetic-probe.sh >/dev/null 2>&1'
-    ) | crontab -
+  if [ -f /tmp/loki-config.yml.deploy ]; then
+    sudo cp /tmp/loki-config.yml.deploy /opt/chatapp-monitoring/loki-config.yml
+    rm -f /tmp/loki-config.yml.deploy
   fi
-  if [ -f /tmp/remote-compose.yml.deploy ]; then
-    sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
-    rm -f /tmp/remote-compose.yml.deploy
+  if [ -f /tmp/tempo-config.yml.deploy ]; then
+    sudo cp /tmp/tempo-config.yml.deploy /opt/chatapp-monitoring/tempo-config.yml
+    rm -f /tmp/tempo-config.yml.deploy
   fi
   if [ -f /tmp/prometheus-db-file-sd.py.deploy ]; then
     sudo cp /tmp/prometheus-db-file-sd.py.deploy /opt/chatapp-monitoring/prometheus-db-file-sd.py
@@ -2192,9 +2201,6 @@ ssh_prod "
     sudo cp /tmp/db-postgres.json.deploy /opt/chatapp-monitoring/file_sd/db-postgres.json
     rm -f /tmp/db-postgres.json.deploy
   fi
-  if [ -f /opt/chatapp-monitoring/prometheus-db-file-sd.py ] && [ -f /opt/chatapp/shared/.env ]; then
-    sudo python3 /opt/chatapp-monitoring/prometheus-db-file-sd.py || echo 'WARN: prometheus-db-file-sd.py failed (non-fatal)'
-  fi
   if [ -f /tmp/alerts.yml.deploy ]; then
     sudo cp /tmp/alerts.yml.deploy /opt/chatapp-monitoring/alerts.yml
     rm -f /tmp/alerts.yml.deploy
@@ -2203,34 +2209,72 @@ ssh_prod "
     sudo cp /tmp/alertmanager.yml.deploy /opt/chatapp-monitoring/alertmanager.yml
     rm -f /tmp/alertmanager.yml.deploy
   fi
-  # Ensure monitoring containers inherit the same environment as the app host.
-  # Without this, ALERT_ENVIRONMENT can default to local and webhook secret selection breaks.
-  sudo cp /opt/chatapp/shared/.env /opt/chatapp-monitoring/.env
-  sudo sed -i 's/^ALERT_ENVIRONMENT=.*/ALERT_ENVIRONMENT=production/' /opt/chatapp-monitoring/.env
-  if ! sudo grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
-    echo 'ALERT_ENVIRONMENT=production' | sudo tee -a /opt/chatapp-monitoring/.env >/dev/null
+  if [ -f /tmp/chatapp-monitoring.env.deploy ]; then
+    sudo cp /tmp/chatapp-monitoring.env.deploy /opt/chatapp-monitoring/.env
+    rm -f /tmp/chatapp-monitoring.env.deploy
   fi
-  sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/remote-compose.yml up -d alertmanager prometheus node-exporter grafana >/dev/null
-  # Fail fast if Discord webhook wiring is broken; silent alert failures are worse than noisy deploys.
+  if [ -f /opt/chatapp-monitoring/.env ]; then
+    sudo sed -i 's/^ALERT_ENVIRONMENT=.*/ALERT_ENVIRONMENT=production/' /opt/chatapp-monitoring/.env
+    if ! sudo grep -q '^ALERT_ENVIRONMENT=' /opt/chatapp-monitoring/.env; then
+      echo 'ALERT_ENVIRONMENT=production' | sudo tee -a /opt/chatapp-monitoring/.env >/dev/null
+    fi
+  fi
+  if [ -f /opt/chatapp-monitoring/prometheus-db-file-sd.py ] && [ -f /opt/chatapp-monitoring/.env ]; then
+    sudo env CHATAPP_ENV_FILE=/opt/chatapp-monitoring/.env python3 /opt/chatapp-monitoring/prometheus-db-file-sd.py || echo 'WARN: prometheus-db-file-sd.py failed on DB VM (non-fatal)'
+  fi
+  if [ -f /opt/chatapp-monitoring/.env ] && [ -f /opt/chatapp-monitoring/db-compose.yml ]; then
+    sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/db-compose.yml up -d --remove-orphans prometheus alertmanager grafana loki tempo >/dev/null
+  fi
   AM_NAME=\$(sudo docker ps --format '{{.Names}}' | grep 'chatapp-monitoring-alertmanager' | head -n 1 || true)
   if [ -z \"\$AM_NAME\" ]; then
-    echo 'ERROR: alertmanager container not running after monitoring refresh'
+    echo 'ERROR: alertmanager container not running on DB VM after monitoring refresh'
     exit 1
   fi
   WEBHOOK_HEAD=\$(sudo docker exec \"\$AM_NAME\" sh -lc \"head -c 8 /alertmanager/secrets/discord_webhook_url 2>/dev/null || true\")
   WEBHOOK_BYTES=\$(sudo docker exec \"\$AM_NAME\" sh -lc \"wc -c < /alertmanager/secrets/discord_webhook_url 2>/dev/null || echo 0\")
   if [ \"\$WEBHOOK_HEAD\" != \"https://\" ] || [ \"\${WEBHOOK_BYTES:-0}\" -lt 32 ]; then
-    echo \"ERROR: Alertmanager webhook secret invalid (head=\$WEBHOOK_HEAD bytes=\$WEBHOOK_BYTES)\"
+    echo \"ERROR: Alertmanager webhook secret invalid on DB VM (head=\$WEBHOOK_HEAD bytes=\$WEBHOOK_BYTES)\"
     exit 1
   fi
-  echo 'Alertmanager Discord webhook wiring verified'
+  echo 'Alertmanager Discord webhook wiring verified (DB VM)'
+"
+
+scp -q "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
+scp -q "${REPO_ROOT}/infrastructure/monitoring/promtail-host-config.yml" "$PROD_USER@$PROD_HOST:/tmp/promtail-host-config.yml.deploy" || true
+scp -q "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
+ssh_prod "
+  set -euo pipefail
+  if [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/promtail-host-config.yml.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ]; then
+    sudo mkdir -p /opt/chatapp-monitoring
+  fi
+  sudo mkdir -p /opt/chatapp-monitoring/node_exporter_textfile
+  sudo chown ${PROD_USER}:${PROD_USER} /opt/chatapp-monitoring/node_exporter_textfile
+  if [ -f /tmp/synthetic-probe.sh.deploy ]; then
+    sudo install -m 755 /tmp/synthetic-probe.sh.deploy /opt/chatapp-monitoring/synthetic-probe.sh
+    rm -f /tmp/synthetic-probe.sh.deploy
+  fi
+  if [ -x /opt/chatapp-monitoring/synthetic-probe.sh ]; then
+    (
+      crontab -l 2>/dev/null | grep -v '/opt/chatapp-monitoring/synthetic-probe.sh' || true
+      echo '*/2 * * * * TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile CURL_MAX_TIME=12 /opt/chatapp-monitoring/synthetic-probe.sh >/dev/null 2>&1'
+    ) | crontab -
+  fi
+  if [ -f /tmp/remote-compose.yml.deploy ]; then
+    sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
+    rm -f /tmp/remote-compose.yml.deploy
+  fi
+  if [ -f /tmp/promtail-host-config.yml.deploy ]; then
+    sudo cp /tmp/promtail-host-config.yml.deploy /opt/chatapp-monitoring/promtail-host-config.yml
+    rm -f /tmp/promtail-host-config.yml.deploy
+  fi
+  if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
+    sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml up -d --remove-orphans node-exporter promtail >/dev/null
+  fi
   set -a
   # shellcheck disable=SC1091
   source /opt/chatapp/shared/.env 2>/dev/null || true
   set +a
   RURL=\"\${REDIS_URL:-redis://127.0.0.1:6379}\"
-  # Only pull and restart redis_exporter if the container is absent or stopped.
-  # Skipping the pull on every deploy saves ~30-60s when image is already current.
   if ! sudo docker ps --format '{{.Names}}' | grep -qx redis_exporter; then
     if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
       sudo docker rm -f redis_exporter 2>/dev/null || true

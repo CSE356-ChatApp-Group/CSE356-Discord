@@ -1,55 +1,7 @@
+# App VM only: metrics collection (node-exporter) and log shipping (promtail).
+# The full monitoring stack (Grafana, Prometheus, Alertmanager, Loki, Tempo)
+# runs on the DB VM via db-compose.yml.
 services:
-  prometheus:
-    image: prom/prometheus:v2.53.1
-    restart: unless-stopped
-    depends_on: [alertmanager]
-    network_mode: host
-    environment:
-      ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-local}
-    entrypoint: ["sh", "-ec"]
-    command:
-      - |
-        sed "s/__ALERT_ENVIRONMENT__/$${ALERT_ENVIRONMENT:-local}/g" /etc/prometheus/prometheus.yml.template >/tmp/prometheus.yml
-        exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --web.listen-address=127.0.0.1:9090
-    volumes:
-      - ./prometheus-host.yml:/etc/prometheus/prometheus.yml.template:ro
-      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
-      - ./file_sd:/etc/prometheus/file_sd:ro
-      - prometheus_data:/prometheus
-
-  alertmanager:
-    image: prom/alertmanager:v0.28.0
-    restart: unless-stopped
-    environment:
-      ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-local}
-      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
-      DISCORD_WEBHOOK_URL_LOCAL: ${DISCORD_WEBHOOK_URL_LOCAL:-}
-      DISCORD_WEBHOOK_URL_STAGING: ${DISCORD_WEBHOOK_URL_STAGING:-}
-      DISCORD_WEBHOOK_URL_PROD: ${DISCORD_WEBHOOK_URL_PROD:-}
-    entrypoint: ["sh", "-ec"]
-    command:
-      - |
-        mkdir -p /alertmanager/secrets
-        WEBHOOK="$$DISCORD_WEBHOOK_URL"
-        case "$${ALERT_ENVIRONMENT:-local}" in
-          prod|production)
-            [ -n "$$DISCORD_WEBHOOK_URL_PROD" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_PROD"
-            ;;
-          stage|staging)
-            [ -n "$$DISCORD_WEBHOOK_URL_STAGING" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_STAGING"
-            ;;
-          local|dev|development)
-            [ -n "$$DISCORD_WEBHOOK_URL_LOCAL" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_LOCAL"
-            ;;
-        esac
-        printf '%s\n' "$$WEBHOOK" >/alertmanager/secrets/discord_webhook_url
-        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager
-    volumes:
-      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      - alertmanager_data:/alertmanager
-    ports:
-      - "127.0.0.1:9093:9093"
-
   node-exporter:
     image: prom/node-exporter:v1.8.2
     restart: unless-stopped
@@ -68,22 +20,11 @@ services:
       # Synthetic probe metrics from scripts/synthetic-probe.sh (TEXTFILE_DIR on host).
       - ./node_exporter_textfile:/var/lib/node_exporter/textfile_collector:ro
 
-  grafana:
-    image: grafana/grafana:11.1.0
+  promtail:
+    image: grafana/promtail:3.1.0
     restart: unless-stopped
-    network_mode: host
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
-      GF_SERVER_HTTP_ADDR: 127.0.0.1
-      GF_SERVER_HTTP_PORT: "3001"
-      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
-      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    command: ["-config.file=/etc/promtail/config.yml"]
     volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana-provisioning-remote:/etc/grafana/provisioning:ro
-    depends_on: [prometheus, alertmanager]
-
-volumes:
-  prometheus_data:
-  grafana_data:
-  alertmanager_data:
+      - /var/log:/var/log:ro
+      - /opt/chatapp/shared/logs:/opt/chatapp/shared/logs:ro
+      - ./promtail-host-config.yml:/etc/promtail/config.yml:ro
