@@ -15,7 +15,7 @@
 const redis = require("../db/redis");
 const fanout = require("../websocket/fanout");
 const { publishUserFeedTargets } = require("../websocket/userFeed");
-const { query } = require("../db/pool");
+const { query, withTransaction } = require("../db/pool");
 const overload = require("../utils/overload");
 const logger = require("../utils/logger");
 const { presenceFanoutTotal } = require("../utils/metrics");
@@ -245,16 +245,19 @@ async function setPresence(userId, status, awayMessage) {
       logger.warn({ err: redisErr, userId }, 'presence: Redis CAS eval failed, writing DB anyway');
     }
     if (shouldWriteDb) {
-      // Mirror to Postgres (non-blocking)
-      query(
-        `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
-         VALUES ($1, $2, $3, NOW())
-         ON CONFLICT (user_id) DO UPDATE SET
-           status = EXCLUDED.status,
-           custom_msg = EXCLUDED.custom_msg,
-           updated_at = NOW()`,
-        [userId, status, status === "away" ? nextAwayMessage : null],
-      ).catch(() => {});
+      // Mirror to Postgres (non-blocking, synchronous_commit=off — losing last presence on crash is acceptable)
+      withTransaction(async (client) => {
+        await client.query('SET LOCAL synchronous_commit = off');
+        await client.query(
+          `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
+           VALUES ($1, $2, $3, NOW())
+           ON CONFLICT (user_id) DO UPDATE SET
+             status = EXCLUDED.status,
+             custom_msg = EXCLUDED.custom_msg,
+             updated_at = NOW()`,
+          [userId, status, status === "away" ? nextAwayMessage : null],
+        );
+      }).catch(() => {});
     }
   }
 }

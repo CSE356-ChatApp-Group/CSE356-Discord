@@ -467,27 +467,30 @@ async function advanceReadStateCursor({
       didAdvanceCursor: true,
     };
   }
-  const dbWrite = query(
-    `INSERT INTO read_states (
-       user_id,
-       channel_id,
-       conversation_id,
-       last_read_message_id,
-       last_read_message_created_at,
-       last_read_at
-     )
-     VALUES ($1, $2, $3, $4, $5, NOW())
-     ON CONFLICT (user_id, COALESCE(channel_id, conversation_id)) DO UPDATE SET
-       last_read_message_id = EXCLUDED.last_read_message_id,
-       last_read_message_created_at = EXCLUDED.last_read_message_created_at,
-       last_read_at = NOW()
-     WHERE
-       read_states.last_read_message_id IS NULL
-       OR read_states.last_read_message_created_at IS NULL
-       OR $5 >= read_states.last_read_message_created_at
-     RETURNING last_read_message_id, last_read_at`,
-    [userId, channelId, conversationId, messageId, messageCreatedAt],
-  );
+  const dbWrite = withTransaction(async (client) => {
+    await client.query('SET LOCAL synchronous_commit = off');
+    await client.query(
+      `INSERT INTO read_states (
+         user_id,
+         channel_id,
+         conversation_id,
+         last_read_message_id,
+         last_read_message_created_at,
+         last_read_at
+       )
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (user_id, COALESCE(channel_id, conversation_id)) DO UPDATE SET
+         last_read_message_id = EXCLUDED.last_read_message_id,
+         last_read_message_created_at = EXCLUDED.last_read_message_created_at,
+         last_read_at = NOW()
+       WHERE
+         read_states.last_read_message_id IS NULL
+         OR read_states.last_read_message_created_at IS NULL
+         OR $5 >= read_states.last_read_message_created_at
+       RETURNING last_read_message_id, last_read_at`,
+      [userId, channelId, conversationId, messageId, messageCreatedAt],
+    );
+  });
   dbWrite.catch((err) => {
     logger.warn({ err, userId, channelId, conversationId, messageId }, 'read_state async DB write failed');
   });
