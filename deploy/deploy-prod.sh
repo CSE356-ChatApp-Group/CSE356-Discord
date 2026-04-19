@@ -285,7 +285,8 @@ if [ "${CHATAPP_INSTANCES}" -ge 3 ]; then
   # Rolling restart: first-to-roll = last TARGET_PORT (e.g. 4003 for 4 workers).
   # No spare port outside TARGET_PORTS — workers never exceed CHATAPP_INSTANCES simultaneously,
   # so PgBouncer pool stays bounded at inst×PG_POOL_MAX with zero overrun risk on cutover.
-  NEW_PORT="${TARGET_PORTS[-1]}"
+  # Last worker port (bash 3.2 on macOS has no array[-1]; use explicit index).
+  NEW_PORT="${TARGET_PORTS[$((CHATAPP_INSTANCES - 1))]}"
   ROLLING_RESTART=true
 else
   ROLLING_RESTART=false
