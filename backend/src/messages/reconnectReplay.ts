@@ -60,7 +60,7 @@ const WS_MESSAGE_REPLAY_MAX_CONCURRENT =
 
 let replayDbInFlight = 0;
 
-function replayQueryProfile(gapMs, stage = overload.getStage()) {
+function replayQueryProfile(gapMs, stage = overload.getStage(), closeCode?: number) {
   let windowMs = WS_MESSAGE_REPLAY_MAX_WINDOW_MS;
   let limit = WS_MESSAGE_REPLAY_LIMIT;
   // Grace period: how far before disconnectedAt to extend the scan lower bound.
@@ -69,10 +69,19 @@ function replayQueryProfile(gapMs, stage = overload.getStage()) {
   // the full 15 s default only for long/abnormal disconnects.
   let gracePeriodMs = WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS;
 
+  // Abnormal close (1006) means the server detected the dead TCP connection at
+  // heartbeat time — up to WS_HEARTBEAT_INTERVAL_MS (20s) after the connection
+  // actually died. Messages delivered to the zombie socket during that window
+  // appear delivered but are lost. Use a large grace period to recover them.
+  const isAbnormalClose = closeCode === 1006;
+
   if (gapMs <= 1_000) {
     windowMs = Math.min(windowMs, 5_000);
     limit = Math.min(limit, 15);
-    gracePeriodMs = 500; // clean close: disconnectedAt is accurate to <100 ms
+    // For clean closes, disconnectedAt is accurate. For 1006 (zombie detected
+    // by heartbeat), the socket may have been dead for up to the heartbeat
+    // interval before the server noticed — look back far enough to cover that.
+    gracePeriodMs = isAbnormalClose ? 25_000 : 500;
   } else if (gapMs <= 5_000) {
     windowMs = Math.min(windowMs, 15_000);
     limit = Math.min(limit, 60);
@@ -114,7 +123,7 @@ function classifyReplayError(err) {
   return 'error';
 }
 
-async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnectObservedAtMs) {
+async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnectObservedAtMs, closeCode?: number) {
   if (!userId) return [];
 
   const lowerBoundMs = Number(disconnectedAtMs || 0);
@@ -134,7 +143,7 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
     return [];
   }
 
-  const profile = replayQueryProfile(gapMs);
+  const profile = replayQueryProfile(gapMs, undefined, closeCode);
   if (profile.stage >= 3 || profile.limit <= 0 || profile.windowMs <= 0) {
     wsReplayQueryTotal.inc({ result: 'skipped' });
     wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
