@@ -28,8 +28,9 @@ echo ""
 echo "=== Per-worker metrics (sample) ==="
 for p in 4000 4001 4002 4003 4004; do
   echo "--- :${p} ---"
+  # message_post line contains `{` / `}` — escape them for grep -E; close the outer `^(...|...)` group.
   ssh_app "curl -fsS --max-time 3 http://127.0.0.1:${p}/metrics 2>/dev/null" | grep -E \
-    '^(pg_pool_waiting|pg_pool_total|pg_pool_idle|pg_pool_circuit_breaker_rejects_total|chatapp_overload_stage|http_overload_shed_total|message_post_response_total\{status_code="(201|503)"' \
+    '^(pg_pool_waiting|pg_pool_total|pg_pool_idle|pg_pool_circuit_breaker_rejects_total|chatapp_overload_stage|http_overload_shed_total|message_post_response_total\{status_code="(201|503)"\})' \
     || echo "(metrics unavailable)"
 done
 
