@@ -15,7 +15,7 @@ A Discord-like chat API graded by automated bots (course autograder at CSE 356, 
 | **Staging app VM** | `136.114.103.71` | `ssh ssperrottet@136.114.103.71` | 8 vCPU, 32 GB, GCP (internal `10.128.0.2`) |
 | **Staging DB VM** | `34.122.64.224` | `ssh ssperrottet@34.122.64.224` | 8 vCPU, 8 GB, GCP Debian 12 (internal `10.128.0.5`) |
 
-CI uses GitHub-hosted `ubuntu-latest` runners (no self-hosted). Prod app runs **4 Node workers** on ports 4000–4003. Staging runs 2 workers (4000–4001). Prod DB is a remote Linode VM (`10.0.1.62` internal). Staging DB is a remote GCP VM (`10.128.0.5` internal).
+CI uses GitHub-hosted `ubuntu-latest` runners (no self-hosted). Prod app runs **5 Node workers** on ports 4000–4004. Staging runs 5 workers (4000–4001). Prod DB is a remote Linode VM (`10.0.1.62` internal). Staging DB is a remote GCP VM (`10.128.0.5` internal).
 
 ---
 
