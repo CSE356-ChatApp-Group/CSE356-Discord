@@ -68,8 +68,8 @@ print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-# Cap at 280 — keep parity with deploy-prod.sh pool-circuit commentary.
-print(max(64, min(280, pmi * 3 + inst * 60)))
+# Same ceiling curve as deploy-prod.sh (deeper queue before POOL_CIRCUIT_OPEN 503s).
+print(max(96, min(360, pmi * 4 + inst * 80)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
@@ -79,7 +79,7 @@ print(max(150, min(500, b + 100)))
 # Parallel fanout workers per instance — cheap headroom on larger CPUs.
 FANOUT_QUEUE_CONCURRENCY=$(python3 -c "
 n = int('${_REMOTE_NPROC}')
-print(min(12, max(2, (n + 1) // 2 + 1)))
+print(min(18, max(4, (n * 3 + 3) // 4)))
 ")
 # libuv thread pool per instance: minimum 8 threads to prevent bcrypt/dns starvation.
 # With 2 instances on a 2-vCPU host: 8 threads/instance = 16 total.

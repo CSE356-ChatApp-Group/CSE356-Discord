@@ -178,11 +178,10 @@ print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-# Cap at 280: same formula as before (pmi*3 + inst*60), but raised from 200 after
-# prod metrics showed healthy PgBouncer (cl_waiting=0) while pg-pool circuit trips
-# still produced rare 503s under bursts. PgBouncer default_pool_size stays 500;
-# Postgres max_connections remains deploy-computed. Watch pg_pool_waiting in Grafana.
-print(max(64, min(280, pmi * 3 + inst * 60)))
+# Allow a deeper checkout wait queue before immediate 503 (POOL_CIRCUIT_OPEN).
+# PgBouncer default_pool_size stays high; grader bursts hit auth + messages together.
+# Watch pg_pool_waiting / statement timeouts — raise PG capacity before pushing this further.
+print(max(96, min(360, pmi * 4 + inst * 80)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
@@ -191,7 +190,9 @@ print(max(150, min(500, b + 100)))
 ")
 FANOUT_QUEUE_CONCURRENCY=$(python3 -c "
 n = int('${_REMOTE_NCPU}')
-print(min(12, max(2, (n + 1) // 2 + 1)))
+# Parallel fanout:critical workers (Redis publishes). 8 vCPU prod was ~5; raising
+# modestly improves deferred user-feed work without oversubscribing the event loop.
+print(min(18, max(4, (n * 3 + 3) // 4)))
 ")
 UV_THREADPOOL_PER_INSTANCE=$(python3 -c "print(max(8, 16 // max(1, ${CHATAPP_INSTANCES})))")
 BCRYPT_MAX_CONCURRENT=$(python3 -c "
@@ -1215,9 +1216,9 @@ ssh_prod "
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
     || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Grading-shaped realtime: re-apply on every deploy (same as deploy-staging.sh) so shared
-  # .env cannot drift after manual edits. Set CHANNEL_MESSAGE_USER_FANOUT=0 in .env only if
-  # you deliberately disable user-topic duplicate publish on a tiny host.
+  # Realtime-related keys below are overwritten again by apply-env-profile.py using
+  # deploy/env/prod.required.env (throughput-first: non-blocking user fanout, recent_connect, etc.).
+  # These sed lines exist so a half-written remote script still has sane defaults if the profile step fails.
   sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT=.*/CHANNEL_MESSAGE_USER_FANOUT=true/' /opt/chatapp/shared/.env \
     || echo 'CHANNEL_MESSAGE_USER_FANOUT=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null

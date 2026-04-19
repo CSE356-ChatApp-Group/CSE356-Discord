@@ -35,6 +35,7 @@ jobs:
           bash -n scripts/prod-observe-loop.sh
           bash -n scripts/prod-log-correlate.sh
           bash -n scripts/prod-capacity-snapshot.sh
+          bash -n scripts/prod-prom-snapshot.sh
           bash -n deploy/cutover-to-remote-db.sh
           bash -n deploy/tune-remote-db-postgres.sh
           bash -n deploy/postgres-migrate-data-volume.sh

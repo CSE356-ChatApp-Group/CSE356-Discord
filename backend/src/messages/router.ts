@@ -368,6 +368,11 @@ async function publishConversationEventNow(conversationId, event, data) {
 
 async function incrementChannelMessageCount(channelId) {
   const countKey = `channel:msg_count:${channelId}`;
+  // Hot path: skip cold-init machinery when the counter already exists (one EXISTS + one INCR).
+  if (await redis.exists(countKey)) {
+    await redis.incr(countKey);
+    return;
+  }
   const ensureInitialized = async () => {
     const exists = await redis.exists(countKey);
     if (exists) return;
@@ -1295,11 +1300,12 @@ router.post('/',
 
       let realtimePublishedAtForHttp;
       if (channelId) {
-        try {
-          await incrementChannelMessageCount(channelId);
-        } catch (err) {
-          logger.warn({ err, channelId }, 'Failed to increment channel:msg_count before realtime publish');
-        }
+        // Run Redis `channel:msg_count` maintenance in parallel with realtime fanout.
+        // Cold channels used to `await` a full-table `COUNT(*)` before any publish, which
+        // stacked DB latency on top of the fanout path and amplified tail latency under load.
+        incrementChannelMessageCount(channelId).catch((err) => {
+          logger.warn({ err, channelId }, 'Failed to increment channel:msg_count alongside realtime publish');
+        });
         const createdEnvelope = messageFanoutEnvelope('message:created', message);
         // Await channel (+ optionally user-topic) Redis publishes per MESSAGE_USER_FANOUT_HTTP_BLOCKING.
         // Response fields `realtimeChannelFanoutComplete` / `realtimeUserFanoutDeferred` document what finished before 201.
