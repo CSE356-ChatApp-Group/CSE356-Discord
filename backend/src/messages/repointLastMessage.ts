@@ -59,12 +59,16 @@ const CONVERSATION_REPOINT_SQL = `WITH lm AS (
      FROM lm
      WHERE conv.id = $1`;
 
-const CHANNEL_LAST_MESSAGE_UPDATE_SQL = `UPDATE channels
-     SET last_message_id = $1,
-         last_message_author_id = $2,
-         last_message_at = $3
-   WHERE id = $4
-     AND (last_message_at IS NULL OR $3 >= last_message_at)`;
+const CHANNEL_LAST_MESSAGE_UPDATE_SQL = `WITH lock_guard AS (
+       SELECT set_config('lock_timeout', '1ms', true)
+     )
+     UPDATE channels
+        SET last_message_id = $1,
+            last_message_author_id = $2,
+            last_message_at = $3
+       FROM lock_guard
+      WHERE id = $4
+        AND (last_message_at IS NULL OR $3 >= last_message_at)`;
 
 const pendingChannelLastMessageUpdates = new Map<
   string,
