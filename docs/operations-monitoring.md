@@ -9,7 +9,7 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Alert rules (PromQL) | [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) |
 | Incident steps | [`RUNBOOKS.md`](RUNBOOKS.md) |
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
-| Grafana dashboard (repo copy) | [`infrastructure/monitoring/grafana-provisioning-remote/dashboards/chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/chatapp-overview.json) |
+| Grafana dashboard (repo copy) | [`infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) |
 | Instant Prometheus triage | [`scripts/metrics-snapshot.sh`](../scripts/metrics-snapshot.sh) |
 | Top normalized SQL (`pg_stat_statements`) | [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) |
 

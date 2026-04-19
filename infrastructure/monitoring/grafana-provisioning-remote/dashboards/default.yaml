@@ -1,0 +1,15 @@
+# File provider: JSON lives only under dashboards/files/ (avoids mixing .json with
+# provider YAML in one directory, which can confuse some Grafana builds).
+apiVersion: 1
+
+providers:
+  - name: ChatApp Dashboards
+    orgId: 1
+    folder: ChatApp
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards/files
