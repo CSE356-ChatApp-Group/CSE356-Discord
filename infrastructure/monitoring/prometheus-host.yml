@@ -18,22 +18,22 @@ scrape_configs:
     metrics_path: '/metrics'
     static_configs:
       # Staging: both instances always run. Prod: deploy-prod.sh may append 4002/4003 when CHATAPP_INSTANCES>=4.
-      - targets: ['127.0.0.1:4000']
+      - targets: ['10.0.0.237:4000']
         labels:
           node: live-4000
-      - targets: ['127.0.0.1:4001']
+      - targets: ['10.0.0.237:4001']
         labels:
           node: candidate-4001
 
   - job_name: 'minio'
     metrics_path: '/minio/health/live'
     static_configs:
-      - targets: ['127.0.0.1:9000']
+      - targets: ['10.0.0.237:9000']
 
   # App VM host metrics (node_exporter in remote-compose).
   - job_name: 'node'
     static_configs:
-      - targets: ['127.0.0.1:9100']
+      - targets: ['10.0.0.237:9100']
 
   # Dedicated DB VM — targets from file_sd (see deploy/prometheus-db-file-sd.py).
   # Empty [] when Postgres is local or PGDUMP_DATABASE_URL is unset. Install exporters:
@@ -56,7 +56,7 @@ scrape_configs:
   # redis_memory_used_bytes, redis_connected_clients, redis_commands_processed_total, ...
   - job_name: 'redis'
     static_configs:
-      - targets: ['127.0.0.1:9121']
+      - targets: ['10.0.0.237:9121']
         labels:
           instance: 'redis-local'
 
