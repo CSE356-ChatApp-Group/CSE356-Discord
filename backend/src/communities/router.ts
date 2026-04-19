@@ -495,6 +495,13 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
     );
     await cleanupCommunityUnreadCounterKeys(req.params.id);
 
+    // FK cascade from messages.channel_id -> channels.id was dropped (migration 023).
+    // Delete all channel messages in this community before the community (and its
+    // channels via channels.community_id CASCADE) are removed.
+    await query(
+      'DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE community_id = $1)',
+      [req.params.id],
+    );
     await query('DELETE FROM communities WHERE id=$1', [req.params.id]);
 
     if (community.is_public) {

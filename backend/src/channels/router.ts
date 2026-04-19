@@ -715,6 +715,9 @@ router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
+    // FK cascade from messages.channel_id -> channels.id was dropped (migration 023).
+    // Delete dependent messages explicitly before removing the channel row.
+    await query('DELETE FROM messages WHERE channel_id = $1', [req.params.id]);
     const { rows } = await query(
       'DELETE FROM channels WHERE id=$1 RETURNING id, community_id',
       [req.params.id]
