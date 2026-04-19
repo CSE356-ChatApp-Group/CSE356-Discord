@@ -271,6 +271,29 @@ sudo CHATAPP_NGINX_SITE_PATH=/etc/nginx/sites-available/chatapp ./deploy/patch-n
 
 Idempotent: safe to re-run. Prefer updating `deploy/nginx/staging.conf` / prod bootstrap templates in-repo too so the next full nginx rewrite keeps the rule.
 
+### App VM disk hygiene (journal, apt cache, nginx logrotate)
+
+Under heavy traffic, nginx access logs can grow faster than **daily** rotation allows. `deploy/prod-disk-hygiene.sh` is **idempotent**: it adds `maxsize 200M` to `/etc/logrotate.d/nginx` when missing, vacuums the systemd journal (`JOURNAL_VACUUM_SIZE`, default **800M**), runs `apt-get clean`, then best-effort `logrotate -f` for nginx.
+
+On the prod app host (from a repo checkout, or after copying the script):
+
+```bash
+sudo DRY_RUN=1 ./deploy/prod-disk-hygiene.sh
+sudo ./deploy/prod-disk-hygiene.sh
+```
+
+New installs run the same nginx `maxsize` guard from `deploy/prod-vm-setup.sh` (step 5b).
+
+### Read-only production capacity snapshot
+
+From a machine with SSH to the prod **app** and **DB** hosts (override `PROD_HOST`, `PROD_DB_HOST`, `PROD_USER`, `PROD_POSTGRES_DB` if needed):
+
+```bash
+./deploy/analyze-prod-capacity.sh
+```
+
+The script prints `df`, nginx logrotate hints, PgBouncer `SHOW POOLS`, a short scrape of each worker’s `/metrics` (pool gauges, overload counters, `message_post` 201 vs 503), and Postgres `pg_stat_activity` counts. In Grafana, watch **pg pool waiting**, **circuit breaker rejects**, and **message_post** status codes when validating overload behavior.
+
 ### Capacity gate before tuning prod
 
 Run load on **staging** first (same `CHATAPP_INSTANCES` shape as prod when possible):

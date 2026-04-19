@@ -243,6 +243,14 @@ sudo tee /etc/logrotate.d/chatapp > /dev/null <<'EOF'
 EOF
 echo "✓ Log rotation configured"
 
+# 5b. Packaged nginx logrotate is often daily-only; add maxsize so bursts cannot fill disk same-day.
+if [[ -f /etc/logrotate.d/nginx ]] && ! grep -qE '^[[:space:]]*maxsize[[:space:]]' /etc/logrotate.d/nginx; then
+  sudo sed -i '/^[[:space:]]*daily[[:space:]]*$/a maxsize 200M' /etc/logrotate.d/nginx
+  echo "✓ nginx logrotate: added maxsize 200M"
+else
+  echo "✓ nginx logrotate: maxsize already set or /etc/logrotate.d/nginx missing"
+fi
+
 # 6. Create systemd service (optional, for long-lived deployments)
 echo "6. Creating systemd service template..."
 sudo tee /etc/systemd/system/chatapp-4000.service > /dev/null <<EOF
