@@ -8,6 +8,7 @@
 const { query } = require('../db/pool');
 const logger = require('../utils/logger');
 const { messageLastMessageRepointFkRetryTotal } = require('../utils/metrics');
+const sideEffects = require('./sideEffects');
 
 async function clearChannelLastMessagePointers(channelId: string) {
   await query(
@@ -57,6 +58,89 @@ const CONVERSATION_REPOINT_SQL = `WITH lm AS (
          updated_at = NOW()
      FROM lm
      WHERE conv.id = $1`;
+
+const CHANNEL_LAST_MESSAGE_UPDATE_SQL = `UPDATE channels
+     SET last_message_id = $1,
+         last_message_author_id = $2,
+         last_message_at = $3
+   WHERE id = $4
+     AND (last_message_at IS NULL OR $3 >= last_message_at)`;
+
+const pendingChannelLastMessageUpdates = new Map<
+  string,
+  { messageId: string; authorId: string; createdAt: string | Date }
+>();
+const queuedChannelLastMessageUpdates = new Set<string>();
+
+function lastMessagePointerSortValue(createdAt: string | Date) {
+  const millis = new Date(createdAt).getTime();
+  return Number.isFinite(millis) ? millis : 0;
+}
+
+function shouldReplacePendingChannelLastMessageUpdate(
+  current: { messageId: string; authorId: string; createdAt: string | Date } | undefined,
+  next: { messageId: string; authorId: string; createdAt: string | Date },
+) {
+  if (!current) return true;
+  const currentTime = lastMessagePointerSortValue(current.createdAt);
+  const nextTime = lastMessagePointerSortValue(next.createdAt);
+  if (nextTime !== currentTime) return nextTime > currentTime;
+  return String(next.messageId) > String(current.messageId);
+}
+
+async function flushChannelLastMessageUpdate(channelId: string) {
+  while (true) {
+    const pending = pendingChannelLastMessageUpdates.get(channelId);
+    if (!pending) return;
+    pendingChannelLastMessageUpdates.delete(channelId);
+
+    try {
+      await query(CHANNEL_LAST_MESSAGE_UPDATE_SQL, [
+        pending.messageId,
+        pending.authorId,
+        pending.createdAt,
+        channelId,
+      ]);
+    } catch (err) {
+      logger.warn(
+        { err, channelId, messageId: pending.messageId },
+        'scheduleChannelLastMessagePointerUpdate: async update failed',
+      );
+    }
+
+    if (!pendingChannelLastMessageUpdates.has(channelId)) return;
+  }
+}
+
+function scheduleChannelLastMessagePointerUpdate(
+  channelId: string,
+  payload: { messageId: string; authorId: string; createdAt: string | Date },
+) {
+  const current = pendingChannelLastMessageUpdates.get(channelId);
+  if (!shouldReplacePendingChannelLastMessageUpdate(current, payload)) {
+    return true;
+  }
+  pendingChannelLastMessageUpdates.set(channelId, payload);
+
+  if (queuedChannelLastMessageUpdates.has(channelId)) {
+    return true;
+  }
+  queuedChannelLastMessageUpdates.add(channelId);
+
+  return sideEffects.enqueueFanoutJob('last_message.channel_pointer', async () => {
+    try {
+      await flushChannelLastMessageUpdate(channelId);
+    } finally {
+      queuedChannelLastMessageUpdates.delete(channelId);
+      if (pendingChannelLastMessageUpdates.has(channelId)) {
+        scheduleChannelLastMessagePointerUpdate(
+          channelId,
+          pendingChannelLastMessageUpdates.get(channelId)!,
+        );
+      }
+    }
+  });
+}
 
 async function repointChannelLastMessage(channelId: string) {
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -117,4 +201,5 @@ async function repointConversationLastMessage(conversationId: string) {
 module.exports = {
   repointChannelLastMessage,
   repointConversationLastMessage,
+  scheduleChannelLastMessagePointerUpdate,
 };

@@ -56,6 +56,7 @@ const {
 const {
   repointChannelLastMessage,
   repointConversationLastMessage,
+  scheduleChannelLastMessagePointerUpdate,
 } = require('./repointLastMessage');
 const {
   publishChannelMessageCreated,
@@ -1414,31 +1415,17 @@ router.post('/',
       });
 
       // Fire-and-forget: update channel/conversation last_message pointers outside
-      // the transaction to eliminate row-level lock contention under concurrent posts.
+      // the transaction so the response does not wait on denormalized metadata writes.
+      // Channel writes are additionally coalesced per channel to avoid a burst of
+      // concurrent UPDATEs on the same row during hot-channel traffic.
       // Pool guard: skip if pool is under pressure — the next successful send will
       // update last_message_id anyway (WHERE clause guards against regression).
       if (baseMessage.id && poolStats().waiting < BG_WRITE_POOL_GUARD) {
         if (channelId) {
-          // Concurrent POSTs to a hot channel create a queue of NO KEY UPDATE tuple
-          // locks on the same channels row. A queued NO KEY UPDATE blocks subsequent
-          // KEY SHARE requests (needed by INSERT INTO messages FK check) due to PG
-          // lock queue ordering, which cascades into statement timeouts.
-          // lock_timeout=1 (1ms) causes immediate LockNotAvailable rather than queueing.
-          // SET LOCAL confines the timeout to this transaction only.
-          // The WHERE clause is idempotent — the next successful post sets the pointer.
-          withTransaction(async (client) => {
-            await client.query('SET LOCAL lock_timeout = 1');
-            await client.query(
-              `UPDATE channels
-                 SET last_message_id = $1,
-                     last_message_author_id = $2,
-                     last_message_at = $3
-               WHERE id = $4
-                 AND (last_message_at IS NULL OR $3 >= last_message_at)`,
-              [baseMessage.id, baseMessage.author_id, baseMessage.created_at, channelId],
-            );
-          }).catch(() => {
-            // Silently drop lock conflicts — next post to this channel will update it.
+          scheduleChannelLastMessagePointerUpdate(channelId, {
+            messageId: baseMessage.id,
+            authorId: baseMessage.author_id,
+            createdAt: baseMessage.created_at,
           });
         } else if (conversationId) {
           withTransaction(async (client) => {
