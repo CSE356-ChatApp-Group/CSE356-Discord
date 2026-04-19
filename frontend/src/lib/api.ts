@@ -126,13 +126,17 @@ async function refreshToken() {
   return data.accessToken;
 }
 
-/** Stable per logical POST /messages for Idempotency-Key across 401 refresh + 503 retries. */
+/**
+ * Stable per logical POST /messages for Idempotency-Key across 401 refresh + 503 retries.
+ * Always returns a non-empty string in browsers so we never retry POST /messages without dedupe.
+ */
 function messagePostIdempotencyKey(existing?: string | null): string | undefined {
-  if (existing) return existing;
+  if (existing && String(existing).trim()) return String(existing).trim();
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
   }
-  return undefined;
+  // Extremely old / non-standard environments: best-effort uniqueness (still safer than omitting the header).
+  return `idem-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 /** Max extra fetches after a 503/429 (first try does not count toward this). */
@@ -167,11 +171,11 @@ async function request(
     }
   }
 
-  const useTransient = allowsTransientRetry(method, path);
   const idempotencyKey =
     method === 'POST' && path === '/messages'
       ? messagePostIdempotencyKey(messageIdemKey)
       : undefined;
+  const useTransient = allowsTransientRetry(method, path, idempotencyKey);
 
   let canRefresh401 = retry401;
   let transientRetriesUsed = 0;

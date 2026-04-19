@@ -1,11 +1,13 @@
 /**
  * Frozen reference: COMPAS / course grader test harness `GeneratedClient`.
  * Pasted 2026-04-17 — may drift if the official harness changes.
- * Not part of any build; do not import from app or backend code.
+ * Not part of any ChatApp build; do not import from app or backend code.
  *
- * Resilience: production web UI (`frontend/src/lib/api.ts`) retries 503/429 on GET
- * and on POST /messages with `Idempotency-Key`. Harness `fetchWithRetry` should
- * treat the same statuses similarly for grader stability.
+ * Ops note: the real grader/harness cannot be changed from this repo. This client
+ * uses `fetchWithRetry` (external) and does not send `Idempotency-Key` on JSON
+ * POST /messages — so **server capacity and low 503 rate** are what keep grader
+ * sends reliable. The production **browser** client is `frontend/src/lib/api.ts`
+ * (retries + Idempotency-Key for POST /messages only there).
  */
 import FormData from 'form-data';
 import { CookieJar, fetchWithRetry, RealtimeManager } from '/test-harness/helpers';

@@ -46,8 +46,11 @@ describe('allowsTransientRetry', () => {
     expect(allowsTransientRetry('GET', '/communities')).toBe(true);
   });
 
-  it('allows POST only for /messages', () => {
-    expect(allowsTransientRetry('POST', '/messages')).toBe(true);
+  it('allows POST /messages only when an idempotency key is present', () => {
+    expect(allowsTransientRetry('POST', '/messages', 'a-real-key')).toBe(true);
+    expect(allowsTransientRetry('POST', '/messages', '')).toBe(false);
+    expect(allowsTransientRetry('POST', '/messages', null)).toBe(false);
+    expect(allowsTransientRetry('POST', '/messages')).toBe(false);
     expect(allowsTransientRetry('POST', '/attachments/presign')).toBe(false);
   });
 

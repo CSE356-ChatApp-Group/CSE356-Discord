@@ -41,10 +41,20 @@ export function sleep(ms: number): Promise<void> {
   });
 }
 
-/** GET is always safe to retry. POST /messages is safe with a stable Idempotency-Key per logical send. */
-export function allowsTransientRetry(method: string, path: string): boolean {
+/**
+ * Whether this method/path may use transient retries.
+ * POST /messages is only eligible when `idempotencyKey` is non-empty — never
+ * retry mutating POSTs without the server's dedupe header.
+ */
+export function allowsTransientRetry(
+  method: string,
+  path: string,
+  idempotencyKeyForMessagePost?: string | null,
+): boolean {
   if (method === 'GET') return true;
-  if (method === 'POST' && path === '/messages') return true;
+  if (method === 'POST' && path === '/messages') {
+    return Boolean(idempotencyKeyForMessagePost && idempotencyKeyForMessagePost.trim());
+  }
   return false;
 }
 
