@@ -188,6 +188,38 @@ const wsBackpressureEventsTotal = new client.Counter({
   labelNames: ['action'],
 });
 
+/** Per-socket outbound queue depth after enqueue (message:* vs best-effort). */
+const wsOutboundQueueDepthHistogram = new client.Histogram({
+  name: 'ws_outbound_queue_depth',
+  help: 'Depth of per-socket outbound WS frame queue after enqueue',
+  labelNames: ['priority'],
+  buckets: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+});
+
+/** Total frames waiting in outbound queues on this Node process. */
+const wsOutboundQueuedFramesGauge = new client.Gauge({
+  name: 'ws_outbound_queued_frames',
+  help: 'Total outbound WS frames queued across all sockets on this process',
+});
+
+/** message:* enqueue yielded waiting for bounded queue capacity. */
+const wsOutboundQueueBlockWaitsTotal = new client.Counter({
+  name: 'ws_outbound_queue_block_waits_total',
+  help: 'Times a message:* enqueue waited for queue capacity (setImmediate yield)',
+});
+
+/** Best-effort frames dropped at enqueue when queue at cap (never used for message:*). */
+const wsOutboundQueueDroppedBestEffortTotal = new client.Counter({
+  name: 'ws_outbound_queue_dropped_best_effort_total',
+  help: 'Non-message frames dropped because outbound queue was at max depth',
+});
+
+/** Outbound queue drain batches (setImmediate ticks). */
+const wsOutboundDrainBatchesTotal = new client.Counter({
+  name: 'ws_outbound_drain_batches_total',
+  help: 'WebSocket outbound queue drain batches executed',
+});
+
 /** WebSocket disconnects by close code and whether bootstrap had completed. */
 const wsDisconnectsTotal = new client.Counter({
   name: 'ws_disconnects_total',
@@ -466,6 +498,12 @@ function startPgPoolMetrics(pool) {
   try {
     wsBackpressureEventsTotal.inc({ action: 'drop' }, 0);
     wsBackpressureEventsTotal.inc({ action: 'kill' }, 0);
+    wsOutboundQueueDepthHistogram.observe({ priority: 'message' }, 0);
+    wsOutboundQueueDepthHistogram.observe({ priority: 'best_effort' }, 0);
+    wsOutboundQueuedFramesGauge.set(0);
+    wsOutboundQueueBlockWaitsTotal.inc(0);
+    wsOutboundQueueDroppedBestEffortTotal.inc(0);
+    wsOutboundDrainBatchesTotal.inc(0);
     wsDisconnectsTotal.inc({ code: '1000', clean: 'true', bootstrap_ready: 'true' }, 0);
     wsDisconnectsTotal.inc({ code: '1006', clean: 'false', bootstrap_ready: 'false' }, 0);
     wsConnectionLifetimeMs.observe({ close_code: '1000', bootstrap_ready: 'true' }, 0);
@@ -540,6 +578,12 @@ function startPgPoolMetrics(pool) {
     fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'target_lookup' }, 0);
     fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'publish' }, 0);
     fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'total' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'target_lookup' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'wrap_payload' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'publish_passthrough_wall' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'publish_userfeed_wall' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'publish_parallel_wall' }, 0);
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'total' }, 0);
     fanoutPublishTargetsHistogram.observe({ path: 'channel_message_user_topics' }, 0);
     fanoutPublishTargetsHistogram.observe({ path: 'conversation_event' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'hit' }, 0);
@@ -588,6 +632,11 @@ module.exports = {
   messagePostIdempotencyPollWaitMs,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
+  wsOutboundQueueDepthHistogram,
+  wsOutboundQueuedFramesGauge,
+  wsOutboundQueueBlockWaitsTotal,
+  wsOutboundQueueDroppedBestEffortTotal,
+  wsOutboundDrainBatchesTotal,
   wsDisconnectsTotal,
   wsConnectionLifetimeMs,
   wsReconnectsTotal,

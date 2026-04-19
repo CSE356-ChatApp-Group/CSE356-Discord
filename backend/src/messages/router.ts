@@ -64,7 +64,11 @@ const { appendChannelMessageIngested } = require('./messageIngestLog');
 const {
   getConversationFanoutTargets,
 } = require('./conversationFanoutTargets');
-const { publishUserFeedTargets, splitUserTargets } = require('../websocket/userFeed');
+const {
+  publishUserFeedTargets,
+  splitUserTargets,
+  userFeedRedisChannelForUserId,
+} = require('../websocket/userFeed');
 import { MESSAGE_RETURNING_FIELDS, MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 const router = express.Router();
@@ -120,6 +124,15 @@ const MSG_TARGET_CACHE_TTL_SECS =
 // Per (uuid, userId) because access is user-specific (private channels).
 // '_' is a sentinel for negative cache (UUID is a real conversation, not a channel).
 const CHANNEL_COMPAT_CACHE_TTL_SECS = parseInt(process.env.CHANNEL_COMPAT_CACHE_TTL_SECS || '60', 10);
+
+/** Log `dm_fanout_timing` for every `message:*` DM publish when true; else only if total >= min ms. */
+const DM_FANOUT_TIMING_LOG =
+  String(process.env.DM_FANOUT_TIMING_LOG || '').toLowerCase() === 'all'
+  || process.env.DM_FANOUT_TIMING_LOG === '1'
+  || process.env.DM_FANOUT_TIMING_LOG === 'true';
+const _dmFanoutTimingMin = parseInt(process.env.DM_FANOUT_TIMING_LOG_MIN_MS || '50', 10);
+const DM_FANOUT_TIMING_LOG_MIN_MS =
+  Number.isFinite(_dmFanoutTimingMin) && _dmFanoutTimingMin >= 0 ? _dmFanoutTimingMin : 50;
 
 // Read cursor Redis CAS: stores last-known cursor timestamp (epoch ms) per (user, target).
 // The Lua script atomically advances only if the new value is strictly greater, preventing
@@ -324,12 +337,14 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
 
 async function publishConversationEventNow(conversationId, event, data) {
   const startedAt = process.hrtime.bigint();
-  const lookupStartedAt = startedAt;
+  const isDmTimingEvent = typeof event === 'string' && event.startsWith('message:');
   const targets: string[] = await getConversationFanoutTargets(conversationId);
-  fanoutPublishDurationMs.observe(
-    { path: 'conversation_event', stage: 'target_lookup' },
-    Number(process.hrtime.bigint() - lookupStartedAt) / 1e6,
-  );
+  const lookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'target_lookup' }, lookupMs);
+  if (isDmTimingEvent) {
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'target_lookup' }, lookupMs);
+  }
+
   let uniqueTargets: string[] = [...new Set(targets)];
   if (event === 'read:updated') {
     uniqueTargets = uniqueTargets.filter((target) => target.startsWith('user:'));
@@ -352,24 +367,104 @@ async function publishConversationEventNow(conversationId, event, data) {
 
   // Any partial Redis failure must not return HTTP success while a participant
   // misses message:* / read — mirrors single-target await for channel posts.
+  const wrapStart = process.hrtime.bigint();
   const payload = wrapFanoutPayload(event, data);
+  const wrapPayloadMs = Number(process.hrtime.bigint() - wrapStart) / 1e6;
+  if (isDmTimingEvent) {
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'wrap_payload' }, wrapPayloadMs);
+  }
+
   fanoutPublishTargetsHistogram.observe(
     { path: 'conversation_event' },
     passthroughTargets.length + userIds.length,
   );
+
   const publishStartedAt = process.hrtime.bigint();
-  await Promise.all([
-    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
-    ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
+  const userfeedShardCount =
+    userIds.length > 0 ? new Set(userIds.map((uid) => userFeedRedisChannelForUserId(uid))).size : 0;
+
+  async function publishPassthroughWithTimings() {
+    if (!passthroughTargets.length) return { wallMs: 0, perTargetMs: [] as { target: string; ms: number }[] };
+    const wall0 = process.hrtime.bigint();
+    const perTargetMs = await Promise.all(
+      passthroughTargets.map(async (target) => {
+        const t0 = process.hrtime.bigint();
+        await fanout.publish(target, payload);
+        return { target, ms: Number(process.hrtime.bigint() - t0) / 1e6 };
+      }),
+    );
+    return { wallMs: Number(process.hrtime.bigint() - wall0) / 1e6, perTargetMs };
+  }
+
+  async function publishUserfeedWithTiming() {
+    if (!userIds.length) return { wallMs: 0 };
+    const t0 = process.hrtime.bigint();
+    await publishUserFeedTargets(userIds, payload);
+    return { wallMs: Number(process.hrtime.bigint() - t0) / 1e6 };
+  }
+
+  const [passthroughResult, userfeedResult] = await Promise.all([
+    publishPassthroughWithTimings(),
+    publishUserfeedWithTiming(),
   ]);
+  const parallelPublishWallMs = Number(process.hrtime.bigint() - publishStartedAt) / 1e6;
+  const totalMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
   fanoutPublishDurationMs.observe(
     { path: 'conversation_event', stage: 'publish' },
-    Number(process.hrtime.bigint() - publishStartedAt) / 1e6,
+    parallelPublishWallMs,
   );
-  fanoutPublishDurationMs.observe(
-    { path: 'conversation_event', stage: 'total' },
-    Number(process.hrtime.bigint() - startedAt) / 1e6,
-  );
+  fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'total' }, totalMs);
+
+  if (isDmTimingEvent) {
+    fanoutPublishDurationMs.observe(
+      { path: 'conversation_dm', stage: 'publish_passthrough_wall' },
+      passthroughResult.wallMs,
+    );
+    fanoutPublishDurationMs.observe(
+      { path: 'conversation_dm', stage: 'publish_userfeed_wall' },
+      userfeedResult.wallMs,
+    );
+    fanoutPublishDurationMs.observe(
+      { path: 'conversation_dm', stage: 'publish_parallel_wall' },
+      parallelPublishWallMs,
+    );
+    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'total' }, totalMs);
+  }
+
+  if (
+    isDmTimingEvent
+    && (DM_FANOUT_TIMING_LOG || totalMs >= DM_FANOUT_TIMING_LOG_MIN_MS)
+  ) {
+    logger.info(
+      {
+        event: 'dm_fanout_timing',
+        conversationId,
+        wsEvent: event,
+        messageId: (data as any)?.id ?? null,
+        participantCount: userIds.length,
+        passthroughCount: passthroughTargets.length,
+        userfeedShardCount,
+        lookupMs: Math.round(lookupMs * 1000) / 1000,
+        wrapPayloadMs: Math.round(wrapPayloadMs * 1000) / 1000,
+        passthroughWallMs: Math.round(passthroughResult.wallMs * 1000) / 1000,
+        passthroughPerTargetMs: passthroughResult.perTargetMs.map((row) => ({
+          target: row.target,
+          ms: Math.round(row.ms * 1000) / 1000,
+        })),
+        userfeedWallMs: Math.round(userfeedResult.wallMs * 1000) / 1000,
+        parallelPublishWallMs: Math.round(parallelPublishWallMs * 1000) / 1000,
+        totalMs: Math.round(totalMs * 1000) / 1000,
+        gradingNote: 'correlate_with_delivery_timeout',
+        redisHints: {
+          connectionSet: 'user:<uuid>:connections',
+          aliveKey: 'user:<uuid>:connection:<connectionId>:alive',
+          recentDisconnect: 'ws:recent_disconnect:<uuid>',
+        },
+      },
+      'DM fanout publish timing breakdown',
+    );
+  }
 
   if (event === 'read:updated') return undefined;
 

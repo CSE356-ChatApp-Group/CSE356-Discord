@@ -35,6 +35,12 @@ There are two slightly different listener models in this repo today:
 
 So for grading-style investigations, treat **“open WS subscribed to `user:<self>`”** as the first compatibility bar, not “channel pane open.” The repo now has backend websocket coverage for **open-only** sockets on DMs, public channels, join-live channel delivery, and invited private-channel delivery. If the official grader still disagrees with local counts, compare **listener scope** (for example, open WebSocket vs. channel-specific subscribe) and **duplicate dedupe** on the harness side before assuming a core fanout bug.
 
+### WS bootstrap, replay, and dedupe (non-obvious invariants)
+
+1. **`markWsRecentConnect` vs bootstrap** — On connect, [`server.ts`](../backend/src/websocket/server.ts) calls `markWsRecentConnect` **before** `bootstrapWithRetry` finishes walking hundreds of `channel:` / `conversation:` subscriptions. During that window the client is on **`user:<self>`** (first `subscribeClient`) but may not yet be on every **`channel:`** topic. **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`** therefore gates duplicates to “recent” sockets: it is a **correctness coupling** for channel delivery during bootstrap, not only a perf tradeoff. **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`** (default) avoids relying on that window shape.
+
+2. **Replay vs live dedupe** — Reconnect replay sends with `bypassLogicalDuplicateSuppression: true` so replay is not blocked by the “explicit channel unsubscribe” rule. **`bypassLogicalDuplicateSuppression` does not skip `wasSocketMessageRecentlyDelivered`**: if the same `message:created` was already delivered on the logical `user:` stream before replay runs, the replay frame is suppressed by message-id dedupe. That is intentional (no double delivery).
+
 ## Common patterns behind “sustained failed deliveries”
 
 | Pattern | Likely cause |

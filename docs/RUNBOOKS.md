@@ -212,6 +212,96 @@ If Grafana shows **traffic drop ~14:35** and **p95 + event-loop spike ~15:55** (
 
 **Repeatable snapshot on the VM:** `scripts/prod-capacity-snapshot.sh` (see repo; also validated in CI `bash -n`).
 
+## DM delivery timeout — 2-minute triage (conversationId + missingUserId)
+
+Use when the leaderboard shows **`Delivery timeout | … conversation=<UUID> missing=[username]`**. Replace placeholders: **`CONV`** = conversation UUID, **`USER`** = missing participant’s **user UUID** (resolve username → id from DB or admin if needed).
+
+### Minute 0–1: Redis — was the user “connected”?
+
+Run against the **same Redis** the API uses (`REDIS_URL`). If you use ACL: add `-a "$REDIS_PASSWORD"` to every command below.
+
+1. **Any registered WS connections for that user?**
+
+   ```bash
+   redis-cli SMEMBERS "user:USER:connections"
+   ```
+
+   - **Empty** → no API node had registered this user’s sockets at Redis write time → classify as **not connected** (or never finished bootstrap / tab killed). Correlate with harness opening WS **after** POST if timing is suspicious.
+   - **Non-empty** → copy connection ids (UUID strings), then for **each** id:
+
+   ```bash
+   redis-cli EXISTS "user:USER:connection:<connectionId>:alive"
+   ```
+
+   - **`1`** on at least one id → strong evidence the server believed a live socket existed recently (TTL window; see `CONNECTION_ALIVE_TTL_SECONDS` in code, default **120s**).
+   - **All `0`** → stale connection set (cleanup lag) or connections died just before check → treat as **likely disconnected / replay path**.
+
+2. **Recent disconnect marker (replay eligibility on next connect)?**
+
+   ```bash
+   redis-cli GET "ws:recent_disconnect:USER"
+   ```
+
+   - **Non-nil JSON** with `disconnectedAt` near the incident → user **was** disconnected around that time; next connect should run DB replay (`ws.replay.missed_messages` in logs).
+   - **nil** → no recorded disconnect in TTL window (`WS_RECENT_DISCONNECT_TTL_SECONDS`, default **180s** in `server.ts` unless overridden).
+
+### Minute 1–2: Logs — starved vs killed vs never delivered
+
+On an API host (or centralized log store), narrow to **incident time ±90s** and **`CONV`** / **`USER`**.
+
+1. **DM fanout (HTTP path) — was Redis publish slow?**
+
+   ```bash
+   journalctl -u 'chatapp@*' --since '2026-04-19 18:44:00' --until '2026-04-19 18:49:00' \
+     | grep -F 'dm_fanout_timing' | grep -F 'CONV'
+   ```
+
+   - **`totalMs` tiny** (e.g. under 100 ms) and no Redis errors → server-side publish is unlikely the 15s bottleneck.
+   - **Large `lookupMs` / `userfeedWallMs`** → target lookup or Redis publish contention.
+
+2. **Slow consumer kill (TCP buffer huge)?**
+
+   ```bash
+   journalctl -u 'chatapp@*' --since '...' --until '...' \
+     | grep -E 'ws\.slow_consumer\.killed|slow consumer: terminating' | grep USER
+   ```
+
+   - **Hit** → **connected but slow consumer killed** (`buffered` ≥ `WS_BACKPRESSURE_KILL_BYTES`, default 2 MiB).
+
+3. **Send failed / frame dropped (non-message drop; message uses queue)?**
+
+   ```bash
+   journalctl -u 'chatapp@*' --since '...' --until '...' \
+     | grep -E 'ws\.send_failed|ws\.slow_consumer\.frame_dropped' | grep USER
+   ```
+
+   - **`frame_dropped`** for non-`message:*` only; **`message:*`** is not dropped at the drop threshold, but **kill** still applies.
+
+4. **Event-loop / queue pressure (this repo’s metrics)?**
+
+   From Prometheus on the scrape window:
+
+   - **`rate(ws_outbound_queue_block_waits_total[5m])` above zero** for the same minute → **`message:*` enqueues waited** because the per-socket queue stayed at cap (bounded wait with `setImmediate`) → classify as **connected but delivery path backlogged** (starvation / burst).
+   - **`ws_outbound_queued_frames`** elevated across instances → backlog on process-wide outbound queues.
+
+5. **Replay ran after reconnect?**
+
+   ```bash
+   journalctl -u 'chatapp@*' --since '...' --until '...' \
+     | grep -E 'ws\.replay\.missed_messages|ws\.reconnected_after_gap' | grep USER
+   ```
+
+   - **`missed_messages`** after a gap → **disconnected** path recovered from DB.
+
+### Decision table (within ~2 minutes)
+
+| Evidence | Verdict |
+|----------|---------|
+| `SMEMBERS user:USER:connections` empty and no `dm_fanout_timing` slowness | **Not connected** (or harness/client never held WS open for `USER`). |
+| Connections + `alive` = 1 near T, `dm_fanout_timing.totalMs` low, **`ws_outbound_queue_block_waits_total` / queued frames up** | **Connected but event-loop / outbound-queue starved** (mitigation: capacity, batch tuning `WS_OUTBOUND_DRAIN_BATCH`, shard spread). |
+| **`ws.slow_consumer.killed`** for `USER` near T | **Connected but slow consumer killed**. |
+| **`ws:recent_disconnect:USER`** set and **`ws.replay.missed_messages`** after | **Disconnected** then replay; if timeout still counted, harness window vs replay overlap. |
+
 ## After mitigation
 
 Update the incident log, trigger a **staging drill** ([`deploy/STAGING-DRILL-CHECKLIST.md`](../deploy/STAGING-DRILL-CHECKLIST.md)), and open a follow-up if the root cause is uncaught by tests (see [`docs/VERIFICATION-RISK-REGISTER.md`](VERIFICATION-RISK-REGISTER.md)).

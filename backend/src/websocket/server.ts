@@ -35,12 +35,20 @@
  *     `community:` subscriptions still happen explicitly from the client after
  *     it loads state.
  *
+ * Outbound path: each socket has a bounded FIFO plus optional `message:*`
+ * waiter backlog; Redis subscriber handlers only enqueue and return, while
+ * `setImmediate` drains up to `WS_OUTBOUND_DRAIN_BATCH` `ws.send` calls per tick.
+ *
  * Remaining future work, if we need another step up:
  *   • Aggregate presence/notifications server-side before WS push.
  *   • Prefer server-initiated delta sync when backpressure fires instead of
- *     unbounded frame queues.
+ *     growing unbounded waiters beyond `WS_OUTBOUND_MESSAGE_WAITERS_MAX`.
  *
  * SLO / UX stance for backpressure (current implementation):
+ *   • **Outbound queue:** Redis→WS fanout enqueues frames per socket and drains
+ *     with `setImmediate` batches so the subscriber callback does not run long
+ *     `ws.send` chains. `message:*` is never dropped at enqueue (waits for capacity);
+ *     best-effort frames may be dropped when their queue cap is reached.
  *   • **Drop** (buffer > WS_BACKPRESSURE_DROP_BYTES): best-effort — client may
  *     miss an ephemeral frame; acceptable for presence-style traffic if clients
  *     reconcile via REST or a periodic sync. **Not applied** to `message:*` Redis
@@ -75,6 +83,11 @@ const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
+  wsOutboundQueueDepthHistogram,
+  wsOutboundQueuedFramesGauge,
+  wsOutboundQueueBlockWaitsTotal,
+  wsOutboundQueueDroppedBestEffortTotal,
+  wsOutboundDrainBatchesTotal,
   wsDisconnectsTotal,
   wsConnectionLifetimeMs,
   wsReconnectsTotal,
@@ -100,6 +113,26 @@ const WS_BACKPRESSURE_DROP_BYTES = parseInt(
 );
 const WS_BACKPRESSURE_KILL_BYTES = parseInt(
   process.env.WS_BACKPRESSURE_KILL_BYTES || String(2 * 1024 * 1024), 10,
+);
+/** Max queued `message:*` frames per socket (never dropped; enqueue waits with setImmediate). */
+const WS_OUTBOUND_QUEUE_MAX_MESSAGE = parseInt(
+  process.env.WS_OUTBOUND_QUEUE_MAX_MESSAGE || String(512),
+  10,
+);
+/** Max queued best-effort frames per socket (dropped at enqueue when full). */
+const WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT = parseInt(
+  process.env.WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT || String(128),
+  10,
+);
+/** Max `ws.send` calls per setImmediate drain tick per socket. */
+const WS_OUTBOUND_DRAIN_BATCH = parseInt(process.env.WS_OUTBOUND_DRAIN_BATCH || String(32), 10);
+/** When primary queue is full, `message:*` jobs wait here (FIFO) until drain makes room. */
+const WS_OUTBOUND_MESSAGE_WAITERS_MAX = Math.max(
+  64,
+  Math.min(
+    65536,
+    parseInt(process.env.WS_OUTBOUND_MESSAGE_WAITERS_MAX || String(4096), 10) || 4096,
+  ),
 );
 // Skip the sweeper for users whose presence was just recomputed by a real
 // event (activity ping, status change, connect/disconnect).  5 s is well
@@ -370,6 +403,11 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
     "Replaying missed websocket messages after reconnect gap",
   );
 
+  // sendPayloadToSocket is async (queues then drains); await preserves ordering and
+  // lets message:* admission wait on outbound backpressure without blocking the
+  // wrong caller. bypassLogicalDuplicateSuppression skips only the explicit-channel
+  // unsub gate — wasSocketMessageRecentlyDelivered in flushOutboundJob still
+  // suppresses replay when the same message id was already delivered live.
   for (const message of messages) {
     if (ws.readyState !== WebSocket.OPEN) return;
     const payload = {
@@ -377,7 +415,7 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
       data: message,
       publishedAt: new Date().toISOString(),
     };
-    sendPayloadToSocket(
+    await sendPayloadToSocket(
       ws,
       `user:${userId}`,
       payload,
@@ -703,27 +741,65 @@ function prepareSocketPayload(logicalChannel, parsed, rawMessage) {
   return { dedupeKey, outbound, payloadEventName, skipDropForBackpressure };
 }
 
-function sendPayloadToSocket(
-  ws,
-  logicalChannel,
-  parsed,
-  rawMessage,
-  { bypassLogicalDuplicateSuppression = false, preparedPayload = null } = {},
-) {
-  if (ws.readyState !== WebSocket.OPEN) return false;
+function ensureOutboundQueue(ws) {
+  if (!(ws as any)._outboundQueue) {
+    (ws as any)._outboundQueue = [];
+    (ws as any)._outboundDrainScheduled = false;
+  }
+  if (!(ws as any)._outMsgWaiters) {
+    (ws as any)._outMsgWaiters = [];
+  }
+}
+
+function adjustWsOutboundGauge(delta) {
+  if (!delta) return;
+  if (delta > 0) {
+    wsOutboundQueuedFramesGauge.inc(delta);
+  } else {
+    wsOutboundQueuedFramesGauge.dec(-delta);
+  }
+}
+
+function clearOutboundQueue(ws) {
+  ensureOutboundQueue(ws);
+  const q = (ws as any)._outboundQueue;
+  const n = q.length;
+  if (n > 0) {
+    q.length = 0;
+    adjustWsOutboundGauge(-n);
+  }
+  const waiters = (ws as any)._outMsgWaiters;
+  if (waiters && waiters.length) {
+    waiters.length = 0;
+  }
+}
+
+function flushOutboundJob(ws, job) {
+  const {
+    logicalChannel,
+    parsed,
+    rawMessage,
+    bypassLogicalDuplicateSuppression,
+    preparedPayload,
+  } = job;
+  if (ws.readyState !== WebSocket.OPEN) return;
   if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
-    return false;
+    return;
   }
 
+  const resolvedPrepared =
+    preparedPayload || prepareSocketPayload(logicalChannel, parsed, rawMessage);
   const {
     dedupeKey,
     outbound,
     payloadEventName,
     skipDropForBackpressure,
-  } = preparedPayload || prepareSocketPayload(logicalChannel, parsed, rawMessage);
-  if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
-    return false;
-  }
+  } = resolvedPrepared;
+  // Dedupe is independent of bypassLogicalDuplicateSuppression (which only skips
+  // user:<self> message:* when the client explicitly unsubscribed the channel).
+  // Reconnect replay uses bypass…:true but still hits this check — if live fanout
+  // already delivered the same message id, replay is a no-op (correct).
+  if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) return;
 
   const buffered = (ws as any).bufferedAmount ?? 0;
   if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
@@ -740,8 +816,9 @@ function sendPayloadToSocket(
       "WS slow consumer: terminating connection due to excessive backpressure",
     );
     noteRecentDisconnectForSocket(ws, 1006, "backpressure_kill");
+    clearOutboundQueue(ws);
     ws.terminate();
-    return false;
+    return;
   }
   if (!skipDropForBackpressure && buffered >= WS_BACKPRESSURE_DROP_BYTES) {
     wsBackpressureEventsTotal.inc({ action: "drop" });
@@ -756,14 +833,14 @@ function sendPayloadToSocket(
       },
       "WS slow consumer: dropping frame due to backpressure",
     );
-    return false;
+    return;
   }
 
   markSocketMessageDelivered(ws, dedupeKey);
   ws._lastDataFrameAt = Date.now();
   ws.send(outbound, (err) => {
     if (!err) return;
-    ws._sawError = true;
+    (ws as any)._sawError = true;
     logger.warn(
       {
         err,
@@ -777,11 +854,156 @@ function sendPayloadToSocket(
     );
     try {
       noteRecentDisconnectForSocket(ws, 1006, "send_failed");
+      clearOutboundQueue(ws);
       ws.terminate();
     } catch {
       // Ignore termination failures after send errors.
     }
   });
+}
+
+function drainOutboundBatch(ws) {
+  ensureOutboundQueue(ws);
+  const q = (ws as any)._outboundQueue;
+  const waiters = (ws as any)._outMsgWaiters;
+  if (ws.readyState !== WebSocket.OPEN) {
+    if (waiters.length) {
+      waiters.length = 0;
+    }
+    if (q.length) {
+      adjustWsOutboundGauge(-q.length);
+      q.length = 0;
+    }
+    return 0;
+  }
+  const msgCap =
+    Number.isFinite(WS_OUTBOUND_QUEUE_MAX_MESSAGE) && WS_OUTBOUND_QUEUE_MAX_MESSAGE > 0
+      ? Math.floor(WS_OUTBOUND_QUEUE_MAX_MESSAGE)
+      : 512;
+  const batchCap =
+    Number.isFinite(WS_OUTBOUND_DRAIN_BATCH) && WS_OUTBOUND_DRAIN_BATCH > 0
+      ? Math.min(256, Math.floor(WS_OUTBOUND_DRAIN_BATCH))
+      : 32;
+  const promoteBudget = Math.max(batchCap * 4, 64);
+  let promoted = 0;
+  let n = 0;
+  while (n < batchCap && ws.readyState === WebSocket.OPEN) {
+    while (waiters.length > 0 && q.length < msgCap && promoted < promoteBudget) {
+      q.push(waiters.shift());
+      adjustWsOutboundGauge(1);
+      promoted += 1;
+    }
+    if (!q.length) break;
+    const job = q.shift();
+    adjustWsOutboundGauge(-1);
+    flushOutboundJob(ws, job);
+    n += 1;
+  }
+  return n;
+}
+
+function scheduleOutboundDrain(ws) {
+  ensureOutboundQueue(ws);
+  if ((ws as any)._outboundDrainScheduled) return;
+  const q = (ws as any)._outboundQueue;
+  const waiters = (ws as any)._outMsgWaiters;
+  const hasWork = q.length > 0 || waiters.length > 0;
+  if (!hasWork) return;
+  (ws as any)._outboundDrainScheduled = true;
+  setImmediate(() => {
+    (ws as any)._outboundDrainScheduled = false;
+    if (ws.readyState !== WebSocket.OPEN) {
+      clearOutboundQueue(ws);
+      return;
+    }
+    const sent = drainOutboundBatch(ws);
+    if (sent > 0) {
+      wsOutboundDrainBatchesTotal.inc();
+    }
+    if ((ws as any)._outboundQueue.length > 0 || (ws as any)._outMsgWaiters.length > 0) {
+      scheduleOutboundDrain(ws);
+    }
+  });
+}
+
+function sendPayloadToSocket(
+  ws,
+  logicalChannel,
+  parsed,
+  rawMessage,
+  { bypassLogicalDuplicateSuppression = false, preparedPayload = null } = {},
+) {
+  if (ws.readyState !== WebSocket.OPEN) return false;
+  if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
+    return false;
+  }
+
+  const prepared =
+    preparedPayload || prepareSocketPayload(logicalChannel, parsed, rawMessage);
+  const { dedupeKey, skipDropForBackpressure } = prepared;
+
+  if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
+    return false;
+  }
+
+  const maxDepth = skipDropForBackpressure
+    ? (Number.isFinite(WS_OUTBOUND_QUEUE_MAX_MESSAGE) && WS_OUTBOUND_QUEUE_MAX_MESSAGE > 0
+      ? Math.floor(WS_OUTBOUND_QUEUE_MAX_MESSAGE)
+      : 512)
+    : (Number.isFinite(WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT) && WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT > 0
+      ? Math.floor(WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT)
+      : 128);
+
+  ensureOutboundQueue(ws);
+  const q = (ws as any)._outboundQueue;
+
+  if (skipDropForBackpressure) {
+    if (q.length >= maxDepth) {
+      const waiters = (ws as any)._outMsgWaiters;
+      if (waiters.length >= WS_OUTBOUND_MESSAGE_WAITERS_MAX) {
+        wsBackpressureEventsTotal.inc({ action: "kill" });
+        logger.warn(
+          {
+            event: "ws.outbound_waiters_overflow",
+            userId: (ws as any)._userId,
+            waiters: waiters.length,
+            queue: q.length,
+            gradingNote: "correlate_with_failed_deliveries",
+          },
+          "WS outbound: message waiter backlog exceeded hard cap; terminating socket",
+        );
+        noteRecentDisconnectForSocket(ws, 1006, "outbound_waiters_overflow");
+        clearOutboundQueue(ws);
+        ws.terminate();
+        return false;
+      }
+      waiters.push({
+        logicalChannel,
+        parsed,
+        rawMessage,
+        bypassLogicalDuplicateSuppression,
+        preparedPayload: preparedPayload || prepared,
+      });
+      wsOutboundQueueBlockWaitsTotal.inc();
+      scheduleOutboundDrain(ws);
+      return true;
+    }
+  } else if (q.length >= maxDepth) {
+    wsOutboundQueueDroppedBestEffortTotal.inc();
+    return false;
+  }
+
+  q.push({
+    logicalChannel,
+    parsed,
+    rawMessage,
+    bypassLogicalDuplicateSuppression,
+    preparedPayload: preparedPayload || prepared,
+  });
+  adjustWsOutboundGauge(1);
+  const priority = skipDropForBackpressure ? "message" : "best_effort";
+  wsOutboundQueueDepthHistogram.observe({ priority }, q.length);
+  scheduleOutboundDrain(ws);
   return true;
 }
 
@@ -897,9 +1119,9 @@ function deliverUserFeedMessage(channel, routed) {
     if (!clients || clients.size === 0) continue;
     const logicalChannel = `user:${userId}`;
     const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
-    clients.forEach((ws) => {
+    for (const ws of clients) {
       if (internalSubscribeChannels) {
-        if (!internalSubscribeChannels.length) return;
+        if (!internalSubscribeChannels.length) continue;
         Promise.allSettled(
           internalSubscribeChannels.map((targetChannel) => subscribeClient(ws, targetChannel)),
         ).catch((err) => {
@@ -908,11 +1130,11 @@ function deliverUserFeedMessage(channel, routed) {
             "WS internal auto-subscribe command failed",
           );
         });
-        return;
+        continue;
       }
 
       sendPayloadToSocket(ws, logicalChannel, payload, null, { preparedPayload });
-    });
+    }
   }
 }
 
@@ -975,15 +1197,19 @@ function deliverPubsubMessage(channel, message) {
 
   const preparedPayload = prepareSocketPayload(channel, parsed, message);
   let deliveredCount = 0;
-  clients.forEach((ws) => {
+  for (const ws of clients) {
     if (sendPayloadToSocket(ws, channel, parsed, message, { preparedPayload })) {
-      deliveredCount++;
+      deliveredCount += 1;
     }
-  });
+  }
 }
 
 redisSub.on("message", (channel, message) => {
-  deliverPubsubMessage(channel, message);
+  try {
+    deliverPubsubMessage(channel, message);
+  } catch (err) {
+    logger.error({ err, channel }, "deliverPubsubMessage failed");
+  }
 });
 
 const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
@@ -1222,9 +1448,21 @@ wss.on("connection", async (ws, req) => {
   ws._sawError = false;
   ws._recentDisconnectRecorded = false;
   ws._recentMessageKeys = new Map();
+  ws._outboundQueue = [];
+  ws._outboundDrainScheduled = false;
 
   // Mark freshly connected users for a short window so channel fanout can send
   // a targeted user-topic duplicate while channel auto-subscribe warms up.
+  //
+  // Ordering: markWsRecentConnect runs immediately; full channel/conversation
+  // bootstrap (bootstrapWithRetry → bootstrapUserSubscriptions) runs in parallel
+  // and can take seconds for large accounts. During that window the socket is
+  // subscribed to user:<id> (below) but not yet to every channel:<id>. Live
+  // channel message:created delivery therefore relies on the logical user:<id>
+  // duplicate path — in particular CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect
+  // is not merely a throughput knob: with that mode, only users in the recent-connect
+  // window receive the duplicate; turning it off or mis-tuning it can drop channel
+  // messages for sockets still bootstrapping. Default mode=all avoids that coupling.
   markWsRecentConnect(user.id).catch(() => {});
 
   ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
@@ -1582,6 +1820,7 @@ async function unsubscribeClient(ws, redisChannel) {
 }
 
 function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
+  clearOutboundQueue(ws);
   const subscriptions = [...ws._subscriptions];
   const bootstrapReady = ws._bootstrapReady === true;
   const lifetimeMs = Math.max(0, Date.now() - Number(ws._connectedAt || Date.now()));

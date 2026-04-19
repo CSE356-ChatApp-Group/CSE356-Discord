@@ -119,6 +119,8 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
+| `WS_OUTBOUND_QUEUE_MAX_MESSAGE`, `WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT`, `WS_OUTBOUND_DRAIN_BATCH` | Per-socket outbound queue caps and max `ws.send` calls per `setImmediate` drain tick |
+| `WS_OUTBOUND_MESSAGE_WAITERS_MAX` | When the primary queue is full, `message:*` frames wait in a FIFO (default **4096**); exceeding this closes the socket (`outbound_waiters_overflow`) |
 | `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning (code/deploy defaults: bootstrap TTL `180`; deploy batch size `64` when `WS_AUTO_SUBSCRIBE_MODE` is not `user_only`; recent-connect bridge window `20`) |
 | `WS_AUTO_SUBSCRIBE_MODE` | `messages` (default) subscribes **`channel:`** + **`conversation:`** + **`user:<self>`** during connect; `user_only` keeps just **`user:<self>`**; `full` also eager-subscribes accessible **`community:`** topics. |
 | `WS_APP_KEEPALIVE_INTERVAL_MS` | When `>=5000`, sends a tiny `{"event":"keepalive"}` data frame to otherwise-idle sockets on that cadence. Leave `0` to disable. Useful when intermediaries churn idle WebSocket upgrades despite normal control ping/pong. |
