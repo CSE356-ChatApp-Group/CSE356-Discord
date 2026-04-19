@@ -105,16 +105,26 @@ const MSG_TARGET_CACHE_TTL_SECS =
 // time is Redis-bound (~1ms) rather than DB-bound (~10ms).
 // TTL: 10 minutes — long enough to cover the grader session, short enough to GC old users.
 const READ_CURSOR_TS_TTL_SECS = parseInt(process.env.READ_CURSOR_TS_TTL_SECS || '600', 10);
-// Lua script: SET key newTs EX ttl only if newTs is strictly greater than current value.
-// Returns 1 if advanced, 0 if not. Atomic on the Redis single-threaded executor.
+const READ_DB_LOCK_TTL_MS = parseInt(process.env.READ_DB_LOCK_TTL_MS || '500', 10);
+// Two-key Lua script:
+//   KEYS[1] = cursor key (read_cursor_ts:...)
+//   KEYS[2] = db_lock key (read_db_lock:...)
+//   ARGV[1] = new timestamp ms, ARGV[2] = cursor TTL secs, ARGV[3] = db_lock TTL ms
+// Returns 0: cursor already at/ahead — skip entirely.
+//         1: cursor advanced, but DB write rate-limited by lock — skip DB.
+//         2: cursor advanced AND db_lock acquired — fire DB write.
 const READ_CURSOR_ADVANCE_LUA = `
 local current = redis.call('GET', KEYS[1])
 local new_ts = tonumber(ARGV[1])
-if not current or tonumber(current) < new_ts then
-  redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
-  return 1
+if current and tonumber(current) >= new_ts then
+  return 0
 end
-return 0
+redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+local locked = redis.call('SET', KEYS[2], '1', 'NX', 'PX', tonumber(ARGV[3]))
+if locked then
+  return 2
+end
+return 1
 `;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -135,6 +145,12 @@ function readCursorTsKey(userId, channelId, conversationId) {
   if (channelId) return `read_cursor_ts:${userId}:ch:${channelId}`;
   if (conversationId) return `read_cursor_ts:${userId}:cv:${conversationId}`;
   throw new Error('read cursor scope required');
+}
+
+function readDbLockKey(userId, channelId, conversationId) {
+  if (channelId) return `read_db_lock:${userId}:ch:${channelId}`;
+  if (conversationId) return `read_db_lock:${userId}:cv:${conversationId}`;
+  throw new Error('read db lock scope required');
 }
 
 async function getCachedReadReceiptMessageId(userId, channelId, conversationId) {
@@ -409,23 +425,32 @@ async function advanceReadStateCursor({
   // Fail-open: Redis unavailable → redisAdvanced=true → fall through to sync DB.
   const newTs = String(new Date(messageCreatedAt).getTime());
   const cursorKey = readCursorTsKey(userId, channelId, conversationId);
-  let redisAdvanced = true; // default: attempt DB write
+  const dbLockKey = readDbLockKey(userId, channelId, conversationId);
+  let casResult: number = 2; // default: attempt DB write
   try {
-    const result = await redis.eval(
-      READ_CURSOR_ADVANCE_LUA, 1, cursorKey, newTs, String(READ_CURSOR_TS_TTL_SECS),
-    );
-    redisAdvanced = result === 1;
+    casResult = await redis.eval(
+      READ_CURSOR_ADVANCE_LUA, 2, cursorKey, dbLockKey, newTs,
+      String(READ_CURSOR_TS_TTL_SECS), String(READ_DB_LOCK_TTL_MS),
+    ) as number;
   } catch {
-    // Redis unavailable: conservative fallback to DB path
-    redisAdvanced = true;
+    // Redis unavailable: conservative fallback — allow DB write
+    casResult = 2;
   }
 
-  if (!redisAdvanced) {
+  if (casResult === 0) {
     // Cursor already at or ahead of this message — no DB write needed
     return { applied: null, didAdvanceCursor: false };
   }
 
-  // Redis advanced — fire DB upsert async so we don't block the response on PG.
+  if (casResult === 1) {
+    // Cursor advanced in Redis but DB write rate-limited (another write in-flight)
+    return {
+      applied: { last_read_message_id: messageId, last_read_at: new Date().toISOString() },
+      didAdvanceCursor: true,
+    };
+  }
+
+  // casResult === 2: cursor advanced AND db_lock acquired — fire DB upsert async.
   // The upsert's ON CONFLICT WHERE acts as a secondary safety net: if two workers
   // both passed the Redis CAS (race on identical timestamp), only one DB row
   // update will win; the other returns 0 rows (no harm).
@@ -1096,15 +1121,6 @@ router.post('/',
                INSERT INTO messages (channel_id, author_id, content, thread_id)
                SELECT $1, $2, $3, $4 FROM access
                RETURNING ${MESSAGE_RETURNING_FIELDS}
-             ), ch_last AS (
-               UPDATE channels ch
-               SET last_message_id = ins.id,
-                   last_message_author_id = ins.author_id,
-                   last_message_at = ins.created_at
-               FROM ins
-               WHERE ch.id = ins.channel_id
-                 AND (ch.last_message_at IS NULL OR ins.created_at >= ch.last_message_at)
-               RETURNING ch.id
              )
              SELECT
                (SELECT EXISTS(SELECT 1 FROM users WHERE id = $2)) AS author_exists,
@@ -1139,16 +1155,6 @@ router.post('/',
                INSERT INTO messages (conversation_id, author_id, content, thread_id)
                SELECT $1, $2, $3, $4 FROM access
                RETURNING ${MESSAGE_RETURNING_FIELDS}
-             ), conv_last AS (
-               UPDATE conversations conv
-               SET last_message_id = ins.id,
-                   last_message_author_id = ins.author_id,
-                   last_message_at = ins.created_at,
-                   updated_at = NOW()
-               FROM ins
-               WHERE conv.id = ins.conversation_id
-                 AND (conv.last_message_at IS NULL OR ins.created_at >= conv.last_message_at)
-               RETURNING conv.id
              )
              SELECT
                (SELECT EXISTS(SELECT 1 FROM users WHERE id = $2)) AS author_exists,
@@ -1220,6 +1226,37 @@ router.post('/',
 
         return row;
       });
+
+      // Fire-and-forget: update channel/conversation last_message pointers outside
+      // the transaction to eliminate row-level lock contention under concurrent posts.
+      if (baseMessage.id) {
+        if (channelId) {
+          query(
+            `UPDATE channels
+               SET last_message_id = $1,
+                   last_message_author_id = $2,
+                   last_message_at = $3
+             WHERE id = $4
+               AND (last_message_at IS NULL OR $3 >= last_message_at)`,
+            [baseMessage.id, baseMessage.author_id, baseMessage.created_at, channelId],
+          ).catch((err) => {
+            logger.warn({ err, channelId, messageId: baseMessage.id }, 'channel last_message update failed');
+          });
+        } else if (conversationId) {
+          query(
+            `UPDATE conversations
+               SET last_message_id = $1,
+                   last_message_author_id = $2,
+                   last_message_at = $3,
+                   updated_at = NOW()
+             WHERE id = $4
+               AND (last_message_at IS NULL OR $3 >= last_message_at)`,
+            [baseMessage.id, baseMessage.author_id, baseMessage.created_at, conversationId],
+          ).catch((err) => {
+            logger.warn({ err, conversationId, messageId: baseMessage.id }, 'conversation last_message update failed');
+          });
+        }
+      }
 
       // Re-hydrate only when attachments were inserted so the response includes
       // them. For the common no-attachment path the CTE result is already fully
