@@ -178,13 +178,11 @@ print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-# Cap at 200: with PG_POOL_MAX=80 (0.8x ratio, no PgBouncer queuing) a queue of 200
-# is safe — at up to 2s query time every request drains within 15s (grader window).
-# Higher than 100 but far below old 300 (which combined with 230 max caused the
-# 17:51 storm). CBQ=200 absorbs moderate DB slowdowns without building an
-# undrainable backlog. At genuine DB catastrophe (>5s/query) requests beyond
-# position 160 miss anyway, so a hard ceiling of 200 is the useful maximum.
-print(max(64, min(200, pmi * 3 + inst * 60)))
+# Cap at 280: same formula as before (pmi*3 + inst*60), but raised from 200 after
+# prod metrics showed healthy PgBouncer (cl_waiting=0) while pg-pool circuit trips
+# still produced rare 503s under bursts. PgBouncer default_pool_size stays 500;
+# Postgres max_connections remains deploy-computed. Watch pg_pool_waiting in Grafana.
+print(max(64, min(280, pmi * 3 + inst * 60)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
@@ -2104,25 +2102,15 @@ set +e  # failures here are warnings, not deploy failures
 
 # 10.55. Copy repo Prometheus template so the `redis` scrape job exists; 10.6 restarts
 # Prometheus to pick up the template (no port rewriting — dual targets stay intact).
-echo "10.55. Syncing prometheus-host.yml from repo (includes redis job)..."
+echo "10.55. Rendering prometheus-host.yml (chatapp-api targets = CHATAPP_INSTANCES; VPC app host)..."
 PROM_BUILD="$(mktemp)"
-cp "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "${PROM_BUILD}"
-if [ "${CHATAPP_INSTANCES}" -ge 4 ]; then
-  python3 - "${PROM_BUILD}" <<'PY'
-import sys
-from pathlib import Path
-p = Path(sys.argv[1])
-t = p.read_text()
-if '127.0.0.1:4002' in t:
-    sys.exit(0)
-old = """      - targets: ['127.0.0.1:4001']\n        labels:\n          node: candidate-4001\n\n  - job_name: 'minio'"""
-new = """      - targets: ['127.0.0.1:4001']\n        labels:\n          node: candidate-4001\n      - targets: ['127.0.0.1:4002']\n        labels:\n          node: worker-4002\n      - targets: ['127.0.0.1:4003']\n        labels:\n          node: worker-4003\n\n  - job_name: 'minio'"""
-if old not in t:
-    print('ERROR: prometheus-host.yml template mismatch — cannot inject 4002/4003', file=sys.stderr)
-    sys.exit(1)
-p.write_text(t.replace(old, new, 1))
-PY
-fi
+PROM_APP_HOST="${PROM_APP_HOST:-$(ssh_prod 'hostname -I 2>/dev/null' | awk '{print $1}')}"
+PROM_APP_HOST="${PROM_APP_HOST:-10.0.0.237}"
+python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
+  --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
+  --output "${PROM_BUILD}" \
+  --app-host "${PROM_APP_HOST}" \
+  --workers "${CHATAPP_INSTANCES}"
 scp -q "${PROM_BUILD}" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-host.yml.deploy" || true
 rm -f "${PROM_BUILD}"
 

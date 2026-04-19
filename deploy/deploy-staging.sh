@@ -68,9 +68,8 @@ print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-# Cap at 200: with PG_POOL_MAX=80 (0.8x ratio, no PgBouncer queuing) a queue of 200
-# is safe — at up to 2s query time every request drains within 15s (grader window).
-print(max(64, min(200, pmi * 3 + inst * 60)))
+# Cap at 280 — keep parity with deploy-prod.sh pool-circuit commentary.
+print(max(64, min(280, pmi * 3 + inst * 60)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
@@ -612,7 +611,16 @@ CUTOVER_COMPLETED=1
 
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 echo "7a) Monitoring: staging DB VM stack + app VM (node-exporter, promtail, redis_exporter)..."
-scp -q "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" "${STAGING_USER}@${STAGING_DB_HOST}:/tmp/prometheus-host.yml.deploy" || true
+PROM_BUILD_STG="$(mktemp)"
+PROM_APP_HOST="${STAGING_PROM_APP_HOST:-$(ssh -o BatchMode=yes -o ConnectTimeout=15 "${STAGING_USER}@${STAGING_HOST}" 'hostname -I 2>/dev/null' | awk '{print $1}')}"
+PROM_APP_HOST="${PROM_APP_HOST:-10.128.0.2}"
+python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
+  --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
+  --output "${PROM_BUILD_STG}" \
+  --app-host "${PROM_APP_HOST}" \
+  --workers "${CHATAPP_INSTANCES}"
+scp -q "${PROM_BUILD_STG}" "${STAGING_USER}@${STAGING_DB_HOST}:/tmp/prometheus-host.yml.deploy" || true
+rm -f "${PROM_BUILD_STG}"
 ssh_staging_db "
   if [ -f /tmp/prometheus-host.yml.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
