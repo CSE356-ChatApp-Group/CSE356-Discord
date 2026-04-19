@@ -16,9 +16,11 @@ This is the source of truth for current environment shape. Update this file when
 - App/proxy VM (`ubuntu-intelbroadwell`, Linode): `130.245.136.44`, 8 vCPU, 16 GB RAM. Monitoring here is **node-exporter**, **promtail** (logs to Loki on the DB VM), and **redis_exporter** only — not Grafana/Prometheus/Alertmanager.
 - Database VM (`ubuntu-intelbroadwell-001`, Linode): `130.245.136.21`, 8 vCPU, 16 GB RAM. **Grafana, Prometheus, Alertmanager, Loki, and Tempo** run in Docker (`db-compose.yml`). Host `:9100` / `:9187` metrics use systemd exporters from `deploy/install-db-metrics-exporters.sh` (not a duplicate Docker node-exporter).
 
+**Latency / 5xx bottleneck (typical):** end-user and grader slowness under load most often traces to **PostgreSQL** (long queries, lock contention) and **per-Node connection pools** to PgBouncer/Postgres (`query timeout`, `pg_pool_waiting`, pool circuit breaker / **503**). The app and Redis CPU can look busy but are usually **symptoms**; confirm with DB metrics, `pg_stat_statements`, and app metrics in [operations-monitoring.md](operations-monitoring.md).
+
 ## Notes for deploy/ops guidance
 
 - Capacity comparisons should use staging app VM (8 vCPU) vs production app VM (8 vCPU).
 - Staging default shape is dual-worker (`CHATAPP_INSTANCES=2`); for production worker-scaling experiments, temporarily match the intended prod worker count.
-- Production app VM: Node HTTP workers may run as **four** processes (`chatapp@4000`–`4003`) when `CHATAPP_INSTANCES=4` / `CHATAPP_INSTANCES_PROD=4`; nginx `upstream app` lists all active ports.
+- Production app VM: `deploy-prod.sh` defaults to **`CHATAPP_INSTANCES=5`** — five Node workers **`chatapp@4000`–`chatapp@4004`**; nginx `upstream app` lists all active ports. Prometheus on the DB VM scrapes **`/metrics` on each configured port** (see `deploy/render-prometheus-host-config.py`).
 - If infra changes, update this file and mention the date in the "Last updated" line.

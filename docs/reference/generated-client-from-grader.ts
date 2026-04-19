@@ -1,3 +1,5 @@
+// @ts-nocheck — Course grader `GeneratedClient` snapshot; not part of any workspace `tsc` program (external `/test-harness/*` imports). Do not import from app code.
+
 /**
  * Frozen reference: COMPAS / course grader test harness `GeneratedClient`.
  * Pasted 2026-04-17 — may drift if the official harness changes.
@@ -950,4 +952,3 @@ export class GeneratedClient {
     }
   }
 }
-*/

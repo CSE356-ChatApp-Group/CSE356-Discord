@@ -13,6 +13,16 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Instant Prometheus triage | [`scripts/metrics-snapshot.sh`](../scripts/metrics-snapshot.sh) |
 | Top normalized SQL (`pg_stat_statements`) | [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) |
 
+## Where latency comes from (split app + DB VMs)
+
+Under load, **PostgreSQL is usually the limiting factor**, not nginx or Node in isolation:
+
+1. **Postgres / PgBouncer** — API logs show `query timeout`; metrics show **`pg_pool_waiting`** high and **`pg_pool_idle`** near zero with **`pg_pool_total`** at max; **`pg_pool_circuit_breaker_rejects_total`** and HTTP **503** “pool queue” / circuit-open errors follow. Several **`chatapp@`** workers each hold a large pool; slow statements or contention on the DB multiply waits across all processes.
+2. **Redis** — secondary; publish lag or connection counts can affect realtime delivery but rarely drives **multi-second** HTTP stalls alone.
+3. **App CPU** — bcrypt login stampedes and WS fanout can spike CPU; check **`route=/api/v1/auth/login`** and event-loop lag before attributing everything to Postgres.
+
+**MinIO:** Prometheus on the DB VM does **not** scrape MinIO health (S3 API is **127.0.0.1** on the app VM). Use **`curl -sS http://127.0.0.1:9000/minio/health/live`** on the app host or app-level errors for object storage.
+
 ## Giving the agent usable telemetry
 
 The AI cannot reach your private Prometheus from Cursor. Use one of these:

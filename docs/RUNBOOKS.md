@@ -112,6 +112,8 @@ Automated graders (browser clients) should treat **HTTP as the source of truth**
 
 When investigating **delivery fails**, **peak rate**, or tail latency under many concurrent browser sessions, correlate with:
 
+**Capacity bottleneck (typical):** **`pg_pool_waiting`**, **`query timeout`** in API logs, and pool circuit-breaker **503**s point to **Postgres / PgBouncer** saturation before Redis or nginx. See [operations-monitoring.md](operations-monitoring.md) (“Where latency comes from”).
+
 | Metric | What it indicates |
 |--------|-------------------|
 | `side_effect_queue_depth{job="chatapp-api",queue="fanout:critical"}` | Backlog of Redis publish jobs for message/read fanout; sustained growth means realtime lag. |

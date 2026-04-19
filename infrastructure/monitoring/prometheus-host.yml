@@ -1,3 +1,6 @@
+# Prometheus on the **database / monitoring** host scrapes the **app** VM over the VPC.
+# Placeholders are expanded by deploy/render-prometheus-host-config.py during deploy
+# (see deploy-prod.sh and deploy-staging.sh).
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -17,23 +20,15 @@ scrape_configs:
   - job_name: 'chatapp-api'
     metrics_path: '/metrics'
     static_configs:
-      # Staging: both instances always run. Prod: deploy-prod.sh may append 4002/4003 when CHATAPP_INSTANCES>=4.
-      - targets: ['10.0.0.237:4000']
-        labels:
-          node: live-4000
-      - targets: ['10.0.0.237:4001']
-        labels:
-          node: candidate-4001
+__CHATAPP_API_STATIC_CONFIGS__
+  # MinIO is intentionally not scraped here: on prod/staging the app VM binds the S3 API
+  # to 127.0.0.1 only, so a Prometheus on the DB VM cannot dial :9000. Check MinIO with
+  # `curl -sS http://127.0.0.1:9000/minio/health/live` on the app host.
 
-  - job_name: 'minio'
-    metrics_path: '/minio/health/live'
-    static_configs:
-      - targets: ['10.0.0.237:9000']
-
-  # App VM host metrics (node_exporter in remote-compose).
+  # App VM host metrics (node_exporter in remote-compose on the app VM).
   - job_name: 'node'
     static_configs:
-      - targets: ['10.0.0.237:9100']
+      - targets: ['__PROM_APP_HOST__:9100']
 
   # Dedicated DB VM — targets from file_sd (see deploy/prometheus-db-file-sd.py).
   # Empty [] when Postgres is local or PGDUMP_DATABASE_URL is unset. Install exporters:
@@ -52,11 +47,10 @@ scrape_configs:
           - /etc/prometheus/file_sd/db-postgres.json
         refresh_interval: 30s
 
-  # Host-network redis_exporter (deploy-staging ensures container). Metrics:
-  # redis_memory_used_bytes, redis_connected_clients, redis_commands_processed_total, ...
+  # Host-network redis_exporter on the app VM (deploy ensures container).
   - job_name: 'redis'
     static_configs:
-      - targets: ['10.0.0.237:9121']
+      - targets: ['__PROM_APP_HOST__:9121']
         labels:
           instance: 'redis-local'
 

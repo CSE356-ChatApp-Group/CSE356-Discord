@@ -4,6 +4,8 @@ Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool s
 
 **Deploy script (runner environment, not app `.env`):** `INGRESS_POST_DEPLOY_SECONDS` (default **20**) controls how long `deploy-prod.sh` hammers **`http://127.0.0.1/health`** through nginx after cutover. **`DEPLOY_NON_INTERACTIVE=true`** skips the production confirmation prompt (Ansible / CI); **`GITHUB_ACTIONS=true`** does the same.
 
+**Prometheus scrape host (runner env, optional):** When rendering `infrastructure/monitoring/prometheus-host.yml` for the DB/monitoring VM, **`deploy-prod.sh`** sets the app VM address via **`PROM_APP_HOST`** if set; otherwise it uses the first address from **`hostname -I`** on the prod app SSH host, then falls back to **`10.0.0.237`**. Staging uses **`STAGING_PROM_APP_HOST`** with the same pattern, default **`10.128.0.2`**. Override when VPC addressing differs.
+
 ## Grading / autograder hosts
 
 If the VM is **only** hit by course autograders (no general public) and you do not care about auth brute-force or spam, the deploy scripts now pin a grading profile on staging/prod:

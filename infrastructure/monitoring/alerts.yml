@@ -317,14 +317,8 @@ groups:
           summary: ChatApp overload shedding is active
           description: The overload guard has reached stage {{ $value }}, which means search or write protection is engaged. This is a strong signal that the current server size is under pressure.
 
-      - alert: ChatAppMinioDown
-        expr: sum(up{job="minio",environment="production"}) < 1
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: Production MinIO attachment store is unavailable
-          description: Prometheus cannot reach production MinIO on /minio/health/live. Attachment uploads and downloads may fail until it recovers.
+      # MinIO is not scraped from the DB-VM Prometheus (S3 API is 127.0.0.1 on the app VM).
+      # Validate attachments with curl on the app host or application-level checks.
 
       - alert: ChatAppHostCpuHigh
         expr: 100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m]))) > 85
