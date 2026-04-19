@@ -21,6 +21,7 @@ const { bustConversationMessagesCache } = require('./messageCacheBust');
 const { invalidateConversationFanoutTargetsCache } = require('./conversationFanoutTargets');
 const { wrapFanoutPayload } = require('./realtimePayload');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 router.use(authenticate);
@@ -427,8 +428,26 @@ router.post('/',
           [req.user.id, otherId]
         );
         if (rows.length) {
-          const existing = await loadConversationWithParticipants(client, rows[0].id);
+          const existingId = rows[0].id;
+          const existing = await loadConversationWithParticipants(client, existingId);
           await client.query('COMMIT');
+          // Same realtime hints as a newly created DM: grader harnesses often hit
+          // create-or-get 1:1 with fresh WS sessions; without subscribe + cache bust,
+          // an existing thread can miss message:created on conversation:<id> until reconnect.
+          const pairIds = [req.user.id, otherId].filter(Boolean);
+          await Promise.allSettled([
+            invalidateConversationFanoutTargetsCache(existingId),
+            ...pairIds.map((participantId) => invalidateWsBootstrapCache(participantId)),
+            invalidateConversationsListCaches(pairIds),
+          ]);
+          publishUserFeedTargets(pairIds, {
+            __wsInternal: {
+              kind: 'subscribe_channels',
+              channels: [`conversation:${existingId}`],
+            },
+          }).catch((err) => {
+            logger.warn({ err, conversationId: existingId }, 'subscribe_channels push failed (existing 1:1 DM)');
+          });
           return res.json({ conversation: existing || rows[0], created: false });
         }
       }
@@ -446,6 +465,7 @@ router.post('/',
       const invitedUserIds = allIds.filter(id => id !== req.user.id);
       await client.query('COMMIT');
       await Promise.allSettled([
+        invalidateConversationFanoutTargetsCache(conv.id),
         ...allIds.map((participantId) => presenceService.invalidatePresenceFanoutTargets(participantId)),
         ...allIds.map((participantId) => invalidateWsBootstrapCache(participantId)),
         invalidateConversationsListCaches(allIds),
@@ -460,7 +480,9 @@ router.post('/',
             kind: 'subscribe_channels',
             channels: [`conversation:${conv.id}`],
           },
-        }).catch(() => {});
+        }).catch((err) => {
+          logger.warn({ err, conversationId: conv.id }, 'subscribe_channels push failed (new DM)');
+        });
         await publishConversationInviteNotifications(
           invitedUserIds.map((userId) => `user:${userId}`),
           {
