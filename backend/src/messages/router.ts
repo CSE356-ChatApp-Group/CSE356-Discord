@@ -283,7 +283,14 @@ async function publishConversationEventNow(conversationId, event, data) {
         conversationSubCount = count;
       }
     }),
-    ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
+    // Publish each DM participant individually to their own user-feed shard envelope.
+    // Batching multiple userIds into a single envelope means that when the sender
+    // and recipient happen to hash to the same shard (~1.5% of pairs), deliverUserFeedMessage
+    // sees userIds.length > 1 and never fires pushPendingDelivery for the disconnected
+    // recipient (the guard is `userIds.length === 1`). Publishing per-user guarantees
+    // every participant always gets a single-user envelope, so pushPendingDelivery fires
+    // correctly for each disconnected user.
+    ...userIds.map((uid) => publishUserFeedTargets([uid], payload)),
   ]);
   // Park message for reconnecting recipients when conversation channel had 0 Redis subscribers.
   if (event === 'message:created' && conversationSubCount === 0) {
