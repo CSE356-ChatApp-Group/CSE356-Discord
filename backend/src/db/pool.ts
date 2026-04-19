@@ -121,10 +121,13 @@ const SLOW_QUERY_MS = parseInt(process.env.PG_SLOW_QUERY_MS || '3000', 10);
 
 /**
  * PgBouncer is a loopback socket – no NAT involved, so no keepalive needed.
- * connectionTimeoutMillis is kept short because PgBouncer should respond
- * in microseconds unless it is itself overwhelmed.
+ * connectionTimeoutMillis bounds how long we wait for a checkout from the
+ * Node pool when all PG slots are busy. 8s (default) absorbs short bursts
+ * (slow queries, grader spikes) before returning 503; override via
+ * PG_CONNECTION_TIMEOUT_MS. PgBouncer itself answers quickly when it has
+ * capacity; long waits usually mean real contention at Postgres.
  */
-const CONNECTION_TIMEOUT_MS = parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '5000', 10);
+const CONNECTION_TIMEOUT_MS = parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '8000', 10);
 
 /**
  * Idle timeout for Node→PgBouncer connections.  PgBouncer manages the real

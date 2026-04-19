@@ -3,8 +3,17 @@
  *
  * • Attaches Authorization header from in-memory access token (per-tab session)
  * • Auto-refreshes on 401 (once) using the httpOnly cookie
+ * • Retries 503/429 on safe methods: all GETs, and POST /messages (with
+ *   Idempotency-Key so retries cannot double-insert)
  * • Throws { status, message, errors } on non-2xx
  */
+
+import {
+  allowsTransientRetry,
+  isTransientRetryStatus,
+  nextTransientWaitMs,
+  sleep,
+} from './apiTransientRetry';
 
 const BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '');
 
@@ -117,10 +126,26 @@ async function refreshToken() {
   return data.accessToken;
 }
 
-async function request(method: string, path: string, body?: unknown, retry = true) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (_accessToken) headers['Authorization'] = `Bearer ${_accessToken}`;
+/** Stable per logical POST /messages for Idempotency-Key across 401 refresh + 503 retries. */
+function messagePostIdempotencyKey(existing?: string | null): string | undefined {
+  if (existing) return existing;
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return undefined;
+}
 
+/** Max extra fetches after a 503/429 (first try does not count toward this). */
+const MAX_TRANSIENT_RETRIES = 4;
+
+async function request(
+  method: string,
+  path: string,
+  body?: unknown,
+  retry401 = true,
+  /** Internal: preserve Idempotency-Key when recursion was used for 401 (legacy callers). */
+  messageIdemKey?: string | null,
+) {
   const skipRefreshForPath =
     path === '/auth/login' ||
     path === '/auth/register' ||
@@ -142,35 +167,62 @@ async function request(method: string, path: string, body?: unknown, retry = tru
     }
   }
 
-  const res = await fetchWithTimeout(`${BASE}${path}`, {
-    method,
-    headers,
-    credentials: 'include',
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const useTransient = allowsTransientRetry(method, path);
+  const idempotencyKey =
+    method === 'POST' && path === '/messages'
+      ? messagePostIdempotencyKey(messageIdemKey)
+      : undefined;
 
-  if (res.status === 401 && retry && !skipRefreshForPath) {
-    // Deduplicate concurrent refresh attempts
-    if (!_refreshing) _refreshing = refreshToken().finally(() => { _refreshing = null; });
-    try {
-      await _refreshing;
-      return request(method, path, body, false);
-    } catch {
-      notifySessionExpired();
-      throw new Error('Session expired');
+  let canRefresh401 = retry401;
+  let transientRetriesUsed = 0;
+
+  for (;;) {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (_accessToken) headers.Authorization = `Bearer ${_accessToken}`;
+    if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+
+    const res = await fetchWithTimeout(`${BASE}${path}`, {
+      method,
+      headers,
+      credentials: 'include',
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    if (res.status === 401 && canRefresh401 && !skipRefreshForPath) {
+      canRefresh401 = false;
+      if (!_refreshing) _refreshing = refreshToken().finally(() => { _refreshing = null; });
+      try {
+        await _refreshing;
+        await res.text().catch(() => {});
+        continue;
+      } catch {
+        notifySessionExpired();
+        throw new Error('Session expired');
+      }
     }
-  }
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }));
-    const e = new Error(err.error || err.message || 'Request failed') as ApiError;
-    e.status = res.status;
-    e.errors = err.errors;
-    throw e;
-  }
+    if (
+      useTransient
+      && isTransientRetryStatus(res.status)
+      && transientRetriesUsed < MAX_TRANSIENT_RETRIES
+    ) {
+      await res.text().catch(() => {});
+      await sleep(nextTransientWaitMs(transientRetriesUsed, res));
+      transientRetriesUsed += 1;
+      continue;
+    }
 
-  if (res.status === 204) return null;
-  return res.json();
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ message: res.statusText }));
+      const e = new Error(err.error || err.message || 'Request failed') as ApiError;
+      e.status = res.status;
+      e.errors = err.errors;
+      throw e;
+    }
+
+    if (res.status === 204) return null;
+    return res.json();
+  }
 }
 
 export const api = {
