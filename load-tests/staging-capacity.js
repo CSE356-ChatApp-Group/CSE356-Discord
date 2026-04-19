@@ -27,6 +27,10 @@ import { Counter, Rate, Trend } from 'k6/metrics';
  * model “every listener counts separately.” For that, run backend integration:
  * `describe('Channel message multi-listener delivery')` in `backend/tests/websocket.test.ts`
  * (CI) or extend Playwright `delivery-fanout.spec.ts` against staging.
+ *
+ * **DM burst (WS user-feed path)** — `LOAD_PROFILE=ws-dm-burst`: group DM with N listeners
+ * on `user:<id>`, one VU POSTs a burst of DMs (`LOADTEST_DM_BURST_COUNT`). Stresses
+ * `deliverUserFeedMessage` / outbound queue. Run: `npm run load:staging:ws-dm-burst`.
  */
 
 /** Classify HTTP responses so reports can separate timeouts vs 503 (shed / pool) vs other errors. */
@@ -326,9 +330,42 @@ const PROFILES = {
       optimization_ws_message_delivery_miss_total: ['count<10'],
     },
   },
+
+  /**
+   * WebSocket DM delivery stress: N concurrent clients subscribe to `user:<id>`,
+   * one client bursts POST /messages to a group DM. No HTTP mix / presence storm.
+   * Tune: LOADTEST_DM_LISTENERS (2..wsVUs), LOADTEST_DM_BURST_COUNT (10..2000).
+   */
+  'ws-dm-burst': {
+    httpStages: [],
+    preAllocatedVUs: 50,
+    maxVUs: 50,
+    wsVUs: 40,
+    wsDuration: '3m',
+    maxFailureRate: 0.20,
+    httpP95Ms: 120000,
+    httpP99Ms: 180000,
+    optimizationKpiThresholds: {
+      optimization_message_post_fail_total: ['count<50'],
+      optimization_ws_handshake_fail_total: ['count<20'],
+      optimization_ws_message_delivery_miss_total: ['count<2000'],
+    },
+  },
 };
 
-const profile = PROFILES[__ENV.LOAD_PROFILE || 'break'] || PROFILES.break;
+const loadProfileName = __ENV.LOAD_PROFILE || 'break';
+const IS_WS_DM_BURST = loadProfileName === 'ws-dm-burst';
+const profile = PROFILES[loadProfileName] || PROFILES.break;
+
+const DM_BURST_COUNT = IS_WS_DM_BURST
+  ? Math.min(2000, Math.max(10, Number(__ENV.LOADTEST_DM_BURST_COUNT || 150)))
+  : 0;
+const DM_LISTENER_COUNT = IS_WS_DM_BURST
+  ? Math.min(
+      profile.wsVUs,
+      Math.min(32, Math.max(2, Number(__ENV.LOADTEST_DM_LISTENERS || 8))),
+    )
+  : 0;
 
 const useConstantArrival = profile.arrivalMode === 'constant';
 
@@ -339,10 +376,9 @@ const useConstantArrival = profile.arrivalMode === 'constant';
 // Scale with maxVUs (~one reader per 6 VUs) but cap so setup() does not create
 // hundreds of accounts when maxVUs is high for arrival-rate headroom only.
 const READER_POOL_CAP = 220;
-const NUM_READER_POOL = Math.max(
-  20,
-  Math.min(READER_POOL_CAP, Math.ceil(profile.maxVUs / 6)),
-);
+const NUM_READER_POOL = IS_WS_DM_BURST
+  ? 5
+  : Math.max(20, Math.min(READER_POOL_CAP, Math.ceil(profile.maxVUs / 6)));
 
 const httpThresholds = {
   http_req_failed: [`rate<${profile.maxFailureRate != null ? profile.maxFailureRate : 0.05}`],
@@ -362,11 +398,16 @@ const httpThresholds = {
 if (profile.optimizationKpiThresholds) {
   Object.assign(httpThresholds, profile.optimizationKpiThresholds);
 }
+if (IS_WS_DM_BURST) {
+  httpThresholds.ws_connect_success = ['rate>0.85'];
+  httpThresholds.capacity_checks = ['rate>0.80'];
+}
 
 const wsMessageDeliveryProbeEnabled =
-  __ENV.LOADTEST_WS_MESSAGE_DELIVERY_PROBE === '1' ||
-  __ENV.LOADTEST_WS_MESSAGE_DELIVERY_PROBE === 'true' ||
-  profile.arrivalMode === 'constant';
+  !IS_WS_DM_BURST &&
+  (__ENV.LOADTEST_WS_MESSAGE_DELIVERY_PROBE === '1' ||
+    __ENV.LOADTEST_WS_MESSAGE_DELIVERY_PROBE === 'true' ||
+    profile.arrivalMode === 'constant');
 
 const wsMessageDeliveryScenarioDuration =
   profile.constantDuration || profile.wsDuration || '2m';
@@ -393,18 +434,36 @@ const httpMixScenario = useConstantArrival
       gracefulStop: '30s',
     };
 
-const scenarioTable = {
-  http_mix: httpMixScenario,
-  websocket_presence: {
-    executor: 'constant-vus',
-    exec: 'presenceSocketStorm',
-    vus: profile.wsVUs,
-    duration: profile.wsDuration,
-    gracefulStop: '10s',
-  },
-};
+const scenarioTable = IS_WS_DM_BURST
+  ? {
+      dm_burst_listen: {
+        executor: 'constant-vus',
+        exec: 'dmBurstListener',
+        vus: DM_LISTENER_COUNT,
+        duration: '2m50s',
+        gracefulStop: '40s',
+      },
+      dm_burst_send: {
+        executor: 'constant-vus',
+        exec: 'dmBurstSender',
+        vus: 1,
+        startTime: '20s',
+        duration: '2m20s',
+        gracefulStop: '45s',
+      },
+    }
+  : {
+      http_mix: httpMixScenario,
+      websocket_presence: {
+        executor: 'constant-vus',
+        exec: 'presenceSocketStorm',
+        vus: profile.wsVUs,
+        duration: profile.wsDuration,
+        gracefulStop: '10s',
+      },
+    };
 
-if (wsMessageDeliveryProbeEnabled) {
+if (!IS_WS_DM_BURST && wsMessageDeliveryProbeEnabled) {
   scenarioTable.ws_message_delivery = {
     executor: 'constant-vus',
     exec: 'channelMessageDeliveryProbe',
@@ -573,8 +632,16 @@ export function setup() {
 
   // Batch-join peer + all readers so their GET /communities responses are
   // non-empty, making the cached payload realistic.
+  // ws-dm-burst: join DM listener accounts too (same community as other participants).
+  const joinTokens = [peer.token];
+  if (IS_WS_DM_BURST) {
+    for (let i = 0; i < DM_LISTENER_COUNT; i += 1) {
+      joinTokens.push(wsPeers[i].token);
+    }
+  }
+  joinTokens.push(...readerPool.map((r) => r.token));
   const joinResponses = http.batch(
-    [peer.token, ...readerPool.map((r) => r.token)].map((token) => ({
+    joinTokens.map((token) => ({
       method: 'POST',
       url: `${BASE_URL}/communities/${communityId}/join`,
       body: JSON.stringify({}),
@@ -595,9 +662,12 @@ export function setup() {
   }
   const channelId = safeJson(channelRes).channel.id;
 
+  const participantIdsForConversation = IS_WS_DM_BURST
+    ? wsPeers.slice(0, DM_LISTENER_COUNT).map((p) => p.userId)
+    : [peer.userId];
   const conversationRes = http.post(
     `${BASE_URL}/conversations`,
-    JSON.stringify({ participantIds: [peer.userId] }),
+    JSON.stringify({ participantIds: participantIdsForConversation }),
     jsonParams(owner.token, { endpoint: 'conversations_create' }, true),
   );
   recordHttpStatus(conversationRes, 'conversations_create');
@@ -616,6 +686,10 @@ export function setup() {
     conversationId,
     wsPeers,
     readerPool,
+    isWsDmBurst: IS_WS_DM_BURST,
+    dmBurstPrefix: IS_WS_DM_BURST ? `dm-${RUN_ID}-` : '',
+    dmBurstExpected: IS_WS_DM_BURST ? DM_BURST_COUNT : 0,
+    dmListenerPeers: IS_WS_DM_BURST ? wsPeers.slice(0, DM_LISTENER_COUNT) : [],
   };
 }
 
@@ -871,6 +945,85 @@ export function channelMessageDeliveryProbe(data) {
   if (!ok) optimizationWsMessageDeliveryMissTotal.add(1);
 
   sleep(2);
+}
+
+/** N VUs each open WS, subscribe `user:<id>`, count `message:created` for the burst DM. */
+export function dmBurstListener(data) {
+  if (!data || !data.isWsDmBurst || !data.dmListenerPeers || !data.dmListenerPeers.length) {
+    sleep(1);
+    return;
+  }
+  const idx = (exec.vu.idInTest - 1) % data.dmListenerPeers.length;
+  const peer = data.dmListenerPeers[idx];
+  const url = `${WS_URL}?token=${encodeURIComponent(peer.token)}`;
+  const convId = String(data.conversationId);
+  const prefix = data.dmBurstPrefix;
+  const expected = data.dmBurstExpected;
+  let received = 0;
+
+  const response = ws.connect(url, { tags: { endpoint: 'ws_dm_burst_listen' } }, (socket) => {
+    socket.on('open', () => {
+      socket.send(JSON.stringify({ type: 'subscribe', channel: `user:${peer.userId}` }));
+    });
+
+    socket.setInterval(() => {
+      socket.send(JSON.stringify({ type: 'ping' }));
+    }, 20000);
+
+    socket.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw);
+        if (msg.event !== 'message:created' || !msg.data) return;
+        const d = msg.data;
+        const c = String(d.conversation_id || d.conversationId || '');
+        if (c !== convId) return;
+        const content = d.content || '';
+        if (!content.startsWith(prefix)) return;
+        received += 1;
+      } catch (_e) {
+        /* ignore */
+      }
+    });
+
+    socket.setTimeout(() => {
+      if (received < expected) {
+        optimizationWsMessageDeliveryMissTotal.add(expected - received);
+      }
+      checksRate.add(received >= expected);
+      socket.close();
+    }, 130000);
+  });
+
+  const ok = check(response, { 'dm burst ws upgraded': (r) => r && r.status === 101 });
+  checksRate.add(ok);
+  if (!ok) {
+    optimizationWsHandshakeFailTotal.add(1);
+    optimizationWsMessageDeliveryMissTotal.add(expected);
+    sleep(2);
+    return;
+  }
+  wsConnectRate.add(true);
+}
+
+/** Single VU: rapid POST /messages to the shared group DM (owner). */
+export function dmBurstSender(data) {
+  if (!data || !data.isWsDmBurst) {
+    sleep(1);
+    return;
+  }
+  const prefix = data.dmBurstPrefix;
+  const n = data.dmBurstExpected;
+  for (let i = 0; i < n; i += 1) {
+    const res = http.post(
+      `${BASE_URL}/messages`,
+      JSON.stringify({ conversationId: data.conversationId, content: `${prefix}${i}` }),
+      jsonParams(data.ownerToken, { endpoint: 'messages_post_dm_burst' }),
+    );
+    recordHttpStatus(res, 'messages_post_dm_burst');
+    const ok = check(res, { 'dm burst post 201': (r) => r.status === 201 });
+    checksRate.add(ok);
+    if (!ok) optimizationMessagePostFailTotal.add(1);
+  }
 }
 
 export function presenceSocketStorm(data) {

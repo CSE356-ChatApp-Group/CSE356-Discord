@@ -100,6 +100,8 @@ docker run --rm \
   -e LOADTEST_MIX_POST_CONVERSATION="${LOADTEST_MIX_POST_CONVERSATION:-}" \
   -e LOADTEST_MIX_CHANNELS="${LOADTEST_MIX_CHANNELS:-}" \
   -e LOADTEST_MIX_REAUTH="${LOADTEST_MIX_REAUTH:-}" \
+  -e LOADTEST_DM_LISTENERS="${LOADTEST_DM_LISTENERS:-}" \
+  -e LOADTEST_DM_BURST_COUNT="${LOADTEST_DM_BURST_COUNT:-}" \
   "$K6_IMAGE" run \
     --summary-export "/work/artifacts/load-tests/$RUN_ID/summary.json" \
     --out "json=/work/artifacts/load-tests/$RUN_ID/metrics.ndjson" \

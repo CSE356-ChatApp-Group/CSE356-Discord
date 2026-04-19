@@ -21,6 +21,7 @@ const { body, query: qv, param, validationResult } = require('express-validator'
 const { query, queryRead, readPool, withTransaction, poolStats } = require('../db/pool');
 const {
   messagePostAccessDeniedTotal,
+  messagePostRealtimePublishFailTotal,
   messagePostIdempotencyPollTotal,
   messagePostIdempotencyPollWaitMs,
   messageCacheBustFailuresTotal,
@@ -98,6 +99,26 @@ const MSG_IDEM_POLL_MAX_SLEEP_MS =
 // These writes (last_message_id updates, read_states inserts) are non-critical — skipping them
 // under pool pressure stops background writes from crowding out sync queries for the pool.
 const BG_WRITE_POOL_GUARD = parseInt(process.env.BG_WRITE_POOL_GUARD || '5', 10);
+
+/** Shorter than role/PgBouncer caps so POST /messages fails fast on lock wait (hot channel + last_message UPDATE). */
+const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
+  const raw = parseInt(process.env.MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS || '8000', 10);
+  if (!Number.isFinite(raw) || raw < 1000) return 8000;
+  return Math.min(60000, raw);
+})();
+
+/** PgBouncer `query_timeout` or PG `statement_timeout` during insert (often row lock behind channels FK). */
+function isMessagePostInsertDbTimeout(err) {
+  if (!err) return false;
+  const msg = String(err.message || '');
+  const code = err.code;
+  if (code === '57014') return true;
+  if (/query timeout/i.test(msg)) return true;
+  if (/statement timeout/i.test(msg)) return true;
+  if (/canceling statement due to statement timeout/i.test(msg)) return true;
+  if (code === '08P01' && /timeout/i.test(msg)) return true;
+  return false;
+}
 
 // When unset, keep historical default (defer only under heavy pool wait).
 // `0` disables the pool-wait defer branch entirely (see PUT /messages/:id/read).
@@ -365,8 +386,9 @@ async function publishConversationEventNow(conversationId, event, data) {
     );
   }
 
-  // Any partial Redis failure must not return HTTP success while a participant
-  // misses message:* / read — mirrors single-target await for channel posts.
+  // Redis publish failures throw to the POST /messages caller, which now degrades
+  // to 201 + realtimeConversationFanoutComplete:false so the author is not told the
+  // write failed when Postgres already committed (see channel path try/catch too).
   const wrapStart = process.hrtime.bigint();
   const payload = wrapFanoutPayload(event, data);
   const wrapPayloadMs = Number(process.hrtime.bigint() - wrapStart) / 1e6;
@@ -1263,6 +1285,7 @@ router.post('/',
       // cutting connection hold time ~40% and improving throughput under contention.
       let communityId: string | null = null;
       const baseMessage = await withTransaction(async (client) => {
+        await client.query(`SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`);
         let rows: any[];
 
         if (channelId) {
@@ -1449,6 +1472,8 @@ router.post('/',
       await bustMessagesCacheSafe({ channelId, conversationId });
 
       let realtimePublishedAtForHttp;
+      let realtimeChannelFanoutComplete = false;
+      let realtimeConversationFanoutComplete = false;
       if (channelId) {
         // Run Redis `channel:msg_count` maintenance in parallel with realtime fanout.
         // Cold channels used to `await` a full-table `COUNT(*)` before any publish, which
@@ -1458,9 +1483,26 @@ router.post('/',
         });
         const createdEnvelope = messageFanoutEnvelope('message:created', message);
         // Await channel (+ optionally user-topic) Redis publishes per MESSAGE_USER_FANOUT_HTTP_BLOCKING.
-        // Response fields `realtimeChannelFanoutComplete` / `realtimeUserFanoutDeferred` document what finished before 201.
-        await publishChannelMessageCreated(channelId, createdEnvelope);
-        realtimePublishedAtForHttp = createdEnvelope.publishedAt;
+        // If Redis is unavailable, fanout.publish throws after retries — still return 201 because
+        // the message row is committed; clients should poll or rely on channel: replay.
+        try {
+          await publishChannelMessageCreated(channelId, createdEnvelope);
+          realtimePublishedAtForHttp = createdEnvelope.publishedAt;
+          realtimeChannelFanoutComplete = true;
+        } catch (fanoutErr) {
+          messagePostRealtimePublishFailTotal.inc({ target: 'channel' });
+          logger.error(
+            {
+              err: fanoutErr,
+              requestId: req.id,
+              channelId,
+              messageId: message.id,
+              pool: poolStats(),
+            },
+            'POST /messages: channel realtime fanout failed after DB commit',
+          );
+          realtimePublishedAtForHttp = new Date().toISOString();
+        }
         appendChannelMessageIngested({
           messageId: String(message.id),
           channelId: String(channelId),
@@ -1471,11 +1513,27 @@ router.post('/',
               : new Date(baseMessage.created_at).toISOString(),
         });
       } else {
-        realtimePublishedAtForHttp = await publishConversationEventNow(
-          conversationId,
-          'message:created',
-          message,
-        );
+        try {
+          realtimePublishedAtForHttp = await publishConversationEventNow(
+            conversationId,
+            'message:created',
+            message,
+          );
+          realtimeConversationFanoutComplete = true;
+        } catch (fanoutErr) {
+          messagePostRealtimePublishFailTotal.inc({ target: 'conversation' });
+          logger.error(
+            {
+              err: fanoutErr,
+              requestId: req.id,
+              conversationId,
+              messageId: message.id,
+              pool: poolStats(),
+            },
+            'POST /messages: conversation realtime fanout failed after DB commit',
+          );
+          realtimePublishedAtForHttp = new Date().toISOString();
+        }
       }
       if (!realtimePublishedAtForHttp) {
         realtimePublishedAtForHttp = new Date().toISOString();
@@ -1492,7 +1550,8 @@ router.post('/',
 
       const userFanoutDeferred =
         !!channelId
-        && (process.env.MESSAGE_USER_FANOUT_HTTP_BLOCKING === 'false'
+        && (!realtimeChannelFanoutComplete
+          || process.env.MESSAGE_USER_FANOUT_HTTP_BLOCKING === 'false'
           || process.env.MESSAGE_USER_FANOUT_HTTP_BLOCKING === '0');
 
       if (idemRedisKey && idemLease) {
@@ -1502,10 +1561,10 @@ router.post('/',
           realtimePublishedAt: realtimePublishedAtForHttp,
         };
         if (channelId) {
-          idemBlob.realtimeChannelFanoutComplete = true;
+          idemBlob.realtimeChannelFanoutComplete = realtimeChannelFanoutComplete;
           idemBlob.realtimeUserFanoutDeferred = userFanoutDeferred;
         } else {
-          idemBlob.realtimeConversationFanoutComplete = true;
+          idemBlob.realtimeConversationFanoutComplete = realtimeConversationFanoutComplete;
         }
         redis
           .set(
@@ -1522,10 +1581,10 @@ router.post('/',
         realtimePublishedAt: realtimePublishedAtForHttp,
       };
       if (channelId) {
-        httpBody.realtimeChannelFanoutComplete = true;
+        httpBody.realtimeChannelFanoutComplete = realtimeChannelFanoutComplete;
         httpBody.realtimeUserFanoutDeferred = userFanoutDeferred;
       } else {
-        httpBody.realtimeConversationFanoutComplete = true;
+        httpBody.realtimeConversationFanoutComplete = realtimeConversationFanoutComplete;
       }
       res.status(201).json(httpBody);
     } catch (err: any) {
@@ -1558,6 +1617,19 @@ router.post('/',
           return res.status(401).json({ error: 'Session no longer valid' });
         }
         return res.status(409).json({ error: 'Could not save message; please try again' });
+      }
+      if (isMessagePostInsertDbTimeout(err)) {
+        logger.warn(
+          { requestId: req.id, pgCode: err.code, pgMessage: err.message },
+          'POST /messages: insert hit statement/query timeout (likely lock contention on hot channel)',
+        );
+        return res
+          .status(503)
+          .set('Retry-After', '1')
+          .json({
+            error: 'Messaging is briefly busy saving your message; please retry.',
+            requestId: req.id,
+          });
       }
       next(err);
     }

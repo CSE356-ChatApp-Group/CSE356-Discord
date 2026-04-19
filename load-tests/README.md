@@ -22,7 +22,10 @@ npm run load:staging:tune
 npm run load:staging:peak
 npm run load:staging:break-fast
 npm run load:staging:break
+npm run load:staging:ws-dm-burst
 ```
+
+`ws-dm-burst` opens N WebSocket clients subscribed to `user:<id>` on a **group DM**, then one client sends a tight burst of `POST /messages` (conversation). Use it to stress the **user-feed WebSocket delivery path** (including outbound queue backpressure). Env: `LOADTEST_DM_LISTENERS` (default 8, max 32, capped by profile `wsVUs`), `LOADTEST_DM_BURST_COUNT` (default 150, max 2000).
 
 The `break` profile is intentionally aggressive and is meant to find the failure point.
 Use `slo` for steady-state go/no-go checks, `tune` for fast iteration while changing knobs,
@@ -60,6 +63,7 @@ Optional knobs:
 - `MESSAGE_SIZE=128`
 - `RUN_ID=my-custom-label`
 - `LOADTEST_WS_MESSAGE_DELIVERY_PROBE=1`
+- `LOADTEST_DM_LISTENERS`, `LOADTEST_DM_BURST_COUNT` (for `ws-dm-burst` only)
 - Mix tuning (all optional, auto-normalized):  
   `LOADTEST_MIX_COMMUNITIES`, `LOADTEST_MIX_CONVERSATIONS`, `LOADTEST_MIX_MESSAGES_LIST`,  
   `LOADTEST_MIX_CHANNELS`, `LOADTEST_MIX_MESSAGE_READ`, `LOADTEST_MIX_POST_CHANNEL`,  

@@ -27,6 +27,7 @@
     "load:staging:break-5w": "./scripts/run-staging-capacity.sh break-5w",
     "load:staging:tune": "./scripts/run-staging-capacity.sh tune",
     "load:staging:break-fast": "./scripts/run-staging-capacity.sh break-fast",
+    "load:staging:ws-dm-burst": "./scripts/run-staging-capacity.sh ws-dm-burst",
     "e2e:install": "npm --prefix frontend run e2e:install",
     "e2e": "npm --prefix frontend run e2e",
     "e2e:ci": "npm --prefix frontend run e2e:ci",

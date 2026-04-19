@@ -157,6 +157,13 @@ const messagePostResponseTotal = new client.Counter({
   labelNames: ['status_code'],
 });
 
+/** POST /messages: Postgres succeeded but Redis pub/sub fanout threw (client still gets 201 + complete:false). */
+const messagePostRealtimePublishFailTotal = new client.Counter({
+  name: 'message_post_realtime_publish_fail_total',
+  help: 'POST /messages realtime fanout failed after DB commit (Redis publish exhausted retries or lookup error)',
+  labelNames: ['target'],
+});
+
 /**
  * Second POST /messages with the same Idempotency-Key while the first holds the
  * Redis NX lease: polls until replay or deadline (see router exponential backoff).
@@ -530,6 +537,8 @@ function startPgPoolMetrics(pool) {
     messageCacheBustFailuresTotal.inc({ target: 'conversation' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
+    messagePostRealtimePublishFailTotal.inc({ target: 'channel' }, 0);
+    messagePostRealtimePublishFailTotal.inc({ target: 'conversation' }, 0);
     messagePostIdempotencyPollTotal.inc({ outcome: 'replay_201' }, 0);
     messagePostIdempotencyPollTotal.inc({ outcome: 'exhausted_409' }, 0);
     messagePostIdempotencyPollWaitMs.observe({ outcome: 'replay_201' }, 0);
@@ -628,6 +637,7 @@ module.exports = {
   messageIngestStreamAppendedTotal,
   messageIngestStreamConsumedTotal,
   messagePostResponseTotal,
+  messagePostRealtimePublishFailTotal,
   messagePostIdempotencyPollTotal,
   messagePostIdempotencyPollWaitMs,
   wsConnectionResultTotal,
