@@ -97,21 +97,30 @@ Staging validates:
 ./deploy/deploy-prod.sh <sha>
 ```
 
-Or **Actions → Manual Deploy → prod** (passes `GITHUB_ACTIONS=true` so the script skips the interactive `y/N` prompt; use a **GitHub Environment** with required reviewers if you want a human gate in the UI).
+Or **Actions → Manual Deploy → prod** (passes `GITHUB_ACTIONS=true` so the script skips the interactive `y/N` prompt).
+
+**Speed flags:**
+
+| Flag | Saves | When to use |
+|------|-------|-------------|
+| `SKIP_BACKUP=true ./deploy/deploy-prod.sh <sha>` | 2–5 min (pg_dump) | Code-only deploy, no schema changes |
+| `./deploy/deploy-prod.sh <prev-sha> --rollback` | ~6 min (skips everything except rolling restart) | Bad deploy, need to revert immediately |
 
 Process:
 1. **Staging must have deployed and passed first**
 2. Interactive confirmation prompt when run from a laptop (skipped in GitHub Actions)
-3. Database backup (automatic; failures log a warning — consider `DEPLOY_STRICT_BACKUP` if you add it)
-4. Download exact same artifact
-5. Unpack as new release directory
-6. Start on alternate port (4001) **without touching running traffic**
+3. Database backup (skippable with `SKIP_BACKUP=true` for code-only redeploys)
+4. Download exact same artifact from GitHub Releases
+5. Unpack as new release directory; `npm ci` with `nice -n 15` (low-priority, avoids CPU competition with live workers)
+6. Start on alternate port without touching running traffic
 7. Full health + smoke + **candidate WebSocket round-trip** on the new port
-8. Only if healthy → switch Nginx to candidate
-9. Monitor for 60 seconds
-10. Update `current` symlink
+8. Only if healthy → rolling restart (one worker at a time, 10s settle each)
+9. Monitor 30 seconds
+10. Update `current` symlink; monitoring containers refreshed in background
 
-**Old version stays running on port 4000 for instant rollback.**
+**Total deploy time:** ~5–8 min (normal), ~2 min (with `SKIP_BACKUP=true`).
+
+**Old releases stay in `/opt/chatapp/releases/` for instant rollback (keeps last 3).**
 
 ## Safety Guarantees
 
@@ -135,14 +144,26 @@ Process:
 - If bad, revert Nginx upstream (instant)
 
 ### Rollback
+
+**Fast rollback (recommended)** — uses an already-deployed release on the server, ~2 min:
+
 ```bash
-# Revert Nginx upstream to old version
-ssh ssperrottet@136.114.103.71 '
-  sudo sed -i "s/localhost:4001/localhost:4000/" /etc/nginx/sites-available/chatapp
-  sudo systemctl reload nginx
-'
+# Roll all workers back to a previously-deployed SHA
+./deploy/deploy-prod.sh <prev-sha> --rollback
+
+# Find available releases on prod:
+ssh ubuntu@130.245.136.44 'ls -1t /opt/chatapp/releases | head -5'
 ```
-Takes ~5 seconds, old process resumes handling traffic.
+
+The `--rollback` flag skips backup, artifact download, npm ci, migrations, pgbouncer setup,
+and monitoring. It only does the rolling worker restart + health gates, then updates the
+`current` symlink. The same rolling restart (10s settle per worker) keeps capacity above 4/5.
+
+**Old nginx sed trick (for nginx-only reverts, no process restart):**
+```bash
+# Emergency nginx-only revert (< 5s, use only if old worker is still running)
+ssh ubuntu@130.245.136.44 'sudo sed -i "s/localhost:NEW/localhost:OLD/" /etc/nginx/sites-available/chatapp && sudo systemctl reload nginx'
+```
 
 ## Health Checks
 
