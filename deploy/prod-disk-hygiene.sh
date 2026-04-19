@@ -11,12 +11,14 @@
 #
 # Env:
 #   DRY_RUN=1              — no writes
-#   JOURNAL_VACUUM_SIZE    — default 800M (passed to journalctl --vacuum-size)
+#   JOURNAL_VACUUM_SIZE              — default 800M (passed to journalctl --vacuum-size)
+#   SKIP_FORCE_NGINX_LOGROTATE=1     — skip logrotate -f (can take minutes on large logs)
 
 set -euo pipefail
 
 DRY_RUN="${DRY_RUN:-0}"
 JOURNAL_VACUUM_SIZE="${JOURNAL_VACUUM_SIZE:-800M}"
+SKIP_FORCE_NGINX_LOGROTATE="${SKIP_FORCE_NGINX_LOGROTATE:-0}"
 
 log() { echo "[prod-disk-hygiene] $*"; }
 
@@ -56,19 +58,30 @@ apt_clean_safe() {
 }
 
 force_nginx_logrotate_once() {
+  if [[ "$SKIP_FORCE_NGINX_LOGROTATE" == "1" ]]; then
+    log "SKIP_FORCE_NGINX_LOGROTATE=1 — leaving logrotate to cron (maxsize still applies on next run)"
+    return 0
+  fi
   if [[ "$DRY_RUN" == "1" ]]; then
-    log "DRY_RUN: logrotate -f /etc/logrotate.d/nginx"
+    log "DRY_RUN: logrotate -f /etc/logrotate.d/nginx (large logs can take several minutes)"
     return 0
   fi
   if [[ -f /etc/logrotate.d/nginx ]]; then
-    sudo logrotate -f /etc/logrotate.d/nginx 2>/dev/null || log "WARN: logrotate -f nginx returned non-zero (ignore if logs empty)"
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 600 sudo logrotate -f /etc/logrotate.d/nginx 2>/dev/null ||
+        log "WARN: logrotate -f nginx timed out or failed — check logs; re-run with SKIP_FORCE_NGINX_LOGROTATE=1 if needed"
+    else
+      sudo logrotate -f /etc/logrotate.d/nginx 2>/dev/null ||
+        log "WARN: logrotate -f nginx returned non-zero (ignore if logs empty)"
+    fi
   fi
 }
 
 main() {
   if [[ "$(id -u)" -ne 0 ]] && [[ "$DRY_RUN" != "1" ]]; then
     log "Re-exec with sudo (required for journal/apt/logrotate writes)"
-    exec sudo DRY_RUN="${DRY_RUN}" JOURNAL_VACUUM_SIZE="${JOURNAL_VACUUM_SIZE}" "$0" "$@"
+    exec sudo DRY_RUN="${DRY_RUN}" JOURNAL_VACUUM_SIZE="${JOURNAL_VACUUM_SIZE}" \
+      SKIP_FORCE_NGINX_LOGROTATE="${SKIP_FORCE_NGINX_LOGROTATE}" "$0" "$@"
   fi
 
   ensure_nginx_logrotate_maxsize

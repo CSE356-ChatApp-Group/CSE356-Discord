@@ -280,6 +280,8 @@ On the prod app host (from a repo checkout, or after copying the script):
 ```bash
 sudo DRY_RUN=1 ./deploy/prod-disk-hygiene.sh
 sudo ./deploy/prod-disk-hygiene.sh
+# Skip the final `logrotate -f` if SSH must return quickly (maxsize still applies on cron):
+sudo SKIP_FORCE_NGINX_LOGROTATE=1 ./deploy/prod-disk-hygiene.sh
 ```
 
 New installs run the same nginx `maxsize` guard from `deploy/prod-vm-setup.sh` (step 5b).
