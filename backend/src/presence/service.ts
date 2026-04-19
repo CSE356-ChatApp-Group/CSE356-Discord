@@ -21,6 +21,22 @@ const logger = require("../utils/logger");
 const { presenceFanoutTotal } = require("../utils/metrics");
 
 const TTL_SECONDS = 90;
+const PRESENCE_DB_CURSOR_TTL_SECS = parseInt(process.env.PRESENCE_DB_CURSOR_TTL_SECS || '300', 10);
+
+// Lua CAS: set key to ARGV[1] only if key is missing or value differs. Returns 1=written, 0=skipped.
+const PRESENCE_DB_CAS_LUA = `
+local current = redis.call('GET', KEYS[1])
+if not current or current ~= ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+  return 1
+end
+return 0
+`;
+
+function presenceDbCursorKey(userId) {
+  return `presence_db_cursor:${userId}`;
+}
+
 const rawFanoutCacheTtl = Number(process.env.PRESENCE_FANOUT_CACHE_TTL_SECONDS || 120);
 const PRESENCE_FANOUT_CACHE_TTL_SECONDS = Number.isFinite(rawFanoutCacheTtl) && rawFanoutCacheTtl > 0
   ? Math.floor(rawFanoutCacheTtl)
@@ -210,17 +226,36 @@ async function setPresence(userId, status, awayMessage) {
   }
 
   if (!overload.shouldSkipPresenceMirror()) {
-    // Mirror to Postgres (non-blocking)
-    query(
-      `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
-       SELECT $1, $2, $3, NOW()
-       WHERE EXISTS (SELECT 1 FROM users WHERE id = $1)
-       ON CONFLICT (user_id) DO UPDATE SET
-         status = EXCLUDED.status,
-         custom_msg = EXCLUDED.custom_msg,
-         updated_at = NOW()`,
-      [userId, status, status === "away" ? nextAwayMessage : null],
-    ).catch(() => {});
+    // Redis CAS gate: deduplicate presence DB writes across workers for the same user.
+    // Only the first worker to observe a new status value fires the DB upsert.
+    const dbCursorKey = presenceDbCursorKey(userId);
+    const cursorValue = `${status}:${status === "away" ? (nextAwayMessage || "") : ""}`;
+    let shouldWriteDb = true;
+    try {
+      const casResult = await redis.eval(
+        PRESENCE_DB_CAS_LUA,
+        1,
+        dbCursorKey,
+        cursorValue,
+        String(PRESENCE_DB_CURSOR_TTL_SECS),
+      );
+      shouldWriteDb = casResult === 1;
+    } catch (redisErr) {
+      // Fail open — if Redis is unavailable, write DB anyway
+      logger.warn({ err: redisErr, userId }, 'presence: Redis CAS eval failed, writing DB anyway');
+    }
+    if (shouldWriteDb) {
+      // Mirror to Postgres (non-blocking)
+      query(
+        `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           status = EXCLUDED.status,
+           custom_msg = EXCLUDED.custom_msg,
+           updated_at = NOW()`,
+        [userId, status, status === "away" ? nextAwayMessage : null],
+      ).catch(() => {});
+    }
   }
 }
 
