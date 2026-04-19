@@ -354,72 +354,41 @@ async function advanceReadStateCursor({
   messageId,
   messageCreatedAt,
 }) {
-  const scopeColumn = channelId ? 'channel_id' : 'conversation_id';
-  const scopeValue = channelId || conversationId;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const { rows } = await query(
-      `WITH inserted AS (
-         INSERT INTO read_states (
-           user_id,
-           channel_id,
-           conversation_id,
-           last_read_message_id,
-           last_read_at
-         )
-         VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT DO NOTHING
-         RETURNING last_read_message_id, last_read_at, TRUE AS did_advance_cursor
-       ),
-       updated AS (
-         UPDATE read_states rs
-         SET last_read_message_id = $4,
-             last_read_at = NOW()
-         WHERE NOT EXISTS (SELECT 1 FROM inserted)
-           AND rs.user_id = $1
-           AND ${scopeColumn} = $5
-           AND rs.last_read_message_id IS DISTINCT FROM $4
-           AND (
-             rs.last_read_message_id IS NULL
-             OR NOT EXISTS (
-               SELECT 1
-               FROM messages current_read
-               WHERE current_read.id = rs.last_read_message_id
-                 AND current_read.deleted_at IS NULL
-                 AND current_read.created_at > $6
-             )
-           )
-         RETURNING rs.last_read_message_id, rs.last_read_at, TRUE AS did_advance_cursor
-       ),
-       current_state AS (
-         SELECT last_read_message_id, last_read_at, FALSE AS did_advance_cursor
-         FROM read_states
-         WHERE NOT EXISTS (SELECT 1 FROM inserted)
-           AND NOT EXISTS (SELECT 1 FROM updated)
-           AND user_id = $1
-           AND ${scopeColumn} = $5
-         LIMIT 1
+  // Single atomic upsert: INSERT or UPDATE in one statement to avoid the
+  // two-phase (ON CONFLICT DO NOTHING + separate UPDATE) pattern that causes
+  // row-level lock waits when many concurrent requests target the same
+  // (user_id, channel_id/conversation_id) row.
+  const { rows } = await query(
+    `INSERT INTO read_states (
+       user_id,
+       channel_id,
+       conversation_id,
+       last_read_message_id,
+       last_read_at
+     )
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (user_id, COALESCE(channel_id, conversation_id)) DO UPDATE SET
+       last_read_message_id = EXCLUDED.last_read_message_id,
+       last_read_at = NOW()
+     WHERE
+       read_states.last_read_message_id IS NULL
+       OR NOT EXISTS (
+         SELECT 1
+         FROM messages current_read
+         WHERE current_read.id = read_states.last_read_message_id
+           AND current_read.deleted_at IS NULL
+           AND current_read.created_at > $5
        )
-       SELECT last_read_message_id, last_read_at, did_advance_cursor
-       FROM inserted
-       UNION ALL
-       SELECT last_read_message_id, last_read_at, did_advance_cursor
-       FROM updated
-       UNION ALL
-       SELECT last_read_message_id, last_read_at, did_advance_cursor
-       FROM current_state
-       LIMIT 1`,
-      [userId, channelId, conversationId, messageId, scopeValue, messageCreatedAt],
-    );
+     RETURNING last_read_message_id, last_read_at`,
+    [userId, channelId, conversationId, messageId, messageCreatedAt],
+  );
 
-    if (rows[0]) {
-      return {
-        applied: rows[0],
-        didAdvanceCursor: !!rows[0].did_advance_cursor,
-      };
-    }
+  if (rows[0]) {
+    return { applied: rows[0], didAdvanceCursor: true };
   }
-
-  throw new Error('read_state_advance_failed_after_retries');
+  // No rows: conflict + WHERE was false — current state is already at or
+  // ahead of this message position; cursor was not advanced.
+  return { applied: null, didAdvanceCursor: false };
 }
 
 async function loadMessageTarget(messageId) {
