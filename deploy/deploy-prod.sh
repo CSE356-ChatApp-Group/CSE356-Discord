@@ -124,8 +124,9 @@ WORKER_SETTLE_SECS="${WORKER_SETTLE_SECS:-15}"
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 
 # Number of Node.js HTTP workers (systemd chatapp@ ports).
-# Production runs four workers by default (chatapp@4000..@4003) unless explicitly overridden.
-CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-4}
+# Production runs five workers by default (chatapp@4000..@4004). Staging validated 5 workers
+# clean across multiple SLO runs (453a655). Pool math stays safe: 5×80=400 virtual < 500 real.
+CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-5}
 _REMOTE_NCPU=$(ssh_prod 'nproc --all' 2>/dev/null || echo 2)
 # PgBouncer pool + Node pool math matches deploy-staging.sh (same caps, different host).
 # Scale default_pool_size with **host vCPU** so 8 vCPU (etc.) actually gets more real PG
