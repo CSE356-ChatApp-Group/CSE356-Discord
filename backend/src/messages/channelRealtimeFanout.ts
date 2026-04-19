@@ -77,6 +77,19 @@ function channelUserFanoutTargetsVersionKey(channelId: string) {
   return `channel:${channelId}:user_fanout_targets_v`;
 }
 
+async function readChannelUserFanoutCacheState(cacheKey: string, versionKey: string) {
+  try {
+    const [cached, version] = await redis.mget(cacheKey, versionKey);
+    return { cached: cached || null, version: version || null };
+  } catch {
+    const [cached, version] = await Promise.all([
+      redis.get(cacheKey).catch(() => null),
+      redis.get(versionKey).catch(() => null),
+    ]);
+    return { cached, version };
+  }
+}
+
 async function invalidateChannelUserFanoutTargetsCache(channelId: string) {
   const cacheKey = channelUserFanoutTargetsCacheKey(channelId);
   const versionKey = channelUserFanoutTargetsVersionKey(channelId);
@@ -121,7 +134,8 @@ async function invalidateCommunityChannelUserFanoutTargetsCache(communityId: str
  */
 async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string[]> {
   const cacheKey = channelUserFanoutTargetsCacheKey(channelId);
-  const cached = await redis.get(cacheKey).catch(() => null);
+  const versionKey = channelUserFanoutTargetsVersionKey(channelId);
+  const { cached, version: cachedVersion } = await readChannelUserFanoutCacheState(cacheKey, versionKey);
   if (cached) {
     try {
       const parsed = JSON.parse(cached);
@@ -141,11 +155,12 @@ async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string
   }
 
   fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'miss' });
-  const versionKey = channelUserFanoutTargetsVersionKey(channelId);
   const maxVersionRetries = 8;
   const load: Promise<string[]> = (async (): Promise<string[]> => {
     for (let attempt = 0; attempt < maxVersionRetries; attempt += 1) {
-      const vBeforeQuery = Number((await redis.get(versionKey).catch(() => null)) || 0);
+      const vBeforeQuery = attempt === 0
+        ? Number(cachedVersion || 0)
+        : Number((await redis.get(versionKey).catch(() => null)) || 0);
       const { rows } = await query(
         `SELECT DISTINCT cm.user_id::text AS user_id
          FROM channels c

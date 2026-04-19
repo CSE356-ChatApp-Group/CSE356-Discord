@@ -92,11 +92,11 @@ describe('channelRealtimeFanout', () => {
   });
 
   it('getChannelUserFanoutTargetKeys reuses cached user fanout targets', async () => {
+    redis.mget
+      .mockResolvedValueOnce([null, '0'])
+      .mockResolvedValueOnce([JSON.stringify(['user:cached-a', 'user:cached-b']), '0']);
     redis.get
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce('0')
-      .mockResolvedValueOnce('0')
-      .mockResolvedValueOnce(JSON.stringify(['user:cached-a', 'user:cached-b']));
+      .mockResolvedValueOnce('0');
     query.mockResolvedValueOnce({
       rows: [{ user_id: 'cached-a' }, { user_id: 'cached-b' }],
     });
@@ -139,7 +139,7 @@ describe('channelRealtimeFanout', () => {
   });
 
   it('publishChannelMessageCreated publishes all visible member user targets by default', async () => {
-    redis.get.mockResolvedValueOnce(null);
+    redis.mget.mockResolvedValueOnce([null, null]);
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
     const expectedChannels = [
@@ -155,8 +155,9 @@ describe('channelRealtimeFanout', () => {
     const prev = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
     process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
     try {
-      redis.get.mockResolvedValueOnce(null);
-      redis.mget.mockResolvedValueOnce(['1', null]);
+      redis.mget
+        .mockResolvedValueOnce([null, null])
+        .mockResolvedValueOnce(['1', null]);
       query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
       await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
       const expectedChannels = [
@@ -172,8 +173,9 @@ describe('channelRealtimeFanout', () => {
   });
 
   it('publishChannelMessageCreated falls back to full user fanout when recent-connect lookup fails', async () => {
-    redis.get.mockResolvedValueOnce(null);
-    redis.mget.mockRejectedValueOnce(new Error('redis mget failed'));
+    redis.mget
+      .mockResolvedValueOnce([null, null])
+      .mockRejectedValueOnce(new Error('redis mget failed'));
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
     const expectedChannels = [

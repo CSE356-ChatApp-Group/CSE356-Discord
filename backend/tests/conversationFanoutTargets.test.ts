@@ -4,6 +4,7 @@ jest.mock('../src/db/pool', () => ({
 
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(() => Promise.resolve(null)),
+  mget: jest.fn(() => Promise.resolve([null, null])),
   set: jest.fn(() => Promise.resolve('OK')),
   del: jest.fn(() => Promise.resolve(1)),
   pipeline: jest.fn(() => ({
@@ -27,6 +28,7 @@ const { query } = require('../src/db/pool') as { query: jest.Mock };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const redis = require('../src/db/redis') as {
   get: jest.Mock;
+  mget: jest.Mock;
   set: jest.Mock;
   del: jest.Mock;
   pipeline: jest.Mock;
@@ -49,10 +51,12 @@ describe('conversationFanoutTargets', () => {
   afterEach(() => {
     query.mockReset();
     redis.get.mockReset();
+    redis.mget.mockReset();
     redis.set.mockReset();
     redis.del.mockReset();
     redis.pipeline.mockReset();
     redis.get.mockResolvedValue(null);
+    redis.mget.mockResolvedValue([null, null]);
     redis.set.mockResolvedValue('OK');
     redis.del.mockResolvedValue(1);
     redis.pipeline.mockImplementation(() => ({
@@ -79,11 +83,11 @@ describe('conversationFanoutTargets', () => {
   });
 
   it('reuses cached conversation fanout targets', async () => {
+    redis.mget
+      .mockResolvedValueOnce([null, null])
+      .mockResolvedValueOnce([JSON.stringify(['conversation:conv-2', 'user:a', 'user:b']), '0']);
     redis.get
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(JSON.stringify(['conversation:conv-2', 'user:a', 'user:b']));
+      .mockResolvedValueOnce('0');
     query.mockResolvedValueOnce({
       rows: [{ user_id: 'a' }, { user_id: 'b' }],
     });
@@ -112,9 +116,9 @@ describe('conversationFanoutTargets', () => {
   });
 
   it('retries load when fanout version changes during the PG round-trip', async () => {
+    redis.mget
+      .mockResolvedValueOnce([null, '0']);
     redis.get
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce('1')
       .mockResolvedValueOnce('1')
       .mockResolvedValueOnce('1');

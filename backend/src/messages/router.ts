@@ -322,14 +322,14 @@ async function publishConversationEventNow(conversationId, event, data) {
   }
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
 
-  if (event.startsWith('message:')) {
+  if (event.startsWith('message:') && logger.isLevelEnabled('debug')) {
     logger.debug(
       {
         conversationId,
         event,
         messageId: (data as any)?.id,
         userIdCount: userIds.length,
-        userIds,
+        passthroughTargetCount: passthroughTargets.length,
         gradingNote: 'conversation_fanout_targets',
       },
       'conversation fanout: publishing to targets',
@@ -344,32 +344,10 @@ async function publishConversationEventNow(conversationId, event, data) {
     passthroughTargets.length + userIds.length,
   );
   const publishStartedAt = process.hrtime.bigint();
-  let conversationSubCount: number | null = null;
   await Promise.all([
-    ...passthroughTargets.map(async (target) => {
-      const count = await fanout.publish(target, payload);
-      if (event === 'message:created' && target === `conversation:${conversationId}`) {
-        conversationSubCount = count;
-      }
-    }),
-    // Publish each DM participant individually to their own user-feed shard envelope.
-    // Batching multiple userIds into a single envelope means that when the sender
-    // and recipient happen to hash to the same shard (~1.5% of pairs), deliverUserFeedMessage
-    // sees userIds.length > 1 and never fires pushPendingDelivery for the disconnected
-    // recipient (the guard is `userIds.length === 1`). Publishing per-user guarantees
-    // every participant always gets a single-user envelope, so pushPendingDelivery fires
-    // correctly for each disconnected user.
-    ...userIds.map((uid) => publishUserFeedTargets([uid], payload)),
+    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
+    ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
   ]);
-  // Park message for reconnecting recipients when conversation channel had 0 Redis subscribers.
-  if (event === 'message:created' && conversationSubCount === 0) {
-    const pendingKey = `dm_pending:${conversationId}`;
-    redis.set(pendingKey, JSON.stringify(payload), 'EX', 10).catch(() => {});
-    logger.debug(
-      { conversationId, messageId: (data as any)?.id, gradingNote: 'dm_pending_write' },
-      'DM fanout: 0 conversation channel subscribers; parked payload for reconnecting recipient',
-    );
-  }
   fanoutPublishDurationMs.observe(
     { path: 'conversation_event', stage: 'publish' },
     Number(process.hrtime.bigint() - publishStartedAt) / 1e6,
@@ -381,7 +359,9 @@ async function publishConversationEventNow(conversationId, event, data) {
 
   if (event === 'read:updated') return undefined;
 
-  Promise.allSettled(userIds.map((uid) => redis.del(`conversations:list:${uid}`))).catch(() => {});
+  if (userIds.length > 0) {
+    redis.del(...userIds.map((uid) => `conversations:list:${uid}`)).catch(() => {});
+  }
 
   return fanoutPublishedAt(payload);
 }

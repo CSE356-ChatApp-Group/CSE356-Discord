@@ -280,6 +280,16 @@ async function isGroupConversation(client, conversationId) {
 const CONVERSATIONS_CACHE_TTL_SECS = 15;
 function conversationsCacheKey(userId) { return `conversations:list:${userId}`; }
 
+async function invalidateConversationsListCaches(userIds) {
+  const keys = [...new Set(
+    (Array.isArray(userIds) ? userIds : [])
+      .filter((userId) => typeof userId === 'string' && userId)
+      .map((userId) => conversationsCacheKey(userId))
+  )];
+  if (!keys.length) return;
+  await redis.del(...keys);
+}
+
 // In-process singleflight: prevents thundering-herd on cache expiry.
 const conversationsInflight: Map<string, Promise<{ conversations: any[] }>> = new Map();
 
@@ -438,7 +448,7 @@ router.post('/',
       await Promise.allSettled([
         ...allIds.map((participantId) => presenceService.invalidatePresenceFanoutTargets(participantId)),
         ...allIds.map((participantId) => invalidateWsBootstrapCache(participantId)),
-        ...allIds.map((uid) => redis.del(conversationsCacheKey(uid))),
+        invalidateConversationsListCaches(allIds),
       ]);
 
       if (conversation) {
@@ -536,7 +546,7 @@ router.patch(
             'conversation:updated',
             { conversation: conv, conversationId: id }
           ),
-          ...participantIds.map((uid) => redis.del(conversationsCacheKey(uid))),
+          invalidateConversationsListCaches(participantIds),
         ]);
         res.json({ conversation: conv });
       } finally {
@@ -633,9 +643,7 @@ async function addParticipantsHandler(req, res, next) {
         ),
         // Invalidate conversation list cache for newly added AND existing
         // participants so everyone sees the updated participant list immediately.
-        ...[...participantIdsToAdd, ...currentParticipantIds].map((uid) =>
-          redis.del(conversationsCacheKey(uid))
-        ),
+        invalidateConversationsListCaches([...participantIdsToAdd, ...currentParticipantIds]),
       ]);
     }
 
@@ -765,14 +773,14 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       /* non-fatal */
     }
     try {
-      await redis.del(conversationsCacheKey(req.user.id));
+      await invalidateConversationsListCaches([req.user.id]);
     } catch {
       /* non-fatal */
     }
     if (!shouldDelete && activeParticipantIds.length > 0) {
-      await Promise.allSettled(
-        activeParticipantIds.map((uid) => redis.del(conversationsCacheKey(uid))),
-      );
+      await Promise.allSettled([
+        invalidateConversationsListCaches(activeParticipantIds),
+      ]);
     }
 
     // Broadcast system message if group DM and not deleted

@@ -15,9 +15,11 @@ type ApiError = Error & { status?: number; errors?: unknown };
 // restores the session via the httpOnly refresh cookie.
 let _accessToken: string | null = null;
 
-// Maximum time to wait for any single API request before aborting. Prevents the
-// app from getting stuck indefinitely when the server is slow or unreachable.
-const REQUEST_TIMEOUT_MS = 12_000;
+const parsedRequestTimeoutMs = Number(import.meta.env.VITE_API_TIMEOUT_MS || '25000');
+const REQUEST_TIMEOUT_MS =
+  Number.isFinite(parsedRequestTimeoutMs) && parsedRequestTimeoutMs >= 1000
+    ? parsedRequestTimeoutMs
+    : 25_000;
 
 function fetchWithTimeout(url: string, init: RequestInit, ms = REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();

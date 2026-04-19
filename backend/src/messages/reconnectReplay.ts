@@ -1,11 +1,9 @@
 'use strict';
 
 const { withTransaction } = require('../db/pool');
-const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
 const { wsReplayQueryTotal, wsReplayQueryDurationMs } = require('../utils/metrics');
-const { ringBufferKey, RING_BUFFER_WINDOW_MS, isRingBufferReliable } = require('../websocket/fanout');
 import { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 // Reconnect replay is our safety net for brief WS gaps. Keep the default large
@@ -252,84 +250,8 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   }
 }
 
-/**
- * Fast-path reconnect replay using per-channel Redis ring buffers.
- *
- * Each `channel:` and `conversation:` topic maintains a sorted set of recent
- * message:created payloads (written by fanout.publishAndBuffer). This avoids
- * the expensive DB CTE for short-gap reconnects where the ring buffer is warm.
- *
- * Returns:
- *   - Array of fanout payload objects (with .event / .data) if the ring was
- *     readable (may be empty if no messages in the window).
- *   - null if ring buffers should not be trusted (Redis error, or the window
- *     exceeds what the ring can cover).
- *
- * Permission check is implicit: the user was subscribed to these topics
- * at disconnect time so they are entitled to see those messages.
- */
-async function loadReplayFromRingBuffers(channelTopics, lowerBoundMs, upperBoundMs) {
-  if (!Array.isArray(channelTopics) || channelTopics.length === 0) return null;
-  if (!Number.isFinite(lowerBoundMs) || !Number.isFinite(upperBoundMs)) return null;
-  if (upperBoundMs <= lowerBoundMs) return [];
-
-  // If a ring buffer write recently failed, a successful-but-empty read would be
-  // indistinguishable from "genuinely no messages", so fall back to DB.
-  if (!isRingBufferReliable()) return null;
-
-  // If the requested window is wider than the ring covers, fall back to DB.
-  const windowMs = upperBoundMs - lowerBoundMs;
-  if (windowMs > RING_BUFFER_WINDOW_MS) return null;
-
-  const startedAt = Date.now();
-  const seenIds = new Set();
-  const allPayloads = [];
-
-  try {
-    const results = await Promise.all(
-      channelTopics.map((topic) =>
-        redis.zrangebyscore(ringBufferKey(topic), lowerBoundMs, upperBoundMs).catch(() => null),
-      ),
-    );
-
-    // Any Redis error → fall back to DB so we don't silently miss messages.
-    if (results.some((r) => r === null)) return null;
-
-    for (const entries of results) {
-      for (const raw of entries) {
-        try {
-          const payload = JSON.parse(raw);
-          const id = payload?.data?.id;
-          if (typeof id === 'string' && !seenIds.has(id)) {
-            seenIds.add(id);
-            allPayloads.push(payload);
-          }
-        } catch {
-          // Malformed entry — fall back to DB to be safe.
-          return null;
-        }
-      }
-    }
-  } catch {
-    return null;
-  }
-
-  // Sort by createdAt ascending, breaking ties by id for determinism.
-  allPayloads.sort((a, b) => {
-    const aMs = a?.data?.createdAt ? new Date(a.data.createdAt).getTime() : 0;
-    const bMs = b?.data?.createdAt ? new Date(b.data.createdAt).getTime() : 0;
-    if (aMs !== bMs) return aMs - bMs;
-    return (a?.data?.id || '') < (b?.data?.id || '') ? -1 : 1;
-  });
-
-  wsReplayQueryTotal.inc({ result: 'ring_hit' });
-  wsReplayQueryDurationMs.observe({ result: 'ring_hit' }, Date.now() - startedAt);
-  return allPayloads;
-}
-
 module.exports = {
   loadReplayableMessagesForUser,
-  loadReplayFromRingBuffers,
   replayQueryProfile,
   classifyReplayError,
   WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,

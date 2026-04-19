@@ -574,11 +574,11 @@ router.post('/:id/members',
             channels: [`channel:${req.params.id}`],
           },
         }).catch(() => {});
+        redis
+          .del(...insertedUserIds.map((userId) => `channels:list:${channel.community_id}:${userId}`))
+          .catch(() => {});
       }
       for (const { user_id } of insertedRows) {
-        // Bust the newly-invited user's channel list cache so the private
-        // channel appears immediately on their next GET /channels request.
-        redis.del(`channels:list:${channel.community_id}:${user_id}`).catch(() => {});
         // Expire the WS ACL cache so subsequent subscribe attempts are checked fresh.
         invalidateWsAclCache(user_id, `channel:${req.params.id}`);
         // Rebuild auto-subscribe list on reconnect; otherwise ws:bootstrap cache can omit channel:N.

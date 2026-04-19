@@ -25,6 +25,28 @@ function conversationFanoutTargetsVersionKey(conversationId: string) {
   return `conversation:${conversationId}:fanout_targets_v`;
 }
 
+async function readConversationFanoutCacheState(cacheKey: string, versionKey: string) {
+  const mget = typeof redis.mget === 'function' ? redis.mget.bind(redis) : null;
+  if (!mget) {
+    const [cached, version] = await Promise.all([
+      redis.get(cacheKey).catch(() => null),
+      redis.get(versionKey).catch(() => null),
+    ]);
+    return { cached, version };
+  }
+
+  try {
+    const [cached, version] = await mget(cacheKey, versionKey);
+    return { cached: cached || null, version: version || null };
+  } catch {
+    const [cached, version] = await Promise.all([
+      redis.get(cacheKey).catch(() => null),
+      redis.get(versionKey).catch(() => null),
+    ]);
+    return { cached, version };
+  }
+}
+
 async function invalidateConversationFanoutTargetsCache(conversationId: string) {
   const cacheKey = conversationFanoutTargetsCacheKey(conversationId);
   const versionKey = conversationFanoutTargetsVersionKey(conversationId);
@@ -55,7 +77,8 @@ async function loadUniqueFanoutTargetsFromDb(conversationId: string): Promise<st
 
 async function getConversationFanoutTargets(conversationId: string): Promise<string[]> {
   const cacheKey = conversationFanoutTargetsCacheKey(conversationId);
-  const cached = await redis.get(cacheKey).catch(() => null);
+  const versionKey = conversationFanoutTargetsVersionKey(conversationId);
+  const { cached, version: cachedVersion } = await readConversationFanoutCacheState(cacheKey, versionKey);
   if (cached) {
     try {
       const parsed = JSON.parse(cached);
@@ -75,11 +98,12 @@ async function getConversationFanoutTargets(conversationId: string): Promise<str
   }
 
   fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'miss' });
-  const versionKey = conversationFanoutTargetsVersionKey(conversationId);
   const maxVersionRetries = 8;
   const load = (async () => {
     for (let attempt = 0; attempt < maxVersionRetries; attempt++) {
-      const vBeforeQuery = Number((await redis.get(versionKey).catch(() => null)) || 0);
+      const vBeforeQuery = attempt === 0
+        ? Number(cachedVersion || 0)
+        : Number((await redis.get(versionKey).catch(() => null)) || 0);
       const uniqueTargets = await loadUniqueFanoutTargetsFromDb(conversationId);
       const vAfterQuery = Number((await redis.get(versionKey).catch(() => null)) || 0);
       if (vBeforeQuery !== vAfterQuery) {
