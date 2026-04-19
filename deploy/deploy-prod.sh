@@ -137,10 +137,10 @@ ncpu = int('${_REMOTE_NCPU}')
 inst = int('${CHATAPP_INSTANCES}')
 cpu_part = ncpu * 50
 extra = max(0, inst - 1) * 30
-# Cap raised from 400 → 500: blue-green cutover temporarily spins inst+1 workers
-# (e.g. 5 during a 4-worker deploy). At PG_POOL_MAX=80 that is 5*80=400 virtual
-# connections — exactly the old cap, leaving zero PgBouncer headroom and triggering
-# circuit breaker storms. 500 gives a 20% buffer over the peak cutover load.
+# Rolling cutover never exceeds CHATAPP_INSTANCES workers simultaneously (candidate
+# port is within TARGET_PORTS; old spare-port pattern is gone). Peak load is
+# inst*PG_POOL_MAX virtual connections. 500 gives a 20% buffer over the 5-worker
+# peak of 5*80=400, keeping the oversubscription ratio at 0.8x (no PgBouncer queuing).
 x = max(60, min(500, cpu_part + extra))
 print(x)
 ")

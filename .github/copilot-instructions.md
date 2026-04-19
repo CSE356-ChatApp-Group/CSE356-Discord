@@ -186,7 +186,7 @@ tail -f artifacts/rollout-monitoring/grader-watch-events.jsonl
 | `ddd2f94` | Migration 017 CI fix (same CONCURRENTLY issue) |
 | `d62f284` | WS fanout optimization, presence Redis round-trips, auth hot paths |
 
-**Current prod SHA: `4856991`** (as of 2026-04-17). Commits `b89face` and `a39ed84` are staged on `main`, not yet deployed to prod.
+**Current prod SHA: `6bb5778`** (as of 2026-04-17). All prior fixes (`b89face`, `a39ed84`, `89525b3`, `6bb5778`) are deployed.
 
 ---
 
