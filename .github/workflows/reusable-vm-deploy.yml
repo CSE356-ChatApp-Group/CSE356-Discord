@@ -39,7 +39,7 @@ on:
         default: false
         type: boolean
       chatapp_instances:
-        description: Node HTTP worker count (deploy-prod CHATAPP_INSTANCES); production currently defaults to 4 (chatapp@4000..@4003)
+        description: Node HTTP worker count (deploy-prod CHATAPP_INSTANCES); production currently defaults to 5 (chatapp@4000..@4004)
         required: false
         default: ''
         type: string

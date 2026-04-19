@@ -187,6 +187,6 @@ jobs:
       auto_confirm: true
       artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
       clear_prod_deploy_lock: ${{ inputs.clear_prod_deploy_lock }}
-      # Prod runs four app workers by default (chatapp@4000..@4003) unless the repo/org
+      # Prod runs five app workers by default (chatapp@4000..@4004) unless the repo/org
       # variable overrides it explicitly for a smaller recovery footprint.
-      chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '4' }}
+      chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '5' }}
