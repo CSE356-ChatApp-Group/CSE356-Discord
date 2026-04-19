@@ -97,6 +97,10 @@ const MSG_TARGET_CACHE_TTL_SECS =
   Number.isFinite(_msgTargetCacheTtl) && _msgTargetCacheTtl >= 0
     ? _msgTargetCacheTtl
     : 30;
+// Cache the UUID→channelId resolution for the legacy conversationId= compat shim.
+// Per (uuid, userId) because access is user-specific (private channels).
+// '_' is a sentinel for negative cache (UUID is a real conversation, not a channel).
+const CHANNEL_COMPAT_CACHE_TTL_SECS = parseInt(process.env.CHANNEL_COMPAT_CACHE_TTL_SECS || '60', 10);
 
 // Read cursor Redis CAS: stores last-known cursor timestamp (epoch ms) per (user, target).
 // The Lua script atomically advances only if the new value is strictly greater, preventing
@@ -269,6 +273,12 @@ async function ensureMessageAccess(target, userId) {
  * user can access that channel; otherwise keep conversation semantics.
  */
 async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
+  if (CHANNEL_COMPAT_CACHE_TTL_SECS > 0) {
+    try {
+      const cached = await redis.get(`ch_compat:${uuid}:${userId}`);
+      if (cached !== null) return cached === '_' ? null : cached;
+    } catch { /* fail open */ }
+  }
   const { rows } = await query(
     `SELECT c.id::text AS id
      FROM channels c
@@ -286,7 +296,11 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
      LIMIT 1`,
     [uuid, userId],
   );
-  return rows[0]?.id ?? null;
+  const result = rows[0]?.id ?? null;
+  if (CHANNEL_COMPAT_CACHE_TTL_SECS > 0) {
+    redis.set(`ch_compat:${uuid}:${userId}`, result ?? '_', 'EX', CHANNEL_COMPAT_CACHE_TTL_SECS).catch(() => {});
+  }
+  return result;
 }
 
 async function publishConversationEventNow(conversationId, event, data) {
@@ -1395,49 +1409,77 @@ router.patch('/:id',
       return res.status(503).json({ error: 'Edits temporarily unavailable under high load' });
     }
     try {
-      const target = await loadMessageTarget(req.params.id);
-      if (!target || target.author_id !== req.user.id) {
+      // Single CTE: check existence+authorship+access, update, join author — 1 round-trip vs 4.
+      const { rows } = await query(
+        `WITH chk AS (
+           SELECT
+             (m.author_id = $3)                        AS is_author,
+             CASE
+               WHEN m.channel_id IS NOT NULL THEN EXISTS (
+                 SELECT 1 FROM channels c
+                 JOIN community_members community_member
+                   ON community_member.community_id = c.community_id
+                  AND community_member.user_id = $3
+                 WHERE c.id = m.channel_id
+                   AND (c.is_private = FALSE
+                        OR EXISTS (
+                          SELECT 1 FROM channel_members
+                          WHERE channel_id = c.id AND user_id = $3
+                        ))
+               )
+               WHEN m.conversation_id IS NOT NULL THEN EXISTS (
+                 SELECT 1 FROM conversation_participants cp
+                 WHERE cp.conversation_id = m.conversation_id
+                   AND cp.user_id = $3 AND cp.left_at IS NULL
+               )
+               ELSE FALSE
+             END                                       AS has_access
+           FROM messages m
+           WHERE m.id = $2 AND m.deleted_at IS NULL
+         ),
+         upd AS (
+           UPDATE messages
+           SET content = $1, edited_at = NOW(), updated_at = NOW()
+           WHERE id = $2 AND author_id = $3 AND deleted_at IS NULL
+             AND (SELECT COALESCE(is_author AND has_access, FALSE) FROM chk)
+           RETURNING ${MESSAGE_RETURNING_FIELDS}
+         )
+         SELECT
+           (SELECT is_author  FROM chk) AS is_author,
+           (SELECT has_access FROM chk) AS has_access,
+           upd.*,
+           ${MESSAGE_AUTHOR_JSON},
+           '[]'::json                  AS attachments
+         FROM   (VALUES (1)) dummy
+         LEFT   JOIN upd ON TRUE
+         LEFT   JOIN users u ON u.id = upd.author_id`,
+        [req.body.content, req.params.id, req.user.id],
+      );
+      const row = rows[0];
+      if (!row.is_author) {
         return res.status(404).json({ error: 'Message not found or not yours' });
       }
-
-      const hasAccess = await ensureMessageAccess({
-        channelId: target.channel_id,
-        conversationId: target.conversation_id,
-      }, req.user.id);
-      if (!hasAccess) {
+      if (!row.has_access) {
         return res.status(403).json({ error: 'Access denied' });
       }
-
-      const { rows } = await query(
-        `UPDATE messages
-         SET content=$1, edited_at=NOW(), updated_at=NOW()
-         WHERE id=$2 AND author_id=$3 AND deleted_at IS NULL
-         RETURNING ${MESSAGE_RETURNING_FIELDS}`,
-        [req.body.content, req.params.id, req.user.id]
-      );
-      if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
-
-      const baseMessage = rows[0];
-      const message = await loadHydratedMessageById(baseMessage.id);
-      // Bust the Redis message cache so a GET immediately after returns updated content.
-      if (baseMessage.channel_id) {
-        await bustMessagesCacheSafe({ channelId: baseMessage.channel_id });
+      if (!row.id) {
+        return res.status(404).json({ error: 'Message not found or not yours' });
       }
-      if (baseMessage.conversation_id) {
-        await bustMessagesCacheSafe({ conversationId: baseMessage.conversation_id });
-        await publishConversationEventNow(
-          baseMessage.conversation_id,
-          'message:updated',
-          message || baseMessage,
-        );
+      const { is_author, has_access, ...message } = row;
+      // Bust the Redis message cache so a GET immediately after returns updated content.
+      if (message.channel_id) {
+        await bustMessagesCacheSafe({ channelId: message.channel_id });
+      }
+      if (message.conversation_id) {
+        await bustMessagesCacheSafe({ conversationId: message.conversation_id });
+        await publishConversationEventNow(message.conversation_id, 'message:updated', message);
       } else {
         await publishChannelMessageEvent(
-          baseMessage.channel_id,
-          messageFanoutEnvelope('message:updated', message || baseMessage),
+          message.channel_id,
+          messageFanoutEnvelope('message:updated', message),
         );
       }
-
-      res.json({ message: message || baseMessage });
+      res.json({ message });
     } catch (err) { next(err); }
   }
 );
@@ -1451,37 +1493,66 @@ router.delete('/:id',
       return res.status(503).json({ error: 'Deletes temporarily unavailable under high load' });
     }
     try {
-      const target = await loadMessageTarget(req.params.id);
-      if (!target || target.author_id !== req.user.id) {
+      // Single CTE: check existence+authorship+access, collect attachment keys, delete — 1 round-trip vs 4.
+      // The att CTE reads from the pre-DELETE snapshot so attachment rows are visible before CASCADE fires.
+      const { rows } = await query(
+        `WITH chk AS (
+           SELECT
+             (m.author_id = $2)                        AS is_author,
+             CASE
+               WHEN m.channel_id IS NOT NULL THEN EXISTS (
+                 SELECT 1 FROM channels c
+                 JOIN community_members community_member
+                   ON community_member.community_id = c.community_id
+                  AND community_member.user_id = $2
+                 WHERE c.id = m.channel_id
+                   AND (c.is_private = FALSE
+                        OR EXISTS (
+                          SELECT 1 FROM channel_members
+                          WHERE channel_id = c.id AND user_id = $2
+                        ))
+               )
+               WHEN m.conversation_id IS NOT NULL THEN EXISTS (
+                 SELECT 1 FROM conversation_participants cp
+                 WHERE cp.conversation_id = m.conversation_id
+                   AND cp.user_id = $2 AND cp.left_at IS NULL
+               )
+               ELSE FALSE
+             END                                       AS has_access
+           FROM messages m
+           WHERE m.id = $1 AND m.deleted_at IS NULL
+         ),
+         att AS (
+           SELECT COALESCE(json_agg(a.storage_key), '[]'::json) AS keys
+           FROM attachments a WHERE a.message_id = $1
+         ),
+         del AS (
+           DELETE FROM messages
+           WHERE id = $1 AND author_id = $2
+             AND (SELECT COALESCE(is_author AND has_access, FALSE) FROM chk)
+           RETURNING id, channel_id, conversation_id
+         )
+         SELECT
+           (SELECT is_author  FROM chk) AS is_author,
+           (SELECT has_access FROM chk) AS has_access,
+           (SELECT keys FROM att)       AS attachment_keys,
+           del.id, del.channel_id, del.conversation_id
+         FROM   (VALUES (1)) dummy
+         LEFT   JOIN del ON TRUE`,
+        [req.params.id, req.user.id],
+      );
+      const row = rows[0];
+      if (!row.is_author) {
         return res.status(404).json({ error: 'Message not found or not yours' });
       }
-
-      const hasAccess = await ensureMessageAccess({
-        channelId: target.channel_id,
-        conversationId: target.conversation_id,
-      }, req.user.id);
-      if (!hasAccess) {
+      if (!row.has_access) {
         return res.status(403).json({ error: 'Access denied' });
       }
-
-      // Collect attachment storage keys BEFORE the DELETE so we can clean up
-      // S3 objects.  The attachments table has ON DELETE CASCADE, meaning the
-      // rows disappear with the message — they must be captured first.
-      const { rows: attachRows } = await query(
-        'SELECT storage_key FROM attachments WHERE message_id = $1',
-        [req.params.id]
-      );
-      const attachmentKeys = attachRows.map((r) => r.storage_key);
-
-      const { rows } = await query(
-        `DELETE FROM messages
-         WHERE id=$1 AND author_id=$2
-         RETURNING id, channel_id, conversation_id`,
-        [req.params.id, req.user.id]
-      );
-      if (!rows.length) return res.status(404).json({ error: 'Message not found or not yours' });
-
-      const message = rows[0];
+      if (!row.id) {
+        return res.status(404).json({ error: 'Message not found or not yours' });
+      }
+      const attachmentKeys: string[] = Array.isArray(row.attachment_keys) ? row.attachment_keys as string[] : [];
+      const message = { id: row.id, channel_id: row.channel_id, conversation_id: row.conversation_id };
       sideEffects.deleteAttachmentObjects(attachmentKeys);
       // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
       if (message.channel_id) {
