@@ -78,7 +78,7 @@ describe('reconnectReplay bounds', () => {
     expect(withTransaction).toHaveBeenCalledTimes(1);
     expect(recordedClient?.query).toHaveBeenNthCalledWith(
       1,
-      `SET LOCAL statement_timeout TO '${WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED}ms'`,
+      `SET LOCAL statement_timeout = '${WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED}ms'`,
     );
     const replayQueryArgs = recordedClient?.query.mock.calls[1];
     expect(replayQueryArgs?.[1]).toEqual([
@@ -98,6 +98,7 @@ describe('reconnectReplay bounds', () => {
     const rows = await loadReplayableMessagesForUser('user-3', 5_000, 25_000);
 
     expect(rows).toEqual([]);
+    expect(withTransaction).toHaveBeenCalledTimes(2);
     expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'timeout' });
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -107,5 +108,29 @@ describe('reconnectReplay bounds', () => {
       }),
       'WS reconnect replay skipped after bounded DB failure',
     );
+  });
+
+  it('retries once on statement timeout then succeeds', async () => {
+    let call = 0;
+    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any[]>) => {
+      call += 1;
+      const client = {
+        query: jest.fn()
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ rows: [{ id: 'msg-retry', content: 'ok' }] }),
+      };
+      if (call === 1) {
+        throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+      }
+      return run(client);
+    });
+
+    const disconnectedAtMs = 5_000_000;
+    const reconnectObservedAtMs = 5_030_000;
+    const rows = await loadReplayableMessagesForUser('user-retry', disconnectedAtMs, reconnectObservedAtMs);
+
+    expect(rows).toEqual([{ id: 'msg-retry', content: 'ok' }]);
+    expect(withTransaction).toHaveBeenCalledTimes(2);
+    expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'ok' });
   });
 });

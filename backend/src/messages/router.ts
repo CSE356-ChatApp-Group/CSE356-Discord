@@ -102,8 +102,8 @@ const BG_WRITE_POOL_GUARD = parseInt(process.env.BG_WRITE_POOL_GUARD || '5', 10)
 
 /** Shorter than role/PgBouncer caps so POST /messages fails fast on lock wait (hot channel + last_message UPDATE). */
 const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
-  const raw = parseInt(process.env.MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS || '8000', 10);
-  if (!Number.isFinite(raw) || raw < 1000) return 8000;
+  const raw = parseInt(process.env.MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS || '5000', 10);
+  if (!Number.isFinite(raw) || raw < 1000) return 5000;
   return Math.min(60000, raw);
 })();
 

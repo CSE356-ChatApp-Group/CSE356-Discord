@@ -1905,7 +1905,13 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
   }
 }
 
-// ── Heartbeat loop (60 s) ──────────────────────────────────────────────────────
+// ── Heartbeat (server → client WS ping/pong) ──────────────────────────────────
+// Uses one global setInterval(WS_HEARTBEAT_INTERVAL_MS). Each tick sets isAlive=false,
+// sends ws.ping(); the next tick terminates if no pong arrived. Connect time relative
+// to this interval therefore yields *wall-clock* lifetimes between ~heartbeat and
+// ~2×heartbeat (e.g. ~20–40s at 20s) — not a fixed 2× from connect unless connects align.
+// Missed pongs (slow client, stalled TCP, proxy dropping ping frames, event loop delay)
+// produce the same pattern; correlate with ws.disconnected 1006 heartbeat_timeout.
 const heartbeatInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) {

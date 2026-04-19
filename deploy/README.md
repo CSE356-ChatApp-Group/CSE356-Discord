@@ -77,8 +77,8 @@ You can still deploy manually from GitHub Actions using **Manual Deploy** (`work
 
 ### Required GitHub configuration
 
-- Repository secret: `DEPLOY_SSH_KEY`
-   - Private key for SSH access to deploy hosts.
+- Secret: `DEPLOY_SSH_KEY` — private key whose public half is in `authorized_keys` on the deploy VMs (Ed25519 matches [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml), which writes `~/.ssh/id_ed25519`).
+- Optional secret: `SSH_KNOWN_HOSTS` — one or more `ssh-keyscan -H` lines. **Recommended for production** when the app host and DB host differ: [`deploy-prod.sh`](deploy-prod.sh) SCPs to `PROD_HOST` and `PROD_DB_HOST`, but the workflow only auto-keyscans the primary `host` input, so pin both (or rely on `DEPLOY_SSH_EXTRA_OPTS` / host-key policy only on the runner side after keys rotate).
 - Repository/environment variables (optional overrides):
    - `STAGING_HOST` (default: `136.114.103.71`)
    - `STAGING_USER` (default: `ssperrottet`)
@@ -87,6 +87,33 @@ You can still deploy manually from GitHub Actions using **Manual Deploy** (`work
    - If you move production to a new VM/IP, update `PROD_HOST` in GitHub environment variables before running deploys.
 - GitHub Environment protection:
    - Set approvals on `production` environment to require manual reviewer approval.
+
+#### Set secrets with `gh` (from a maintainer laptop)
+
+Log in (`gh auth login`) with permission to manage secrets. Environments **`staging`** and **`production`** must exist under **Settings → Environments** if you store environment-scoped secrets (recommended).
+
+One-shot helper (scans host keys, then uploads):
+
+```bash
+./scripts/gh-set-deploy-ssh-secrets.sh --key ~/.ssh/your-deploy-key.ed25519 \
+  --scan-hosts "136.114.103.71" --env staging
+
+./scripts/gh-set-deploy-ssh-secrets.sh --key ~/.ssh/your-deploy-key.ed25519 \
+  --scan-hosts "130.245.136.44,130.245.136.21" --env production
+```
+
+Use `--env repo` for repository-level secrets only, or `--env all` to push the same key and known_hosts to both environments. `--dry-run` prints the `gh` invocations without calling GitHub or `ssh-keyscan`.
+
+Equivalent manual commands:
+
+```bash
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+gh secret set DEPLOY_SSH_KEY --repo "$REPO" --env production < ~/.ssh/your-deploy-key.ed25519
+( ssh-keyscan -H 130.245.136.44; ssh-keyscan -H 130.245.136.21 ) | gh secret set SSH_KNOWN_HOSTS --repo "$REPO" --env production
+
+gh variable set PROD_HOST --body "130.245.136.44" --repo "$REPO"
+gh variable set PROD_USER --body "ubuntu" --repo "$REPO"
+```
 
 ### How to run
 

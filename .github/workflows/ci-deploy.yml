@@ -44,6 +44,7 @@ jobs:
           bash -n scripts/synthetic-probe.sh
           bash -n scripts/metrics-snapshot.sh
           bash -n scripts/self-hosted-actions-runner-disk-cleanup.sh
+          bash -n scripts/gh-set-deploy-ssh-secrets.sh
           bash -n scripts/recommended-release-verify.sh
           bash -n scripts/measure-fanout-baseline.sh
           python3 -m py_compile deploy/ensure-pgdump-env.py

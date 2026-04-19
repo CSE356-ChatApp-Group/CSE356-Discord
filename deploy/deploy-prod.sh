@@ -35,15 +35,25 @@ source "${SCRIPT_DIR}/deploy-common.sh"
 
 ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT="${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT:-true}"
 
+# Extra OpenSSH client options for every prod ssh/scp (monitoring uses raw scp and must match).
+# Default accept-new: first connect records the key; later connects verify (survives VM reprovision
+# better than strict yes). For strict CI: DEPLOY_SSH_EXTRA_OPTS='-o StrictHostKeyChecking=yes'
+# after pre-populating known_hosts. To fix a one-off mismatch: ssh-keygen -R "${PROD_HOST}" etc.
+DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-new}"
+
 ssh_prod() {
+  # shellcheck disable=SC2086
   ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
       -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+      ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${PROD_HOST}" "$@"
 }
 
 ssh_prod_db() {
+  # shellcheck disable=SC2086
   ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
       -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+      ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${PROD_DB_HOST}" "$@"
 }
 
@@ -491,7 +501,9 @@ do_fast_rollback() {
   echo "✓ Release found on server"
 
   # Ensure health-check.sh is in place on the server
+  # shellcheck disable=SC2086
   scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p \
+      ${DEPLOY_SSH_EXTRA_OPTS} \
       "${SCRIPT_DIR}/health-check.sh" "${PROD_USER}@${PROD_HOST}:/tmp/health-check.sh"
   ssh_prod "chmod +x /tmp/health-check.sh"
 
@@ -854,8 +866,14 @@ fi  # end SKIP_BACKUP check
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
 echo "2b) Installing and configuring PgBouncer..."
 ssh_prod "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
-scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
-scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
+# shellcheck disable=SC2086
+scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
+# shellcheck disable=SC2086
+scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
 ssh_prod "
   set -euo pipefail
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
@@ -1053,8 +1071,14 @@ echo "✓ Artifact ready locally"
 
 # 4. Copy to production server
 echo "4. Copying to production..."
-scp "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
-scp "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "${SCRIPT_DIR}/candidate-ws-smoke.cjs" "$PROD_USER@$PROD_HOST:/tmp/"
+# shellcheck disable=SC2086
+scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
+# shellcheck disable=SC2086
+scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "${SCRIPT_DIR}/candidate-ws-smoke.cjs" "$PROD_USER@$PROD_HOST:/tmp/"
 rm "$DOWNLOAD_PATH"
 echo "✓ Copied to production"
 
@@ -1127,8 +1151,14 @@ echo "5.5. Installing/updating systemd unit..."
 # Use ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
 # subsystem which misparses '@' in remote paths, causing "Permission denied".
 ssh_prod 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
-scp "${SCRIPT_DIR}/apply-env-profile.py" "${PROD_USER}@${PROD_HOST}:/tmp/apply-env-profile.py"
-scp "${SCRIPT_DIR}/env/prod.required.env" "${PROD_USER}@${PROD_HOST}:/tmp/prod.required.env"
+# shellcheck disable=SC2086
+scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${SCRIPT_DIR}/apply-env-profile.py" "${PROD_USER}@${PROD_HOST}:/tmp/apply-env-profile.py"
+# shellcheck disable=SC2086
+scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${SCRIPT_DIR}/env/prod.required.env" "${PROD_USER}@${PROD_HOST}:/tmp/prod.required.env"
 ssh_prod "
   set -e
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
@@ -1371,7 +1401,11 @@ fi
 
 # 8c. Nginx access.log: append request_time + upstream_response_time (idempotent).
 echo "8c. Nginx access log timing fields (idempotent)..."
-scp -o BatchMode=yes -o ConnectTimeout=20 "${SCRIPT_DIR}/patch-nginx-access-log-timing.sh" "${PROD_USER}@${PROD_HOST}:/tmp/patch-nginx-access-log-timing.sh"
+# shellcheck disable=SC2086
+scp -o BatchMode=yes -o ConnectTimeout=20 \
+    -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${SCRIPT_DIR}/patch-nginx-access-log-timing.sh" "${PROD_USER}@${PROD_HOST}:/tmp/patch-nginx-access-log-timing.sh"
 ssh_prod 'sudo bash /tmp/patch-nginx-access-log-timing.sh && sudo rm -f /tmp/patch-nginx-access-log-timing.sh'
 echo "✓ Nginx access log timing patch applied"
 
@@ -2113,7 +2147,10 @@ python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
   --output "${PROM_BUILD}" \
   --app-host "${PROM_APP_HOST}" \
   --workers "${CHATAPP_INSTANCES}"
-scp -q "${PROM_BUILD}" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-host.yml.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${PROM_BUILD}" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-host.yml.deploy" || true
 rm -f "${PROM_BUILD}"
 
 # 10.6. Refresh Prometheus on the DB VM (scrapes app VM private IP; see prometheus-host.yml).
@@ -2140,19 +2177,52 @@ ssh_prod_db "
 
 echo "10.65. Sync monitoring: DB VM (Prometheus, Alertmanager, Grafana, Loki, Tempo) + app VM (node-exporter, promtail, redis_exporter)..."
 ENV_PULL="$(mktemp)"
-scp -q "${PROD_USER}@${PROD_HOST}:/opt/chatapp/shared/.env" "${ENV_PULL}" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${PROD_USER}@${PROD_HOST}:/opt/chatapp/shared/.env" "${ENV_PULL}" || true
 
-scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/alerts.yml.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/alertmanager.yml.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/db-compose.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/db-compose.yml.deploy" || true
-scp -qr "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "$PROD_USER@$PROD_DB_HOST:/tmp/grafana-provisioning-remote.deploy" || true
-scp -q "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-db-file-sd.py.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "$PROD_USER@$PROD_DB_HOST:/tmp/db-node.json.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "$PROD_USER@$PROD_DB_HOST:/tmp/db-postgres.json.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/loki-config.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/loki-config.yml.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/tempo-config.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/tempo-config.yml.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/alerts.yml.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/alertmanager.yml.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/db-compose.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/db-compose.yml.deploy" || true
+# shellcheck disable=SC2086
+scp -qr -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "$PROD_USER@$PROD_DB_HOST:/tmp/grafana-provisioning-remote.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-db-file-sd.py.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "$PROD_USER@$PROD_DB_HOST:/tmp/db-node.json.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "$PROD_USER@$PROD_DB_HOST:/tmp/db-postgres.json.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/loki-config.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/loki-config.yml.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/tempo-config.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/tempo-config.yml.deploy" || true
 if [ -f "${ENV_PULL}" ]; then
-  scp -q "${ENV_PULL}" "$PROD_USER@$PROD_DB_HOST:/tmp/chatapp-monitoring.env.deploy" || true
+  # shellcheck disable=SC2086
+  scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+      ${DEPLOY_SSH_EXTRA_OPTS} \
+      "${ENV_PULL}" "$PROD_USER@$PROD_DB_HOST:/tmp/chatapp-monitoring.env.deploy" || true
 fi
 rm -f "${ENV_PULL}"
 
@@ -2229,9 +2299,18 @@ ssh_prod_db "
   echo 'Alertmanager Discord webhook wiring verified (DB VM)'
 "
 
-scp -q "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/promtail-host-config.yml" "$PROD_USER@$PROD_HOST:/tmp/promtail-host-config.yml.deploy" || true
-scp -q "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/infrastructure/monitoring/promtail-host-config.yml" "$PROD_USER@$PROD_HOST:/tmp/promtail-host-config.yml.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
 ssh_prod "
   set -euo pipefail
   if [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/promtail-host-config.yml.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ]; then
