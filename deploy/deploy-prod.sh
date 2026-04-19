@@ -763,9 +763,39 @@ fi
 # Never pg_dump through PgBouncer transaction pool (unreliable COPY); use PGDUMP_DATABASE_URL.
 # Set SKIP_BACKUP=true for config-only deploys (same SHA, env-var change only) to avoid
 # running gzip compression on the app VM while the grader is live.
+# Auto-skip if no pending migrations (saves 5-10 min on a 7+ GB DB).
+if [[ "${SKIP_BACKUP:-false}" != "true" ]]; then
+  echo "2. Checking for pending migrations..."
+  PENDING_MIGRATIONS=$(ssh_prod bash -s -- "$RELEASE_SHA" <<'CHECK_MIGRATIONS'
+set -euo pipefail
+RELEASE_SHA_REMOTE="$1"
+source /opt/chatapp/shared/.env
+RELEASE_MIGRATIONS="/opt/chatapp/releases/${RELEASE_SHA_REMOTE}/migrations"
+# Fall back to current symlink if release dir not yet extracted
+[[ -d "$RELEASE_MIGRATIONS" ]] || RELEASE_MIGRATIONS="/opt/chatapp/current/migrations"
+MIGRATE_DB="${PGDUMP_DATABASE_URL:-$DATABASE_URL}"
+APPLIED=$(psql "$MIGRATE_DB" -qAt -c "SELECT filename FROM schema_migrations;" 2>/dev/null || echo "")
+PENDING=0
+for f in "$RELEASE_MIGRATIONS"/*.sql; do
+  fname=$(basename "$f")
+  if ! echo "$APPLIED" | grep -qx "$fname"; then
+    PENDING=$((PENDING + 1))
+  fi
+done
+echo "$PENDING"
+CHECK_MIGRATIONS
+  )
+  if [[ "${PENDING_MIGRATIONS:-0}" -eq 0 ]]; then
+    echo "2. No pending migrations — skipping database backup (saves ~5-10 min)"
+    deploy_log_phase "database backup skipped (no pending migrations)"
+    SKIP_BACKUP=true
+  else
+    echo "2. Found ${PENDING_MIGRATIONS} pending migration(s) — backup required"
+  fi
+fi
+
 if [[ "${SKIP_BACKUP:-false}" == "true" ]]; then
-  echo "2. Skipping database backup (SKIP_BACKUP=true)"
-  deploy_log_phase "database backup skipped"
+  : # already logged above
 else
 echo "2. Backing up database..."
 ssh_prod bash -s <<'REMOTE_BACKUP'
