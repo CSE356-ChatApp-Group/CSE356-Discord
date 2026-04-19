@@ -1626,12 +1626,19 @@ router.delete('/:id',
       sideEffects.deleteAttachmentObjects(attachmentKeys);
       // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
       if (message.channel_id) {
-        await repointChannelLastMessage(message.channel_id);
+        repointChannelLastMessage(message.channel_id).catch((err) =>
+          logger.warn({ err, channelId: message.channel_id }, 'repointChannelLastMessage failed'),
+        );
         redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
         await bustMessagesCacheSafe({ channelId: message.channel_id });
       }
       if (message.conversation_id) {
-        await repointConversationLastMessage(message.conversation_id);
+        repointConversationLastMessage(message.conversation_id).catch((err) =>
+          logger.warn(
+            { err, conversationId: message.conversation_id },
+            'repointConversationLastMessage failed',
+          ),
+        );
         await bustMessagesCacheSafe({ conversationId: message.conversation_id });
       }
       if (message.conversation_id) {
