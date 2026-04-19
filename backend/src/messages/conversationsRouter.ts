@@ -442,6 +442,15 @@ router.post('/',
       ]);
 
       if (conversation) {
+        // Push subscribe_channels to all participants so their active WS sessions
+        // subscribe to conversation:<id> immediately — same pattern as private channel
+        // invites. Without this, connected users miss messages until they reconnect.
+        publishUserFeedTargets(allIds, {
+          __wsInternal: {
+            kind: 'subscribe_channels',
+            channels: [`conversation:${conv.id}`],
+          },
+        }).catch(() => {});
         await publishConversationInviteNotifications(
           invitedUserIds.map((userId) => `user:${userId}`),
           {
@@ -667,6 +676,14 @@ async function addParticipantsHandler(req, res, next) {
     }
 
     if (participantIdsToAdd.length) {
+      // Push subscribe_channels to newly added participants so active WS sessions
+      // subscribe to the conversation channel without waiting for a reconnect.
+      publishUserFeedTargets(participantIdsToAdd, {
+        __wsInternal: {
+          kind: 'subscribe_channels',
+          channels: [`conversation:${req.params.id}`],
+        },
+      }).catch(() => {});
       await publishConversationInviteNotifications(
         participantIdsToAdd.map((participantId) => `user:${participantId}`),
         sharedEventData

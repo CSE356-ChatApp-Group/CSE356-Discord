@@ -5,7 +5,7 @@ const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
 const { wsReplayQueryTotal, wsReplayQueryDurationMs } = require('../utils/metrics');
-const { ringBufferKey, RING_BUFFER_WINDOW_MS } = require('../websocket/fanout');
+const { ringBufferKey, RING_BUFFER_WINDOW_MS, isRingBufferReliable } = require('../websocket/fanout');
 import { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 // Reconnect replay is our safety net for brief WS gaps. Keep the default large
@@ -272,6 +272,10 @@ async function loadReplayFromRingBuffers(channelTopics, lowerBoundMs, upperBound
   if (!Array.isArray(channelTopics) || channelTopics.length === 0) return null;
   if (!Number.isFinite(lowerBoundMs) || !Number.isFinite(upperBoundMs)) return null;
   if (upperBoundMs <= lowerBoundMs) return [];
+
+  // If a ring buffer write recently failed, a successful-but-empty read would be
+  // indistinguishable from "genuinely no messages", so fall back to DB.
+  if (!isRingBufferReliable()) return null;
 
   // If the requested window is wider than the ring covers, fall back to DB.
   const windowMs = upperBoundMs - lowerBoundMs;

@@ -32,10 +32,31 @@ function sleepMs(ms) {
  * Score: message createdAt epoch-ms (falls back to Date.now() if not parsed)
  * TTL:   RING_BUFFER_KEY_TTL_S seconds; entries older than RING_BUFFER_WINDOW_MS pruned on each write
  *
- * Write failures are silently swallowed — the DB replay path remains the fallback.
+ * Write failures mark the ring as unreliable for RING_BUFFER_WRITE_FAIL_TTL_MS
+ * so that reconnect replay falls back to DB instead of trusting a stale/empty
+ * sorted set (a successful empty read after a failed write is indistinguishable
+ * from "genuinely no messages").
  */
 const RING_BUFFER_WINDOW_MS = Number(process.env.RING_BUFFER_WINDOW_MS || '30000');
 const RING_BUFFER_KEY_TTL_S = Math.ceil(RING_BUFFER_WINDOW_MS / 1000) * 2 + 5;
+const RING_BUFFER_WRITE_FAIL_TTL_MS = Number(process.env.RING_BUFFER_WRITE_FAIL_TTL_MS || '60000');
+
+// Per-process flag: if a ring buffer pipeline write fails, distrust all ring
+// buffer reads until this deadline passes. Cleared to 0 once expired.
+let ringBufferUnreliableUntil = 0;
+
+function markRingBufferUnreliable() {
+  ringBufferUnreliableUntil = Date.now() + RING_BUFFER_WRITE_FAIL_TTL_MS;
+}
+
+function isRingBufferReliable() {
+  if (ringBufferUnreliableUntil === 0) return true;
+  if (Date.now() >= ringBufferUnreliableUntil) {
+    ringBufferUnreliableUntil = 0;
+    return true;
+  }
+  return false;
+}
 
 function ringBufferKey(channel) {
   return `msg_ring:${channel}`;
@@ -56,9 +77,13 @@ function bufferMessage(channel, payload) {
     p.zadd(key, scoreMs, member);
     p.zremrangebyscore(key, '-inf', cutoff);
     p.expire(key, RING_BUFFER_KEY_TTL_S);
-    p.exec().catch(() => {});
-  } catch {
-    // Ring buffer writes are best-effort; DB replay remains the authoritative fallback.
+    p.exec().catch((err) => {
+      logger.warn({ err, channel }, 'Ring buffer pipeline write failed; distrusting ring for replay');
+      markRingBufferUnreliable();
+    });
+  } catch (err) {
+    logger.warn({ err, channel }, 'Ring buffer write threw; distrusting ring for replay');
+    markRingBufferUnreliable();
   }
 }
 
@@ -111,4 +136,4 @@ async function publish(channel, payload) {
   throw lastErr;
 }
 
-module.exports = { publish, ringBufferKey, RING_BUFFER_WINDOW_MS };
+module.exports = { publish, ringBufferKey, RING_BUFFER_WINDOW_MS, isRingBufferReliable };
