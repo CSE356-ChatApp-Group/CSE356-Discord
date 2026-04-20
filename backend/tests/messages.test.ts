@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import { request, app, wsServer, pool, redis, closeRedisConnections } from './runtime';
 
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
+const { flushDirtyReadStatesToDB } = require('../src/messages/batchReadState');
 
 afterAll(async () => {
   await wsServer.shutdown();
@@ -163,7 +164,16 @@ describe('Read state writes', () => {
          AND channel_id = $2`,
       [owner.user.id, channelId],
     );
-    expect(rows[0]?.last_read_message_id).toBe(secondMessageId);
+    // Option C defers the DB write to the batch flush interval; force it now.
+    await flushDirtyReadStatesToDB();
+    const { rows: flushedRows } = await pool.query(
+      `SELECT last_read_message_id::text AS last_read_message_id
+       FROM read_states
+       WHERE user_id = $1
+         AND channel_id = $2`,
+      [owner.user.id, channelId],
+    );
+    expect(flushedRows[0]?.last_read_message_id).toBe(secondMessageId);
   });
 });
 
