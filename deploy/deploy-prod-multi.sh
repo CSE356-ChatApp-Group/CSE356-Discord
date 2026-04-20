@@ -23,6 +23,8 @@ VM2_INTERNAL=10.0.3.243
 VM3_INTERNAL=10.0.2.164
 PROD_USER="${PROD_USER:-ubuntu}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# VM1 runs fewer workers than VM2/VM3; deploy-prod.sh reads CHATAPP_INSTANCES from the target
+# host's /opt/chatapp/shared/.env so systemd/nginx match (Phase 5 health checks use these lists).
 VM1_WORKER_PORTS=(4000 4001 4002 4003)
 VMX_WORKER_PORTS=(4000 4001 4002 4003 4004)
 

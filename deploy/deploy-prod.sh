@@ -155,9 +155,18 @@ WORKER_SETTLE_SECS="${WORKER_SETTLE_SECS:-10}"
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 
 # Number of Node.js HTTP workers (systemd chatapp@ ports).
-# Production runs five workers by default (chatapp@4000..@4004). Staging validated 5 workers
-# clean across multiple SLO runs (453a655). Pool math stays safe: 5×80=400 virtual < 500 real.
-CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-5}
+# Prefer the value persisted on the deploy target in /opt/chatapp/shared/.env so VM1 can run
+# 4 workers (no chatapp@4004) while CI omits CHATAPP_INSTANCES; otherwise deploy-prod-multi
+# would re-enable :4004 when this script defaulted to 5. Fall back to caller env, then 5.
+_chatapp_remote=""
+_chatapp_remote=$(ssh_prod "grep -E '^CHATAPP_INSTANCES=' /opt/chatapp/shared/.env 2>/dev/null | tail -1 | cut -d= -f2-" 2>/dev/null || true)
+_chatapp_remote=$(printf '%s' "${_chatapp_remote}" | tr -d '[:space:]' | tr -d '\r')
+if [[ "${_chatapp_remote}" =~ ^[0-9]+$ ]] && [ "${_chatapp_remote}" -ge 1 ] && [ "${_chatapp_remote}" -le 8 ]; then
+  CHATAPP_INSTANCES="${_chatapp_remote}"
+else
+  CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-5}
+fi
+unset _chatapp_remote
 _REMOTE_NCPU=$(ssh_prod 'nproc --all' 2>/dev/null || echo 2)
 # PgBouncer pool + Node pool math matches deploy-staging.sh (same caps, different host).
 # Scale default_pool_size with **host vCPU** so 8 vCPU (etc.) actually gets more real PG
@@ -2097,6 +2106,12 @@ PY
     sudo systemctl reload nginx
     for p in ${TARGET_PORTS_CSV//,/ }; do
       sudo systemctl enable chatapp@\$p 2>/dev/null || true
+    done
+    # Belt-and-suspenders: stop/disable any higher-numbered workers (e.g. @4004 when CHATAPP_INSTANCES=4)
+    # so a previous deploy or manual start cannot leave them enabled after nginx only lists TARGET_PORTS.
+    for p in \$(seq $((4000 + CHATAPP_INSTANCES)) 4007); do
+      sudo systemctl stop chatapp@\${p} 2>/dev/null || true
+      sudo systemctl disable chatapp@\${p} 2>/dev/null || true
     done
     echo 'Nginx: load-balanced ports ${TARGET_PORTS_CSV}'
   " || {
