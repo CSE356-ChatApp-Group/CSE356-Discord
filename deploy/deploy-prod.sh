@@ -1576,11 +1576,35 @@ if ! sudo test -f "$SITE"; then
   exit 0
 fi
 if sudo awk '
-  /location \/api\/ \{/ {in_api=1; next}
-  in_api && /\}/ {in_api=0}
-  in_api && /proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;/ {retry=1}
-  in_api && /proxy_next_upstream_tries 2;/ {tries=1}
-  END {exit((retry && tries) ? 0 : 1)}
+  BEGIN {
+    in_api=0
+    seen_api=0
+    all_ok=1
+    retry=0
+    tries=0
+  }
+  /location[[:space:]]+\/api\/[[:space:]]*\{/ {
+    in_api=1
+    seen_api++
+    retry=0
+    tries=0
+    next
+  }
+  in_api && /^[[:space:]]*}/ {
+    if (!(retry && tries)) {
+      all_ok=0
+    }
+    in_api=0
+    next
+  }
+  in_api && /proxy_next_upstream[[:space:]]+error[[:space:]]+timeout[[:space:]]+http_502[[:space:]]+http_503[[:space:]]+http_504[[:space:]]+non_idempotent;/ {retry=1}
+  in_api && /proxy_next_upstream_tries[[:space:]]+2;/ {tries=1}
+  END {
+    if (in_api && !(retry && tries)) {
+      all_ok=0
+    }
+    exit((seen_api > 0 && all_ok) ? 0 : 1)
+  }
 ' "$SITE"; then
   echo "9.06: /api retry + non-idempotent POST policy already present"
   exit 0
@@ -1598,23 +1622,32 @@ from pathlib import Path
 p = Path(os.environ['TMP'])
 text = p.read_text()
 pattern = re.compile(r'(location\s+/api/\s*\{)(.*?)(\n\s*\})', re.DOTALL)
-m = pattern.search(text)
-if not m:
+found = False
+changed = False
+
+def normalize_api_block(match):
+    global found, changed
+    found = True
+    body = match.group(2)
+    orig = body
+    # Remove mistaken standalone directive (not valid nginx); real knob is
+    # `non_idempotent` on the proxy_next_upstream line.
+    body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
+    retry_full = os.environ["RETRY_FULL"]
+    # Normalize all retry directives in /api/ to one canonical pair to keep patching idempotent.
+    body = re.sub(r"\n\s*proxy_next_upstream[^\n]*;", "", body)
+    body = re.sub(r"\n\s*proxy_next_upstream_tries\s+\d+;", "", body)
+    body += f"\n    {retry_full}\n    proxy_next_upstream_tries 2;"
+    if body != orig:
+        changed = True
+    return match.group(1) + body + match.group(3)
+
+text = pattern.sub(normalize_api_block, text)
+if not found:
     print('9.06: /api location block not found', file=sys.stderr)
     sys.exit(1)
-body = m.group(2)
-orig = body
-# Remove mistaken standalone directive (not valid nginx); real knob is
-# `non_idempotent` on the proxy_next_upstream line.
-body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
-retry_full = os.environ["RETRY_FULL"]
-# Normalize all retry directives in /api/ to one canonical pair to keep patching idempotent.
-body = re.sub(r"\n\s*proxy_next_upstream[^\n]*;", "", body)
-body = re.sub(r"\n\s*proxy_next_upstream_tries\s+\d+;", "", body)
-body += f"\n    {retry_full}\n    proxy_next_upstream_tries 2;"
-if body == orig:
+if not changed:
     sys.exit(2)
-text = text[:m.start()] + m.group(1) + body + m.group(3) + text[m.end():]
 p.write_text(text)
 sys.exit(0)
 PY
