@@ -336,6 +336,13 @@ const fanoutTargetCandidatesHistogram = new client.Histogram({
   buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
 });
 
+/** In-process cache outcomes for recent-connect target resolution in channel fanout. */
+const fanoutRecentConnectCacheTotal = new client.Counter({
+  name: 'fanout_recent_connect_cache_total',
+  help: 'Cache outcomes for in-process channel recent-connect target resolution',
+  labelNames: ['result'],
+});
+
 /** Cache outcomes for WS bootstrap subscription lists. */
 const wsBootstrapListCacheTotal = new client.Counter({
   name: 'ws_bootstrap_list_cache_total',
@@ -606,6 +613,8 @@ function startPgPoolMetrics(pool) {
     fanoutPublishTargetsHistogram.observe({ path: 'conversation_event' }, 0);
     fanoutTargetCandidatesHistogram.observe({ path: 'channel_message_user_topics' }, 0);
     fanoutTargetCandidatesHistogram.observe({ path: 'channel_message_recent_connect_user_topics' }, 0);
+    fanoutRecentConnectCacheTotal.inc({ result: 'hit' }, 0);
+    fanoutRecentConnectCacheTotal.inc({ result: 'miss' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'hit' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'miss' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'coalesced' }, 0);
@@ -672,6 +681,7 @@ module.exports = {
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
   fanoutTargetCandidatesHistogram,
+  fanoutRecentConnectCacheTotal,
   wsBootstrapListCacheTotal,
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,

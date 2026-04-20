@@ -18,6 +18,7 @@ const {
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
   fanoutTargetCandidatesHistogram,
+  fanoutRecentConnectCacheTotal,
 } = require('../utils/metrics');
 
 const rawUserFanoutTargetsCacheTtl = Number(process.env.CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS || '180');
@@ -26,6 +27,12 @@ const CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS =
     ? Math.floor(rawUserFanoutTargetsCacheTtl)
     : 180;
 const channelUserFanoutTargetsInflight: Map<string, Promise<string[]>> = new Map();
+const _recentConnectTargetCacheMs = parseInt(process.env.RECENT_CONNECT_TARGET_CACHE_MS || '1500', 10);
+const RECENT_CONNECT_TARGET_CACHE_MS =
+  Number.isFinite(_recentConnectTargetCacheMs) && _recentConnectTargetCacheMs >= 0
+    ? _recentConnectTargetCacheMs
+    : 1500;
+const recentConnectTargetsCache: Map<string, { targets: string[]; cachedAt: number }> = new Map();
 
 function channelMessageUserFanoutEnabled() {
   const v = process.env.CHANNEL_MESSAGE_USER_FANOUT;
@@ -228,11 +235,44 @@ async function publishUserTopicTargets(
   );
 }
 
-async function recentConnectTargets(targets: string[]) {
+function recentConnectTargetsCacheKey(channelId: string) {
+  return `rc_targets:${channelId}`;
+}
+
+function readRecentConnectTargetsCache(channelId: string): string[] | null {
+  if (RECENT_CONNECT_TARGET_CACHE_MS <= 0) return null;
+  const key = recentConnectTargetsCacheKey(channelId);
+  const entry = recentConnectTargetsCache.get(key);
+  if (!entry) return null;
+  const ageMs = Date.now() - entry.cachedAt;
+  if (ageMs > RECENT_CONNECT_TARGET_CACHE_MS) {
+    recentConnectTargetsCache.delete(key);
+    return null;
+  }
+  return entry.targets;
+}
+
+function writeRecentConnectTargetsCache(channelId: string, targets: string[]) {
+  if (RECENT_CONNECT_TARGET_CACHE_MS <= 0) return;
+  recentConnectTargetsCache.set(recentConnectTargetsCacheKey(channelId), {
+    targets,
+    cachedAt: Date.now(),
+  });
+}
+
+async function recentConnectTargets(channelId: string, targets: string[]) {
   if (!targets.length) return [];
+  const cachedTargets = readRecentConnectTargetsCache(channelId);
+  if (cachedTargets) {
+    fanoutRecentConnectCacheTotal.inc({ result: 'hit' });
+    return cachedTargets;
+  }
+  fanoutRecentConnectCacheTotal.inc({ result: 'miss' });
   try {
     const markers = await redis.mget(...targets.map((target) => wsRecentConnectKey(target.slice(5))));
-    return targets.filter((_target, idx) => !!markers[idx]);
+    const filteredTargets = targets.filter((_target, idx) => !!markers[idx]);
+    writeRecentConnectTargetsCache(channelId, filteredTargets);
+    return filteredTargets;
   } catch (err) {
     logger.warn(
       { err, targetCount: targets.length },
@@ -280,7 +320,7 @@ async function resolveUserTopicTargets(channelId: string) {
   }
 
   const recentLookupStartedAt = process.hrtime.bigint();
-  const inlineTargets = await recentConnectTargets(capped);
+  const inlineTargets = await recentConnectTargets(channelId, capped);
   fanoutPublishDurationMs.observe(
     { path: 'channel_message_recent_connect_user_topics', stage: 'target_lookup' },
     Number(process.hrtime.bigint() - recentLookupStartedAt) / 1e6,
@@ -331,7 +371,7 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
   const blocking = userFanoutHttpBlocking();
   const recentTargets =
     mode === 'all' && !blocking
-      ? await recentConnectTargets(allTargets)
+      ? await recentConnectTargets(channelId, allTargets)
       : hintedRecentTargets;
   const recentTargetSet = new Set(recentTargets);
   const inlineTargets =
