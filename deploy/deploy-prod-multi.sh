@@ -1,14 +1,15 @@
 #!/bin/bash
 # deploy/deploy-prod-multi.sh
-# Two-VM production deploy orchestrator.
-# Deploys to VM2 first (no shared services), verifies healthy, then deploys to VM1.
+# Three-VM production deploy orchestrator.
+# Deploys to VM3 first, then VM2 (both workers-only), then VM1 (shared services).
 #
 # Usage: bash deploy/deploy-prod-multi.sh <release-sha>
-#   --rollback    Pass through to both VM deploys (fast rollback mode)
+#   --rollback    Pass through to all VM deploys (fast rollback mode)
 #
-# VM2 (130.245.136.137) runs Node workers only; no PgBouncer/Redis/MinIO/nginx.
+# VM3 (130.245.136.54)  runs Node workers only; no shared services.
+# VM2 (130.245.136.137) runs Node workers only; no shared services.
 # VM1 (130.245.136.44)  runs Node workers + PgBouncer + Redis + MinIO + nginx.
-# Both share the same /opt/chatapp/shared/.env (managed independently per VM).
+# All share DB/Redis/PgBouncer via VM1's internal IP (10.0.0.237).
 
 set -euo pipefail
 
@@ -17,7 +18,9 @@ ROLLBACK_FLAG="${2:-}"
 
 VM1=130.245.136.44
 VM2=130.245.136.137
+VM3=130.245.136.54
 VM2_INTERNAL=10.0.3.243
+VM3_INTERNAL=10.0.2.164
 PROD_USER="${PROD_USER:-ubuntu}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -35,18 +38,47 @@ ssh_vm() {
 }
 
 # Extra upstream servers to inject on every rewrite_nginx_upstream call during VM1 deploy.
-VM2_UPSTREAM_CSV="${VM2_INTERNAL}:4000,${VM2_INTERNAL}:4001,${VM2_INTERNAL}:4002,${VM2_INTERNAL}:4003,${VM2_INTERNAL}:4004"
+EXTRA_UPSTREAM_CSV="${VM2_INTERNAL}:4000,${VM2_INTERNAL}:4001,${VM2_INTERNAL}:4002,${VM2_INTERNAL}:4003,${VM2_INTERNAL}:4004,${VM3_INTERNAL}:4000,${VM3_INTERNAL}:4001,${VM3_INTERNAL}:4002,${VM3_INTERNAL}:4003,${VM3_INTERNAL}:4004"
 
 echo "======================================================================"
-echo "=== Two-VM Production Deploy: ${SHA:0:12}                        ==="
+echo "=== Three-VM Production Deploy: ${SHA:0:12}                      ==="
 echo "=== VM1 (nginx/PgBouncer/Redis): ${VM1}            ==="
 echo "=== VM2 (workers only):          ${VM2}           ==="
+echo "=== VM3 (workers only):          ${VM3}            ==="
 echo "======================================================================"
 echo ""
 
-# ── Phase 1: Deploy to VM2 first ─────────────────────────────────────────────
-# VM2 has no shared services (PgBouncer, Redis, MinIO, nginx) so a failed deploy
-# here has zero impact on live traffic — all requests still route through VM1 workers.
+# ── Phase 0: Deploy to VM3 first ─────────────────────────────────────────────
+# VM3 has no shared services so a failed deploy has zero impact on live traffic.
+echo "=== Phase 0: Deploy to VM3 (isolated — no live-traffic impact) ==="
+PROD_HOST=$VM3 \
+  SKIP_BACKUP=true \
+  SKIP_UPSTREAM_PARITY_CHECK=1 \
+  ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT=false \
+  DEPLOY_NON_INTERACTIVE=true \
+  ${ROLLBACK_FLAG:+FAST_ROLLBACK=true} \
+  bash "${SCRIPT_DIR}/deploy-prod.sh" "$SHA" ${ROLLBACK_FLAG}
+
+# ── Phase 0.5: Verify VM3 healthy ────────────────────────────────────────────
+echo ""
+echo "=== Phase 0.5: Verify all 5 VM3 workers healthy ==="
+all_ok=1
+for p in 4000 4001 4002 4003 4004; do
+  status=$(ssh_vm "$VM3" "curl -sf --max-time 8 http://127.0.0.1:${p}/health | python3 -c \"import sys,json; print(json.load(sys.stdin)['status'])\"" 2>/dev/null || echo "DEAD")
+  echo "  VM3 worker ${p}: ${status}"
+  if [ "$status" != "ok" ]; then
+    all_ok=0
+  fi
+done
+if [ "$all_ok" -ne 1 ]; then
+  echo "ERROR: One or more VM3 workers unhealthy — aborting before touching VM2/VM1."
+  exit 1
+fi
+echo "✓ All VM3 workers healthy"
+
+# ── Phase 1: Deploy to VM2 ───────────────────────────────────────────────────
+# VM2 has no shared services so a failed deploy has zero impact on live traffic.
+echo ""
 echo "=== Phase 1: Deploy to VM2 (isolated — no live-traffic impact) ==="
 PROD_HOST=$VM2 \
   SKIP_BACKUP=true \
@@ -67,7 +99,7 @@ for p in 4000 4001 4002 4003 4004; do
 done
 if [ "$all_ok" -ne 1 ]; then
   echo "ERROR: One or more VM2 workers unhealthy — aborting before touching VM1."
-  echo "       VM1 is still on the previous release and fully operational."
+  echo "       VM1/VM3 are still on their previous releases."
   exit 1
 fi
 echo "✓ All VM2 workers healthy"
@@ -79,24 +111,26 @@ echo "✓ All VM2 workers healthy"
 echo ""
 echo "=== Phase 3: Deploy to VM1 (PgBouncer/Redis/MinIO/nginx) ==="
 PROD_HOST=$VM1 \
-  EXTRA_UPSTREAM_SERVERS_CSV="$VM2_UPSTREAM_CSV" \
+  EXTRA_UPSTREAM_SERVERS_CSV="$EXTRA_UPSTREAM_CSV" \
   ${ROLLBACK_FLAG:+FAST_ROLLBACK=true} \
   bash "${SCRIPT_DIR}/deploy-prod.sh" "$SHA" ${ROLLBACK_FLAG}
 
-# ── Phase 4: Ensure VM2 upstream entries survived the VM1 deploy ─────────────
+# ── Phase 4: Ensure VM2+VM3 upstream entries survived the VM1 deploy ─────────
 # rewrite_nginx_upstream now preserves EXTRA_UPSTREAM_SERVERS_CSV entries, so this
-# is a belt-and-suspenders check.  If entries are missing (e.g. manual nginx edit
-# since last deploy), re-inject them with Python to avoid fragile sed patterns.
+# is a belt-and-suspenders check.  If entries are missing, re-inject with Python.
 echo ""
-echo "=== Phase 4: Verify / re-inject VM2 upstream entries ==="
+echo "=== Phase 4: Verify / re-inject VM2+VM3 upstream entries ==="
 ssh_vm "$VM1" "
   set -euo pipefail
   SITE=/etc/nginx/sites-enabled/chatapp
-  if grep -q '${VM2_INTERNAL}' \"\$SITE\"; then
-    echo 'VM2 upstream entries intact — no action needed'
+  missing=0
+  grep -q '${VM2_INTERNAL}' \"\$SITE\" || missing=1
+  grep -q '${VM3_INTERNAL}' \"\$SITE\" || missing=1
+  if [ \"\$missing\" = \"0\" ]; then
+    echo 'VM2+VM3 upstream entries intact — no action needed'
     exit 0
   fi
-  echo 'VM2 upstream entries missing — re-injecting...'
+  echo 'Upstream entries missing — re-injecting...'
   TMP=\$(mktemp)
   sudo cp \"\$SITE\" \"\$TMP\"
   sudo python3 -c \"
@@ -106,19 +140,24 @@ from pathlib import Path
 site = Path('\$TMP')
 text = site.read_text()
 
-vm2_servers = (
+extra_servers = (
     '  server ${VM2_INTERNAL}:4000 max_fails=2 fail_timeout=10s;\\\n'
     '  server ${VM2_INTERNAL}:4001 max_fails=2 fail_timeout=10s;\\\n'
     '  server ${VM2_INTERNAL}:4002 max_fails=2 fail_timeout=10s;\\\n'
     '  server ${VM2_INTERNAL}:4003 max_fails=2 fail_timeout=10s;\\\n'
     '  server ${VM2_INTERNAL}:4004 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM3_INTERNAL}:4000 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM3_INTERNAL}:4001 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM3_INTERNAL}:4002 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM3_INTERNAL}:4003 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM3_INTERNAL}:4004 max_fails=2 fail_timeout=10s;\\\n'
 )
 
 def inject(m):
     block = m.group(0)
-    if '${VM2_INTERNAL}' in block:
+    if '${VM2_INTERNAL}' in block and '${VM3_INTERNAL}' in block:
         return block
-    return re.sub(r'(  keepalive \d+;)', vm2_servers + r'\1', block, count=1)
+    return re.sub(r'(  keepalive \d+;)', extra_servers + r'\1', block, count=1)
 
 text, n = re.subn(r'upstream app \{[^}]+\}', inject, text, count=1, flags=re.DOTALL)
 if n != 1:
@@ -128,16 +167,17 @@ site.write_text(text)
   sudo install -m 644 \"\$TMP\" \"\$SITE\"
   rm -f \"\$TMP\"
   sudo nginx -t && sudo systemctl reload nginx
-  echo 'VM2 upstream entries re-injected and nginx reloaded'
+  echo 'VM2+VM3 upstream entries re-injected and nginx reloaded'
 "
 
-# ── Phase 5: Final health check — all 10 workers across both VMs ─────────────
+# ── Phase 5: Final health check — all 15 workers across all VMs ──────────────
 echo ""
-echo "=== Phase 5: Final health check — all 10 workers ==="
+echo "=== Phase 5: Final health check — all 15 workers ==="
 overall_ok=1
-for vm in "$VM1" "$VM2"; do
+for vm in "$VM1" "$VM2" "$VM3"; do
   label="VM1"
   [ "$vm" = "$VM2" ] && label="VM2"
+  [ "$vm" = "$VM3" ] && label="VM3"
   echo "--- ${label} (${vm}) ---"
   # shellcheck disable=SC2029
   ssh_vm "$vm" 'for p in 4000 4001 4002 4003 4004; do
@@ -152,7 +192,7 @@ done
 echo ""
 if [ "$overall_ok" -eq 1 ]; then
   echo "======================================================================"
-  echo "=== Deploy complete: ${SHA:0:12} live on both VMs              ==="
+  echo "=== Deploy complete: ${SHA:0:12} live on all three VMs          ==="
   echo "======================================================================"
 else
   echo "WARNING: One or more workers may be degraded — check output above."
