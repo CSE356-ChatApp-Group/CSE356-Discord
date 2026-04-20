@@ -1269,8 +1269,8 @@ ssh_prod "
     && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT=.*/CHANNEL_MESSAGE_USER_FANOUT=true/' /opt/chatapp/shared/.env \
     || echo 'CHANNEL_MESSAGE_USER_FANOUT=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MODE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MODE=.*/CHANNEL_MESSAGE_USER_FANOUT_MODE=all/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_MESSAGE_USER_FANOUT_MODE=all' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MODE=.*/CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect/' /opt/chatapp/shared/.env \
+    || echo 'CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MAX=.*/CHANNEL_MESSAGE_USER_FANOUT_MAX=10000/' /opt/chatapp/shared/.env \
     || echo 'CHANNEL_MESSAGE_USER_FANOUT_MAX=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
@@ -1281,14 +1281,17 @@ ssh_prod "
     && sudo sed -i 's/^CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=.*/CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180/' /opt/chatapp/shared/.env \
     || echo 'CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^MESSAGE_USER_FANOUT_HTTP_BLOCKING=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=true/' /opt/chatapp/shared/.env \
-    || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=false/' /opt/chatapp/shared/.env \
+    || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^WS_AUTO_SUBSCRIBE_MODE=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^WS_AUTO_SUBSCRIBE_MODE=.*/WS_AUTO_SUBSCRIBE_MODE=messages/' /opt/chatapp/shared/.env \
     || echo 'WS_AUTO_SUBSCRIBE_MODE=messages' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^USER_FEED_SHARD_COUNT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=64/' /opt/chatapp/shared/.env \
-    || echo 'USER_FEED_SHARD_COUNT=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=4/' /opt/chatapp/shared/.env \
+    || echo 'USER_FEED_SHARD_COUNT=4' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^WS_RECENT_CONNECT_TTL_SECONDS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^WS_RECENT_CONNECT_TTL_SECONDS=.*/WS_RECENT_CONNECT_TTL_SECONDS=300/' /opt/chatapp/shared/.env \
+    || echo 'WS_RECENT_CONNECT_TTL_SECONDS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
     || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null

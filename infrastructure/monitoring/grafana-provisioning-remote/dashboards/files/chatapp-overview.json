@@ -781,11 +781,16 @@
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by (le, path) (rate(fanout_publish_targets_bucket{job=\"chatapp-api\"}[5m])))",
-          "legendFormat": "{{path}} p95",
+          "legendFormat": "{{path}} publish p95",
           "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(fanout_target_candidates_bucket{job=\"chatapp-api\"}[5m])))",
+          "legendFormat": "{{path}} candidates p95",
+          "refId": "B"
         }
       ],
-      "title": "Realtime fanout targets p95",
+      "title": "Realtime fanout publish vs candidate targets p95",
       "type": "timeseries"
     },
     {

@@ -43,7 +43,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - route p95 latency and request rate
    - p95 business-SQL round-trips per request
    - realtime fanout cache hit/miss/coalesced rates
-   - realtime fanout stage/target p95
+   - realtime fanout stage/target p95 plus candidate-audience p95 before recent-connect filtering
    - websocket bootstrap wall-time, breadth, and cache-hit rate
 
 2. **Grafana / Prometheus UI** — export panel data or run the same PromQL as in the snapshot script and paste results.
@@ -73,7 +73,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 | DB / handler | `pg_business_sql_queries_per_http_request`, `pg_queries_per_http_request` | Primary operator view is the business-SQL histogram by `route`; raw `pg_queries_per_http_request` also counts BEGIN/COMMIT/ROLLBACK and is mainly for engineering/debugging. |
 | Cache | `endpoint_list_cache_total` | Redis list cache `hit` / `miss` / `coalesced` by `endpoint`. |
 | Overload | `chatapp_overload_stage`, `http_overload_shed_total` | Stage 0–3; early 503s when shedding enabled. |
-| Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_cache_total`, `conversation_fanout_targets_cache_version_retry_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total` | Fanout health, Redis publish multiplier, target-cache effectiveness, conversation fanout cache invalidation races, WS bootstrap breadth, and slow clients. |
+| Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_candidates`, `fanout_target_cache_total`, `conversation_fanout_targets_cache_version_retry_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total` | Fanout health, Redis publish multiplier, candidate audience size before recent-connect filtering, target-cache effectiveness, conversation fanout cache invalidation races, WS bootstrap breadth, and slow clients. |
 | Messages | `message_post_response_total`, `message_post_idempotency_poll_total`, `message_post_idempotency_poll_wait_ms`, `message_cache_bust_failures_total` | POST outcomes; idempotency duplicate-lease polls (`outcome=replay_201|exhausted_409`) and wait histogram; cache bust issues. |
 | Optional RUM | `client_web_vital_*`, `client_rum_batches_total` | Browser-side; requires `ENABLE_CLIENT_RUM` + built frontend flags. |
 | Memory | `process_resident_memory_bytes{job="chatapp-api"}` | **Per Node process** (each `chatapp@` port is a target). **`ChatAppHighMemoryUsage`** in [`alerts.yml`](../infrastructure/monitoring/alerts.yml) fires when RSS **> ~650 MiB for 10m** per target — tune if VM RAM or worker count changes. Grafana overview panel overlays the same threshold. |
@@ -97,6 +97,9 @@ max(chatapp_overload_stage{job="chatapp-api"})
 
 # Realtime fanout stage p95
 histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job="chatapp-api"}[5m])))
+
+# Realtime candidate audience p95 (before recent-connect filtering / inline publish)
+histogram_quantile(0.95, sum by (le, path) (rate(fanout_target_candidates_bucket{job="chatapp-api"}[5m])))
 
 # WS bootstrap breadth p95
 histogram_quantile(0.95, sum by (le) (rate(ws_bootstrap_channels_bucket{job="chatapp-api"}[5m])))

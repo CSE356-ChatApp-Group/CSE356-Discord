@@ -166,10 +166,12 @@ tail -f artifacts/rollout-monitoring/grader-watch-events.jsonl
 | `CHATAPP_INSTANCES` | 4 | Number of workers |
 | `FANOUT_QUEUE_CONCURRENCY` | 5 | Parallel fanout workers |
 | `DISABLE_RATE_LIMITS` | true | Grader environment — no rate limiting |
-| `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | true | Await user fanout before 201 |
+| `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | false | Return 201 after channel publish; defer the rest of logical user fanout |
 | `WS_AUTO_SUBSCRIBE_MODE` | messages | Auto-sub channel+conversation+user on connect |
 | `WS_APP_KEEPALIVE_INTERVAL_MS` | 10000 | App-level WS keepalive (grader path churn) |
-| `USER_FEED_SHARD_COUNT` | 64 | Redis pubsub shards for user feed |
+| `USER_FEED_SHARD_COUNT` | 4 | Redis pubsub shards for user feed on grader hosts |
+| `CHANNEL_MESSAGE_USER_FANOUT_MODE` | recent_connect | Inline only very recent reconnect bridge recipients |
+| `WS_RECENT_CONNECT_TTL_SECONDS` | 300 | Recent-connect bridge window on grader hosts |
 | `AUTH_PASSWORD_STORAGE_MODE` | plain | Throughput-first (grader env) |
 | `OVERLOAD_HTTP_SHED_ENABLED` | false | Keep false — 503 = grader delivery miss |
 | `CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS` | 180 | DM participant cache TTL |

@@ -17,6 +17,7 @@ const {
   fanoutTargetCacheTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
+  fanoutTargetCandidatesHistogram,
 } = require('../utils/metrics');
 
 const rawUserFanoutTargetsCacheTtl = Number(process.env.CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS || '180');
@@ -246,6 +247,11 @@ async function resolveUserTopicTargets(channelId: string) {
     return { allTargets: [], recentTargets: [] };
   }
 
+  const mode = userFanoutMode();
+  const candidateMetricPath =
+    mode === 'all'
+      ? 'channel_message_user_topics'
+      : 'channel_message_recent_connect_user_topics';
   const startedAt = process.hrtime.bigint();
   const lookupStartedAt = startedAt;
   const targets = await getChannelUserFanoutTargetKeys(channelId);
@@ -255,6 +261,7 @@ async function resolveUserTopicTargets(channelId: string) {
   );
   const cap = fanoutMaxRecipients();
   const capped = targets.slice(0, Math.min(cap, targets.length));
+  fanoutTargetCandidatesHistogram.observe({ path: candidateMetricPath }, capped.length);
 
   if (!capped.length) {
     fanoutPublishDurationMs.observe(
@@ -264,7 +271,7 @@ async function resolveUserTopicTargets(channelId: string) {
     return { allTargets: [], recentTargets: [] };
   }
 
-  if (userFanoutMode() === 'all') {
+  if (mode === 'all') {
     fanoutPublishDurationMs.observe(
       { path: 'channel_message_user_topics', stage: 'total' },
       Number(process.hrtime.bigint() - startedAt) / 1e6,

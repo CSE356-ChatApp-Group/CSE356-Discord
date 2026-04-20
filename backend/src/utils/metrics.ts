@@ -328,6 +328,14 @@ const fanoutPublishTargetsHistogram = new client.Histogram({
   buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
 });
 
+/** Number of logical targets considered before recent-connect filtering or inline publish. */
+const fanoutTargetCandidatesHistogram = new client.Histogram({
+  name: 'fanout_target_candidates',
+  help: 'Number of logical user targets considered before recent-connect filtering or inline publish',
+  labelNames: ['path'],
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
 /** Cache outcomes for WS bootstrap subscription lists. */
 const wsBootstrapListCacheTotal = new client.Counter({
   name: 'ws_bootstrap_list_cache_total',
@@ -594,7 +602,10 @@ function startPgPoolMetrics(pool) {
     fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'publish_parallel_wall' }, 0);
     fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'total' }, 0);
     fanoutPublishTargetsHistogram.observe({ path: 'channel_message_user_topics' }, 0);
+    fanoutPublishTargetsHistogram.observe({ path: 'channel_message_recent_connect_user_topics' }, 0);
     fanoutPublishTargetsHistogram.observe({ path: 'conversation_event' }, 0);
+    fanoutTargetCandidatesHistogram.observe({ path: 'channel_message_user_topics' }, 0);
+    fanoutTargetCandidatesHistogram.observe({ path: 'channel_message_recent_connect_user_topics' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'hit' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'miss' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'coalesced' }, 0);
@@ -660,6 +671,7 @@ module.exports = {
   conversationFanoutTargetsCacheVersionRetryTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
+  fanoutTargetCandidatesHistogram,
   wsBootstrapListCacheTotal,
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,

@@ -13,7 +13,7 @@ const requiredPanelsByFile = new Map([
   ['chatapp-overview.json', [
     'Fanout target cache (rate by path + result)',
     'Realtime fanout stage p95 (ms)',
-    'Realtime fanout targets p95',
+    'Realtime fanout publish vs candidate targets p95',
     'WS bootstrap channel count p95',
     'WS bootstrap list cache (rate by result)',
   ]],
