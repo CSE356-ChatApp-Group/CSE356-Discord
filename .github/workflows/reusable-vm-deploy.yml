@@ -200,10 +200,18 @@ jobs:
         env:
           PROD_HOST: ${{ inputs.host }}
           PROD_USER: ${{ inputs.user }}
+          DEPLOY_SCRIPT_PATH: ${{ inputs.script_path }}
         run: |
           set -euo pipefail
-          ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" \
-            'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
+          if [[ "${DEPLOY_SCRIPT_PATH}" == "deploy/deploy-prod-multi.sh" ]]; then
+            for vm in 130.245.136.44 130.245.136.137 130.245.136.54; do
+              ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${vm}" \
+                'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
+            done
+          else
+            ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" \
+              'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
+          fi
 
       - name: Deploy
         shell: bash
