@@ -183,7 +183,7 @@ jobs:
       target_sha: ${{ needs.resolve-target.outputs.resolved_sha }}
       host: ${{ vars.PROD_HOST }}
       user: ${{ vars.PROD_USER }}
-      script_path: deploy/deploy-prod.sh
+      script_path: deploy/deploy-prod-multi.sh
       verify_public_host: true
       auto_confirm: true
       artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}

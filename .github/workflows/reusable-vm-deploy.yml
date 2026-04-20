@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       script_path:
-        description: "Deprecated — ignored. Kept for workflow_call compatibility."
+        description: Deployment script path relative to repo root
         required: true
         type: string
       artifact_name:
@@ -216,15 +216,25 @@ jobs:
           CHATAPP_INSTANCES_INPUT: ${{ inputs.chatapp_instances }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           DEPLOY_ENV: ${{ inputs.environment }}
+          DEPLOY_SCRIPT_PATH: ${{ inputs.script_path }}
         run: |
           set -euo pipefail
 
+          if [[ -z "${DEPLOY_SCRIPT_PATH:-}" ]]; then
+            echo "Missing deploy script path"
+            exit 1
+          fi
+          if [[ "${DEPLOY_SCRIPT_PATH}" = /* ]]; then
+            SCRIPT="${DEPLOY_SCRIPT_PATH}"
+          else
+            SCRIPT="${GITHUB_WORKSPACE}/${DEPLOY_SCRIPT_PATH}"
+          fi
+          test -f "${SCRIPT}" || { echo "Deploy script not found: ${SCRIPT}"; exit 1; }
+
           if [[ "$DEPLOY_ENV" == "production" ]]; then
-            SCRIPT="${GITHUB_WORKSPACE}/deploy/deploy-prod.sh"
             export PROD_HOST="${DEPLOY_HOST}"
             export PROD_USER="${DEPLOY_USER}"
           elif [[ "$DEPLOY_ENV" == "staging" ]]; then
-            SCRIPT="${GITHUB_WORKSPACE}/deploy/deploy-staging.sh"
             export STAGING_HOST="${DEPLOY_HOST}"
             export STAGING_USER="${DEPLOY_USER}"
           else
