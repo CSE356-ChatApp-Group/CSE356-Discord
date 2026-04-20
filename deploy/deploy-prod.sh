@@ -542,6 +542,7 @@ do_fast_rollback() {
         echo "ERROR: could not remove :${roll_port} from nginx during rollback"
         exit 1
       }
+      sleep 2  # drain: let nginx old-worker keepalive connections clear before SIGTERM
     fi
 
     # Point systemd dropin at rollback release and restart
@@ -1574,7 +1575,7 @@ fi
 if sudo awk '
   /location \/api\/ \{/ {in_api=1; next}
   in_api && /\}/ {in_api=0}
-  in_api && /proxy_next_upstream error timeout http_502 http_504 non_idempotent;/ {retry=1}
+  in_api && /proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;/ {retry=1}
   in_api && /proxy_next_upstream_tries 2;/ {tries=1}
   END {exit((retry && tries) ? 0 : 1)}
 ' "$SITE"; then
@@ -1779,6 +1780,10 @@ if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
       rewrite_nginx_upstream "${_ROLL_EXCL_CSV}" "remove :${roll_port} before roll" || {
         echo "ERROR: failed to remove :${roll_port} from nginx"; rollback_cutover; exit 1
       }
+      # Brief drain: nginx reload is graceful but old worker processes may still hold keepalive
+      # connections to the now-removed upstream.  2s is enough for those connections to drain
+      # before SIGTERM is sent.
+      sleep 2
 
       # 3. Stop, update systemd dropin, start on new release.
       ssh_prod "

@@ -79,6 +79,7 @@ async function enqueueBatchReadStateUpdate(
       'channel_id',     channelId ?? '',
       'conversation_id', conversationId ?? '',
     );
+    await redis.expire(pendingKey, 86400); // 24h TTL — prevents unbounded memory from inactive (user, target) pairs
     await redis.sadd(RS_DIRTY_SET, dirtyKey);
   } catch (err: any) {
     logger.warn({ err, userId, channelId, conversationId, messageId }, 'batchReadState Redis enqueue failed');
