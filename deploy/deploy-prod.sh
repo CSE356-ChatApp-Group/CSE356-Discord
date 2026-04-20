@@ -346,6 +346,7 @@ rewrite_nginx_upstream() {
     set -euo pipefail
     export PORTS_CSV='${ports_csv}'
     export SITE='${CHATAPP_NGINX_SITE_PATH}'
+    export EXTRA_UPSTREAM_SERVERS_CSV='${EXTRA_UPSTREAM_SERVERS_CSV:-}'
     TMP_SITE=\$(mktemp)
     sudo cp \"\$SITE\" \"\$TMP_SITE\"
     export TMP_SITE
@@ -371,6 +372,15 @@ else:
         for port in ports
     )
     balance = '  least_conn;\\n'
+
+# Preserve extra upstream servers (e.g. VM2 in multi-VM mode) on every rewrite.
+extra_csv = os.environ.get('EXTRA_UPSTREAM_SERVERS_CSV', '').strip()
+if extra_csv:
+    for ep in extra_csv.split(','):
+        ep = ep.strip()
+        if ep:
+            servers += f'  server {ep} max_fails=2 fail_timeout=10s;\\n'
+    balance = '  least_conn;\\n'  # always use least_conn when extra servers present
 
 block = (
     'upstream app {\\n'
@@ -672,6 +682,10 @@ gate_all_worker_health() {
 }
 
 gate_upstream_parity() {
+  if [ "${SKIP_UPSTREAM_PARITY_CHECK:-0}" = "1" ]; then
+    echo "Gate: upstream parity skipped (SKIP_UPSTREAM_PARITY_CHECK=1 — multi-VM mode)"
+    return 0
+  fi
   echo "Gate: nginx upstream parity with active workers..."
   if ! ssh_prod "
     set -euo pipefail
