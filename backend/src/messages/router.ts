@@ -100,6 +100,11 @@ const MSG_IDEM_POLL_MAX_SLEEP_MS =
 // These writes (last_message_id updates, read_states inserts) are non-critical — skipping them
 // under pool pressure stops background writes from crowding out sync queries for the pool.
 const BG_WRITE_POOL_GUARD = parseInt(process.env.BG_WRITE_POOL_GUARD || '5', 10);
+const pendingConversationLastMessageUpdates = new Map<
+  string,
+  { messageId: string; authorId: string | null; createdAt: string | Date }
+>();
+const queuedConversationLastMessageUpdates = new Set<string>();
 
 /** Shorter than role/PgBouncer caps so POST /messages fails fast on lock wait (hot channel + last_message UPDATE). */
 const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
@@ -119,6 +124,57 @@ function isMessagePostInsertDbTimeout(err) {
   if (/canceling statement due to statement timeout/i.test(msg)) return true;
   if (code === '08P01' && /timeout/i.test(msg)) return true;
   return false;
+}
+
+async function flushConversationLastMessageUpdate(conversationId: string) {
+  while (true) {
+    const pending = pendingConversationLastMessageUpdates.get(conversationId);
+    if (!pending) return;
+    pendingConversationLastMessageUpdates.delete(conversationId);
+
+    if (poolStats().waiting < BG_WRITE_POOL_GUARD) {
+      await withTransaction(async (client) => {
+        await client.query(`SET LOCAL lock_timeout = '1ms'`);
+        await client.query(
+          `UPDATE conversations
+             SET last_message_id = $1,
+                 last_message_author_id = $2,
+                 last_message_at = $3,
+                 updated_at = NOW()
+           WHERE id = $4
+             AND (last_message_at IS NULL OR $3 >= last_message_at)`,
+          [pending.messageId, pending.authorId, pending.createdAt, conversationId],
+        );
+      }).catch(() => {
+      });
+    }
+
+    if (!pendingConversationLastMessageUpdates.has(conversationId)) return;
+  }
+}
+
+function scheduleConversationLastMessagePointerUpdate(
+  conversationId: string,
+  payload: { messageId: string; authorId: string | null; createdAt: string | Date },
+) {
+  pendingConversationLastMessageUpdates.set(conversationId, payload);
+  if (queuedConversationLastMessageUpdates.has(conversationId)) {
+    return true;
+  }
+
+  queuedConversationLastMessageUpdates.add(conversationId);
+  setImmediate(() => {
+    void flushConversationLastMessageUpdate(conversationId).finally(() => {
+      queuedConversationLastMessageUpdates.delete(conversationId);
+      if (pendingConversationLastMessageUpdates.has(conversationId)) {
+        scheduleConversationLastMessagePointerUpdate(
+          conversationId,
+          pendingConversationLastMessageUpdates.get(conversationId)!,
+        );
+      }
+    });
+  });
+  return true;
 }
 
 // When unset, keep historical default (defer only under heavy pool wait).
@@ -1458,20 +1514,10 @@ router.post('/',
             createdAt: baseMessage.created_at,
           });
         } else if (conversationId) {
-          withTransaction(async (client) => {
-            await client.query('SET LOCAL lock_timeout = 1');
-            await client.query(
-              `UPDATE conversations
-                 SET last_message_id = $1,
-                     last_message_author_id = $2,
-                     last_message_at = $3,
-                     updated_at = NOW()
-               WHERE id = $4
-                 AND (last_message_at IS NULL OR $3 >= last_message_at)`,
-              [baseMessage.id, baseMessage.author_id, baseMessage.created_at, conversationId],
-            );
-          }).catch(() => {
-            // Silently drop lock conflicts.
+          scheduleConversationLastMessagePointerUpdate(conversationId, {
+            messageId: baseMessage.id,
+            authorId: baseMessage.author_id,
+            createdAt: baseMessage.created_at,
           });
         }
       }

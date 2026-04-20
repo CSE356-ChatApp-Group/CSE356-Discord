@@ -1225,10 +1225,22 @@ function wsBootstrapCacheKey(userId, scope = 'full') {
 /** Invalidate the cached WS subscription list for a user. Call this whenever
  *  their community membership, channel access, or conversation list changes. */
 async function invalidateWsBootstrapCache(userId) {
-  await redis.del(
-    wsBootstrapCacheKey(userId, 'messages'),
-    wsBootstrapCacheKey(userId, 'full'),
-  );
+  await invalidateWsBootstrapCaches([userId]);
+}
+
+async function invalidateWsBootstrapCaches(userIds) {
+  const keys = [];
+  const seen = new Set();
+  for (const userId of Array.isArray(userIds) ? userIds : []) {
+    if (typeof userId !== 'string' || !userId || seen.has(userId)) continue;
+    seen.add(userId);
+    keys.push(
+      wsBootstrapCacheKey(userId, 'messages'),
+      wsBootstrapCacheKey(userId, 'full'),
+    );
+  }
+  if (!keys.length) return;
+  await redis.del(...keys);
 }
 
 function wsAutoSubscribeMode() {
@@ -1990,6 +2002,7 @@ module.exports = {
   shutdown,
   getLocalWebSocketClientCount,
   invalidateWsBootstrapCache,
+  invalidateWsBootstrapCaches,
   invalidateWsAclCache,
   evictUnauthorizedChannelSubscribers,
 };

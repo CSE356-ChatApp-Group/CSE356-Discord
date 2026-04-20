@@ -108,6 +108,16 @@ function communitiesCacheKey(userId, publicVersion = '0') {
   return `communities:list:${userId}:v${publicVersion}`;
 }
 
+async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
+  const keys = [...new Set(
+    (Array.isArray(userIds) ? userIds : [])
+      .filter((userId) => typeof userId === 'string' && userId)
+      .map((userId) => communitiesCacheKey(userId, publicVersion))
+  )];
+  if (!keys.length) return;
+  await redis.del(...keys);
+}
+
 async function getPublicCommunitiesVersion() {
   return (await redis.get(PUBLIC_COMMUNITIES_VERSION_KEY).catch(() => null)) || '0';
 }
@@ -432,7 +442,7 @@ router.post('/',
         await bumpPublicCommunitiesVersion();
       }
       const publicVersion = await getPublicCommunitiesVersion();
-      redis.del(communitiesCacheKey(req.user.id, publicVersion)).catch(() => {});
+      invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
       res.status(201).json({ community });
     } catch (err) {
       await client?.query('ROLLBACK');
@@ -511,7 +521,7 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
     const publicVersion = await getPublicCommunitiesVersion();
 
     await Promise.allSettled([
-      ...memberRows.map((r) => redis.del(communitiesCacheKey(r.user_id, publicVersion))),
+      invalidateCommunitiesCaches(memberRows.map((r) => r.user_id), publicVersion),
       fanout.publish(`community:${req.params.id}`, {
         event: 'community:deleted',
         data: { communityId: req.params.id },
@@ -554,7 +564,7 @@ router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
     invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
     {
       const publicVersion = await getPublicCommunitiesVersion();
-      redis.del(communitiesCacheKey(req.user.id, publicVersion)).catch(() => {});
+      invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
     }
     redis.del(membersCacheKey(req.params.id)).catch(() => {});
 
@@ -594,9 +604,11 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 
     await Promise.allSettled([
       invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),
-      redis.del(communitiesCacheKey(req.user.id, publicVersion)),
+      invalidateCommunitiesCaches(
+        [req.user.id, ...remainingMembers.map((member) => member.user_id)],
+        publicVersion,
+      ),
       redis.del(membersCacheKey(req.params.id)),
-      ...remainingMembers.map((member) => redis.del(communitiesCacheKey(member.user_id, publicVersion))),
       fanout.publish(`community:${req.params.id}`, {
         event: 'community:member_left',
         data: { userId: req.user.id, leftUserId: req.user.id, communityId: req.params.id },
@@ -689,7 +701,7 @@ router.patch(
       const publicVersion = await getPublicCommunitiesVersion();
 
       await Promise.allSettled([
-        redis.del(communitiesCacheKey(req.params.userId, publicVersion)),
+        invalidateCommunitiesCaches([req.params.userId], publicVersion),
         redis.del(membersCacheKey(req.params.id)),
         fanout.publish(`community:${req.params.id}`, {
           event: 'community:role_updated',

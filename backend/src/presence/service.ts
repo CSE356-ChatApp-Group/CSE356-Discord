@@ -66,6 +66,16 @@ async function invalidatePresenceFanoutTargets(userId) {
   await redis.del(fanoutTargetsKey(userId));
 }
 
+async function invalidatePresenceFanoutTargetsBulk(userIds) {
+  const keys = [...new Set(
+    (Array.isArray(userIds) ? userIds : [])
+      .filter((userId) => typeof userId === 'string' && userId)
+      .map((userId) => fanoutTargetsKey(userId))
+  )];
+  if (!keys.length) return;
+  await redis.del(...keys);
+}
+
 async function getPresenceFanoutTargets(userId) {
   const cacheKey = fanoutTargetsKey(userId);
   const cached = await redis.get(cacheKey);
@@ -306,6 +316,7 @@ module.exports = {
   getAwayMessage,
   syncConnectionStatuses,
   invalidatePresenceFanoutTargets,
+  invalidatePresenceFanoutTargetsBulk,
   getPresence,
   getPresenceDetails,
   getBulkPresence,

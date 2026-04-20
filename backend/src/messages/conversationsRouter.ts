@@ -16,7 +16,7 @@ const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
 const { publishUserFeedTargets, splitUserTargets } = require('../websocket/userFeed');
 const presenceService  = require('../presence/service');
-const { invalidateWsBootstrapCache } = require('../websocket/server');
+const { invalidateWsBootstrapCache, invalidateWsBootstrapCaches } = require('../websocket/server');
 const { bustConversationMessagesCache } = require('./messageCacheBust');
 const { invalidateConversationFanoutTargetsCache } = require('./conversationFanoutTargets');
 const { wrapFanoutPayload } = require('./realtimePayload');
@@ -437,7 +437,7 @@ router.post('/',
           const pairIds = [req.user.id, otherId].filter(Boolean);
           await Promise.allSettled([
             invalidateConversationFanoutTargetsCache(existingId),
-            ...pairIds.map((participantId) => invalidateWsBootstrapCache(participantId)),
+            invalidateWsBootstrapCaches(pairIds),
             invalidateConversationsListCaches(pairIds),
           ]);
           publishUserFeedTargets(pairIds, {
@@ -466,8 +466,8 @@ router.post('/',
       await client.query('COMMIT');
       await Promise.allSettled([
         invalidateConversationFanoutTargetsCache(conv.id),
-        ...allIds.map((participantId) => presenceService.invalidatePresenceFanoutTargets(participantId)),
-        ...allIds.map((participantId) => invalidateWsBootstrapCache(participantId)),
+        presenceService.invalidatePresenceFanoutTargetsBulk(allIds),
+        invalidateWsBootstrapCaches(allIds),
         invalidateConversationsListCaches(allIds),
       ]);
 
@@ -657,12 +657,8 @@ async function addParticipantsHandler(req, res, next) {
     if (participantIdsToAdd.length > 0) {
       await Promise.allSettled([
         invalidateConversationFanoutTargetsCache(req.params.id),
-        ...participantIdsToAdd.map((participantId) =>
-          presenceService.invalidatePresenceFanoutTargets(participantId)
-        ),
-        ...participantIdsToAdd.map((participantId) =>
-          invalidateWsBootstrapCache(participantId)
-        ),
+        presenceService.invalidatePresenceFanoutTargetsBulk(participantIdsToAdd),
+        invalidateWsBootstrapCaches(participantIdsToAdd),
         // Invalidate conversation list cache for newly added AND existing
         // participants so everyone sees the updated participant list immediately.
         invalidateConversationsListCaches([...participantIdsToAdd, ...currentParticipantIds]),

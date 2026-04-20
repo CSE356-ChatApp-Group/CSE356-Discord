@@ -20,7 +20,7 @@ const fanout           = require('../websocket/fanout');
 const { publishUserFeedTargets } = require('../websocket/userFeed');
 const {
   invalidateWsAclCache,
-  invalidateWsBootstrapCache,
+  invalidateWsBootstrapCaches,
   evictUnauthorizedChannelSubscribers,
 } = require('../websocket/server');
 const { invalidateChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
@@ -428,9 +428,7 @@ router.post('/',
       client.release();
       client = null;
       const affectedUserIds = await listCommunityUserIds(communityId);
-      await Promise.allSettled(
-        affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId))
-      );
+      await invalidateWsBootstrapCaches(affectedUserIds);
       await publishChannelLifecycleEvent(communityId, 'channel:created', channel);
       bustChannelListCache(communityId).catch(() => {});
       res.status(201).json({ channel });
@@ -581,9 +579,9 @@ router.post('/:id/members',
       for (const { user_id } of insertedRows) {
         // Expire the WS ACL cache so subsequent subscribe attempts are checked fresh.
         invalidateWsAclCache(user_id, `channel:${req.params.id}`);
-        // Rebuild auto-subscribe list on reconnect; otherwise ws:bootstrap cache can omit channel:N.
-        invalidateWsBootstrapCache(user_id).catch(() => {});
       }
+      // Rebuild auto-subscribe list on reconnect; otherwise ws:bootstrap cache can omit channel:N.
+      invalidateWsBootstrapCaches(insertedRows.map((row) => row.user_id)).catch(() => {});
 
       res.json({ members, addedUserIds: insertedRows.map((row) => row.user_id) });
     } catch (err) {
@@ -671,7 +669,7 @@ router.patch('/:id',
       await Promise.allSettled([
         invalidateChannelUserFanoutTargetsCache(updatedChannel.id),
         ...affectedUserIds.map((userId) => invalidateWsAclCache(userId, `channel:${updatedChannel.id}`)),
-        ...affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId)),
+        invalidateWsBootstrapCaches(affectedUserIds),
       ]);
       await evictUnauthorizedChannelSubscribers(updatedChannel.id);
       await publishChannelLifecycleEvent(updatedChannel.community_id, 'channel:updated', updatedChannel);
@@ -727,7 +725,7 @@ router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
       const affectedUserIds = await listCommunityUserIds(communityId);
       await Promise.allSettled([
         invalidateChannelUserFanoutTargetsCache(rows[0].id),
-        ...affectedUserIds.map((userId) => invalidateWsBootstrapCache(userId)),
+        invalidateWsBootstrapCaches(affectedUserIds),
       ]);
       await evictUnauthorizedChannelSubscribers(rows[0].id);
       await publishChannelLifecycleEvent(communityId, 'channel:deleted', {
