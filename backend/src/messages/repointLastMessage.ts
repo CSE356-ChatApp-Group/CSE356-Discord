@@ -6,9 +6,30 @@
 'use strict';
 
 const { query } = require('../db/pool');
+const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const { messageLastMessageRepointFkRetryTotal } = require('../utils/metrics');
 const sideEffects = require('./sideEffects');
+
+// Redis keys for deferred channel last_message pointer updates.
+// Hot path writes to Redis (loopback); a background interval batch-flushes to DB.
+const CH_LAST_MSG_KEY_PREFIX = 'ch:last_msg:';
+const CH_LAST_MSG_DIRTY_SET  = 'ch:last_msg:dirty';
+
+const CHANNEL_FLUSH_INTERVAL_MS = parseInt(
+  process.env.CHANNEL_LAST_MSG_FLUSH_INTERVAL_MS || '10000', 10
+);
+const CHANNEL_FLUSH_BATCH_SIZE = 50;
+
+// SQL for background flush — no 1 ms lock_timeout, normal lock wait is fine
+// because this runs out of the hot path.
+const CHANNEL_LAST_MESSAGE_FLUSH_SQL = `
+  UPDATE channels
+     SET last_message_id = $1,
+         last_message_author_id = $2,
+         last_message_at = $3
+   WHERE id = $4
+     AND (last_message_at IS NULL OR $3 >= last_message_at)`;
 
 async function clearChannelLastMessagePointers(channelId: string) {
   await query(
@@ -59,17 +80,6 @@ const CONVERSATION_REPOINT_SQL = `WITH lm AS (
      FROM lm
      WHERE conv.id = $1`;
 
-const CHANNEL_LAST_MESSAGE_UPDATE_SQL = `WITH lock_guard AS (
-       SELECT set_config('lock_timeout', '1ms', true)
-     )
-     UPDATE channels
-        SET last_message_id = $1,
-            last_message_author_id = $2,
-            last_message_at = $3
-       FROM lock_guard
-      WHERE id = $4
-        AND (last_message_at IS NULL OR $3 >= last_message_at)`;
-
 const pendingChannelLastMessageUpdates = new Map<
   string,
   { messageId: string; authorId: string; createdAt: string | Date }
@@ -92,51 +102,79 @@ function shouldReplacePendingChannelLastMessageUpdate(
   return String(next.messageId) > String(current.messageId);
 }
 
-const MAX_FLUSH_RETRIES = 3;
-const FLUSH_RETRY_BASE_MS = 10;
-
 async function flushChannelLastMessageUpdate(channelId: string) {
-  let attempt = 0;
+  // Write to Redis (loopback, sub-ms) instead of the DB.
+  // A background interval batch-flushes all dirty channels to DB every
+  // CHANNEL_FLUSH_INTERVAL_MS ms, eliminating hot-row contention on channels.
   while (true) {
     const pending = pendingChannelLastMessageUpdates.get(channelId);
     if (!pending) return;
     pendingChannelLastMessageUpdates.delete(channelId);
 
+    const atStr = typeof pending.createdAt === 'string'
+      ? pending.createdAt
+      : (pending.createdAt as Date).toISOString();
+
     try {
-      await query(CHANNEL_LAST_MESSAGE_UPDATE_SQL, [
-        pending.messageId,
-        pending.authorId,
-        pending.createdAt,
-        channelId,
-      ]);
-    } catch (err: any) {
-      attempt++;
-      const isLockTimeout = err?.code === '55P03';
-      if (isLockTimeout && attempt < MAX_FLUSH_RETRIES) {
-        const backoffMs = Math.min(FLUSH_RETRY_BASE_MS * Math.pow(2, attempt - 1), 100);
-        logger.debug(
-          { channelId, attempt, backoffMs },
-          'channel pointer update: lock timeout, backing off',
-        );
-        await new Promise(r => setTimeout(r, backoffMs));
-        // Re-queue the failed update so it's not lost if no newer one arrived
-        if (!pendingChannelLastMessageUpdates.has(channelId)) {
-          pendingChannelLastMessageUpdates.set(channelId, pending);
-        }
-        continue;
-      }
-      // Exhausted retries or non-lock error
-      logger.warn(
-        { err, channelId, messageId: pending.messageId, attempts: attempt },
-        'scheduleChannelLastMessagePointerUpdate: async update failed after retries',
+      await redis.hset(
+        `${CH_LAST_MSG_KEY_PREFIX}${channelId}`,
+        'msg_id',    pending.messageId,
+        'author_id', pending.authorId,
+        'at',        atStr,
       );
+      await redis.sadd(CH_LAST_MSG_DIRTY_SET, channelId);
+    } catch (err: any) {
+      // Redis is loopback — failures are rare. Skip; the bg flush will
+      // carry whatever the previous Redis value was (or nothing if cold).
+      logger.warn({ err, channelId }, 'channel last_message Redis write failed');
       return;
     }
 
-    // Success — check if a new update arrived while we were working
+    // Loop back if another update arrived while we were writing
     if (!pendingChannelLastMessageUpdates.has(channelId)) return;
-    attempt = 0; // reset retry counter for the new pending update
   }
+}
+
+async function flushDirtyChannelsToDB() {
+  let channelIds: string[];
+  try {
+    channelIds = await redis.smembers(CH_LAST_MSG_DIRTY_SET);
+  } catch { return; }
+
+  if (channelIds.length === 0) return;
+
+  // Remove from dirty set before flushing so a crash mid-flush does not
+  // re-flush stale data; the next message write will re-dirty the channel.
+  try {
+    await (channelIds.length === 1
+      ? redis.srem(CH_LAST_MSG_DIRTY_SET, channelIds[0])
+      : redis.srem(CH_LAST_MSG_DIRTY_SET, ...channelIds));
+  } catch { return; }
+
+  for (let i = 0; i < channelIds.length; i += CHANNEL_FLUSH_BATCH_SIZE) {
+    const batch = channelIds.slice(i, i + CHANNEL_FLUSH_BATCH_SIZE);
+    const pipeline = redis.pipeline();
+    for (const id of batch) pipeline.hgetall(`${CH_LAST_MSG_KEY_PREFIX}${id}`);
+    let results: [Error | null, Record<string, string>][];
+    try {
+      results = await pipeline.exec();
+    } catch { continue; }
+
+    for (let j = 0; j < batch.length; j++) {
+      const channelId = batch[j];
+      const [pipeErr, data] = results[j];
+      if (pipeErr || !data || !data.msg_id) continue;
+      query(CHANNEL_LAST_MESSAGE_FLUSH_SQL, [data.msg_id, data.author_id, data.at, channelId])
+        .catch((qErr) => logger.debug(
+          { err: qErr, channelId },
+          'channel last_msg bg flush query failed',
+        ));
+    }
+  }
+}
+
+function startChannelLastMessageFlushInterval() {
+  setInterval(flushDirtyChannelsToDB, CHANNEL_FLUSH_INTERVAL_MS).unref();
 }
 
 function scheduleChannelLastMessagePointerUpdate(
@@ -229,4 +267,5 @@ module.exports = {
   repointChannelLastMessage,
   repointConversationLastMessage,
   scheduleChannelLastMessagePointerUpdate,
+  startChannelLastMessageFlushInterval,
 };
