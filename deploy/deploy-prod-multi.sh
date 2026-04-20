@@ -23,6 +23,8 @@ VM2_INTERNAL=10.0.3.243
 VM3_INTERNAL=10.0.2.164
 PROD_USER="${PROD_USER:-ubuntu}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VM1_WORKER_PORTS=(4000 4001 4002 4003)
+VMX_WORKER_PORTS=(4000 4001 4002 4003 4004)
 
 # Extra OpenSSH options — mirrors deploy-prod.sh default
 DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-new}"
@@ -107,7 +109,7 @@ echo "✓ All VM2 workers healthy"
 # ── Phase 3: Deploy to VM1 ───────────────────────────────────────────────────
 # Pass VM2_UPSTREAM_CSV so rewrite_nginx_upstream preserves VM2 entries throughout
 # the rolling restart.  SKIP_UPSTREAM_PARITY_CHECK is NOT set here — the gate runs
-# normally and verifies localhost:4000-4004 are active and in upstream.
+# normally and verifies VM1 localhost workers are active and in upstream.
 echo ""
 echo "=== Phase 3: Deploy to VM1 (PgBouncer/Redis/MinIO/nginx) ==="
 PROD_HOST=$VM1 \
@@ -170,23 +172,25 @@ site.write_text(text)
   echo 'VM2+VM3 upstream entries re-injected and nginx reloaded'
 "
 
-# ── Phase 5: Final health check — all 15 workers across all VMs ──────────────
+# ── Phase 5: Final health check — all 14 workers across all VMs ──────────────
 echo ""
-echo "=== Phase 5: Final health check — all 15 workers ==="
+echo "=== Phase 5: Final health check — all 14 workers ==="
 overall_ok=1
 for vm in "$VM1" "$VM2" "$VM3"; do
   label="VM1"
   [ "$vm" = "$VM2" ] && label="VM2"
   [ "$vm" = "$VM3" ] && label="VM3"
+  ports=("${VMX_WORKER_PORTS[@]}")
+  if [ "$vm" = "$VM1" ]; then
+    ports=("${VM1_WORKER_PORTS[@]}")
+  fi
+  ports_list="${ports[*]}"
   echo "--- ${label} (${vm}) ---"
   # shellcheck disable=SC2029
-  ssh_vm "$vm" 'for p in 4000 4001 4002 4003 4004; do
-    echo -n "  Worker $p: "
-    curl -sf --max-time 8 http://127.0.0.1:$p/health 2>/dev/null | python3 -c "
-import sys,json; d=json.load(sys.stdin)
-c=d[\"capacity\"]
-print(d[\"status\"], \"lag=\"+str(c[\"event_loop_lag_p99_ms\"])+\"ms stage=\"+str(c[\"overload_stage\"]))" 2>/dev/null || echo "DEAD"
-  done' || overall_ok=0
+  ssh_vm "$vm" "for p in ${ports_list}; do
+    echo -n \"  Worker \$p: \"
+    curl -sf --max-time 8 http://127.0.0.1:\$p/health 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); c=d[\"capacity\"]; print(d[\"status\"], \"lag=\"+str(c[\"event_loop_lag_p99_ms\"])+\"ms stage=\"+str(c[\"overload_stage\"]))' 2>/dev/null || echo \"DEAD\"
+  done" || overall_ok=0
 done
 
 echo ""
