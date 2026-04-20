@@ -99,33 +99,32 @@ ssh_vm "$VM1" "
   echo 'VM2 upstream entries missing — re-injecting...'
   TMP=\$(mktemp)
   sudo cp \"\$SITE\" \"\$TMP\"
-  sudo python3 - <<'PYEOF'
-import re
+  sudo python3 -c \"
+import re, sys
 from pathlib import Path
 
-site = Path('${TMP}')
+site = Path('\$TMP')
 text = site.read_text()
 
 vm2_servers = (
-    '  server ${VM2_INTERNAL}:4000 max_fails=2 fail_timeout=10s;\n'
-    '  server ${VM2_INTERNAL}:4001 max_fails=2 fail_timeout=10s;\n'
-    '  server ${VM2_INTERNAL}:4002 max_fails=2 fail_timeout=10s;\n'
-    '  server ${VM2_INTERNAL}:4003 max_fails=2 fail_timeout=10s;\n'
-    '  server ${VM2_INTERNAL}:4004 max_fails=2 fail_timeout=10s;\n'
+    '  server ${VM2_INTERNAL}:4000 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM2_INTERNAL}:4001 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM2_INTERNAL}:4002 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM2_INTERNAL}:4003 max_fails=2 fail_timeout=10s;\\\n'
+    '  server ${VM2_INTERNAL}:4004 max_fails=2 fail_timeout=10s;\\\n'
 )
 
 def inject(m):
     block = m.group(0)
     if '${VM2_INTERNAL}' in block:
         return block
-    # Insert VM2 servers before the keepalive line
     return re.sub(r'(  keepalive \d+;)', vm2_servers + r'\1', block, count=1)
 
 text, n = re.subn(r'upstream app \{[^}]+\}', inject, text, count=1, flags=re.DOTALL)
 if n != 1:
     raise SystemExit('upstream app block not found')
 site.write_text(text)
-PYEOF
+\"
   sudo install -m 644 \"\$TMP\" \"\$SITE\"
   rm -f \"\$TMP\"
   sudo nginx -t && sudo systemctl reload nginx
