@@ -146,15 +146,17 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
 
     if (userIds.length === 0) continue;
 
-    query(READ_STATE_BATCH_UPSERT_SQL, [
-      userIds,
-      channelIds,
-      conversationIds,
-      messageIds,
-      messageCreatedAts,
-    ]).catch((err: any) => {
+    try {
+      await query(READ_STATE_BATCH_UPSERT_SQL, [
+        userIds,
+        channelIds,
+        conversationIds,
+        messageIds,
+        messageCreatedAts,
+      ]);
+    } catch (err: any) {
       logger.debug({ err }, 'read_state batch flush query failed');
-    });
+    }
   }
 }
 
