@@ -171,6 +171,7 @@ jobs:
       script_path: deploy/deploy-staging.sh
       artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
       clear_prod_deploy_lock: false
+      chatapp_instances: ${{ vars.CHATAPP_INSTANCES_STAGING != '' && vars.CHATAPP_INSTANCES_STAGING || '5' }}
 
   deploy-prod:
     needs: [resolve-target, fetch-release]
