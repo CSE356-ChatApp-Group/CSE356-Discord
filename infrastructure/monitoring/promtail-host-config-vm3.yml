@@ -1,0 +1,30 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://10.0.1.102:3100/loki/api/v1/push
+    external_labels:
+      host: vm3
+
+scrape_configs:
+  - job_name: chatapp-systemd
+    journal:
+      max_age: 12h
+      labels:
+        job: chatapp
+        host: vm3
+    relabel_configs:
+      - source_labels: [__journal__systemd_unit]
+        target_label: unit
+
+  - job_name: nginx-logs
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: nginx
+          host: vm3
+          __path__: /var/log/nginx/*.log

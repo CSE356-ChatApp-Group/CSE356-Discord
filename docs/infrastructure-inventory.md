@@ -1,6 +1,6 @@
 # Infrastructure Inventory
 
-Last updated: 2026-04-19
+Last updated: 2026-04-20
 
 This is the source of truth for current environment shape. Update this file whenever VM sizing, hosts, or provider changes.
 
@@ -13,8 +13,9 @@ This is the source of truth for current environment shape. Update this file when
 
 ## Production hosts
 
-- App/proxy VM (`ubuntu-intelbroadwell`, Linode): `130.245.136.44`, 8 vCPU, 16 GB RAM. Monitoring here is **node-exporter**, **promtail** (logs to Loki on the DB VM), and **redis_exporter** only — not Grafana/Prometheus/Alertmanager.
-- Database VM (`ubuntu-intelbroadwell-001`, Linode): `130.245.136.21`, 8 vCPU, 16 GB RAM. PostgreSQL 16 primary now runs from the attached **100 GB NVMe volume** mounted at `/mnt/DB-NVMe` with data directory `/mnt/DB-NVMe/16/nvme` on port `5432`. The previous **50 GB HDD-backed** PostgreSQL volume remains attached at `/var/lib/postgresql/16/main` as a temporary rollback reference and should be kept for at least 24 hours after the cutover before deletion. **Grafana, Prometheus, Alertmanager, Loki, and Tempo** run in Docker (`db-compose.yml`). Host `:9100` / `:9187` metrics use systemd exporters from `deploy/install-db-metrics-exporters.sh` (not a duplicate Docker node-exporter).
+- Monitoring VM (Linode): external **`130.245.136.120`**, internal **`10.0.1.102`**. Runs the **Docker monitoring stack** (Grafana, Prometheus, Alertmanager, **Loki**, Tempo, etc.). **Loki** listens on **`10.0.1.102:3100`** (and on the host); Promtail on app VMs pushes here. Grafana uses host networking and talks to Loki at **`http://127.0.0.1:3100`** on this machine.
+- App VMs (`ubuntu-intelbroadwell`, Linode): **three** app/proxy hosts — **`130.245.136.44`** (vm1), **`130.245.136.137`** (vm2), **`130.245.136.54`** (vm3), each 8 vCPU, 16 GB RAM. Monitoring on each is **node-exporter**, **Promtail** (logs to Loki on the monitoring VM at **`http://10.0.1.102:3100`**; `external_labels.host` is **`vm1`** / **`vm2`** in `promtail-host-config.yml`, **`vm3`** uses `infrastructure/monitoring/promtail-host-config-vm3.yml` with journal + nginx), and **redis_exporter** where deployed — not Grafana/Prometheus/Alertmanager on the app hosts.
+- Database VM (`ubuntu-intelbroadwell-001`, Linode): `130.245.136.21`, internal **`10.0.1.62`**, 8 vCPU, 16 GB RAM. PostgreSQL 16 primary runs from the attached **100 GB NVMe volume** mounted at `/mnt/DB-NVMe` with data directory `/mnt/DB-NVMe/16/nvme` on port `5432`. The previous **50 GB HDD-backed** PostgreSQL volume may remain attached at `/var/lib/postgresql/16/main` as a rollback reference until you delete it after a stable cutover. **Grafana, Prometheus, Alertmanager, and Tempo** still run in Docker via **`db-compose.yml`** on this host; **Loki has been migrated off** this VM (the `loki` service is stopped; data volume retained for rollback). Host `:9100` / `:9187` metrics use systemd exporters from `deploy/install-db-metrics-exporters.sh` (not a duplicate Docker node-exporter). **`/opt/chatapp-monitoring/promtail-host-config.yml`** points at the monitoring VM Loki URL so Promtail is safe if re-enabled here.
 
 **Latency / 5xx bottleneck (typical):** end-user and grader slowness under load most often traces to **PostgreSQL** (long queries, lock contention) and **per-Node connection pools** to PgBouncer/Postgres (`query timeout`, `pg_pool_waiting`, pool circuit breaker / **503**). The app and Redis CPU can look busy but are usually **symptoms**; confirm with DB metrics, `pg_stat_statements`, and app metrics in [operations-monitoring.md](operations-monitoring.md).
 
