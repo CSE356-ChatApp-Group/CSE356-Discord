@@ -56,8 +56,15 @@ function isTransactionControlSql(queryArg) {
 
 /**
  * Count successful `client.query` calls toward the same per-request histogram as `query()`.
+ *
+ * Guard against re-wrapping: pg-pool reuses client objects across checkouts. Without this
+ * check, each `getClient()` call stacks another wrapper around an already-wrapped `query`,
+ * causing `incrementDbQuery` to fire N times after N checkouts of the same client object —
+ * making `pg_business_sql_queries_per_http_request` grow linearly with pool client reuse.
  */
 function wrapPoolClientForRequestMetrics(client) {
+  if (client._reqMetricsWrapped) return client;
+  client._reqMetricsWrapped = true;
   const origQuery = client.query.bind(client);
   client.query = function queryWrapped(...args) {
     const last = args[args.length - 1];
