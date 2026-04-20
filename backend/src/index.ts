@@ -18,6 +18,7 @@ const logger   = require('./utils/logger');
 const { pool, readPool, query: dbQuery, poolStats } = require('./db/pool');
 const { startMessageIngestConsumerIfEnabled, stopMessageIngestConsumer } = require('./messages/messageIngestLog');
 const { startChannelLastMessageFlushInterval } = require('./messages/repointLastMessage');
+const { startReadStateFlushInterval } = require('./messages/batchReadState');
 const redis    = require('./db/redis');
 const { startPgPoolMetrics } = require('./utils/metrics');
 const { startCapacitySnapshotHeartbeat } = require('./utils/capacitySnapshot');
@@ -141,6 +142,7 @@ async function start() {
   startPgPoolMetrics(pool);
   startCapacitySnapshotHeartbeat();
   startChannelLastMessageFlushInterval();
+  startReadStateFlushInterval();
 
   server = http.createServer(app);
 

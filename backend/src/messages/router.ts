@@ -63,6 +63,7 @@ const {
   publishChannelMessageEvent,
 } = require('./channelRealtimeFanout');
 const { appendChannelMessageIngested } = require('./messageIngestLog');
+const { enqueueBatchReadStateUpdate } = require('./batchReadState');
 const {
   getConversationFanoutTargets,
 } = require('./conversationFanoutTargets');
@@ -642,46 +643,10 @@ async function advanceReadStateCursor({
     };
   }
 
-  // casResult === 2: cursor advanced AND db_lock acquired — fire DB upsert async.
-  // The upsert's ON CONFLICT WHERE acts as a secondary safety net: if two workers
-  // both passed the Redis CAS (race on identical timestamp), only one DB row
-  // update will win; the other returns 0 rows (no harm).
-  // Pool guard: skip DB write if pool is already under pressure — the Redis cursor
-  // advance already happened (casResult===2), so the caller gets a valid response;
-  // the DB will be reconciled on the next write that passes the guard.
-  if (poolStats().waiting >= BG_WRITE_POOL_GUARD) {
-    return {
-      applied: { last_read_message_id: messageId, last_read_at: new Date().toISOString() },
-      didAdvanceCursor: true,
-    };
-  }
-  const dbWrite = withTransaction(async (client) => {
-    await client.query('SET LOCAL synchronous_commit = off');
-    await client.query(
-      `INSERT INTO read_states (
-         user_id,
-         channel_id,
-         conversation_id,
-         last_read_message_id,
-         last_read_message_created_at,
-         last_read_at
-       )
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (user_id, COALESCE(channel_id, conversation_id)) DO UPDATE SET
-         last_read_message_id = EXCLUDED.last_read_message_id,
-         last_read_message_created_at = EXCLUDED.last_read_message_created_at,
-         last_read_at = NOW()
-       WHERE
-         read_states.last_read_message_id IS NULL
-         OR read_states.last_read_message_created_at IS NULL
-         OR $5 >= read_states.last_read_message_created_at
-       RETURNING last_read_message_id, last_read_at`,
-      [userId, channelId, conversationId, messageId, messageCreatedAt],
-    );
-  });
-  dbWrite.catch((err) => {
-    logger.warn({ err, userId, channelId, conversationId, messageId }, 'read_state async DB write failed');
-  });
+  // casResult === 2: enqueue to Redis batch flusher instead of a per-row DB write.
+  // flushDirtyReadStatesToDB() runs every READ_STATE_FLUSH_INTERVAL_MS and upserts
+  // all dirty entries in a single UNNEST query, eliminating per-row lock contention.
+  void enqueueBatchReadStateUpdate(userId, channelId, conversationId, messageId, messageCreatedAt);
 
   // Return synthetic applied immediately — caller uses last_read_at only for the
   // WS publish payload timestamp, which NOW() on the app server is fine for.
