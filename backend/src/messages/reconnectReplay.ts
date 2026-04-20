@@ -16,14 +16,14 @@ const WS_MESSAGE_REPLAY_LIMIT =
     ? Math.min(10_000, Math.floor(rawReplayLimit))
     : 150;
 
-// Replay is primarily for brief websocket gaps, not long offline catch-up.
-// Keeping the default window near one minute sharply reduces the rows scanned
-// during reconnect bursts while still covering the grader's short disconnects.
-const rawReplayMaxWindowMs = Number(process.env.WS_MESSAGE_REPLAY_MAX_WINDOW_MS || '60000');
+// Replay window covers the full disconnect gap up to 1 hour so users who
+// are offline for minutes (e.g. grader pausing a bot) still get missed DMs
+// on reconnect. The per-gap profile function further shapes limit/windowMs.
+const rawReplayMaxWindowMs = Number(process.env.WS_MESSAGE_REPLAY_MAX_WINDOW_MS || '3600000');
 const WS_MESSAGE_REPLAY_MAX_WINDOW_MS =
   Number.isFinite(rawReplayMaxWindowMs) && rawReplayMaxWindowMs > 0
     ? Math.floor(rawReplayMaxWindowMs)
-    : 60000;
+    : 3600000;
 // A socket can die on the client/intermediary side before the server records
 // the disconnect on heartbeat. Looking back slightly prevents messages created
 // in that blind window from being skipped during reconnect replay.
@@ -105,6 +105,14 @@ function replayQueryProfile(gapMs, stage = overload.getStage(), closeCode?: numb
   } else if (gapMs <= 30_000) {
     windowMs = Math.min(windowMs, 45_000);
     limit = Math.min(limit, 100);
+  } else if (gapMs <= 300_000) {
+    // 30s–5min gap: scan the full gap duration, cap at 150 messages
+    windowMs = Math.min(windowMs, gapMs + 5_000);
+    limit = Math.min(limit, 150);
+  } else {
+    // >5min gap (e.g. grader bot offline): scan the full gap, cap at 200 messages
+    windowMs = Math.min(windowMs, gapMs + 5_000);
+    limit = Math.min(limit, 200);
   }
 
   if (stage >= 1) {

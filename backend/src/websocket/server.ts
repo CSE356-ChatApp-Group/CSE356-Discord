@@ -181,12 +181,12 @@ const WS_BOOTSTRAP_BATCH_SIZE =
     ? Math.floor(rawBootstrapBatchSize)
     : 96;
 const rawRecentDisconnectTtlSeconds = Number(
-  process.env.WS_RECENT_DISCONNECT_TTL_SECONDS || 300,
+  process.env.WS_RECENT_DISCONNECT_TTL_SECONDS || 3600,
 );
 const WS_RECENT_DISCONNECT_TTL_SECONDS =
   Number.isFinite(rawRecentDisconnectTtlSeconds) && rawRecentDisconnectTtlSeconds > 0
     ? Math.floor(rawRecentDisconnectTtlSeconds)
-    : 180;
+    : 3600;
 const rawHeartbeatIntervalMs = Number(process.env.WS_HEARTBEAT_INTERVAL_MS || 20_000);
 const WS_HEARTBEAT_INTERVAL_MS =
   Number.isFinite(rawHeartbeatIntervalMs) && rawHeartbeatIntervalMs >= 5_000
