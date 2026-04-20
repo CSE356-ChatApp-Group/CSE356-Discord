@@ -92,7 +92,11 @@ function shouldReplacePendingChannelLastMessageUpdate(
   return String(next.messageId) > String(current.messageId);
 }
 
+const MAX_FLUSH_RETRIES = 3;
+const FLUSH_RETRY_BASE_MS = 10;
+
 async function flushChannelLastMessageUpdate(channelId: string) {
+  let attempt = 0;
   while (true) {
     const pending = pendingChannelLastMessageUpdates.get(channelId);
     if (!pending) return;
@@ -105,14 +109,33 @@ async function flushChannelLastMessageUpdate(channelId: string) {
         pending.createdAt,
         channelId,
       ]);
-    } catch (err) {
+    } catch (err: any) {
+      attempt++;
+      const isLockTimeout = err?.code === '55P03';
+      if (isLockTimeout && attempt < MAX_FLUSH_RETRIES) {
+        const backoffMs = Math.min(FLUSH_RETRY_BASE_MS * Math.pow(2, attempt - 1), 100);
+        logger.debug(
+          { channelId, attempt, backoffMs },
+          'channel pointer update: lock timeout, backing off',
+        );
+        await new Promise(r => setTimeout(r, backoffMs));
+        // Re-queue the failed update so it's not lost if no newer one arrived
+        if (!pendingChannelLastMessageUpdates.has(channelId)) {
+          pendingChannelLastMessageUpdates.set(channelId, pending);
+        }
+        continue;
+      }
+      // Exhausted retries or non-lock error
       logger.warn(
-        { err, channelId, messageId: pending.messageId },
-        'scheduleChannelLastMessagePointerUpdate: async update failed',
+        { err, channelId, messageId: pending.messageId, attempts: attempt },
+        'scheduleChannelLastMessagePointerUpdate: async update failed after retries',
       );
+      return;
     }
 
+    // Success — check if a new update arrived while we were working
     if (!pendingChannelLastMessageUpdates.has(channelId)) return;
+    attempt = 0; // reset retry counter for the new pending update
   }
 }
 
