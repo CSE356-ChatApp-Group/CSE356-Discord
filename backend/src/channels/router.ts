@@ -281,26 +281,27 @@ router.get('/',
 
       recordEndpointListCache('channels', 'miss');
       const promise = (async () => {
+        // Access control must read from primary to avoid replica lag causing false 403s
+        // immediately after a user joins a community.
+        const { rows: memberRows } = await query(
+          'SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2 LIMIT 1',
+          [communityId, userId]
+        );
+        if (memberRows.length === 0) {
+          return { ok: false };
+        }
+
         // Return all visible channel names. Private-channel metadata/content pointers
         // are redacted for users who are not invited to that private channel.
         const { rows } = await queryRead(
-          `WITH membership AS (
-             SELECT EXISTS (
-               SELECT 1
-               FROM community_members
-               WHERE community_id = $1 AND user_id = $2
-             ) AS is_member
-           )
-           SELECT membership.is_member,
-                  ${VISIBLE_CHANNEL_FIELDS},
+          `SELECT ${VISIBLE_CHANNEL_FIELDS},
                   vc.can_access,
                   CASE WHEN vc.can_access THEN vc.last_message_id ELSE NULL END AS last_message_id,
                   CASE WHEN vc.can_access THEN vc.last_message_author_id ELSE NULL END AS last_message_author_id,
                   CASE WHEN vc.can_access THEN vc.last_message_at ELSE NULL END AS last_message_at,
                   CASE WHEN vc.can_access THEN rs.last_read_message_id ELSE NULL END AS my_last_read_message_id,
                   CASE WHEN vc.can_access THEN rs.last_read_at ELSE NULL END AS my_last_read_at
-           FROM membership
-           LEFT JOIN LATERAL (
+           FROM LATERAL (
              SELECT ${CHANNEL_SELECT_FIELDS},
                     (ch.is_private = FALSE
                      OR EXISTS (
@@ -310,7 +311,7 @@ router.get('/',
              FROM channels ch
              WHERE ch.community_id = $1
              ORDER BY ch.position, ch.name
-           ) vc ON membership.is_member = TRUE
+           ) vc
            LEFT JOIN read_states rs
                   ON vc.can_access
                  AND rs.channel_id = vc.id
@@ -318,10 +319,6 @@ router.get('/',
            ORDER  BY vc.position, vc.name`,
           [communityId, userId]
         );
-
-        if (rows[0] && rows[0].is_member === false) {
-          return { ok: false };
-        }
 
         // Attach Redis-backed unread_message_count to each accessible channel
         const accessibleRows = rows.filter(ch => ch.id && ch.can_access);
