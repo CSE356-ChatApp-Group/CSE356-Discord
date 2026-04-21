@@ -232,8 +232,10 @@ async function request(
 export const api = {
   get:    (path: string)               => {
     // Message history must not use the short GET cache — pollers (e.g. graders)
-    // can otherwise see a stale first page right after a write.
-    const skipRecentCache = path.startsWith('/messages');
+    // can otherwise see a stale first page right after a write. Search must also
+    // bypass this cache so repeated queries do not briefly reuse an empty result
+    // after the underlying chat history changes.
+    const skipRecentCache = path.startsWith('/messages') || path.startsWith('/search');
 
     if (!skipRecentCache) {
       const cached = _recentGets.get(path);

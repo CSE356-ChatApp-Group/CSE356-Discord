@@ -333,6 +333,10 @@ function escapeLikePattern(s: string): string {
 
 function buildLiteralAllTermsClause(params: any[], columnExpr: string, q: string): string {
   const terms = extractSearchTerms(q);
+  return buildLiteralTermsClause(params, columnExpr, terms);
+}
+
+function buildLiteralTermsClause(params: any[], columnExpr: string, terms: string[]): string {
   if (!terms.length) return '';
   return terms
     .map(
@@ -552,6 +556,41 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
   let fromClause = FROM_CLAUSE;
 
   if (isChannelOrConversationScoped) {
+    const terms = extractSearchTerms(q);
+    const anchorTerm = [...terms]
+      .filter((term) => term.length >= 3)
+      .sort((a, b) => b.length - a.length)[0];
+
+    if (anchorTerm) {
+      const params: any[] = [];
+      const scope = buildScopedAccessParts(params, opts);
+      const filters = buildFilters(params, opts);
+      const remainingTerms = terms.filter((term) => term.toLowerCase() !== anchorTerm.toLowerCase());
+      const anchorPattern = p(params, `%${escapeLikePattern(anchorTerm)}%`);
+      const otherLiteralTermFilter = buildLiteralTermsClause(params, 'm.content', remainingTerms);
+      const limitPh = p(params, limit);
+      const offsetPh = p(params, offset);
+
+      return {
+        sql: `
+          ${scope ? `WITH ${scope.cte}` : ''}
+          SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+            search_rows.*
+          ${scope ? scope.fromClause : 'FROM'}
+          ${scope ? 'LEFT JOIN LATERAL (' : '('}
+            SELECT ${SELECT_COLS}
+            ${FROM_CLAUSE}
+            WHERE m.deleted_at IS NULL
+              AND coalesce(m.content, '') ILIKE ${anchorPattern} ESCAPE '\\'
+              ${otherLiteralTermFilter}
+              ${filters}
+            ORDER BY m.created_at DESC
+            LIMIT ${limitPh} OFFSET ${offsetPh}
+          ) search_rows ${scope ? scope.onClause : ''}`,
+        params, limit, offset, q,
+      };
+    }
+
     const params: any[] = [];
     const scope = buildScopedAccessParts(params, opts);
     const candidateScopeFilters = buildScopedNewestCandidateFilters(params, opts, 'messages');
@@ -810,7 +849,13 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
     // skip the retry — it will almost certainly timeout again and waste pool time.
     const isTimeout = err?.code === '57014' || /timeout/i.test(err?.message || '');
     if (isTimeout) {
-      logger.warn({ err, query: trimmed }, 'search: query timeout, skipping trigram retry');
+      logger.warn({
+        err,
+        query: trimmed,
+        communityId: opts.communityId,
+        channelId: opts.channelId,
+        conversationId: opts.conversationId,
+      }, 'search: query timeout, skipping trigram retry');
       return buildResult([], trimmed, Number(opts.offset) || 0, Number(opts.limit) || 20);
     }
     
@@ -819,7 +864,13 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
     try {
       return await searchTrigram(trimmed, opts);
     } catch (triErr) {
-      logger.error({ err: triErr }, 'search trigram fallback failed');
+      logger.error({
+        err: triErr,
+        query: trimmed,
+        communityId: opts.communityId,
+        channelId: opts.channelId,
+        conversationId: opts.conversationId,
+      }, 'search trigram fallback failed');
       throw triErr;
     }
   }

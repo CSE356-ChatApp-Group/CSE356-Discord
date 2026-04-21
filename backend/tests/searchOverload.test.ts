@@ -115,7 +115,7 @@ describe('search overload behavior', () => {
     expect(recordedClient?.query).toHaveBeenCalledTimes(4);
   });
 
-  it('caps channel-scoped trigram fallback to newest scoped candidates', async () => {
+  it('caps tiny channel-scoped fallback to newest scoped candidates', async () => {
     let recordedClient: { query: jest.Mock } | null = null;
     withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
       const client = {
@@ -129,7 +129,7 @@ describe('search overload behavior', () => {
       return run(client);
     });
 
-    const result = await search('the', {
+    const result = await search('be', {
       channelId: 'channel-1',
       userId: 'user-1',
       limit: 20,
@@ -186,6 +186,49 @@ describe('search overload behavior', () => {
     expect(result.hits[0].content).toBe('hi ed be');
     expect(result.hits[0]._formatted.content).toContain('<em>be</em>');
     expect(recordedClient?.query).toHaveBeenCalledTimes(4);
+  });
+
+  it('uses full scoped trigram search for 3+ character filler words instead of only the newest candidate window', async () => {
+    process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED = '999';
+
+    let recordedClient: { query: jest.Mock } | null = null;
+    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+      const client = {
+        query: jest.fn()
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({
+            rows: [{
+              id: 'msg-1',
+              content: 'what are the odds',
+              authorId: 'user-1',
+              authorDisplayName: 'User One',
+              channelId: 'channel-1',
+              conversationId: null,
+              communityId: 'community-1',
+              channelName: 'general',
+              createdAt: '2026-04-21T16:35:23.000Z',
+            }],
+          }),
+      };
+      recordedClient = client;
+      return run(client);
+    });
+
+    const result = await search('the', {
+      channelId: 'channel-1',
+      userId: 'user-1',
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]._formatted.content).toContain('<em>the</em>');
+    const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
+    expect(trigramSql).not.toContain('trigram_scope_candidates');
+    expect(trigramSql).toContain("coalesce(m.content, '') ILIKE");
+    expect(trigramSql).toContain('m.channel_id = $3');
   });
 
   it('builds both FTS and trigram queries to require every search term', async () => {
