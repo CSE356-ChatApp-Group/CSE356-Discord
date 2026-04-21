@@ -2390,9 +2390,13 @@ scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o Co
 scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
     "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/deploy/pgbouncer-exporter.py" "$PROD_USER@$PROD_HOST:/tmp/pgbouncer-exporter.py.deploy" || true
 ssh_prod "
   set -euo pipefail
-  if [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/promtail-host-config.yml.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ]; then
+  if [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/promtail-host-config.yml.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ] || [ -f /tmp/pgbouncer-exporter.py.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
   fi
   sudo mkdir -p /opt/chatapp-monitoring/node_exporter_textfile
@@ -2433,6 +2437,50 @@ ssh_prod "
     echo 'redis_exporter started (uses REDIS_URL from /opt/chatapp/shared/.env)'
   else
     echo 'redis_exporter already running — skipping pull'
+  fi
+
+  # PgBouncer exporter: Python script that exposes :9126/metrics
+  if [ ! -f /opt/chatapp-monitoring/pgbouncer-exporter.py ]; then
+    echo 'Setting up pgbouncer-exporter...'
+    sudo mkdir -p /opt/chatapp-monitoring
+  fi
+
+  # Install the exporter script (copy from repo during deploy)
+  # and ensure it has execute permission
+  if [ -f /tmp/pgbouncer-exporter.py.deploy ]; then
+    sudo install -m 755 /tmp/pgbouncer-exporter.py.deploy /opt/chatapp-monitoring/pgbouncer-exporter.py
+    rm -f /tmp/pgbouncer-exporter.py.deploy
+  fi
+
+  # Create systemd service for pgbouncer_exporter
+  if [ -f /opt/chatapp-monitoring/pgbouncer-exporter.py ]; then
+    sudo tee /etc/systemd/system/pgbouncer-exporter.service > /dev/null <<'UNIT'
+[Unit]
+Description=PgBouncer Prometheus exporter
+After=network.target pgbouncer.service
+Wants=pgbouncer.service
+
+[Service]
+Type=simple
+User=nobody
+ExecStart=/usr/bin/python3 /opt/chatapp-monitoring/pgbouncer-exporter.py --listen 0.0.0.0:9126 --pgbouncer 127.0.0.1:6432
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl daemon-reload
+    sudo systemctl enable pgbouncer-exporter 2>/dev/null || true
+    sudo systemctl restart pgbouncer-exporter
+    sleep 1
+    if sudo systemctl is-active --quiet pgbouncer-exporter; then
+      echo 'pgbouncer-exporter started on :9126/metrics'
+    else
+      echo 'Warning: pgbouncer-exporter failed to start (non-critical)' >&2
+    fi
   fi
 "
 echo "✓ Monitoring updated"

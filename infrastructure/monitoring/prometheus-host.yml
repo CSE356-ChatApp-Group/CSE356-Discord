@@ -54,6 +54,14 @@ __CHATAPP_API_STATIC_CONFIGS__
         labels:
           instance: 'redis-local'
 
+  # PgBouncer metrics exporter on the app VM (deploy ensures python script running).
+  - job_name: 'pgbouncer'
+    static_configs:
+      - targets: ['__PROM_APP_HOST__:9126']
+        labels:
+          instance: 'pgbouncer-local'
+    scrape_interval: 10s
+
   - job_name: 'prometheus'
     static_configs:
       - targets: ['127.0.0.1:9090']
