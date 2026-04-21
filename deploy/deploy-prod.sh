@@ -369,9 +369,13 @@ ports = [p.strip() for p in os.environ['PORTS_CSV'].split(',') if p.strip()]
 if not ports:
     raise SystemExit('no upstream ports provided')
 
-keepalive = '''  keepalive 512;
-  keepalive_requests 100000;
-  keepalive_timeout 75s;
+# Keepalive tuning for performance: lower pool size + shorter lifetime force faster
+# connection rotation and more even distribution of new requests across workers.
+# This is especially important in multi-worker setups to avoid connection reuse bias.
+keepalive = '''  round_robin;
+  keepalive 16;
+  keepalive_requests 100;
+  keepalive_timeout 10s;
 '''
 if len(ports) == 1:
     servers = f'  server localhost:{ports[0]} max_fails=0;\\n'
@@ -381,7 +385,7 @@ else:
         f'  server localhost:{port} max_fails=2 fail_timeout=10s;\\n'
         for port in ports
     )
-    balance = '  least_conn;\\n'
+    balance = ''  # round_robin is now in keepalive block
 
 # Preserve extra upstream servers (e.g. VM2 in multi-VM mode) on every rewrite.
 extra_csv = os.environ.get('EXTRA_UPSTREAM_SERVERS_CSV', '').strip()
@@ -390,7 +394,7 @@ if extra_csv:
         ep = ep.strip()
         if ep:
             servers += f'  server {ep} max_fails=2 fail_timeout=10s;\\n'
-    balance = '  least_conn;\\n'  # always use least_conn when extra servers present
+    # balance stays as '' since round_robin is in keepalive block
 
 block = (
     'upstream app {\\n'
@@ -1490,9 +1494,9 @@ else
 import os, re
 cfg_path = os.environ['TMP_SITE']
 newp = os.environ['NEW_PORT']
-keepalive = '''  keepalive 512;
-  keepalive_requests 100000;
-  keepalive_timeout 75s;
+keepalive = '''  keepalive 16;
+  keepalive_requests 100;
+  keepalive_timeout 10s;
 '''
 block = (
     'upstream app {\\n'
@@ -1901,9 +1905,9 @@ if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
 import os, re
 cfg_path = os.environ['TMP_SITE']
 newp = os.environ['NEW_PORT']
-keepalive = '''  keepalive 512;
-  keepalive_requests 100000;
-  keepalive_timeout 75s;
+keepalive = '''  keepalive 16;
+  keepalive_requests 100;
+  keepalive_timeout 10s;
 '''
 block = (
     'upstream app {\\n'

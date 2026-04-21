@@ -112,15 +112,20 @@ ini = f"""\
 {pg_db} = host={pg_host} port={pg_backend_port} dbname={_pgbouncer_conn_value(pg_db)} user={_pgbouncer_conn_value(pg_user)} password={_pgbouncer_conn_value(pg_pass)}
 
 [pgbouncer]
-listen_addr = 127.0.0.1
+; Listen on all interfaces (0.0.0.0) to allow both local workers on VM1 and remote
+; workers on VM2/VM3 to reach PgBouncer. In multi-VM architectures, only VM1 runs
+; PgBouncer, so this enables cross-VM worker connectivity. Loopback-only (127.0.0.1)
+; would break remote workers' ability to establish database connections.
+listen_addr = 0.0.0.0
 listen_port = 6432
 
 ; Required for daemon mode (init.d / sysv service on Ubuntu 22.04)
 logfile = /var/log/pgbouncer/pgbouncer.log
 pidfile = /var/run/pgbouncer/pgbouncer.pid
 
-; Trust connections from localhost – Node processes run on the same VM.
-; The password above is used only for PgBouncer → PostgreSQL auth.
+; Trust connections from loopback and internal network – Node processes run on the same
+; VM (localhost) or on other VMs in the internal network (10.0.x.x). The password above
+; is used only for PgBouncer → PostgreSQL auth.
 auth_type = trust
 auth_file = /etc/pgbouncer/userlist.txt
 
