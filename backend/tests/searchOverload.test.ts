@@ -32,7 +32,8 @@ describe('search overload behavior', () => {
     withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
       const client = {
         query: jest.fn()
-          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({})  // SET LOCAL statement_timeout
+          .mockResolvedValueOnce({})  // SET LOCAL work_mem
           .mockResolvedValueOnce({ rows: [] }),
       };
       recordedClient = client;
@@ -47,7 +48,7 @@ describe('search overload behavior', () => {
     });
 
     expect(result.hits).toEqual([]);
-    expect(recordedClient?.query).toHaveBeenCalledTimes(2);
+    expect(recordedClient?.query).toHaveBeenCalledTimes(3);
     expect(recordedClient?.query).toHaveBeenNthCalledWith(1, 'SET LOCAL statement_timeout = 3000');
   });
 
@@ -58,8 +59,9 @@ describe('search overload behavior', () => {
     withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
       const client = {
         query: jest.fn()
-          .mockResolvedValueOnce({})
-          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({})  // SET LOCAL statement_timeout
+          .mockResolvedValueOnce({})  // SET LOCAL work_mem
+          .mockResolvedValueOnce({ rows: [] })  // FTS query (no results)
           .mockResolvedValueOnce({
             rows: [{
               id: 'msg-1',
@@ -88,6 +90,6 @@ describe('search overload behavior', () => {
 
     expect(result.hits).toHaveLength(1);
     expect(result.hits[0].id).toBe('msg-1');
-    expect(recordedClient?.query).toHaveBeenCalledTimes(3);
+    expect(recordedClient?.query).toHaveBeenCalledTimes(4);
   });
 });
