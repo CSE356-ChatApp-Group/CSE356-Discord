@@ -11,6 +11,7 @@
 set -euo pipefail
 PROD_HOST="${PROD_HOST:-130.245.136.44}"
 PROD_USER="${PROD_USER:-ubuntu}"
+PRIMARY_VM1_HOST="130.245.136.44"
 
 ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" bash <<'REMOTE'
 set -euo pipefail
@@ -81,37 +82,55 @@ if [[ -n "${DUP}" ]]; then
   exit 1
 fi
 
-# Exact topology parity with current production.
-for s in "${EXPECTED_SERVERS[@]}"; do
-  if ! echo "${SERVER_LINES}" | grep -qx "${s}"; then
-    echo "FAIL: upstream app missing expected server ${s}"
-    exit 1
-  fi
-done
-while IFS= read -r s; do
-  [[ -n "${s}" ]] || continue
-  found=0
-  for exp in "${EXPECTED_SERVERS[@]}"; do
-    if [[ "${exp}" == "${s}" ]]; then
-      found=1
-      break
+if [[ "${PROD_HOST}" == "${PRIMARY_VM1_HOST}" ]]; then
+  # VM1 (shared ingress): enforce full 14-worker cross-VM topology.
+  for s in "${EXPECTED_SERVERS[@]}"; do
+    if ! echo "${SERVER_LINES}" | grep -qx "${s}"; then
+      echo "FAIL: upstream app missing expected server ${s}"
+      exit 1
     fi
   done
-  if [[ "${found}" -ne 1 ]]; then
-    echo "FAIL: upstream app has unexpected server ${s}"
-    exit 1
-  fi
-done <<< "${SERVER_LINES}"
-echo "OK: upstream includes expected 14 worker server entries (4+5+5)"
+  while IFS= read -r s; do
+    [[ -n "${s}" ]] || continue
+    found=0
+    for exp in "${EXPECTED_SERVERS[@]}"; do
+      if [[ "${exp}" == "${s}" ]]; then
+        found=1
+        break
+      fi
+    done
+    if [[ "${found}" -ne 1 ]]; then
+      echo "FAIL: upstream app has unexpected server ${s}"
+      exit 1
+    fi
+  done <<< "${SERVER_LINES}"
+  echo "OK: upstream includes expected 14 worker server entries (4+5+5)"
 
-# VM1 local workers (localhost:4000-4003) must be active.
-for p in 4000 4001 4002 4003; do
-  if ! systemctl is-active --quiet "chatapp@${p}" 2>/dev/null; then
-    echo "FAIL: expected local worker chatapp@${p} is not active"
+  # VM1 local workers (localhost:4000-4003) must be active.
+  for p in 4000 4001 4002 4003; do
+    if ! systemctl is-active --quiet "chatapp@${p}" 2>/dev/null; then
+      echo "FAIL: expected local worker chatapp@${p} is not active"
+      exit 1
+    fi
+  done
+  echo "OK: VM1 local workers 4000-4003 are active"
+else
+  # VM2/VM3 workers-only: enforce local upstream matches active local units.
+  LOCAL_UP=$(echo "${SERVER_LINES}" | grep -E '^localhost:' || true)
+  if [[ -z "${LOCAL_UP}" ]]; then
+    echo "FAIL: no localhost upstream servers found on workers-only host"
     exit 1
   fi
-done
-echo "OK: VM1 local workers 4000-4003 are active"
+  while IFS= read -r s; do
+    [[ -n "${s}" ]] || continue
+    p="${s#localhost:}"
+    if ! systemctl is-active --quiet "chatapp@${p}" 2>/dev/null; then
+      echo "FAIL: upstream lists ${s} but chatapp@${p} is not active"
+      exit 1
+    fi
+  done <<< "${LOCAL_UP}"
+  echo "OK: worker-host local upstream matches active local chatapp units"
+fi
 
 # Required retry policy now includes http_503 + non_idempotent and tries=2.
 RETRY_LINE='proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;'
