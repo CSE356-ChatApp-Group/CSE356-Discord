@@ -1340,6 +1340,19 @@ async function bootstrapUserSubscriptions(ws, userId) {
   if (mode === 'user_only') return;
   const channels = await listAutoSubscriptionChannels(userId, mode);
   warmWsAclCacheFromChannelList(userId, channels);
+  
+  // Populate channel:recent_connect ZSETs immediately for all channel: topics
+  // before async subscription work begins. This closes a timing gap where
+  // users could receive messages on user:<id> but not be in channel ZSETs,
+  // causing delivery failures with CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect.
+  const channelTopics = channels.filter((ch) => ch.startsWith('channel:'));
+  if (channelTopics.length > 0) {
+    const zaddPromises = channelTopics.map((channel) => 
+      markChannelRecentConnect(userId, channel.slice('channel:'.length)).catch(() => {})
+    );
+    await Promise.allSettled(zaddPromises);
+  }
+  
   for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
     const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
     await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
