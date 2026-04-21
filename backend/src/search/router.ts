@@ -6,7 +6,7 @@
  * Scope: communityId, channelId, and/or conversationId (see handler: when
  * channelId === conversationId, only conversation scope is used — matches
  * COMPAS generated client searchMessages URL).
- * Omitting all three falls back to an access-filtered cross-scope search.
+ * Omitting all three is rejected; this route is intentionally scoped-only.
  */
 
 'use strict';

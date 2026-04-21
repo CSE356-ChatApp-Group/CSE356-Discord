@@ -45,7 +45,7 @@ function shouldAllowTrigramFallback(opts: Record<string, any>, queryLength: numb
 
   const stage = overload.getStage();
   if (stage >= 2) return false;
-  if (stage >= 1 && !opts.channelId && !opts.conversationId) return false;
+  if (stage >= 1 && !scoped) return false;
   return true;
 }
 
@@ -292,11 +292,44 @@ function sanitizeHeadline(raw: string): string {
     .replace(/%%EM_END%%/g, '</em>');
 }
 
+function extractSearchTerms(q: string): string[] {
+  const seen = new Set();
+  return String(q || '')
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter(Boolean)
+    .filter((term) => {
+      const key = term.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function escapeLikePattern(s: string): string {
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_');
+}
+
+function buildLiteralAllTermsClause(params: any[], columnExpr: string, q: string): string {
+  const terms = extractSearchTerms(q);
+  if (!terms.length) return '';
+  return terms
+    .map(
+      (term) =>
+        `AND coalesce(${columnExpr}, '') ILIKE ${p(params, `%${escapeLikePattern(term)}%`)} ESCAPE '\\'`,
+    )
+    .join('\n');
+}
+
 function highlightIlike(content: string, q: string): string {
   if (!content) return '';
   // HTML-escape first, then insert <em> markers so the output is safe for innerHTML.
   const safe = escapeHtml(content);
-  const terms = q.trim().split(/\s+/).filter(Boolean).map(escapeRegExp);
+  const terms = extractSearchTerms(q).map(escapeRegExp);
   if (!terms.length) return safe;
   return safe.replace(new RegExp(`(${terms.join('|')})`, 'gi'), '<em>$1</em>');
 }
@@ -333,6 +366,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   const params: any[] = [q]; // $1 reserved for the query string
   const scope = buildScopedAccessParts(params, opts);
   const filters = buildFilters(params, opts);
+  const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
   const limitPh = p(params, limit);
@@ -394,6 +428,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       WHERE m.deleted_at IS NULL
         AND m.content_tsv @@ sq.q
         ${innerWhereExtra}
+        ${literalTermFilter}
         ${filters}
       ORDER BY m.created_at DESC
       LIMIT ${limitPh} OFFSET ${offsetPh}
@@ -404,9 +439,11 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
 
 /** Statement + paging metadata for trigram ILIKE fallback. */
 function buildTrigramParts(q: string, opts: Record<string, any>) {
-  const params: any[] = [`%${q}%`]; // $1 reserved for the ILIKE pattern
+  const params: any[] = [];
   const scope = buildScopedAccessParts(params, opts);
   const filters = buildFilters(params, opts);
+  const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+  const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'content', q);
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
   const limitPh = p(params, limit);
@@ -424,7 +461,6 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
     : 500;
 
   let fromClause = FROM_CLAUSE;
-  let whereExtra = '';
 
   if (isUnscoped || isCommunityScoped) {
     const cteSql = `
@@ -432,7 +468,7 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
       trigram_candidates AS (
         SELECT id FROM messages
         WHERE deleted_at IS NULL
-          AND content ILIKE $1
+          ${candidateLiteralTermFilter}
         ORDER BY created_at DESC
         LIMIT ${trigramCandidatesLimit}
       )
@@ -443,7 +479,6 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
       JOIN messages m ON m.id = tc.id
       JOIN users u ON u.id = m.author_id
       LEFT JOIN channels ch ON ch.id = m.channel_id`;
-    whereExtra = `AND tc.id IN (SELECT id FROM trigram_candidates)`;
     
     return {
       sql: `
@@ -455,7 +490,7 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
           SELECT ${SELECT_COLS}
           ${fromClause}
           WHERE m.deleted_at IS NULL
-            ${whereExtra}
+            ${literalTermFilter}
             ${filters}
           ORDER BY m.created_at DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
@@ -475,7 +510,7 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
       SELECT ${SELECT_COLS}
       ${FROM_CLAUSE}
       WHERE m.deleted_at IS NULL
-        AND m.content ILIKE $1
+        ${literalTermFilter}
         ${filters}
       ORDER BY m.created_at DESC
       LIMIT ${limitPh} OFFSET ${offsetPh}
@@ -551,26 +586,9 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
   const allowTrigramFallback = shouldAllowTrigramFallback(opts, trimmed.length);
 
-  // Check if the query consists entirely of stopwords (empty tsquery)
-  // If so, skip trigram fallback entirely — it will scan the whole table and timeout
-  const isAllStopwords = async (client) => {
-    try {
-      const checkRes = await client.query(
-        'SELECT websearch_to_tsquery($1) AS tsq',
-        ['english', trimmed]
-      );
-      return checkRes.rows[0]?.tsq === '';
-    } catch (err) {
-      // If tsquery check fails (e.g., invalid input), assume not all stopwords
-      // to avoid blocking valid searches
-      logger.warn({ err, query: trimmed }, 'search: failed to check for stopwords');
-      return false;
-    }
-  };
-
   try {
     const ftsMeta = buildFtsParts(trimmed, opts);
-    const triMeta = buildTrigramParts(trimmed, opts);
+    const triMeta = allowTrigramFallback ? buildTrigramParts(trimmed, opts) : null;
     return await runSearchTransaction(async (client) => {
       const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
       if (scoped && ftsRes.rows[0]?.__scopeAccess === false) {
@@ -581,15 +599,8 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       if (ftsRes.rows.some((row) => row?.id)) {
         return buildResult(ftsRes.rows, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
       }
-      
-      // If FTS found no results, check if it's an all-stopword query before running trigram
-      // This prevents expensive full-table scans for queries like "will just have"
-      if (await isAllStopwords(client)) {
-        logger.info({ query: trimmed }, 'search: all-stopword query, skipping trigram fallback');
-        return buildResult([], ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
-      }
-      
-      if (!allowTrigramFallback) {
+
+      if (!triMeta) {
         return buildResult([], ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
       }
       const triRes = await client.query(triMeta.sql, triMeta.params);

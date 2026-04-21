@@ -350,6 +350,52 @@ describe('Search – trigram fallback', () => {
   });
 });
 
+describe('Search – common phrases and all-term matching', () => {
+  let ownerToken: string;
+  let channelId: string;
+  const exactPhrase = `games that have ${uniqueSuffix()}`;
+  const commonPhrase = 'more just about';
+
+  beforeAll(async () => {
+    const owner = await createAuthenticatedUser('srchallterms');
+    ownerToken = owner.accessToken;
+    const community = await createCommunity(ownerToken, uniqueSuffix());
+    const channel = await createChannel(ownerToken, community.id);
+    channelId = channel.id;
+
+    await sendMessage(ownerToken, channelId, `${exactPhrase} with every searched word present`);
+    await sendMessage(ownerToken, channelId, 'games that are popular but missing the last word');
+    await sendMessage(ownerToken, channelId, `${commonPhrase} this sentence should still be searchable`);
+  });
+
+  it('does not return hits that miss one of the query words', async () => {
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('games that have')}&channelId=${channelId}`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    for (const hit of res.body.hits) {
+      const lower = String(hit.content || '').toLowerCase();
+      expect(lower).toContain('games');
+      expect(lower).toContain('that');
+      expect(lower).toContain('have');
+    }
+  });
+
+  it('still finds stopword-heavy phrases when every word is present', async () => {
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(commonPhrase)}&channelId=${channelId}`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    expect(
+      res.body.hits.some((hit: any) => String(hit.content || '').includes(commonPhrase)),
+    ).toBe(true);
+  });
+});
+
 describe('Search – COMPAS duplicate scope query', () => {
   it('treats channelId=conversationId (same UUID) as conversation-scoped search', async () => {
     const a = await createAuthenticatedUser('srchcompasa');
