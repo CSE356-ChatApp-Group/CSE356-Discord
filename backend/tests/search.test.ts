@@ -356,6 +356,7 @@ describe('Search – common phrases and all-term matching', () => {
   const exactPhrase = `games that have ${uniqueSuffix()}`;
   const commonPhrase = 'more just about';
   const shortPhrase = 'hi ed be';
+  const boundaryPhrase = 'a lazy';
 
   beforeAll(async () => {
     const owner = await createAuthenticatedUser('srchallterms');
@@ -368,6 +369,8 @@ describe('Search – common phrases and all-term matching', () => {
     await sendMessage(ownerToken, channelId, 'games that are popular but missing the last word');
     await sendMessage(ownerToken, channelId, `${commonPhrase} this sentence should still be searchable`);
     await sendMessage(ownerToken, channelId, shortPhrase);
+    await sendMessage(ownerToken, channelId, 'the lazy dog');
+    await sendMessage(ownerToken, channelId, 'a lazy fox');
   });
 
   it('does not return hits that miss one of the query words', async () => {
@@ -410,6 +413,20 @@ describe('Search – common phrases and all-term matching', () => {
     expect(
       res.body.hits.some((hit: any) => String(hit._formatted?.content || '').includes('<em>be</em>')),
     ).toBe(true);
+  });
+
+  it('does not treat a short word as matched just because it appears inside another word', async () => {
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(boundaryPhrase)}&channelId=${channelId}`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(
+      res.body.hits.some((hit: any) => String(hit.content || '').includes('a lazy fox')),
+    ).toBe(true);
+    expect(
+      res.body.hits.some((hit: any) => String(hit.content || '').includes('the lazy dog')),
+    ).toBe(false);
   });
 });
 

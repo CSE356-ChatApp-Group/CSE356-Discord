@@ -227,7 +227,8 @@ describe('search overload behavior', () => {
     expect(result.hits[0]._formatted.content).toContain('<em>the</em>');
     const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
     expect(trigramSql).not.toContain('trigram_scope_candidates');
-    expect(trigramSql).toContain("coalesce(m.content, '') ILIKE");
+    expect(trigramSql).toContain('m.content IS NOT NULL');
+    expect(trigramSql).toContain('m.content ILIKE');
     expect(trigramSql).toContain('m.channel_id = $3');
   });
 
@@ -258,10 +259,101 @@ describe('search overload behavior', () => {
     const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
     const trigramParams = recordedClient?.query.mock.calls[3]?.[1] ?? [];
 
-    expect((ftsSql.match(/coalesce\(m\.content, ''\) ILIKE/g) || []).length).toBe(3);
-    expect((trigramSql.match(/coalesce\(m\.content, ''\) ILIKE/g) || []).length).toBe(3);
-    expect(ftsParams).toEqual(expect.arrayContaining(['%games%', '%that%', '%have%']));
-    expect(trigramParams).toEqual(expect.arrayContaining(['%games%', '%that%', '%have%']));
+    expect((ftsSql.match(/m\.content IS NOT NULL AND m\.content ~\*/g) || []).length).toBe(3);
+    expect((trigramSql.match(/m\.content IS NOT NULL AND m\.content ~\*/g) || []).length).toBe(2);
+    expect(trigramSql).toContain('m.content IS NOT NULL');
+    expect(trigramSql).toContain('m.content ILIKE');
+    expect(ftsParams).toEqual(expect.arrayContaining([
+      '(^|[^[:alnum:]])games([^[:alnum:]]|$)',
+      '(^|[^[:alnum:]])that([^[:alnum:]]|$)',
+      '(^|[^[:alnum:]])have([^[:alnum:]]|$)',
+    ]));
+    expect(trigramParams).toEqual(expect.arrayContaining([
+      '%games%',
+      '(^|[^[:alnum:]])that([^[:alnum:]]|$)',
+      '(^|[^[:alnum:]])have([^[:alnum:]]|$)',
+    ]));
+  });
+
+  it('uses word-boundary matching for multi-term all-word filters so short words do not match inside larger words', async () => {
+    let recordedClient: { query: jest.Mock } | null = null;
+    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+      const client = {
+        query: jest.fn()
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] }),
+      };
+      recordedClient = client;
+      return run(client);
+    });
+
+    await search('a lazy', {
+      channelId: 'channel-1',
+      userId: 'user-1',
+      limit: 20,
+      offset: 0,
+    });
+
+    const ftsSql = recordedClient?.query.mock.calls[2]?.[0] ?? '';
+    const ftsParams = recordedClient?.query.mock.calls[2]?.[1] ?? [];
+    expect(ftsSql).toContain('m.content IS NOT NULL AND m.content ~*');
+    expect(ftsParams).toEqual(expect.arrayContaining([
+      '(^|[^[:alnum:]])a([^[:alnum:]]|$)',
+      '(^|[^[:alnum:]])lazy([^[:alnum:]]|$)',
+    ]));
+  });
+
+  it('retries fallback separately when the FTS phase times out', async () => {
+    let firstClient: { query: jest.Mock } | null = null;
+    let secondClient: { query: jest.Mock } | null = null;
+
+    withTransaction
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockRejectedValueOnce(Object.assign(new Error('statement timeout'), { code: '57014' })),
+        };
+        firstClient = client;
+        return run(client);
+      })
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({
+              rows: [{
+                id: 'msg-1',
+                content: 'probably some other message',
+                authorId: 'user-1',
+                authorDisplayName: 'User One',
+                channelId: null,
+                conversationId: 'conv-1',
+                communityId: null,
+                channelName: null,
+                createdAt: '2026-04-21T16:35:23.000Z',
+              }],
+            }),
+        };
+        secondClient = client;
+        return run(client);
+      });
+
+    const result = await search('probably some other', {
+      conversationId: 'conv-1',
+      userId: 'user-1',
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(result.hits).toHaveLength(1);
+    expect(firstClient?.query).toHaveBeenCalledTimes(3);
+    expect(secondClient?.query).toHaveBeenCalledTimes(3);
+    expect(withTransaction).toHaveBeenCalledTimes(2);
   });
 
   it('limits community-scoped candidates inside the requested community instead of globally', async () => {

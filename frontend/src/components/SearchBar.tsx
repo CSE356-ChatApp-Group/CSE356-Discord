@@ -78,10 +78,22 @@ export default function SearchBar({
   function highlightedContent(hit, query) {
     if (hit._formatted?.content) return hit._formatted.content;
     const safe = escapeHtml(hit.content || '');
-    const terms = extractHighlightTerms(query).map(escapeRegex);
+    const terms = extractHighlightTerms(query);
     if (!terms.length) return safe;
-    const re = new RegExp(`(${terms.join('|')})`, 'ig');
-    return safe.replace(re, '<em>$1</em>');
+
+    if (terms.length === 1) {
+      const [term] = terms.map(escapeRegex);
+      return safe.replace(new RegExp(`(${term})`, 'ig'), '<em>$1</em>');
+    }
+
+    const wordPattern = terms
+      .map(escapeRegex)
+      .sort((a, b) => b.length - a.length)
+      .join('|');
+    return safe.replace(
+      new RegExp(`(^|[^\\p{L}\\p{N}])(${wordPattern})(?=$|[^\\p{L}\\p{N}])`, 'giu'),
+      (_match, prefix, term) => `${prefix}<em>${term}</em>`,
+    );
   }
 
   function isRangeValid(filters) {

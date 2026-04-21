@@ -331,6 +331,10 @@ function escapeLikePattern(s: string): string {
     .replace(/_/g, '\\_');
 }
 
+function escapePgRegexPattern(s: string): string {
+  return s.replace(/[\\.^$|?*+()[\]{}-]/g, '\\$&');
+}
+
 function buildLiteralAllTermsClause(params: any[], columnExpr: string, q: string): string {
   const terms = extractSearchTerms(q);
   return buildLiteralTermsClause(params, columnExpr, terms);
@@ -338,11 +342,19 @@ function buildLiteralAllTermsClause(params: any[], columnExpr: string, q: string
 
 function buildLiteralTermsClause(params: any[], columnExpr: string, terms: string[]): string {
   if (!terms.length) return '';
+  if (terms.length === 1) {
+    return terms
+      .map(
+        (term) =>
+          `AND ${columnExpr} IS NOT NULL AND ${columnExpr} ILIKE ${p(params, `%${escapeLikePattern(term)}%`)} ESCAPE '\\'`,
+      )
+      .join('\n');
+  }
   return terms
-    .map(
-      (term) =>
-        `AND coalesce(${columnExpr}, '') ILIKE ${p(params, `%${escapeLikePattern(term)}%`)} ESCAPE '\\'`,
-    )
+    .map((term) => {
+      const boundaryPattern = `(^|[^[:alnum:]])${escapePgRegexPattern(term)}([^[:alnum:]]|$)`;
+      return `AND ${columnExpr} IS NOT NULL AND ${columnExpr} ~* ${p(params, boundaryPattern)}`;
+    })
     .join('\n');
 }
 
@@ -392,11 +404,29 @@ function buildCommunityScopedCandidateParts(
 
 function highlightIlike(content: string, q: string): string {
   if (!content) return '';
-  const terms = extractSearchTerms(q).map(escapeRegExp);
+  const terms = extractSearchTerms(q);
   if (!terms.length) return content;
-  // Use the same sentinels as ts_headline so buildResult() can sanitize once and
-  // emit real <em> tags for both FTS and fallback highlights.
-  return content.replace(new RegExp(`(${terms.join('|')})`, 'gi'), '%%EM_START%%$1%%EM_END%%');
+
+  // Single-term fallback searches intentionally allow infix/substring matches so
+  // partial searches like "hel" can highlight inside "hello".
+  if (terms.length === 1) {
+    const [term] = terms.map(escapeRegExp);
+    return content.replace(
+      new RegExp(`(${term})`, 'gi'),
+      '%%EM_START%%$1%%EM_END%%',
+    );
+  }
+
+  // Multi-term fallback verification uses whole-word semantics, so highlight the
+  // same way and avoid marking a short word only because it appears inside a larger word.
+  const wordPattern = terms
+    .map(escapeRegExp)
+    .sort((a, b) => b.length - a.length)
+    .join('|');
+  return content.replace(
+    new RegExp(`(^|[^\\p{L}\\p{N}])(${wordPattern})(?=$|[^\\p{L}\\p{N}])`, 'giu'),
+    (_match, prefix, term) => `${prefix}%%EM_START%%${term}%%EM_END%%`,
+  );
 }
 
 function buildResult(rows: any[], q: string, offset: number, limit: number) {
@@ -581,7 +611,8 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
             SELECT ${SELECT_COLS}
             ${FROM_CLAUSE}
             WHERE m.deleted_at IS NULL
-              AND coalesce(m.content, '') ILIKE ${anchorPattern} ESCAPE '\\'
+              AND m.content IS NOT NULL
+              AND m.content ILIKE ${anchorPattern} ESCAPE '\\'
               ${otherLiteralTermFilter}
               ${filters}
             ORDER BY m.created_at DESC
@@ -809,6 +840,7 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
   const allowTrigramFallback = shouldAllowTrigramFallback(opts, trimmed.length);
   const allowBoundedScopedFallback = shouldAllowBoundedScopedFallback(opts, trimmed.length);
+  let failedPhase: 'fts' | 'fallback' | null = null;
 
   try {
     const ftsMeta = buildFtsParts(trimmed, opts);
@@ -816,6 +848,7 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       ? buildTrigramParts(trimmed, opts)
       : null;
     return await runSearchTransaction(async (client) => {
+      failedPhase = 'fts';
       const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
       if (scoped && ftsRes.rows[0]?.__scopeAccess === false) {
         const err: any = new Error('Access denied');
@@ -827,14 +860,17 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       }
 
       if (!triMeta) {
+        failedPhase = null;
         return buildResult([], ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
       }
+      failedPhase = 'fallback';
       const triRes = await client.query(triMeta.sql, triMeta.params);
       if (scoped && triRes.rows[0]?.__scopeAccess === false) {
         const err: any = new Error('Access denied');
         err.statusCode = 403;
         throw err;
       }
+      failedPhase = null;
       const processed = triRes.rows.map((row) => ({
         ...row,
         highlight: highlightIlike(row.content, trimmed),
@@ -849,6 +885,27 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
     // skip the retry — it will almost certainly timeout again and waste pool time.
     const isTimeout = err?.code === '57014' || /timeout/i.test(err?.message || '');
     if (isTimeout) {
+      if (failedPhase === 'fts' && (allowTrigramFallback || allowBoundedScopedFallback)) {
+        logger.warn({
+          err,
+          query: trimmed,
+          communityId: opts.communityId,
+          channelId: opts.channelId,
+          conversationId: opts.conversationId,
+        }, 'search: FTS query timeout, retrying fallback separately');
+        try {
+          return await searchTrigram(trimmed, opts);
+        } catch (triErr) {
+          logger.error({
+            err: triErr,
+            query: trimmed,
+            communityId: opts.communityId,
+            channelId: opts.channelId,
+            conversationId: opts.conversationId,
+          }, 'search trigram fallback failed');
+          throw triErr;
+        }
+      }
       logger.warn({
         err,
         query: trimmed,
