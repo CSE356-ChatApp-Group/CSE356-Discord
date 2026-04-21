@@ -70,9 +70,18 @@ async function main() {
   const { community } = await r.json();
   if (!community?.id) fail('missing community id');
 
-  r = await fetch(`${BASE}/channels?communityId=${community.id}`, { headers: auth });
-  if (!r.ok) fail(`list channels HTTP ${r.status}`);
-  const chJson = await r.json();
+  // Retry up to 5× to tolerate read-replica replication lag (community_members
+  // write on primary may not have replicated by the time queryRead() fires).
+  let chJson;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    r = await fetch(`${BASE}/channels?communityId=${community.id}`, { headers: auth });
+    if (r.ok) { chJson = await r.json(); break; }
+    if (r.status === 403 && attempt < 5) {
+      await new Promise((res) => setTimeout(res, 300 * attempt));
+      continue;
+    }
+    fail(`list channels HTTP ${r.status}`);
+  }
   const channels = chJson.channels || [];
   const general = channels.find((c) => c.name === 'general') || channels[0];
   if (!general?.id) fail('no channel to post to');
