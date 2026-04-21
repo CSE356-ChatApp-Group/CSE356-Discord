@@ -130,9 +130,13 @@ describe('search overload behavior', () => {
 
     expect(result.hits).toEqual([]);
     const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
+    const trigramParams = recordedClient?.query.mock.calls[3]?.[1] ?? [];
     expect(trigramSql).toContain('trigram_scope_candidates');
     expect(trigramSql).toContain('messages.channel_id');
     expect(trigramSql).toContain('ORDER BY created_at DESC');
+    expect(trigramSql).toContain('messages.channel_id = $3');
+    expect(trigramSql).toContain("ILIKE $4 ESCAPE '\\'");
+    expect(trigramParams).toHaveLength(6);
   });
 
   it('builds both FTS and trigram queries to require every search term', async () => {

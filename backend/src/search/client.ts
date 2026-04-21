@@ -462,9 +462,6 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
 function buildTrigramParts(q: string, opts: Record<string, any>) {
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
-  const baseParams: any[] = [];
-  const scope = buildScopedAccessParts(baseParams, opts);
-  const filters = buildFilters(baseParams, opts);
 
   // Add a candidates CTE for trigram fallback to cap expensive scans.
   // Unlike FTS, we don't have the content_tsv GIN to limit rows efficiently,
@@ -491,7 +488,8 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
   let fromClause = FROM_CLAUSE;
 
   if (isChannelOrConversationScoped) {
-    const params = [...baseParams];
+    const params: any[] = [];
+    const scope = buildScopedAccessParts(params, opts);
     const candidateScopeFilters = buildScopedNewestCandidateFilters(params, opts, 'messages');
     const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
     const limitPh = p(params, limit);
@@ -530,6 +528,10 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
       params, limit, offset, q,
     };
   }
+
+  const baseParams: any[] = [];
+  const scope = buildScopedAccessParts(baseParams, opts);
+  const filters = buildFilters(baseParams, opts);
 
   if (isUnscoped || isCommunityScoped) {
     const params = [...baseParams];
