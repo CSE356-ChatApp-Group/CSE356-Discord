@@ -103,17 +103,10 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
 
   if (dirtyKeys.length === 0) return;
 
-  // Remove from dirty set before fetching data — prevents re-flushing stale
-  // data if we crash mid-flush; next enqueue will re-dirty the entry.
-  try {
-    if (dirtyKeys.length === 1) {
-      await redis.srem(RS_DIRTY_SET, dirtyKeys[0]);
-    } else {
-      await redis.srem(RS_DIRTY_SET, ...dirtyKeys);
-    }
-  } catch {
-    return;
-  }
+  // Do NOT srem from rs:dirty before reading rs:pending:* — if hgetall is empty or the
+  // upsert is skipped, we would drop the dirty flag without persisting (flaky tests +
+  // lost read cursors). Remove keys only after a successful batch upsert, or when a
+  // dirty entry has no pending payload (stale pointer — clear to avoid spinning).
 
   for (let i = 0; i < dirtyKeys.length; i += READ_STATE_FLUSH_BATCH_SIZE) {
     const batch = dirtyKeys.slice(i, i + READ_STATE_FLUSH_BATCH_SIZE);
@@ -136,31 +129,52 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
     const conversationIds: (string | null)[] = [];
     const messageIds: string[] = [];
     const messageCreatedAts: string[] = [];
+    const dirtyKeysFlushed: string[] = [];
+    const dirtyKeysStale: string[] = [];
 
     for (let j = 0; j < batch.length; j++) {
+      const dirtyKey = batch[j];
       const [pipeErr, data] = results[j];
-      if (pipeErr || !data || !data.msg_id || !data.msg_created_at) continue;
+      if (pipeErr || !data || !data.msg_id || !data.msg_created_at) {
+        dirtyKeysStale.push(dirtyKey);
+        continue;
+      }
 
-      const [userId] = batch[j].split('|');
+      const [userId] = dirtyKey.split('|');
       userIds.push(userId);
       channelIds.push(data.channel_id || null);
       conversationIds.push(data.conversation_id || null);
       messageIds.push(data.msg_id);
       messageCreatedAts.push(data.msg_created_at);
+      dirtyKeysFlushed.push(dirtyKey);
     }
 
-    if (userIds.length === 0) continue;
+    if (userIds.length > 0) {
+      try {
+        await query(READ_STATE_BATCH_UPSERT_SQL, [
+          userIds,
+          channelIds,
+          conversationIds,
+          messageIds,
+          messageCreatedAts,
+        ]);
+      } catch (err: any) {
+        logger.debug({ err }, 'read_state batch flush query failed');
+        continue;
+      }
+    }
+
+    const toClear = [...dirtyKeysFlushed, ...dirtyKeysStale];
+    if (toClear.length === 0) continue;
 
     try {
-      await query(READ_STATE_BATCH_UPSERT_SQL, [
-        userIds,
-        channelIds,
-        conversationIds,
-        messageIds,
-        messageCreatedAts,
-      ]);
-    } catch (err: any) {
-      logger.debug({ err }, 'read_state batch flush query failed');
+      if (toClear.length === 1) {
+        await redis.srem(RS_DIRTY_SET, toClear[0]);
+      } else {
+        await redis.srem(RS_DIRTY_SET, ...toClear);
+      }
+    } catch {
+      // ignore
     }
   }
 }
