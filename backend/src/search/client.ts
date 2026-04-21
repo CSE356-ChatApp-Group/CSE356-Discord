@@ -21,7 +21,7 @@ const overload = require('../utils/overload');
 
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
-  const configuredMs = Math.min(Math.max(parseInt(rawMs || '4000', 10), 1000), 120000);
+  const configuredMs = Math.min(Math.max(parseInt(rawMs || '10000', 10), 1000), 120000);
   const stage = overload.getStage();
   if (stage >= 2) return Math.min(configuredMs, 2000);
   if (stage >= 1) return Math.min(configuredMs, 3000);
@@ -61,6 +61,7 @@ async function runSearchQuery(sql: string, params: any[]) {
     try {
       await client.query('BEGIN READ ONLY');
       await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+      await client.query(`SET LOCAL work_mem = '64MB'`);
       const { rows } = await client.query(sql, params);
       await client.query('COMMIT');
       return rows;
@@ -73,6 +74,7 @@ async function runSearchQuery(sql: string, params: any[]) {
   }
   return withTransaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    await client.query(`SET LOCAL work_mem = '64MB'`);
     const { rows } = await client.query(sql, params);
     return rows;
   });
@@ -89,6 +91,7 @@ async function runSearchTransaction(run) {
     try {
       await client.query('BEGIN READ ONLY');
       await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+      await client.query(`SET LOCAL work_mem = '64MB'`);
       const out = await run(client);
       await client.query('COMMIT');
       return out;
@@ -101,6 +104,7 @@ async function runSearchTransaction(run) {
   }
   return withTransaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    await client.query(`SET LOCAL work_mem = '64MB'`);
     return run(client);
   });
 }
