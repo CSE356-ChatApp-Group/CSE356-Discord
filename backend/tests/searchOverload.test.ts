@@ -34,7 +34,8 @@ describe('search overload behavior', () => {
         query: jest.fn()
           .mockResolvedValueOnce({})  // SET LOCAL statement_timeout
           .mockResolvedValueOnce({})  // SET LOCAL work_mem
-          .mockResolvedValueOnce({ rows: [] }),
+          .mockResolvedValueOnce({ rows: [] })  // FTS query (no results)
+          .mockResolvedValueOnce({ rows: [{ tsq: '' }] }),  // websearch_to_tsquery check (all stopwords)
       };
       recordedClient = client;
       return run(client);
@@ -48,7 +49,7 @@ describe('search overload behavior', () => {
     });
 
     expect(result.hits).toEqual([]);
-    expect(recordedClient?.query).toHaveBeenCalledTimes(3);
+    expect(recordedClient?.query).toHaveBeenCalledTimes(4);
     expect(recordedClient?.query).toHaveBeenNthCalledWith(1, 'SET LOCAL statement_timeout = 3000');
   });
 
@@ -62,6 +63,7 @@ describe('search overload behavior', () => {
           .mockResolvedValueOnce({})  // SET LOCAL statement_timeout
           .mockResolvedValueOnce({})  // SET LOCAL work_mem
           .mockResolvedValueOnce({ rows: [] })  // FTS query (no results)
+          .mockResolvedValueOnce({ rows: [{ tsq: 'hel' }] })  // websearch_to_tsquery check (not all stopwords)
           .mockResolvedValueOnce({
             rows: [{
               id: 'msg-1',
@@ -90,6 +92,6 @@ describe('search overload behavior', () => {
 
     expect(result.hits).toHaveLength(1);
     expect(result.hits[0].id).toBe('msg-1');
-    expect(recordedClient?.query).toHaveBeenCalledTimes(4);
+    expect(recordedClient?.query).toHaveBeenCalledTimes(5);
   });
 });
