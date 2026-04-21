@@ -325,6 +325,27 @@ function buildLiteralAllTermsClause(params: any[], columnExpr: string, q: string
     .join('\n');
 }
 
+function buildScopedNewestCandidateFilters(
+  params: any[],
+  opts: Record<string, any>,
+  tableExpr: string,
+): string {
+  const parts: string[] = [];
+  const column = (name: string) => `${tableExpr}.${name}`;
+
+  if (opts.channelId) {
+    parts.push(`AND ${column('channel_id')} = ${p(params, opts.channelId)}`);
+  } else if (opts.conversationId) {
+    parts.push(`AND ${column('conversation_id')} = ${p(params, opts.conversationId)}`);
+  }
+
+  if (opts.authorId) parts.push(`AND ${column('author_id')} = ${p(params, opts.authorId)}`);
+  if (opts.after) parts.push(`AND ${column('created_at')} >= ${p(params, opts.after)}::timestamptz`);
+  if (opts.before) parts.push(`AND ${column('created_at')} <= ${p(params, opts.before)}::timestamptz`);
+
+  return parts.join('\n');
+}
+
 function highlightIlike(content: string, q: string): string {
   if (!content) return '';
   // HTML-escape first, then insert <em> markers so the output is safe for innerHTML.
@@ -439,15 +460,11 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
 
 /** Statement + paging metadata for trigram ILIKE fallback. */
 function buildTrigramParts(q: string, opts: Record<string, any>) {
-  const params: any[] = [];
-  const scope = buildScopedAccessParts(params, opts);
-  const filters = buildFilters(params, opts);
-  const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
-  const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'content', q);
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
-  const limitPh = p(params, limit);
-  const offsetPh = p(params, offset);
+  const baseParams: any[] = [];
+  const scope = buildScopedAccessParts(baseParams, opts);
+  const filters = buildFilters(baseParams, opts);
 
   // Add a candidates CTE for trigram fallback to cap expensive scans.
   // Unlike FTS, we don't have the content_tsv GIN to limit rows efficiently,
@@ -459,10 +476,67 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
   const trigramCandidatesLimit = Number.isFinite(rawTrigramCandidatesLimit) && rawTrigramCandidatesLimit > 0 
     ? rawTrigramCandidatesLimit 
     : 500;
+  const rawScopedTrigramCandidatesLimit = parseInt(
+    process.env.SEARCH_TRIGRAM_SCOPED_CANDIDATES_LIMIT || '2000',
+    10,
+  );
+  const scopedTrigramCandidatesLimit = Number.isFinite(rawScopedTrigramCandidatesLimit)
+    && rawScopedTrigramCandidatesLimit > 0
+    ? rawScopedTrigramCandidatesLimit
+    : 2000;
+  const isChannelOrConversationScoped = Boolean(
+    (opts.channelId || opts.conversationId) && !opts.communityId,
+  );
 
   let fromClause = FROM_CLAUSE;
 
+  if (isChannelOrConversationScoped) {
+    const params = [...baseParams];
+    const candidateScopeFilters = buildScopedNewestCandidateFilters(params, opts, 'messages');
+    const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+    const limitPh = p(params, limit);
+    const offsetPh = p(params, offset);
+    const cteSql = `
+      WITH ${scope ? scope.cte.trim() + ',' : ''}
+      trigram_scope_candidates AS (
+        SELECT id FROM messages
+        WHERE deleted_at IS NULL
+          ${candidateScopeFilters}
+        ORDER BY created_at DESC
+        LIMIT ${scopedTrigramCandidatesLimit}
+      )
+    `;
+
+    fromClause = `
+      FROM trigram_scope_candidates tc
+      JOIN messages m ON m.id = tc.id
+      JOIN users u ON u.id = m.author_id
+      LEFT JOIN channels ch ON ch.id = m.channel_id`;
+
+    return {
+      sql: `
+        ${cteSql}
+        SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+          search_rows.*
+        ${scope ? scope.fromClause : 'FROM'}
+        ${scope ? 'LEFT JOIN LATERAL (' : '('}
+          SELECT ${SELECT_COLS}
+          ${fromClause}
+          WHERE m.deleted_at IS NULL
+            ${literalTermFilter}
+          ORDER BY m.created_at DESC
+          LIMIT ${limitPh} OFFSET ${offsetPh}
+        ) search_rows ${scope ? scope.onClause : ''}`,
+      params, limit, offset, q,
+    };
+  }
+
   if (isUnscoped || isCommunityScoped) {
+    const params = [...baseParams];
+    const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'content', q);
+    const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+    const limitPh = p(params, limit);
+    const offsetPh = p(params, offset);
     const cteSql = `
       WITH ${scope ? scope.cte.trim() + ',' : ''}
       trigram_candidates AS (
@@ -501,6 +575,10 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
 
   // Scoped queries (channel/conversation) don't need candidates cap — the equality
   // filter on channel_id/conversation_id is already selective.
+  const params = [...baseParams];
+  const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+  const limitPh = p(params, limit);
+  const offsetPh = p(params, offset);
   const sql = `
     ${scope ? `WITH ${scope.cte}` : ''}
     SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
@@ -616,6 +694,9 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       return buildResult(processed, triMeta.q, triMeta.offset, triMeta.limit);
     });
   } catch (err) {
+    if (err?.statusCode === 403) {
+      throw err;
+    }
     // If the error is a query timeout and we were already trying the trigram fallback,
     // skip the retry — it will almost certainly timeout again and waste pool time.
     const isTimeout = err?.code === '57014' || /timeout/i.test(err?.message || '');

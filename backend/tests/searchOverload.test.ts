@@ -107,6 +107,34 @@ describe('search overload behavior', () => {
     expect(recordedClient?.query).toHaveBeenCalledTimes(4);
   });
 
+  it('caps channel-scoped trigram fallback to newest scoped candidates', async () => {
+    let recordedClient: { query: jest.Mock } | null = null;
+    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+      const client = {
+        query: jest.fn()
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] }),
+      };
+      recordedClient = client;
+      return run(client);
+    });
+
+    const result = await search('the', {
+      channelId: 'channel-1',
+      userId: 'user-1',
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(result.hits).toEqual([]);
+    const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
+    expect(trigramSql).toContain('trigram_scope_candidates');
+    expect(trigramSql).toContain('messages.channel_id');
+    expect(trigramSql).toContain('ORDER BY created_at DESC');
+  });
+
   it('builds both FTS and trigram queries to require every search term', async () => {
     let recordedClient: { query: jest.Mock } | null = null;
     withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
@@ -138,5 +166,30 @@ describe('search overload behavior', () => {
     expect((trigramSql.match(/coalesce\(m\.content, ''\) ILIKE/g) || []).length).toBe(3);
     expect(ftsParams).toEqual(expect.arrayContaining(['%games%', '%that%', '%have%']));
     expect(trigramParams).toEqual(expect.arrayContaining(['%games%', '%that%', '%have%']));
+  });
+
+  it('does not retry trigram fallback after a scoped access denial', async () => {
+    let recordedClient: { query: jest.Mock } | null = null;
+    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+      const client = {
+        query: jest.fn()
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ rows: [{ __scopeAccess: false }] }),
+      };
+      recordedClient = client;
+      return run(client);
+    });
+
+    await expect(
+      search('private marker', {
+        channelId: 'channel-1',
+        userId: 'user-2',
+        limit: 20,
+        offset: 0,
+      }),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(recordedClient?.query).toHaveBeenCalledTimes(3);
   });
 });
