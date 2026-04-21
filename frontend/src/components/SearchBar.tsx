@@ -13,6 +13,7 @@ export default function SearchBar({
 }) {
   const {
     searchResults,
+    searchError,
     searchFilters,
     setSearchFilters,
     resetSearchFilters,
@@ -22,6 +23,7 @@ export default function SearchBar({
   } = useChatStore(
     useShallow((s) => ({
       searchResults: s.searchResults,
+      searchError: s.searchError,
       searchFilters: s.searchFilters,
       setSearchFilters: s.setSearchFilters,
       resetSearchFilters: s.resetSearchFilters,
@@ -203,7 +205,9 @@ export default function SearchBar({
             {count} Result{count !== 1 ? 's' : ''}
           </div>
         )}
-        {!hasSubmittedSearch ? null : count === 0 ? (
+        {!hasSubmittedSearch ? null : searchError ? (
+          <p className={styles.error} data-testid="search-error">{searchError}</p>
+        ) : count === 0 ? (
           <p className={styles.none}>No results found.</p>
         ) : (
           searchResults.map(hit => (

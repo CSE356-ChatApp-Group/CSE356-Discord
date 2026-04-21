@@ -205,6 +205,13 @@
   color: var(--text-muted);
 }
 
+.error {
+  padding: 18px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--danger, #d95763);
+}
+
 .hit {
   display: block;
   width: 100%;

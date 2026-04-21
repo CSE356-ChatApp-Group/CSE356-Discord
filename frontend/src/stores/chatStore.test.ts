@@ -973,6 +973,24 @@ describe('search filters', () => {
     });
   });
 
+  it('uses channel scope when a channel is active', async () => {
+    apiGet.mockResolvedValue({ hits: [] });
+
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      activeChannel: { id: 'ch-1', name: 'general', community_id: 'comm-1' },
+      activeConv: null,
+      searchFilters: { author: '', after: '', before: '' },
+    } as any);
+
+    await useChatStore.getState().search('hi');
+
+    const requestedPath = apiGet.mock.calls[0]?.[0] as string;
+    expect(requestedPath).toContain('/search?');
+    expect(requestedPath).toContain('channelId=ch-1');
+    expect(requestedPath).not.toContain('communityId=comm-1');
+  });
+
   it('includes a single-character text query instead of dropping it in favor of filters', async () => {
     apiGet.mockResolvedValue({ hits: [] });
 
@@ -1021,6 +1039,44 @@ describe('search filters', () => {
 
     expect(apiGet).not.toHaveBeenCalled();
     expect(useChatStore.getState().searchResults).toEqual([]);
+  });
+
+  it('ignores stale search responses and keeps the latest result set', async () => {
+    let resolveFirst: ((value: any) => void) | null = null;
+    let resolveSecond: ((value: any) => void) | null = null;
+    apiGet
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+
+    useChatStore.setState({
+      activeConv: { id: 'conv-1', participants: [] },
+      searchFilters: { author: '', after: '', before: '' },
+    } as any);
+
+    const firstSearch = useChatStore.getState().search('old query');
+    const secondSearch = useChatStore.getState().search('new query');
+
+    resolveSecond?.({ hits: [{ id: 'new-hit' }] });
+    await secondSearch;
+    resolveFirst?.({ hits: [{ id: 'old-hit' }] });
+    await firstSearch;
+
+    expect(useChatStore.getState().searchResults).toEqual([{ id: 'new-hit' }]);
+    expect(useChatStore.getState().searchQuery).toBe('new query');
+  });
+
+  it('surfaces a search error instead of silently doing nothing', async () => {
+    apiGet.mockRejectedValue(Object.assign(new Error('Search temporarily unavailable'), { status: 503 }));
+
+    useChatStore.setState({
+      activeConv: { id: 'conv-1', participants: [] },
+      searchFilters: { author: '', after: '', before: '' },
+    } as any);
+
+    await useChatStore.getState().search('hello');
+
+    expect(useChatStore.getState().searchResults).toEqual([]);
+    expect(useChatStore.getState().searchError).toBe('Search temporarily unavailable');
   });
 
   it('loads only the clicked result context and stores the jump target', async () => {

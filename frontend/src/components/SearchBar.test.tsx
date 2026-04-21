@@ -37,6 +37,7 @@ describe('SearchBar filters', () => {
         messagePagination: {},
         searchResults: [],
         searchQuery: 'hello',
+        searchError: null,
         searchFilters: { author: '', after: '', before: '' },
         jumpTargetMessageId: null,
       } as any);
@@ -51,6 +52,7 @@ describe('SearchBar filters', () => {
         messagePagination: {},
         searchResults: null,
         searchQuery: '',
+        searchError: null,
         searchFilters: { author: '', after: '', before: '' },
         jumpTargetMessageId: null,
       } as any);
@@ -99,5 +101,15 @@ describe('SearchBar filters', () => {
         expect.stringContaining(`after=${encodeURIComponent(new Date(afterValue).toISOString())}`)
       );
     });
+  });
+
+  it('shows a visible error when the latest search fails', async () => {
+    apiGetMock.mockRejectedValueOnce(Object.assign(new Error('Search temporarily unavailable'), { status: 503 }));
+
+    render(<SearchBar currentQuery="hello" />);
+
+    fireEvent.click(screen.getByTestId('search-submit'));
+
+    expect(await screen.findByTestId('search-error')).toHaveTextContent('Search temporarily unavailable');
   });
 });

@@ -172,6 +172,36 @@ describe('search overload behavior', () => {
     expect(trigramParams).toEqual(expect.arrayContaining(['%games%', '%that%', '%have%']));
   });
 
+  it('limits community-scoped candidates inside the requested community instead of globally', async () => {
+    let recordedClient: { query: jest.Mock } | null = null;
+    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+      const client = {
+        query: jest.fn()
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] }),
+      };
+      recordedClient = client;
+      return run(client);
+    });
+
+    const result = await search('hi', {
+      communityId: 'community-1',
+      userId: 'user-1',
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(result.hits).toEqual([]);
+    const ftsSql = recordedClient?.query.mock.calls[2]?.[0] ?? '';
+    const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
+    expect(ftsSql).toContain('JOIN channels ch_scope');
+    expect(ftsSql).toContain('ch_scope.community_id = $2');
+    expect(trigramSql).toContain('JOIN channels ch_scope');
+    expect(trigramSql).toContain('ch_scope.community_id = $1');
+  });
+
   it('does not retry trigram fallback after a scoped access denial', async () => {
     let recordedClient: { query: jest.Mock } | null = null;
     withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {

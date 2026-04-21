@@ -44,6 +44,7 @@ type ChatState = {
   members: Entity[];
   searchResults: Entity[] | null;
   searchQuery: string;
+  searchError: string | null;
   searchFilters: SearchFilters;
   jumpTargetMessageId: string | null;
   fetchCommunities: () => Promise<Entity[]>;
@@ -88,6 +89,7 @@ const DEFAULT_SEARCH_FILTERS: SearchFilters = {
   after: '',
   before: '',
 };
+let latestSearchRequestSeq = 0;
 
 function dedupeMessages(messages: Entity[]) {
   const deduped = [];
@@ -523,6 +525,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   members:         [],   // members of activeCommunity
   searchResults:   null,
   searchQuery:     '',
+  searchError:     null,
   searchFilters:   DEFAULT_SEARCH_FILTERS,
   jumpTargetMessageId: null,
 
@@ -543,6 +546,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       members:         [],
       searchResults:   null,
       searchQuery:     '',
+      searchError:     null,
       searchFilters:   DEFAULT_SEARCH_FILTERS,
       jumpTargetMessageId: null,
     });
@@ -1321,35 +1325,55 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       ? { ...get().searchFilters, ...filters }
       : get().searchFilters;
 
-    set({ searchQuery: q, searchFilters: nextFilters });
+    const requestSeq = ++latestSearchRequestSeq;
+    set({ searchQuery: q, searchFilters: nextFilters, searchError: null });
     const normalizedQuery = String(q || '').trim();
     const after = normalizeSearchDateTime(nextFilters.after);
     const before = normalizeSearchDateTime(nextFilters.before);
-    const { activeCommunity, activeConv, members } = get();
+    const { activeCommunity, activeChannel, activeConv, members } = get();
     const authorId = resolveSearchAuthorId(nextFilters.author, members, activeConv);
     const hasAnyFilter = Boolean(nextFilters.author.trim() || after || before);
     const canSearchText = normalizedQuery.length > 0;
 
     if (!canSearchText && !hasAnyFilter) {
-      set({ searchResults: null });
+      if (requestSeq === latestSearchRequestSeq) {
+        set({ searchResults: null, searchError: null });
+      }
       return;
     }
 
     if (nextFilters.author.trim() && !authorId) {
-      set({ searchResults: [] });
+      if (requestSeq === latestSearchRequestSeq) {
+        set({ searchResults: [], searchError: null });
+      }
       return;
     }
 
     const qs = new URLSearchParams({ limit: '30' });
-    // Scope: community (all accessible channels) or DM conversation — per spec.
-    if (activeConv)          qs.set('conversationId', activeConv.id);
+    if (activeConv) qs.set('conversationId', activeConv.id);
+    else if (activeChannel) qs.set('channelId', activeChannel.id);
     else if (activeCommunity) qs.set('communityId', activeCommunity.id);
+    else {
+      if (requestSeq === latestSearchRequestSeq) {
+        set({ searchResults: [], searchError: 'Open a channel, conversation, or community before searching.' });
+      }
+      return;
+    }
     if (canSearchText) qs.set('q', normalizedQuery);
     if (authorId) qs.set('authorId', authorId);
     if (after) qs.set('after', after);
     if (before) qs.set('before', before);
-    const results = await api.get(`/search?${qs}`);
-    set({ searchResults: results.hits || [] });
+    try {
+      const results = await api.get(`/search?${qs}`);
+      if (requestSeq !== latestSearchRequestSeq) return;
+      set({ searchResults: results.hits || [], searchError: null });
+    } catch (err: any) {
+      if (requestSeq !== latestSearchRequestSeq) return;
+      set({
+        searchResults: [],
+        searchError: err?.message || 'Search failed. Please try again.',
+      });
+    }
   },
 
   async jumpToSearchResult(hit: Entity) {
@@ -1471,7 +1495,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     set({ searchFilters: DEFAULT_SEARCH_FILTERS });
   },
 
-  clearSearch() { set({ searchResults: null, searchQuery: '' }); },
+  clearSearch() { set({ searchResults: null, searchQuery: '', searchError: null }); },
 
   // ── WebSocket event handler ───────────────────────────────────────────────
   _handleWsEvent(event: any) {

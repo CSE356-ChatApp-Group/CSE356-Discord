@@ -136,6 +136,9 @@ function buildScopedAccessParts(params: any[], opts: Record<string, any>) {
     const channelId = p(params, opts.channelId);
     const userId = p(params, opts.userId);
     return {
+      scopeType: 'channel',
+      targetIdPh: channelId,
+      userIdPh: userId,
       cte: `
         scope_access AS (
           SELECT EXISTS (
@@ -160,6 +163,9 @@ function buildScopedAccessParts(params: any[], opts: Record<string, any>) {
     const conversationId = p(params, opts.conversationId);
     const userId = p(params, opts.userId);
     return {
+      scopeType: 'conversation',
+      targetIdPh: conversationId,
+      userIdPh: userId,
       cte: `
         scope_access AS (
           SELECT EXISTS (
@@ -179,6 +185,9 @@ function buildScopedAccessParts(params: any[], opts: Record<string, any>) {
     const communityId = p(params, opts.communityId);
     const userId = p(params, opts.userId);
     return {
+      scopeType: 'community',
+      targetIdPh: communityId,
+      userIdPh: userId,
       cte: `
         scope_access AS (
           SELECT EXISTS (
@@ -346,6 +355,29 @@ function buildScopedNewestCandidateFilters(
   return parts.join('\n');
 }
 
+function buildCommunityScopedCandidateParts(
+  scope: Record<string, any> | null,
+  messageAlias: string,
+  channelAlias: string,
+  memberAlias: string,
+) {
+  if (!scope || scope.scopeType !== 'community' || !scope.targetIdPh || !scope.userIdPh) {
+    return null;
+  }
+  return {
+    join: `
+      JOIN channels ${channelAlias} ON ${channelAlias}.id = ${messageAlias}.channel_id
+      LEFT JOIN channel_members ${memberAlias}
+        ON ${memberAlias}.channel_id = ${channelAlias}.id
+       AND ${memberAlias}.user_id = ${scope.userIdPh}
+    `,
+    where: `
+      AND ${channelAlias}.community_id = ${scope.targetIdPh}
+      AND (${channelAlias}.is_private = FALSE OR ${memberAlias}.user_id IS NOT NULL)
+    `,
+  };
+}
+
 function highlightIlike(content: string, q: string): string {
   if (!content) return '';
   // HTML-escape first, then insert <em> markers so the output is safe for innerHTML.
@@ -416,8 +448,21 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
 
   let innerFromClause = FTS_FROM_CLAUSE;
   let innerWhereExtra = '';
+  const communityCandidateParts = buildCommunityScopedCandidateParts(scope, 'm0', 'ch_scope', 'cm_scope');
 
-  if (isUnscoped || isCommunityScoped) {
+  if (isCommunityScoped && communityCandidateParts) {
+    ctes.push(`candidates AS (
+      SELECT m0.id
+      FROM messages m0
+      ${communityCandidateParts.join}
+      WHERE m0.deleted_at IS NULL
+        AND m0.content_tsv @@ (SELECT q FROM search_query)
+        ${communityCandidateParts.where}
+      ORDER BY m0.created_at DESC
+      LIMIT ${candidatesLimit}
+    )`);
+    innerWhereExtra = `AND m.id = ANY(SELECT id FROM candidates)`;
+  } else if (isUnscoped) {
     ctes.push(`candidates AS (
       SELECT id FROM messages
       WHERE deleted_at IS NULL
@@ -462,6 +507,9 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
 function buildTrigramParts(q: string, opts: Record<string, any>) {
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
+  const baseParams: any[] = [];
+  const scope = buildScopedAccessParts(baseParams, opts);
+  const filters = buildFilters(baseParams, opts);
 
   // Add a candidates CTE for trigram fallback to cap expensive scans.
   // Unlike FTS, we don't have the content_tsv GIN to limit rows efficiently,
@@ -484,6 +532,7 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
   const isChannelOrConversationScoped = Boolean(
     (opts.channelId || opts.conversationId) && !opts.communityId,
   );
+  const communityCandidateParts = buildCommunityScopedCandidateParts(scope, 'm0', 'ch_scope', 'cm_scope');
 
   let fromClause = FROM_CLAUSE;
 
@@ -529,11 +578,51 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
     };
   }
 
-  const baseParams: any[] = [];
-  const scope = buildScopedAccessParts(baseParams, opts);
-  const filters = buildFilters(baseParams, opts);
+  if (isCommunityScoped && communityCandidateParts) {
+    const params = [...baseParams];
+    const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'm0.content', q);
+    const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+    const limitPh = p(params, limit);
+    const offsetPh = p(params, offset);
+    const cteSql = `
+      WITH ${scope ? scope.cte.trim() + ',' : ''}
+      trigram_candidates AS (
+        SELECT m0.id
+        FROM messages m0
+        ${communityCandidateParts.join}
+        WHERE m0.deleted_at IS NULL
+          ${candidateLiteralTermFilter}
+          ${communityCandidateParts.where}
+        ORDER BY m0.created_at DESC
+        LIMIT ${trigramCandidatesLimit}
+      )
+    `;
+    fromClause = `
+      FROM trigram_candidates tc
+      JOIN messages m ON m.id = tc.id
+      JOIN users u ON u.id = m.author_id
+      LEFT JOIN channels ch ON ch.id = m.channel_id`;
 
-  if (isUnscoped || isCommunityScoped) {
+    return {
+      sql: `
+        ${cteSql}
+        SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+          search_rows.*
+        ${scope ? scope.fromClause : 'FROM'}
+        ${scope ? 'LEFT JOIN LATERAL (' : '('}
+          SELECT ${SELECT_COLS}
+          ${fromClause}
+          WHERE m.deleted_at IS NULL
+            ${literalTermFilter}
+            ${filters}
+          ORDER BY m.created_at DESC
+          LIMIT ${limitPh} OFFSET ${offsetPh}
+        ) search_rows ${scope ? scope.onClause : ''}`,
+      params, limit, offset, q,
+    };
+  }
+
+  if (isUnscoped) {
     const params = [...baseParams];
     const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'content', q);
     const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
