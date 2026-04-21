@@ -247,29 +247,24 @@ describe('Search – access control', () => {
     expect(res.status).toBe(403);
   });
 
-  it('unscoped search does not return messages from private channels outside the user\'s access', async () => {
+  it('unscoped search is rejected (must provide scope)', async () => {
     const outsider = await createAuthenticatedUser('srchunscoped');
     const res = await request(app)
       .get(`/api/v1/search?q=${markerChannel}`)
       .set('Authorization', `Bearer ${outsider.accessToken}`);
 
-    expect(res.status).toBe(200);
-    // outsider has no access to the private channel — must not appear in results
-    for (const hit of res.body.hits) {
-      expect(hit.channelId).not.toBe(privateChannelId);
-    }
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Search must be scoped');
   });
 
-  it('unscoped search does not return messages from public channels outside the user\'s communities', async () => {
+  it('unscoped search is rejected for public channels too (must provide scope)', async () => {
     const outsider = await createAuthenticatedUser('srchunscopedpublic');
     const res = await request(app)
       .get(`/api/v1/search?q=${markerPublic}`)
       .set('Authorization', `Bearer ${outsider.accessToken}`);
 
-    expect(res.status).toBe(200);
-    for (const hit of res.body.hits) {
-      expect(hit.channelId).not.toBe(publicChannelId);
-    }
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Search must be scoped');
   });
 });
 

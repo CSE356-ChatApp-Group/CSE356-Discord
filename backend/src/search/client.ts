@@ -554,11 +554,18 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   // Check if the query consists entirely of stopwords (empty tsquery)
   // If so, skip trigram fallback entirely — it will scan the whole table and timeout
   const isAllStopwords = async (client) => {
-    const checkRes = await client.query(
-      'SELECT websearch_to_tsquery($1) AS tsq',
-      ['english', trimmed]
-    );
-    return checkRes.rows[0]?.tsq === '';
+    try {
+      const checkRes = await client.query(
+        'SELECT websearch_to_tsquery($1) AS tsq',
+        ['english', trimmed]
+      );
+      return checkRes.rows[0]?.tsq === '';
+    } catch (err) {
+      // If tsquery check fails (e.g., invalid input), assume not all stopwords
+      // to avoid blocking valid searches
+      logger.warn({ err, query: trimmed }, 'search: failed to check for stopwords');
+      return false;
+    }
   };
 
   try {
