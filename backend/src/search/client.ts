@@ -15,7 +15,7 @@
 
 'use strict';
 
-const { withTransaction } = require('../db/pool');
+const { withTransaction, readPool } = require('../db/pool');
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
 
@@ -50,11 +50,27 @@ function shouldAllowTrigramFallback(opts: Record<string, any>, queryLength: numb
 }
 
 /**
- * Run search SQL inside a short transaction with statement_timeout so one bad query
- * cannot hold a pool slot for ~15s (which starves messages / WS under load).
+ * Run search SQL inside a short read-only transaction with statement_timeout so one bad
+ * query cannot hold a pool slot for ~15s. Uses the read replica pool when configured so
+ * search load stays off the primary; falls back to primary `withTransaction` when unset.
  */
 async function runSearchQuery(sql: string, params: any[]) {
   const timeoutMs = getSearchStatementTimeoutMs();
+  if (readPool) {
+    const client = await readPool.connect();
+    try {
+      await client.query('BEGIN READ ONLY');
+      await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+      const { rows } = await client.query(sql, params);
+      await client.query('COMMIT');
+      return rows;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
   return withTransaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     const { rows } = await client.query(sql, params);
@@ -63,11 +79,26 @@ async function runSearchQuery(sql: string, params: any[]) {
 }
 
 /**
- * One transaction, one SET LOCAL, multiple SELECTs — halves round-trips when FTS is empty
+ * One read-only transaction, one SET LOCAL, multiple SELECTs — halves round-trips when FTS is empty
  * and trigram fallback runs (was 2× BEGIN/COMMIT + 2× SET).
  */
 async function runSearchTransaction(run) {
   const timeoutMs = getSearchStatementTimeoutMs();
+  if (readPool) {
+    const client = await readPool.connect();
+    try {
+      await client.query('BEGIN READ ONLY');
+      await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+      const out = await run(client);
+      await client.query('COMMIT');
+      return out;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
   return withTransaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     return run(client);

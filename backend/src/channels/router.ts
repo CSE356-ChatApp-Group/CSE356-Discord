@@ -11,7 +11,7 @@
 
 const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');
-const { query, getClient } = require('../db/pool');
+const { query, queryRead, getClient } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const sideEffects      = require('../messages/sideEffects');
 const redis            = require('../db/redis');
@@ -231,7 +231,7 @@ async function publishChannelLifecycleEvent(communityId, event, data) {
  */
 async function bustChannelListCache(communityId) {
   try {
-    const { rows } = await query(
+    const { rows } = await queryRead(
       'SELECT user_id::text FROM community_members WHERE community_id = $1',
       [communityId]
     );
@@ -283,7 +283,7 @@ router.get('/',
       const promise = (async () => {
         // Return all visible channel names. Private-channel metadata/content pointers
         // are redacted for users who are not invited to that private channel.
-        const { rows } = await query(
+        const { rows } = await queryRead(
           `WITH membership AS (
              SELECT EXISTS (
                SELECT 1
@@ -465,7 +465,7 @@ router.get('/:id/members',
         return res.status(403).json({ error: 'Channel not allowed' });
       }
 
-      const { rows } = await query(
+      const { rows } = await queryRead(
         channel.is_private
           ? `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role
              FROM channel_members chm

@@ -18,7 +18,7 @@ const express = require('express');
 const { validate: uuidValidate } = require('uuid');
 const { body, param, validationResult } = require('express-validator');
 
-const { query, getClient } = require('../db/pool');
+const { query, queryRead, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
 const { authenticate } = require('../middleware/authenticate');
@@ -130,7 +130,7 @@ const MEMBERS_CACHE_TTL_SECS = 30;
 function membersCacheKey(communityId) { return `community:${communityId}:members`; }
 
 async function listCommunityRealtimeTargets(communityId, userId) {
-  const { rows } = await query(
+  const { rows } = await queryRead(
     `SELECT c.id::text AS id
      FROM channels c
      LEFT JOIN channel_members chm
@@ -154,7 +154,7 @@ const communitiesInflight: Map<string, Promise<{ communities: any[] }>> = new Ma
 
 async function cleanupCommunityUnreadCounterKeys(communityId) {
   try {
-    const { rows } = await query('SELECT id::text FROM channels WHERE community_id = $1', [communityId]);
+    const { rows } = await queryRead('SELECT id::text FROM channels WHERE community_id = $1', [communityId]);
     if (!rows.length) return;
     const channelKeys = rows.map((row) => `channel:msg_count:${row.id}`);
     await redis.del(...channelKeys);
@@ -215,7 +215,7 @@ function isCommunitiesTimeout(err) {
 async function queryCommunitiesListBase(baseSql, params, orderAndLimitSql) {
   const fullSql = `${baseSql}
        ${orderAndLimitSql}`;
-  return query({
+  return queryRead({
     text: fullSql,
     values: params,
   });
@@ -230,7 +230,7 @@ async function fetchUnreadCountsForCommunities(userId, communityIds) {
 
   communitiesUnreadQueriesInFlight += 1;
   try {
-    const { rows } = await query({
+    const { rows } = await queryRead({
       text: `
         SELECT ch.community_id, COUNT(*)::int AS unread_channel_count
         FROM channels ch
@@ -311,7 +311,7 @@ router.get('/', async (req, res, next) => {
       let cursorName = null;
       let cursorId = null;
       if (page.after) {
-        const { rows: curRows } = await query(
+        const { rows: curRows } = await queryRead(
           `WITH visible_communities AS (
              SELECT c.id, c.name
              FROM communities c
@@ -456,7 +456,7 @@ router.post('/',
 router.get('/:id', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    const { rows } = await query(
+    const { rows } = await queryRead(
       `SELECT ${COMMUNITY_SELECT_FIELDS},
               (SELECT COUNT(*) FROM community_members WHERE community_id = c.id) AS member_count,
               json_agg(
@@ -624,7 +624,7 @@ router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
     // One round-trip for community existence + caller membership (replaces loadMembership + EXISTS).
-    const { rows: accessRows } = await query(
+    const { rows: accessRows } = await queryRead(
       `SELECT cm.role AS my_role
        FROM communities c
        LEFT JOIN community_members cm
@@ -637,7 +637,7 @@ router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
       return res.status(403).json({ error: 'Not a community member' });
     }
 
-    const { rows } = await query(
+    const { rows } = await queryRead(
       `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
        FROM community_members cm JOIN users u ON u.id = cm.user_id
        WHERE cm.community_id = $1

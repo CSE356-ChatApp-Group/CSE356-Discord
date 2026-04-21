@@ -685,7 +685,7 @@ async function loadMessageTargetForUser(messageId, userId) {
     } catch { /* fail open */ }
   }
 
-  const { rows } = await query(
+  const { rows } = await queryRead(
     `SELECT m.id,
             m.author_id,
             m.channel_id,

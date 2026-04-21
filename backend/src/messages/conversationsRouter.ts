@@ -10,7 +10,7 @@
 
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
-const { query, getClient } = require('../db/pool');
+const { query, queryRead, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
@@ -318,7 +318,7 @@ router.get('/', async (req, res, next) => {
 
   recordEndpointListCache('conversations', 'miss');
   const promise: Promise<{ conversations: any[] }> = (async () => {
-    const { rows } = await query(
+    const { rows } = await queryRead(
       `SELECT ${CONVERSATION_LIST_FIELDS},
               COALESCE(m_denorm.id, lm.id) AS last_message_id,
               COALESCE(m_denorm.author_id, lm.author_id) AS last_message_author_id,
@@ -505,7 +505,7 @@ router.post('/',
 // ── Get single ─────────────────────────────────────────────────────────────────
 router.get('/:id', async (req, res, next) => {
   try {
-    const { rows } = await query(
+    const { rows } = await queryRead(
       `SELECT ${CONVERSATION_FIELDS},
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name))
                 AS participants
