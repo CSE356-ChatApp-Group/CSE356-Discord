@@ -72,15 +72,19 @@ async function enqueueBatchReadStateUpdate(
     : (messageCreatedAt as Date).toISOString();
 
   try {
-    await redis.hset(
-      pendingKey,
-      'msg_id',         messageId,
-      'msg_created_at', createdAtStr,
-      'channel_id',     channelId ?? '',
-      'conversation_id', conversationId ?? '',
-    );
-    await redis.expire(pendingKey, 86400); // 24h TTL — prevents unbounded memory from inactive (user, target) pairs
-    await redis.sadd(RS_DIRTY_SET, dirtyKey);
+    // MULTI keeps HSET + EXPIRE atomic so a key cannot exist without TTL if the transaction commits.
+    await redis
+      .multi()
+      .hset(
+        pendingKey,
+        'msg_id', messageId,
+        'msg_created_at', createdAtStr,
+        'channel_id', channelId ?? '',
+        'conversation_id', conversationId ?? '',
+      )
+      .expire(pendingKey, 86400) // 24h TTL — prevents unbounded memory from inactive (user, target) pairs
+      .sadd(RS_DIRTY_SET, dirtyKey)
+      .exec();
   } catch (err: any) {
     logger.warn({ err, userId, channelId, conversationId, messageId }, 'batchReadState Redis enqueue failed');
   }

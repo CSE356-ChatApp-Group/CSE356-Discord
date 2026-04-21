@@ -34,6 +34,12 @@ const fanout           = require('../websocket/fanout');
 const overload         = require('../utils/overload');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
+
+/** Redis cache for channel unread watermark (`user:last_read_count:*`). Must expire so keys do not grow without bound. */
+const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
+  process.env.USER_LAST_READ_COUNT_REDIS_TTL_SEC || '604800',
+  10,
+);
 const {
   channelMsgCacheKey,
   conversationMsgCacheKey,
@@ -1947,7 +1953,7 @@ router.put('/:id/read',
           const readKey  = `user:last_read_count:${channel_id}:${uid}`;
           const currentCount = await redis.get(countKey);
           if (currentCount !== null) {
-            await redis.set(readKey, currentCount);
+            await redis.set(readKey, currentCount, 'EX', USER_LAST_READ_COUNT_REDIS_TTL_SEC);
           }
         } catch (err) {
           logger.warn({ err, channel_id }, 'Failed to reset user:last_read_count in Redis');
