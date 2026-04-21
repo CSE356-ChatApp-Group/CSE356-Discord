@@ -340,21 +340,29 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   const ctes = [`search_query AS (SELECT websearch_to_tsquery('english', $1) AS q)`];
   if (scope) ctes.push(scope.cte.trim());
 
-  // For unscoped queries (no channel/conversation/community scope, but has userId),
-  // add a candidates CTE that caps the TSV scan before access control runs.
-  // Without this, a common search term can return thousands of TSV matches and the
-  // per-row access control EXISTS runs for each one — O(matches) instead of O(limit).
-  // The candidates CTE takes top N rows by recency from the GIN index scan, then
-  // access control only evaluates those N rows. Since grader messages are the most
-  // recent, this is correct in practice.
+  // Add a candidates CTE to cap the GIN index scan before per-row access control runs.
+  //
+  // Without this, a common search term (e.g. "have more than", "What does that") can
+  // return thousands of TSV matches and the per-row access control EXISTS subquery runs
+  // for each one — O(matches) instead of O(limit). This causes 1–8s query times on the
+  // replica for high-frequency English phrases.
+  //
+  // The candidates CTE takes the top N rows by recency from the GIN index scan. Access
+  // control only evaluates those N rows. Since grader messages are the most recent, this
+  // is correct in practice.
+  //
+  // Applied to both unscoped (no channelId/conversationId/communityId) and community-
+  // scoped queries. Channel/conversation-scoped queries use a simple equality filter and
+  // don't have the O(matches) fan-out problem.
   const isUnscoped = Boolean(opts.userId && !opts.channelId && !opts.conversationId && !opts.communityId);
+  const isCommunityScoped = Boolean(opts.communityId && !opts.channelId && !opts.conversationId);
   const rawCandidatesLimit = parseInt(process.env.SEARCH_UNSCOPED_CANDIDATES_LIMIT || '200', 10);
   const candidatesLimit = Number.isFinite(rawCandidatesLimit) && rawCandidatesLimit > 0 ? rawCandidatesLimit : 200;
 
   let innerFromClause = FTS_FROM_CLAUSE;
   let innerWhereExtra = '';
 
-  if (isUnscoped) {
+  if (isUnscoped || isCommunityScoped) {
     ctes.push(`candidates AS (
       SELECT id FROM messages
       WHERE deleted_at IS NULL
@@ -362,8 +370,9 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       ORDER BY created_at DESC
       LIMIT ${candidatesLimit}
     )`);
-    // Replace the FROM clause to drive from candidates instead of full messages scan.
-    // Referencing candidates via m.id = ANY ensures the planner uses the small CTE result.
+    // Drive the main query from the small candidates set instead of the full messages table.
+    // m.id = ANY(SELECT id FROM candidates) lets the planner use the CTE result as a nested
+    // loop with index scan rather than re-scanning messages for each row.
     innerWhereExtra = `AND m.id = ANY(SELECT id FROM candidates)`;
   }
 
