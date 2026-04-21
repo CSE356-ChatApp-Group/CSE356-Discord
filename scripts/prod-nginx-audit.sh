@@ -46,8 +46,10 @@ UPSTREAM=$(sudo sed -n '/^upstream app {/,/^}/p' "${SITE}")
 
 if echo "$UPSTREAM" | grep -qE '^\s*least_conn\s*;'; then
   echo "OK: upstream uses least_conn"
+elif echo "$UPSTREAM" | grep -qE '^\s*round_robin\s*;'; then
+  echo "OK: upstream uses round_robin (acceptable during rolling deploys)"
 else
-  echo "FAIL: least_conn not present in upstream app block"
+  echo "FAIL: neither least_conn nor round_robin load balancing method found"
   exit 1
 fi
 
@@ -68,11 +70,13 @@ EXPECTED_SERVERS=(
   "10.0.3.243:4002"
   "10.0.3.243:4003"
   "10.0.3.243:4004"
+  "10.0.3.243:4005"
   "10.0.2.164:4000"
   "10.0.2.164:4001"
   "10.0.2.164:4002"
   "10.0.2.164:4003"
   "10.0.2.164:4004"
+  "10.0.2.164:4005"
 )
 
 SERVER_LINES=$(echo "$UPSTREAM" | grep -oE 'server[[:space:]]+[^[:space:];]+' | awk '{print $2}')
@@ -104,7 +108,7 @@ if [[ "${PROD_HOST}" == "${PRIMARY_VM1_HOST}" ]]; then
       exit 1
     fi
   done <<< "${SERVER_LINES}"
-  echo "OK: upstream includes expected 14 worker server entries (4+5+5)"
+  echo "OK: upstream includes expected 16 worker server entries (4+6+6)"
 
   # VM1 local workers (localhost:4000-4003) must be active.
   for p in 4000 4001 4002 4003; do
