@@ -1,7 +1,15 @@
 #!/bin/bash
 # deploy/deploy-prod-multi.sh
-# Three-VM production deploy orchestrator.
+# Three-VM production deploy orchestrator with per-VM PgBouncer architecture.
 # Deploys to VM3 first, then VM2 (both workers-only), then VM1 (shared services).
+#
+# ARCHITECTURE:
+#   Per-VM PgBouncer: Each VM runs an independent PgBouncer instance:
+#     - VM1 (127.0.0.1:6432)  handles 4 local workers only
+#     - VM2 (10.0.3.243:6432)  handles 6 workers on VM2 only
+#     - VM3 (10.0.2.164:6432)  handles 6 workers on VM3 only
+#   All connect to PostgreSQL on the shared DB VM (130.245.136.21:5432)
+#   nginx on VM1 load-balances HTTP traffic across all 16 workers unchanged.
 #
 # Usage: bash deploy/deploy-prod-multi.sh <release-sha>
 #   --rollback    Pass through to all VM deploys (fast rollback mode)
@@ -9,7 +17,6 @@
 # VM3 (130.245.136.54)  runs Node workers only; no shared services.
 # VM2 (130.245.136.137) runs Node workers only; no shared services.
 # VM1 (130.245.136.44)  runs Node workers + PgBouncer + Redis + MinIO + nginx.
-# All share DB/Redis/PgBouncer via VM1's internal IP (10.0.0.237).
 
 set -euo pipefail
 
@@ -54,7 +61,27 @@ echo "=== VM3 (workers only):          ${VM3}            ==="
 echo "======================================================================"
 echo ""
 
-# ── Phase 0: Deploy to VM3 first ─────────────────────────────────────────────
+# ── Phase -1: Pre-flight checks before any deploy ──────────────────────────────
+echo "=== Phase -1: Pre-flight PostgreSQL check ==="
+echo "Verifying PostgreSQL max_connections is set for per-VM PgBouncer architecture..."
+PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
+CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "${PROD_USER}@${PROD_DB_HOST}" \
+  "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null" || echo "0")
+echo "  Current PostgreSQL max_connections: ${CURRENT_MAX}"
+if [ "${CURRENT_MAX:-0}" -lt 1500 ]; then
+  echo "ERROR: PostgreSQL max_connections must be >= 1500 for per-VM PgBouncer."
+  echo "  Current: ${CURRENT_MAX}"
+  echo "  Required: 1600 (VM1 pool ~490 + VM2 pool ~500 + VM3 pool ~500 + headroom)"
+  echo ""
+  echo "  Run on DB VM to upgrade:"
+  echo "    DB_SSH=${PROD_USER}@${PROD_DB_HOST} ALLOW_DB_RESTART=true ./deploy/tune-remote-db-postgres.sh"
+  echo ""
+  exit 1
+fi
+echo "✓ PostgreSQL max_connections is adequate (${CURRENT_MAX})"
+echo ""
+
+# ── Phase 0: Deploy to VM3 first (after pre-flight PostgreSQL check) ─────────
 # VM3 has no shared services so a failed deploy has zero impact on live traffic.
 echo "=== Phase 0: Deploy to VM3 (isolated — no live-traffic impact) ==="
 PROD_HOST=$VM3 \

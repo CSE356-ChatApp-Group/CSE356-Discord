@@ -2,21 +2,24 @@
 # Raise max_connections (and work_mem) on the dedicated PostgreSQL VM so PgBouncer
 # can use default_pool_size + reserve_pool without sitting on the last few slots.
 #
-# Typical need: PgBouncer default_pool_size up to 400 + reserve_pool_size ~40 → allow ≥500
-# on Postgres, plus headroom for admin / monitoring connections.
+# Typical need: Per-VM PgBouncer architecture with 3 pools:
+#   - VM1: pool_size ~490 (4 workers, 8 vCPU)
+#   - VM2: pool_size ~500 (6 workers, 8 vCPU)
+#   - VM3: pool_size ~500 (6 workers, 8 vCPU)
+#   Total: 1490 + headroom for admin / monitoring = 1600
 #
 # Usage:
 #   DB_SSH=root@130.245.136.21 ./deploy/tune-remote-db-postgres.sh
 #
 # Env:
-#   REMOTE_PG_MAX_CONNECTIONS  default 550
+#   REMOTE_PG_MAX_CONNECTIONS  default 1600 (supports 3 independent per-VM PgBouncers)
 #   ALLOW_DB_RESTART           default false — set true to restart Postgres when
 #                              max_connections requires it (otherwise prints instructions)
 #
 set -euo pipefail
 
 DB_SSH="${DB_SSH:?Set DB_SSH, e.g. root@db-host}"
-TARGET_MAX="${REMOTE_PG_MAX_CONNECTIONS:-550}"
+TARGET_MAX="${REMOTE_PG_MAX_CONNECTIONS:-1600}"
 ALLOW_DB_RESTART="${ALLOW_DB_RESTART:-false}"
 
 echo "=== Remote PostgreSQL tuning → ${DB_SSH} (target max_connections=${TARGET_MAX}) ==="

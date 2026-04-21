@@ -206,7 +206,8 @@ print(max(96, min(100, pmi * 4 + inst * 80)))
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
 # Headroom above PgBouncer default_pool_size for admin, stats, and burst.
-print(max(150, min(500, b + 100)))
+# Cap at 1600 to support per-VM PgBouncer architecture (3 × 500-pool = 1500 total).
+print(max(150, min(1600, b + 100)))
 ")
 FANOUT_QUEUE_CONCURRENCY=$(python3 -c "
 n = int('${_REMOTE_NCPU}')
