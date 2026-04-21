@@ -26,7 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # VM1 runs fewer workers than VM2/VM3; deploy-prod.sh reads CHATAPP_INSTANCES from the target
 # host's /opt/chatapp/shared/.env so systemd/nginx match (Phase 5 health checks use these lists).
 VM1_WORKER_PORTS=(4000 4001 4002 4003)
-VMX_WORKER_PORTS=(4000 4001 4002 4003 4004)
+VMX_WORKER_PORTS=(4000 4001 4002 4003 4004 4005)
 
 # Extra OpenSSH options — mirrors deploy-prod.sh default
 DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-new}"
@@ -42,7 +42,9 @@ ssh_vm() {
 }
 
 # Extra upstream servers to inject on every rewrite_nginx_upstream call during VM1 deploy.
-EXTRA_UPSTREAM_CSV="${VM2_INTERNAL}:4000,${VM2_INTERNAL}:4001,${VM2_INTERNAL}:4002,${VM2_INTERNAL}:4003,${VM2_INTERNAL}:4004,${VM3_INTERNAL}:4000,${VM3_INTERNAL}:4001,${VM3_INTERNAL}:4002,${VM3_INTERNAL}:4003,${VM3_INTERNAL}:4004"
+# INCREASED from 5 to 6 workers per VM2/VM3 to utilize idle CPU capacity on those VMs.
+# Validated: VM3 CPU idle ~76%, VM2 CPU idle ~48%. Adding 1 worker should use ~15% additional CPU.
+EXTRA_UPSTREAM_CSV="${VM2_INTERNAL}:4000,${VM2_INTERNAL}:4001,${VM2_INTERNAL}:4002,${VM2_INTERNAL}:4003,${VM2_INTERNAL}:4004,${VM2_INTERNAL}:4005,${VM3_INTERNAL}:4000,${VM3_INTERNAL}:4001,${VM3_INTERNAL}:4002,${VM3_INTERNAL}:4003,${VM3_INTERNAL}:4004,${VM3_INTERNAL}:4005"
 
 echo "======================================================================"
 echo "=== Three-VM Production Deploy: ${SHA:0:12}                      ==="
@@ -65,9 +67,9 @@ PROD_HOST=$VM3 \
 
 # ── Phase 0.5: Verify VM3 healthy ────────────────────────────────────────────
 echo ""
-echo "=== Phase 0.5: Verify all 5 VM3 workers healthy ==="
+echo "=== Phase 0.5: Verify all 6 VM3 workers healthy ==="
 all_ok=1
-for p in 4000 4001 4002 4003 4004; do
+for p in 4000 4001 4002 4003 4004 4005; do
   status=$(ssh_vm "$VM3" "curl -sf --max-time 8 http://127.0.0.1:${p}/health | python3 -c \"import sys,json; print(json.load(sys.stdin)['status'])\"" 2>/dev/null || echo "DEAD")
   echo "  VM3 worker ${p}: ${status}"
   if [ "$status" != "ok" ]; then
@@ -92,9 +94,9 @@ PROD_HOST=$VM2 \
 
 # ── Phase 2: Verify VM2 healthy before touching VM1 ──────────────────────────
 echo ""
-echo "=== Phase 2: Verify all 5 VM2 workers healthy ==="
+echo "=== Phase 2: Verify all 6 VM2 workers healthy ==="
 all_ok=1
-for p in 4000 4001 4002 4003 4004; do
+for p in 4000 4001 4002 4003 4004 4005; do
   status=$(ssh_vm "$VM2" "curl -sf --max-time 8 http://127.0.0.1:${p}/health | python3 -c \"import sys,json; print(json.load(sys.stdin)['status'])\"" 2>/dev/null || echo "DEAD")
   echo "  VM2 worker ${p}: ${status}"
   if [ "$status" != "ok" ]; then
@@ -174,9 +176,9 @@ site.write_text(text)
   echo 'VM2+VM3 upstream entries re-injected and nginx reloaded'
 "
 
-# ── Phase 5: Final health check — all 14 workers across all VMs ──────────────
+# ── Phase 5: Final health check — all 16 workers across all VMs ──────────────
 echo ""
-echo "=== Phase 5: Final health check — all 14 workers ==="
+echo "=== Phase 5: Final health check — all 16 workers (4 VM1 + 6 VM2 + 6 VM3) ==="
 overall_ok=1
 for vm in "$VM1" "$VM2" "$VM3"; do
   label="VM1"
