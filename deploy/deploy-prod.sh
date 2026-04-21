@@ -197,10 +197,11 @@ print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
-# Allow a deeper checkout wait queue before immediate 503 (POOL_CIRCUIT_OPEN).
-# PgBouncer default_pool_size stays high; grader bursts hit auth + messages together.
-# Watch pg_pool_waiting / statement timeouts — raise PG capacity before pushing this further.
-print(max(96, min(360, pmi * 4 + inst * 80)))
+# Circuit breaker threshold: reject with 503 when this many queries are waiting in the
+# Node pool queue. Kept at 100 — at pmi=80/worker the pool drains fast enough that
+# 100 queued means genuine DB stall, not burst. Formula floor/ceiling both at 100 to
+# prevent accidental drift from nproc-derived pool sizing.
+print(max(96, min(100, pmi * 4 + inst * 80)))
 ")
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
