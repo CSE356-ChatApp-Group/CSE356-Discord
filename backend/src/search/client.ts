@@ -15,9 +15,13 @@
 
 'use strict';
 
-const { withTransaction, readPool } = require('../db/pool');
+const db = require('../db/pool');
+const { withTransaction } = db;
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
+
+const SEARCH_USE_READ_REPLICA =
+  String(process.env.SEARCH_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
 
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
@@ -62,8 +66,13 @@ function shouldAllowBoundedScopedFallback(opts: Record<string, any>, queryLength
  * query cannot hold a pool slot for ~15s. Uses the read replica pool when configured so
  * search load stays off the primary; falls back to primary `withTransaction` when unset.
  */
-async function runSearchQuery(sql: string, params: any[]) {
+async function runSearchQuery(
+  sql: string,
+  params: any[],
+  options: { forcePrimary?: boolean } = {},
+) {
   const timeoutMs = getSearchStatementTimeoutMs();
+  const readPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA ? db.readPool : null;
   if (readPool) {
     const client = await readPool.connect();
     try {
@@ -92,8 +101,9 @@ async function runSearchQuery(sql: string, params: any[]) {
  * One read-only transaction, one SET LOCAL, multiple SELECTs — halves round-trips when FTS is empty
  * and trigram fallback runs (was 2× BEGIN/COMMIT + 2× SET).
  */
-async function runSearchTransaction(run) {
+async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {}) {
   const timeoutMs = getSearchStatementTimeoutMs();
+  const readPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA ? db.readPool : null;
   if (readPool) {
     const client = await readPool.connect();
     try {
@@ -777,9 +787,13 @@ function buildTrigramParts(q: string, opts: Record<string, any>) {
  * Fallback: ILIKE via the existing pg_trgm GIN index (separate transaction).
  * Used when the combined FTS+trigram transaction fails mid-flight.
  */
-async function searchTrigram(q: string, opts: Record<string, any>): Promise<any> {
+async function searchTrigram(
+  q: string,
+  opts: Record<string, any>,
+  forcePrimary = false,
+): Promise<any> {
   const b = buildTrigramParts(q, opts);
-  const rows = await runSearchQuery(b.sql, b.params);
+  const rows = await runSearchQuery(b.sql, b.params, { forcePrimary });
   if ((opts.channelId || opts.conversationId || opts.communityId) && rows[0]?.__scopeAccess === false) {
     const err: any = new Error('Access denied');
     err.statusCode = 403;
@@ -789,7 +803,10 @@ async function searchTrigram(q: string, opts: Record<string, any>): Promise<any>
   return buildResult(processed, b.q, b.offset, b.limit);
 }
 
-async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
+async function searchFilteredOnly(
+  opts: Record<string, any>,
+  forcePrimary = false,
+): Promise<any> {
   const params: any[] = [];
   const scope = buildScopedAccessParts(params, opts);
   const filters  = buildFilters(params, opts);
@@ -812,13 +829,66 @@ async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
       LIMIT ${limitPh} OFFSET ${offsetPh}
     ) search_rows ${scope ? scope.onClause : ''}`;
 
-  const rows = await runSearchQuery(sql, params);
+  const rows = await runSearchQuery(sql, params, { forcePrimary });
   if (scope && rows[0]?.__scopeAccess === false) {
     const err: any = new Error('Access denied');
     err.statusCode = 403;
     throw err;
   }
   return buildResult(rows, '', offset, limit);
+}
+
+function shouldRetrySearchOnPrimary(
+  forcePrimary: boolean,
+  result: { hits?: any[] } | null,
+  err?: any,
+) {
+  if (forcePrimary || !SEARCH_USE_READ_REPLICA || !db.readPool) return false;
+  if (err?.statusCode === 403) return true;
+  return Array.isArray(result?.hits) && result!.hits.length === 0;
+}
+
+function buildExactPrimaryParts(q: string, opts: Record<string, any>) {
+  const params: any[] = [];
+  const scope = buildScopedAccessParts(params, opts);
+  const filters = buildFilters(params, opts);
+  const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+  const limit = Number(opts.limit) || 20;
+  const offset = Number(opts.offset) || 0;
+  const limitPh = p(params, limit);
+  const offsetPh = p(params, offset);
+
+  const sql = `
+    ${scope ? `WITH ${scope.cte}` : ''}
+    SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+      search_rows.*
+    ${scope ? scope.fromClause : 'FROM'}
+    ${scope ? 'LEFT JOIN LATERAL (' : '('}
+      SELECT ${SELECT_COLS}
+      ${FROM_CLAUSE}
+      WHERE m.deleted_at IS NULL
+        ${literalTermFilter}
+        ${filters}
+      ORDER BY m.created_at DESC
+      LIMIT ${limitPh} OFFSET ${offsetPh}
+    ) search_rows ${scope ? scope.onClause : ''}`;
+
+  return { sql, params, limit, offset, q };
+}
+
+async function searchExactPrimary(q: string, opts: Record<string, any>) {
+  const meta = buildExactPrimaryParts(q, opts);
+  const rows = await runSearchQuery(meta.sql, meta.params, { forcePrimary: true });
+  if ((opts.channelId || opts.conversationId || opts.communityId) && rows[0]?.__scopeAccess === false) {
+    const err: any = new Error('Access denied');
+    err.statusCode = 403;
+    throw err;
+  }
+  const processed = rows.map((row) => ({
+    ...row,
+    highlight: highlightIlike(row.content, q),
+  }));
+  return buildResult(processed, meta.q, meta.offset, meta.limit);
 }
 
 /**
@@ -831,9 +901,13 @@ async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
  * @param q     Raw query string (validated by caller: non-empty when present)
  * @param opts  { channelId?, conversationId?, userId, authorId?, after?, before?, limit?, offset? }
  */
-async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
+async function searchOnce(
+  q: string,
+  opts: Record<string, any> = {},
+  forcePrimary = false,
+): Promise<any> {
   if (!String(q || '').trim()) {
-    return searchFilteredOnly(opts);
+    return searchFilteredOnly(opts, forcePrimary);
   }
 
   const trimmed = String(q).trim();
@@ -876,7 +950,7 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
         highlight: highlightIlike(row.content, trimmed),
       }));
       return buildResult(processed, triMeta.q, triMeta.offset, triMeta.limit);
-    });
+    }, { forcePrimary });
   } catch (err) {
     if (err?.statusCode === 403) {
       throw err;
@@ -894,7 +968,7 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
           conversationId: opts.conversationId,
         }, 'search: FTS query timeout, retrying fallback separately');
         try {
-          return await searchTrigram(trimmed, opts);
+          return await searchTrigram(trimmed, opts, forcePrimary);
         } catch (triErr) {
           logger.error({
             err: triErr,
@@ -919,7 +993,7 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
     logger.warn({ err }, 'search FTS failed; optional fallback retry');
     if (!allowTrigramFallback && !allowBoundedScopedFallback) throw err;
     try {
-      return await searchTrigram(trimmed, opts);
+      return await searchTrigram(trimmed, opts, forcePrimary);
     } catch (triErr) {
       logger.error({
         err: triErr,
@@ -930,6 +1004,54 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       }, 'search trigram fallback failed');
       throw triErr;
     }
+  }
+}
+
+async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
+  const trimmed = String(q || '').trim();
+  const initialForcePrimary = !SEARCH_USE_READ_REPLICA;
+
+  try {
+    const result = await searchOnce(trimmed, opts, initialForcePrimary);
+    if (trimmed && Array.isArray(result?.hits) && result.hits.length === 0) {
+      logger.info(
+        {
+          query: trimmed,
+          communityId: opts.communityId,
+          channelId: opts.channelId,
+          conversationId: opts.conversationId,
+        },
+        'search: search returned empty result set, retrying exhaustive scoped primary scan',
+      );
+      return await searchExactPrimary(trimmed, opts);
+    }
+    if (!shouldRetrySearchOnPrimary(initialForcePrimary, result)) {
+      return result;
+    }
+    logger.info(
+      {
+        query: trimmed,
+        communityId: opts.communityId,
+        channelId: opts.channelId,
+        conversationId: opts.conversationId,
+      },
+      'search: replica returned empty result set, retrying on primary',
+    );
+    return await searchOnce(trimmed, opts, true);
+  } catch (err) {
+    if (!shouldRetrySearchOnPrimary(initialForcePrimary, null, err)) {
+      throw err;
+    }
+    logger.info(
+      {
+        query: trimmed,
+        communityId: opts.communityId,
+        channelId: opts.channelId,
+        conversationId: opts.conversationId,
+      },
+      'search: replica access check may be stale, retrying on primary',
+    );
+    return searchOnce(trimmed, opts, true);
   }
 }
 

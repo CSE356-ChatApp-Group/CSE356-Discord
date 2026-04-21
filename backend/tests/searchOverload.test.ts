@@ -116,18 +116,30 @@ describe('search overload behavior', () => {
   });
 
   it('caps tiny channel-scoped fallback to newest scoped candidates', async () => {
-    let recordedClient: { query: jest.Mock } | null = null;
-    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
-      const client = {
-        query: jest.fn()
-          .mockResolvedValueOnce({})
-          .mockResolvedValueOnce({})
-          .mockResolvedValueOnce({ rows: [] })
-          .mockResolvedValueOnce({ rows: [] }),
-      };
-      recordedClient = client;
-      return run(client);
-    });
+    let firstClient: { query: jest.Mock } | null = null;
+    let secondClient: { query: jest.Mock } | null = null;
+    withTransaction
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [] }),
+        };
+        firstClient = client;
+        return run(client);
+      })
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({ rows: [] }),
+        };
+        secondClient = client;
+        return run(client);
+      });
 
     const result = await search('be', {
       channelId: 'channel-1',
@@ -137,14 +149,15 @@ describe('search overload behavior', () => {
     });
 
     expect(result.hits).toEqual([]);
-    const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
-    const trigramParams = recordedClient?.query.mock.calls[3]?.[1] ?? [];
+    const trigramSql = firstClient?.query.mock.calls[3]?.[0] ?? '';
+    const trigramParams = firstClient?.query.mock.calls[3]?.[1] ?? [];
     expect(trigramSql).toContain('trigram_scope_candidates');
     expect(trigramSql).toContain('messages.channel_id');
     expect(trigramSql).toContain('ORDER BY created_at DESC');
     expect(trigramSql).toContain('messages.channel_id = $3');
     expect(trigramSql).toContain("ILIKE $4 ESCAPE '\\'");
     expect(trigramParams).toHaveLength(6);
+    expect(secondClient?.query).toHaveBeenCalledTimes(3);
   });
 
   it('still falls back for short channel-scoped words when scoped trigram is disabled by config', async () => {
@@ -233,18 +246,30 @@ describe('search overload behavior', () => {
   });
 
   it('builds both FTS and trigram queries to require every search term', async () => {
-    let recordedClient: { query: jest.Mock } | null = null;
-    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
-      const client = {
-        query: jest.fn()
-          .mockResolvedValueOnce({})  // SET LOCAL statement_timeout
-          .mockResolvedValueOnce({})  // SET LOCAL work_mem
-          .mockResolvedValueOnce({ rows: [] })  // FTS query (no results)
-          .mockResolvedValueOnce({ rows: [] }), // trigram query (no results)
-      };
-      recordedClient = client;
-      return run(client);
-    });
+    let firstClient: { query: jest.Mock } | null = null;
+    let secondClient: { query: jest.Mock } | null = null;
+    withTransaction
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})  // SET LOCAL statement_timeout
+            .mockResolvedValueOnce({})  // SET LOCAL work_mem
+            .mockResolvedValueOnce({ rows: [] })  // FTS query (no results)
+            .mockResolvedValueOnce({ rows: [] }), // trigram query (no results)
+        };
+        firstClient = client;
+        return run(client);
+      })
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({ rows: [] }),
+        };
+        secondClient = client;
+        return run(client);
+      });
 
     const result = await search('games that have', {
       channelId: 'channel-1',
@@ -254,10 +279,10 @@ describe('search overload behavior', () => {
     });
 
     expect(result.hits).toEqual([]);
-    const ftsSql = recordedClient?.query.mock.calls[2]?.[0] ?? '';
-    const ftsParams = recordedClient?.query.mock.calls[2]?.[1] ?? [];
-    const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
-    const trigramParams = recordedClient?.query.mock.calls[3]?.[1] ?? [];
+    const ftsSql = firstClient?.query.mock.calls[2]?.[0] ?? '';
+    const ftsParams = firstClient?.query.mock.calls[2]?.[1] ?? [];
+    const trigramSql = firstClient?.query.mock.calls[3]?.[0] ?? '';
+    const trigramParams = firstClient?.query.mock.calls[3]?.[1] ?? [];
 
     expect((ftsSql.match(/m\.content IS NOT NULL AND m\.content ~\*/g) || []).length).toBe(3);
     expect((trigramSql.match(/m\.content IS NOT NULL AND m\.content ~\*/g) || []).length).toBe(2);
@@ -273,6 +298,7 @@ describe('search overload behavior', () => {
       '(^|[^[:alnum:]])that([^[:alnum:]]|$)',
       '(^|[^[:alnum:]])have([^[:alnum:]]|$)',
     ]));
+    expect(secondClient?.query).toHaveBeenCalledTimes(3);
   });
 
   it('uses word-boundary matching for multi-term all-word filters so short words do not match inside larger words', async () => {
@@ -357,18 +383,30 @@ describe('search overload behavior', () => {
   });
 
   it('limits community-scoped candidates inside the requested community instead of globally', async () => {
-    let recordedClient: { query: jest.Mock } | null = null;
-    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
-      const client = {
-        query: jest.fn()
-          .mockResolvedValueOnce({})
-          .mockResolvedValueOnce({})
-          .mockResolvedValueOnce({ rows: [] })
-          .mockResolvedValueOnce({ rows: [] }),
-      };
-      recordedClient = client;
-      return run(client);
-    });
+    let firstClient: { query: jest.Mock } | null = null;
+    let secondClient: { query: jest.Mock } | null = null;
+    withTransaction
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [] }),
+        };
+        firstClient = client;
+        return run(client);
+      })
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({ rows: [] }),
+        };
+        secondClient = client;
+        return run(client);
+      });
 
     const result = await search('hi', {
       communityId: 'community-1',
@@ -378,12 +416,66 @@ describe('search overload behavior', () => {
     });
 
     expect(result.hits).toEqual([]);
-    const ftsSql = recordedClient?.query.mock.calls[2]?.[0] ?? '';
-    const trigramSql = recordedClient?.query.mock.calls[3]?.[0] ?? '';
+    const ftsSql = firstClient?.query.mock.calls[2]?.[0] ?? '';
+    const trigramSql = firstClient?.query.mock.calls[3]?.[0] ?? '';
     expect(ftsSql).toContain('JOIN channels ch_scope');
     expect(ftsSql).toContain('ch_scope.community_id = $2');
     expect(trigramSql).toContain('JOIN channels ch_scope');
     expect(trigramSql).toContain('ch_scope.community_id = $1');
+    expect(secondClient?.query).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries an exhaustive scoped primary scan when the normal search returns an empty result set', async () => {
+    let firstClient: { query: jest.Mock } | null = null;
+    let secondClient: { query: jest.Mock } | null = null;
+
+    withTransaction
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({ rows: [] })
+            .mockResolvedValueOnce({ rows: [] }),
+        };
+        firstClient = client;
+        return run(client);
+      })
+      .mockImplementationOnce(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+        const client = {
+          query: jest.fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({
+              rows: [{
+                id: 'msg-1',
+                content: 'only this server',
+                authorId: 'user-1',
+                authorDisplayName: 'User One',
+                channelId: null,
+                conversationId: 'conv-1',
+                communityId: null,
+                channelName: null,
+                createdAt: '2026-04-21T16:35:23.000Z',
+              }],
+            }),
+        };
+        secondClient = client;
+        return run(client);
+      });
+
+    const result = await search('only this server', {
+      conversationId: 'conv-1',
+      userId: 'user-1',
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0].content).toBe('only this server');
+    expect(firstClient?.query).toHaveBeenCalledTimes(4);
+    expect(secondClient?.query).toHaveBeenCalledTimes(3);
+    expect(withTransaction).toHaveBeenCalledTimes(2);
   });
 
   it('does not retry trigram fallback after a scoped access denial', async () => {

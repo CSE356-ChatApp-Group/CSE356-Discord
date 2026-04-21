@@ -236,6 +236,7 @@ export const api = {
     // bypass this cache so repeated queries do not briefly reuse an empty result
     // after the underlying chat history changes.
     const skipRecentCache = path.startsWith('/messages') || path.startsWith('/search');
+    const skipInflightDedup = path.startsWith('/search');
 
     if (!skipRecentCache) {
       const cached = _recentGets.get(path);
@@ -244,8 +245,10 @@ export const api = {
       }
     }
 
-    const existing = _inFlightGets.get(path);
-    if (existing) return existing;
+    if (!skipInflightDedup) {
+      const existing = _inFlightGets.get(path);
+      if (existing) return existing;
+    }
 
     const pending = request('GET', path)
       .then((value) => {
@@ -263,7 +266,9 @@ export const api = {
       .finally(() => {
         _inFlightGets.delete(path);
       });
-    _inFlightGets.set(path, pending);
+    if (!skipInflightDedup) {
+      _inFlightGets.set(path, pending);
+    }
     return pending;
   },
   post:   (path: string, body?: unknown) => request('POST',   path, body),
