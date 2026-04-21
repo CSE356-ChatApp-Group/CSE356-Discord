@@ -355,6 +355,7 @@ describe('Search – common phrases and all-term matching', () => {
   let channelId: string;
   const exactPhrase = `games that have ${uniqueSuffix()}`;
   const commonPhrase = 'more just about';
+  const shortPhrase = 'hi ed be';
 
   beforeAll(async () => {
     const owner = await createAuthenticatedUser('srchallterms');
@@ -366,6 +367,7 @@ describe('Search – common phrases and all-term matching', () => {
     await sendMessage(ownerToken, channelId, `${exactPhrase} with every searched word present`);
     await sendMessage(ownerToken, channelId, 'games that are popular but missing the last word');
     await sendMessage(ownerToken, channelId, `${commonPhrase} this sentence should still be searchable`);
+    await sendMessage(ownerToken, channelId, shortPhrase);
   });
 
   it('does not return hits that miss one of the query words', async () => {
@@ -392,6 +394,21 @@ describe('Search – common phrases and all-term matching', () => {
     expect(res.body.hits.length).toBeGreaterThan(0);
     expect(
       res.body.hits.some((hit: any) => String(hit.content || '').includes(commonPhrase)),
+    ).toBe(true);
+  });
+
+  it('still finds short scoped stopwords when they appear explicitly in the message', async () => {
+    const res = await request(app)
+      .get(`/api/v1/search?q=be&channelId=${channelId}`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    expect(
+      res.body.hits.some((hit: any) => String(hit.content || '').includes(shortPhrase)),
+    ).toBe(true);
+    expect(
+      res.body.hits.some((hit: any) => String(hit._formatted?.content || '').includes('<em>be</em>')),
     ).toBe(true);
   });
 });

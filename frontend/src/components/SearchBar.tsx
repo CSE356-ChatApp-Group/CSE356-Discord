@@ -48,6 +48,21 @@ export default function SearchBar({
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  function extractHighlightTerms(query) {
+    const seen = new Set();
+    return String(query || '')
+      .trim()
+      .split(/\s+/)
+      .map((term) => term.trim())
+      .filter(Boolean)
+      .filter((term) => {
+        const key = term.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
+
   function displayAuthor(hit) {
     return (
       hit.authorDisplayName ||
@@ -63,10 +78,10 @@ export default function SearchBar({
   function highlightedContent(hit, query) {
     if (hit._formatted?.content) return hit._formatted.content;
     const safe = escapeHtml(hit.content || '');
-    const trimmed = (query || '').trim();
-    if (!trimmed) return safe;
-    const re = new RegExp(`(${escapeRegex(trimmed)})`, 'ig');
-    return safe.replace(re, '<mark>$1</mark>');
+    const terms = extractHighlightTerms(query).map(escapeRegex);
+    if (!terms.length) return safe;
+    const re = new RegExp(`(${terms.join('|')})`, 'ig');
+    return safe.replace(re, '<em>$1</em>');
   }
 
   function isRangeValid(filters) {

@@ -112,4 +112,23 @@ describe('SearchBar filters', () => {
 
     expect(await screen.findByTestId('search-error')).toHaveTextContent('Search temporarily unavailable');
   });
+
+  it('highlights fallback matches term-by-term when formatted HTML is absent', () => {
+    act(() => {
+      useChatStore.setState({
+        searchResults: [{
+          id: 'msg-1',
+          content: 'hi ed be',
+          createdAt: new Date().toISOString(),
+          authorDisplayName: 'User',
+        }],
+      } as any);
+    });
+
+    render(<SearchBar currentQuery="hi be" />);
+
+    const hit = screen.getByTestId('search-hit-msg-1');
+    expect(hit.innerHTML).toContain('<em>hi</em>');
+    expect(hit.innerHTML).toContain('<em>be</em>');
+  });
 });

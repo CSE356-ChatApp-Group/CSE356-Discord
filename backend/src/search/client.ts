@@ -49,6 +49,14 @@ function shouldAllowTrigramFallback(opts: Record<string, any>, queryLength: numb
   return true;
 }
 
+function shouldAllowBoundedScopedFallback(opts: Record<string, any>, queryLength: number) {
+  if (!queryLength) return false;
+  // Channel/conversation searches already have a selective scope and the fallback
+  // reads only the newest bounded candidate window from that scope. Keep this
+  // available even when trigram fallback is disabled for short scoped queries.
+  return Boolean(opts.channelId || opts.conversationId);
+}
+
 /**
  * Run search SQL inside a short read-only transaction with statement_timeout so one bad
  * query cannot hold a pool slot for ~15s. Uses the read replica pool when configured so
@@ -380,11 +388,11 @@ function buildCommunityScopedCandidateParts(
 
 function highlightIlike(content: string, q: string): string {
   if (!content) return '';
-  // HTML-escape first, then insert <em> markers so the output is safe for innerHTML.
-  const safe = escapeHtml(content);
   const terms = extractSearchTerms(q).map(escapeRegExp);
-  if (!terms.length) return safe;
-  return safe.replace(new RegExp(`(${terms.join('|')})`, 'gi'), '<em>$1</em>');
+  if (!terms.length) return content;
+  // Use the same sentinels as ts_headline so buildResult() can sanitize once and
+  // emit real <em> tags for both FTS and fallback highlights.
+  return content.replace(new RegExp(`(${terms.join('|')})`, 'gi'), '%%EM_START%%$1%%EM_END%%');
 }
 
 function buildResult(rows: any[], q: string, offset: number, limit: number) {
@@ -503,7 +511,14 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   return { sql, params, limit, offset, q };
 }
 
-/** Statement + paging metadata for trigram ILIKE fallback. */
+/**
+ * Statement + paging metadata for fallback matching.
+ *
+ * Community/unscoped paths use the pg_trgm-backed ILIKE fallback.
+ * Channel/conversation paths use a cheaper bounded literal fallback against the
+ * newest messages in that scope so short stopword searches (e.g. "be") still
+ * work even when scoped trigram fallback is disabled by config.
+ */
 function buildTrigramParts(q: string, opts: Record<string, any>) {
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
@@ -739,9 +754,9 @@ async function searchFilteredOnly(opts: Record<string, any>): Promise<any> {
 /**
  * search – main entry point.
  *
- * FTS first (GIN). Trigram ILIKE only when allowed: always for scoped searches,
- * and for unscoped only when the query is long enough — short unscoped queries
- * used to fan out ILIKE %q% across all visible messages and stall the DB for many seconds.
+ * FTS first (GIN). Broader trigram ILIKE fallback remains gated by query length
+ * and overload, but channel/conversation searches always retain the bounded
+ * newest-scope literal fallback so short exact words still work.
  *
  * @param q     Raw query string (validated by caller: non-empty when present)
  * @param opts  { channelId?, conversationId?, userId, authorId?, after?, before?, limit?, offset? }
@@ -754,10 +769,13 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   const trimmed = String(q).trim();
   const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
   const allowTrigramFallback = shouldAllowTrigramFallback(opts, trimmed.length);
+  const allowBoundedScopedFallback = shouldAllowBoundedScopedFallback(opts, trimmed.length);
 
   try {
     const ftsMeta = buildFtsParts(trimmed, opts);
-    const triMeta = allowTrigramFallback ? buildTrigramParts(trimmed, opts) : null;
+    const triMeta = (allowTrigramFallback || allowBoundedScopedFallback)
+      ? buildTrigramParts(trimmed, opts)
+      : null;
     return await runSearchTransaction(async (client) => {
       const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
       if (scoped && ftsRes.rows[0]?.__scopeAccess === false) {
@@ -796,8 +814,8 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       return buildResult([], trimmed, Number(opts.offset) || 0, Number(opts.limit) || 20);
     }
     
-    logger.warn({ err }, 'search FTS failed; optional trigram retry');
-    if (!allowTrigramFallback) throw err;
+    logger.warn({ err }, 'search FTS failed; optional fallback retry');
+    if (!allowTrigramFallback && !allowBoundedScopedFallback) throw err;
     try {
       return await searchTrigram(trimmed, opts);
     } catch (triErr) {

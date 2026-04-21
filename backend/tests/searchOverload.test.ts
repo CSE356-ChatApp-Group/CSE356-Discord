@@ -20,9 +20,17 @@ const { search } = require('../src/search/client') as {
 };
 
 describe('search overload behavior', () => {
+  const originalScopedMinLen = process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED;
+
   beforeEach(() => {
     jest.clearAllMocks();
     overload.getStage.mockReturnValue(0);
+    delete process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED;
+  });
+
+  afterAll(() => {
+    if (originalScopedMinLen === undefined) delete process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED;
+    else process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED = originalScopedMinLen;
   });
 
   it('still allows trigram fallback for community-scoped searches at stage 1', async () => {
@@ -137,6 +145,47 @@ describe('search overload behavior', () => {
     expect(trigramSql).toContain('messages.channel_id = $3');
     expect(trigramSql).toContain("ILIKE $4 ESCAPE '\\'");
     expect(trigramParams).toHaveLength(6);
+  });
+
+  it('still falls back for short channel-scoped words when scoped trigram is disabled by config', async () => {
+    process.env.SEARCH_TRIGRAM_MIN_LEN_SCOPED = '999';
+
+    let recordedClient: { query: jest.Mock } | null = null;
+    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any>) => {
+      const client = {
+        query: jest.fn()
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({
+            rows: [{
+              id: 'msg-1',
+              content: 'hi ed be',
+              authorId: 'user-1',
+              authorDisplayName: 'User One',
+              channelId: 'channel-1',
+              conversationId: null,
+              communityId: 'community-1',
+              channelName: 'general',
+              createdAt: '2026-04-21T16:35:23.000Z',
+            }],
+          }),
+      };
+      recordedClient = client;
+      return run(client);
+    });
+
+    const result = await search('be', {
+      channelId: 'channel-1',
+      userId: 'user-1',
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0].content).toBe('hi ed be');
+    expect(result.hits[0]._formatted.content).toContain('<em>be</em>');
+    expect(recordedClient?.query).toHaveBeenCalledTimes(4);
   });
 
   it('builds both FTS and trigram queries to require every search term', async () => {

@@ -139,7 +139,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **Search** | |
 | `SEARCH_STATEMENT_TIMEOUT_MS` | Per-statement timeout (ms) for each search query; code default 8000. Deploy scripts currently set 5000 on staging/prod to cap pool hold-time under load. |
 | `SEARCH_MAX_LIMIT`, `SEARCH_MAX_OFFSET` | Cap `limit` (default 50) and `offset` (default 500) on `GET /search`. |
-| `SEARCH_TRIGRAM_MIN_LEN_SCOPED` | Minimum query length (default 2) before allowing trigram `ILIKE` fallback when search is scoped by `communityId`, `channelId`, or `conversationId`; reduces one-character fallback scans on hot paths. |
+| `SEARCH_TRIGRAM_MIN_LEN_SCOPED` | Minimum query length (default 2) before allowing the broader trigram `ILIKE` fallback for community-scoped searches. Channel- and conversation-scoped searches still keep the bounded newest-scope literal fallback so short explicit words like `be` remain searchable. |
 | `SEARCH_TRIGRAM_CANDIDATES_LIMIT` | Maximum rows (default 500) to scan in trigram fallback CTE for community-scoped queries. Caps expensive `ILIKE '%phrase%'` scans that can timeout on multi-word patterns. |
 | `SEARCH_TRIGRAM_SCOPED_CANDIDATES_LIMIT` | Maximum newest rows (default 2000) to inspect during channel- or conversation-scoped trigram fallback before applying the literal all-terms match. Uses the existing `(channel_id, created_at DESC)` / `(conversation_id, created_at DESC)` indexes to bound common-word fallback work. |
 
