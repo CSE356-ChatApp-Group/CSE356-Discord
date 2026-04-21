@@ -377,7 +377,7 @@ fi
 
 echo "2) Copying artifact and verification scripts to staging host..."
 scp "${SOURCE_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
-scp deploy/health-check.sh deploy/smoke-test.sh deploy/candidate-ws-smoke.cjs deploy/pgbouncer-setup.py "${STAGING_USER}@${STAGING_HOST}:/tmp/"
+scp deploy/health-check.sh deploy/smoke-test.sh deploy/candidate-ws-smoke.cjs deploy/pgbouncer-setup.py deploy/redis-wait.sh "${STAGING_USER}@${STAGING_HOST}:/tmp/"
 if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
   rm -f "${DOWNLOADED_ARTIFACT}"
 fi
@@ -391,6 +391,8 @@ scp "${SCRIPT_DIR}/env/staging.required.env" "${STAGING_USER}@${STAGING_HOST}:/t
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   sed 's/__DEPLOY_USER__/${STAGING_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
+  sudo cp /tmp/redis-wait.sh /opt/chatapp/shared/redis-wait.sh
+  sudo chmod +x /opt/chatapp/shared/redis-wait.sh
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
   # CHATAPP_INSTANCES: persist worker count so monitoring scripts and health endpoints

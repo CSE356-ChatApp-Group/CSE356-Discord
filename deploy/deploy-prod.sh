@@ -1175,6 +1175,7 @@ echo "5.5. Installing/updating systemd unit..."
 # Use ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
 # subsystem which misparses '@' in remote paths, causing "Permission denied".
 ssh_prod 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
+ssh_prod 'cat > /tmp/redis-wait.sh' < "${SCRIPT_DIR}/redis-wait.sh"
 # shellcheck disable=SC2086
 scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
@@ -1186,6 +1187,8 @@ scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o Contr
 ssh_prod "
   set -e
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
+  sudo cp /tmp/redis-wait.sh /opt/chatapp/shared/redis-wait.sh
+  sudo chmod +x /opt/chatapp/shared/redis-wait.sh
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
   # CHATAPP_INSTANCES: persist worker count so monitoring and health endpoints
