@@ -343,6 +343,13 @@ const fanoutRecentConnectCacheTotal = new client.Counter({
   labelNames: ['result'],
 });
 
+/** Size of the per-channel recent-connect ZSET slice returned by ZRANGEBYSCORE (before cap intersection). */
+const fanoutRecentConnectZsetSize = new client.Histogram({
+  name: 'fanout_recent_connect_zset_size',
+  help: 'Number of member user ids in channel:recent_connect ZSET above the recency cutoff',
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
 /** Cache outcomes for WS bootstrap subscription lists. */
 const wsBootstrapListCacheTotal = new client.Counter({
   name: 'ws_bootstrap_list_cache_total',
@@ -615,6 +622,7 @@ function startPgPoolMetrics(pool) {
     fanoutTargetCandidatesHistogram.observe({ path: 'channel_message_recent_connect_user_topics' }, 0);
     fanoutRecentConnectCacheTotal.inc({ result: 'hit' }, 0);
     fanoutRecentConnectCacheTotal.inc({ result: 'miss' }, 0);
+    fanoutRecentConnectZsetSize.observe(0);
     wsBootstrapListCacheTotal.inc({ result: 'hit' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'miss' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'coalesced' }, 0);
@@ -682,6 +690,7 @@ module.exports = {
   fanoutPublishTargetsHistogram,
   fanoutTargetCandidatesHistogram,
   fanoutRecentConnectCacheTotal,
+  fanoutRecentConnectZsetSize,
   wsBootstrapListCacheTotal,
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,

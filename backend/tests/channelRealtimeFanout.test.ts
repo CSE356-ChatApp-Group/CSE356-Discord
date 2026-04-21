@@ -17,10 +17,17 @@ jest.mock('../src/messages/sideEffects', () => ({
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(() => Promise.resolve(null)),
   mget: jest.fn(() => Promise.resolve([])),
+  zrangebyscore: jest.fn(() => Promise.resolve([])),
   set: jest.fn(() => Promise.resolve('OK')),
   del: jest.fn(() => Promise.resolve(1)),
   incr: jest.fn(() => Promise.resolve(1)),
   pipeline: jest.fn(),
+  multi: jest.fn(() => ({
+    zremrangebyscore: jest.fn().mockReturnThis(),
+    zadd: jest.fn().mockReturnThis(),
+    expire: jest.fn().mockReturnThis(),
+    exec: jest.fn(() => Promise.resolve([])),
+  })),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -31,10 +38,12 @@ const fanout = require('../src/websocket/fanout') as { publish: jest.Mock };
 const redis = require('../src/db/redis') as {
   get: jest.Mock;
   mget: jest.Mock;
+  zrangebyscore: jest.Mock;
   set: jest.Mock;
   del: jest.Mock;
   incr: jest.Mock;
   pipeline: jest.Mock;
+  multi: jest.Mock;
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { userFeedRedisChannelForUserId } = require('../src/websocket/userFeed') as {
@@ -58,17 +67,24 @@ describe('channelRealtimeFanout', () => {
   let pipelineIncr: jest.Mock;
   let pipelineExec: jest.Mock;
 
+  beforeEach(() => {
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'false';
+  });
+
   afterEach(() => {
     query.mockReset();
     fanout.publish.mockReset();
     redis.get.mockReset();
     redis.mget.mockReset();
+    redis.zrangebyscore.mockReset();
     redis.set.mockReset();
     redis.del.mockReset();
     redis.incr.mockReset();
     redis.pipeline.mockReset();
+    redis.multi.mockReset();
     redis.get.mockResolvedValue(null);
     redis.mget.mockResolvedValue([]);
+    redis.zrangebyscore.mockResolvedValue([]);
     redis.set.mockResolvedValue('OK');
     redis.del.mockResolvedValue(1);
     redis.incr.mockResolvedValue(1);
@@ -80,7 +96,14 @@ describe('channelRealtimeFanout', () => {
       incr: pipelineIncr,
       exec: pipelineExec,
     });
+    redis.multi.mockReturnValue({
+      zremrangebyscore: jest.fn().mockReturnThis(),
+      zadd: jest.fn().mockReturnThis(),
+      expire: jest.fn().mockReturnThis(),
+      exec: jest.fn(() => Promise.resolve([])),
+    });
     delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    delete process.env.CHANNEL_RECENT_ZSET_ENABLED;
   });
 
   it('getChannelUserFanoutTargetKeys returns distinct user: keys from query rows', async () => {
@@ -169,6 +192,51 @@ describe('channelRealtimeFanout', () => {
     } finally {
       if (prev === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
       else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prev;
+    }
+  });
+
+  it('publishChannelMessageCreated recent_connect uses per-channel ZSET when CHANNEL_RECENT_ZSET_ENABLED', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-zset-1';
+    try {
+      redis.mget.mockResolvedValueOnce([null, null]);
+      redis.zrangebyscore.mockResolvedValueOnce(['a']);
+      query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
+      await publishChannelMessageCreated(ch, { event: 'message:created', data: { id: 'm1' } });
+      expect(redis.mget).toHaveBeenCalledTimes(1);
+      expect(redis.zrangebyscore).toHaveBeenCalledTimes(1);
+      const expectedChannels = [
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+      ].sort();
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+    }
+  });
+
+  it('publishChannelMessageCreated falls back to capped targets when ZSET recent-connect lookup fails', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-zset-fail-1';
+    try {
+      redis.mget.mockResolvedValueOnce([null, null]);
+      redis.zrangebyscore.mockRejectedValueOnce(new Error('redis zrange failed'));
+      query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
+      await publishChannelMessageCreated(ch, { event: 'message:created', data: { id: 'm1' } });
+      const expectedChannels = [
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+        userFeedRedisChannelForUserId('b'),
+      ].sort();
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
     }
   });
 

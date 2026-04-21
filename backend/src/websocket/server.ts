@@ -73,7 +73,7 @@ const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { loadReplayableMessagesForUser } = require("../messages/reconnectReplay");
-const { markWsRecentConnect } = require("./recentConnect");
+const { markWsRecentConnect, markChannelRecentConnect } = require("./recentConnect");
 const {
   allUserFeedRedisChannels,
   isUserFeedEnvelope,
@@ -1799,6 +1799,10 @@ async function subscribeClient(ws, redisChannel) {
   ws._subscriptions.add(redisChannel);
   if (redisChannel.startsWith("channel:")) {
     ws._explicitChannelUnsub?.delete(redisChannel);
+    const uid = ws._userId;
+    if (uid) {
+      markChannelRecentConnect(uid, redisChannel.slice("channel:".length)).catch(() => {});
+    }
   }
 }
 

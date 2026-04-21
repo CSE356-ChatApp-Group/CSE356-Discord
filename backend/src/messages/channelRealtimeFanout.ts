@@ -10,7 +10,12 @@ const redis = require('../db/redis');
 const fanout = require('../websocket/fanout');
 const { publishUserFeedTargets } = require('../websocket/userFeed');
 const sideEffects = require('./sideEffects');
-const { wsRecentConnectKey } = require('../websocket/recentConnect');
+const {
+  wsRecentConnectKey,
+  channelRecentConnectKey,
+  channelRecentZsetEnabled,
+  WS_RECENT_CONNECT_TTL_SECONDS,
+} = require('../websocket/recentConnect');
 const logger = require('../utils/logger');
 const {
   fanoutRecipientsHistogram,
@@ -19,6 +24,7 @@ const {
   fanoutPublishTargetsHistogram,
   fanoutTargetCandidatesHistogram,
   fanoutRecentConnectCacheTotal,
+  fanoutRecentConnectZsetSize,
 } = require('../utils/metrics');
 
 const rawUserFanoutTargetsCacheTtl = Number(process.env.CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS || '180');
@@ -269,6 +275,21 @@ async function recentConnectTargets(channelId: string, targets: string[]) {
   }
   fanoutRecentConnectCacheTotal.inc({ result: 'miss' });
   try {
+    if (channelRecentZsetEnabled()) {
+      const since = Date.now() - WS_RECENT_CONNECT_TTL_SECONDS * 1000;
+      const userIds = await redis.zrangebyscore(
+        channelRecentConnectKey(channelId),
+        since,
+        '+inf',
+      );
+      fanoutRecentConnectZsetSize.observe(userIds.length);
+      const cappedSet = new Set(targets);
+      const filteredTargets = userIds
+        .filter((uid) => typeof uid === 'string' && cappedSet.has(`user:${uid}`))
+        .map((uid) => `user:${uid}`);
+      writeRecentConnectTargetsCache(channelId, filteredTargets);
+      return filteredTargets;
+    }
     const markers = await redis.mget(...targets.map((target) => wsRecentConnectKey(target.slice(5))));
     const filteredTargets = targets.filter((_target, idx) => !!markers[idx]);
     writeRecentConnectTargetsCache(channelId, filteredTargets);
