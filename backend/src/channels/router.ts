@@ -293,8 +293,10 @@ router.get('/',
 
         // Return all visible channel names. Private-channel metadata/content pointers
         // are redacted for users who are not invited to that private channel.
-        const { rows } = await queryRead(
-          `SELECT ${VISIBLE_CHANNEL_FIELDS},
+        // Fall back to primary if the replica returns 0 rows — this handles the
+        // replication lag window after community creation where the default channel
+        // exists on primary but hasn't replicated yet.
+        const channelListSql = `SELECT ${VISIBLE_CHANNEL_FIELDS},
                   vc.can_access,
                   CASE WHEN vc.can_access THEN vc.last_message_id ELSE NULL END AS last_message_id,
                   CASE WHEN vc.can_access THEN vc.last_message_author_id ELSE NULL END AS last_message_author_id,
@@ -316,9 +318,11 @@ router.get('/',
                   ON vc.can_access
                  AND rs.channel_id = vc.id
                  AND rs.user_id = $2
-           ORDER  BY vc.position, vc.name`,
-          [communityId, userId]
-        );
+           ORDER  BY vc.position, vc.name`;
+        let { rows } = await queryRead(channelListSql, [communityId, userId]);
+        if (rows.length === 0) {
+          ({ rows } = await query(channelListSql, [communityId, userId]));
+        }
 
         // Attach Redis-backed unread_message_count to each accessible channel
         const accessibleRows = rows.filter(ch => ch.id && ch.can_access);
