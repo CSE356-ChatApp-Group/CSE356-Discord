@@ -23,13 +23,16 @@ const CHANNEL_FLUSH_BATCH_SIZE = 50;
 
 // SQL for background flush — no 1 ms lock_timeout, normal lock wait is fine
 // because this runs out of the hot path.
+// EXISTS guard prevents FK violation when the message is deleted in the ~10s
+// window between the Redis write and this batch flush.
 const CHANNEL_LAST_MESSAGE_FLUSH_SQL = `
   UPDATE channels
      SET last_message_id = $1,
          last_message_author_id = $2,
          last_message_at = $3
    WHERE id = $4
-     AND (last_message_at IS NULL OR $3 >= last_message_at)`;
+     AND (last_message_at IS NULL OR $3 >= last_message_at)
+     AND EXISTS (SELECT 1 FROM messages WHERE id = $1)`;
 
 async function clearChannelLastMessagePointers(channelId: string) {
   await query(

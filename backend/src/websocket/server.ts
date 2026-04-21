@@ -1581,8 +1581,16 @@ async function handleClientMessage(ws, user, msg) {
   refreshConnectionTtls(user.id, ws._connectionId).catch(() => {});
 
   switch (msg.type) {
-    case "subscribe":
-      if (await isAllowedChannel(user, msg.channel)) {
+    case "subscribe": {
+      let allowed: boolean;
+      try {
+        allowed = await isAllowedChannel(user, msg.channel);
+      } catch (err) {
+        logger.warn({ err, userId: user.id, channel: msg.channel }, "WS subscribe: channel access check failed");
+        ws.send(JSON.stringify({ event: "error", data: "Subscribe temporarily unavailable" }));
+        break;
+      }
+      if (allowed) {
         try {
           await subscribeClient(ws, msg.channel);
           ws.send(
@@ -1600,6 +1608,7 @@ async function handleClientMessage(ws, user, msg) {
         );
       }
       break;
+    }
 
     case "unsubscribe":
       await unsubscribeClient(ws, msg.channel);
