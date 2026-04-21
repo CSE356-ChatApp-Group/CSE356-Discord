@@ -43,6 +43,15 @@ router.get('/', async (req, res, next) => {
       return res.status(503).json({ error: 'Search temporarily unavailable under high load' });
     }
 
+    // Search must be scoped per assignment: either communityId, channelId, or conversationId
+    // Unscoped searches (omitting all three) are disallowed to prevent expensive cross-scope scans.
+    const isScoped = Boolean(communityId || channelId || conversationId);
+    if (!isScoped) {
+      return res.status(400).json({ 
+        error: 'Search must be scoped: provide communityId, channelId, or conversationId' 
+      });
+    }
+
     const normalizedQuery = String(q || '').trim();
     const hasFilterOnlySearch = Boolean(authorId || after || before);
 
