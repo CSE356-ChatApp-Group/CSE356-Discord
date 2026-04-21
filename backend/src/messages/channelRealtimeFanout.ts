@@ -284,9 +284,26 @@ async function recentConnectTargets(channelId: string, targets: string[]) {
       );
       fanoutRecentConnectZsetSize.observe(userIds.length);
       const cappedSet = new Set(targets);
-      const filteredTargets = userIds
+      const zsetSet = new Set(userIds.filter((uid) => typeof uid === 'string'));
+      const inZset = userIds
         .filter((uid) => typeof uid === 'string' && cappedSet.has(`user:${uid}`))
         .map((uid) => `user:${uid}`);
+
+      // Fall back to ws:recent_connect for users not yet in the channel ZSET.
+      // This covers the bootstrap timing window (~5-55ms after connect) before
+      // bootstrapUserSubscriptions has had a chance to run markChannelRecentConnect.
+      const notInZset = targets.filter((t) => !zsetSet.has(t.slice('user:'.length)));
+      let bootstrapWindowTargets: string[] = [];
+      if (notInZset.length > 0) {
+        const markers = await redis.mget(
+          ...notInZset.map((target) => wsRecentConnectKey(target.slice('user:'.length))),
+        );
+        bootstrapWindowTargets = notInZset.filter((_t, idx) => !!markers[idx]);
+      }
+
+      const filteredTargets = bootstrapWindowTargets.length > 0
+        ? [...new Set([...inZset, ...bootstrapWindowTargets])]
+        : inZset;
       writeRecentConnectTargetsCache(channelId, filteredTargets);
       return filteredTargets;
     }

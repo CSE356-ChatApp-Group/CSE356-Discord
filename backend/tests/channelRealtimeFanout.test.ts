@@ -201,15 +201,44 @@ describe('channelRealtimeFanout', () => {
     process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
     const ch = 'chan-zset-1';
     try {
-      redis.mget.mockResolvedValueOnce([null, null]);
+      // First mget: cache state check; second mget: ws:recent_connect fallback for user 'b' (not in ZSET)
+      redis.mget
+        .mockResolvedValueOnce([null, null])
+        .mockResolvedValueOnce([null]);
       redis.zrangebyscore.mockResolvedValueOnce(['a']);
       query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
       await publishChannelMessageCreated(ch, { event: 'message:created', data: { id: 'm1' } });
-      expect(redis.mget).toHaveBeenCalledTimes(1);
       expect(redis.zrangebyscore).toHaveBeenCalledTimes(1);
       const expectedChannels = [
         `channel:${ch}`,
         userFeedRedisChannelForUserId('a'),
+      ].sort();
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+    }
+  });
+
+  it('publishChannelMessageCreated recent_connect ZSET includes bootstrap-window users via ws:recent_connect fallback', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-zset-bootstrap';
+    try {
+      // User 'a' is in channel ZSET; user 'b' is NOT in ZSET but has ws:recent_connect set
+      // (bootstrap timing window: user connected but markChannelRecentConnect hasn't run yet)
+      redis.mget
+        .mockResolvedValueOnce([null, null])  // cache state check
+        .mockResolvedValueOnce(['1']);         // ws:recent_connect:b → present
+      redis.zrangebyscore.mockResolvedValueOnce(['a']);
+      query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
+      await publishChannelMessageCreated(ch, { event: 'message:created', data: { id: 'm1' } });
+      expect(redis.zrangebyscore).toHaveBeenCalledTimes(1);
+      const expectedChannels = [
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+        userFeedRedisChannelForUserId('b'),
       ].sort();
       expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
     } finally {
