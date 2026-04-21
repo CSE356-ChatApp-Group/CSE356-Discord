@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Production nginx + chatapp upstream audit (run from laptop with SSH).
-# Checks: every upstream server line targets an *active* chatapp@ port; nginx -t.
-# Warns (does not fail) when active units exist that are missing from upstream — deploy
-# realigns nginx from CHATAPP_INSTANCES, and pre-audit must not block that repair.
+# Checks:
+#   - exact 14-worker 3-VM upstream topology (VM1=4, VM2=5, VM3=5)
+#   - required proxy retry policy includes http_503 + non_idempotent
+#   - nginx -t succeeds
 #
 # Usage:
 #   ./scripts/prod-nginx-audit.sh
@@ -39,60 +40,93 @@ else
   exit 1
 fi
 
-UPSTREAM=$(sudo sed -n '/^upstream app {/,/^}/p' /etc/nginx/sites-available/chatapp)
+SITE=/etc/nginx/sites-available/chatapp
+UPSTREAM=$(sudo sed -n '/^upstream app {/,/^}/p' "${SITE}")
 
 if echo "$UPSTREAM" | grep -qE '^\s*least_conn\s*;'; then
   echo "OK: upstream uses least_conn"
 else
-  echo "WARN: least_conn not present (optional for single-backend)"
+  echo "FAIL: least_conn not present in upstream app block"
+  exit 1
 fi
 
 if echo "$UPSTREAM" | grep -E '^\s*server\s+' | grep -v 'max_fails=' | grep -q .; then
-  echo "WARN: some upstream server lines lack max_fails= (unexpected)"
+  echo "FAIL: some upstream server lines lack max_fails= (unexpected)"
+  exit 1
 else
   echo "OK: each server line includes max_fails (or no server lines matched)"
 fi
 
-if echo "$UPSTREAM" | grep -qF 'max_fails=0'; then
-  srv_n=$(echo "$UPSTREAM" | grep -cE '^\s*server\s+' || true)
-  if [[ "${srv_n}" -ge 2 ]]; then
-    echo "WARN: multi-upstream uses max_fails=0 — peers are never marked down (see deploy-prod.sh 9c)"
-  fi
-fi
+EXPECTED_SERVERS=(
+  "localhost:4000"
+  "localhost:4001"
+  "localhost:4002"
+  "localhost:4003"
+  "10.0.3.243:4000"
+  "10.0.3.243:4001"
+  "10.0.3.243:4002"
+  "10.0.3.243:4003"
+  "10.0.3.243:4004"
+  "10.0.2.164:4000"
+  "10.0.2.164:4001"
+  "10.0.2.164:4002"
+  "10.0.2.164:4003"
+  "10.0.2.164:4004"
+)
 
-PORTS_UP=$(echo "$UPSTREAM" | grep -oE 'localhost:[0-9]+|127\.0\.0\.1:[0-9]+' | sed 's/.*://' | sort -u)
-DUP=$(echo "$UPSTREAM" | grep -oE 'localhost:[0-9]+|127\.0\.0\.1:[0-9]+' | sort | uniq -d || true)
-if [[ -n "$DUP" ]]; then
-  echo "FAIL: duplicate upstream ports: $DUP"
+SERVER_LINES=$(echo "$UPSTREAM" | grep -oE 'server[[:space:]]+[^[:space:];]+' | awk '{print $2}')
+DUP=$(echo "$SERVER_LINES" | sort | uniq -d || true)
+if [[ -n "${DUP}" ]]; then
+  echo "FAIL: duplicate upstream servers: ${DUP}"
   exit 1
 fi
 
-# Upstream must only reference active workers (otherwise nginx sends traffic to a dead port).
-while IFS= read -r p; do
-  [[ -n "$p" ]] || continue
+# Exact topology parity with current production.
+for s in "${EXPECTED_SERVERS[@]}"; do
+  if ! echo "${SERVER_LINES}" | grep -qx "${s}"; then
+    echo "FAIL: upstream app missing expected server ${s}"
+    exit 1
+  fi
+done
+while IFS= read -r s; do
+  [[ -n "${s}" ]] || continue
   found=0
-  for active in "${ACTIVE_PORTS[@]}"; do
-    if [[ "$active" == "$p" ]]; then
+  for exp in "${EXPECTED_SERVERS[@]}"; do
+    if [[ "${exp}" == "${s}" ]]; then
       found=1
       break
     fi
   done
-  if [[ "$found" -ne 1 ]]; then
-    echo "FAIL: upstream app lists port ${p} but chatapp@${p} is not active (active ports: ${ACTIVE_PORTS[*]:-none})"
+  if [[ "${found}" -ne 1 ]]; then
+    echo "FAIL: upstream app has unexpected server ${s}"
     exit 1
   fi
-done <<< "$PORTS_UP"
+done <<< "${SERVER_LINES}"
+echo "OK: upstream includes expected 14 worker server entries (4+5+5)"
 
-# Active workers missing from upstream is drift (e.g. mid-cutover or manual edits).
-# Do not block deploy: deploy-prod.sh rewrites this block from CHATAPP_INSTANCES.
-for p in "${ACTIVE_PORTS[@]}"; do
-  if ! echo "$PORTS_UP" | grep -qx "$p"; then
-    echo "WARN: chatapp@${p} is active but upstream app does not list port ${p} (upstream ports: $(echo "$PORTS_UP" | tr '\n' ' '))"
+# VM1 local workers (localhost:4000-4003) must be active.
+for p in 4000 4001 4002 4003; do
+  if ! systemctl is-active --quiet "chatapp@${p}" 2>/dev/null; then
+    echo "FAIL: expected local worker chatapp@${p} is not active"
+    exit 1
   fi
 done
+echo "OK: VM1 local workers 4000-4003 are active"
 
-if [[ "${#ACTIVE_PORTS[@]}" -ge 1 ]] && [[ -n "$PORTS_UP" ]]; then
-  echo "OK: upstream only lists active worker port(s); ${#ACTIVE_PORTS[@]} chatapp unit(s) running"
+# Required retry policy now includes http_503 + non_idempotent and tries=2.
+RETRY_LINE='proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;'
+TRIES_LINE='proxy_next_upstream_tries 2;'
+if sudo grep -Fq "${RETRY_LINE}" "${SITE}"; then
+  echo "OK: proxy_next_upstream includes http_503 + non_idempotent"
+else
+  echo "FAIL: missing '${RETRY_LINE}' in ${SITE}"
+  exit 1
+fi
+if sudo grep -Fq "${TRIES_LINE}" "${SITE}"; then
+  echo "OK: proxy_next_upstream_tries 2 is present"
+else
+  echo "FAIL: missing '${TRIES_LINE}' in ${SITE}"
+  exit 1
 fi
 
 echo "=== nginx -t ==="
