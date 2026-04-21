@@ -432,9 +432,10 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
     || echo 'READ_RECEIPT_DEFER_POOL_WAITING=0' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Keep search DB statements bounded so a slow query cannot monopolize a pool
   # slot for too long during burst load.
+  # 10 s: unscoped TSV search (no trigram) hits ~4.7 s max on replica; 5 s left too little margin.
   sudo grep -q '^SEARCH_STATEMENT_TIMEOUT_MS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^SEARCH_STATEMENT_TIMEOUT_MS=.*/SEARCH_STATEMENT_TIMEOUT_MS=5000/' /opt/chatapp/shared/.env \
-    || echo 'SEARCH_STATEMENT_TIMEOUT_MS=5000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^SEARCH_STATEMENT_TIMEOUT_MS=.*/SEARCH_STATEMENT_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
+    || echo 'SEARCH_STATEMENT_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Keep access tokens valid across long load windows to reduce auth churn-driven 401s.
   sudo grep -q '^JWT_ACCESS_TTL=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^JWT_ACCESS_TTL=.*/JWT_ACCESS_TTL=24h/' /opt/chatapp/shared/.env \

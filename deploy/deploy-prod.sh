@@ -1236,9 +1236,10 @@ ssh_prod "
     || echo 'BG_WRITE_POOL_GUARD=5' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Bound search query hold-time in the pool; keeps hot non-search paths from
   # starving behind long text-search statements during traffic spikes.
+  # 10 s: unscoped TSV search (no trigram) hits ~4.7 s max on replica; 5 s left too little margin.
   sudo grep -q '^SEARCH_STATEMENT_TIMEOUT_MS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^SEARCH_STATEMENT_TIMEOUT_MS=.*/SEARCH_STATEMENT_TIMEOUT_MS=5000/' /opt/chatapp/shared/.env \
-    || echo 'SEARCH_STATEMENT_TIMEOUT_MS=5000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^SEARCH_STATEMENT_TIMEOUT_MS=.*/SEARCH_STATEMENT_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
+    || echo 'SEARCH_STATEMENT_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Grader clients often use bearer tokens without cookie-based refresh loops.
   # Keep access tokens valid for long test windows to avoid 401 delivery failures.
   sudo grep -q '^JWT_ACCESS_TTL=' /opt/chatapp/shared/.env \
