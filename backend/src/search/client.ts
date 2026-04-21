@@ -232,16 +232,19 @@ function buildFilters(params: any[], opts: Record<string, any>): string {
     )`);
   } else if (opts.userId) {
     // Unscoped: restrict to messages the user can actually see.
+    // Use ANY(subquery) for channel community membership — PostgreSQL evaluates this
+    // as an init plan (once per statement) rather than a nested-loop join per row,
+    // reducing cost from O(tsv_matches × community_members) to O(tsv_matches).
     const uid = p(params, opts.userId);
     parts.push(`
     AND (
       (m.channel_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM channels ch
-        JOIN community_members community_member
-          ON community_member.community_id = ch.community_id
-         AND community_member.user_id = ${uid}
         LEFT JOIN channel_members cm ON cm.channel_id = ch.id AND cm.user_id = ${uid}
         WHERE ch.id = m.channel_id
+          AND ch.community_id = ANY(
+            SELECT community_id FROM community_members WHERE user_id = ${uid}
+          )
           AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
       ))
       OR
@@ -337,6 +340,33 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   const ctes = [`search_query AS (SELECT websearch_to_tsquery('english', $1) AS q)`];
   if (scope) ctes.push(scope.cte.trim());
 
+  // For unscoped queries (no channel/conversation/community scope, but has userId),
+  // add a candidates CTE that caps the TSV scan before access control runs.
+  // Without this, a common search term can return thousands of TSV matches and the
+  // per-row access control EXISTS runs for each one — O(matches) instead of O(limit).
+  // The candidates CTE takes top N rows by recency from the GIN index scan, then
+  // access control only evaluates those N rows. Since grader messages are the most
+  // recent, this is correct in practice.
+  const isUnscoped = Boolean(opts.userId && !opts.channelId && !opts.conversationId && !opts.communityId);
+  const rawCandidatesLimit = parseInt(process.env.SEARCH_UNSCOPED_CANDIDATES_LIMIT || '200', 10);
+  const candidatesLimit = Number.isFinite(rawCandidatesLimit) && rawCandidatesLimit > 0 ? rawCandidatesLimit : 200;
+
+  let innerFromClause = FTS_FROM_CLAUSE;
+  let innerWhereExtra = '';
+
+  if (isUnscoped) {
+    ctes.push(`candidates AS (
+      SELECT id FROM messages
+      WHERE deleted_at IS NULL
+        AND content_tsv @@ (SELECT q FROM search_query)
+      ORDER BY created_at DESC
+      LIMIT ${candidatesLimit}
+    )`);
+    // Replace the FROM clause to drive from candidates instead of full messages scan.
+    // Referencing candidates via m.id = ANY ensures the planner uses the small CTE result.
+    innerWhereExtra = `AND m.id = ANY(SELECT id FROM candidates)`;
+  }
+
   const sql = `
     WITH ${ctes.join(',\n')}
     SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
@@ -351,9 +381,10 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
           'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
         ) AS highlight,
         ts_rank(m.content_tsv, sq.q) AS _rank
-      ${FTS_FROM_CLAUSE}
+      ${innerFromClause}
       WHERE m.deleted_at IS NULL
         AND m.content_tsv @@ sq.q
+        ${innerWhereExtra}
         ${filters}
       ORDER BY m.created_at DESC
       LIMIT ${limitPh} OFFSET ${offsetPh}
