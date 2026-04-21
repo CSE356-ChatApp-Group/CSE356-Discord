@@ -13,7 +13,7 @@ PROD_HOST="${PROD_HOST:-130.245.136.44}"
 PROD_USER="${PROD_USER:-ubuntu}"
 PRIMARY_VM1_HOST="130.245.136.44"
 
-ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" bash <<'REMOTE'
+ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" "PROD_HOST='${PROD_HOST}' PRIMARY_VM1_HOST='${PRIMARY_VM1_HOST}' bash" <<'REMOTE'
 set -euo pipefail
 echo "=== $(date -u) (UTC) | $(hostname) ==="
 
