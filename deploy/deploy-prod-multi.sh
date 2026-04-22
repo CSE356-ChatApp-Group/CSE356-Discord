@@ -98,8 +98,8 @@ PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
 CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "${PROD_USER}@${PROD_DB_HOST}" \
   "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null)
 SSH_EXIT=$?
-if [ $SSH_EXIT -ne 0 ]; then
-  echo "ERROR: SSH connection to DB host ${PROD_DB_HOST} failed (exit code $SSH_EXIT)."
+if [ "${SSH_EXIT}" -ne 0 ]; then
+  echo "ERROR: SSH connection to DB host ${PROD_DB_HOST} failed (exit code ${SSH_EXIT})."
   echo "This usually means host key verification failed or SSH is not properly configured."
   echo "Check that ${PROD_DB_HOST} is in known_hosts and the SSH key can access the host."
   exit 1
