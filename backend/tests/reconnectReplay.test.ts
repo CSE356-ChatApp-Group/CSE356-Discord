@@ -85,7 +85,7 @@ describe('reconnectReplay bounds', () => {
       'user-2',
       disconnectedAtMs - WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
       disconnectedAtMs + 12_000,
-      25,
+      10,
     ]);
     expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'ok' });
   });
