@@ -22,6 +22,18 @@ fi
 PROD_HOST="${PROD_HOST:-130.245.136.44}"
 PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
 PROD_USER="${PROD_USER:-ubuntu}"
+# Monitoring VM hosts the full observability stack (Grafana/Prometheus/Alertmanager/Loki/Tempo).
+# Set SKIP_MONITORING_SYNC=1 to suppress the monitoring refresh (used by deploy-prod-multi.sh
+# which handles monitoring as a single combined step after all VMs are deployed).
+MONITORING_VM_HOST="${MONITORING_VM_HOST:-130.245.136.120}"
+MONITORING_VM_USER="${MONITORING_VM_USER:-${PROD_USER}}"
+SKIP_MONITORING_SYNC="${SKIP_MONITORING_SYNC:-0}"
+# Multi-VM Prometheus params: set by deploy-prod-multi.sh to render all-VM scrape config.
+PROM_VM1_WORKERS="${PROM_VM1_WORKERS:-0}"
+PROM_VM2_HOST="${PROM_VM2_HOST:-}"
+PROM_VM2_WORKERS="${PROM_VM2_WORKERS:-0}"
+PROM_VM3_HOST="${PROM_VM3_HOST:-}"
+PROM_VM3_WORKERS="${PROM_VM3_WORKERS:-0}"
 GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
 LOCAL_ARTIFACT_PATH="${LOCAL_ARTIFACT_PATH:-}"
 RELEASE_DIR="/opt/chatapp/releases"
@@ -55,6 +67,14 @@ ssh_prod_db() {
       -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${PROD_DB_HOST}" "$@"
+}
+
+ssh_monitor() {
+  # shellcheck disable=SC2086
+  ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+      -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
+      ${DEPLOY_SSH_EXTRA_OPTS} \
+      "${MONITORING_VM_USER}@${MONITORING_VM_HOST}" "$@"
 }
 
 # Send a Discord notification to the prod ops webhook (DISCORD_WEBHOOK_URL_PROD env var).
@@ -2212,32 +2232,54 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # 10.55–10.65. Sync monitoring config and refresh containers.
 # Run in background — monitoring is non-critical for the grader and takes 1-2 min.
 # We wait for it before the final success notification so errors surface in the log.
+#
+# SKIP_MONITORING_SYNC=1 suppresses this block; deploy-prod-multi.sh sets it for
+# per-VM calls and handles monitoring as a single combined step at the end.
 echo "10.55–10.65. Starting monitoring refresh in background..."
 (
 set +e  # failures here are warnings, not deploy failures
 
-# 10.55. Copy repo Prometheus template so the `redis` scrape job exists; 10.6 restarts
-# Prometheus to pick up the template (no port rewriting — dual targets stay intact).
-echo "10.55. Rendering prometheus-host.yml (chatapp-api targets = CHATAPP_INSTANCES; VPC app host)..."
+if [ "${SKIP_MONITORING_SYNC:-0}" = "1" ]; then
+  echo "SKIP_MONITORING_SYNC=1 — skipping monitoring stack sync (handled by orchestrator)"
+  exit 0
+fi
+
+# 10.55. Render prometheus-host.yml with correct app-VM targets.
+# In multi-VM mode (PROM_VM1_WORKERS > 0) all three VMs are included so Prometheus
+# scrapes chatapp-api, node_exporter, and pgbouncer on every app host.
+echo "10.55. Rendering prometheus-host.yml..."
 PROM_BUILD="$(mktemp)"
 PROM_APP_HOST="${PROM_APP_HOST:-$(ssh_prod 'hostname -I 2>/dev/null' | awk '{print $1}')}"
 PROM_APP_HOST="${PROM_APP_HOST:-10.0.0.237}"
-python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
-  --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
-  --output "${PROM_BUILD}" \
-  --app-host "${PROM_APP_HOST}" \
-  --workers "${CHATAPP_INSTANCES}"
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${PROM_BUILD}" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-host.yml.deploy" || true
-rm -f "${PROM_BUILD}"
+if [ "${PROM_VM1_WORKERS:-0}" -gt 0 ]; then
+  PROM_EXTRA_ARGS=""
+  [ -n "${PROM_VM2_HOST:-}" ] && [ "${PROM_VM2_WORKERS:-0}" -gt 0 ] && \
+    PROM_EXTRA_ARGS="$PROM_EXTRA_ARGS --vm2-host ${PROM_VM2_HOST} --vm2-workers ${PROM_VM2_WORKERS}"
+  [ -n "${PROM_VM3_HOST:-}" ] && [ "${PROM_VM3_WORKERS:-0}" -gt 0 ] && \
+    PROM_EXTRA_ARGS="$PROM_EXTRA_ARGS --vm3-host ${PROM_VM3_HOST} --vm3-workers ${PROM_VM3_WORKERS}"
+  # shellcheck disable=SC2086
+  python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
+    --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
+    --output "${PROM_BUILD}" \
+    --app-host "${PROM_APP_HOST}" \
+    --vm1-workers "${PROM_VM1_WORKERS}" \
+    $PROM_EXTRA_ARGS
+else
+  python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
+    --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
+    --output "${PROM_BUILD}" \
+    --app-host "${PROM_APP_HOST}" \
+    --workers "${CHATAPP_INSTANCES}"
+fi
 
-# 10.6. Refresh Prometheus on the DB VM (scrapes app VM private IP; see prometheus-host.yml).
-# Do **not** global-sed replace ports here: that collapses dual targets to one
-# port when nginx load-balances two Node workers.
-echo "10.6. Refreshing Prometheus scrape config on DB VM..."
-ssh_prod_db "
+# 10.6. Push rendered prometheus-host.yml to the monitoring VM and reload Prometheus.
+echo "10.6. Refreshing Prometheus scrape config on monitoring VM (${MONITORING_VM_HOST})..."
+# shellcheck disable=SC2086
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${PROM_BUILD}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/prometheus-host.yml.deploy" || true
+rm -f "${PROM_BUILD}"
+ssh_monitor "
   if [ -f /tmp/prometheus-host.yml.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
     sudo cp /tmp/prometheus-host.yml.deploy /opt/chatapp-monitoring/prometheus-host.yml
@@ -2246,16 +2288,16 @@ ssh_prod_db "
   PROM_TMPL=/opt/chatapp-monitoring/prometheus-host.yml
   if [ -f \"\$PROM_TMPL\" ]; then
     if sudo docker restart chatapp-monitoring-prometheus-1 >/dev/null 2>&1; then
-      echo 'Prometheus restarted on DB VM (chatapp-api scrape list in prometheus-host.yml)'
+      echo 'Prometheus restarted on monitoring VM'
     else
-      echo 'WARN: Prometheus restart failed on DB VM (non-fatal)'
+      echo 'WARN: Prometheus restart failed on monitoring VM (non-fatal)'
     fi
   else
-    echo 'WARN: prometheus-host.yml not found on DB VM, skipping Prometheus update'
+    echo 'WARN: prometheus-host.yml not found on monitoring VM, skipping Prometheus update'
   fi
 " || echo "⚠ Prometheus target update failed (non-fatal)"
 
-echo "10.65. Sync monitoring: DB VM (Prometheus, Alertmanager, Grafana, Loki, Tempo) + app VM (node-exporter, promtail, redis_exporter)..."
+echo "10.65. Sync monitoring stack to monitoring VM (${MONITORING_VM_HOST})..."
 ENV_PULL="$(mktemp)"
 # shellcheck disable=SC2086
 scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
@@ -2263,61 +2305,59 @@ scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o Co
     "${PROD_USER}@${PROD_HOST}:/opt/chatapp/shared/.env" "${ENV_PULL}" || true
 
 # shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/alerts.yml.deploy" || true
+    "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/alerts.yml.deploy" || true
 # shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/alertmanager.yml.deploy" || true
+    "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/alertmanager.yml.deploy" || true
 # shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/db-compose.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/db-compose.yml.deploy" || true
+    "${REPO_ROOT}/infrastructure/monitoring/monitoring-compose.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/monitoring-compose.yml.deploy" || true
 # shellcheck disable=SC2086
-scp -qr -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -qr -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "$PROD_USER@$PROD_DB_HOST:/tmp/grafana-provisioning-remote.deploy" || true
+    "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/grafana-provisioning-remote.deploy" || true
 # shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "$PROD_USER@$PROD_DB_HOST:/tmp/prometheus-db-file-sd.py.deploy" || true
+    "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/prometheus-db-file-sd.py.deploy" || true
 # shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "$PROD_USER@$PROD_DB_HOST:/tmp/db-node.json.deploy" || true
+    "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/db-node.json.deploy" || true
 # shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "$PROD_USER@$PROD_DB_HOST:/tmp/db-postgres.json.deploy" || true
+    "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/db-postgres.json.deploy" || true
 # shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/loki-config.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/loki-config.yml.deploy" || true
+    "${REPO_ROOT}/infrastructure/monitoring/loki-config.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/loki-config.yml.deploy" || true
 # shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/tempo-config.yml" "$PROD_USER@$PROD_DB_HOST:/tmp/tempo-config.yml.deploy" || true
+    "${REPO_ROOT}/infrastructure/monitoring/tempo-config.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/tempo-config.yml.deploy" || true
 if [ -f "${ENV_PULL}" ]; then
   # shellcheck disable=SC2086
-  scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+  scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
-      "${ENV_PULL}" "$PROD_USER@$PROD_DB_HOST:/tmp/chatapp-monitoring.env.deploy" || true
+      "${ENV_PULL}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/chatapp-monitoring.env.deploy" || true
 fi
 rm -f "${ENV_PULL}"
 
-ssh_prod_db "
+ssh_monitor "
   set -euo pipefail
-  if [ -f /tmp/alerts.yml.deploy ] || [ -f /tmp/alertmanager.yml.deploy ] || [ -f /tmp/db-compose.yml.deploy ] || [ -f /tmp/prometheus-db-file-sd.py.deploy ] || [ -f /tmp/db-node.json.deploy ] || [ -f /tmp/db-postgres.json.deploy ] || [ -d /tmp/grafana-provisioning-remote.deploy ] || [ -f /tmp/loki-config.yml.deploy ] || [ -f /tmp/tempo-config.yml.deploy ] || [ -f /tmp/chatapp-monitoring.env.deploy ]; then
-    sudo mkdir -p /opt/chatapp-monitoring
-  fi
+  sudo mkdir -p /opt/chatapp-monitoring/file_sd
   if [ -d /tmp/grafana-provisioning-remote.deploy ]; then
     sudo rm -rf /opt/chatapp-monitoring/grafana-provisioning-remote
     sudo mv /tmp/grafana-provisioning-remote.deploy /opt/chatapp-monitoring/grafana-provisioning-remote
   fi
-  if [ -f /tmp/db-compose.yml.deploy ]; then
-    sudo cp /tmp/db-compose.yml.deploy /opt/chatapp-monitoring/db-compose.yml
-    rm -f /tmp/db-compose.yml.deploy
+  if [ -f /tmp/monitoring-compose.yml.deploy ]; then
+    sudo cp /tmp/monitoring-compose.yml.deploy /opt/chatapp-monitoring/monitoring-compose.yml
+    rm -f /tmp/monitoring-compose.yml.deploy
   fi
   if [ -f /tmp/loki-config.yml.deploy ]; then
     sudo cp /tmp/loki-config.yml.deploy /opt/chatapp-monitoring/loki-config.yml
@@ -2332,7 +2372,6 @@ ssh_prod_db "
     sudo chmod 644 /opt/chatapp-monitoring/prometheus-db-file-sd.py
     rm -f /tmp/prometheus-db-file-sd.py.deploy
   fi
-  sudo mkdir -p /opt/chatapp-monitoring/file_sd
   if [ -f /tmp/db-node.json.deploy ]; then
     sudo cp /tmp/db-node.json.deploy /opt/chatapp-monitoring/file_sd/db-node.json
     rm -f /tmp/db-node.json.deploy
@@ -2360,23 +2399,23 @@ ssh_prod_db "
     fi
   fi
   if [ -f /opt/chatapp-monitoring/prometheus-db-file-sd.py ] && [ -f /opt/chatapp-monitoring/.env ]; then
-    sudo env CHATAPP_ENV_FILE=/opt/chatapp-monitoring/.env python3 /opt/chatapp-monitoring/prometheus-db-file-sd.py || echo 'WARN: prometheus-db-file-sd.py failed on DB VM (non-fatal)'
+    sudo env CHATAPP_ENV_FILE=/opt/chatapp-monitoring/.env python3 /opt/chatapp-monitoring/prometheus-db-file-sd.py || echo 'WARN: prometheus-db-file-sd.py failed on monitoring VM (non-fatal)'
   fi
-  if [ -f /opt/chatapp-monitoring/.env ] && [ -f /opt/chatapp-monitoring/db-compose.yml ]; then
-    sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/db-compose.yml up -d --remove-orphans prometheus alertmanager grafana loki tempo >/dev/null
+  if [ -f /opt/chatapp-monitoring/.env ] && [ -f /opt/chatapp-monitoring/monitoring-compose.yml ]; then
+    sudo docker compose --env-file /opt/chatapp-monitoring/.env -f /opt/chatapp-monitoring/monitoring-compose.yml up -d --remove-orphans prometheus alertmanager grafana loki tempo >/dev/null
   fi
-  AM_NAME=\$(sudo docker ps --format '{{.Names}}' | grep 'chatapp-monitoring-alertmanager' | head -n 1 || true)
+  AM_NAME=\$(sudo docker ps --format '{{.Names}}' | grep 'alertmanager' | head -n 1 || true)
   if [ -z \"\$AM_NAME\" ]; then
-    echo 'ERROR: alertmanager container not running on DB VM after monitoring refresh'
+    echo 'ERROR: alertmanager container not running on monitoring VM after refresh'
     exit 1
   fi
   WEBHOOK_HEAD=\$(sudo docker exec \"\$AM_NAME\" sh -lc \"head -c 8 /alertmanager/secrets/discord_webhook_url 2>/dev/null || true\")
   WEBHOOK_BYTES=\$(sudo docker exec \"\$AM_NAME\" sh -lc \"wc -c < /alertmanager/secrets/discord_webhook_url 2>/dev/null || echo 0\")
   if [ \"\$WEBHOOK_HEAD\" != \"https://\" ] || [ \"\${WEBHOOK_BYTES:-0}\" -lt 32 ]; then
-    echo \"ERROR: Alertmanager webhook secret invalid on DB VM (head=\$WEBHOOK_HEAD bytes=\$WEBHOOK_BYTES)\"
+    echo \"ERROR: Alertmanager webhook secret invalid on monitoring VM (head=\$WEBHOOK_HEAD bytes=\$WEBHOOK_BYTES)\"
     exit 1
   fi
-  echo 'Alertmanager Discord webhook wiring verified (DB VM)'
+  echo 'Alertmanager Discord webhook wiring verified (monitoring VM)'
 "
 
 # shellcheck disable=SC2086
@@ -2440,20 +2479,11 @@ ssh_prod "
     echo 'redis_exporter already running — skipping pull'
   fi
 
-  # PgBouncer exporter: Python script that exposes :9126/metrics
-  if [ ! -f /opt/chatapp-monitoring/pgbouncer-exporter.py ]; then
-    echo 'Setting up pgbouncer-exporter...'
-    sudo mkdir -p /opt/chatapp-monitoring
-  fi
-
-  # Install the exporter script (copy from repo during deploy)
-  # and ensure it has execute permission
   if [ -f /tmp/pgbouncer-exporter.py.deploy ]; then
     sudo install -m 755 /tmp/pgbouncer-exporter.py.deploy /opt/chatapp-monitoring/pgbouncer-exporter.py
     rm -f /tmp/pgbouncer-exporter.py.deploy
   fi
 
-  # Create systemd service for pgbouncer_exporter
   if [ -f /opt/chatapp-monitoring/pgbouncer-exporter.py ]; then
     sudo tee /etc/systemd/system/pgbouncer-exporter.service > /dev/null <<'UNIT'
 [Unit]

@@ -1,0 +1,98 @@
+# Monitoring VM: full observability stack for prod ChatApp.
+# Deployed to MONITORING_VM_HOST (130.245.136.120 / 10.0.1.102) by deploy-prod.sh.
+#
+# App VMs (VM1/VM2/VM3) run only node-exporter + promtail via remote-compose.yml.
+# The DB VM runs only systemd-managed node_exporter + postgres_exporter (no Docker here).
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    restart: unless-stopped
+    depends_on: [alertmanager]
+    network_mode: host
+    environment:
+      ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-prod}
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        sed "s/__ALERT_ENVIRONMENT__/$${ALERT_ENVIRONMENT:-prod}/g" /etc/prometheus/prometheus.yml.template >/tmp/prometheus.yml
+        exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --web.listen-address=127.0.0.1:9090
+    volumes:
+      - ./prometheus-host.yml:/etc/prometheus/prometheus.yml.template:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./file_sd:/etc/prometheus/file_sd:ro
+      - prometheus_data:/prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    restart: unless-stopped
+    environment:
+      ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-prod}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      DISCORD_WEBHOOK_URL_LOCAL: ${DISCORD_WEBHOOK_URL_LOCAL:-}
+      DISCORD_WEBHOOK_URL_STAGING: ${DISCORD_WEBHOOK_URL_STAGING:-}
+      DISCORD_WEBHOOK_URL_PROD: ${DISCORD_WEBHOOK_URL_PROD:-}
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        mkdir -p /alertmanager/secrets
+        WEBHOOK="$$DISCORD_WEBHOOK_URL"
+        case "$${ALERT_ENVIRONMENT:-prod}" in
+          prod|production)
+            [ -n "$$DISCORD_WEBHOOK_URL_PROD" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_PROD"
+            ;;
+          stage|staging)
+            [ -n "$$DISCORD_WEBHOOK_URL_STAGING" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_STAGING"
+            ;;
+          local|dev|development)
+            [ -n "$$DISCORD_WEBHOOK_URL_LOCAL" ] && WEBHOOK="$$DISCORD_WEBHOOK_URL_LOCAL"
+            ;;
+        esac
+        printf '%s\n' "$$WEBHOOK" >/alertmanager/secrets/discord_webhook_url
+        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SERVER_HTTP_ADDR: 0.0.0.0
+      GF_SERVER_HTTP_PORT: "3001"
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana-provisioning-remote:/etc/grafana/provisioning:ro
+    depends_on: [prometheus, loki, tempo]
+
+  loki:
+    image: grafana/loki:3.1.0
+    restart: unless-stopped
+    volumes:
+      - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/config.yml"]
+    volumes:
+      - ./tempo-config.yml:/etc/tempo/config.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "4318:4318"
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  tempo_data:
+  alertmanager_data:

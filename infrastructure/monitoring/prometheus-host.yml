@@ -1,6 +1,14 @@
-# Prometheus on the **database / monitoring** host scrapes the **app** VM over the VPC.
+# Prometheus on the **monitoring VM** scrapes all prod VMs over the VPC.
 # Placeholders are expanded by deploy/render-prometheus-host-config.py during deploy
-# (see deploy-prod.sh and deploy-staging.sh).
+# (see deploy-prod.sh / deploy-prod-multi.sh).
+#
+# Single-VM placeholders (backward-compatible):
+#   __PROM_APP_HOST__              — private IP of the primary app VM (VM1)
+#   __CHATAPP_API_STATIC_CONFIGS__ — one chatapp-api scrape target per HTTP worker
+#
+# Multi-VM placeholders (set when --vm2-host / --vm3-host are passed):
+#   __NODE_EXPORTER_TARGETS__      — node_exporter targets for all app VMs
+#   __PGBOUNCER_TARGETS__          — pgbouncer-exporter targets for all app VMs
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -25,10 +33,12 @@ __CHATAPP_API_STATIC_CONFIGS__
   # to 127.0.0.1 only, so a Prometheus on the DB VM cannot dial :9000. Check MinIO with
   # `curl -sS http://127.0.0.1:9000/minio/health/live` on the app host.
 
-  # App VM host metrics (node_exporter in remote-compose on the app VM).
+  # App VM host metrics (node_exporter via remote-compose on each app VM).
+  # In multi-VM mode __NODE_EXPORTER_TARGETS__ expands to all three VMs with a vm label.
+  # In single-VM mode it expands to a single target matching __PROM_APP_HOST__.
   - job_name: 'node'
     static_configs:
-      - targets: ['__PROM_APP_HOST__:9100']
+__NODE_EXPORTER_TARGETS__
 
   # Dedicated DB VM — targets from file_sd (see deploy/prometheus-db-file-sd.py).
   # Empty [] when Postgres is local or PGDUMP_DATABASE_URL is unset. Install exporters:
@@ -54,12 +64,11 @@ __CHATAPP_API_STATIC_CONFIGS__
         labels:
           instance: 'redis-local'
 
-  # PgBouncer metrics exporter on the app VM (deploy ensures python script running).
+  # PgBouncer metrics exporter on each app VM (:9126).  Each VM runs an independent
+  # PgBouncer in multi-VM mode; __PGBOUNCER_TARGETS__ expands to all of them.
   - job_name: 'pgbouncer'
     static_configs:
-      - targets: ['__PROM_APP_HOST__:9126']
-        labels:
-          instance: 'pgbouncer-local'
+__PGBOUNCER_TARGETS__
     scrape_interval: 10s
 
   - job_name: 'prometheus'

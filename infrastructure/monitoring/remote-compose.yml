@@ -1,6 +1,6 @@
 # App VM only: metrics collection (node-exporter) and log shipping (promtail).
 # The full monitoring stack (Grafana, Prometheus, Alertmanager, Loki, Tempo)
-# runs on the DB VM via db-compose.yml.
+# runs on the monitoring VM (130.245.136.120) via monitoring-compose.yml.
 services:
   node-exporter:
     image: prom/node-exporter:v1.8.2
