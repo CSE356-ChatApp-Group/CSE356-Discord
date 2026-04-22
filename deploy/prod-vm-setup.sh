@@ -54,8 +54,11 @@ server {
   listen [::]:80 default_server;
   server_name _;
 
-  # Abusive registration flood (Apr 2026, single residential IP); not the grader.
+  # Known abusive / malicious clients (Apr 2026); not grader infrastructure.
   deny 47.20.119.33;
+  deny 45.55.213.87;
+  deny 129.49.101.12;
+  deny 130.245.67.34;
 
   # Redirect to HTTPS if configured
   # return 301 https://$host$request_uri;

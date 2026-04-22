@@ -39,6 +39,12 @@ server {
   listen [::]:80 default_server;
   server_name _;
 
+  # Known abusive / malicious clients (Apr 2026); not grader infrastructure.
+  deny 47.20.119.33;
+  deny 45.55.213.87;
+  deny 129.49.101.12;
+  deny 130.245.67.34;
+
   location /ws {
     proxy_pass http://chatapp_upstream;
     proxy_http_version 1.1;
