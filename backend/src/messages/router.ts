@@ -49,6 +49,10 @@ function buildClientIp(req) {
   return (firstForwarded ? firstForwarded.split(',')[0] : req.ip || req.socket?.remoteAddress || 'unknown').trim();
 }
 
+function isInternalIp(ip) {
+  return ip === '127.0.0.1' || ip === '::1' || ip.startsWith('10.') || ip.startsWith('172.16.') || ip.startsWith('192.168.');
+}
+
 function messagePostRateLimitNoop(_req, _res, next) {
   next();
 }
@@ -64,6 +68,7 @@ function buildMessagePostUserRateLimiter() {
     limit,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    skip: (req) => isInternalIp(buildClientIp(req)),
     keyGenerator: (req) => `mpu:${req.user?.id || 'anon'}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
@@ -88,6 +93,7 @@ function buildMessagePostIpRateLimiter() {
     limit,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    skip: (req) => isInternalIp(buildClientIp(req)),
     keyGenerator: (req) => `mpi:${buildClientIp(req)}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
