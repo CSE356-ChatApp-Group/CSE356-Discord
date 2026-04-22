@@ -569,7 +569,7 @@
               }
             ]
           },
-          "unit": "percentunit"
+          "unit": "percent"
         },
         "overrides": []
       },
@@ -593,14 +593,14 @@
       },
       "targets": [
         {
-          "expr": "rate(process_cpu_seconds_total{job=\"chatapp-api\"}[1m])",
+          "expr": "topk(8, rate(process_cpu_seconds_total{job=\"chatapp-api\"}[1m]) * 100)",
           "interval": "",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
-      "title": "CPU Usage by Instance",
-      "type": "timeseries"
+      "title": "CPU by Instance (Top 8)",
+      "type": "barchart"
     },
     {
       "datasource": {
