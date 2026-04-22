@@ -63,6 +63,10 @@ const COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT =
     : 4;
 const PUBLIC_COMMUNITIES_VERSION_KEY = 'communities:list:public_version';
 let communitiesUnreadQueriesInFlight = 0;
+const COMMUNITIES_LAST_GOOD_CACHE_TTL_SECS = Math.max(
+  COMMUNITIES_CACHE_TTL_SECS,
+  900,
+);
 
 const COMMUNITY_RETURNING_FIELDS = `
   id,
@@ -106,6 +110,10 @@ const COMMUNITY_DETAIL_CHANNEL_JSON = `
 
 function communitiesCacheKey(userId, publicVersion = '0') {
   return `communities:list:${userId}:v${publicVersion}`;
+}
+
+function communitiesLastGoodCacheKey(userId) {
+  return `communities:list:last_good:${userId}`;
 }
 
 async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
@@ -212,12 +220,48 @@ function isCommunitiesTimeout(err) {
   );
 }
 
+function isCommunitiesTransientFailure(err) {
+  if (isCommunitiesTimeout(err)) return true;
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    err?.code === 'POOL_CIRCUIT_OPEN'
+    || err?.name === 'PoolTimeoutError'
+    || err?.code === '57014'
+    || (/timeout exceeded/i.test(msg) && /(connect|client|connection|waiting)/i.test(msg))
+    || msg.includes('waiting for a client')
+    || msg.includes('remaining connection slots')
+    || msg.includes('too many clients')
+  );
+}
+
+async function readLastGoodCommunitiesPayload(userId) {
+  try {
+    const raw = await redis.get(communitiesLastGoodCacheKey(userId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && Array.isArray(parsed.communities) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeLastGoodCommunitiesPayload(userId, payload) {
+  redis
+    .setex(
+      communitiesLastGoodCacheKey(userId),
+      COMMUNITIES_LAST_GOOD_CACHE_TTL_SECS,
+      JSON.stringify(payload),
+    )
+    .catch(() => {});
+}
+
 async function queryCommunitiesListBase(baseSql, params, orderAndLimitSql) {
   const fullSql = `${baseSql}
        ${orderAndLimitSql}`;
   return queryRead({
     text: fullSql,
     values: params,
+    query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
   });
 }
 
@@ -342,6 +386,13 @@ router.get('/', async (req, res, next) => {
       if (hasMore) body.nextAfter = slice[slice.length - 1].id;
       return res.json(body);
     } catch (err) {
+      if (isCommunitiesTransientFailure(err)) {
+        logger.warn({ err, userId: req.user.id }, 'GET /communities (paged) transient failure');
+        return res
+          .status(503)
+          .set('Retry-After', '1')
+          .json({ error: 'Communities are briefly unavailable; please retry.', requestId: req.id });
+      }
       return next(err);
     }
   }
@@ -365,6 +416,22 @@ router.get('/', async (req, res, next) => {
     try {
       return res.json(await communitiesInflight.get(cacheKey));
     } catch (err) {
+      if (isCommunitiesTransientFailure(err)) {
+        const stale = await readLastGoodCommunitiesPayload(req.user.id);
+        if (stale) {
+          recordEndpointListCacheBypass('communities', 'timeout');
+          logger.warn(
+            { err, userId: req.user.id },
+            'GET /communities transient failure during coalesced fetch; serving stale cache',
+          );
+          return res.json(stale);
+        }
+        logger.warn({ err, userId: req.user.id }, 'GET /communities transient failure during coalesced fetch');
+        return res
+          .status(503)
+          .set('Retry-After', '1')
+          .json({ error: 'Communities are briefly unavailable; please retry.', requestId: req.id });
+      }
       return next(err);
     }
   }
@@ -378,6 +445,7 @@ router.get('/', async (req, res, next) => {
     );
     const payload = await buildCommunitiesListPayload(req.user.id, rows);
     redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
+    writeLastGoodCommunitiesPayload(req.user.id, payload);
     return payload;
   })();
 
@@ -387,6 +455,22 @@ router.get('/', async (req, res, next) => {
   try {
     res.json(await promise);
   } catch (err) {
+    if (isCommunitiesTransientFailure(err)) {
+      const stale = await readLastGoodCommunitiesPayload(req.user.id);
+      if (stale) {
+        recordEndpointListCacheBypass('communities', 'timeout');
+        logger.warn(
+          { err, userId: req.user.id },
+          'GET /communities transient failure; serving stale cache',
+        );
+        return res.json(stale);
+      }
+      logger.warn({ err, userId: req.user.id }, 'GET /communities transient failure');
+      return res
+        .status(503)
+        .set('Retry-After', '1')
+        .json({ error: 'Communities are briefly unavailable; please retry.', requestId: req.id });
+    }
     next(err);
   }
 });
