@@ -40,7 +40,7 @@ MONITORING_VM_HOST="${MONITORING_VM_HOST:-130.245.136.120}"
 MONITORING_VM_USER="${MONITORING_VM_USER:-${PROD_USER}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # VM1 runs fewer workers than VM2/VM3; deploy-prod.sh reads CHATAPP_INSTANCES from the target
-# host's /opt/chatapp/shared/.env so systemd/nginx match (Phase 5 health checks use these lists).
+# host's /opt/chatapp/shared/.env so systemd/nginx match (Phase 6 health checks use these lists).
 VM1_WORKER_PORTS=(4000 4001 4002 4003)
 VMX_WORKER_PORTS=(4000 4001 4002 4003 4004 4005)
 
@@ -60,7 +60,14 @@ ssh_vm() {
 # Extra upstream servers to inject on every rewrite_nginx_upstream call during VM1 deploy.
 # INCREASED from 5 to 6 workers per VM2/VM3 to utilize idle CPU capacity on those VMs.
 # Validated: VM3 CPU idle ~76%, VM2 CPU idle ~48%. Adding 1 worker should use ~15% additional CPU.
-EXTRA_UPSTREAM_CSV="${VM2_INTERNAL}:4000,${VM2_INTERNAL}:4001,${VM2_INTERNAL}:4002,${VM2_INTERNAL}:4003,${VM2_INTERNAL}:4004,${VM2_INTERNAL}:4005,${VM3_INTERNAL}:4000,${VM3_INTERNAL}:4001,${VM3_INTERNAL}:4002,${VM3_INTERNAL}:4003,${VM3_INTERNAL}:4004,${VM3_INTERNAL}:4005"
+EXTRA_UPSTREAMS=()
+for p in "${VMX_WORKER_PORTS[@]}"; do
+  EXTRA_UPSTREAMS+=("${VM2_INTERNAL}:${p}")
+done
+for p in "${VMX_WORKER_PORTS[@]}"; do
+  EXTRA_UPSTREAMS+=("${VM3_INTERNAL}:${p}")
+done
+EXTRA_UPSTREAM_CSV=$(IFS=,; echo "${EXTRA_UPSTREAMS[*]}")
 
 echo "======================================================================"
 echo "=== Three-VM Production Deploy: ${SHA:0:12}                      ==="
@@ -68,7 +75,7 @@ echo "=== VM1 (nginx/PgBouncer/Redis): ${VM1}            ==="
 echo "=== VM2 (workers only):          ${VM2}           ==="
 echo "=== VM3 (workers only):          ${VM3}            ==="
 echo "======================================================================"
-if [ $DRY_RUN -eq 1 ]; then
+if [ "$DRY_RUN" -eq 1 ]; then
   echo ""
   echo "🏃 DRY RUN MODE - No changes will be made"
   echo ""
@@ -77,9 +84,13 @@ if [ $DRY_RUN -eq 1 ]; then
   echo "  Phases:"
   echo "    Phase -1:  Pre-flight PostgreSQL check"
   echo "    Phase  0:  Deploy to VM3 (6 workers: 4000-4005)"
+  echo "    Phase 0.5: Verify VM3 workers"
   echo "    Phase  1:  Deploy to VM2 (6 workers: 4000-4005)"
+  echo "    Phase  2:  Verify VM2 workers"
   echo "    Phase  3:  Deploy to VM1 (4 workers: 4000-4003)"
-  echo "    Phase  5:  Final health check (all 16 workers)"
+  echo "    Phase  4:  Verify nginx upstream entries"
+  echo "    Phase  5:  Sync monitoring stack"
+  echo "    Phase  6:  Final health check (all 16 workers)"
   echo ""
   echo "Configuration:"
   POOL_SIZE=$("${SCRIPT_DIR}/pool-calculator.py" --vcpu=8 --workers=6)
@@ -95,9 +106,12 @@ echo ""
 echo "=== Phase -1: Pre-flight PostgreSQL check ==="
 echo "Verifying PostgreSQL max_connections is set for per-VM PgBouncer architecture..."
 PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
-CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "${PROD_USER}@${PROD_DB_HOST}" \
-  "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null)
+set +e
+# shellcheck disable=SC2086
+CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ${DEPLOY_SSH_EXTRA_OPTS} "${PROD_USER}@${PROD_DB_HOST}" \
+  "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null")
 SSH_EXIT=$?
+set -e
 if [ "${SSH_EXIT}" -ne 0 ]; then
   echo "ERROR: SSH connection to DB host ${PROD_DB_HOST} failed (exit code ${SSH_EXIT})."
   echo "This usually means host key verification failed or SSH is not properly configured."
@@ -124,7 +138,7 @@ echo ""
 
 # ── Phase 0: Deploy to VM3 first (after pre-flight PostgreSQL check) ─────────
 # VM3 has no shared services so a failed deploy has zero impact on live traffic.
-# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 6).
+# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo "=== Phase 0: Deploy to VM3 (isolated — no live-traffic impact) ==="
 PROD_HOST=$VM3 \
   SKIP_BACKUP=true \
@@ -140,7 +154,7 @@ PROD_HOST=$VM3 \
 echo ""
 echo "=== Phase 0.5: Verify all 6 VM3 workers healthy ==="
 all_ok=1
-for p in 4000 4001 4002 4003 4004 4005; do
+for p in "${VMX_WORKER_PORTS[@]}"; do
   status=$(ssh_vm "$VM3" "curl -sf --max-time 8 http://127.0.0.1:${p}/health | python3 -c \"import sys,json; print(json.load(sys.stdin)['status'])\"" 2>/dev/null || echo "DEAD")
   echo "  VM3 worker ${p}: ${status}"
   if [ "$status" != "ok" ]; then
@@ -155,7 +169,7 @@ echo "✓ All VM3 workers healthy"
 
 # ── Phase 1: Deploy to VM2 ───────────────────────────────────────────────────
 # VM2 has no shared services so a failed deploy has zero impact on live traffic.
-# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 6).
+# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo ""
 echo "=== Phase 1: Deploy to VM2 (isolated — no live-traffic impact) ==="
 PROD_HOST=$VM2 \
@@ -171,7 +185,7 @@ PROD_HOST=$VM2 \
 echo ""
 echo "=== Phase 2: Verify all 6 VM2 workers healthy ==="
 all_ok=1
-for p in 4000 4001 4002 4003 4004 4005; do
+for p in "${VMX_WORKER_PORTS[@]}"; do
   status=$(ssh_vm "$VM2" "curl -sf --max-time 8 http://127.0.0.1:${p}/health | python3 -c \"import sys,json; print(json.load(sys.stdin)['status'])\"" 2>/dev/null || echo "DEAD")
   echo "  VM2 worker ${p}: ${status}"
   if [ "$status" != "ok" ]; then
@@ -186,10 +200,10 @@ fi
 echo "✓ All VM2 workers healthy"
 
 # ── Phase 3: Deploy to VM1 ───────────────────────────────────────────────────
-# Pass VM2_UPSTREAM_CSV so rewrite_nginx_upstream preserves VM2 entries throughout
+# Pass EXTRA_UPSTREAM_SERVERS_CSV so rewrite_nginx_upstream preserves VM2/VM3 entries throughout
 # the rolling restart.  SKIP_UPSTREAM_PARITY_CHECK is NOT set here — the gate runs
 # normally and verifies VM1 localhost workers are active and in upstream.
-# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 6).
+# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo ""
 echo "=== Phase 3: Deploy to VM1 (PgBouncer/Redis/MinIO/nginx) ==="
 PROD_HOST=$VM1 \
@@ -208,9 +222,12 @@ echo "=== Phase 4: Verify / re-inject VM2+VM3 upstream entries ==="
 ssh_vm "$VM1" "
   set -euo pipefail
   SITE=/etc/nginx/sites-enabled/chatapp
+  EXPECTED_UPSTREAM_CSV='${EXTRA_UPSTREAM_CSV}'
   missing=0
-  grep -q '${VM2_INTERNAL}' \"\$SITE\" || missing=1
-  grep -q '${VM3_INTERNAL}' \"\$SITE\" || missing=1
+  IFS=',' read -r -a expected_upstreams <<< \"\$EXPECTED_UPSTREAM_CSV\"
+  for endpoint in \"\${expected_upstreams[@]}\"; do
+    grep -q \"server \${endpoint} \" \"\$SITE\" || missing=1
+  done
   if [ \"\$missing\" = \"0\" ]; then
     echo 'VM2+VM3 upstream entries intact — no action needed'
     exit 0
@@ -218,29 +235,27 @@ ssh_vm "$VM1" "
   echo 'Upstream entries missing — re-injecting...'
   TMP=\$(mktemp)
   sudo cp \"\$SITE\" \"\$TMP\"
-  sudo python3 -c \"
-import re, sys
+  sudo env EXPECTED_UPSTREAM_CSV=\"\$EXPECTED_UPSTREAM_CSV\" TMP_SITE=\"\$TMP\" python3 - <<'PY'
+import os
+import re
 from pathlib import Path
 
-site = Path('\$TMP')
+site = Path(os.environ['TMP_SITE'])
 text = site.read_text()
 
-extra_servers = (
-    '  server ${VM2_INTERNAL}:4000 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM2_INTERNAL}:4001 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM2_INTERNAL}:4002 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM2_INTERNAL}:4003 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM2_INTERNAL}:4004 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM3_INTERNAL}:4000 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM3_INTERNAL}:4001 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM3_INTERNAL}:4002 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM3_INTERNAL}:4003 max_fails=2 fail_timeout=10s;\\\n'
-    '  server ${VM3_INTERNAL}:4004 max_fails=2 fail_timeout=10s;\\\n'
+expected = [
+    endpoint.strip()
+    for endpoint in os.environ['EXPECTED_UPSTREAM_CSV'].split(',')
+    if endpoint.strip()
+]
+extra_servers = ''.join(
+    f'  server {endpoint} max_fails=2 fail_timeout=10s;\\n'
+    for endpoint in expected
 )
 
 def inject(m):
     block = m.group(0)
-    if '${VM2_INTERNAL}' in block and '${VM3_INTERNAL}' in block:
+    if all(endpoint in block for endpoint in expected):
         return block
     return re.sub(r'(  keepalive \d+;)', extra_servers + r'\1', block, count=1)
 
@@ -248,7 +263,7 @@ text, n = re.subn(r'upstream app \{[^}]+\}', inject, text, count=1, flags=re.DOT
 if n != 1:
     raise SystemExit('upstream app block not found')
 site.write_text(text)
-\"
+PY
   sudo install -m 644 \"\$TMP\" \"\$SITE\"
   rm -f \"\$TMP\"
   sudo nginx -t && sudo systemctl reload nginx
@@ -342,9 +357,9 @@ ssh -o StrictHostKeyChecking=accept-new "${MONITORING_VM_USER}@${MONITORING_VM_H
 echo "✓ Monitoring stack updated on monitoring VM (${MONITORING_VM_HOST})"
 echo ""
 
-# ── Phase 5: Final health check — all 16 workers across all VMs ──────────────
+# ── Phase 6: Final health check — all 16 workers across all VMs ──────────────
 echo ""
-echo "=== Phase 5: Final health check — all 16 workers (4 VM1 + 6 VM2 + 6 VM3) ==="
+echo "=== Phase 6: Final health check — all 16 workers (4 VM1 + 6 VM2 + 6 VM3) ==="
 overall_ok=1
 for vm in "$VM1" "$VM2" "$VM3"; do
   label="VM1"
