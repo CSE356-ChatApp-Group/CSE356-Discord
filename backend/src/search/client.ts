@@ -956,17 +956,19 @@ function buildExactPrimaryParts(q: string, opts: Record<string, any>) {
 
   const params: any[] = [];
   const scope = buildScopedAccessParts(params, opts);
-  const filters = buildFilters(params, opts);
-  const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
-  const limitPh = p(params, limit);
-  const offsetPh = p(params, offset);
   const communityCandidateParts = buildCommunityScopedCandidateParts(scope, 'm0', 'ch_scope', 'cm_scope');
 
   let fromClause = FROM_CLAUSE;
   let sqlShape = 'exact_primary_uncapped_literal';
 
   if (isCommunityScoped && communityCandidateParts && scope) {
+    const filters = buildFilters(params, opts);
+    // Match buildTrigramParts: candidate literals on m0.content before inner m.content literals
+    // so $n placeholders follow SQL clause order (CTE then lateral).
     const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'm0.content', q);
+    const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+    const limitPh = p(params, limit);
+    const offsetPh = p(params, offset);
     const cteSql = `
       WITH ${scope.cte.trim()},
       exact_primary_candidates AS (
@@ -1004,7 +1006,11 @@ function buildExactPrimaryParts(q: string, opts: Record<string, any>) {
   }
 
   if (isChannelOrConversationScoped) {
+    // Match buildTrigramParts: scope filters in the CTE before inner literals (same $n order as SQL).
     const candidateScopeFilters = buildScopedNewestCandidateFilters(params, opts, 'messages');
+    const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+    const limitPh = p(params, limit);
+    const offsetPh = p(params, offset);
     const cteSql = `
       WITH ${scope ? `${scope.cte.trim()},` : ''}
       exact_primary_scope_candidates AS (
@@ -1038,7 +1044,11 @@ function buildExactPrimaryParts(q: string, opts: Record<string, any>) {
   }
 
   if (isUnscoped) {
+    const filters = buildFilters(params, opts);
     const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'content', q);
+    const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+    const limitPh = p(params, limit);
+    const offsetPh = p(params, offset);
     const cteSql = `
       WITH ${scope ? `${scope.cte.trim()},` : ''}
       exact_primary_candidates AS (
@@ -1072,6 +1082,10 @@ function buildExactPrimaryParts(q: string, opts: Record<string, any>) {
     return { sql, params, limit, offset, q, sql_shape: sqlShape };
   }
 
+  const filters = buildFilters(params, opts);
+  const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
+  const limitPh = p(params, limit);
+  const offsetPh = p(params, offset);
   const sql = `
     ${scope ? `WITH ${scope.cte}` : ''}
     SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
