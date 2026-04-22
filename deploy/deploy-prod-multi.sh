@@ -13,6 +13,7 @@
 #
 # Usage: bash deploy/deploy-prod-multi.sh <release-sha>
 #   --rollback    Pass through to all VM deploys (fast rollback mode)
+#   --dry-run     Show what will be deployed without making changes
 #
 # VM3 (130.245.136.54)  runs Node workers only; no shared services.
 # VM2 (130.245.136.137) runs Node workers only; no shared services.
@@ -20,8 +21,13 @@
 
 set -euo pipefail
 
-SHA=${1:?Usage: deploy-prod-multi.sh <sha> [--rollback]}
+SHA=${1:?Usage: deploy-prod-multi.sh <sha> [--rollback|--dry-run]}
 ROLLBACK_FLAG="${2:-}"
+DRY_RUN=0
+if [[ "${ROLLBACK_FLAG}" == "--dry-run" ]]; then
+  DRY_RUN=1
+  ROLLBACK_FLAG=""
+fi
 
 VM1=130.245.136.44
 VM2=130.245.136.137
@@ -59,6 +65,27 @@ echo "=== VM1 (nginx/PgBouncer/Redis): ${VM1}            ==="
 echo "=== VM2 (workers only):          ${VM2}           ==="
 echo "=== VM3 (workers only):          ${VM3}            ==="
 echo "======================================================================"
+if [ $DRY_RUN -eq 1 ]; then
+  echo ""
+  echo "🏃 DRY RUN MODE - No changes will be made"
+  echo ""
+  echo "Expected Deployment Plan:"
+  echo "  Release:      ${SHA:0:12} (from release-${SHA})"
+  echo "  Phases:"
+  echo "    Phase -1:  Pre-flight PostgreSQL check"
+  echo "    Phase  0:  Deploy to VM3 (6 workers: 4000-4005)"
+  echo "    Phase  1:  Deploy to VM2 (6 workers: 4000-4005)"
+  echo "    Phase  3:  Deploy to VM1 (4 workers: 4000-4003)"
+  echo "    Phase  5:  Final health check (all 16 workers)"
+  echo ""
+  echo "Configuration:"
+  POOL_SIZE=$("${SCRIPT_DIR}/pool-calculator.py" --vcpu=8 --workers=6)
+  echo "  Per-VM pool_size: ~${POOL_SIZE} (will be calculated per VM)"
+  echo "  PostgreSQL needed: max_connections >= 1600"
+  echo "  nginx upstream: 16 workers (4 VM1 + 6 VM2 + 6 VM3)"
+  echo ""
+  exit 0
+fi
 echo ""
 
 # ── Phase -1: Pre-flight checks before any deploy ──────────────────────────────
