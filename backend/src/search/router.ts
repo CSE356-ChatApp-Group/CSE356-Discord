@@ -15,6 +15,7 @@ const express = require('express');
 const { authenticate } = require('../middleware/authenticate');
 const searchClient = require('./client');
 const overload = require('../utils/overload');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 router.use(authenticate);
