@@ -117,11 +117,11 @@ function replayQueryProfile(gapMs, stage = overload.getStage(), closeCode?: numb
 
   if (stage >= 1) {
     windowMs = Math.min(windowMs, 20_000);
-    limit = Math.min(limit, 35);
+    limit = Math.min(limit, 25);
   }
   if (stage >= 2) {
     windowMs = Math.min(windowMs, 12_000);
-    limit = Math.min(limit, 25);
+    limit = Math.min(limit, 10);
   }
 
   return {
@@ -157,12 +157,14 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
 
   const gapMs = reconnectObservedMs - lowerBoundMs;
 
-  if (replayDbInFlight >= WS_MESSAGE_REPLAY_MAX_CONCURRENT) {
+  const RESERVED_LIVE_SLOTS = 2;
+  const replaySlotCap = Math.max(1, WS_MESSAGE_REPLAY_MAX_CONCURRENT - RESERVED_LIVE_SLOTS);
+  if (replayDbInFlight >= replaySlotCap) {
     wsReplayQueryTotal.inc({ result: 'skipped' });
     wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
     logger.warn(
-      { userId, gapMs, inFlight: replayDbInFlight, max: WS_MESSAGE_REPLAY_MAX_CONCURRENT },
-      'WS reconnect replay skipped: concurrency cap',
+      { userId, gapMs, inFlight: replayDbInFlight, max: replaySlotCap },
+      'WS reconnect replay skipped: concurrency cap reached',
     );
     return [];
   }
