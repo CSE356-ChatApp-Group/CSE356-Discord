@@ -7,7 +7,7 @@
  *  - access control: non-member cannot search a private channel / community
  *  - single-character queries are allowed
  *  - highlight XSS sanitization (ts_headline output must be HTML-escaped)
- *  - trigram fallback path for partial/infix queries
+ *  - FTS-only: trigram/infix fallback removed; stop-word queries return empty
  */
 
 import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
@@ -323,7 +323,8 @@ describe('Search – XSS sanitization', () => {
   });
 });
 
-describe('Search – trigram fallback', () => {
+// Trigram/partial-match fallback removed; FTS-only per spec.
+describe.skip('Search – trigram fallback', () => {
   let ownerToken: string;
   let channelId: string;
   const base = `trigfallback${uniqueSuffix()}`;
@@ -373,9 +374,13 @@ describe('Search – common phrases and all-term matching', () => {
     await sendMessage(ownerToken, channelId, 'a lazy fox');
   });
 
-  it('does not return hits that miss one of the query words', async () => {
+  it('FTS multi-term: results contain all indexed (non-stop) query terms', async () => {
+    // "that" and "have" are English stop words stripped by websearch_to_tsquery.
+    // Use the unique numeric suffix from exactPhrase as the second non-stop discriminator
+    // so only the one message containing both "games" and that number is returned.
+    const uniqueTerm = exactPhrase.split(' ').pop()!;
     const res = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent('games that have')}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${encodeURIComponent(`games ${uniqueTerm}`)}&channelId=${channelId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -383,39 +388,35 @@ describe('Search – common phrases and all-term matching', () => {
     for (const hit of res.body.hits) {
       const lower = String(hit.content || '').toLowerCase();
       expect(lower).toContain('games');
-      expect(lower).toContain('that');
-      expect(lower).toContain('have');
+      expect(lower).toContain(uniqueTerm);
     }
   });
 
-  it('still finds stopword-heavy phrases when every word is present', async () => {
+  it('stop-word-only query returns empty results (FTS-only behavior)', async () => {
+    // "more just about" are English stop words; websearch_to_tsquery('english') produces
+    // ''::tsquery which matches nothing. Correct FTS-only behavior — no fallback scan.
     const res = await request(app)
       .get(`/api/v1/search?q=${encodeURIComponent(commonPhrase)}&channelId=${channelId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hits.length).toBeGreaterThan(0);
-    expect(
-      res.body.hits.some((hit: any) => String(hit.content || '').includes(commonPhrase)),
-    ).toBe(true);
+    expect(res.body.hits.length).toBe(0);
   });
 
-  it('still finds short scoped stopwords when they appear explicitly in the message', async () => {
+  it('single stop-word query returns empty results (FTS-only behavior)', async () => {
+    // "be" is an English stop word; FTS returns 0 results. No fallback scan.
     const res = await request(app)
       .get(`/api/v1/search?q=be&channelId=${channelId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hits.length).toBeGreaterThan(0);
-    expect(
-      res.body.hits.some((hit: any) => String(hit.content || '').includes(shortPhrase)),
-    ).toBe(true);
-    expect(
-      res.body.hits.some((hit: any) => String(hit._formatted?.content || '').includes('<em>be</em>')),
-    ).toBe(true);
+    expect(res.body.hits.length).toBe(0);
   });
 
-  it('does not treat a short word as matched just because it appears inside another word', async () => {
+  it('FTS strips stop words from query; remaining terms match all containing messages', async () => {
+    // "a lazy": "a" is a stop word, stripped by websearch_to_tsquery('english').
+    // FTS produces 'lazy'::tsquery which matches any message containing "lazy",
+    // so both "a lazy fox" and "the lazy dog" are returned.
     const res = await request(app)
       .get(`/api/v1/search?q=${encodeURIComponent(boundaryPhrase)}&channelId=${channelId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
@@ -426,7 +427,7 @@ describe('Search – common phrases and all-term matching', () => {
     ).toBe(true);
     expect(
       res.body.hits.some((hit: any) => String(hit.content || '').includes('the lazy dog')),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
