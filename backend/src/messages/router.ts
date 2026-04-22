@@ -16,6 +16,8 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const { rateLimit } = require('express-rate-limit');
+const { RedisStore } = require('rate-limit-redis');
 const { body, query: qv, param, validationResult } = require('express-validator');
 
 const { query, queryRead, readPool, withTransaction, poolStats } = require('../db/pool');
@@ -24,6 +26,7 @@ const {
   messagePostRealtimePublishFailTotal,
   messagePostIdempotencyPollTotal,
   messagePostIdempotencyPollWaitMs,
+  messagePostRateLimitHitsTotal,
   messageCacheBustFailuresTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
@@ -34,6 +37,72 @@ const fanout           = require('../websocket/fanout');
 const overload         = require('../utils/overload');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
+
+function parsePositiveIntEnv(name, fallback) {
+  const parsed = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function buildClientIp(req) {
+  const forwardedFor = req.headers['x-forwarded-for'];
+  const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+  return (firstForwarded ? firstForwarded.split(',')[0] : req.ip || req.socket?.remoteAddress || 'unknown').trim();
+}
+
+function messagePostRateLimitNoop(_req, _res, next) {
+  next();
+}
+
+function buildMessagePostUserRateLimiter() {
+  if (process.env.DISABLE_RATE_LIMITS === 'true' || process.env.NODE_ENV === 'test') {
+    return messagePostRateLimitNoop;
+  }
+  const windowMs = parsePositiveIntEnv('MESSAGE_POST_PER_USER_WINDOW_MS', 60_000);
+  const limit = parsePositiveIntEnv('MESSAGE_POST_PER_USER_MAX', 90);
+  return rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `mpu:${req.user?.id || 'anon'}`,
+    store: new RedisStore({
+      sendCommand: (...args) => redis.call(...args),
+      prefix: 'rl:mp:user:',
+    }),
+    message: { error: 'Too many messages from this account. Slow down and try again shortly.' },
+    handler: (_req, res, _next, options) => {
+      messagePostRateLimitHitsTotal.inc({ scope: 'user' });
+      res.status(options.statusCode).json(options.message);
+    },
+  });
+}
+
+function buildMessagePostIpRateLimiter() {
+  if (process.env.DISABLE_RATE_LIMITS === 'true' || process.env.NODE_ENV === 'test') {
+    return messagePostRateLimitNoop;
+  }
+  const windowMs = parsePositiveIntEnv('MESSAGE_POST_PER_IP_WINDOW_MS', 60_000);
+  const limit = parsePositiveIntEnv('MESSAGE_POST_PER_IP_MAX', 300);
+  return rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => `mpi:${buildClientIp(req)}`,
+    store: new RedisStore({
+      sendCommand: (...args) => redis.call(...args),
+      prefix: 'rl:mp:ip:',
+    }),
+    message: { error: 'Too many messages from this network. Slow down and try again shortly.' },
+    handler: (_req, res, _next, options) => {
+      messagePostRateLimitHitsTotal.inc({ scope: 'ip' });
+      res.status(options.statusCode).json(options.message);
+    },
+  });
+}
+
+const messagePostIpRateLimiter = buildMessagePostIpRateLimiter();
+const messagePostUserRateLimiter = buildMessagePostUserRateLimiter();
 
 /** Redis cache for channel unread watermark (`user:last_read_count:*`). Must expire so keys do not grow without bound. */
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
@@ -1209,6 +1278,8 @@ async function awaitIdempotentPostAfterLeaseContention(idemRedisKey) {
 }
 
 router.post('/',
+  messagePostIpRateLimiter,
+  messagePostUserRateLimiter,
   body('content').optional().isString(),
   body('channelId').optional().isUUID(),
   body('conversationId').optional().isUUID(),

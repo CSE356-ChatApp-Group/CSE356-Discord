@@ -181,6 +181,13 @@ const messagePostIdempotencyPollWaitMs = new client.Histogram({
   buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
 });
 
+/** POST /messages rejected by Redis-backed per-user / per-IP rate limits. */
+const messagePostRateLimitHitsTotal = new client.Counter({
+  name: 'message_post_rate_limit_hits_total',
+  help: 'POST /api/v1/messages requests rejected by message-post rate limiters',
+  labelNames: ['scope'],
+});
+
 /** WebSocket connection outcomes (upgrade + auth + bootstrap failures). */
 const wsConnectionResultTotal = new client.Counter({
   name: 'ws_connection_result_total',
@@ -700,6 +707,7 @@ module.exports = {
   messagePostRealtimePublishFailTotal,
   messagePostIdempotencyPollTotal,
   messagePostIdempotencyPollWaitMs,
+  messagePostRateLimitHitsTotal,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
   wsOutboundQueueDepthHistogram,

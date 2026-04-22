@@ -135,15 +135,21 @@ function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
  * Per-client-IP cap across all credentials. Load harnesses often use a unique
  * username per virtual user; per-credential limits do not damp that stampede.
  *
- * **Off by default** — returning 429 under burst is a product policy choice.
- * Set `AUTH_GLOBAL_PER_IP_RATE_LIMIT=true` to enable when you prefer shedding
- * overload over longer tails / nginx 504s.
+ * @param {'global-flag'|'register-always'} gate
+ *   - **global-flag** (login): active only when `AUTH_GLOBAL_PER_IP_RATE_LIMIT=true`.
+ *   - **register-always**: always active for `POST /register` (except test / disabled),
+ *     because registration abuse uses a fresh username per request and bypasses
+ *     the per-credential `registerLimiter` buckets.
  */
-function buildAuthIpLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
+function buildAuthIpLimiter(
+  route,
+  { limit, windowMs, limitEnv, windowEnv },
+  { gate = 'global-flag' } = {},
+) {
   if (process.env.DISABLE_RATE_LIMITS === 'true') {
     return (_req, _res, next) => next();
   }
-  if (process.env.AUTH_GLOBAL_PER_IP_RATE_LIMIT !== 'true') {
+  if (gate === 'global-flag' && process.env.AUTH_GLOBAL_PER_IP_RATE_LIMIT !== 'true') {
     return (_req, _res, next) => next();
   }
   // Jest creates hundreds of distinct users from one synthetic client IP; keep per-credential limits only.
@@ -189,12 +195,16 @@ const loginGlobalIpLimiter = buildAuthIpLimiter('login_global_ip', {
   windowEnv: 'AUTH_LOGIN_GLOBAL_PER_IP_WINDOW_MS',
 });
 
-const registerGlobalIpLimiter = buildAuthIpLimiter('register_global_ip', {
-  limit: 120,
-  windowMs: 10 * 60 * 1000,
-  limitEnv: 'AUTH_REGISTER_GLOBAL_PER_IP_MAX',
-  windowEnv: 'AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS',
-});
+const registerGlobalIpLimiter = buildAuthIpLimiter(
+  'register_global_ip',
+  {
+    limit: 120,
+    windowMs: 10 * 60 * 1000,
+    limitEnv: 'AUTH_REGISTER_GLOBAL_PER_IP_MAX',
+    windowEnv: 'AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS',
+  },
+  { gate: 'register-always' },
+);
 
 const passwordConnectLimiter = buildAuthLimiter('oauth-connect', {
   limit: 30,
