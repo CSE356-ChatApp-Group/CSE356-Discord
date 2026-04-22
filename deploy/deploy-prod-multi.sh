@@ -96,9 +96,20 @@ echo "=== Phase -1: Pre-flight PostgreSQL check ==="
 echo "Verifying PostgreSQL max_connections is set for per-VM PgBouncer architecture..."
 PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
 CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "${PROD_USER}@${PROD_DB_HOST}" \
-  "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null" || echo "0")
+  "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null)
+SSH_EXIT=$?
+if [ $SSH_EXIT -ne 0 ]; then
+  echo "ERROR: SSH connection to DB host ${PROD_DB_HOST} failed (exit code $SSH_EXIT)."
+  echo "This usually means host key verification failed or SSH is not properly configured."
+  echo "Check that ${PROD_DB_HOST} is in known_hosts and the SSH key can access the host."
+  exit 1
+fi
+if [ -z "${CURRENT_MAX}" ]; then
+  echo "ERROR: PostgreSQL max_connections check returned empty output from ${PROD_DB_HOST}."
+  exit 1
+fi
 echo "  Current PostgreSQL max_connections: ${CURRENT_MAX}"
-if [ "${CURRENT_MAX:-0}" -lt 1500 ]; then
+if [ "${CURRENT_MAX}" -lt 1500 ]; then
   echo "ERROR: PostgreSQL max_connections must be >= 1500 for per-VM PgBouncer."
   echo "  Current: ${CURRENT_MAX}"
   echo "  Required: 1600 (VM1 pool ~490 + VM2 pool ~500 + VM3 pool ~500 + headroom)"

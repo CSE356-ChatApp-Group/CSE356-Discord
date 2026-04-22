@@ -170,6 +170,15 @@ jobs:
               sleep 5
             done
             test -s ~/.ssh/known_hosts || { echo "Failed to populate known_hosts"; exit 1; }
+            # For prod multi-VM deployments, also add the DB host to known_hosts
+            if [[ "${{ inputs.environment }}" == "production" ]]; then
+              DB_HOST="${{ vars.PROD_DB_HOST || '130.245.136.21' }}"
+              for attempt in 1 2 3; do
+                ssh-keyscan -T 15 -H "$DB_HOST" >> ~/.ssh/known_hosts && break
+                echo "DB host keyscan attempt ${attempt}/3 failed; retrying in 5s"
+                sleep 5
+              done
+            fi
           fi
           chmod 600 ~/.ssh/known_hosts
 
