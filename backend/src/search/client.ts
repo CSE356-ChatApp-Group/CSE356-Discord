@@ -936,14 +936,141 @@ function shouldRetrySearchOnPrimary(
 }
 
 function buildExactPrimaryParts(q: string, opts: Record<string, any>) {
+  const limit = Number(opts.limit) || 20;
+  const offset = Number(opts.offset) || 0;
+  const isUnscoped = Boolean(opts.userId && !opts.channelId && !opts.conversationId && !opts.communityId);
+  const isCommunityScoped = Boolean(opts.communityId && !opts.channelId && !opts.conversationId);
+  const rawTrigramCandidatesLimit = parseInt(process.env.SEARCH_TRIGRAM_CANDIDATES_LIMIT || '500', 10);
+  const exactPrimaryCandidatesLimit = Number.isFinite(rawTrigramCandidatesLimit) && rawTrigramCandidatesLimit > 0
+    ? rawTrigramCandidatesLimit
+    : 500;
+  const rawScopedTrigramCandidatesLimit = parseInt(
+    process.env.SEARCH_TRIGRAM_SCOPED_CANDIDATES_LIMIT || '2000',
+    10,
+  );
+  const exactPrimaryScopedCandidatesLimit = Number.isFinite(rawScopedTrigramCandidatesLimit)
+    && rawScopedTrigramCandidatesLimit > 0
+    ? rawScopedTrigramCandidatesLimit
+    : 2000;
+  const isChannelOrConversationScoped = Boolean(opts.channelId || opts.conversationId);
+
   const params: any[] = [];
   const scope = buildScopedAccessParts(params, opts);
   const filters = buildFilters(params, opts);
   const literalTermFilter = buildLiteralAllTermsClause(params, 'm.content', q);
-  const limit = Number(opts.limit) || 20;
-  const offset = Number(opts.offset) || 0;
   const limitPh = p(params, limit);
   const offsetPh = p(params, offset);
+  const communityCandidateParts = buildCommunityScopedCandidateParts(scope, 'm0', 'ch_scope', 'cm_scope');
+
+  let fromClause = FROM_CLAUSE;
+  let sqlShape = 'exact_primary_uncapped_literal';
+
+  if (isCommunityScoped && communityCandidateParts && scope) {
+    const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'm0.content', q);
+    const cteSql = `
+      WITH ${scope.cte.trim()},
+      exact_primary_candidates AS (
+        SELECT m0.id
+        FROM messages m0
+        ${communityCandidateParts.join}
+        WHERE m0.deleted_at IS NULL
+          ${candidateLiteralTermFilter}
+          ${communityCandidateParts.where}
+        ORDER BY m0.created_at DESC
+        LIMIT ${exactPrimaryCandidatesLimit}
+      )
+    `;
+    fromClause = `
+      FROM exact_primary_candidates tc
+      JOIN messages m ON m.id = tc.id
+      JOIN users u ON u.id = m.author_id
+      LEFT JOIN channels ch ON ch.id = m.channel_id`;
+    sqlShape = 'exact_primary_community_literal_candidates_cte';
+    const sql = `
+      ${cteSql}
+      SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+        search_rows.*
+      ${scope.fromClause}
+      LEFT JOIN LATERAL (
+        SELECT ${SELECT_COLS}
+        ${fromClause}
+        WHERE m.deleted_at IS NULL
+          ${literalTermFilter}
+          ${filters}
+        ORDER BY m.created_at DESC
+        LIMIT ${limitPh} OFFSET ${offsetPh}
+      ) search_rows ${scope.onClause}`;
+    return { sql, params, limit, offset, q, sql_shape: sqlShape };
+  }
+
+  if (isChannelOrConversationScoped) {
+    const candidateScopeFilters = buildScopedNewestCandidateFilters(params, opts, 'messages');
+    const cteSql = `
+      WITH ${scope ? `${scope.cte.trim()},` : ''}
+      exact_primary_scope_candidates AS (
+        SELECT id FROM messages
+        WHERE deleted_at IS NULL
+          ${candidateScopeFilters}
+        ORDER BY created_at DESC
+        LIMIT ${exactPrimaryScopedCandidatesLimit}
+      )
+    `;
+    fromClause = `
+      FROM exact_primary_scope_candidates tc
+      JOIN messages m ON m.id = tc.id
+      JOIN users u ON u.id = m.author_id
+      LEFT JOIN channels ch ON ch.id = m.channel_id`;
+    sqlShape = 'exact_primary_channel_conv_newest_literal_candidates_cte';
+    const sql = `
+      ${cteSql}
+      SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+        search_rows.*
+      ${scope ? scope.fromClause : 'FROM'}
+      ${scope ? 'LEFT JOIN LATERAL (' : '('}
+        SELECT ${SELECT_COLS}
+        ${fromClause}
+        WHERE m.deleted_at IS NULL
+          ${literalTermFilter}
+        ORDER BY m.created_at DESC
+        LIMIT ${limitPh} OFFSET ${offsetPh}
+      ) search_rows ${scope ? scope.onClause : ''}`;
+    return { sql, params, limit, offset, q, sql_shape: sqlShape };
+  }
+
+  if (isUnscoped) {
+    const candidateLiteralTermFilter = buildLiteralAllTermsClause(params, 'content', q);
+    const cteSql = `
+      WITH ${scope ? `${scope.cte.trim()},` : ''}
+      exact_primary_candidates AS (
+        SELECT id FROM messages
+        WHERE deleted_at IS NULL
+          ${candidateLiteralTermFilter}
+        ORDER BY created_at DESC
+        LIMIT ${exactPrimaryCandidatesLimit}
+      )
+    `;
+    fromClause = `
+      FROM exact_primary_candidates tc
+      JOIN messages m ON m.id = tc.id
+      JOIN users u ON u.id = m.author_id
+      LEFT JOIN channels ch ON ch.id = m.channel_id`;
+    sqlShape = 'exact_primary_unscoped_literal_candidates_cte';
+    const sql = `
+      ${cteSql}
+      SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+        search_rows.*
+      ${scope ? scope.fromClause : 'FROM'}
+      ${scope ? 'LEFT JOIN LATERAL (' : '('}
+        SELECT ${SELECT_COLS}
+        ${fromClause}
+        WHERE m.deleted_at IS NULL
+          ${literalTermFilter}
+          ${filters}
+        ORDER BY m.created_at DESC
+        LIMIT ${limitPh} OFFSET ${offsetPh}
+      ) search_rows ${scope ? scope.onClause : ''}`;
+    return { sql, params, limit, offset, q, sql_shape: sqlShape };
+  }
 
   const sql = `
     ${scope ? `WITH ${scope.cte}` : ''}
@@ -960,7 +1087,7 @@ function buildExactPrimaryParts(q: string, opts: Record<string, any>) {
       LIMIT ${limitPh} OFFSET ${offsetPh}
     ) search_rows ${scope ? scope.onClause : ''}`;
 
-  return { sql, params, limit, offset, q };
+  return { sql, params, limit, offset, q, sql_shape: sqlShape };
 }
 
 async function searchExactPrimary(q: string, opts: Record<string, any>) {
