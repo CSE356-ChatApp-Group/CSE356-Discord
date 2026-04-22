@@ -16,7 +16,7 @@
 'use strict';
 
 const db = require('../db/pool');
-const { withTransaction } = db;
+const { getClientTimed } = db;
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
 
@@ -61,11 +61,33 @@ function shouldAllowBoundedScopedFallback(opts: Record<string, any>, queryLength
   return Boolean(opts.channelId || opts.conversationId);
 }
 
+function logSearchDbTiming(
+  kind: string,
+  acquireMs: number,
+  queryMs: number,
+  totalMs: number,
+  extra: Record<string, unknown> = {},
+) {
+  const payload = {
+    search_db_timing: true,
+    kind,
+    acquire_ms: acquireMs,
+    query_ms: queryMs,
+    total_ms: totalMs,
+    ...extra,
+  };
+  if (totalMs > 300 || acquireMs > 50) {
+    logger.warn(payload, 'search_db_timing');
+  } else {
+    logger.debug(payload, 'search_db_timing');
+  }
+}
+
 /**
  * Run search SQL inside a short read-only transaction with statement_timeout so one bad
  * query cannot hold a pool slot for ~15s. Uses the read replica pool when configured so
- * search load stays off the primary; falls back to primary `withTransaction` when unset.
- * Logs slow queries for analysis.
+ * search load stays off the primary; falls back to primary pool with timed checkout when unset.
+ * Emits acquire_ms / query_ms / total_ms for bottleneck analysis.
  */
 async function runSearchQuery(
   sql: string,
@@ -74,9 +96,12 @@ async function runSearchQuery(
 ) {
   const timeoutMs = getSearchStatementTimeoutMs();
   const readPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA ? db.readPool : null;
-  const queryStartMs = Date.now();
+  const tAll = Date.now();
   if (readPool) {
+    const tConn = Date.now();
     const client = await readPool.connect();
+    const acquireMs = Date.now() - tConn;
+    const tWork = Date.now();
     try {
       await client.query('BEGIN READ ONLY');
       await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
@@ -84,15 +109,13 @@ async function runSearchQuery(
       await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
       const { rows } = await client.query(sql, params);
       await client.query('COMMIT');
-      const durationMs = Date.now() - queryStartMs;
-      if (durationMs > 300) {
-        logger.warn({
-          durationMs,
-          rowCount: rows.length,
-          sqlLength: sql.length,
-          paramCount: params.length,
-        }, `Slow search query (${durationMs}ms): ${sql.substring(0, 200)}...`);
-      }
+      const queryMs = Date.now() - tWork;
+      const totalMs = Date.now() - tAll;
+      logSearchDbTiming('search_query', acquireMs, queryMs, totalMs, {
+        rowCount: rows.length,
+        sqlLength: sql.length,
+        paramCount: params.length,
+      });
       return rows;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -101,22 +124,29 @@ async function runSearchQuery(
       client.release();
     }
   }
-  return withTransaction(async (client) => {
+  const { client, acquireMs } = await getClientTimed();
+  const tWork = Date.now();
+  try {
+    await client.query('BEGIN');
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     await client.query(`SET LOCAL work_mem = '64MB'`);
     await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
     const { rows } = await client.query(sql, params);
-    const durationMs = Date.now() - queryStartMs;
-    if (durationMs > 300) {
-      logger.warn({
-        durationMs,
-        rowCount: rows.length,
-        sqlLength: sql.length,
-        paramCount: params.length,
-      }, `Slow search query (${durationMs}ms): ${sql.substring(0, 200)}...`);
-    }
+    await client.query('COMMIT');
+    const queryMs = Date.now() - tWork;
+    const totalMs = Date.now() - tAll;
+    logSearchDbTiming('search_query', acquireMs, queryMs, totalMs, {
+      rowCount: rows.length,
+      sqlLength: sql.length,
+      paramCount: params.length,
+    });
     return rows;
-  });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -127,9 +157,12 @@ async function runSearchQuery(
 async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {}) {
   const timeoutMs = getSearchStatementTimeoutMs();
   const readPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA ? db.readPool : null;
-  const txStartMs = Date.now();
+  const tAll = Date.now();
   if (readPool) {
+    const tConn = Date.now();
     const client = await readPool.connect();
+    const acquireMs = Date.now() - tConn;
+    const tWork = Date.now();
     try {
       await client.query('BEGIN READ ONLY');
       await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
@@ -137,10 +170,9 @@ async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {
       await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
       const out = await run(client);
       await client.query('COMMIT');
-      const durationMs = Date.now() - txStartMs;
-      if (durationMs > 300) {
-        logger.warn({ durationMs }, `Slow search transaction (${durationMs}ms)`);
-      }
+      const queryMs = Date.now() - tWork;
+      const totalMs = Date.now() - tAll;
+      logSearchDbTiming('search_transaction', acquireMs, queryMs, totalMs, {});
       return out;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -149,17 +181,25 @@ async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {
       client.release();
     }
   }
-  return withTransaction(async (client) => {
+  const { client, acquireMs } = await getClientTimed();
+  const tWork = Date.now();
+  try {
+    await client.query('BEGIN');
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     await client.query(`SET LOCAL work_mem = '64MB'`);
     await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
     const out = await run(client);
-    const durationMs = Date.now() - txStartMs;
-    if (durationMs > 300) {
-      logger.warn({ durationMs }, `Slow search transaction (${durationMs}ms)`);
-    }
+    await client.query('COMMIT');
+    const queryMs = Date.now() - tWork;
+    const totalMs = Date.now() - tAll;
+    logSearchDbTiming('search_transaction', acquireMs, queryMs, totalMs, {});
     return out;
-  });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 const SELECT_COLS = `
@@ -537,14 +577,26 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   let innerWhereExtra = '';
   const communityCandidateParts = buildCommunityScopedCandidateParts(scope, 'm0', 'ch_scope', 'cm_scope');
 
-  if (isCommunityScoped && communityCandidateParts) {
+  if (isCommunityScoped && communityCandidateParts && scope) {
+    // EXISTS(channel visibility) keeps the planner on a tiny channel set first, then
+    // idx_messages_channel + FTS filter per channel. The old JOIN-channels-first shape
+    // pulled large GIN bitmap heap scans into the outer lateral (multi-second prod plans).
     ctes.push(`candidates AS (
       SELECT m0.id
       FROM messages m0
-      ${communityCandidateParts.join}
       WHERE m0.deleted_at IS NULL
+        AND m0.channel_id IS NOT NULL
         AND m0.content_tsv @@ (SELECT q FROM search_query)
-        ${communityCandidateParts.where}
+        AND EXISTS (
+          SELECT 1
+          FROM channels ch_scope
+          LEFT JOIN channel_members cm_scope
+            ON cm_scope.channel_id = ch_scope.id
+           AND cm_scope.user_id = ${scope.userIdPh}
+          WHERE ch_scope.id = m0.channel_id
+            AND ch_scope.community_id = ${scope.targetIdPh}
+            AND (ch_scope.is_private = FALSE OR cm_scope.user_id IS NOT NULL)
+        )
       ORDER BY m0.created_at DESC
       LIMIT ${candidatesLimit}
     )`);

@@ -129,12 +129,19 @@ const SLOW_QUERY_MS = parseInt(process.env.PG_SLOW_QUERY_MS || '3000', 10);
 /**
  * PgBouncer is a loopback socket – no NAT involved, so no keepalive needed.
  * connectionTimeoutMillis bounds how long we wait for a checkout from the
- * Node pool when all PG slots are busy. 8s (default) absorbs short bursts
- * (slow queries, grader spikes) before returning 503; override via
- * PG_CONNECTION_TIMEOUT_MS. PgBouncer itself answers quickly when it has
- * capacity; long waits usually mean real contention at Postgres.
+ * Node pool when all PG slots are busy. Production default 450ms fails fast
+ * during DB recovery (reconnect-storm guard); non-production defaults to 8000.
+ * Override with PG_CONNECTION_TIMEOUT_MS (clamped 100–10000).
  */
-const CONNECTION_TIMEOUT_MS = parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '8000', 10);
+const _defaultPgConnTimeoutMs =
+  process.env.NODE_ENV === 'production' && process.env.PG_CONNECTION_TIMEOUT_MS == null ? 450 : 8000;
+const CONNECTION_TIMEOUT_MS = Math.min(
+  10000,
+  Math.max(
+    100,
+    parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || String(_defaultPgConnTimeoutMs), 10),
+  ),
+);
 
 /**
  * Idle timeout for Node→PgBouncer connections.  PgBouncer manages the real
@@ -277,6 +284,14 @@ async function getClient() {
   return wrapPoolClientForRequestMetrics(await pool.connect());
 }
 
+/** Checkout + `acquire_ms` (ms waiting for a pool slot from PgBouncer). */
+async function getClientTimed() {
+  checkCircuitBreaker('getClientTimed');
+  const t = Date.now();
+  const client = wrapPoolClientForRequestMetrics(await pool.connect());
+  return { client, acquireMs: Date.now() - t };
+}
+
 // ── Transaction convenience wrapper ───────────────────────────────────────────
 
 /**
@@ -306,6 +321,7 @@ module.exports = {
   query,
   queryRead,
   getClient,
+  getClientTimed,
   withTransaction,
   poolStats,
   PoolCircuitBreakerError,
