@@ -65,6 +65,7 @@ function shouldAllowBoundedScopedFallback(opts: Record<string, any>, queryLength
  * Run search SQL inside a short read-only transaction with statement_timeout so one bad
  * query cannot hold a pool slot for ~15s. Uses the read replica pool when configured so
  * search load stays off the primary; falls back to primary `withTransaction` when unset.
+ * Logs slow queries for analysis.
  */
 async function runSearchQuery(
   sql: string,
@@ -73,6 +74,7 @@ async function runSearchQuery(
 ) {
   const timeoutMs = getSearchStatementTimeoutMs();
   const readPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA ? db.readPool : null;
+  const queryStartMs = Date.now();
   if (readPool) {
     const client = await readPool.connect();
     try {
@@ -81,6 +83,15 @@ async function runSearchQuery(
       await client.query(`SET LOCAL work_mem = '64MB'`);
       const { rows } = await client.query(sql, params);
       await client.query('COMMIT');
+      const durationMs = Date.now() - queryStartMs;
+      if (durationMs > 300) {
+        logger.warn({
+          durationMs,
+          rowCount: rows.length,
+          sqlLength: sql.length,
+          paramCount: params.length,
+        }, `Slow search query (${durationMs}ms): ${sql.substring(0, 200)}...`);
+      }
       return rows;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -93,6 +104,15 @@ async function runSearchQuery(
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     await client.query(`SET LOCAL work_mem = '64MB'`);
     const { rows } = await client.query(sql, params);
+    const durationMs = Date.now() - queryStartMs;
+    if (durationMs > 300) {
+      logger.warn({
+        durationMs,
+        rowCount: rows.length,
+        sqlLength: sql.length,
+        paramCount: params.length,
+      }, `Slow search query (${durationMs}ms): ${sql.substring(0, 200)}...`);
+    }
     return rows;
   });
 }
@@ -100,10 +120,12 @@ async function runSearchQuery(
 /**
  * One read-only transaction, one SET LOCAL, multiple SELECTs — halves round-trips when FTS is empty
  * and trigram fallback runs (was 2× BEGIN/COMMIT + 2× SET).
+ * Logs slow transaction execution.
  */
 async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {}) {
   const timeoutMs = getSearchStatementTimeoutMs();
   const readPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA ? db.readPool : null;
+  const txStartMs = Date.now();
   if (readPool) {
     const client = await readPool.connect();
     try {
@@ -112,6 +134,10 @@ async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {
       await client.query(`SET LOCAL work_mem = '64MB'`);
       const out = await run(client);
       await client.query('COMMIT');
+      const durationMs = Date.now() - txStartMs;
+      if (durationMs > 300) {
+        logger.warn({ durationMs }, `Slow search transaction (${durationMs}ms)`);
+      }
       return out;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -123,7 +149,12 @@ async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {
   return withTransaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     await client.query(`SET LOCAL work_mem = '64MB'`);
-    return run(client);
+    const out = await run(client);
+    const durationMs = Date.now() - txStartMs;
+    if (durationMs > 300) {
+      logger.warn({ durationMs }, `Slow search transaction (${durationMs}ms)`);
+    }
+    return out;
   });
 }
 

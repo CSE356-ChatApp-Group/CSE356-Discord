@@ -28,6 +28,7 @@ function clampSearchPaging(limitRaw, offsetRaw) {
 }
 
 router.get('/', async (req, res, next) => {
+  const startMs = Date.now();
   try {
     let { q, communityId, channelId, conversationId, authorId, after, before, limit, offset } = req.query;
     // COMPAS generated client sends `channelId=<id>&conversationId=<id>` with the same UUID
@@ -47,8 +48,8 @@ router.get('/', async (req, res, next) => {
     // Unscoped searches (omitting all three) are disallowed to prevent expensive cross-scope scans.
     const isScoped = Boolean(communityId || channelId || conversationId);
     if (!isScoped) {
-      return res.status(400).json({ 
-        error: 'Search must be scoped: provide communityId, channelId, or conversationId' 
+      return res.status(400).json({
+        error: 'Search must be scoped: provide communityId, channelId, or conversationId'
       });
     }
 
@@ -68,11 +69,47 @@ router.get('/', async (req, res, next) => {
       offset: clampedOffset,
     });
 
+    const durationMs = Date.now() - startMs;
+    const queryMeta = {
+      queryLength: normalizedQuery.length,
+      hasQueryText: Boolean(normalizedQuery),
+      scope: communityId ? 'community' : (channelId ? 'channel' : (conversationId ? 'conversation' : 'unknown')),
+      hasFilters: Boolean(authorId || after || before),
+      hitCount: results?.hits?.length || 0,
+      durationMs,
+    };
+
+    // Log all search requests to identify patterns
+    logger.debug(queryMeta, 'search request completed');
+
+    // Flag slow searches for deeper analysis
+    if (durationMs > 500) {
+      logger.warn(
+        { ...queryMeta, query: normalizedQuery },
+        `SLOW SEARCH: ${durationMs}ms (>500ms threshold)`
+      );
+    }
+    if (durationMs > 1000) {
+      logger.warn(
+        { ...queryMeta, query: normalizedQuery },
+        `VERY SLOW SEARCH: ${durationMs}ms (>1s threshold)`
+      );
+    }
+    if (durationMs > 2000) {
+      logger.error(
+        { ...queryMeta, query: normalizedQuery },
+        `CRITICAL SLOW SEARCH: ${durationMs}ms (>2s threshold)`
+      );
+    }
+
     res.json(results);
   } catch (err) {
+    const durationMs = Date.now() - startMs;
     if (err?.statusCode === 403) {
+      logger.debug({ durationMs }, 'search: access denied');
       return res.status(403).json({ error: 'Access denied' });
     }
+    logger.error({ err, durationMs }, 'search request failed');
     next(err);
   }
 });
