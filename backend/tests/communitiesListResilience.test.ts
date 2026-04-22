@@ -61,6 +61,7 @@ function buildApp() {
 describe('GET /communities resilience', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    redis.setex.mockResolvedValue('OK');
   });
 
   it('serves last-good cached payload on transient main-list query failure', async () => {
@@ -124,4 +125,3 @@ describe('GET /communities resilience', () => {
     );
   });
 });
-

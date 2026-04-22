@@ -450,7 +450,9 @@ router.get('/', async (req, res, next) => {
   })();
 
   communitiesInflight.set(cacheKey, promise);
-  promise.finally(() => communitiesInflight.delete(cacheKey));
+  // Avoid unhandledRejection when the shared in-flight query rejects: .finally()
+  // returns a new promise that mirrors rejection unless we attach a handler.
+  promise.finally(() => communitiesInflight.delete(cacheKey)).catch(() => {});
 
   try {
     res.json(await promise);
