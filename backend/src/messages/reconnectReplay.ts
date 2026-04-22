@@ -194,42 +194,26 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
       await client.query(`SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`);
       const result = await client.query(
         `WITH accessible AS (
-           SELECT m.id, m.created_at
+           SELECT DISTINCT m.id, m.created_at
            FROM messages m
            LEFT JOIN channels ch ON ch.id = m.channel_id
+           LEFT JOIN conversation_participants cp
+             ON m.conversation_id = cp.conversation_id
+             AND cp.user_id = $1
+             AND cp.left_at IS NULL
+           LEFT JOIN community_members cm
+             ON ch.community_id = cm.community_id
+             AND cm.user_id = $1
+           LEFT JOIN channel_members chm
+             ON ch.id = chm.channel_id
+             AND chm.user_id = $1
            WHERE m.deleted_at IS NULL
              AND m.created_at > to_timestamp($2::double precision / 1000.0)
              AND m.created_at <= to_timestamp($3::double precision / 1000.0)
              AND (
-               (
-                 m.conversation_id IS NOT NULL
-                 AND EXISTS (
-                   SELECT 1
-                   FROM conversation_participants cp
-                   WHERE cp.conversation_id = m.conversation_id
-                     AND cp.user_id = $1
-                     AND cp.left_at IS NULL
-                 )
-               )
+               (m.conversation_id IS NOT NULL AND cp.user_id IS NOT NULL)
                OR
-               (
-                 m.channel_id IS NOT NULL
-                 AND EXISTS (
-                   SELECT 1
-                   FROM community_members cm
-                   WHERE cm.community_id = ch.community_id
-                     AND cm.user_id = $1
-                 )
-                 AND (
-                   ch.is_private = FALSE
-                   OR EXISTS (
-                     SELECT 1
-                     FROM channel_members chm
-                     WHERE chm.channel_id = ch.id
-                       AND chm.user_id = $1
-                   )
-                 )
-               )
+               (m.channel_id IS NOT NULL AND cm.user_id IS NOT NULL AND (ch.is_private = FALSE OR chm.user_id IS NOT NULL))
              )
            ORDER BY m.created_at ASC, m.id ASC
            LIMIT $4
