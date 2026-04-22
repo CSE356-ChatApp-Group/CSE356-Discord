@@ -68,12 +68,17 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { authenticateAccessToken } = require("../utils/jwt");
 const redis = require("../db/redis");
 const { redisSub } = require("../db/redis");
-const { query } = require("../db/pool");
+const { query, poolStats } = require("../db/pool");
 const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { loadReplayableMessagesForUser } = require("../messages/reconnectReplay");
 const { markWsRecentConnect, markChannelRecentConnect } = require("./recentConnect");
+const {
+  parseReplayAdmissionConfig,
+  evaluateReplayGate,
+  computeReplayDeferredDelayMs,
+} = require("./replayAdmission");
 const {
   allUserFeedRedisChannels,
   isUserFeedEnvelope,
@@ -198,6 +203,106 @@ const WS_APP_KEEPALIVE_INTERVAL_MS =
     ? Math.floor(rawAppKeepaliveIntervalMs)
     : 0;
 const WS_APP_KEEPALIVE_FRAME = JSON.stringify({ event: "keepalive" });
+const replayAdmissionConfig = parseReplayAdmissionConfig(process.env);
+let wsReplayInFlightCount = 0;
+
+function replayGateSnapshot() {
+  const pool = poolStats();
+  const gate = evaluateReplayGate(
+    Number(pool.waiting || 0),
+    wsReplayInFlightCount,
+    replayAdmissionConfig,
+  );
+  return { ...gate, pool };
+}
+
+function replayDeferredDelayMs(attempt) {
+  return computeReplayDeferredDelayMs(attempt, replayAdmissionConfig, Math.random);
+}
+
+function scheduleDeferredReplay(
+  ws,
+  userId,
+  previousDisconnect,
+  reconnectObservedAtMs,
+  attempt = 1,
+) {
+  if (attempt > replayAdmissionConfig.replayDeferMaxAttempts) {
+    logger.warn(
+      {
+        userId,
+        attempts: replayAdmissionConfig.replayDeferMaxAttempts,
+      },
+      "WS reconnect replay permanently skipped after deferred retries",
+    );
+    return;
+  }
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (ws._deferredReplayTimer) return;
+
+  const delayMs = replayDeferredDelayMs(attempt);
+  ws._deferredReplayTimer = setTimeout(async () => {
+    ws._deferredReplayTimer = null;
+    if (ws.readyState !== WebSocket.OPEN) return;
+
+    const gate = replayGateSnapshot();
+    if (!gate.ok) {
+      logger.info(
+        {
+          userId,
+          attempt,
+          delayMs,
+          reason: gate.reason,
+          waiting: gate.pool.waiting,
+          inFlight: wsReplayInFlightCount,
+          maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+        },
+        "WS reconnect replay deferred retry delayed by ongoing pressure",
+      );
+      scheduleDeferredReplay(
+        ws,
+        userId,
+        previousDisconnect,
+        reconnectObservedAtMs,
+        attempt + 1,
+      );
+      return;
+    }
+
+    wsReplayInFlightCount += 1;
+    try {
+      await replayMissedMessagesToSocket(
+        ws,
+        userId,
+        previousDisconnect,
+        reconnectObservedAtMs,
+      );
+      logger.info(
+        {
+          userId,
+          attempt,
+          delayMs,
+        },
+        "WS reconnect replay succeeded after deferred retry",
+      );
+    } catch (err) {
+      logger.warn(
+        { err, userId, attempt, delayMs },
+        "WS reconnect replay deferred retry failed",
+      );
+      scheduleDeferredReplay(
+        ws,
+        userId,
+        previousDisconnect,
+        reconnectObservedAtMs,
+        attempt + 1,
+      );
+    } finally {
+      wsReplayInFlightCount -= 1;
+    }
+  }, delayMs);
+  ws._deferredReplayTimer.unref?.();
+}
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -403,9 +508,8 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
     "Replaying missed websocket messages after reconnect gap",
   );
 
-  // sendPayloadToSocket is async (queues then drains); await preserves ordering and
-  // lets message:* admission wait on outbound backpressure without blocking the
-  // wrong caller. bypassLogicalDuplicateSuppression skips only the explicit-channel
+  // sendPayloadToSocket enqueues synchronously and drains with setImmediate.
+  // bypassLogicalDuplicateSuppression skips only the explicit-channel
   // unsub gate — wasSocketMessageRecentlyDelivered in flushOutboundJob still
   // suppresses replay when the same message id was already delivered live.
   for (const message of messages) {
@@ -415,7 +519,7 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
       data: message,
       publishedAt: new Date().toISOString(),
     };
-    await sendPayloadToSocket(
+    sendPayloadToSocket(
       ws,
       `user:${userId}`,
       payload,
@@ -1506,15 +1610,39 @@ wss.on("connection", async (ws, req) => {
       const recentDisconnect = await consumeRecentDisconnect(user.id).catch(() => null);
       observeRecentReconnect(user.id, ws._connectionId, recentDisconnect);
       if (recentDisconnect) {
-        try {
-          await replayMissedMessagesToSocket(
+        const gate = replayGateSnapshot();
+        if (!gate.ok) {
+          logger.warn(
+            {
+              userId: user.id,
+              reason: gate.reason,
+              waiting: gate.pool.waiting,
+              inFlight: wsReplayInFlightCount,
+              maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+            },
+            "WS reconnect replay deferred: transient pressure",
+          );
+          scheduleDeferredReplay(
             ws,
             user.id,
             recentDisconnect,
             replayUpperBoundMs,
+            1,
           );
-        } catch (err) {
-          logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
+        } else {
+          wsReplayInFlightCount += 1;
+          try {
+            await replayMissedMessagesToSocket(
+              ws,
+              user.id,
+              recentDisconnect,
+              replayUpperBoundMs,
+            );
+          } catch (err) {
+            logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
+          } finally {
+            wsReplayInFlightCount -= 1;
+          }
         }
       }
       ws._bootstrapReady = true;
@@ -1858,6 +1986,10 @@ async function unsubscribeClient(ws, redisChannel) {
 }
 
 function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
+  if (ws._deferredReplayTimer) {
+    clearTimeout(ws._deferredReplayTimer);
+    ws._deferredReplayTimer = null;
+  }
   clearOutboundQueue(ws);
   const subscriptions = [...ws._subscriptions];
   const bootstrapReady = ws._bootstrapReady === true;
