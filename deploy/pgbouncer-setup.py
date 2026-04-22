@@ -218,9 +218,14 @@ for d in ('/var/log/pgbouncer', '/var/run/pgbouncer'):
     subprocess.run(['sudo', 'chmod', '750', d], check=True)
 
 # ── Redirect DATABASE_URL to PgBouncer ─────────────────────────────────────────
+# For per-VM PgBouncer architecture, allow override of the PgBouncer bind address.
+# Default is 127.0.0.1 (loopback) for single-VM/local setups.
+# For per-VM deployments, pass PGBOUNCER_BIND_ADDR (e.g., 10.0.3.243 for VM2).
+pgbouncer_bind_addr = os.environ.get('PGBOUNCER_BIND_ADDR', '127.0.0.1')
+
 if str(pg_port) != '6432':
     # Replace host:port in the netloc, preserve user:pass
-    new_netloc = f'{pg_user}:{urllib.parse.quote(pg_pass, safe="")}@127.0.0.1:6432'
+    new_netloc = f'{pg_user}:{urllib.parse.quote(pg_pass, safe="")}@{pgbouncer_bind_addr}:6432'
     new_url = urllib.parse.urlunparse(r._replace(netloc=new_netloc))
     new_env = re.sub(r'^DATABASE_URL=.+$', f'DATABASE_URL={new_url}', env_text, flags=re.MULTILINE)
     write_sudo(ENV_FILE, new_env)
