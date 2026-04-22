@@ -81,6 +81,7 @@ async function runSearchQuery(
       await client.query('BEGIN READ ONLY');
       await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
       await client.query(`SET LOCAL work_mem = '64MB'`);
+      await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
       const { rows } = await client.query(sql, params);
       await client.query('COMMIT');
       const durationMs = Date.now() - queryStartMs;
@@ -103,6 +104,7 @@ async function runSearchQuery(
   return withTransaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     await client.query(`SET LOCAL work_mem = '64MB'`);
+    await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
     const { rows } = await client.query(sql, params);
     const durationMs = Date.now() - queryStartMs;
     if (durationMs > 300) {
@@ -132,6 +134,7 @@ async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {
       await client.query('BEGIN READ ONLY');
       await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
       await client.query(`SET LOCAL work_mem = '64MB'`);
+      await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
       const out = await run(client);
       await client.query('COMMIT');
       const durationMs = Date.now() - txStartMs;
@@ -149,6 +152,7 @@ async function runSearchTransaction(run, options: { forcePrimary?: boolean } = {
   return withTransaction(async (client) => {
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
     await client.query(`SET LOCAL work_mem = '64MB'`);
+    await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
     const out = await run(client);
     const durationMs = Date.now() - txStartMs;
     if (durationMs > 300) {
