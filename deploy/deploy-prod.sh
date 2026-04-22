@@ -393,8 +393,8 @@ if not ports:
 # Keepalive tuning for performance: lower pool size + shorter lifetime force faster
 # connection rotation and more even distribution of new requests across workers.
 # This is especially important in multi-worker setups to avoid connection reuse bias.
-keepalive = '''  round_robin;
-  keepalive 16;
+# Nginx has no "round_robin" directive; default multi-upstream scheduling is round-robin.
+keepalive = '''  keepalive 16;
   keepalive_requests 100;
   keepalive_timeout 10s;
 '''
@@ -406,7 +406,7 @@ else:
         f'  server localhost:{port} max_fails=2 fail_timeout=10s;\\n'
         for port in ports
     )
-    balance = ''  # round_robin is now in keepalive block
+    balance = ''
 
 # Preserve extra upstream servers (e.g. VM2 in multi-VM mode) on every rewrite.
 extra_csv = os.environ.get('EXTRA_UPSTREAM_SERVERS_CSV', '').strip()
@@ -415,7 +415,6 @@ if extra_csv:
         ep = ep.strip()
         if ep:
             servers += f'  server {ep} max_fails=2 fail_timeout=10s;\\n'
-    # balance stays as '' since round_robin is in keepalive block
 
 block = (
     'upstream app {\\n'

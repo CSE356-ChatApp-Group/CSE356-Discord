@@ -150,6 +150,7 @@ echo "=== Phase 1: Deploy to VM2 (isolated — no live-traffic impact) ==="
 PROD_HOST=$VM2 \
   SKIP_BACKUP=true \
   SKIP_UPSTREAM_PARITY_CHECK=1 \
+  DEPLOY_NON_INTERACTIVE=true \
   PGBOUNCER_BIND_ADDR=$VM2_INTERNAL \
   SKIP_MONITORING_SYNC=1 \
   ${ROLLBACK_FLAG:+FAST_ROLLBACK=true} \
@@ -183,6 +184,7 @@ echo "=== Phase 3: Deploy to VM1 (PgBouncer/Redis/MinIO/nginx) ==="
 PROD_HOST=$VM1 \
   EXTRA_UPSTREAM_SERVERS_CSV="$EXTRA_UPSTREAM_CSV" \
   PGBOUNCER_BIND_ADDR=127.0.0.1 \
+  DEPLOY_NON_INTERACTIVE=true \
   SKIP_MONITORING_SYNC=1 \
   ${ROLLBACK_FLAG:+FAST_ROLLBACK=true} \
   bash "${SCRIPT_DIR}/deploy-prod.sh" "$SHA" ${ROLLBACK_FLAG}

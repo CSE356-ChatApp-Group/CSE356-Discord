@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Idempotently add "deny <ip>;" after the first server_name in the main nginx site.
-# Usage: sudo CHATAPP_NGINX_SITE_PATH=/etc/nginx/sites-available/chatapp ./patch-nginx-deny-ip.sh 47.20.119.33
+# Idempotently add "deny <ip>;" after each "server_name" line in the nginx site file
+# so every server { ... } block (HTTP :80 redirects and HTTPS :443) enforces the block.
+# Usage: sudo ./patch-nginx-deny-ip.sh 203.0.113.7
+# Override path if your layout differs: sudo CHATAPP_NGINX_SITE_PATH=/etc/nginx/sites-available/chatapp ./patch-nginx-deny-ip.sh …
 set -euo pipefail
 
-SITE="${CHATAPP_NGINX_SITE_PATH:-/etc/nginx/sites-available/chatapp}"
+# Default to sites-enabled: that is what nginx loads. On some hosts this is a
+# symlink to sites-available (same inode); on others it is a divergent copy—
+# patching only sites-available then does nothing.
+SITE="${CHATAPP_NGINX_SITE_PATH:-/etc/nginx/sites-enabled/chatapp}"
 IP="${1:?usage: $0 <ipv4>}"
 
 if [[ ! "$IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
@@ -23,31 +28,29 @@ from pathlib import Path
 
 site = Path(sys.argv[1])
 ip = sys.argv[2]
-text = site.read_text()
-if re.search(r"^\s*deny\s+" + re.escape(ip) + r"\s*;", text, re.MULTILINE):
-    print(f"deny {ip} already present — OK")
+deny_line_re = re.compile(rf"^\s*deny\s+{re.escape(ip)}\s*;", re.MULTILINE)
+lines = site.read_text().splitlines(keepends=True)
+out = []
+inserted_any = False
+for i, line in enumerate(lines):
+    out.append(line)
+    if not re.match(r"\s*server_name\s+", line):
+        continue
+    window = "".join(lines[i + 1 : i + 16])
+    if deny_line_re.search(window):
+        continue
+    m = re.match(r"^(\s*)", line)
+    ind = m.group(1) if m else "  "
+    out.append(f"{ind}# Manual IP blocklist (patch-nginx-deny-ip.sh).\n")
+    out.append(f"{ind}deny {ip};\n")
+    inserted_any = True
+
+if not inserted_any:
+    print(f"deny {ip} already present after each server_name (or no server_name) — OK")
     sys.exit(0)
 
-lines = text.splitlines(keepends=True)
-out = []
-inserted = False
-for line in lines:
-    out.append(line)
-    if inserted:
-        continue
-    if re.match(r"\s*server_name\s+", line):
-        m = re.match(r"^(\s*)", line)
-        ind = m.group(1) if m else "  "
-        out.append(f"{ind}# Abusive registration flood (Apr 2026); not grader.\n")
-        out.append(f"{ind}deny {ip};\n")
-        inserted = True
-
-if not inserted:
-    print("ERROR: no server_name line found — edit nginx manually", file=sys.stderr)
-    sys.exit(1)
-
 site.write_text("".join(out))
-print(f"wrote deny {ip} into {site}")
+print(f"wrote deny {ip} into {site} (one or more server blocks)")
 PY
 
 nginx -t

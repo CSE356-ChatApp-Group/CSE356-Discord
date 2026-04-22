@@ -47,9 +47,12 @@ UPSTREAM=$(sudo sed -n '/^upstream app {/,/^}/p' "${SITE}")
 if echo "$UPSTREAM" | grep -qE '^\s*least_conn\s*;'; then
   echo "OK: upstream uses least_conn"
 elif echo "$UPSTREAM" | grep -qE '^\s*round_robin\s*;'; then
-  echo "OK: upstream uses round_robin (acceptable during rolling deploys)"
+  echo "FAIL: round_robin is not a valid nginx directive (remove it; default is round-robin)"
+  exit 1
+elif echo "$UPSTREAM" | grep -qE '^\s*server\s+'; then
+  echo "OK: upstream uses implicit round-robin (no explicit balance directive)"
 else
-  echo "FAIL: neither least_conn nor round_robin load balancing method found"
+  echo "FAIL: upstream has no recognized load-balancing / server configuration"
   exit 1
 fi
 
