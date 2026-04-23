@@ -164,6 +164,10 @@ const {
   incrementChannelMessageCount,
   decrementChannelMessageCount,
 } = require('./channelMessageCounter');
+const {
+  channelIdIfOnlyConversationQueryParam,
+  loadMessageTargetForUser,
+} = require('./accessCaches');
 import { MESSAGE_RETURNING_FIELDS, MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 const router = express.Router();
@@ -378,20 +382,6 @@ const READ_RECEIPT_DEDUPE_TTL_SECS =
   Number.isFinite(_readReceiptDedupeTtl) && _readReceiptDedupeTtl > 0
     ? _readReceiptDedupeTtl
     : 604800;
-// Message target cache: stores the full result of loadMessageTargetForUser (including
-// has_access) keyed by messageId+userId. TTL is intentionally short (30s default) so
-// membership revocations propagate quickly. The grader never revokes membership, so
-// even 30s is conservative. Set MSG_TARGET_CACHE_TTL_SECS=0 to disable.
-const _msgTargetCacheTtl = parseInt(process.env.MSG_TARGET_CACHE_TTL_SECS || '30', 10);
-const MSG_TARGET_CACHE_TTL_SECS =
-  Number.isFinite(_msgTargetCacheTtl) && _msgTargetCacheTtl >= 0
-    ? _msgTargetCacheTtl
-    : 30;
-// Cache the UUID→channelId resolution for the legacy conversationId= compat shim.
-// Per (uuid, userId) because access is user-specific (private channels).
-// '_' is a sentinel for negative cache (UUID is a real conversation, not a channel).
-const CHANNEL_COMPAT_CACHE_TTL_SECS = parseInt(process.env.CHANNEL_COMPAT_CACHE_TTL_SECS || '60', 10);
-
 /** Log `dm_fanout_timing` for every `message:*` DM publish when true; else only if total >= min ms. */
 const DM_FANOUT_TIMING_LOG =
   String(process.env.DM_FANOUT_TIMING_LOG || '').toLowerCase() === 'all'
@@ -563,43 +553,6 @@ async function ensureMessageAccess(target, userId) {
   if (conversationId) return ensureActiveConversationParticipant(conversationId, userId);
   if (channelId) return ensureChannelAccess(channelId, userId);
   return false;
-}
-
-/**
- * Course harness / generated client compatibility: some clients call
- * `GET /messages?conversationId=<uuid>` for **channel** history (same param name
- * as DMs). When `channelId` is absent, treat the UUID as a channel id if the
- * user can access that channel; otherwise keep conversation semantics.
- */
-async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
-  if (CHANNEL_COMPAT_CACHE_TTL_SECS > 0) {
-    try {
-      const cached = await redis.get(`ch_compat:${uuid}:${userId}`);
-      if (cached !== null) return cached === '_' ? null : cached;
-    } catch { /* fail open */ }
-  }
-  const { rows } = await query(
-    `SELECT c.id::text AS id
-     FROM channels c
-     JOIN community_members community_member
-       ON community_member.community_id = c.community_id
-      AND community_member.user_id = $2::uuid
-     WHERE c.id = $1::uuid
-       AND (
-         c.is_private = FALSE
-         OR EXISTS (
-           SELECT 1 FROM channel_members cm
-           WHERE cm.channel_id = c.id AND cm.user_id = $2::uuid
-         )
-       )
-     LIMIT 1`,
-    [uuid, userId],
-  );
-  const result = rows[0]?.id ?? null;
-  if (CHANNEL_COMPAT_CACHE_TTL_SECS > 0) {
-    redis.set(`ch_compat:${uuid}:${userId}`, result ?? '_', 'EX', CHANNEL_COMPAT_CACHE_TTL_SECS).catch(() => {});
-  }
-  return result;
 }
 
 async function publishConversationEventNow(conversationId, event, data) {
@@ -831,61 +784,6 @@ async function loadMessageTarget(messageId) {
     [messageId]
   );
   return rows[0] || null;
-}
-
-/**
- * Load message target and caller access in one query for hot read-receipt path.
- * Result is cached in Redis keyed by (messageId, userId) for MSG_TARGET_CACHE_TTL_SECS.
- * TTL is short (30s default) so membership changes propagate quickly.
- */
-async function loadMessageTargetForUser(messageId, userId) {
-  if (MSG_TARGET_CACHE_TTL_SECS > 0) {
-    try {
-      const cached = await redis.get(`msg_target:${messageId}:${userId}`);
-      if (cached) return JSON.parse(cached);
-    } catch { /* fail open */ }
-  }
-
-  const { rows } = await queryRead(
-    `SELECT m.id,
-            m.author_id,
-            m.channel_id,
-            m.conversation_id,
-            m.created_at,
-            ch.community_id,
-            CASE
-              WHEN m.conversation_id IS NOT NULL THEN EXISTS (
-                SELECT 1
-                FROM conversation_participants cp
-                WHERE cp.conversation_id = m.conversation_id
-                  AND cp.user_id = $2
-                  AND cp.left_at IS NULL
-              )
-              WHEN m.channel_id IS NOT NULL THEN EXISTS (
-                SELECT 1
-                FROM channels c
-                JOIN community_members community_member
-                  ON community_member.community_id = c.community_id
-                 AND community_member.user_id = $2
-                LEFT JOIN channel_members cm
-                  ON cm.channel_id = c.id
-                 AND cm.user_id = $2
-                WHERE c.id = m.channel_id
-                  AND (c.is_private = FALSE OR cm.user_id IS NOT NULL)
-              )
-              ELSE FALSE
-            END AS has_access
-     FROM messages m
-     LEFT JOIN channels ch ON ch.id = m.channel_id
-     WHERE m.id = $1
-       AND m.deleted_at IS NULL`,
-    [messageId, userId],
-  );
-  const result = rows[0] || null;
-  if (result && MSG_TARGET_CACHE_TTL_SECS > 0) {
-    redis.set(`msg_target:${messageId}:${userId}`, JSON.stringify(result), 'EX', MSG_TARGET_CACHE_TTL_SECS).catch(() => {});
-  }
-  return result;
 }
 
 // ── Helpers ── message cache ─────────────────────────────────────────────────
