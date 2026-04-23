@@ -695,13 +695,16 @@ describe('Channel realtime delivery', () => {
       });
 
       try {
+        const channelScoped = (event: any) =>
+          event.event === 'message:created'
+          && event.data?.channel_id === channelId
+          && event.data?.content === 'default-mode public channel delivery'
+          && event.channel === `channel:${channelId}`;
+
         const createdEventPromise = waitForLoggedWsEvent(
           memberSocket,
           frames,
-          (event) =>
-            event.event === 'message:created'
-            && event.data?.channel_id === channelId
-            && event.data?.content === 'default-mode public channel delivery',
+          channelScoped,
           15_000,
         );
 
@@ -718,12 +721,13 @@ describe('Channel realtime delivery', () => {
 
         await new Promise((resolve) => setTimeout(resolve, 150));
 
-        const matchingFrames = frames.filter(
+        const channelDeliveryFrames = frames.filter(
           (candidate) =>
             candidate.event === 'message:created'
-            && candidate.data?.id === messageId,
+            && candidate.data?.id === messageId
+            && candidate.channel === `channel:${channelId}`,
         );
-        expect(matchingFrames).toHaveLength(1);
+        expect(channelDeliveryFrames).toHaveLength(1);
       } finally {
         await closeWebSocket(memberSocket);
       }
