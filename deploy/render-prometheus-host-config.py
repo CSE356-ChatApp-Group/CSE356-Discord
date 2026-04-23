@@ -2,7 +2,7 @@
 """Expand prometheus-host.yml placeholders for the monitoring-VM Prometheus (scrapes all app VMs).
 
 Replaces:
-  __PROM_APP_HOST__              — private IP/hostname of the primary app VM (VM1); used for redis
+  __PROM_REDIS_HOST__            — private IP/hostname of the Redis VM for redis_exporter scrape
   __CHATAPP_API_STATIC_CONFIGS__ — one chatapp-api scrape target per HTTP worker (4000..)
   __NODE_EXPORTER_TARGETS__      — node_exporter targets for all app VMs (with vm label in multi-VM)
   __PGBOUNCER_TARGETS__          — pgbouncer-exporter targets for all app VMs
@@ -95,6 +95,11 @@ def main() -> None:
     ap.add_argument("--template", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--app-host", required=True, help="VM1 private IP (always required)")
+    ap.add_argument(
+        "--redis-host",
+        default="",
+        help="Redis VM private IP for redis_exporter scrape (defaults to --app-host)",
+    )
     ap.add_argument("--workers", type=int, default=0, help="VM1 worker count (single-VM mode)")
     ap.add_argument("--vm1-workers", type=int, default=0, help="VM1 worker count (multi-VM mode)")
     ap.add_argument("--vm2-host", default="", help="VM2 private IP (multi-VM mode)")
@@ -106,8 +111,8 @@ def main() -> None:
     text = args.template.read_text(encoding="utf-8")
     if "__CHATAPP_API_STATIC_CONFIGS__" not in text:
         raise SystemExit("template missing __CHATAPP_API_STATIC_CONFIGS__ marker")
-    if "__PROM_APP_HOST__" not in text:
-        raise SystemExit("template missing __PROM_APP_HOST__ marker")
+    if "__PROM_REDIS_HOST__" not in text:
+        raise SystemExit("template missing __PROM_REDIS_HOST__ marker")
     if "__NODE_EXPORTER_TARGETS__" not in text:
         raise SystemExit("template missing __NODE_EXPORTER_TARGETS__ marker")
     if "__PGBOUNCER_TARGETS__" not in text:
@@ -137,8 +142,10 @@ def main() -> None:
         node_config = _node_exporter_targets([(args.app_host, "vm1")])
         pgb_config = _pgbouncer_targets([(args.app_host, "vm1")])
 
+    redis_host = args.redis_host or args.app_host
+
     text = text.replace("__CHATAPP_API_STATIC_CONFIGS__", api_config)
-    text = text.replace("__PROM_APP_HOST__", args.app_host)
+    text = text.replace("__PROM_REDIS_HOST__", redis_host)
     text = text.replace("__NODE_EXPORTER_TARGETS__", node_config)
     text = text.replace("__PGBOUNCER_TARGETS__", pgb_config)
     args.output.write_text(text, encoding="utf-8")

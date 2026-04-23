@@ -3,12 +3,12 @@
 # (see deploy-prod.sh / deploy-prod-multi.sh).
 #
 # Single-VM placeholders (backward-compatible):
-#   __PROM_APP_HOST__              — private IP of the primary app VM (VM1)
-#   __CHATAPP_API_STATIC_CONFIGS__ — one chatapp-api scrape target per HTTP worker
+#   primary app host marker        — private IP of the primary app VM (VM1)
+#   api static config marker       — one chatapp-api scrape target per HTTP worker
 #
 # Multi-VM placeholders (set when --vm2-host / --vm3-host are passed):
-#   __NODE_EXPORTER_TARGETS__      — node_exporter targets for all app VMs
-#   __PGBOUNCER_TARGETS__          — pgbouncer-exporter targets for all app VMs
+#   node exporter marker           — node_exporter targets for all app VMs
+#   pgbouncer marker               — pgbouncer-exporter targets for all app VMs
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -34,8 +34,8 @@ __CHATAPP_API_STATIC_CONFIGS__
   # `curl -sS http://127.0.0.1:9000/minio/health/live` on the app host.
 
   # App VM host metrics (node_exporter via remote-compose on each app VM).
-  # In multi-VM mode __NODE_EXPORTER_TARGETS__ expands to all three VMs with a vm label.
-  # In single-VM mode it expands to a single target matching __PROM_APP_HOST__.
+  # In multi-VM mode, node-exporter targets expand to all three VMs with a vm label.
+  # In single-VM mode, this resolves to one target on the primary app VM.
   - job_name: 'node'
     static_configs:
 __NODE_EXPORTER_TARGETS__
@@ -57,15 +57,15 @@ __NODE_EXPORTER_TARGETS__
           - /etc/prometheus/file_sd/db-postgres.json
         refresh_interval: 30s
 
-  # Host-network redis_exporter on the app VM (deploy ensures container).
+  # Redis metrics via redis_exporter on the Redis VM.
   - job_name: 'redis'
     static_configs:
-      - targets: ['__PROM_APP_HOST__:9121']
+      - targets: ['__PROM_REDIS_HOST__:9121']
         labels:
-          instance: 'redis-local'
+          instance: 'redis-primary'
 
-  # PgBouncer metrics exporter on each app VM (:9126).  Each VM runs an independent
-  # PgBouncer in multi-VM mode; __PGBOUNCER_TARGETS__ expands to all of them.
+  # PgBouncer metrics exporter on each app VM (:9126). Each VM runs an independent
+  # PgBouncer in multi-VM mode, and the marker expands to all targets.
   - job_name: 'pgbouncer'
     static_configs:
 __PGBOUNCER_TARGETS__

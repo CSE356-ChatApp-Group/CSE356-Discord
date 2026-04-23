@@ -198,6 +198,8 @@ DATABASE_URL=postgres://user:password@db.internal:5432/chatapp_prod
 POSTGRES_SSL=require
 
 # Redis (production)
+REDIS_HOST=redis.internal
+REDIS_PASSWORD=password
 REDIS_URL=redis://:password@redis.internal:6379/0
 
 # Secrets

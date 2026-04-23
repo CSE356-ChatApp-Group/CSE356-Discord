@@ -17,7 +17,7 @@
 #
 # VM3 (130.245.136.54)  runs Node workers only; no shared services.
 # VM2 (130.245.136.137) runs Node workers only; no shared services.
-# VM1 (130.245.136.44)  runs Node workers + PgBouncer + Redis + MinIO + nginx.
+# VM1 (130.245.136.44)  runs Node workers + PgBouncer + MinIO + nginx.
 
 set -euo pipefail
 
@@ -38,6 +38,9 @@ VM3_INTERNAL=10.0.2.164
 PROD_USER="${PROD_USER:-ubuntu}"
 MONITORING_VM_HOST="${MONITORING_VM_HOST:-130.245.136.120}"
 MONITORING_VM_USER="${MONITORING_VM_USER:-${PROD_USER}}"
+APP_HOST="${APP_HOST:-${VM1_INTERNAL}}"
+REDIS_HOST="${REDIS_HOST:-${APP_HOST}}"
+PROM_REDIS_HOST="${PROM_REDIS_HOST:-${REDIS_HOST}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # VM1 runs fewer workers than VM2/VM3; deploy-prod.sh reads CHATAPP_INSTANCES from the target
 # host's /opt/chatapp/shared/.env so systemd/nginx match (Phase 6 health checks use these lists).
@@ -71,7 +74,7 @@ EXTRA_UPSTREAM_CSV=$(IFS=,; echo "${EXTRA_UPSTREAMS[*]}")
 
 echo "======================================================================"
 echo "=== Three-VM Production Deploy: ${SHA:0:12}                      ==="
-echo "=== VM1 (nginx/PgBouncer/Redis): ${VM1}            ==="
+echo "=== VM1 (nginx/PgBouncer/MinIO): ${VM1}            ==="
 echo "=== VM2 (workers only):          ${VM2}           ==="
 echo "=== VM3 (workers only):          ${VM3}            ==="
 echo "======================================================================"
@@ -141,6 +144,8 @@ echo ""
 # SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo "=== Phase 0: Deploy to VM3 (isolated — no live-traffic impact) ==="
 PROD_HOST=$VM3 \
+  REDIS_HOST="${REDIS_HOST}" \
+  PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
   SKIP_BACKUP=true \
   SKIP_UPSTREAM_PARITY_CHECK=1 \
   ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT=false \
@@ -173,6 +178,8 @@ echo "✓ All VM3 workers healthy"
 echo ""
 echo "=== Phase 1: Deploy to VM2 (isolated — no live-traffic impact) ==="
 PROD_HOST=$VM2 \
+  REDIS_HOST="${REDIS_HOST}" \
+  PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
   SKIP_BACKUP=true \
   SKIP_UPSTREAM_PARITY_CHECK=1 \
   DEPLOY_NON_INTERACTIVE=true \
@@ -205,8 +212,10 @@ echo "✓ All VM2 workers healthy"
 # normally and verifies VM1 localhost workers are active and in upstream.
 # SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo ""
-echo "=== Phase 3: Deploy to VM1 (PgBouncer/Redis/MinIO/nginx) ==="
+echo "=== Phase 3: Deploy to VM1 (PgBouncer/MinIO/nginx) ==="
 PROD_HOST=$VM1 \
+  REDIS_HOST="${REDIS_HOST}" \
+  PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
   EXTRA_UPSTREAM_SERVERS_CSV="$EXTRA_UPSTREAM_CSV" \
   PGBOUNCER_BIND_ADDR=127.0.0.1 \
   DEPLOY_NON_INTERACTIVE=true \
@@ -280,6 +289,7 @@ python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
   --template "${SCRIPT_DIR}/../infrastructure/monitoring/prometheus-host.yml" \
   --output "${PROM_BUILD}" \
   --app-host "${VM1_INTERNAL}" \
+  --redis-host "${PROM_REDIS_HOST}" \
   --vm1-workers 4 \
   --vm2-host "${VM2_INTERNAL}" \
   --vm2-workers 6 \
@@ -356,6 +366,39 @@ ssh -o StrictHostKeyChecking=accept-new "${MONITORING_VM_USER}@${MONITORING_VM_H
 " || echo "⚠ Monitoring VM sync had errors (non-fatal — app deploy succeeded)"
 echo "✓ Monitoring stack updated on monitoring VM (${MONITORING_VM_HOST})"
 echo ""
+
+if [ "${REDIS_HOST}" != "${VM1_INTERNAL}" ]; then
+  ssh_vm "$VM1" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
+fi
+if [ "${REDIS_HOST}" != "${VM2_INTERNAL}" ]; then
+  ssh_vm "$VM2" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
+fi
+if [ "${REDIS_HOST}" != "${VM3_INTERNAL}" ]; then
+  ssh_vm "$VM3" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
+fi
+
+echo "Starting redis_exporter on Redis VM (${REDIS_HOST})..."
+# shellcheck disable=SC2086
+ssh -o StrictHostKeyChecking=accept-new \
+    "${PROD_USER}@${REDIS_HOST}" "
+  set -euo pipefail
+  if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
+    sudo docker rm -f redis_exporter >/dev/null 2>&1 || true
+  fi
+  sudo docker pull oliver006/redis_exporter:latest >/dev/null
+  sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
+    oliver006/redis_exporter:latest --redis.addr='redis://127.0.0.1:6379' >/dev/null
+  echo 'redis_exporter started on Redis VM (:9121)'
+" || echo "⚠ Failed to start redis_exporter on Redis VM (${REDIS_HOST})"
+
+echo "Checking monitoring VM -> Redis exporter connectivity (${PROM_REDIS_HOST}:9121)..."
+ssh -o StrictHostKeyChecking=accept-new "${MONITORING_VM_USER}@${MONITORING_VM_HOST}" "
+  if curl -fsS --max-time 8 http://${PROM_REDIS_HOST}:9121/metrics >/dev/null; then
+    echo 'Monitoring connectivity to Redis exporter OK'
+  else
+    echo 'WARN: monitoring VM cannot reach ${PROM_REDIS_HOST}:9121 (check firewall/security groups)'
+  fi
+" || true
 
 # ── Phase 6: Final health check — all 16 workers across all VMs ──────────────
 echo ""
