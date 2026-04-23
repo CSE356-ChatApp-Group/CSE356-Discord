@@ -163,6 +163,7 @@ const {
   channelIdIfOnlyConversationQueryParam,
   loadMessageTargetForUser,
 } = require('./accessCaches');
+const { runChannelMessageInsertSerialized } = require('./channelInsertConcurrency');
 import { MESSAGE_RETURNING_FIELDS, MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 const router = express.Router();
@@ -1367,8 +1368,8 @@ router.post('/',
       }
 
       let communityId: string | null = null;
-      txPhases.t0 = Date.now();
-      const baseMessage = await withTransaction(async (client) => {
+      const runMessageInsertTransaction = () => withTransaction(async (client) => {
+        txPhases.t0 = Date.now();
         await client.query(`SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`);
         await client.query(`SET LOCAL synchronous_commit = off`);
         let row: any;
@@ -1547,6 +1548,9 @@ router.post('/',
         txPhases.t_later = Date.now();
         return row;
       });
+      const baseMessage = await (channelId
+        ? runChannelMessageInsertSerialized(channelId, runMessageInsertTransaction)
+        : runMessageInsertTransaction());
       const t_tx_done = Date.now();
       {
         const successLog = buildMessagePostSuccessPhaseLog({
