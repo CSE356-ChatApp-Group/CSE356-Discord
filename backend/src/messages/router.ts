@@ -1499,21 +1499,39 @@ router.post('/',
           const accessRes = await client.query(
             `SELECT
                EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
-               COUNT(*)::int                             AS has_access,
-               MIN(c.community_id)                       AS community_id
-             FROM channels c
-             JOIN community_members community_member
-               ON community_member.community_id = c.community_id
-              AND community_member.user_id = $2
-             WHERE c.id = $1
-               AND (
-                 c.is_private = FALSE
-                 OR EXISTS (
-                   SELECT 1
-                   FROM channel_members
-                   WHERE channel_id = c.id AND user_id = $2
-                 )
-               )`,
+               EXISTS (
+                 SELECT 1
+                 FROM channels c
+                 JOIN community_members community_member
+                   ON community_member.community_id = c.community_id
+                  AND community_member.user_id = $2
+                 WHERE c.id = $1
+                   AND (
+                     c.is_private = FALSE
+                     OR EXISTS (
+                       SELECT 1
+                       FROM channel_members
+                       WHERE channel_id = c.id AND user_id = $2
+                     )
+                   )
+               ) AS has_access,
+               (
+                 SELECT c.community_id
+                 FROM channels c
+                 JOIN community_members community_member
+                   ON community_member.community_id = c.community_id
+                  AND community_member.user_id = $2
+                 WHERE c.id = $1
+                   AND (
+                     c.is_private = FALSE
+                     OR EXISTS (
+                       SELECT 1
+                       FROM channel_members
+                       WHERE channel_id = c.id AND user_id = $2
+                     )
+                   )
+                 LIMIT 1
+               ) AS community_id`,
             [channelId, req.user.id],
           );
           txPhases.t_access = Date.now();
