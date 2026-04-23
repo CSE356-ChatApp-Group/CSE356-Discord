@@ -41,6 +41,22 @@ const {
 } = require('../utils/distributedSingleflight');
 
 const router = express.Router();
+
+// POST /join with no id in body: 400 before auth (clearer than 401 for malformed harnesses + tests).
+router.use((req, res, next) => {
+  if (req.method !== 'POST') return next();
+  const path = String(req.path || '').replace(/\/$/, '') || '/';
+  if (path !== '/join') return next();
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const raw = String(
+    body.communityId ?? body.community_id ?? body.id ?? body.slug ?? body.name ?? ''
+  ).trim();
+  if (!raw) {
+    return res.status(400).json({ error: 'Missing community id', requestId: req.id });
+  }
+  next();
+});
+
 router.use(authenticate);
 
 function validate(req, res) {
