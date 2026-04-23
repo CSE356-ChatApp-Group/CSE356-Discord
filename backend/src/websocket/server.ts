@@ -1347,7 +1347,7 @@ async function invalidateWsBootstrapCaches(userIds) {
     );
   }
   if (!keys.length) return;
-  await redis.del(...keys);
+  await redis.unlink(...keys);
 }
 
 function wsAutoSubscribeMode() {
