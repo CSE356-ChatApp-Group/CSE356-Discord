@@ -258,6 +258,34 @@ async function getCommunitiesUserVersion(userId) {
 
 const MEMBERS_CACHE_TTL_SECS = 30;
 function membersCacheKey(communityId) { return `community:${communityId}:members`; }
+const communityMembersInflight: Map<string, Promise<any[]>> = new Map();
+const COMMUNITY_MEMBERS_ROSTER_SQL = `
+  SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
+  FROM community_members cm
+  JOIN users u ON u.id = cm.user_id
+  WHERE cm.community_id = $1
+  ORDER BY cm.role DESC, u.username`;
+
+async function loadCommunityMembersRoster(communityId) {
+  const cacheKey = membersCacheKey(communityId);
+  const cached = await getJsonCache(redis, cacheKey);
+  if (Array.isArray(cached)) return cached;
+
+  return withDistributedSingleflight({
+    redis,
+    cacheKey,
+    inflight: communityMembersInflight,
+    readFresh: async () => {
+      const fresh = await getJsonCache(redis, cacheKey);
+      return Array.isArray(fresh) ? fresh : null;
+    },
+    load: async () => {
+      const { rows } = await queryRead(COMMUNITY_MEMBERS_ROSTER_SQL, [communityId]);
+      redis.setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify(rows)).catch(() => {});
+      return rows;
+    },
+  });
+}
 
 async function listCommunityRealtimeTargets(communityId, userId) {
   const { rows } = await queryRead(
@@ -903,21 +931,7 @@ router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
       return res.status(403).json({ error: 'Not a community member' });
     }
 
-    const cacheKey = membersCacheKey(req.params.id);
-    const cachedRoster = await redis.get(cacheKey);
-    let rows;
-    if (cachedRoster) {
-      rows = JSON.parse(cachedRoster);
-    } else {
-      ({ rows } = await queryRead(
-        `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
-         FROM community_members cm JOIN users u ON u.id = cm.user_id
-         WHERE cm.community_id = $1
-         ORDER BY cm.role DESC, u.username`,
-        [req.params.id]
-      ));
-      redis.setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify(rows)).catch(() => {});
-    }
+    const rows = await loadCommunityMembersRoster(req.params.id);
     const presenceMap = await presenceService.getBulkPresenceDetails(rows.map(r => r.id));
     const members = rows.map(r => ({
       ...r,
