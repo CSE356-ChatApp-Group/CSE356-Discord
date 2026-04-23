@@ -5,10 +5,15 @@ const redis = require('../db/redis');
 const {
   channelAccessVersionKey,
   toAccessVersion,
-  scopeVersionKey,
   rowAccessScope,
   readAccessVersion,
 } = require('../utils/accessVersionCache');
+const {
+  isCompatCachePayload,
+  isMessageTargetCachePayload,
+  readScopedVersionedJsonCache,
+  writeScopedVersionedJsonCache,
+} = require('../utils/versionedAccessCache');
 
 // Message target cache: stores the full result of loadMessageTargetForUser (including
 // has_access) keyed by messageId+userId. TTL remains a backstop; membership/version
@@ -36,17 +41,10 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
     try {
       const [cached, rawVersion] = await redis.mget(cacheKey, versionKey);
       if (cached) {
-        let parsed: any;
-        try {
-          parsed = JSON.parse(cached);
-        } catch {
-          redis.del(cacheKey).catch(() => {});
-          parsed = null;
-        }
+        let parsed: any = null;
+        try { parsed = JSON.parse(cached); } catch {}
         if (
-          parsed
-          && typeof parsed === 'object'
-          && Object.prototype.hasOwnProperty.call(parsed, 'channelId')
+          isCompatCachePayload(parsed)
           && toAccessVersion(parsed.version) === toAccessVersion(rawVersion)
         ) {
           return parsed.channelId ?? null;
@@ -99,38 +97,12 @@ async function loadMessageTargetForUser(messageId, userId) {
   const cacheKey = `msg_target:${messageId}:${userId}`;
 
   if (MSG_TARGET_CACHE_TTL_SECS > 0) {
-    try {
-      const cached = await redis.get(cacheKey);
-      if (cached) {
-        let parsed: any;
-        try {
-          parsed = JSON.parse(cached);
-        } catch {
-          redis.del(cacheKey).catch(() => {});
-          parsed = null;
-        }
-        const scope = parsed?.scope;
-        if (
-          parsed
-          && typeof parsed === 'object'
-          && parsed.data
-          && scope
-          && (scope.kind === 'channel' || scope.kind === 'conversation')
-          && typeof scope.id === 'string'
-        ) {
-          const currentVersion = await readAccessVersion(redis, scopeVersionKey(scope));
-          if (toAccessVersion(parsed.version) === currentVersion) {
-            return parsed.data;
-          }
-          redis.del(cacheKey).catch(() => {});
-        } else if (parsed) {
-          // Legacy/invalid shape (e.g. pre-versioned payload) — purge and reload once.
-          redis.del(cacheKey).catch(() => {});
-        }
-      }
-    } catch {
-      // Fail open.
-    }
+    const cached = await readScopedVersionedJsonCache({
+      redis,
+      cacheKey,
+      isPayload: isMessageTargetCachePayload,
+    });
+    if (cached) return cached.data;
   }
 
   const { rows } = await queryRead(
@@ -173,13 +145,13 @@ async function loadMessageTargetForUser(messageId, userId) {
   if (result && MSG_TARGET_CACHE_TTL_SECS > 0) {
     const scope = rowAccessScope(result);
     if (scope) {
-      readAccessVersion(redis, scopeVersionKey(scope))
-        .then((version) => redis.set(
-          cacheKey,
-          JSON.stringify({ data: result, scope, version }),
-          'EX',
-          MSG_TARGET_CACHE_TTL_SECS,
-        ))
+      writeScopedVersionedJsonCache({
+        redis,
+        cacheKey,
+        scope,
+        ttlSeconds: MSG_TARGET_CACHE_TTL_SECS,
+        payloadWithoutVersion: { data: result },
+      })
         .catch(() => {});
     }
   }

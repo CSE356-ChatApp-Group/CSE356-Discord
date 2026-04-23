@@ -178,6 +178,11 @@ let shuttingDown = false;
 // coalescing concurrent isAllowedChannel calls for the same key so only one
 // DB query runs per cache miss.
 const ACL_CACHE_TTL_MS = 30_000;
+const _aclRedisTtlSecs = Number(process.env.WS_ACL_REDIS_TTL_SECS || Math.ceil(ACL_CACHE_TTL_MS / 1000));
+const WS_ACL_REDIS_TTL_SECS =
+  Number.isFinite(_aclRedisTtlSecs) && _aclRedisTtlSecs > 0
+    ? Math.floor(_aclRedisTtlSecs)
+    : 30;
 const aclCache: Map<string, { allowed: boolean; expiresAt: number }> = new Map();
 /** In-flight ACL lookups — shared waiters get the same Promise (thundering herd guard). */
 const aclCheckInFlight: Map<string, Promise<boolean>> = new Map();
@@ -314,7 +319,17 @@ function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
 }
 
-function storeAclCacheEntry(userId: string, channel: string, allowed: boolean) {
+function aclRedisCacheKey(userId: string, channel: string) {
+  return `ws:acl:${userId}:${channel}`;
+}
+
+function parseAclRedisValue(raw: string | null): boolean | null {
+  if (raw === "1") return true;
+  if (raw === "0") return false;
+  return null;
+}
+
+function setAclDecisionLocal(userId: string, channel: string, allowed: boolean) {
   const key = aclCacheKey(userId, channel);
   if (aclCache.size >= ACL_CACHE_MAX_ENTRIES) {
     const oldestKey = aclCache.keys().next().value;
@@ -323,15 +338,51 @@ function storeAclCacheEntry(userId: string, channel: string, allowed: boolean) {
   aclCache.set(key, { allowed, expiresAt: Date.now() + ACL_CACHE_TTL_MS });
 }
 
+function setAclDecisionShared(userId: string, channel: string, allowed: boolean) {
+  if (WS_ACL_REDIS_TTL_SECS <= 0) return;
+  redis.set(
+    aclRedisCacheKey(userId, channel),
+    allowed ? "1" : "0",
+    "EX",
+    WS_ACL_REDIS_TTL_SECS,
+  ).catch(() => {});
+}
+
+function setAclDecision(
+  userId: string,
+  channel: string,
+  allowed: boolean,
+  opts: { writeShared?: boolean } = {},
+) {
+  setAclDecisionLocal(userId, channel, allowed);
+  if (opts.writeShared !== false) {
+    setAclDecisionShared(userId, channel, allowed);
+  }
+}
+
+async function readAclSharedCacheEntry(userId: string, channel: string): Promise<boolean | null> {
+  if (WS_ACL_REDIS_TTL_SECS <= 0) return null;
+  try {
+    return parseAclRedisValue(await redis.get(aclRedisCacheKey(userId, channel)));
+  } catch {
+    return null;
+  }
+}
+
 /** Mark channels as allowed — same membership projection as listAutoSubscriptionChannels. */
 function warmWsAclCacheFromChannelList(userId: string, channels: string[]) {
   for (const channel of channels) {
-    storeAclCacheEntry(userId, channel, true);
+    // Bootstrap warming is local-only to avoid high Redis write volume on reconnect bursts.
+    setAclDecision(userId, channel, true, { writeShared: false });
   }
 }
 
 function invalidateWsAclCache(userId: string, channel: string) {
-  aclCache.delete(aclCacheKey(userId, channel));
+  const key = aclCacheKey(userId, channel);
+  aclCache.delete(key);
+  aclCheckInFlight.delete(key);
+  if (WS_ACL_REDIS_TTL_SECS <= 0) return;
+  redis.del(aclRedisCacheKey(userId, channel)).catch(() => {});
 }
 
 async function evictUnauthorizedChannelSubscribers(channelId) {
@@ -1861,8 +1912,13 @@ async function isAllowedChannel(user, channel) {
 
   const done = (async () => {
     try {
+      const sharedCached = await readAclSharedCacheEntry(user.id, channel);
+      if (sharedCached !== null) {
+        setAclDecision(user.id, channel, sharedCached, { writeShared: false });
+        return sharedCached;
+      }
       const allowed = await _isAllowedChannelDb(user, channel);
-      storeAclCacheEntry(user.id, channel, allowed);
+      setAclDecision(user.id, channel, allowed);
       return allowed;
     } finally {
       aclCheckInFlight.delete(cacheKey);

@@ -3,11 +3,13 @@
 const { query } = require('../db/pool');
 const redis = require('../db/redis');
 const {
-  toAccessVersion,
-  scopeVersionKey,
   rowAccessScope,
-  readAccessVersion,
 } = require('../utils/accessVersionCache');
+const {
+  isAttachmentAccessCachePayload,
+  readScopedVersionedJsonCache,
+  writeScopedVersionedJsonCache,
+} = require('../utils/versionedAccessCache');
 
 const _attachmentGetCacheTtl = parseInt(process.env.ATTACHMENT_GET_CACHE_TTL_SECS || '30', 10);
 const ATTACHMENT_GET_CACHE_TTL_SECS =
@@ -23,34 +25,12 @@ async function readCachedAttachmentAccess(attachmentId, userId) {
   if (ATTACHMENT_GET_CACHE_TTL_SECS <= 0) return null;
   const key = cacheKey(attachmentId, userId);
   try {
-    const cached = await redis.get(key);
-    if (!cached) return null;
-    let parsed;
-    try {
-      parsed = JSON.parse(cached);
-    } catch {
-      redis.del(key).catch(() => {});
-      return null;
-    }
-    if (!parsed || typeof parsed !== 'object') {
-      redis.del(key).catch(() => {});
-      return null;
-    }
-    const scope = parsed.scope;
-    if (
-      !scope
-      || typeof scope.id !== 'string'
-      || (scope.kind !== 'channel' && scope.kind !== 'conversation')
-      || parsed.allowed !== true
-    ) {
-      redis.del(key).catch(() => {});
-      return null;
-    }
-    const currentVersion = await readAccessVersion(redis, scopeVersionKey(scope));
-    if (toAccessVersion(parsed.version) !== currentVersion) {
-      redis.del(key).catch(() => {});
-      return null;
-    }
+    const parsed = await readScopedVersionedJsonCache({
+      redis,
+      cacheKey: key,
+      isPayload: isAttachmentAccessCachePayload,
+    });
+    if (!parsed) return null;
     return {
       found: true,
       allowed: Boolean(parsed.allowed),
@@ -68,19 +48,17 @@ async function writeCachedAttachmentAccess(attachmentId, userId, payload) {
   try {
     const scope = rowAccessScope(payload.attachment);
     if (!scope) return;
-    const version = await readAccessVersion(redis, scopeVersionKey(scope));
-    await redis.set(
-      key,
-      JSON.stringify({
+    await writeScopedVersionedJsonCache({
+      redis,
+      cacheKey: key,
+      scope,
+      ttlSeconds: ATTACHMENT_GET_CACHE_TTL_SECS,
+      payloadWithoutVersion: {
         found: true,
         allowed: true,
         attachment: payload.attachment,
-        scope,
-        version,
-      }),
-      'EX',
-      ATTACHMENT_GET_CACHE_TTL_SECS,
-    );
+      },
+    });
   } catch {
     // Best-effort cache write.
   }
