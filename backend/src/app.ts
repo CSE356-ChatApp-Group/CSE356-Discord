@@ -317,15 +317,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// Harness may call join with no UUID: .../communities//join (empty segment),
-// .../communities/join (no :id — misses POST /:id/join and fell through to JSON 404),
-// or .../communities/undefined/join from stringified undefined.
+// Harness may call join with empty path id: .../communities//join,
+// or .../communities/undefined|/null/join from stringified undefined.
+// POST .../communities/join (no :id) is handled by communities router with JSON body.
 app.use((req, res, next) => {
   if (req.method !== 'POST') return next();
   const pathOnly = (req.originalUrl || req.url || '').split('?')[0];
   const badJoin =
     /^\/api\/v1\/communities\/+\/join\/?$/i.test(pathOnly)
-    || /^\/api\/v1\/communities\/join\/?$/i.test(pathOnly)
     || /^\/api\/v1\/communities\/(?:undefined|null)\/join\/?$/i.test(pathOnly);
   if (badJoin) {
     return res.status(400).json({ error: 'Missing community id', requestId: req.id });

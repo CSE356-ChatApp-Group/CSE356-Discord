@@ -21,7 +21,7 @@ describe('join with empty community id', () => {
     expect(res.body.requestId).toBeDefined();
   });
 
-  it('POST /api/v1/communities/join (no id segment) returns 400 Missing community id', async () => {
+  it('POST /api/v1/communities/join with empty JSON returns 400 Missing community id', async () => {
     const res = await request(app).post('/api/v1/communities/join').send({});
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Missing community id');

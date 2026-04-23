@@ -6,6 +6,7 @@
  * GET    /api/v1/communities/:id                – get details
  * DELETE /api/v1/communities/:id                – delete (owner only)
  * PATCH  /api/v1/communities/:id                – update (admin+)
+ * POST   /api/v1/communities/join               – join (JSON: communityId | id | slug | name)
  * POST   /api/v1/communities/:id/join           – join public community (id UUID, or exact slug/name)
  * DELETE /api/v1/communities/:id/leave          – leave
  * GET    /api/v1/communities/:id/members        – list members + presence
@@ -76,6 +77,63 @@ async function resolveCommunityIdForPublicJoin(rawId) {
   if (rows.length === 0) return { ok: false, reason: 'notfound' };
   if (rows.length > 1) return { ok: false, reason: 'ambiguous' };
   return { ok: true, id: rows[0].id, isPublic: true };
+}
+
+/** Shared join implementation after resolveCommunityIdForPublicJoin. */
+async function executeResolvedPublicJoin(req, res, next, resolved) {
+  if (!resolved.ok) {
+    if (resolved.reason === 'missing' || resolved.reason === 'invalid') {
+      return res.status(400).json({ error: 'Invalid community id' });
+    }
+    if (resolved.reason === 'ambiguous') {
+      return res.status(409).json({ error: 'Multiple communities match; use id or slug' });
+    }
+    return res.status(404).json({ error: 'Community not found' });
+  }
+
+  if (!resolved.isPublic) {
+    return res.status(403).json({ error: 'Community is private' });
+  }
+
+  const communityId = resolved.id;
+
+  try {
+    const { rowCount } = await query(
+      `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+      [communityId, req.user.id]
+    );
+    if (!rowCount) {
+      return res.json({ success: true });
+    }
+
+    const realtimeTargets = await listCommunityRealtimeTargets(communityId, req.user.id);
+    await Promise.allSettled([
+      invalidateCommunityChannelUserFanoutTargetsCache(communityId),
+      presenceService.invalidatePresenceFanoutTargets(req.user.id),
+      invalidateWsBootstrapCache(req.user.id),
+      publishUserFeedTargets([req.user.id], {
+        __wsInternal: {
+          kind: 'subscribe_channels',
+          channels: realtimeTargets,
+        },
+      }),
+    ]);
+    invalidateWsAclCache(req.user.id, `community:${communityId}`);
+    {
+      const publicVersion = await getPublicCommunitiesVersion();
+      invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
+    }
+    redis.del(membersCacheKey(communityId)).catch(() => {});
+
+    await fanout.publish(`community:${communityId}`, {
+      event: 'community:member_joined',
+      data: { userId: req.user.id, communityId },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
 }
 
 function parsePositiveIntEnv(name, fallback) {
@@ -850,6 +908,28 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
 });
 
 // ── Join ───────────────────────────────────────────────────────────────────────
+// Body-based join for harnesses that POST /communities/join with id in JSON (no :id path).
+router.post(
+  '/join',
+  communityJoinIpRateLimiter,
+  communityJoinUserRateLimiter,
+  async (req, res, next) => {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const raw = String(
+      body.communityId ?? body.community_id ?? body.id ?? body.slug ?? body.name ?? ''
+    ).trim();
+    if (!raw) {
+      return res.status(400).json({ error: 'Missing community id', requestId: req.id });
+    }
+    try {
+      const resolved = await resolveCommunityIdForPublicJoin(raw);
+      return executeResolvedPublicJoin(req, res, next, resolved);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 router.post(
   '/:id/join',
   communityJoinIpRateLimiter,
@@ -859,55 +939,7 @@ router.post(
     if (!validate(req, res)) return;
     try {
       const resolved = await resolveCommunityIdForPublicJoin(req.params.id);
-      if (!resolved.ok) {
-        if (resolved.reason === 'missing' || resolved.reason === 'invalid') {
-          return res.status(400).json({ error: 'Invalid community id' });
-        }
-        if (resolved.reason === 'ambiguous') {
-          return res.status(409).json({ error: 'Multiple communities match; use id or slug' });
-        }
-        return res.status(404).json({ error: 'Community not found' });
-      }
-
-      if (!resolved.isPublic) {
-        return res.status(403).json({ error: 'Community is private' });
-      }
-
-      const communityId = resolved.id;
-
-      const { rowCount } = await query(
-        `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-        [communityId, req.user.id]
-      );
-      if (!rowCount) {
-        return res.json({ success: true });
-      }
-
-      const realtimeTargets = await listCommunityRealtimeTargets(communityId, req.user.id);
-      await Promise.allSettled([
-        invalidateCommunityChannelUserFanoutTargetsCache(communityId),
-        presenceService.invalidatePresenceFanoutTargets(req.user.id),
-        invalidateWsBootstrapCache(req.user.id),
-        publishUserFeedTargets([req.user.id], {
-          __wsInternal: {
-            kind: 'subscribe_channels',
-            channels: realtimeTargets,
-          },
-        }),
-      ]);
-      invalidateWsAclCache(req.user.id, `community:${communityId}`);
-      {
-        const publicVersion = await getPublicCommunitiesVersion();
-        invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
-      }
-      redis.del(membersCacheKey(communityId)).catch(() => {});
-
-      await fanout.publish(`community:${communityId}`, {
-        event: 'community:member_joined',
-        data: { userId: req.user.id, communityId },
-      });
-
-      res.json({ success: true });
+      return executeResolvedPublicJoin(req, res, next, resolved);
     } catch (err) { next(err); }
   }
 );
