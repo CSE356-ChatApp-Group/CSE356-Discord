@@ -14,6 +14,7 @@ require('./utils/tracer');
 const http     = require('http');
 const app      = require('./app');
 const wsServer = require('./websocket/server');
+const { allowWsUpgrade } = require('./middleware/wsUpgradeLimiter');
 const logger   = require('./utils/logger');
 const { pool, readPool, query: dbQuery, poolStats } = require('./db/pool');
 const { startMessageIngestConsumerIfEnabled, stopMessageIngestConsumer } = require('./messages/messageIngestLog');
@@ -152,7 +153,19 @@ async function start() {
   server.headersTimeout   = 95_000;
 
   // Attach WebSocket upgrade handler to the same HTTP server
-  server.on('upgrade', wsServer.handleUpgrade);
+  server.on('upgrade', (req, socket, head) => {
+    try {
+      const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+      if (pathname === '/ws' && !allowWsUpgrade(req)) {
+        socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+    } catch {
+      // malformed URL — let WS stack reject
+    }
+    wsServer.handleUpgrade(req, socket, head);
+  });
 
   server.listen({ port: PORT, backlog: 4096 }, () => {
     logger.info({ port: PORT }, 'ChatApp API listening');

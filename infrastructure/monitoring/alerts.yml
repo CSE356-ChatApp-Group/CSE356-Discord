@@ -197,6 +197,29 @@ groups:
 
       # Pool queue depth (Node → PgBouncer). Sustained waits mean you are near DB/app
       # throughput limits — scale vertically, split DB, or reduce per-request DB work.
+      # Early abuse / pool pressure: any checkout waiters (tune duration if noisy on tiny bursts).
+      - alert: ChatAppPgPoolWaitingNonZero
+        expr: max(pg_pool_waiting{job="chatapp-api"}) > 0
+        for: 3m
+        labels:
+          severity: info
+        annotations:
+          summary: Postgres pool has checkout waiters
+          description: >
+            At least one request is waiting for a pool slot for 3 minutes. Correlate with
+            `pg_pool_circuit_breaker_rejects_total`, `chatapp_ws_replay_inflight`, and nginx 429.
+
+      - alert: ChatAppWsReplayInflightAboveCap
+        expr: max(chatapp_ws_replay_inflight{job="chatapp-api"}) > 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: WS replay concurrency exceeds configured hard cap
+          description: >
+            `chatapp_ws_replay_inflight` should never exceed 2 per process. If this fires,
+            replay accounting may be broken or env overrides are inconsistent.
+
       - alert: ChatAppPgPoolPressure
         expr: max(pg_pool_waiting{job="chatapp-api"}) > 15
         for: 10m

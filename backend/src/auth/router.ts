@@ -27,6 +27,7 @@ const { authRateLimitHitsTotal } = require('../utils/metrics');
 const { hashPassword, comparePassword } = require('./passwords');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('./bypass');
 const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLinkIntent } = require('./oauthTokens');
+const { getTrustedClientIp } = require('../utils/trustedClientIp');
 
 const router = express.Router();
 const REFRESH_COOKIE = 'refreshToken';
@@ -91,20 +92,8 @@ function issueTokens(res, user) {
   return { accessToken, user: serializeAuthUser(user) };
 }
 
-function buildClientIp(req) {
-  const realIp = req.headers['x-real-ip'];
-  const firstRealIp = Array.isArray(realIp) ? realIp[0] : realIp;
-  if (firstRealIp) return firstRealIp.trim();
-
-  if (req.ip) return req.ip.trim();
-
-  const forwardedFor = req.headers['x-forwarded-for'];
-  const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-  return (firstForwarded ? firstForwarded.split(',')[0] : req.socket?.remoteAddress || 'unknown').trim();
-}
-
 function buildAuthKey(req, route) {
-  const clientIp = buildClientIp(req);
+  const clientIp = getTrustedClientIp(req);
   const credential = typeof req.body?.email === 'string'
     ? req.body.email.trim().toLowerCase()
     : typeof req.body?.username === 'string'
@@ -167,7 +156,7 @@ function buildAuthIpLimiter(
     limit: parsePositiveIntEnv(process.env[limitEnv], limit),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: (req) => `${route}:${buildClientIp(req)}`,
+    keyGenerator: (req) => `${route}:${getTrustedClientIp(req)}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
       prefix: `rl:${route}-global-ip:`,

@@ -1,5 +1,6 @@
 jest.mock('../src/db/pool', () => ({
   withTransaction: jest.fn(),
+  poolStats: jest.fn(() => ({ waiting: 0, total: 1, idle: 1, max: 25 })),
 }));
 
 jest.mock('../src/utils/overload', () => ({
@@ -16,6 +17,7 @@ jest.mock('../src/utils/logger', () => ({
 jest.mock('../src/utils/metrics', () => ({
   wsReplayQueryTotal: { inc: jest.fn() },
   wsReplayQueryDurationMs: { observe: jest.fn() },
+  wsReplayFailOpenTotal: { inc: jest.fn() },
 }));
 
 const { withTransaction } = require('../src/db/pool') as { withTransaction: jest.Mock };

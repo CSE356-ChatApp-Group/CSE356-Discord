@@ -13,12 +13,14 @@
 
 const express = require('express');
 const { authenticate } = require('../middleware/authenticate');
+const { searchLimiter } = require('../middleware/inMemoryApiLimiter');
 const searchClient = require('./client');
 const overload = require('../utils/overload');
 const logger = require('../utils/logger');
 
 const router = express.Router();
 router.use(authenticate);
+router.use(searchLimiter);
 
 function clampSearchPaging(limitRaw, offsetRaw) {
   const maxLimit = Math.min(Math.max(parseInt(process.env.SEARCH_MAX_LIMIT || '50', 10), 1), 100);

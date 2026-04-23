@@ -30,6 +30,25 @@ const usersRouter        = require('./auth/usersRouter');
 
 const app = express();
 app.set('trust proxy', 1);
+
+const { isIpBlocked } = require('./utils/abuseKillSwitch');
+const { getTrustedClientIp } = require('./utils/trustedClientIp');
+
+app.use((req, res, next) => {
+  const pathOnly = (req.path || '').split('?')[0];
+  if (pathOnly === '/health' || pathOnly === '/metrics') return next();
+  try {
+    const ip = getTrustedClientIp(req);
+    if (isIpBlocked(ip)) {
+      const { abuseBlockedSubnetTotal } = require('./utils/metrics');
+      abuseBlockedSubnetTotal.inc();
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+  } catch {
+    // ignore parse issues
+  }
+  next();
+});
 const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal, pgQueriesPerRequestHistogram, pgBusinessSqlQueriesPerRequestHistogram } = require('./utils/metrics');
 const { run: runDbContext } = require('./utils/requestDbContext');
 

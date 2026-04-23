@@ -3,7 +3,11 @@
 const { withTransaction } = require('../db/pool');
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
-const { wsReplayQueryTotal, wsReplayQueryDurationMs } = require('../utils/metrics');
+const {
+  wsReplayQueryTotal,
+  wsReplayQueryDurationMs,
+  wsReplayFailOpenTotal,
+} = require('../utils/metrics');
 import { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 // Reconnect replay is our safety net for brief WS gaps. Keep the default large
@@ -35,27 +39,29 @@ const WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS =
     ? Math.floor(rawReplayDisconnectGraceMs)
     : 15000;
 
-// Replay should fail before the cluster role statement_timeout (often 15s) under load,
-// so the pool returns quickly. Default 8s — still bounded via SET LOCAL per transaction.
+// Hard cap 1000–1500ms via SET LOCAL so replay cannot hold slots under abuse.
 const rawReplayStatementTimeoutMs = Number(
-  process.env.WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS || '8000',
+  process.env.WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS || '1250',
 );
 const WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS =
   Number.isFinite(rawReplayStatementTimeoutMs) && rawReplayStatementTimeoutMs >= 1000
     ? Math.floor(rawReplayStatementTimeoutMs)
-    : 8000;
+    : 1250;
 
-/** Clamp to [1s, 8s] so mis-set env cannot exceed intended fast-fail or undercut index scans. */
+/** Clamp to [1000ms, 1500ms] for reconnect replay only. */
 const WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED = Math.min(
-  8000,
+  1500,
   Math.max(1000, WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS),
 );
 
-const rawReplayMaxConcurrent = Number(process.env.WS_MESSAGE_REPLAY_MAX_CONCURRENT || '6');
-const WS_MESSAGE_REPLAY_MAX_CONCURRENT =
-  Number.isFinite(rawReplayMaxConcurrent) && rawReplayMaxConcurrent >= 1
-    ? Math.min(32, Math.floor(rawReplayMaxConcurrent))
-    : 6;
+const rawReplayDbMaxGlobal = Number(process.env.WS_REPLAY_DB_MAX_IN_FLIGHT || '2');
+const WS_REPLAY_DB_MAX_GLOBAL =
+  Number.isFinite(rawReplayDbMaxGlobal) && rawReplayDbMaxGlobal >= 1
+    ? Math.min(2, Math.floor(rawReplayDbMaxGlobal))
+    : 2;
+
+/** @deprecated use WS_REPLAY_DB_MAX_GLOBAL — kept for tests / metrics parity */
+const WS_MESSAGE_REPLAY_MAX_CONCURRENT = WS_REPLAY_DB_MAX_GLOBAL;
 
 let replayDbInFlight = 0;
 
@@ -112,7 +118,7 @@ function replayQueryProfile(gapMs, stage = overload.getStage(), closeCode?: numb
 
   return {
     stage,
-    limit: Math.max(0, limit),
+    limit: Math.min(50, Math.max(0, limit)),
     windowMs: Math.max(0, windowMs),
     gracePeriodMs: Math.max(0, gracePeriodMs),
   };
@@ -143,14 +149,13 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
 
   const gapMs = reconnectObservedMs - lowerBoundMs;
 
-  const RESERVED_LIVE_SLOTS = 2;
-  const replaySlotCap = Math.max(1, WS_MESSAGE_REPLAY_MAX_CONCURRENT - RESERVED_LIVE_SLOTS);
-  if (replayDbInFlight >= replaySlotCap) {
+  if (replayDbInFlight >= WS_REPLAY_DB_MAX_GLOBAL) {
+    wsReplayFailOpenTotal.inc({ reason: 'global_concurrency' });
     wsReplayQueryTotal.inc({ result: 'skipped' });
     wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
     logger.warn(
-      { userId, gapMs, inFlight: replayDbInFlight, max: replaySlotCap },
-      'WS reconnect replay skipped: concurrency cap reached',
+      { userId, gapMs, inFlight: replayDbInFlight, max: WS_REPLAY_DB_MAX_GLOBAL },
+      'WS reconnect replay skipped: global DB concurrency cap',
     );
     return [];
   }

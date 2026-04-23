@@ -42,7 +42,7 @@ describe('websocket replay admission', () => {
       replayDeferMaxAttempts: 8,
       replayDeferBaseDelayMs: 250,
       replayDeferMaxDelayMs: 4000,
-      replayPoolWaitingThreshold: 2,
+      replayPoolWaitingThreshold: 0,
     });
   });
 
@@ -56,7 +56,7 @@ describe('websocket replay admission', () => {
     });
 
     expect(cfg).toEqual({
-      replaySemaphoreMax: 16,
+      replaySemaphoreMax: 2,
       replayDeferMaxAttempts: 8,
       replayDeferBaseDelayMs: 250,
       replayDeferMaxDelayMs: 4000,
@@ -66,22 +66,22 @@ describe('websocket replay admission', () => {
 
   it('defers on pool waiting above threshold before checking semaphore', () => {
     const cfg = parseReplayAdmissionConfig({
-      WS_REPLAY_POOL_WAITING_THRESHOLD: '2',
+      WS_REPLAY_POOL_WAITING_THRESHOLD: '1',
       WS_REPLAY_SEMAPHORE_MAX: '2',
     });
 
-    expect(evaluateReplayGate(3, 0, cfg)).toEqual({ ok: false, reason: 'pool_waiting' });
-    expect(evaluateReplayGate(3, 99, cfg)).toEqual({ ok: false, reason: 'pool_waiting' });
+    expect(evaluateReplayGate(2, 0, cfg)).toEqual({ ok: false, reason: 'pool_waiting' });
+    expect(evaluateReplayGate(2, 99, cfg)).toEqual({ ok: false, reason: 'pool_waiting' });
   });
 
   it('allows replay at threshold and blocks when semaphore is full', () => {
     const cfg = parseReplayAdmissionConfig({
-      WS_REPLAY_POOL_WAITING_THRESHOLD: '2',
+      WS_REPLAY_POOL_WAITING_THRESHOLD: '1',
       WS_REPLAY_SEMAPHORE_MAX: '2',
     });
 
-    expect(evaluateReplayGate(2, 1, cfg)).toEqual({ ok: true, reason: null });
-    expect(evaluateReplayGate(2, 2, cfg)).toEqual({ ok: false, reason: 'semaphore_full' });
+    expect(evaluateReplayGate(1, 1, cfg)).toEqual({ ok: true, reason: null });
+    expect(evaluateReplayGate(1, 2, cfg)).toEqual({ ok: false, reason: 'semaphore_full' });
   });
 
   it('computes bounded exponential delays with jitter', () => {

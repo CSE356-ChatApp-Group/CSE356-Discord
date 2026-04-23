@@ -14,7 +14,7 @@ function parseReplayAdmissionConfig(env: NodeJS.ProcessEnv = process.env): Repla
   const rawWsReplaySemaphoreMax = Number(env.WS_REPLAY_SEMAPHORE_MAX || '2');
   const replaySemaphoreMax =
     Number.isFinite(rawWsReplaySemaphoreMax) && rawWsReplaySemaphoreMax > 0
-      ? Math.min(16, Math.floor(rawWsReplaySemaphoreMax))
+      ? Math.min(2, Math.floor(rawWsReplaySemaphoreMax))
       : 2;
 
   const rawWsReplayDeferredMaxAttempts = Number(env.WS_REPLAY_DEFER_MAX_ATTEMPTS || '8');
@@ -36,11 +36,11 @@ function parseReplayAdmissionConfig(env: NodeJS.ProcessEnv = process.env): Repla
       ? Math.min(30_000, Math.floor(rawWsReplayDeferredMaxDelayMs))
       : 4_000;
 
-  const rawWsReplayPoolWaitingThreshold = Number(env.WS_REPLAY_POOL_WAITING_THRESHOLD || '2');
+  const rawWsReplayPoolWaitingThreshold = Number(env.WS_REPLAY_POOL_WAITING_THRESHOLD || '0');
   const replayPoolWaitingThreshold =
     Number.isFinite(rawWsReplayPoolWaitingThreshold) && rawWsReplayPoolWaitingThreshold >= 0
       ? Math.min(128, Math.floor(rawWsReplayPoolWaitingThreshold))
-      : 2;
+      : 0;
 
   return {
     replaySemaphoreMax,

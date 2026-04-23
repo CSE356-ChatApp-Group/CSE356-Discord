@@ -29,10 +29,10 @@
  *   PoolCircuitBreakerError        – error class thrown when circuit is open
  *
  * SKU tuning (env):
- *   1 vCPU — PG_POOL_MAX=10–15 and POOL_CIRCUIT_BREAKER_QUEUE=6–8 usually match
+ *   1 vCPU — PG_POOL_MAX=10–15 and POOL_CIRCUIT_BREAKER_QUEUE≈25–40 usually match
  *   event-loop throughput; align PgBouncer default_pool_size with the sum of
  *   max connections across Node processes.
- *   2 vCPU / staging — defaults (PG_POOL_MAX=25, POOL_CIRCUIT_BREAKER_QUEUE=32)
+ *   2 vCPU / staging — defaults (PG_POOL_MAX=25, POOL_CIRCUIT_BREAKER_QUEUE=50)
  *   favor a longer checkout wait queue over early 503s; raise further only if
  *   PgBouncer and Postgres headroom allow.
  */
@@ -119,7 +119,10 @@ const POOL_MAX = parseInt(process.env.PG_POOL_MAX || '25', 10);
  * With PgBouncer in the stack, checkout latency is sub-millisecond when
  * connections are available, so a growing queue signals real DB overload.
  */
-const CIRCUIT_BREAKER_QUEUE = parseInt(process.env.POOL_CIRCUIT_BREAKER_QUEUE || '32', 10);
+const CIRCUIT_BREAKER_QUEUE = Math.min(
+  50,
+  Math.max(1, parseInt(process.env.POOL_CIRCUIT_BREAKER_QUEUE || '50', 10)),
+);
 
 /**
  * PG_SLOW_QUERY_MS: queries slower than this (milliseconds) are logged at WARN.

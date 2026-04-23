@@ -33,6 +33,8 @@ const {
   fanoutPublishTargetsHistogram,
 } = require('../utils/metrics');
 const { authenticate } = require('../middleware/authenticate');
+const { messagesHotPathLimiter } = require('../middleware/inMemoryApiLimiter');
+const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('../utils/trustedClientIp');
 const sideEffects      = require('./sideEffects');
 const fanout           = require('../websocket/fanout');
 const overload         = require('../utils/overload');
@@ -50,16 +52,6 @@ function parsePositiveIntEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function buildClientIp(req) {
-  const forwardedFor = req.headers['x-forwarded-for'];
-  const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-  return (firstForwarded ? firstForwarded.split(',')[0] : req.ip || req.socket?.remoteAddress || 'unknown').trim();
-}
-
-function isInternalIp(ip) {
-  return ip === '127.0.0.1' || ip === '::1' || ip.startsWith('10.') || ip.startsWith('172.16.') || ip.startsWith('192.168.');
-}
-
 function messagePostRateLimitNoop(_req, _res, next) {
   next();
 }
@@ -75,7 +67,7 @@ function buildMessagePostUserRateLimiter() {
     limit,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    skip: (req) => isInternalIp(buildClientIp(req)),
+    skip: (req) => isPrivateOrInternalNetwork(getTrustedClientIp(req)),
     keyGenerator: (req) => `mpu:${req.user?.id || 'anon'}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
@@ -100,8 +92,8 @@ function buildMessagePostIpRateLimiter() {
     limit,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    skip: (req) => isInternalIp(buildClientIp(req)),
-    keyGenerator: (req) => `mpi:${buildClientIp(req)}`,
+    skip: (req) => isPrivateOrInternalNetwork(getTrustedClientIp(req)),
+    keyGenerator: (req) => `mpi:${getTrustedClientIp(req)}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
       prefix: 'rl:mp:ip:',
@@ -172,6 +164,7 @@ import { MESSAGE_RETURNING_FIELDS, MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } 
 
 const router = express.Router();
 router.use(authenticate);
+router.use(messagesHotPathLimiter);
 
 const _idemPendingTtl = parseInt(process.env.MSG_IDEM_PENDING_TTL_SECS || '120', 10);
 /** Lease TTL for in-flight POST /messages idempotency (seconds). */

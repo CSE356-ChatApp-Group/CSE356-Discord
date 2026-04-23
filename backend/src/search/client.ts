@@ -20,16 +20,16 @@ const overload = require('../utils/overload');
 const SEARCH_USE_READ_REPLICA =
   String(process.env.SEARCH_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
 const STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT = Math.min(
-  Math.max(parseInt(process.env.STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT || '200', 10), 20),
+  Math.max(parseInt(process.env.STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT || '750', 10), 500),
   1000,
 );
 
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
-  const configuredMs = Math.min(Math.max(parseInt(rawMs || '10000', 10), 1000), 120000);
+  const configuredMs = Math.min(2000, Math.max(1500, parseInt(rawMs || '1750', 10) || 1750));
   const stage = overload.getStage();
   if (stage >= 2) return Math.min(configuredMs, 2000);
-  if (stage >= 1) return Math.min(configuredMs, 3000);
+  if (stage >= 1) return Math.min(configuredMs, 2000);
   return configuredMs;
 }
 
@@ -682,7 +682,8 @@ async function searchOnce(
     const isStopwordOnlyQuery = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0) === 0;
 
     if (isStopwordOnlyQuery) {
-      const literalMeta = buildScopedLiteralParts(trimmed, opts);
+      const stopwordLimit = Math.min(20, Math.max(1, Number(opts.limit) || 20));
+      const literalMeta = buildScopedLiteralParts(trimmed, { ...opts, limit: stopwordLimit });
       const literalRes = await client.query(literalMeta.sql, literalMeta.params);
       if (literalRes.rows[0]?.__scopeAccess === false) {
         const err: any = new Error('Access denied');

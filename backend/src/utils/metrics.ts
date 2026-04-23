@@ -195,6 +195,43 @@ const wsConnectionResultTotal = new client.Counter({
   labelNames: ['result'],
 });
 
+/** WS HTTP upgrade attempts seen by Node (before auth). */
+const wsUpgradeSeenTotal = new client.Counter({
+  name: 'ws_upgrade_seen_total',
+  help: 'WebSocket upgrade requests reaching the Node process',
+});
+
+/** WS upgrades rejected by in-process token bucket (429 at TCP layer). */
+const wsUpgradeRateLimitedTotal = new client.Counter({
+  name: 'ws_upgrade_rate_limited_total',
+  help: 'WebSocket upgrades rejected by app-layer per-IP rate limit',
+});
+
+/** Reconnect replay skipped immediately (fail-open empty), by reason. */
+const wsReplayFailOpenTotal = new client.Counter({
+  name: 'ws_replay_fail_open_total',
+  help: 'WS reconnect replay skipped without DB work (pressure / caps / disabled)',
+  labelNames: ['reason'],
+});
+
+/** Reconnect replay DB loads started (after admission + jitter). */
+const wsReplayStartedTotal = new client.Counter({
+  name: 'ws_replay_started_total',
+  help: 'WS reconnect replay DB loads started',
+});
+
+/** Current reconnect replay DB loads in flight on this process. */
+const wsReplayConcurrentGauge = new client.Gauge({
+  name: 'chatapp_ws_replay_inflight',
+  help: 'Concurrent WS reconnect replay DB transactions on this worker',
+});
+
+/** App-layer subnet block (BLOCK_SUBNETS). */
+const abuseBlockedSubnetTotal = new client.Counter({
+  name: 'abuse_blocked_subnet_total',
+  help: 'HTTP requests rejected with 403 due to BLOCK_SUBNETS match',
+});
+
 /** Frames skipped or sockets killed due to WS send backpressure (slow consumers). */
 const wsBackpressureEventsTotal = new client.Counter({
   name: 'ws_backpressure_events_total',
@@ -528,7 +565,7 @@ const overloadStageGauge = new client.Gauge({
 /** Call once after pool is created to start sampling every 500ms */
 function startPgPoolMetrics(pool) {
   const logger = require('./logger');
-  const circuitMax = parseInt(process.env.POOL_CIRCUIT_BREAKER_QUEUE || '32', 10);
+  const circuitMax = parseInt(process.env.POOL_CIRCUIT_BREAKER_QUEUE || '50', 10);
   const highWatermark = Math.max(8, Math.floor(circuitMax * 0.25));
   let queueElevatedLogged = false;
 
@@ -673,6 +710,21 @@ function startPgPoolMetrics(pool) {
     apiRateLimitHitsTotal.inc({ scope: 'rum' }, 0);
     apiRateLimitHitsTotal.inc({ scope: 'community_join_ip' }, 0);
     apiRateLimitHitsTotal.inc({ scope: 'community_join_user' }, 0);
+    apiRateLimitHitsTotal.inc({ scope: 'messages_inmem_user' }, 0);
+    apiRateLimitHitsTotal.inc({ scope: 'messages_inmem_ip' }, 0);
+    apiRateLimitHitsTotal.inc({ scope: 'search_inmem_user' }, 0);
+    apiRateLimitHitsTotal.inc({ scope: 'search_inmem_ip' }, 0);
+    wsUpgradeSeenTotal.inc(0);
+    wsUpgradeRateLimitedTotal.inc(0);
+    wsReplayFailOpenTotal.inc({ reason: 'disabled' }, 0);
+    wsReplayFailOpenTotal.inc({ reason: 'pool_waiting' }, 0);
+    wsReplayFailOpenTotal.inc({ reason: 'semaphore_full' }, 0);
+    wsReplayFailOpenTotal.inc({ reason: 'per_ip' }, 0);
+    wsReplayFailOpenTotal.inc({ reason: 'per_socket' }, 0);
+    wsReplayFailOpenTotal.inc({ reason: 'global_concurrency' }, 0);
+    wsReplayStartedTotal.inc(0);
+    wsReplayConcurrentGauge.set(0);
+    abuseBlockedSubnetTotal.inc(0);
     clientRumBatchesTotal.inc(0);
     clientWebVitalTimingSeconds.observe({ name: 'LCP' }, 0);
     clientWebVitalClsScore.observe({ name: 'CLS' }, 0);
@@ -749,6 +801,12 @@ module.exports = {
   endpointListCacheBypassTotal,
   endpointListCacheInvalidationsTotal,
   apiRateLimitHitsTotal,
+  wsUpgradeSeenTotal,
+  wsUpgradeRateLimitedTotal,
+  wsReplayFailOpenTotal,
+  wsReplayStartedTotal,
+  wsReplayConcurrentGauge,
+  abuseBlockedSubnetTotal,
   clientWebVitalTimingSeconds,
   clientWebVitalClsScore,
   clientRumBatchesTotal,
