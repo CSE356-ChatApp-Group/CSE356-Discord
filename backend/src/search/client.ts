@@ -1,8 +1,11 @@
 /**
- * Search client – Postgres native full-text search (FTS only).
+ * Search client – Postgres native full-text search (FTS primary).
  *
  * Primary path:  websearch_to_tsquery + tsvector GIN index
  *                (ranked via ts_rank, highlighted via ts_headline)
+ *
+ * Scoped searches: if FTS returns no rows, a bounded literal substring pass
+ * runs in the same scope (no trigram / no cross-scope scan).
  *
  * Access control is built into the query:
  *   - Scoped: a `scope_access` CTE preserves 403 behavior without a second DB trip.
@@ -53,6 +56,21 @@ function logSearchDbTiming(
   } else {
     logger.debug(payload, 'search_db_timing');
   }
+}
+
+function resolvedSearchScope(opts: Record<string, any>): string {
+  if (opts.communityId) return 'community';
+  if (opts.channelId) return 'channel';
+  if (opts.conversationId) return 'conversation';
+  return 'unscoped';
+}
+
+function isScopedSearch(opts: Record<string, any>): boolean {
+  return Boolean(opts.communityId || opts.channelId || opts.conversationId);
+}
+
+function logSearchTrace(payload: Record<string, unknown>) {
+  logger.info({ search_trace: true, ...payload }, 'search_trace');
 }
 
 async function runSearchQuery(
@@ -655,13 +673,12 @@ function shouldRetrySearchOnPrimary(
 /**
  * search – main entry point. FTS-only.
  *
- * Stop-word-only queries (e.g. "the and is") collapse to ''::tsquery via
- * websearch_to_tsquery('english'). Scoped requests use a bounded literal
- * fallback inside the already-authorized scope only; unscoped requests still do
- * not run a broad fallback scan.
+ * Scoped searches run FTS first. When FTS returns no hits, a bounded literal
+ * substring match runs inside the same scope (no trigram, no global scan).
+ * Unscoped text queries do not run literal fallback.
  *
  * @param q     Raw query string (validated by caller: non-empty when present)
- * @param opts  { channelId?, conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset? }
+ * @param opts  { channelId?, conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset?, requestId? }
  */
 async function searchOnce(
   q: string,
@@ -673,34 +690,94 @@ async function searchOnce(
   }
 
   const trimmed = String(q).trim();
+  const tSearchStart = Date.now();
+  const requestId = opts.requestId != null ? String(opts.requestId) : undefined;
+  const scopeLabel = resolvedSearchScope(opts);
+  const scoped = isScopedSearch(opts);
 
   return await runSearchTransaction(async (client) => {
+    let queryMsAccum = 0;
+    const tMeta = Date.now();
     const tsqueryMetaRes = await client.query(
-      `SELECT numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes`,
+      `SELECT websearch_to_tsquery('english', $1)::text AS tsquery_text,
+              numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes`,
       [trimmed],
     );
-    const isStopwordOnlyQuery = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0) === 0;
-
-    if (isStopwordOnlyQuery) {
-      const stopwordLimit = Math.min(20, Math.max(1, Number(opts.limit) || 20));
-      const literalMeta = buildScopedLiteralParts(trimmed, { ...opts, limit: stopwordLimit });
-      const literalRes = await client.query(literalMeta.sql, literalMeta.params);
-      if (literalRes.rows[0]?.__scopeAccess === false) {
-        const err: any = new Error('Access denied');
-        err.statusCode = 403;
-        throw err;
-      }
-      return buildResult(literalRes.rows, literalMeta.q, literalMeta.offset, literalMeta.limit);
-    }
+    queryMsAccum += Date.now() - tMeta;
+    const tsqueryText = String(tsqueryMetaRes.rows[0]?.tsquery_text ?? '');
+    const tsqueryNodes = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0);
 
     const ftsMeta = buildFtsParts(trimmed, opts);
+    const tFts = Date.now();
     const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
+    queryMsAccum += Date.now() - tFts;
     if (ftsRes.rows[0]?.__scopeAccess === false) {
       const err: any = new Error('Access denied');
       err.statusCode = 403;
       throw err;
     }
-    return buildResult(ftsRes.rows, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
+
+    const ftsHits = ftsRes.rows.filter((row: any) => row && row.id);
+    const ftsHitCount = ftsHits.length;
+
+    if (ftsHitCount > 0) {
+      const totalMs = Date.now() - tSearchStart;
+      logSearchTrace({
+        requestId,
+        query: trimmed,
+        resolved_scope: scopeLabel,
+        tsquery_text: tsqueryText,
+        tsquery_node_count: tsqueryNodes,
+        fts_hit_count: ftsHitCount,
+        fallback_used: false,
+        fallback_hit_count: 0,
+        total_ms: totalMs,
+        query_ms: queryMsAccum,
+      });
+      return buildResult(ftsRes.rows, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
+    }
+
+    if (!scoped) {
+      const totalMs = Date.now() - tSearchStart;
+      logSearchTrace({
+        requestId,
+        query: trimmed,
+        resolved_scope: scopeLabel,
+        tsquery_text: tsqueryText,
+        tsquery_node_count: tsqueryNodes,
+        fts_hit_count: 0,
+        fallback_used: false,
+        fallback_hit_count: 0,
+        total_ms: totalMs,
+        query_ms: queryMsAccum,
+      });
+      return buildResult(ftsRes.rows, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
+    }
+
+    const literalMeta = buildScopedLiteralParts(trimmed, opts);
+    const tLit = Date.now();
+    const literalRes = await client.query(literalMeta.sql, literalMeta.params);
+    queryMsAccum += Date.now() - tLit;
+    if (literalRes.rows[0]?.__scopeAccess === false) {
+      const err: any = new Error('Access denied');
+      err.statusCode = 403;
+      throw err;
+    }
+    const fallbackHits = literalRes.rows.filter((row: any) => row && row.id);
+    const totalMs = Date.now() - tSearchStart;
+    logSearchTrace({
+      requestId,
+      query: trimmed,
+      resolved_scope: scopeLabel,
+      tsquery_text: tsqueryText,
+      tsquery_node_count: tsqueryNodes,
+      fts_hit_count: 0,
+      fallback_used: true,
+      fallback_hit_count: fallbackHits.length,
+      total_ms: totalMs,
+      query_ms: queryMsAccum,
+    });
+    return buildResult(literalRes.rows, literalMeta.q, literalMeta.offset, literalMeta.limit);
   }, { forcePrimary });
 }
 

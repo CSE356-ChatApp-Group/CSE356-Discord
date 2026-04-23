@@ -7,11 +7,13 @@
  *  - access control: non-member cannot search a private channel / community
  *  - single-character queries are allowed
  *  - highlight XSS sanitization (ts_headline output must be HTML-escaped)
- *  - FTS-only: trigram/infix fallback removed; stop-word queries return empty
+ *  - FTS-first with scoped literal rescue when FTS returns zero hits (bounded, no trigram)
  */
 
 import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
+
+const logger = require('../src/utils/logger');
 
 afterAll(async () => {
   await wsServer.shutdown();
@@ -431,6 +433,57 @@ describe('Search – common phrases and all-term matching', () => {
     expect(
       res.body.hits.some((hit: any) => String(hit.content || '').includes('the lazy dog')),
     ).toBe(true);
+  });
+
+  describe('search_trace logging', () => {
+    let infoSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      infoSpy.mockRestore();
+    });
+
+    it('emits search_trace with fallback_used true for stopword-only query', async () => {
+      await request(app)
+        .get(`/api/v1/search?q=${encodeURIComponent(commonPhrase)}&channelId=${channelId}`)
+        .set('Authorization', `Bearer ${ownerToken}`);
+
+      const traceCall = infoSpy.mock.calls.find(
+        (c: unknown[]) => (c[0] as Record<string, unknown>)?.search_trace === true,
+      );
+      expect(traceCall).toBeDefined();
+      const trace = traceCall![0] as Record<string, unknown>;
+      expect(traceCall![1] === 'search_trace' || trace.msg === 'search_trace').toBe(true);
+      expect(trace.fallback_used).toBe(true);
+      expect(trace.fts_hit_count).toBe(0);
+      expect(trace.fallback_hit_count).toBeGreaterThan(0);
+      expect(trace.tsquery_node_count).toBe(0);
+      expect(trace.resolved_scope).toBe('channel');
+      expect(typeof trace.requestId).toBe('string');
+      expect(typeof trace.total_ms).toBe('number');
+      expect(typeof trace.query_ms).toBe('number');
+    });
+
+    it('emits search_trace with fallback_used false when FTS returns hits', async () => {
+      const uniqueTerm = exactPhrase.split(' ').pop()!;
+      await request(app)
+        .get(
+          `/api/v1/search?q=${encodeURIComponent(`games ${uniqueTerm}`)}&channelId=${channelId}`,
+        )
+        .set('Authorization', `Bearer ${ownerToken}`);
+
+      const traceCall = infoSpy.mock.calls.find(
+        (c: unknown[]) => (c[0] as Record<string, unknown>)?.search_trace === true,
+      );
+      expect(traceCall).toBeDefined();
+      const trace = traceCall![0] as Record<string, unknown>;
+      expect(trace.fallback_used).toBe(false);
+      expect(trace.fallback_hit_count).toBe(0);
+      expect(Number(trace.fts_hit_count)).toBeGreaterThan(0);
+    });
   });
 });
 

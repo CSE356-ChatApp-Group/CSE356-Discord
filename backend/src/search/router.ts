@@ -87,6 +87,7 @@ router.get('/', async (req, res, next) => {
       userId: req.user.id,
       limit: adjustedLimit,
       offset: clampedOffset,
+      requestId: req.id,
     });
 
     const durationMs = Date.now() - startMs;
