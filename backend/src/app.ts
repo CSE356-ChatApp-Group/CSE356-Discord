@@ -317,6 +317,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// Harness logs "community=Galaxy Haxball" but may call join before an id exists
+// (e.g. "Timed out waiting for community creation") → POST .../communities//join → 404.
+app.use((req, res, next) => {
+  const pathOnly = (req.originalUrl || req.url || '').split('?')[0];
+  if (req.method === 'POST' && /^\/api\/v1\/communities\/+\/join\/?$/i.test(pathOnly)) {
+    return res.status(400).json({ error: 'Missing community id', requestId: req.id });
+  }
+  next();
+});
+
 if (process.env.ENABLE_CLIENT_RUM === 'true') {
   app.use('/api/v1', require('./rum/router'));
 }
