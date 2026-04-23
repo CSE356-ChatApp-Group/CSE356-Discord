@@ -698,6 +698,7 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
 
     await Promise.allSettled([
       invalidateCommunitiesCaches(memberRows.map((r) => r.user_id), publicVersion),
+      redis.del(membersCacheKey(req.params.id)),
       fanout.publish(`community:${req.params.id}`, {
         event: 'community:deleted',
         data: { communityId: req.params.id },
@@ -823,13 +824,21 @@ router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
       return res.status(403).json({ error: 'Not a community member' });
     }
 
-    const { rows } = await queryRead(
-      `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
-       FROM community_members cm JOIN users u ON u.id = cm.user_id
-       WHERE cm.community_id = $1
-       ORDER BY cm.role DESC, u.username`,
-      [req.params.id]
-    );
+    const cacheKey = membersCacheKey(req.params.id);
+    const cachedRoster = await redis.get(cacheKey);
+    let rows;
+    if (cachedRoster) {
+      rows = JSON.parse(cachedRoster);
+    } else {
+      ({ rows } = await queryRead(
+        `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
+         FROM community_members cm JOIN users u ON u.id = cm.user_id
+         WHERE cm.community_id = $1
+         ORDER BY cm.role DESC, u.username`,
+        [req.params.id]
+      ));
+      redis.setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify(rows)).catch(() => {});
+    }
     const presenceMap = await presenceService.getBulkPresenceDetails(rows.map(r => r.id));
     const members = rows.map(r => ({
       ...r,
