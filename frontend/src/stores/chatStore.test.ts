@@ -46,6 +46,42 @@ describe('list fetch cache bust', () => {
   });
 });
 
+describe('community id invariants', () => {
+  it('selectCommunity throws when id is missing', async () => {
+    await expect(
+      useChatStore.getState().selectCommunity({ name: 'No ID' } as any),
+    ).rejects.toThrow('selectCommunity requires a valid community id');
+  });
+
+  it('fetchChannels throws before issuing request when id is missing', async () => {
+    await expect(
+      useChatStore.getState().fetchChannels(''),
+    ).rejects.toThrow('fetchChannels requires a valid community id');
+    expect(apiGet).not.toHaveBeenCalled();
+  });
+
+  it('fetchMembers throws before issuing request when id is missing', async () => {
+    await expect(
+      useChatStore.getState().fetchMembers('   '),
+    ).rejects.toThrow('fetchMembers requires a valid community id');
+    expect(apiGet).not.toHaveBeenCalled();
+  });
+
+  it('createCommunity normalizes nested communityId response shape', async () => {
+    apiPost.mockResolvedValue({
+      community: {
+        communityId: 'comm-123',
+        slug: 'alpha',
+        name: 'Alpha',
+      },
+    });
+
+    const created = await useChatStore.getState().createCommunity('alpha', 'Alpha', 'desc');
+    expect(created.id).toBe('comm-123');
+    expect(created.communityId).toBe('comm-123');
+  });
+});
+
 describe('chatStore quick actions', () => {
   it('deleteCommunity removes the active community, related channels, and cached messages', async () => {
     apiDelete.mockResolvedValue({ success: true });

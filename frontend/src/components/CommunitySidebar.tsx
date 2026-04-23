@@ -296,7 +296,11 @@ export default function CommunitySidebar() {
           onClose={() => setShowCreate(false)}
           onCreate={async (slug, name, desc) => {
             const c = await createCommunity(slug, name, desc);
-            selectCommunity(c);
+            const communityId = String(c?.id || '').trim();
+            if (!communityId) {
+              throw new Error('Create community returned no id');
+            }
+            await selectCommunity(c);
             setShowCreate(false);
           }}
         />
@@ -306,10 +310,14 @@ export default function CommunitySidebar() {
         <JoinCommunityModal
           onClose={() => setShowJoin(false)}
           onJoined={async (community) => {
+            const communityId = String(community?.id || '').trim();
+            if (!communityId) {
+              throw new Error('Join community missing id');
+            }
             await fetchCommunities();
             // Sidebar uses `communities.filter(c => c.my_role)`. Until the list reflects
             // the new membership (replica lag or missing row), merge locally after a successful join.
-            const id = community?.id;
+            const id = communityId;
             if (id) {
               const list = useChatStore.getState().communities;
               const row = list.find((c: any) => c.id === id);
@@ -635,10 +643,15 @@ function JoinCommunityModal({ onClose, onJoined }: { onClose: () => void; onJoin
     : allCommunities;
 
   async function join(community: any) {
+    const communityId = String(community?.id || '').trim();
+    if (!communityId) {
+      setErr('Missing community id; please refresh and try again.');
+      return;
+    }
     setErr('');
-    setBusyId(community.id);
+    setBusyId(communityId);
     try {
-      await api.post(`/communities/${community.id}/join`, {});
+      await api.post(`/communities/${communityId}/join`, {});
       await onJoined(community);
     } catch (e: any) {
       setErr(e?.message || 'Could not join community');

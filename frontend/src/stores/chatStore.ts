@@ -170,6 +170,28 @@ function channelCommunityId(channel: Entity) {
   return channel?.community_id || channel?.communityId || null;
 }
 
+function normalizeCommunityId(input: any): string {
+  const id = String(
+    input?.id
+      ?? input?.communityId
+      ?? input?.community_id
+      ?? input?.community?.id
+      ?? input?.community?.communityId
+      ?? input?.community?.community_id
+      ?? input?.data?.id
+      ?? '',
+  ).trim();
+  return id;
+}
+
+function requireCommunityId(id: string | null | undefined, action: string): string {
+  const normalized = String(id ?? '').trim();
+  if (!normalized) {
+    throw new Error(`${action} requires a valid community id`);
+  }
+  return normalized;
+}
+
 function canAccessChannel(channel: Entity | null | undefined) {
   return Boolean(channel && (channel?.can_access ?? channel?.canAccess ?? !channel?.is_private));
 }
@@ -612,9 +634,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         ? body.community
         : {};
     const slugNorm = String(slug).trim();
-    let id = String(
-      inner.id ?? inner._id ?? body.id ?? body.communityId ?? body.data?.id ?? ''
-    ).trim();
+    let id = normalizeCommunityId({ ...body, community: inner });
     // Older / proxied APIs may omit top-level id; slug is unique — recover from list after create.
     if (!id && slugNorm) {
       const list = await get().fetchCommunities();
@@ -662,8 +682,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async selectCommunity(community: Entity) {
+    const communityId = requireCommunityId(normalizeCommunityId(community), 'selectCommunity');
+    const normalizedCommunity = {
+      ...(community || {}),
+      id: communityId,
+      communityId,
+      community_id: communityId,
+    };
     const selectedCommunity =
-      get().communities.find((existing) => existing.id === community.id) || community;
+      get().communities.find((existing) => existing.id === communityId) || normalizedCommunity;
     set(s => ({
       activeCommunity: {
         ...selectedCommunity,
@@ -671,7 +698,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         hasNewActivity: false,
       },
       communities: s.communities.map((c) =>
-        c.id === selectedCommunity.id
+        c.id === communityId
           ? {
               ...c,
               has_new_activity: false,
@@ -680,8 +707,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           : c
       ),
     }));
-    const channelsPromise = get().fetchChannels(selectedCommunity.id);
-    const membersPromise = get().fetchMembers(selectedCommunity.id);
+    const channelsPromise = get().fetchChannels(communityId);
+    const membersPromise = get().fetchMembers(communityId);
     const channels = await channelsPromise;
     // Auto-select the first accessible channel as soon as channel data is ready.
     const firstAccessible = channels.find(ch => {
@@ -696,28 +723,29 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
     await membersPromise;
     // Subscribe to community-level events
-    wsManager.subscribe(`community:${selectedCommunity.id}`, get()._handleWsEvent);
+    wsManager.subscribe(`community:${communityId}`, get()._handleWsEvent);
   },
 
   // ── Channels ──────────────────────────────────────────────────────────────
   async fetchChannels(communityId: string) {
-    if (channelsInFlightByCommunity.has(communityId)) {
-      return channelsInFlightByCommunity.get(communityId)!;
+    const normalizedCommunityId = requireCommunityId(communityId, 'fetchChannels');
+    if (channelsInFlightByCommunity.has(normalizedCommunityId)) {
+      return channelsInFlightByCommunity.get(normalizedCommunityId)!;
     }
 
     const requestToken = ++channelsFetchTokenCounter;
-    latestChannelsFetchTokenByCommunity.set(communityId, requestToken);
+    latestChannelsFetchTokenByCommunity.set(normalizedCommunityId, requestToken);
 
     const inFlight = (async () => {
-      invalidateApiCache(`/channels?communityId=${communityId}`);
-      const { channels } = await api.get(`/channels?communityId=${communityId}`);
-      if (latestChannelsFetchTokenByCommunity.get(communityId) !== requestToken) {
+      invalidateApiCache(`/channels?communityId=${normalizedCommunityId}`);
+      const { channels } = await api.get(`/channels?communityId=${normalizedCommunityId}`);
+      if (latestChannelsFetchTokenByCommunity.get(normalizedCommunityId) !== requestToken) {
         return channels;
       }
       set(s => {
         const activeChannelInCommunity =
-          s.activeChannel && channelCommunityId(s.activeChannel) === communityId;
-        const mergedChannels = preserveRecentLocalChannels(channels || [], s.channels, communityId);
+          s.activeChannel && channelCommunityId(s.activeChannel) === normalizedCommunityId;
+        const mergedChannels = preserveRecentLocalChannels(channels || [], s.channels, normalizedCommunityId);
         const refreshedActiveChannel = activeChannelInCommunity
           ? mergedChannels.find((ch: Entity) => ch.id === s.activeChannel?.id) || null
           : null;
@@ -763,11 +791,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       return channels;
     })();
 
-    channelsInFlightByCommunity.set(communityId, inFlight);
+    channelsInFlightByCommunity.set(normalizedCommunityId, inFlight);
     try {
       return await inFlight;
     } finally {
-      channelsInFlightByCommunity.delete(communityId);
+      channelsInFlightByCommunity.delete(normalizedCommunityId);
     }
   },
 
@@ -1293,7 +1321,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
   // ── Members ───────────────────────────────────────────────────────────────
   async fetchMembers(communityId: string) {
-    const { members } = await api.get(`/communities/${communityId}/members`);
+    const normalizedCommunityId = requireCommunityId(communityId, 'fetchMembers');
+    const { members } = await api.get(`/communities/${normalizedCommunityId}/members`);
     set({ members });
     await get().hydratePresenceForUsers(
       (members || []).map((m: Entity) => String(m?.id || '')).filter(Boolean)
