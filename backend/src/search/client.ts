@@ -170,6 +170,17 @@ const SELECT_COLS = `
   ch.community_id    AS "communityId",
   ch.name            AS "channelName"`;
 
+const SELECT_COLS_FROM_SCOPED_CANDIDATE = `
+  m.id,
+  m.content,
+  m.author_id        AS "authorId",
+  COALESCE(NULLIF(u.display_name, ''), u.username) AS "authorDisplayName",
+  m.channel_id       AS "channelId",
+  m.conversation_id  AS "conversationId",
+  m.created_at       AS "createdAt",
+  sc.community_id    AS "communityId",
+  sc.channel_name    AS "channelName"`;
+
 const FROM_CLAUSE = `
   FROM messages m
   JOIN users u ON u.id = m.author_id
@@ -260,6 +271,18 @@ function p(params: any[], v: any): string {
   return `$${params.length}`;
 }
 
+function buildAuthorTimeFilters(
+  params: any[],
+  opts: Record<string, any>,
+  alias = 'm',
+): string {
+  const parts: string[] = [];
+  if (opts.authorId) parts.push(`AND ${alias}.author_id = ${p(params, opts.authorId)}`);
+  if (opts.after)    parts.push(`AND ${alias}.created_at >= ${p(params, opts.after)}::timestamptz`);
+  if (opts.before)   parts.push(`AND ${alias}.created_at <= ${p(params, opts.before)}::timestamptz`);
+  return parts.join('\n');
+}
+
 function buildFilters(params: any[], opts: Record<string, any>): string {
   const parts: string[] = [];
 
@@ -302,9 +325,8 @@ function buildFilters(params: any[], opts: Record<string, any>): string {
     )`);
   }
 
-  if (opts.authorId) parts.push(`AND m.author_id = ${p(params, opts.authorId)}`);
-  if (opts.after)    parts.push(`AND m.created_at >= ${p(params, opts.after)}::timestamptz`);
-  if (opts.before)   parts.push(`AND m.created_at <= ${p(params, opts.before)}::timestamptz`);
+  const authorTimeFilters = buildAuthorTimeFilters(params, opts);
+  if (authorTimeFilters) parts.push(authorTimeFilters);
 
   return parts.join('\n');
 }
@@ -356,84 +378,106 @@ function buildResult(rows: any[], q: string, offset: number, limit: number) {
   };
 }
 
-function buildCommunityScopedCandidateParts(
-  scope: Record<string, any> | null,
-  messageAlias: string,
-  channelAlias: string,
-  memberAlias: string,
-) {
-  if (!scope || scope.scopeType !== 'community' || !scope.targetIdPh || !scope.userIdPh) {
-    return null;
-  }
-  return {
-    join: `
-      JOIN channels ${channelAlias} ON ${channelAlias}.id = ${messageAlias}.channel_id
-      LEFT JOIN channel_members ${memberAlias}
-        ON ${memberAlias}.channel_id = ${channelAlias}.id
-       AND ${memberAlias}.user_id = ${scope.userIdPh}
-    `,
-    where: `
-      AND ${channelAlias}.community_id = ${scope.targetIdPh}
-      AND (${channelAlias}.is_private = FALSE OR ${memberAlias}.user_id IS NOT NULL)
-    `,
-  };
-}
-
 /** Statement + paging metadata for FTS (content_tsv GIN). */
 function buildFtsParts(q: string, opts: Record<string, any>) {
   const params: any[] = [q]; // $1 reserved for the query string
   const scope = buildScopedAccessParts(params, opts);
-  const filters = buildFilters(params, opts);
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
-  const limitPh = p(params, limit);
-  const offsetPh = p(params, offset);
   const ctes = [`search_query AS (SELECT websearch_to_tsquery('english', $1) AS q)`];
   if (scope) ctes.push(scope.cte.trim());
 
-  // Candidates CTE caps the GIN index scan before per-row access control runs for
-  // community/unscoped queries. Without it a common term returns thousands of TSV
-  // matches and the per-row EXISTS subquery runs O(matches) times.
-  const isUnscoped = Boolean(opts.userId && !opts.channelId && !opts.conversationId && !opts.communityId);
-  const isCommunityScoped = Boolean(opts.communityId && !opts.channelId && !opts.conversationId);
-  const rawCandidatesLimit = parseInt(process.env.SEARCH_UNSCOPED_CANDIDATES_LIMIT || '200', 10);
-  const candidatesLimit = Number.isFinite(rawCandidatesLimit) && rawCandidatesLimit > 0 ? rawCandidatesLimit : 200;
+  // Keep the expensive result phase bounded. For community-scoped FTS we first
+  // materialize raw TSV hits, then apply channel access once via a small scoped
+  // channel set before fetching message/user rows for highlighting.
+  const rawCandidatesLimit = parseInt(
+    process.env.SEARCH_FTS_CANDIDATES_LIMIT ||
+    process.env.SEARCH_UNSCOPED_CANDIDATES_LIMIT ||
+    '200',
+    10,
+  );
+  const minimumCandidates = Math.max(offset + limit, limit);
+  const candidatesLimit = Math.max(
+    Number.isFinite(rawCandidatesLimit) && rawCandidatesLimit > 0 ? rawCandidatesLimit : 200,
+    minimumCandidates,
+  );
 
-  let innerFromClause = FTS_FROM_CLAUSE;
-  let innerWhereExtra = '';
-  const communityCandidateParts = buildCommunityScopedCandidateParts(scope, 'm0', 'ch_scope', 'cm_scope');
+  const candidateFilters: string[] = [];
+  if (opts.authorId) candidateFilters.push(`AND m0.author_id = ${p(params, opts.authorId)}`);
+  if (opts.after)    candidateFilters.push(`AND m0.created_at >= ${p(params, opts.after)}::timestamptz`);
+  if (opts.before)   candidateFilters.push(`AND m0.created_at <= ${p(params, opts.before)}::timestamptz`);
 
-  if (isCommunityScoped && communityCandidateParts && scope) {
-    ctes.push(`candidates AS (
-      SELECT m0.id
+  const isCommunityScoped = scope?.scopeType === 'community';
+  let filters = '';
+  let selectCols = SELECT_COLS;
+  let finalFromClause = `${FTS_FROM_CLAUSE}\n      JOIN fts_candidates fc ON fc.id = m.id`;
+  let orderBy = 'fc.created_at DESC, m.id DESC';
+
+  if (isCommunityScoped && scope?.targetIdPh && scope?.userIdPh) {
+    ctes.push(`community_channels AS MATERIALIZED (
+      SELECT ch.id,
+             ch.community_id,
+             ch.name
+      FROM channels ch
+      LEFT JOIN channel_members cm
+        ON cm.channel_id = ch.id
+       AND cm.user_id = ${scope.userIdPh}
+      WHERE ch.community_id = ${scope.targetIdPh}
+        AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
+    )`);
+
+    ctes.push(`fts_candidates AS MATERIALIZED (
+      SELECT m0.id, m0.created_at, m0.channel_id
       FROM messages m0
+      CROSS JOIN search_query sq0
       WHERE m0.deleted_at IS NULL
         AND m0.channel_id IS NOT NULL
-        AND m0.content_tsv @@ (SELECT q FROM search_query)
-        AND EXISTS (
-          SELECT 1
-          FROM channels ch_scope
-          LEFT JOIN channel_members cm_scope
-            ON cm_scope.channel_id = ch_scope.id
-           AND cm_scope.user_id = ${scope.userIdPh}
-          WHERE ch_scope.id = m0.channel_id
-            AND ch_scope.community_id = ${scope.targetIdPh}
-            AND (ch_scope.is_private = FALSE OR cm_scope.user_id IS NOT NULL)
-        )
+        AND m0.content_tsv @@ sq0.q
+        ${candidateFilters.join('\n        ')}
+    )`);
+
+    ctes.push(`scoped_candidates AS MATERIALIZED (
+      SELECT fc.id,
+             fc.created_at,
+             fc.channel_id,
+             cc.community_id,
+             cc.name AS channel_name
+      FROM fts_candidates fc
+      JOIN community_channels cc ON cc.id = fc.channel_id
+      ORDER BY fc.created_at DESC
+      LIMIT ${candidatesLimit}
+    )`);
+
+    selectCols = SELECT_COLS_FROM_SCOPED_CANDIDATE;
+    finalFromClause = `
+      FROM scoped_candidates sc
+      JOIN messages m ON m.id = sc.id
+      CROSS JOIN search_query sq
+      JOIN users u ON u.id = m.author_id`;
+    orderBy = 'sc.created_at DESC, m.id DESC';
+  } else {
+    if (opts.channelId) {
+      candidateFilters.push(`AND m0.channel_id = ${p(params, opts.channelId)}`);
+    } else if (opts.conversationId) {
+      candidateFilters.push(`AND m0.conversation_id = ${p(params, opts.conversationId)}`);
+    }
+
+    ctes.push(`fts_candidates AS MATERIALIZED (
+      SELECT m0.id, m0.created_at
+      FROM messages m0
+      CROSS JOIN search_query sq0
+      WHERE m0.deleted_at IS NULL
+        AND m0.content_tsv @@ sq0.q
+        ${candidateFilters.join('\n        ')}
       ORDER BY m0.created_at DESC
       LIMIT ${candidatesLimit}
     )`);
-    innerWhereExtra = `AND m.id = ANY(SELECT id FROM candidates)`;
-  } else if (isUnscoped) {
-    ctes.push(`candidates AS (
-      SELECT id FROM messages
-      WHERE deleted_at IS NULL
-        AND content_tsv @@ (SELECT q FROM search_query)
-      ORDER BY created_at DESC
-      LIMIT ${candidatesLimit}
-    )`);
-    innerWhereExtra = `AND m.id = ANY(SELECT id FROM candidates)`;
+
+    filters = buildFilters(params, opts);
   }
+
+  const limitPh = p(params, limit);
+  const offsetPh = p(params, offset);
 
   const sql = `
     WITH ${ctes.join(',\n')}
@@ -441,7 +485,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       search_rows.*
     ${scope ? scope.fromClause : 'FROM'}
     ${scope ? 'LEFT JOIN LATERAL (' : '('}
-      SELECT ${SELECT_COLS},
+      SELECT ${selectCols},
         ts_headline(
           'english',
           coalesce(m.content, ''),
@@ -449,16 +493,102 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
           'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
         ) AS highlight,
         ts_rank(m.content_tsv, sq.q) AS _rank
-      ${innerFromClause}
+      ${finalFromClause}
       WHERE m.deleted_at IS NULL
         AND m.content_tsv @@ sq.q
-        ${innerWhereExtra}
         ${filters}
-      ORDER BY m.created_at DESC
+      ORDER BY ${orderBy}
       LIMIT ${limitPh} OFFSET ${offsetPh}
     ) search_rows ${scope ? scope.onClause : ''}`;
 
   return { sql, params, limit, offset, q };
+}
+
+function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
+  const params: any[] = [];
+  const scope = buildScopedAccessParts(params, opts);
+  const limit = Number(opts.limit) || 20;
+  const offset = Number(opts.offset) || 0;
+  const rawQueryPh = p(params, q);
+  const limitPh = p(params, limit);
+  const offsetPh = p(params, offset);
+
+  if (!scope) {
+    return {
+      sql: `SELECT NULL WHERE FALSE`,
+      params,
+      limit,
+      offset,
+      q,
+    };
+  }
+
+  if (scope.scopeType === 'community') {
+    const authorTimeFilters = buildAuthorTimeFilters(params, opts);
+    return {
+      sql: `
+        WITH ${scope.cte.trim()},
+        community_channels AS MATERIALIZED (
+          SELECT ch.id,
+                 ch.community_id,
+                 ch.name
+          FROM channels ch
+          LEFT JOIN channel_members cm
+            ON cm.channel_id = ch.id
+           AND cm.user_id = ${scope.userIdPh}
+          WHERE ch.community_id = ${scope.targetIdPh}
+            AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
+        )
+        SELECT scope_access.has_access AS "__scopeAccess",
+          search_rows.*
+        FROM scope_access
+        LEFT JOIN LATERAL (
+          SELECT m.id,
+                 m.content,
+                 m.author_id        AS "authorId",
+                 COALESCE(NULLIF(u.display_name, ''), u.username) AS "authorDisplayName",
+                 m.channel_id       AS "channelId",
+                 m.conversation_id  AS "conversationId",
+                 m.created_at       AS "createdAt",
+                 cc.community_id    AS "communityId",
+                 cc.name            AS "channelName"
+          FROM community_channels cc
+          JOIN messages m ON m.channel_id = cc.id
+          JOIN users u ON u.id = m.author_id
+          WHERE m.deleted_at IS NULL
+            AND position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+            ${authorTimeFilters}
+          ORDER BY m.created_at DESC, m.id DESC
+          LIMIT ${limitPh} OFFSET ${offsetPh}
+        ) search_rows ON scope_access.has_access = TRUE`,
+      params,
+      limit,
+      offset,
+      q,
+    };
+  }
+
+  const filters = buildFilters(params, opts);
+  return {
+    sql: `
+      WITH ${scope.cte.trim()}
+      SELECT scope_access.has_access AS "__scopeAccess",
+        search_rows.*
+      FROM scope_access
+      LEFT JOIN LATERAL (
+        SELECT ${SELECT_COLS}
+        ${FROM_CLAUSE}
+        WHERE m.deleted_at IS NULL
+          AND position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+          ${filters}
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT ${limitPh} OFFSET ${offsetPh}
+      ) search_rows ON scope_access.has_access = TRUE`,
+    params,
+    limit,
+    offset,
+    q,
+  };
 }
 
 async function searchFilteredOnly(
@@ -510,8 +640,9 @@ function shouldRetrySearchOnPrimary(
  * search – main entry point. FTS-only.
  *
  * Stop-word-only queries (e.g. "the and is") collapse to ''::tsquery via
- * websearch_to_tsquery('english') and return an empty result immediately —
- * no fallback scan is attempted.
+ * websearch_to_tsquery('english'). Scoped requests use a bounded literal
+ * fallback inside the already-authorized scope only; unscoped requests still do
+ * not run a broad fallback scan.
  *
  * @param q     Raw query string (validated by caller: non-empty when present)
  * @param opts  { channelId?, conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset? }
@@ -526,12 +657,28 @@ async function searchOnce(
   }
 
   const trimmed = String(q).trim();
-  const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
-  const ftsMeta = buildFtsParts(trimmed, opts);
 
   return await runSearchTransaction(async (client) => {
+    const tsqueryMetaRes = await client.query(
+      `SELECT numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes`,
+      [trimmed],
+    );
+    const isStopwordOnlyQuery = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0) === 0;
+
+    if (isStopwordOnlyQuery) {
+      const literalMeta = buildScopedLiteralParts(trimmed, opts);
+      const literalRes = await client.query(literalMeta.sql, literalMeta.params);
+      if (literalRes.rows[0]?.__scopeAccess === false) {
+        const err: any = new Error('Access denied');
+        err.statusCode = 403;
+        throw err;
+      }
+      return buildResult(literalRes.rows, literalMeta.q, literalMeta.offset, literalMeta.limit);
+    }
+
+    const ftsMeta = buildFtsParts(trimmed, opts);
     const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
-    if (scoped && ftsRes.rows[0]?.__scopeAccess === false) {
+    if (ftsRes.rows[0]?.__scopeAccess === false) {
       const err: any = new Error('Access denied');
       err.statusCode = 403;
       throw err;

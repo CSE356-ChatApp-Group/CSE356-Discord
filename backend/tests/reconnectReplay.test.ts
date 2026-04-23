@@ -98,39 +98,37 @@ describe('reconnectReplay bounds', () => {
     const rows = await loadReplayableMessagesForUser('user-3', 5_000, 25_000);
 
     expect(rows).toEqual([]);
-    expect(withTransaction).toHaveBeenCalledTimes(2);
+    expect(withTransaction).toHaveBeenCalledTimes(1);
     expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'timeout' });
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 'user-3',
         replayLimit: expect.any(Number),
+        replayAttempt: 1,
         overloadStage: 0,
       }),
       'WS reconnect replay skipped after bounded DB failure',
     );
   });
 
-  it('retries once on statement timeout then succeeds', async () => {
-    let call = 0;
-    withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any[]>) => {
-      call += 1;
-      const client = {
-        query: jest.fn()
-          .mockResolvedValueOnce({})
-          .mockResolvedValueOnce({ rows: [{ id: 'msg-retry', content: 'ok' }] }),
-      };
-      if (call === 1) {
-        throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
-      }
-      return run(client);
-    });
+  it('does not retry after the first replay timeout', async () => {
+    withTransaction.mockRejectedValue(
+      Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }),
+    );
 
     const disconnectedAtMs = 5_000_000;
     const reconnectObservedAtMs = 5_030_000;
     const rows = await loadReplayableMessagesForUser('user-retry', disconnectedAtMs, reconnectObservedAtMs);
 
-    expect(rows).toEqual([{ id: 'msg-retry', content: 'ok' }]);
-    expect(withTransaction).toHaveBeenCalledTimes(2);
-    expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'ok' });
+    expect(rows).toEqual([]);
+    expect(withTransaction).toHaveBeenCalledTimes(1);
+    expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'timeout' });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-retry',
+        replayAttempt: 1,
+      }),
+      'WS reconnect replay skipped after bounded DB failure',
+    );
   });
 });

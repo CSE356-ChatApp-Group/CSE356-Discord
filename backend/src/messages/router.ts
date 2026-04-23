@@ -15,6 +15,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const os = require('os');
 const express = require('express');
 const { rateLimit } = require('express-rate-limit');
 const { RedisStore } = require('rate-limit-redis');
@@ -206,6 +207,102 @@ function isMessagePostInsertDbTimeout(err) {
   if (/canceling statement due to statement timeout/i.test(msg)) return true;
   if (code === '08P01' && /timeout/i.test(msg)) return true;
   return false;
+}
+
+function buildMessagePostTimeoutPhaseLog({
+  err,
+  req,
+  channelId,
+  conversationId,
+  attachments,
+  txPhases,
+}: {
+  err: any;
+  req: any;
+  channelId: string | null;
+  conversationId: string | null;
+  attachments: Array<unknown>;
+  txPhases: { t0: number; t_access: number; t_insert: number; t_later: number };
+}) {
+  const now = Date.now();
+  const hadAttachments = attachments.length > 0;
+  const reachedAccess = txPhases.t_access > 0;
+  const reachedInsert = txPhases.t_insert > 0;
+  const reachedLater = txPhases.t_later > 0;
+  let timeoutPhase: 'access-check' | 'insert' | 'later-step' | 'commit' = 'access-check';
+  let tx_access_check_ms: number | null = null;
+  let tx_insert_ms: number | null = null;
+  let tx_later_step_ms: number | null = null;
+  let tx_commit_ms: number | null = null;
+
+  if (!reachedAccess) {
+    tx_access_check_ms = Math.max(0, now - txPhases.t0);
+  } else if (!reachedInsert) {
+    timeoutPhase = 'insert';
+    tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
+    tx_insert_ms = Math.max(0, now - txPhases.t_access);
+  } else if (!reachedLater) {
+    timeoutPhase = 'later-step';
+    tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
+    tx_insert_ms = Math.max(0, txPhases.t_insert - txPhases.t_access);
+    tx_later_step_ms = Math.max(0, now - txPhases.t_insert);
+  } else {
+    timeoutPhase = 'commit';
+    tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
+    tx_insert_ms = Math.max(0, txPhases.t_insert - txPhases.t_access);
+    tx_later_step_ms = Math.max(0, txPhases.t_later - txPhases.t_insert);
+    tx_commit_ms = Math.max(0, now - txPhases.t_later);
+  }
+
+  return {
+    event: 'post_messages_tx_timeout_phases',
+    gradingNote: 'correlate_with_post_messages_timeout',
+    requestId: req.id,
+    instance: `${os.hostname()}:${process.env.PORT || 'unknown'}`,
+    targetType: channelId ? 'channel' : 'conversation',
+    channelId: channelId ?? undefined,
+    conversationId: conversationId ?? undefined,
+    timeoutPhase,
+    tx_access_check_ms,
+    tx_insert_ms,
+    tx_later_step_ms,
+    tx_commit_ms,
+    hadAttachments,
+    pgCode: err?.code,
+    pgMessage: err?.message,
+  };
+}
+
+function buildMessagePostSuccessPhaseLog({
+  req,
+  channelId,
+  conversationId,
+  attachments,
+  txPhases,
+  txDoneAt,
+}: {
+  req: any;
+  channelId: string | null;
+  conversationId: string | null;
+  attachments: Array<unknown>;
+  txPhases: { t0: number; t_access: number; t_insert: number; t_later: number };
+  txDoneAt: number;
+}) {
+  const tx_total_ms = txDoneAt - txPhases.t0;
+  return {
+    event: 'post_messages_tx_phases',
+    gradingNote: 'correlate_with_post_messages_timeout',
+    requestId: req.id,
+    channelId: channelId ?? undefined,
+    conversationId: conversationId ?? undefined,
+    targetType: channelId ? 'channel' : 'conversation',
+    tx_access_check_ms: txPhases.t_access - txPhases.t0,
+    tx_insert_ms: txPhases.t_insert - txPhases.t_access,
+    tx_later_step_ms: txPhases.t_later - txPhases.t_insert,
+    tx_commit_ms: txDoneAt - txPhases.t_later,
+    tx_total_ms,
+    had_attachments: attachments.length > 0,
+  };
 }
 
 async function flushConversationLastMessageUpdate(conversationId: string) {
@@ -1301,9 +1398,17 @@ router.post('/',
     if (!validate(req, res)) return;
     let idemRedisKey: string | null = null;
     let idemLease = false;
+    let channelId: string | null = null;
+    let conversationId: string | null = null;
+    let threadId: string | null = null;
+    let attachments: any[] = [];
+    const txPhases = { t0: 0, t_access: 0, t_insert: 0, t_later: 0 };
     try {
-      const { content, channelId, conversationId, threadId } = req.body;
-      const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
+      const { content } = req.body;
+      channelId = req.body.channelId ?? null;
+      conversationId = req.body.conversationId ?? null;
+      threadId = req.body.threadId ?? null;
+      attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
 
       if (!channelId && !conversationId) {
         return res.status(400).json({ error: 'channelId or conversationId required' });
@@ -1384,110 +1489,154 @@ router.post('/',
         }
       }
 
-      // Access-check + INSERT + partial hydrate in a single CTE round-trip.
-      // Holds the pool connection for 3 queries (BEGIN, CTE, COMMIT) instead
-      // of the prior 5 (access-check, BEGIN, INSERT, COMMIT, hydrated-SELECT),
-      // cutting connection hold time ~40% and improving throughput under contention.
       let communityId: string | null = null;
-      const txPhases = { t0: 0, t_cte: 0, t_attach: 0 };
       txPhases.t0 = Date.now();
       const baseMessage = await withTransaction(async (client) => {
         await client.query(`SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`);
-        let rows: any[];
+        await client.query(`SET LOCAL synchronous_commit = off`);
+        let row: any;
 
         if (channelId) {
-          ({ rows } = await client.query(
-            `WITH access AS (
-               SELECT c.community_id AS community_id
-               FROM   channels c
-               JOIN   community_members community_member
-                 ON   community_member.community_id = c.community_id
-                AND   community_member.user_id = $2
-               WHERE  c.id = $1
-                 AND  (c.is_private = FALSE
-                       OR EXISTS (
-                         SELECT 1 FROM channel_members
-                         WHERE  channel_id = c.id AND user_id = $2
-                       ))
-                 AND  EXISTS (SELECT 1 FROM users WHERE id = $2)
-             ), ins AS (
-               INSERT INTO messages (channel_id, author_id, content, thread_id)
-               SELECT $1, $2, $3, $4 FROM access
-               RETURNING ${MESSAGE_RETURNING_FIELDS}
-             )
-             SELECT
-               (SELECT EXISTS(SELECT 1 FROM users WHERE id = $2)) AS author_exists,
-               (SELECT COUNT(*) FROM access)::int             AS has_access,
-               (SELECT community_id FROM access LIMIT 1)      AS community_id,
-               ins.id,
-               ins.channel_id,
-               ins.conversation_id,
-               ins.author_id,
-               ins.content,
-               ins.type,
-               ins.thread_id,
-               ins.edited_at,
-               ins.deleted_at,
-               ins.created_at,
-               ins.updated_at,
-               ${MESSAGE_AUTHOR_JSON},
-               '[]'::json                                     AS attachments
-             FROM   (VALUES (1)) dummy
-             LEFT   JOIN ins ON TRUE
-             LEFT   JOIN users u ON u.id = ins.author_id`,
+          const accessRes = await client.query(
+            `SELECT
+               EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
+               EXISTS (
+                 SELECT 1
+                 FROM channels c
+                 JOIN community_members community_member
+                   ON community_member.community_id = c.community_id
+                  AND community_member.user_id = $2
+                 WHERE c.id = $1
+                   AND (
+                     c.is_private = FALSE
+                     OR EXISTS (
+                       SELECT 1
+                       FROM channel_members
+                       WHERE channel_id = c.id AND user_id = $2
+                     )
+                   )
+               ) AS has_access,
+               (
+                 SELECT c.community_id
+                 FROM channels c
+                 JOIN community_members community_member
+                   ON community_member.community_id = c.community_id
+                  AND community_member.user_id = $2
+                 WHERE c.id = $1
+                   AND (
+                     c.is_private = FALSE
+                     OR EXISTS (
+                       SELECT 1
+                       FROM channel_members
+                       WHERE channel_id = c.id AND user_id = $2
+                     )
+                   )
+                 LIMIT 1
+               ) AS community_id`,
+            [channelId, req.user.id],
+          );
+          txPhases.t_access = Date.now();
+          const accessRow = accessRes.rows[0];
+          if (accessRow && accessRow.author_exists === false) {
+            const err: any = new Error('Session no longer valid');
+            err.statusCode = 401;
+            err.messagePostDenyReason = 'author_missing';
+            throw err;
+          }
+          if (!accessRow?.has_access) {
+            const err: any = new Error('Access denied');
+            err.statusCode = 403;
+            err.messagePostDenyReason = 'channel_access';
+            throw err;
+          }
+
+          communityId = accessRow.community_id ?? null;
+
+          const insertRes = await client.query(
+            `INSERT INTO messages (channel_id, author_id, content, thread_id)
+             VALUES ($1, $2, $3, $4)
+             RETURNING ${MESSAGE_RETURNING_FIELDS}`,
             [channelId, req.user.id, content?.trim() || null, threadId || null],
-          ));
-        } else {
-          ({ rows } = await client.query(
-            `WITH access AS (
-               SELECT 1
-               FROM   conversation_participants
-               WHERE  conversation_id = $1 AND user_id = $2 AND left_at IS NULL
-                 AND  EXISTS (SELECT 1 FROM users WHERE id = $2)
-             ), ins AS (
-               INSERT INTO messages (conversation_id, author_id, content, thread_id)
-               SELECT $1, $2, $3, $4 FROM access
-               RETURNING ${MESSAGE_RETURNING_FIELDS}
-             )
-             SELECT
-               (SELECT EXISTS(SELECT 1 FROM users WHERE id = $2)) AS author_exists,
-               (SELECT COUNT(*) FROM access)::int             AS has_access,
-               ins.id,
-               ins.channel_id,
-               ins.conversation_id,
-               ins.author_id,
-               ins.content,
-               ins.type,
-               ins.thread_id,
-               ins.edited_at,
-               ins.deleted_at,
-               ins.created_at,
-               ins.updated_at,
+          );
+          txPhases.t_insert = Date.now();
+
+          const hydrateRes = await client.query(
+            `SELECT
+               m.id,
+               m.channel_id,
+               m.conversation_id,
+               m.author_id,
+               m.content,
+               m.type,
+               m.thread_id,
+               m.edited_at,
+               m.deleted_at,
+               m.created_at,
+               m.updated_at,
                ${MESSAGE_AUTHOR_JSON},
-               '[]'::json                                     AS attachments
-             FROM   (VALUES (1)) dummy
-             LEFT   JOIN ins ON TRUE
-             LEFT   JOIN users u ON u.id = ins.author_id`,
+               '[]'::json AS attachments
+             FROM messages m
+             LEFT JOIN users u ON u.id = m.author_id
+             WHERE m.id = $1`,
+            [insertRes.rows[0].id],
+          );
+          row = hydrateRes.rows[0] || insertRes.rows[0];
+        } else {
+          const accessRes = await client.query(
+            `SELECT
+               EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
+               COUNT(*)::int                             AS has_access
+             FROM conversation_participants
+             WHERE conversation_id = $1
+               AND user_id = $2
+               AND left_at IS NULL`,
+            [conversationId, req.user.id],
+          );
+          txPhases.t_access = Date.now();
+          const accessRow = accessRes.rows[0];
+          if (accessRow && accessRow.author_exists === false) {
+            const err: any = new Error('Session no longer valid');
+            err.statusCode = 401;
+            err.messagePostDenyReason = 'author_missing';
+            throw err;
+          }
+          if (!accessRow?.has_access) {
+            const err: any = new Error('Not a participant');
+            err.statusCode = 403;
+            err.messagePostDenyReason = 'conversation_participant';
+            throw err;
+          }
+
+          const insertRes = await client.query(
+            `INSERT INTO messages (conversation_id, author_id, content, thread_id)
+             VALUES ($1, $2, $3, $4)
+             RETURNING ${MESSAGE_RETURNING_FIELDS}`,
             [conversationId, req.user.id, content?.trim() || null, threadId || null],
-          ));
-        }
+          );
+          txPhases.t_insert = Date.now();
 
-        txPhases.t_cte = Date.now();
-        const row = rows[0];
-        if (row && row.author_exists === false) {
-          const err: any = new Error('Session no longer valid');
-          err.statusCode = 401;
-          err.messagePostDenyReason = 'author_missing';
-          throw err;
+          const hydrateRes = await client.query(
+            `SELECT
+               m.id,
+               m.channel_id,
+               m.conversation_id,
+               m.author_id,
+               m.content,
+               m.type,
+               m.thread_id,
+               m.edited_at,
+               m.deleted_at,
+               m.created_at,
+               m.updated_at,
+               ${MESSAGE_AUTHOR_JSON},
+               '[]'::json AS attachments
+             FROM messages m
+             LEFT JOIN users u ON u.id = m.author_id
+             WHERE m.id = $1`,
+            [insertRes.rows[0].id],
+          );
+          row = hydrateRes.rows[0] || insertRes.rows[0];
         }
-        if (!row?.has_access) {
-          const err: any = new Error(channelId ? 'Access denied' : 'Not a participant');
-          err.statusCode = 403;
-          err.messagePostDenyReason = channelId ? 'channel_access' : 'conversation_participant';
-          throw err;
-        }
-
-        communityId = row.community_id ?? null;
 
         if (attachments.length > 0) {
           const values: string[] = [];
@@ -1518,33 +1667,21 @@ router.post('/',
           );
         }
 
-        txPhases.t_attach = Date.now();
+        txPhases.t_later = Date.now();
         return row;
       });
       const t_tx_done = Date.now();
       {
-        const tx_total_ms = t_tx_done - txPhases.t0;
-        if (tx_total_ms > 500) {
-          const tx_begin_to_cte_ms = txPhases.t_cte - txPhases.t0;
-          const had_attachments = attachments.length > 0;
-          const tx_cte_to_attachments_ms = had_attachments ? txPhases.t_attach - txPhases.t_cte : 0;
-          const tx_attachments_to_commit_ms = had_attachments
-            ? t_tx_done - txPhases.t_attach
-            : 0;
-          const tx_commit_ms = t_tx_done - (had_attachments ? txPhases.t_attach : txPhases.t_cte);
-          logger.info({
-            event: 'post_messages_tx_phases',
-            gradingNote: 'correlate_with_post_messages_timeout',
-            requestId: req.id,
-            channelId: channelId ?? undefined,
-            conversationId: conversationId ?? undefined,
-            tx_begin_to_cte_ms,
-            tx_cte_to_attachments_ms,
-            tx_attachments_to_commit_ms,
-            tx_commit_ms,
-            tx_total_ms,
-            had_attachments,
-          }, 'POST /messages tx phase timing');
+        const successLog = buildMessagePostSuccessPhaseLog({
+          req,
+          channelId,
+          conversationId,
+          attachments,
+          txPhases,
+          txDoneAt: t_tx_done,
+        });
+        if (successLog.tx_total_ms > 500) {
+          logger.info(successLog, 'POST /messages tx phase timing');
         }
       }
 
@@ -1731,7 +1868,14 @@ router.post('/',
       }
       if (isMessagePostInsertDbTimeout(err)) {
         logger.warn(
-          { requestId: req.id, pgCode: err.code, pgMessage: err.message },
+          buildMessagePostTimeoutPhaseLog({
+            err,
+            req,
+            channelId,
+            conversationId,
+            attachments,
+            txPhases,
+          }),
           'POST /messages: insert hit statement/query timeout (likely lock contention on hot channel)',
         );
         return res
