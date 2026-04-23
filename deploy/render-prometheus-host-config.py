@@ -66,7 +66,7 @@ def _node_exporter_targets(hosts_and_labels: list[tuple[str, str]]) -> str:
 
     Args:
         hosts_and_labels: list of (host_ip, vm_label) tuples
-        Example: [("10.0.1.62", "vm1"), ("10.0.3.243", "vm2"), ("10.0.2.164", "vm3")]
+        Example: [("10.0.0.237", "vm1"), ("10.0.3.243", "vm2"), ("10.0.2.164", "vm3")]
     """
     lines: list[str] = []
     for host, label in hosts_and_labels:

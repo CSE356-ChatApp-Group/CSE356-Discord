@@ -32,7 +32,9 @@ fi
 VM1=130.245.136.44
 VM2=130.245.136.137
 VM3=130.245.136.54
-VM1_INTERNAL=10.0.1.62
+# VM1 app private IP (ens3). Do not use the DB VM (10.0.1.62) — Prometheus chatapp-api
+# scrape targets must hit Node workers on this host or Grafana shows 12/16 "up".
+VM1_INTERNAL=10.0.0.237
 VM2_INTERNAL=10.0.3.243
 VM3_INTERNAL=10.0.2.164
 PROD_USER="${PROD_USER:-ubuntu}"
