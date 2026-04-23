@@ -32,7 +32,7 @@ volumes:
   frontend_node_modules:
   # Shared by api + migrate; same pattern as frontend_node_modules.
   # If the API returns 400/500 on POST with errors like "Cannot find module '../encodings'" (iconv-lite)
-  # or `tsx` fails with ERR_MODULE_NOT_FOUND esbuild, clear and reinstall:
+  # or `tsx`/iconv-lite fails (ERR_MODULE_NOT_FOUND esbuild / '../encodings'), clear and reinstall:
   #   docker compose down && docker volume rm <project>_backend_node_modules && docker compose up -d
   #   docker compose exec -u root api sh -c 'cd /app && rm -rf node_modules/* && npm ci' && docker compose restart api
   backend_node_modules:
@@ -73,8 +73,9 @@ services:
   api:
     image: node:20-alpine
     working_dir: /app
-    # npm ci + heal: named volume can retain a partial tree; tsx then fails with ERR_MODULE_NOT_FOUND esbuild.
-    command: sh -c "npm ci && (node -e \"require('esbuild')\" 2>/dev/null || npm install esbuild@^0.27.5 --no-audit --no-fund) && npm run dev"
+    # npm ci + heal: named volume can retain a partial tree (missing esbuild for tsx, or
+    # iconv-lite/encodings for body-parser → "Cannot find module '../encodings'").
+    command: sh -c "npm ci && (node -e \"require('esbuild');require('iconv-lite')\" 2>/dev/null || npm install esbuild@^0.27.5 iconv-lite@~0.4.24 --no-audit --no-fund) && npm run dev"
     volumes:
       - ./backend:/app
       - ./migrations:/migrations
