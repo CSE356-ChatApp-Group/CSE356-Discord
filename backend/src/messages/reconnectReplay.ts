@@ -51,20 +51,6 @@ const WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED = Math.min(
   Math.max(1000, WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS),
 );
 
-const WS_MESSAGE_REPLAY_TIMEOUT_RETRY_MS = Math.min(
-  500,
-  Math.max(
-    0,
-    Math.floor(Number(process.env.WS_MESSAGE_REPLAY_TIMEOUT_RETRY_MS || '75')),
-  ),
-);
-
-function replayDelay(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms).unref?.();
-  });
-}
-
 const rawReplayMaxConcurrent = Number(process.env.WS_MESSAGE_REPLAY_MAX_CONCURRENT || '6');
 const WS_MESSAGE_REPLAY_MAX_CONCURRENT =
   Number.isFinite(rawReplayMaxConcurrent) && rawReplayMaxConcurrent >= 1
@@ -236,51 +222,30 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
     });
 
     let rows;
-    let attempt = 0;
-    // One retry on statement timeout only — gives a cold pool / contended snapshot a second chance
-    // without waiting for the role-level 15s cancel.
-    while (attempt < 2) {
-      attempt += 1;
-      try {
-        rows = await runReplayTransaction();
-        break;
-      } catch (err) {
-        const kind = classifyReplayError(err);
-        if (kind === 'timeout' && attempt < 2 && WS_MESSAGE_REPLAY_TIMEOUT_RETRY_MS > 0) {
-          logger.warn(
-            {
-              err,
-              userId,
-              gapMs,
-              replayAttempt: attempt,
-              replayRetryAfterMs: WS_MESSAGE_REPLAY_TIMEOUT_RETRY_MS,
-              statementTimeoutMs,
-            },
-            'WS reconnect replay statement timeout — retrying once',
-          );
-          await replayDelay(WS_MESSAGE_REPLAY_TIMEOUT_RETRY_MS);
-          continue;
-        }
-        if (kind === 'timeout' || kind === 'pool_busy') {
-          wsReplayQueryTotal.inc({ result: kind });
-          wsReplayQueryDurationMs.observe({ result: kind }, Date.now() - startedAt);
-          logger.warn(
-            {
-              err,
-              userId,
-              gapMs,
-              replayLowerBoundMs,
-              upperBoundMs,
-              replayLimit: profile.limit,
-              overloadStage: profile.stage,
-              replayAttempt: attempt,
-            },
-            'WS reconnect replay skipped after bounded DB failure',
-          );
-          return [];
-        }
-        throw err;
+    try {
+      rows = await runReplayTransaction();
+    } catch (err) {
+      const kind = classifyReplayError(err);
+      if (kind === 'timeout' || kind === 'pool_busy') {
+        wsReplayQueryTotal.inc({ result: kind });
+        wsReplayQueryDurationMs.observe({ result: kind }, Date.now() - startedAt);
+        logger.warn(
+          {
+            err,
+            userId,
+            gapMs,
+            replayLowerBoundMs,
+            upperBoundMs,
+            replayLimit: profile.limit,
+            overloadStage: profile.stage,
+            replayAttempt: 1,
+            statementTimeoutMs,
+          },
+          'WS reconnect replay skipped after bounded DB failure',
+        );
+        return [];
       }
+      throw err;
     }
     wsReplayQueryTotal.inc({ result: 'ok' });
     wsReplayQueryDurationMs.observe({ result: 'ok' }, Date.now() - startedAt);
@@ -299,6 +264,5 @@ module.exports = {
   WS_MESSAGE_REPLAY_MAX_WINDOW_MS,
   WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS,
   WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED,
-  WS_MESSAGE_REPLAY_TIMEOUT_RETRY_MS,
   WS_MESSAGE_REPLAY_MAX_CONCURRENT,
 };
