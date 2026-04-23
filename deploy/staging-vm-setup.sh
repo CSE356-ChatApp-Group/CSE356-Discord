@@ -28,6 +28,8 @@ sudo mkdir -p /opt/chatapp/releases /opt/chatapp/shared
 sudo chown -R "$USER":"$USER" /opt/chatapp
 
 echo "5) Writing Nginx config (frontend static + backend proxy)..."
+sudo install -d -m 0755 /etc/nginx/conf.d
+sudo install -m 0644 "$(dirname "$0")/nginx/admission-control.conf" /etc/nginx/conf.d/admission-control.conf
 sudo tee /etc/nginx/sites-available/chatapp > /dev/null <<'NGINX'
 upstream chatapp_upstream {
   server 127.0.0.1:4000;
@@ -39,43 +41,77 @@ server {
   listen [::]:80 default_server;
   server_name _;
 
-  # Known abusive / malicious clients (Apr 2026); not grader infrastructure.
-  deny 47.20.119.33;
-  deny 45.55.213.87;
-  deny 129.49.101.12;
-  deny 130.245.67.34;
-
   location /ws {
+    limit_req zone=external_ws burst=20 nodelay;
+    limit_conn external_expensive_conns 5;
     proxy_pass http://chatapp_upstream;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 86400;
     proxy_send_timeout 86400;
   }
 
   location ^~ /api/v1/search {
+    limit_req zone=external_expensive burst=50 nodelay;
+    limit_conn external_expensive_conns 5;
     proxy_pass http://chatapp_upstream;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 90s;
     proxy_send_timeout 90s;
     client_max_body_size 10m;
   }
 
+  location ^~ /api/v1/auth/ {
+    limit_req zone=external_auth burst=3 nodelay;
+    proxy_pass http://chatapp_upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ~ ^/api/v1/communities/[^/]+/join/?$ {
+    limit_req zone=community_join_direct burst=60 nodelay;
+    limit_conn external_expensive_conns 5;
+    proxy_pass http://chatapp_upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 30s;
+    client_max_body_size 10m;
+  }
+
   location /api/ {
+    limit_req zone=external_general burst=200 nodelay;
+    limit_conn external_conns 30;
     proxy_pass http://chatapp_upstream;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
     proxy_next_upstream_tries 2;
@@ -97,7 +133,7 @@ server {
     proxy_http_version      1.1;
     proxy_set_header        Host 127.0.0.1:9000;
     proxy_set_header        X-Real-IP \$remote_addr;
-    proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header        X-Forwarded-For \$remote_addr;
     proxy_set_header        X-Forwarded-Proto \$scheme;
     proxy_buffering         off;
     proxy_request_buffering off;
@@ -114,7 +150,7 @@ server {
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-Host $host;
     proxy_set_header X-Forwarded-Prefix /grafana;

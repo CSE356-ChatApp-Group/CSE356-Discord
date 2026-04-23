@@ -15,6 +15,8 @@
 'use strict';
 
 const express = require('express');
+const { rateLimit } = require('express-rate-limit');
+const { RedisStore } = require('rate-limit-redis');
 const { validate: uuidValidate } = require('uuid');
 const { body, param, validationResult } = require('express-validator');
 
@@ -28,12 +30,7 @@ const { publishUserFeedTargets } = require('../websocket/userFeed');
 const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
 const { invalidateCommunityChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
 const { recordEndpointListCache, recordEndpointListCacheBypass } = require('../utils/endpointCacheMetrics');
-const {
-  staleCacheKey,
-  getJsonCache,
-  setJsonCacheWithStale,
-  withDistributedSingleflight,
-} = require('../utils/distributedSingleflight');
+const { apiRateLimitHitsTotal } = require('../utils/metrics');
 
 const router = express.Router();
 router.use(authenticate);
@@ -43,6 +40,93 @@ function validate(req, res) {
   if (!errors.isEmpty()) { res.status(400).json({ errors: errors.array() }); return false; }
   return true;
 }
+
+function parsePositiveIntEnv(name, fallback) {
+  const parsed = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function clientIp(req) {
+  const realIp = req.headers['x-real-ip'];
+  const firstRealIp = Array.isArray(realIp) ? realIp[0] : realIp;
+  if (firstRealIp) return firstRealIp.trim();
+
+  if (req.ip) return req.ip.trim();
+
+  const forwardedFor = req.headers['x-forwarded-for'];
+  const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+  return (firstForwarded ? firstForwarded.split(',')[0] : req.socket?.remoteAddress || 'unknown').trim();
+}
+
+function isInternalIp(ip) {
+  const normalized = String(ip || '').replace(/^::ffff:/, '');
+  const parts = normalized.split('.');
+  const secondOctet = Number.parseInt(parts[1] || '', 10);
+  return normalized === 'localhost'
+    || normalized === '127.0.0.1'
+    || normalized.startsWith('127.')
+    || ip === '::1'
+    || normalized.startsWith('10.')
+    || (parts[0] === '172' && Number.isFinite(secondOctet) && secondOctet >= 16 && secondOctet <= 31)
+    || normalized.startsWith('192.168.');
+}
+
+function communityJoinRateLimitNoop(_req, _res, next) {
+  next();
+}
+
+function buildCommunityJoinIpRateLimiter() {
+  if (process.env.DISABLE_RATE_LIMITS === 'true' || process.env.NODE_ENV === 'test') {
+    return communityJoinRateLimitNoop;
+  }
+  const windowMs = parsePositiveIntEnv('COMMUNITY_JOIN_PER_IP_WINDOW_MS', 60_000);
+  const limit = parsePositiveIntEnv('COMMUNITY_JOIN_PER_IP_MAX', 300);
+  return rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    skip: (req) => isInternalIp(clientIp(req)),
+    keyGenerator: (req) => `cji:${clientIp(req)}`,
+    store: new RedisStore({
+      sendCommand: (...args) => redis.call(...args),
+      prefix: 'rl:community_join:ip:',
+    }),
+    message: { error: 'Too many community join requests from this network. Slow down and try again shortly.' },
+    handler: (_req, res, _next, options) => {
+      apiRateLimitHitsTotal.inc({ scope: 'community_join_ip' });
+      res.status(options.statusCode).json(options.message);
+    },
+  });
+}
+
+function buildCommunityJoinUserRateLimiter() {
+  if (process.env.DISABLE_RATE_LIMITS === 'true' || process.env.NODE_ENV === 'test') {
+    return communityJoinRateLimitNoop;
+  }
+  const windowMs = parsePositiveIntEnv('COMMUNITY_JOIN_PER_USER_WINDOW_MS', 60_000);
+  const limit = parsePositiveIntEnv('COMMUNITY_JOIN_PER_USER_MAX', 120);
+  return rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    skip: (req) => isInternalIp(clientIp(req)),
+    keyGenerator: (req) => `cju:${req.user?.id || 'anon'}`,
+    store: new RedisStore({
+      sendCommand: (...args) => redis.call(...args),
+      prefix: 'rl:community_join:user:',
+    }),
+    message: { error: 'Too many community join requests from this account. Slow down and try again shortly.' },
+    handler: (_req, res, _next, options) => {
+      apiRateLimitHitsTotal.inc({ scope: 'community_join_user' });
+      res.status(options.statusCode).json(options.message);
+    },
+  });
+}
+
+const communityJoinIpRateLimiter = buildCommunityJoinIpRateLimiter();
+const communityJoinUserRateLimiter = buildCommunityJoinUserRateLimiter();
 
 /** Middleware: load caller's community membership into req.membership */
 async function loadMembership(req, res, next) {
@@ -126,10 +210,7 @@ async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
   const keys = [...new Set(
     (Array.isArray(userIds) ? userIds : [])
       .filter((userId) => typeof userId === 'string' && userId)
-      .flatMap((userId) => {
-        const key = communitiesCacheKey(userId, publicVersion);
-        return [key, staleCacheKey(key)];
-      })
+      .map((userId) => communitiesCacheKey(userId, publicVersion))
   )];
   if (!keys.length) return;
   await redis.del(...keys);
@@ -145,47 +226,6 @@ async function bumpPublicCommunitiesVersion() {
 
 const MEMBERS_CACHE_TTL_SECS = 30;
 function membersCacheKey(communityId) { return `community:${communityId}:members`; }
-const communityMembersInflight: Map<string, Promise<any[]>> = new Map();
-const COMMUNITY_MEMBERS_ROSTER_SQL = `
-  SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
-  FROM community_members cm
-  JOIN users u ON u.id = cm.user_id
-  WHERE cm.community_id = $1
-  ORDER BY cm.role DESC, u.username`;
-
-async function loadCommunityMembersRoster(communityId) {
-  const cacheKey = membersCacheKey(communityId);
-  try {
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      try {
-        const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed)) return parsed;
-      } catch {
-        await redis.del(cacheKey).catch(() => {});
-      }
-    }
-  } catch {
-    // Fall through to DB.
-  }
-
-  if (communityMembersInflight.has(cacheKey)) {
-    return communityMembersInflight.get(cacheKey);
-  }
-
-  const load: Promise<any[]> = (async () => {
-    const { rows } = await queryRead(COMMUNITY_MEMBERS_ROSTER_SQL, [communityId]);
-    redis
-      .setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify(rows))
-      .catch(() => {});
-    return rows;
-  })().finally(() => {
-    communityMembersInflight.delete(cacheKey);
-  });
-
-  communityMembersInflight.set(cacheKey, load);
-  return load;
-}
 
 async function listCommunityRealtimeTargets(communityId, userId) {
   const { rows } = await queryRead(
@@ -449,12 +489,18 @@ router.get('/', async (req, res, next) => {
 
   const publicVersion = await getPublicCommunitiesVersion();
   const cacheKey = communitiesCacheKey(req.user.id, publicVersion);
-  const cached = await getJsonCache(redis, cacheKey);
-  if (cached) {
-    recordEndpointListCache('communities', 'hit');
-    return res.json(cached);
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      recordEndpointListCache('communities', 'hit');
+      return res.json(JSON.parse(cached));
+    }
+  } catch {
+    // cache miss – fall through to DB
   }
 
+  // Singleflight: if a DB query is already in-flight for this key, wait for it
+  // rather than spawning a second concurrent query (thundering-herd defence).
   if (communitiesInflight.has(cacheKey)) {
     recordEndpointListCache('communities', 'coalesced');
     try {
@@ -481,24 +527,22 @@ router.get('/', async (req, res, next) => {
   }
 
   recordEndpointListCache('communities', 'miss');
-  const promise: Promise<{ communities: any[] }> = withDistributedSingleflight({
-    redis,
-    cacheKey,
-    inflight: communitiesInflight,
-    readFresh: async () => getJsonCache(redis, cacheKey),
-    readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
-    load: async () => {
-      const { rows } = await queryCommunitiesListBase(
-        COMMUNITIES_LIST_BASE_CORE,
-        [req.user.id],
-        `ORDER BY vc.name, vc.id`,
-      );
-      const payload = await buildCommunitiesListPayload(req.user.id, rows);
-      await setJsonCacheWithStale(redis, cacheKey, payload, COMMUNITIES_CACHE_TTL_SECS);
-      writeLastGoodCommunitiesPayload(req.user.id, payload);
-      return payload;
-    },
-  });
+  const promise: Promise<{ communities: any[] }> = (async () => {
+    const { rows } = await queryCommunitiesListBase(
+      COMMUNITIES_LIST_BASE_CORE,
+      [req.user.id],
+      `ORDER BY vc.name, vc.id`,
+    );
+    const payload = await buildCommunitiesListPayload(req.user.id, rows);
+    redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
+    writeLastGoodCommunitiesPayload(req.user.id, payload);
+    return payload;
+  })();
+
+  communitiesInflight.set(cacheKey, promise);
+  // Avoid unhandledRejection when the shared in-flight query rejects: .finally()
+  // returns a new promise that mirrors rejection unless we attach a handler.
+  promise.finally(() => communitiesInflight.delete(cacheKey)).catch(() => {});
 
   try {
     res.json(await promise);
@@ -654,7 +698,6 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
 
     await Promise.allSettled([
       invalidateCommunitiesCaches(memberRows.map((r) => r.user_id), publicVersion),
-      redis.del(membersCacheKey(req.params.id)),
       fanout.publish(`community:${req.params.id}`, {
         event: 'community:deleted',
         data: { communityId: req.params.id },
@@ -666,49 +709,59 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
 });
 
 // ── Join ───────────────────────────────────────────────────────────────────────
-router.post('/:id/join', param('id').isUUID(), async (req, res, next) => {
-  if (!validate(req, res)) return;
-  try {
-    const { rows: [community] } = await query(
-      'SELECT id, is_public FROM communities WHERE id=$1', [req.params.id]
-    );
-    if (!community) return res.status(404).json({ error: 'Community not found' });
+router.post(
+  '/:id/join',
+  communityJoinIpRateLimiter,
+  communityJoinUserRateLimiter,
+  param('id').isUUID(),
+  async (req, res, next) => {
+    if (!validate(req, res)) return;
+    try {
+      const { rows: [community] } = await query(
+        'SELECT id, is_public FROM communities WHERE id=$1', [req.params.id]
+      );
+      if (!community) return res.status(404).json({ error: 'Community not found' });
 
-    if (!community.is_public) {
-      return res.status(403).json({ error: 'Community is private' });
-    }
+      if (!community.is_public) {
+        return res.status(403).json({ error: 'Community is private' });
+      }
 
-    await query(
-      `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-      [req.params.id, req.user.id]
-    );
-    const realtimeTargets = await listCommunityRealtimeTargets(req.params.id, req.user.id);
-    await Promise.allSettled([
-      invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),
-      presenceService.invalidatePresenceFanoutTargets(req.user.id),
-      invalidateWsBootstrapCache(req.user.id),
-      publishUserFeedTargets([req.user.id], {
-        __wsInternal: {
-          kind: 'subscribe_channels',
-          channels: realtimeTargets,
-        },
-      }),
-    ]);
-    invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
-    {
-      const publicVersion = await getPublicCommunitiesVersion();
-      invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
-    }
-    redis.del(membersCacheKey(req.params.id)).catch(() => {});
+      const { rowCount } = await query(
+        `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+        [req.params.id, req.user.id]
+      );
+      if (!rowCount) {
+        return res.json({ success: true });
+      }
 
-    await fanout.publish(`community:${req.params.id}`, {
-      event: 'community:member_joined',
-      data: { userId: req.user.id, communityId: req.params.id },
-    });
+      const realtimeTargets = await listCommunityRealtimeTargets(req.params.id, req.user.id);
+      await Promise.allSettled([
+        invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),
+        presenceService.invalidatePresenceFanoutTargets(req.user.id),
+        invalidateWsBootstrapCache(req.user.id),
+        publishUserFeedTargets([req.user.id], {
+          __wsInternal: {
+            kind: 'subscribe_channels',
+            channels: realtimeTargets,
+          },
+        }),
+      ]);
+      invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
+      {
+        const publicVersion = await getPublicCommunitiesVersion();
+        invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
+      }
+      redis.del(membersCacheKey(req.params.id)).catch(() => {});
 
-    res.json({ success: true });
-  } catch (err) { next(err); }
-});
+      await fanout.publish(`community:${req.params.id}`, {
+        event: 'community:member_joined',
+        data: { userId: req.user.id, communityId: req.params.id },
+      });
+
+      res.json({ success: true });
+    } catch (err) { next(err); }
+  }
+);
 
 // ── Leave ──────────────────────────────────────────────────────────────────────
 router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
@@ -770,7 +823,13 @@ router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
       return res.status(403).json({ error: 'Not a community member' });
     }
 
-    const rows = await loadCommunityMembersRoster(req.params.id);
+    const { rows } = await queryRead(
+      `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
+       FROM community_members cm JOIN users u ON u.id = cm.user_id
+       WHERE cm.community_id = $1
+       ORDER BY cm.role DESC, u.username`,
+      [req.params.id]
+    );
     const presenceMap = await presenceService.getBulkPresenceDetails(rows.map(r => r.id));
     const members = rows.map(r => ({
       ...r,

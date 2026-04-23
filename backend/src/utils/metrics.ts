@@ -486,10 +486,10 @@ const endpointListCacheInvalidationsTotal = new client.Counter({
   labelNames: ['endpoint', 'reason'],
 });
 
-/** Optional RUM POST /api/v1/rum rate limiter only (not general API traffic). */
+/** API route rate limiters that intentionally shed abusive traffic before hot paths. */
 const apiRateLimitHitsTotal = new client.Counter({
   name: 'api_rate_limit_hits_total',
-  help: 'Requests rejected by optional rate limiters (scope=rum for POST /rum)',
+  help: 'Requests rejected by API route rate limiters, labelled by limiter scope',
   labelNames: ['scope'],
 });
 
@@ -671,6 +671,8 @@ function startPgPoolMetrics(pool) {
     pgBusinessSqlQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
     pgBusinessSqlQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
     apiRateLimitHitsTotal.inc({ scope: 'rum' }, 0);
+    apiRateLimitHitsTotal.inc({ scope: 'community_join_ip' }, 0);
+    apiRateLimitHitsTotal.inc({ scope: 'community_join_user' }, 0);
     clientRumBatchesTotal.inc(0);
     clientWebVitalTimingSeconds.observe({ name: 'LCP' }, 0);
     clientWebVitalClsScore.observe({ name: 'CLS' }, 0);

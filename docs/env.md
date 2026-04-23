@@ -71,13 +71,15 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **Auth / dev** | |
 | `AUTH_BYPASS` | `true` enables dev bypass (never in prod) |
 | `AUTH_BYPASS_USER_ID`, `AUTH_BYPASS_USER_EMAIL`, `AUTH_BYPASS_USER_USERNAME`, `AUTH_BYPASS_USER_DISPLAY_NAME` | Bypass user profile |
-| `DISABLE_RATE_LIMITS` | `true` disables auth rate limits and (when RUM is enabled) `POST /api/v1/rum` limits; use on isolated grading hosts if desired |
+| `DISABLE_RATE_LIMITS` | `true` disables auth rate limits, community join limits, and (when RUM is enabled) `POST /api/v1/rum` limits; use only on isolated grading hosts if desired |
 | `AUTH_REGISTER_RATE_LIMIT_MAX`, `AUTH_REGISTER_RATE_LIMIT_WINDOW_MS` | Register limiter (per IP + credential — each username/email bucket) |
 | `AUTH_GLOBAL_PER_IP_RATE_LIMIT` | Set to `true` to enable **login** global per-IP 429 (`AUTH_LOGIN_GLOBAL_PER_IP_*`); **default off** |
 | `AUTH_REGISTER_GLOBAL_PER_IP_MAX`, `AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS` | Register cap **per client IP** across all usernames (always on unless `DISABLE_RATE_LIMITS` or `NODE_ENV=test`) |
 | `AUTH_LOGIN_RATE_LIMIT_MAX`, `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` | Login limiter (per IP + credential) |
 | `AUTH_LOGIN_GLOBAL_PER_IP_MAX`, `AUTH_LOGIN_GLOBAL_PER_IP_WINDOW_MS` | Login cap per client IP (only when `AUTH_GLOBAL_PER_IP_RATE_LIMIT=true`; **skipped when `NODE_ENV=test`**) |
 | `AUTH_CONNECT_RATE_LIMIT_MAX`, `AUTH_CONNECT_RATE_LIMIT_WINDOW_MS` | OAuth connect-existing limiter |
+| `COMMUNITY_JOIN_PER_IP_MAX`, `COMMUNITY_JOIN_PER_IP_WINDOW_MS` | Redis-backed cap for `POST /communities/:id/join` per client IP (deploy default: `300` per `60000` ms; skipped for internal IPs, `DISABLE_RATE_LIMITS`, and tests) |
+| `COMMUNITY_JOIN_PER_USER_MAX`, `COMMUNITY_JOIN_PER_USER_WINDOW_MS` | Redis-backed cap for `POST /communities/:id/join` per authenticated user (deploy default: `120` per `60000` ms; skipped for internal IPs, `DISABLE_RATE_LIMITS`, and tests) |
 | `OAUTH_PENDING_SECRET`, `OAUTH_LINK_SECRET` | OAuth state tokens (fallback: JWT secrets) |
 | `BCRYPT_MAX_CONCURRENT`, `BCRYPT_MAX_WAITERS`, `BCRYPT_QUEUE_WAIT_TIMEOUT_MS` | Password hashing queue; watch `auth_bcrypt_active`, `auth_bcrypt_waiters`, and `auth_bcrypt_queue_rejects_total` |
 | `BCRYPT_ROUNDS` | bcrypt cost (default **1**; bcrypt raises configured costs **1–3** to **4** in the stored hash) |

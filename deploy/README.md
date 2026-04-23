@@ -296,7 +296,7 @@ This fails if active `chatapp@` workers are missing from `upstream app` (for exa
 sudo CHATAPP_NGINX_SITE_PATH=/etc/nginx/sites-available/chatapp ./deploy/patch-nginx-deny-ip.sh 203.0.113.10
 ```
 
-Idempotent: safe to re-run. Prefer updating `deploy/nginx/staging.conf` / prod bootstrap templates in-repo too so the next full nginx rewrite keeps the rule.
+Idempotent: safe to re-run. Prefer updating `deploy/nginx/staging.conf` / prod bootstrap templates in-repo too so the next full nginx rewrite keeps the rule. Shared edge throttles now live in [`deploy/nginx/admission-control.conf`](./nginx/admission-control.conf), which the staging/prod VM bootstrap scripts install into `/etc/nginx/conf.d/admission-control.conf`.
 
 ### App VM disk hygiene (journal, apt cache, nginx logrotate)
 

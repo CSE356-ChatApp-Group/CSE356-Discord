@@ -92,9 +92,15 @@ function issueTokens(res, user) {
 }
 
 function buildClientIp(req) {
+  const realIp = req.headers['x-real-ip'];
+  const firstRealIp = Array.isArray(realIp) ? realIp[0] : realIp;
+  if (firstRealIp) return firstRealIp.trim();
+
+  if (req.ip) return req.ip.trim();
+
   const forwardedFor = req.headers['x-forwarded-for'];
   const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-  return (firstForwarded ? firstForwarded.split(',')[0] : req.ip || req.socket?.remoteAddress || 'unknown').trim();
+  return (firstForwarded ? firstForwarded.split(',')[0] : req.socket?.remoteAddress || 'unknown').trim();
 }
 
 function buildAuthKey(req, route) {

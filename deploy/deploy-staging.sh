@@ -188,9 +188,12 @@ echo "0) Ensuring Nginx serves frontend UI and proxies backend routes..."
 # then substitute __LIVE_PORT__ on the server and install it.  This keeps the
 # config reviewable and diffable in version control instead of buried in a heredoc.
 scp "${SCRIPT_DIR}/nginx/staging.conf" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp-nginx.conf"
+scp "${SCRIPT_DIR}/nginx/admission-control.conf" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp-admission-control.conf"
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
   LIVE_PORT='${LIVE_PORT}'
+  sudo install -d -m 0755 /etc/nginx/conf.d
+  sudo install -m 0644 /tmp/chatapp-admission-control.conf /etc/nginx/conf.d/admission-control.conf
   sed \"s/__LIVE_PORT__/\${LIVE_PORT}/g\" /tmp/chatapp-nginx.conf | sudo tee /etc/nginx/sites-available/chatapp >/dev/null
   sudo ln -sfn /etc/nginx/sites-available/chatapp /etc/nginx/sites-enabled/chatapp
   sudo rm -f /etc/nginx/sites-enabled/default

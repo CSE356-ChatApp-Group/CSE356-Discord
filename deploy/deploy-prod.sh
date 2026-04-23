@@ -34,8 +34,6 @@ PROM_VM2_HOST="${PROM_VM2_HOST:-}"
 PROM_VM2_WORKERS="${PROM_VM2_WORKERS:-0}"
 PROM_VM3_HOST="${PROM_VM3_HOST:-}"
 PROM_VM3_WORKERS="${PROM_VM3_WORKERS:-0}"
-REDIS_HOST="${REDIS_HOST:-}"
-PROM_REDIS_HOST="${PROM_REDIS_HOST:-}"
 GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
 LOCAL_ARTIFACT_PATH="${LOCAL_ARTIFACT_PATH:-}"
 RELEASE_DIR="/opt/chatapp/releases"
@@ -1211,9 +1209,6 @@ scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o Contr
 scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
     "${SCRIPT_DIR}/env/prod.required.env" "${PROD_USER}@${PROD_HOST}:/tmp/prod.required.env"
-APP_HOST="${APP_HOST:-$(ssh_prod 'hostname -I 2>/dev/null' | awk '{print $1}')}"
-APP_HOST="${APP_HOST:-${PROD_HOST}}"
-REDIS_HOST="${REDIS_HOST:-${APP_HOST}}"
 ssh_prod "
   set -e
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
@@ -1221,23 +1216,6 @@ ssh_prod "
   sudo chmod +x /opt/chatapp/shared/redis-wait.sh
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
-  # Canonical Redis endpoint: keep REDIS_HOST explicit and normalize REDIS_URL from it.
-  sudo grep -q '^REDIS_HOST=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^REDIS_HOST=.*/REDIS_HOST=${REDIS_HOST}/' /opt/chatapp/shared/.env \
-    || echo 'REDIS_HOST=${REDIS_HOST}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  _redis_password=\$(sudo grep -E '^REDIS_PASSWORD=' /opt/chatapp/shared/.env | tail -1 | cut -d= -f2- || true)
-  if [ -z \"\$_redis_password\" ]; then
-    _redis_url_existing=\$(sudo grep -E '^REDIS_URL=' /opt/chatapp/shared/.env | tail -1 | cut -d= -f2- || true)
-    _redis_password=\$(printf '%s' \"\$_redis_url_existing\" | sed -n 's#^redis://:\\([^@]*\\)@.*#\\1#p')
-  fi
-  if [ -z \"\$_redis_password\" ]; then
-    echo 'ERROR: REDIS_PASSWORD missing and cannot derive password from REDIS_URL in /opt/chatapp/shared/.env'
-    exit 1
-  fi
-  _redis_url_new=\"redis://:\${_redis_password}@${REDIS_HOST}:6379/0\"
-  sudo grep -q '^REDIS_URL=' /opt/chatapp/shared/.env \
-    && sudo sed -i \"s#^REDIS_URL=.*#REDIS_URL=\${_redis_url_new}#\" /opt/chatapp/shared/.env \
-    || echo \"REDIS_URL=\${_redis_url_new}\" | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # CHATAPP_INSTANCES: persist worker count so monitoring and health endpoints
   # can report the expected topology without re-deriving from systemd.
   sudo grep -q '^CHATAPP_INSTANCES=' /opt/chatapp/shared/.env \
@@ -1386,47 +1364,6 @@ ssh_prod "
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \
     --required /tmp/prod.required.env
-  # Keep Redis on the dedicated production VM across deploys while preserving
-  # the existing password/DB from the host-local secret file.
-  sudo env CHATAPP_REDIS_HOST='${PROD_REDIS_HOST:-10.0.1.233}' python3 - <<'PY'
-from pathlib import Path
-import os
-from urllib.parse import urlsplit, urlunsplit
-
-env_path = Path('/opt/chatapp/shared/.env')
-lines = env_path.read_text(encoding='utf-8', errors='replace').splitlines()
-redis_idx = None
-redis_url = None
-for idx, raw in enumerate(lines):
-    line = raw.strip()
-    if line.startswith('export '):
-        line = line[7:].strip()
-    if line.startswith('REDIS_URL='):
-        redis_idx = idx
-        redis_url = line.split('=', 1)[1]
-
-if redis_idx is None or not redis_url:
-    raise SystemExit('REDIS_URL missing from /opt/chatapp/shared/.env')
-
-target_host = os.environ.get('CHATAPP_REDIS_HOST') or '10.0.1.233'
-parts = urlsplit(redis_url)
-userinfo, sep, hostport = parts.netloc.rpartition('@')
-prefix = f'{userinfo}@' if sep else ''
-suffix = ''
-if hostport.startswith('['):
-    end = hostport.find(']')
-    if end != -1:
-        suffix = hostport[end + 1:]
-elif ':' in hostport:
-    maybe_host, maybe_port = hostport.rsplit(':', 1)
-    if maybe_port.isdigit():
-        suffix = f':{maybe_port}'
-
-new_url = urlunsplit((parts.scheme, f'{prefix}{target_host}{suffix}', parts.path, parts.query, parts.fragment))
-lines[redis_idx] = f'REDIS_URL={new_url}'
-env_path.write_text('\n'.join(lines).rstrip() + '\n', encoding='utf-8')
-PY
-  sudo /usr/bin/bash /opt/chatapp/shared/redis-wait.sh
   rm -f /tmp/apply-env-profile.py /tmp/prod.required.env
   sudo systemctl daemon-reload
   echo 'systemd unit installed'"
@@ -1648,7 +1585,7 @@ block = """  location ^~ /api/v1/search {
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 90s;
     proxy_send_timeout 90s;
@@ -1804,7 +1741,7 @@ block = """  location ^~ /api/v1/auth/ {
     proxy_set_header Host $host;
     proxy_set_header X-Request-Id $request_id;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
     proxy_next_upstream_tries 2;
@@ -2313,8 +2250,6 @@ echo "10.55. Rendering prometheus-host.yml..."
 PROM_BUILD="$(mktemp)"
 PROM_APP_HOST="${PROM_APP_HOST:-$(ssh_prod 'hostname -I 2>/dev/null' | awk '{print $1}')}"
 PROM_APP_HOST="${PROM_APP_HOST:-10.0.0.237}"
-REDIS_HOST="${REDIS_HOST:-${PROM_APP_HOST}}"
-PROM_REDIS_HOST="${PROM_REDIS_HOST:-${REDIS_HOST}}"
 if [ "${PROM_VM1_WORKERS:-0}" -gt 0 ]; then
   PROM_EXTRA_ARGS=""
   [ -n "${PROM_VM2_HOST:-}" ] && [ "${PROM_VM2_WORKERS:-0}" -gt 0 ] && \
@@ -2326,7 +2261,6 @@ if [ "${PROM_VM1_WORKERS:-0}" -gt 0 ]; then
     --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
     --output "${PROM_BUILD}" \
     --app-host "${PROM_APP_HOST}" \
-    --redis-host "${PROM_REDIS_HOST}" \
     --vm1-workers "${PROM_VM1_WORKERS}" \
     $PROM_EXTRA_ARGS
 else
@@ -2334,7 +2268,6 @@ else
     --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
     --output "${PROM_BUILD}" \
     --app-host "${PROM_APP_HOST}" \
-    --redis-host "${PROM_REDIS_HOST}" \
     --workers "${CHATAPP_INSTANCES}"
 fi
 
@@ -2528,6 +2461,23 @@ ssh_prod "
   if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
     sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml up -d --remove-orphans node-exporter promtail >/dev/null
   fi
+  set -a
+  # shellcheck disable=SC1091
+  source /opt/chatapp/shared/.env 2>/dev/null || true
+  set +a
+  RURL=\"\${REDIS_URL:-redis://127.0.0.1:6379}\"
+  if ! sudo docker ps --format '{{.Names}}' | grep -qx redis_exporter; then
+    if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
+      sudo docker rm -f redis_exporter 2>/dev/null || true
+    fi
+    sudo docker pull oliver006/redis_exporter:latest >/dev/null
+    sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
+      oliver006/redis_exporter:latest --redis.addr=\"\$RURL\"
+    echo 'redis_exporter started (uses REDIS_URL from /opt/chatapp/shared/.env)'
+  else
+    echo 'redis_exporter already running — skipping pull'
+  fi
+
   if [ -f /tmp/pgbouncer-exporter.py.deploy ]; then
     sudo install -m 755 /tmp/pgbouncer-exporter.py.deploy /opt/chatapp-monitoring/pgbouncer-exporter.py
     rm -f /tmp/pgbouncer-exporter.py.deploy
@@ -2563,41 +2513,6 @@ UNIT
     fi
   fi
 "
-
-if [ "${REDIS_HOST}" != "${PROM_APP_HOST}" ]; then
-  ssh_prod "
-    if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
-      sudo docker rm -f redis_exporter >/dev/null 2>&1 || true
-      echo 'Removed stale redis_exporter from app VM (redis exporter now runs on Redis VM)'
-    fi
-  " || echo "WARN: failed to remove stale redis_exporter on app VM (non-fatal)"
-fi
-
-echo "10.7. Ensuring redis_exporter runs on Redis VM (${REDIS_HOST})..."
-# shellcheck disable=SC2086
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-    -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-redis-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${PROD_USER}@${REDIS_HOST}" "
-  set -euo pipefail
-  if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
-    sudo docker rm -f redis_exporter >/dev/null 2>&1 || true
-  fi
-  sudo docker pull oliver006/redis_exporter:latest >/dev/null
-  sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
-    oliver006/redis_exporter:latest --redis.addr='redis://127.0.0.1:6379' >/dev/null
-  echo 'redis_exporter started on Redis VM (:9121)'
-" || echo "WARN: failed to start redis_exporter on Redis VM ${REDIS_HOST} (non-fatal)"
-
-echo "10.75. Verifying monitoring VM can reach Redis exporter (${PROM_REDIS_HOST}:9121)..."
-ssh_monitor "
-  if curl -fsS --max-time 8 http://${PROM_REDIS_HOST}:9121/metrics >/dev/null; then
-    echo 'Monitoring connectivity to Redis exporter OK'
-  else
-    echo 'WARN: monitoring VM cannot reach Redis exporter on ${PROM_REDIS_HOST}:9121 (check firewall/security groups)'
-  fi
-" || echo "WARN: connectivity check to Redis exporter failed (non-fatal)"
-
 echo "✓ Monitoring updated"
 
 ) &
