@@ -136,6 +136,47 @@ async function bumpPublicCommunitiesVersion() {
 
 const MEMBERS_CACHE_TTL_SECS = 30;
 function membersCacheKey(communityId) { return `community:${communityId}:members`; }
+const communityMembersInflight: Map<string, Promise<any[]>> = new Map();
+const COMMUNITY_MEMBERS_ROSTER_SQL = `
+  SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
+  FROM community_members cm
+  JOIN users u ON u.id = cm.user_id
+  WHERE cm.community_id = $1
+  ORDER BY cm.role DESC, u.username`;
+
+async function loadCommunityMembersRoster(communityId) {
+  const cacheKey = membersCacheKey(communityId);
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {
+        await redis.del(cacheKey).catch(() => {});
+      }
+    }
+  } catch {
+    // Fall through to DB.
+  }
+
+  if (communityMembersInflight.has(cacheKey)) {
+    return communityMembersInflight.get(cacheKey);
+  }
+
+  const load: Promise<any[]> = (async () => {
+    const { rows } = await queryRead(COMMUNITY_MEMBERS_ROSTER_SQL, [communityId]);
+    redis
+      .setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify(rows))
+      .catch(() => {});
+    return rows;
+  })().finally(() => {
+    communityMembersInflight.delete(cacheKey);
+  });
+
+  communityMembersInflight.set(cacheKey, load);
+  return load;
+}
 
 async function listCommunityRealtimeTargets(communityId, userId) {
   const { rows } = await queryRead(
@@ -608,6 +649,7 @@ router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, nex
 
     await Promise.allSettled([
       invalidateCommunitiesCaches(memberRows.map((r) => r.user_id), publicVersion),
+      redis.del(membersCacheKey(req.params.id)),
       fanout.publish(`community:${req.params.id}`, {
         event: 'community:deleted',
         data: { communityId: req.params.id },
@@ -723,13 +765,7 @@ router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
       return res.status(403).json({ error: 'Not a community member' });
     }
 
-    const { rows } = await queryRead(
-      `SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
-       FROM community_members cm JOIN users u ON u.id = cm.user_id
-       WHERE cm.community_id = $1
-       ORDER BY cm.role DESC, u.username`,
-      [req.params.id]
-    );
+    const rows = await loadCommunityMembersRoster(req.params.id);
     const presenceMap = await presenceService.getBulkPresenceDetails(rows.map(r => r.id));
     const members = rows.map(r => ({
       ...r,
