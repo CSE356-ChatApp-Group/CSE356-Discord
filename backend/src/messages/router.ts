@@ -160,6 +160,10 @@ const {
   splitUserTargets,
   userFeedRedisChannelForUserId,
 } = require('../websocket/userFeed');
+const {
+  incrementChannelMessageCount,
+  decrementChannelMessageCount,
+} = require('./channelMessageCounter');
 import { MESSAGE_RETURNING_FIELDS, MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
 const router = express.Router();
@@ -739,33 +743,6 @@ async function publishConversationEventNow(conversationId, event, data) {
   return fanoutPublishedAt(payload);
 }
 
-async function incrementChannelMessageCount(channelId) {
-  const countKey = `channel:msg_count:${channelId}`;
-  // Hot path: skip cold-init machinery when the counter already exists (one EXISTS + one INCR).
-  if (await redis.exists(countKey)) {
-    await redis.incr(countKey);
-    return;
-  }
-  const ensureInitialized = async () => {
-    const exists = await redis.exists(countKey);
-    if (exists) return;
-    const { rows } = await query(
-      `SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL`,
-      [channelId]
-    );
-    const total = rows[0]?.cnt ?? 0;
-    await redis.set(countKey, total, 'NX');
-  };
-  if (channelMsgCountInitInflight.has(countKey)) {
-    await channelMsgCountInitInflight.get(countKey);
-  } else {
-    const p = ensureInitialized().finally(() => channelMsgCountInitInflight.delete(countKey));
-    channelMsgCountInitInflight.set(countKey, p);
-    await p;
-  }
-  await redis.incr(countKey);
-}
-
 async function loadHydratedMessageById(messageId) {
   const { rows } = await query(
     `SELECT ${MESSAGE_SELECT_FIELDS},
@@ -921,7 +898,6 @@ const DEFAULT_CONTEXT_SIDE_LIMIT = 25;
 // when a popular target's cache key expires simultaneously for many readers.
 const msgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
 const convMsgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
-const channelMsgCountInitInflight: Map<string, Promise<void>> = new Map();
 
 // ── GET /messages ──────────────────────────────────────────────────────────────
 router.get('/',
@@ -2058,7 +2034,7 @@ router.delete('/:id',
         repointChannelLastMessage(message.channel_id).catch((err) =>
           logger.warn({ err, channelId: message.channel_id }, 'repointChannelLastMessage failed'),
         );
-        redis.decr(`channel:msg_count:${message.channel_id}`).catch(() => {});
+        decrementChannelMessageCount(message.channel_id).catch(() => {});
         await bustMessagesCacheSafe({ channelId: message.channel_id });
       }
       if (message.conversation_id) {
