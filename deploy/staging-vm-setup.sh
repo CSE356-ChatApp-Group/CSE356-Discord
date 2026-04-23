@@ -56,6 +56,10 @@ server {
     proxy_send_timeout 86400;
   }
 
+  location ~ ^/api/v1(/api/v1)+(.*)$ {
+    rewrite ^ /api/v1$2 last;
+  }
+
   location ^~ /api/v1/search {
     limit_req zone=external_expensive burst=50 nodelay;
     limit_conn external_expensive_conns 5;

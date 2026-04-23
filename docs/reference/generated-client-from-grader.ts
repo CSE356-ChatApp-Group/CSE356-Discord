@@ -80,7 +80,9 @@ export class GeneratedClient {
   ssoPath = '/api/v1/auth/course';
 
   constructor(baseUrl: string) {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+    // Strip trailing /api/v1 so `${baseUrl}/api/v1/...` never becomes /api/v1/api/v1/...
+    // (server + nginx also tolerate duplicates; this keeps the reference client correct.)
+    this.baseUrl = baseUrl.replace(/\/$/, '').replace(/\/api\/v1$/i, '');
     this.jar = new CookieJar();
     this.rt = new RealtimeManager({
       url: () => {

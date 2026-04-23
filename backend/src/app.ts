@@ -300,6 +300,23 @@ api.use('/presence',      presenceRouter);
 api.use('/search',        searchRouter);
 api.use('/attachments',   attachmentsRouter);
 
+// Course / harness clients sometimes pass baseUrl that already ends with /api/v1
+// then call `${baseUrl}/api/v1/...` → /api/v1/api/v1/... which would miss every
+// mount below and fall through to the JSON 404. Collapse duplicate prefixes.
+app.use((req, res, next) => {
+  const raw = req.originalUrl != null ? String(req.originalUrl) : String(req.url || '');
+  const q = raw.indexOf('?');
+  const pathOnly = q === -1 ? raw : raw.slice(0, q);
+  const search = q === -1 ? '' : raw.slice(q);
+  const fixedPath = pathOnly.replace(/^\/api\/v1(?:\/api\/v1)+/, '/api/v1');
+  if (fixedPath !== pathOnly) {
+    const rebuilt = fixedPath + search;
+    req.url = rebuilt;
+    req.originalUrl = rebuilt;
+  }
+  next();
+});
+
 if (process.env.ENABLE_CLIENT_RUM === 'true') {
   app.use('/api/v1', require('./rum/router'));
 }

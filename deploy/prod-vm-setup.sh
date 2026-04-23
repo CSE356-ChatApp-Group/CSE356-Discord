@@ -81,6 +81,11 @@ server {
     proxy_read_timeout 86400;
   }
 
+  # Duplicate /api/v1 prefix (misconfigured harness baseUrl + /api/v1 paths).
+  location ~ ^/api/v1(/api/v1)+(.*)$ {
+    rewrite ^ /api/v1$2 last;
+  }
+
   # Search: allow pool + DB tail without nginx returning 502 while Node still works.
   location ^~ /api/v1/search {
     limit_req zone=external_expensive burst=50 nodelay;
