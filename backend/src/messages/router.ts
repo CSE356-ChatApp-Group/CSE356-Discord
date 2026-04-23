@@ -1493,6 +1493,7 @@ router.post('/',
       txPhases.t0 = Date.now();
       const baseMessage = await withTransaction(async (client) => {
         await client.query(`SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`);
+        await client.query(`SET LOCAL synchronous_commit = off`);
         let row: any;
 
         if (channelId) {
