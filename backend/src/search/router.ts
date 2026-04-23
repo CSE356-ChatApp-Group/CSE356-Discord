@@ -43,6 +43,13 @@ router.get('/', async (req, res, next) => {
     ) {
       channelId = undefined;
     }
+    // When communityId + conversationId are both provided (no explicit channelId), the client
+    // is treating a channel UUID as a "conversationId". Promote it to channelId so the search
+    // filters by channel_id (where messages actually live) rather than conversation_id.
+    if (communityId && conversationId && !channelId) {
+      channelId = conversationId;
+      conversationId = undefined;
+    }
     if (overload.shouldRejectSearchRequests()) {
       return res.status(503).json({ error: 'Search temporarily unavailable under high load' });
     }
