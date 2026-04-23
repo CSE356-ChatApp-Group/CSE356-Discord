@@ -154,17 +154,31 @@ async function start() {
 
   // Attach WebSocket upgrade handler to the same HTTP server
   server.on('upgrade', (req, socket, head) => {
-    try {
-      const pathname = new URL(req.url || '/', 'http://localhost').pathname;
-      if (pathname === '/ws' && !allowWsUpgrade(req)) {
-        socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
-        socket.destroy();
-        return;
+    void (async () => {
+      let blocked = false;
+      try {
+        const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+        if (pathname === '/ws') {
+          const { getTrustedClientIp } = require('./utils/trustedClientIp');
+          const { isIpAutoBanned } = require('./utils/autoIpBan');
+          if (await isIpAutoBanned(getTrustedClientIp(req))) {
+            const { abuseAutoBanBlocksTotal } = require('./utils/metrics');
+            abuseAutoBanBlocksTotal.inc();
+            socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+            socket.destroy();
+            blocked = true;
+          } else if (!allowWsUpgrade(req)) {
+            socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
+            socket.destroy();
+            blocked = true;
+          }
+        }
+      } catch {
+        // malformed URL — let WS stack reject
       }
-    } catch {
-      // malformed URL — let WS stack reject
-    }
-    wsServer.handleUpgrade(req, socket, head);
+      if (blocked) return;
+      wsServer.handleUpgrade(req, socket, head);
+    })();
   });
 
   server.listen({ port: PORT, backlog: 4096 }, () => {

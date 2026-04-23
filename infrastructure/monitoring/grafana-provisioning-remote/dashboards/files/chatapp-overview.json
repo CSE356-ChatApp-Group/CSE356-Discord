@@ -31,14 +31,17 @@
           "color": {
             "mode": "thresholds"
           },
+          "decimals": 1,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              { "color": "orange", "value": 90 },
+              { "color": "yellow", "value": 99 },
+              { "color": "green", "value": 99.9 }
             ]
           },
-          "unit": "none"
+          "unit": "percent"
         },
         "overrides": []
       },
@@ -58,11 +61,11 @@
       },
       "targets": [
         {
-          "expr": "sum(up{job=\"chatapp-api\"})",
+          "expr": "100 * sum(up{job=\"chatapp-api\"}) / clamp_min(count(up{job=\"chatapp-api\"}), 1)",
           "refId": "A"
         }
       ],
-      "title": "API Targets Up",
+      "title": "% API workers scrape-healthy",
       "type": "stat"
     },
     {
@@ -724,7 +727,7 @@
       "gridPos": { "h": 3, "w": 24, "x": 0, "y": 86 },
       "id": 27,
       "options": {
-        "content": "**Interpreting traffic cliffs:** If **API targets up** but **total rate** and this **ratio** collapse with **no deploy** (`journalctl -t chatapp-deploy`) and **no nginx 5xx burst**, suspect **load harness pause** or **client network path**, not Node crash. **Nginx access logs** remain ground truth for ingress volume; after deploy they include **`rt=`** and **`urt=`** for request/upstream seconds. Optional: run [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) from a host outside the harness and alert if it fails while `up{job=\"chatapp-api\"}` is 1. **DB checkpoint tail latency:** correlate search p95 (above) with **DB iowait / disk busy** when `job=db-node` is scraped; run **`DB_SSH=… ./deploy/tune-postgres-checkpoints.sh`** on the Postgres VM if logs show multi-minute checkpoint writes every few minutes.",
+        "content": "**Interpreting traffic cliffs:** If **% API workers scrape-healthy** is **100%** but **total rate** and this **ratio** collapse with **no deploy** (`journalctl -t chatapp-deploy`) and **no nginx 5xx burst**, suspect **load harness pause** or **client network path**, not Node crash. **Nginx access logs** remain ground truth for ingress volume; after deploy they include **`rt=`** and **`urt=`** for request/upstream seconds. Optional: run [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) from a host outside the harness and alert if it fails while `sum(up{job=\"chatapp-api\"})` matches `count(up{job=\"chatapp-api\"})`. **DB checkpoint tail latency:** correlate search p95 (above) with **DB iowait / disk busy** when `job=db-node` is scraped; run **`DB_SSH=… ./deploy/tune-postgres-checkpoints.sh`** on the Postgres VM if logs show multi-minute checkpoint writes every few minutes.",
         "mode": "markdown"
       },
       "title": "",

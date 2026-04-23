@@ -6,6 +6,9 @@
  * Scope: communityId, channelId, and/or conversationId (see handler: when
  * channelId === conversationId, only conversation scope is used — matches
  * COMPAS generated client searchMessages URL).
+ * When communityId + conversationId are sent without channelId, we only treat
+ * conversationId as a channel UUID if `channels(id, community_id)` matches — otherwise
+ * it stays conversation-scoped (DM messages use conversation_id, not channel_id).
  * Omitting all three is rejected; this route is intentionally scoped-only.
  */
 
@@ -15,6 +18,7 @@ const express = require('express');
 const { authenticate } = require('../middleware/authenticate');
 const { searchLimiter } = require('../middleware/inMemoryApiLimiter');
 const searchClient = require('./client');
+const { query } = require('../db/pool');
 const overload = require('../utils/overload');
 const logger = require('../utils/logger');
 
@@ -43,12 +47,18 @@ router.get('/', async (req, res, next) => {
     ) {
       channelId = undefined;
     }
-    // When communityId + conversationId are both provided (no explicit channelId), the client
-    // is treating a channel UUID as a "conversationId". Promote it to channelId so the search
-    // filters by channel_id (where messages actually live) rather than conversation_id.
+    // COMPAS sometimes sends communityId + a channel UUID in conversationId (no channelId).
+    // Only promote when that UUID is actually a row in `channels` for this community — otherwise
+    // keep conversationId for real DMs (messages live on conversation_id, not channel_id).
     if (communityId && conversationId && !channelId) {
-      channelId = conversationId;
-      conversationId = undefined;
+      const { rows } = await query(
+        `SELECT 1 FROM channels WHERE id = $1::uuid AND community_id = $2::uuid LIMIT 1`,
+        [conversationId, communityId],
+      );
+      if (rows.length > 0) {
+        channelId = conversationId;
+        conversationId = undefined;
+      }
     }
     if (overload.shouldRejectSearchRequests()) {
       return res.status(503).json({ error: 'Search temporarily unavailable under high load' });

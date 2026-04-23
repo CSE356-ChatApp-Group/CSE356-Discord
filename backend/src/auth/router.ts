@@ -28,6 +28,7 @@ const { hashPassword, comparePassword } = require('./passwords');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('./bypass');
 const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLinkIntent } = require('./oauthTokens');
 const { getTrustedClientIp } = require('../utils/trustedClientIp');
+const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
 
 const router = express.Router();
 const REFRESH_COOKIE = 'refreshToken';
@@ -119,8 +120,9 @@ function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
       prefix: `rl:${route}:`,
     }),
     message: { error: 'Too many auth attempts. Please wait a minute and try again.' },
-    handler: (_req, res, _next, options) => {
+    handler: (req, res, _next, options) => {
       authRateLimitHitsTotal.inc({ route });
+      recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
     },
   });
@@ -162,8 +164,9 @@ function buildAuthIpLimiter(
       prefix: `rl:${route}-global-ip:`,
     }),
     message: { error: 'Too many auth attempts from this network. Please wait and try again.' },
-    handler: (_req, res, _next, options) => {
+    handler: (req, res, _next, options) => {
       authRateLimitHitsTotal.inc({ route });
+      recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
     },
   });

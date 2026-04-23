@@ -31,6 +31,7 @@ const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websock
 const { invalidateCommunityChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
 const { recordEndpointListCache, recordEndpointListCacheBypass } = require('../utils/endpointCacheMetrics');
 const { apiRateLimitHitsTotal } = require('../utils/metrics');
+const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
 const {
   staleCacheKey,
   getJsonCache,
@@ -99,8 +100,9 @@ function buildCommunityJoinIpRateLimiter() {
       prefix: 'rl:community_join:ip:',
     }),
     message: { error: 'Too many community join requests from this network. Slow down and try again shortly.' },
-    handler: (_req, res, _next, options) => {
+    handler: (req, res, _next, options) => {
       apiRateLimitHitsTotal.inc({ scope: 'community_join_ip' });
+      recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
     },
   });

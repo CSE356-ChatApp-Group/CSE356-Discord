@@ -35,6 +35,7 @@ const {
 const { authenticate } = require('../middleware/authenticate');
 const { messagesHotPathLimiter } = require('../middleware/inMemoryApiLimiter');
 const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('../utils/trustedClientIp');
+const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
 const sideEffects      = require('./sideEffects');
 const fanout           = require('../websocket/fanout');
 const overload         = require('../utils/overload');
@@ -74,8 +75,9 @@ function buildMessagePostUserRateLimiter() {
       prefix: 'rl:mp:user:',
     }),
     message: { error: 'Too many messages from this account. Slow down and try again shortly.' },
-    handler: (_req, res, _next, options) => {
+    handler: (req, res, _next, options) => {
       messagePostRateLimitHitsTotal.inc({ scope: 'user' });
+      recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
     },
   });
@@ -99,8 +101,9 @@ function buildMessagePostIpRateLimiter() {
       prefix: 'rl:mp:ip:',
     }),
     message: { error: 'Too many messages from this network. Slow down and try again shortly.' },
-    handler: (_req, res, _next, options) => {
+    handler: (req, res, _next, options) => {
       messagePostRateLimitHitsTotal.inc({ scope: 'ip' });
+      recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
     },
   });

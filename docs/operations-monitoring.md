@@ -68,11 +68,12 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 
 | Area | Metrics | Interpretation |
 |------|---------|------------------|
-| HTTP | `http_server_request_duration_ms`, `http_server_requests_total` | Tail latency and volume by `route`, `method`, `status_class`. |
+| HTTP | `http_server_request_duration_ms`, `http_server_requests_total` | Tail latency and volume by `route`, `method`, `status_class`. **Only responses completed by Node** increment these; **nginx-only** errors (e.g. **502** when every upstream for that try is dead, **504** upstream read timeout) may **not** appear as `status_class="5xx"` here — use **Loki** (`job=nginx` access/error logs) or `curl` timing for edge truth. |
 | Pool | `pg_pool_waiting`, `pg_pool_idle`, `pg_pool_total`, `pg_pool_circuit_breaker_rejects_total`, `pg_pool_operation_errors_total` | Queueing vs saturation vs checkout/DB errors. |
 | DB / handler | `pg_business_sql_queries_per_http_request`, `pg_queries_per_http_request` | Primary operator view is the business-SQL histogram by `route`; raw `pg_queries_per_http_request` also counts BEGIN/COMMIT/ROLLBACK and is mainly for engineering/debugging. |
 | Cache | `endpoint_list_cache_total` | Redis list cache `hit` / `miss` / `coalesced` by `endpoint`. |
 | Overload | `chatapp_overload_stage`, `http_overload_shed_total` | Stage 0–3; early 503s when shedding enabled. |
+| Abuse (auto-ban) | `abuse_auto_ban_blocks_total`, `abuse_auto_ban_issued_total` | **403** from temporary Redis IP ban (`AUTO_IP_BAN_ENABLED`); bans issued after sustained rate-limit **429** strikes (external IPs only). |
 | Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_candidates`, `fanout_target_cache_total`, `conversation_fanout_targets_cache_version_retry_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total` | Fanout health, Redis publish multiplier, candidate audience size before recent-connect filtering, target-cache effectiveness, conversation fanout cache invalidation races, WS bootstrap breadth, and slow clients. |
 | Messages | `message_post_response_total`, `message_post_idempotency_poll_total`, `message_post_idempotency_poll_wait_ms`, `message_cache_bust_failures_total` | POST outcomes; idempotency duplicate-lease polls (`outcome=replay_201|exhausted_409`) and wait histogram; cache bust issues. |
 | Optional RUM | `client_web_vital_*`, `client_rum_batches_total` | Browser-side; requires `ENABLE_CLIENT_RUM` + built frontend flags. |
@@ -83,6 +84,10 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 Use these in Prometheus **Graph** or in `scripts/metrics-snapshot.sh` (overlapping queries are included there).
 
 ```promql
+# Workers reachable for scrape (multi-VM: expect count == configured targets, often 16)
+sum(up{job="chatapp-api"})
+count(up{job="chatapp-api"})
+
 # Pool stress
 pg_pool_waiting{job="chatapp-api"}
 

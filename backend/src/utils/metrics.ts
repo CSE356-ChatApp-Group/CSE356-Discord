@@ -232,6 +232,18 @@ const abuseBlockedSubnetTotal = new client.Counter({
   help: 'HTTP requests rejected with 403 due to BLOCK_SUBNETS match',
 });
 
+/** HTTP requests rejected with 403 due to Redis-backed AUTO_IP_BAN (temporary). */
+const abuseAutoBanBlocksTotal = new client.Counter({
+  name: 'abuse_auto_ban_blocks_total',
+  help: 'HTTP requests blocked by automatic temporary IP ban (AUTO_IP_BAN)',
+});
+
+/** Times an external IP was placed on the temporary ban list after sustained rate-limit strikes. */
+const abuseAutoBanIssuedTotal = new client.Counter({
+  name: 'abuse_auto_ban_issued_total',
+  help: 'Automatic temporary IP bans issued (Redis key set)',
+});
+
 /** Frames skipped or sockets killed due to WS send backpressure (slow consumers). */
 const wsBackpressureEventsTotal = new client.Counter({
   name: 'ws_backpressure_events_total',
@@ -725,6 +737,8 @@ function startPgPoolMetrics(pool) {
     wsReplayStartedTotal.inc(0);
     wsReplayConcurrentGauge.set(0);
     abuseBlockedSubnetTotal.inc(0);
+    abuseAutoBanBlocksTotal.inc(0);
+    abuseAutoBanIssuedTotal.inc(0);
     clientRumBatchesTotal.inc(0);
     clientWebVitalTimingSeconds.observe({ name: 'LCP' }, 0);
     clientWebVitalClsScore.observe({ name: 'CLS' }, 0);
@@ -807,6 +821,8 @@ module.exports = {
   wsReplayStartedTotal,
   wsReplayConcurrentGauge,
   abuseBlockedSubnetTotal,
+  abuseAutoBanBlocksTotal,
+  abuseAutoBanIssuedTotal,
   clientWebVitalTimingSeconds,
   clientWebVitalClsScore,
   clientRumBatchesTotal,

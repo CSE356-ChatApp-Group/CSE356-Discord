@@ -72,6 +72,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `AUTH_BYPASS` | `true` enables dev bypass (never in prod) |
 | `AUTH_BYPASS_USER_ID`, `AUTH_BYPASS_USER_EMAIL`, `AUTH_BYPASS_USER_USERNAME`, `AUTH_BYPASS_USER_DISPLAY_NAME` | Bypass user profile |
 | `DISABLE_RATE_LIMITS` | `true` disables auth rate limits, community join limits, and (when RUM is enabled) `POST /api/v1/rum` limits; use only on isolated grading hosts if desired |
+| `AUTO_IP_BAN_ENABLED` | Explicit `true` / `false` overrides defaults: when **unset**, bans are **on** in `NODE_ENV=production` and **off** in `NODE_ENV=test`. Set `true` in required env on staging/prod (`deploy/env/*.required.env`). Set `false` if `X-Real-IP` is untrusted. Strikes: `AUTO_IP_BAN_STRIKES` (default 40), `AUTO_IP_BAN_STRIKE_WINDOW_SEC` (120), `AUTO_IP_BAN_TTL_SEC` (900). Internal/private IPs (RFC1918, loopback, ULA, 100.64/10) are never banned or strike-counted. |
 | `AUTH_REGISTER_RATE_LIMIT_MAX`, `AUTH_REGISTER_RATE_LIMIT_WINDOW_MS` | Register limiter (per IP + credential — each username/email bucket) |
 | `AUTH_GLOBAL_PER_IP_RATE_LIMIT` | Set to `true` to enable **login** global per-IP 429 (`AUTH_LOGIN_GLOBAL_PER_IP_*`); **default off** |
 | `AUTH_REGISTER_GLOBAL_PER_IP_MAX`, `AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS` | Register cap **per client IP** across all usernames (always on unless `DISABLE_RATE_LIMITS` or `NODE_ENV=test`) |

@@ -4,6 +4,7 @@ const { createTokenBucket } = require('../utils/inMemoryTokenBucket');
 const { getAbuseLimitScale } = require('../utils/abuseKillSwitch');
 const { apiRateLimitHitsTotal } = require('../utils/metrics');
 const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('../utils/trustedClientIp');
+const { recordRateLimitStrike } = require('../utils/autoIpBan');
 
 function noop(_req, _res, next) {
   next();
@@ -48,6 +49,7 @@ function createUserIpTokenLimiter({
     }
     if (!ipBucket.take(`i:${name}:${ip}`)) {
       apiRateLimitHitsTotal.inc({ scope: ipScopeLabel });
+      recordRateLimitStrike(ip);
       res.set('Retry-After', '1');
       return res.status(429).json({ error: 'Too many requests from this network.' });
     }

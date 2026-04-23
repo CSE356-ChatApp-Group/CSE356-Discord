@@ -4,6 +4,7 @@ const { createTokenBucket } = require('../utils/inMemoryTokenBucket');
 const { getAbuseLimitScale } = require('../utils/abuseKillSwitch');
 const { wsUpgradeRateLimitedTotal, wsUpgradeSeenTotal } = require('../utils/metrics');
 const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('../utils/trustedClientIp');
+const { recordRateLimitStrike } = require('../utils/autoIpBan');
 
 const upgradeBucket = createTokenBucket({
   refillPerSecond: 1,
@@ -27,6 +28,7 @@ function allowWsUpgrade(req) {
   if (isPrivateOrInternalNetwork(ip)) return true;
   if (!upgradeBucket.take(`wsup:${ip}`)) {
     wsUpgradeRateLimitedTotal.inc();
+    recordRateLimitStrike(ip);
     return false;
   }
   return true;

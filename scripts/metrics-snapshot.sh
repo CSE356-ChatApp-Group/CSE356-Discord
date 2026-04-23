@@ -25,11 +25,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 queries=(
-  'max(up{job="chatapp-api"})'
+  'sum(up{job="chatapp-api"})'
+  'count(up{job="chatapp-api"})'
   'max(chatapp_overload_stage{job="chatapp-api"})'
   'max(pg_pool_waiting{job="chatapp-api"})'
   'max(pg_pool_idle{job="chatapp-api"})'
   'sum(rate(http_overload_shed_total{job="chatapp-api"}[5m]))'
+  'sum(rate(abuse_auto_ban_blocks_total{job="chatapp-api"}[5m]))'
+  'sum(rate(abuse_auto_ban_issued_total{job="chatapp-api"}[5m]))'
   'sum(rate(pg_pool_circuit_breaker_rejects_total{job="chatapp-api"}[5m]))'
   'sum(rate(pg_pool_operation_errors_total{job="chatapp-api"}[5m])) by (reason)'
   'histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job="chatapp-api"}[5m])))'

@@ -4,6 +4,8 @@ const express = require('express');
 const { rateLimit } = require('express-rate-limit');
 const { RedisStore } = require('rate-limit-redis');
 const redis = require('../db/redis');
+const { getTrustedClientIp } = require('../utils/trustedClientIp');
+const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
 const {
   clientWebVitalTimingSeconds,
   clientWebVitalClsScore,
@@ -18,14 +20,15 @@ const rumPostLimiter = rateLimit({
   limit: 120,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  keyGenerator: (req: { ip?: string }) => `rum:${req.ip || 'unknown'}`,
+  keyGenerator: (req: { ip?: string }) => `rum:${getTrustedClientIp(req) || 'unknown'}`,
   store: new RedisStore({
     sendCommand: (...args: string[]) => redis.call(...args),
     prefix: 'rl:rum:',
   }),
   message: { error: 'Too many RUM reports. Please try again later.' },
-  handler: (_req: any, res: any, _next: any, options: { statusCode: number; message?: unknown }) => {
+  handler: (req: any, res: any, _next: any, options: { statusCode: number; message?: unknown }) => {
     apiRateLimitHitsTotal.inc({ scope: 'rum' });
+    recordAbuseStrikeFromRequest(req);
     res.status(options.statusCode).json(options.message);
   },
 });

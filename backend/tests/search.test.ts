@@ -461,3 +461,51 @@ describe('Search – COMPAS duplicate scope query', () => {
     expect(res.body.hits[0].content).toContain(marker);
   });
 });
+
+describe('Search – communityId + conversationId (DM vs mislabeled channel)', () => {
+  it('keeps conversation scope for a real DM when communityId is also present', async () => {
+    const a = await createAuthenticatedUser('srchdmscopea');
+    const b = await createAuthenticatedUser('srchdmscopeb');
+    const community = await createCommunity(a.accessToken, uniqueSuffix());
+    await joinCommunity(b.accessToken, community.id);
+    const convRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.username] });
+    expect(convRes.status).toBe(201);
+    const convId = convRes.body.conversation.id as string;
+    const marker = `dmgraderphrase${uniqueSuffix()}`;
+    const msgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ conversationId: convId, content: marker });
+    expect(msgRes.status).toBe(201);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}&conversationId=${convId}`,
+      )
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(res.status).toBe(200);
+    expect((res.body.hits || []).length).toBeGreaterThan(0);
+    expect(res.body.hits[0].content).toContain(marker);
+  });
+
+  it('promotes conversationId to channelId when that UUID is a channel in the community', async () => {
+    const owner = await createAuthenticatedUser('srchmislabel');
+    const community = await createCommunity(owner.accessToken, uniqueSuffix());
+    const ch = await createChannel(owner.accessToken, community.id);
+    const marker = `channelfromwrongparam${uniqueSuffix()}`;
+    await sendMessage(owner.accessToken, ch.id, marker);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}&conversationId=${ch.id}`,
+      )
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(res.status).toBe(200);
+    expect((res.body.hits || []).length).toBeGreaterThan(0);
+    expect(res.body.hits[0].content).toContain(marker);
+    expect(res.body.hits[0].channelId).toBe(ch.id);
+  });
+});

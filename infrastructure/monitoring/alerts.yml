@@ -28,6 +28,21 @@ groups:
             All scraped chatapp-api targets are down. Check systemd units, PgBouncer, and
             `sudo grep 'no live upstreams' /var/log/nginx/error.log | tail`.
 
+      # One or more configured /metrics targets failing while others succeed (not covered by sum(up)<1).
+      # 20m avoids paging on normal rolling restarts; still catches stuck workers / bad nginx upstream subset.
+      - alert: ChatAppSomeWorkersUnreachable
+        expr: sum(up{job="chatapp-api"}) < count(up{job="chatapp-api"})
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: Some ChatApp workers are not scrape-healthy
+          description: >
+            At least one Prometheus target in job chatapp-api has been down while others remain up for 20m.
+            Compare `sum(up{job="chatapp-api"})` vs `count(up{job="chatapp-api"})` in Grafana (overview stat).
+            On each app VM: `systemctl list-units 'chatapp@*.service' --state=failed,running` and per-port `curl -sS http://127.0.0.1:PORT/health`.
+            Nginx may still return 502 for requests routed to a dead upstream even when other workers are healthy.
+
       # Node process.startTime changes on each restart — sustained flapping risks nginx "no live upstreams".
       - alert: ChatAppProcessRestartFlapping
         expr: changes(process_start_time_seconds{job="chatapp-api"}[15m]) >= 2

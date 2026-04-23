@@ -37,17 +37,32 @@ const { getTrustedClientIp } = require('./utils/trustedClientIp');
 app.use((req, res, next) => {
   const pathOnly = (req.path || '').split('?')[0];
   if (pathOnly === '/health' || pathOnly === '/metrics') return next();
-  try {
-    const ip = getTrustedClientIp(req);
-    if (isIpBlocked(ip)) {
-      const { abuseBlockedSubnetTotal } = require('./utils/metrics');
-      abuseBlockedSubnetTotal.inc();
-      return res.status(403).json({ error: 'Forbidden' });
+  void (async () => {
+    try {
+      const ip0 = getTrustedClientIp(req);
+      const { isIpAutoBanned } = require('./utils/autoIpBan');
+      if (await isIpAutoBanned(ip0)) {
+        const { abuseAutoBanBlocksTotal } = require('./utils/metrics');
+        abuseAutoBanBlocksTotal.inc();
+        res.status(403).json({ error: 'Forbidden' });
+        return;
+      }
+    } catch {
+      // ignore (fail open for ban check)
     }
-  } catch {
-    // ignore parse issues
-  }
-  next();
+    try {
+      const ip = getTrustedClientIp(req);
+      if (isIpBlocked(ip)) {
+        const { abuseBlockedSubnetTotal } = require('./utils/metrics');
+        abuseBlockedSubnetTotal.inc();
+        res.status(403).json({ error: 'Forbidden' });
+        return;
+      }
+    } catch {
+      // ignore parse issues
+    }
+    if (!res.headersSent) next();
+  })();
 });
 const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal, pgQueriesPerRequestHistogram, pgBusinessSqlQueriesPerRequestHistogram } = require('./utils/metrics');
 const { run: runDbContext } = require('./utils/requestDbContext');
