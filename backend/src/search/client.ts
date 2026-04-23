@@ -19,6 +19,10 @@ const overload = require('../utils/overload');
 
 const SEARCH_USE_READ_REPLICA =
   String(process.env.SEARCH_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
+const STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT = Math.min(
+  Math.max(parseInt(process.env.STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT || '200', 10), 20),
+  1000,
+);
 
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
@@ -524,7 +528,8 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
   }
 
   if (scope.scopeType === 'community') {
-    const authorTimeFilters = buildAuthorTimeFilters(params, opts);
+    const authorTimeFilters = buildAuthorTimeFilters(params, opts, 'm0');
+    const recentPerChannelLimitPh = p(params, STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT);
     return {
       sql: `
         WITH ${scope.cte.trim()},
@@ -553,11 +558,22 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
                  cc.community_id    AS "communityId",
                  cc.name            AS "channelName"
           FROM community_channels cc
-          JOIN messages m ON m.channel_id = cc.id
+          JOIN LATERAL (
+            SELECT m0.id,
+                   m0.content,
+                   m0.author_id,
+                   m0.channel_id,
+                   m0.conversation_id,
+                   m0.created_at
+            FROM messages m0
+            WHERE m0.deleted_at IS NULL
+              AND m0.channel_id = cc.id
+              ${authorTimeFilters}
+            ORDER BY m0.created_at DESC, m0.id DESC
+            LIMIT ${recentPerChannelLimitPh}
+          ) m ON TRUE
           JOIN users u ON u.id = m.author_id
-          WHERE m.deleted_at IS NULL
-            AND position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
-            ${authorTimeFilters}
+          WHERE position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
           ORDER BY m.created_at DESC, m.id DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
         ) search_rows ON scope_access.has_access = TRUE`,
