@@ -23,6 +23,7 @@ const {
   toClientFacingUrl,
   assertDirectPresignedUrlMatchesSigner,
 } = require('./storage');
+const { loadAttachmentForUser } = require('./accessCache');
 
 const router = express.Router();
 router.use(authenticate);
@@ -149,46 +150,10 @@ router.get('/:id',
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
-      // Join through messages to get channel/conversation context for access control.
-      const { rows } = await query(`
-        SELECT a.*, m.channel_id, m.conversation_id
-        FROM attachments a
-        JOIN messages m ON m.id = a.message_id
-        WHERE a.id = $1
-      `, [req.params.id]);
-
-      if (!rows.length) return res.status(404).json({ error: 'Not found' });
-
-      const attachment = rows[0];
-
-      // Enforce that the requester is a member of the channel or conversation
-      // the attachment's message belongs to.
-      if (attachment.channel_id) {
-        const { rows: access } = await query(
-          `SELECT 1
-           FROM channels c
-           JOIN community_members community_member
-             ON community_member.community_id = c.community_id
-            AND community_member.user_id = $2
-           WHERE c.id = $1
-             AND (
-               c.is_private = FALSE
-               OR EXISTS (
-                 SELECT 1 FROM channel_members
-                 WHERE channel_id = c.id AND user_id = $2
-               )
-             )`,
-          [attachment.channel_id, req.user.id]
-        );
-        if (!access.length) return res.status(403).json({ error: 'Access denied' });
-      } else if (attachment.conversation_id) {
-        const { rows: access } = await query(
-          `SELECT 1 FROM conversation_participants
-           WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
-          [attachment.conversation_id, req.user.id]
-        );
-        if (!access.length) return res.status(403).json({ error: 'Access denied' });
-      }
+      const access = await loadAttachmentForUser(req.params.id, req.user.id);
+      if (!access?.found) return res.status(404).json({ error: 'Not found' });
+      if (!access.allowed) return res.status(403).json({ error: 'Access denied' });
+      const attachment = access.attachment;
 
       // Strip join-only columns from the client response
       const { channel_id, conversation_id, ...clientAttachment } = attachment;

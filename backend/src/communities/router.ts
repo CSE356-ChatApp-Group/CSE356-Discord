@@ -31,6 +31,12 @@ const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websock
 const { invalidateCommunityChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
 const { recordEndpointListCache, recordEndpointListCacheBypass } = require('../utils/endpointCacheMetrics');
 const { apiRateLimitHitsTotal } = require('../utils/metrics');
+const {
+  staleCacheKey,
+  getJsonCache,
+  setJsonCacheWithStale,
+  withDistributedSingleflight,
+} = require('../utils/distributedSingleflight');
 
 const router = express.Router();
 router.use(authenticate);
@@ -141,6 +147,9 @@ async function loadMembership(req, res, next) {
 const _communitiesTtl = parseInt(process.env.COMMUNITIES_LIST_CACHE_TTL_SECS || '300', 10);
 const COMMUNITIES_CACHE_TTL_SECS =
   Number.isFinite(_communitiesTtl) && _communitiesTtl > 0 ? _communitiesTtl : 300;
+const _communitiesPagedTtl = parseInt(process.env.COMMUNITIES_PAGED_CACHE_TTL_SECS || '60', 10);
+const COMMUNITIES_PAGED_CACHE_TTL_SECS =
+  Number.isFinite(_communitiesPagedTtl) && _communitiesPagedTtl > 0 ? _communitiesPagedTtl : 60;
 const _communitiesHeavyTimeout = parseInt(process.env.COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS || '2500', 10);
 const COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS =
   Number.isFinite(_communitiesHeavyTimeout) && _communitiesHeavyTimeout > 100
@@ -152,6 +161,7 @@ const COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT =
     ? _communitiesHeavyInflight
     : 4;
 const PUBLIC_COMMUNITIES_VERSION_KEY = 'communities:list:public_version';
+const COMMUNITIES_USER_VERSION_KEY_PREFIX = 'communities:list:user_version:';
 let communitiesUnreadQueriesInFlight = 0;
 const COMMUNITIES_LAST_GOOD_CACHE_TTL_SECS = Math.max(
   COMMUNITIES_CACHE_TTL_SECS,
@@ -202,18 +212,34 @@ function communitiesCacheKey(userId, publicVersion = '0') {
   return `communities:list:${userId}:v${publicVersion}`;
 }
 
+function communitiesPagedCacheKey(userId, publicVersion, userVersion, limit, after) {
+  return `communities:list:${userId}:v${publicVersion}:uv${userVersion}:paged:l${limit}:a${after || '_'}`;
+}
+
+function communitiesUserVersionKey(userId) {
+  return `${COMMUNITIES_USER_VERSION_KEY_PREFIX}${userId}`;
+}
+
 function communitiesLastGoodCacheKey(userId) {
   return `communities:list:last_good:${userId}`;
 }
 
 async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
-  const keys = [...new Set(
-    (Array.isArray(userIds) ? userIds : [])
-      .filter((userId) => typeof userId === 'string' && userId)
-      .map((userId) => communitiesCacheKey(userId, publicVersion))
+  const normalizedUserIds = [...new Set(
+    (Array.isArray(userIds) ? userIds : []).filter((userId) => typeof userId === 'string' && userId),
   )];
-  if (!keys.length) return;
-  await redis.del(...keys);
+  const keys = [...new Set(
+    normalizedUserIds.flatMap((userId) => {
+      const key = communitiesCacheKey(userId, publicVersion);
+      return [key, staleCacheKey(key)];
+    })
+  )];
+  if (keys.length > 0) {
+    await redis.del(...new Set(keys));
+  }
+  await Promise.allSettled(
+    normalizedUserIds.map((userId) => redis.incr(communitiesUserVersionKey(userId))),
+  );
 }
 
 async function getPublicCommunitiesVersion() {
@@ -222,6 +248,10 @@ async function getPublicCommunitiesVersion() {
 
 async function bumpPublicCommunitiesVersion() {
   await redis.incr(PUBLIC_COMMUNITIES_VERSION_KEY).catch(() => {});
+}
+
+async function getCommunitiesUserVersion(userId) {
+  return (await redis.get(communitiesUserVersionKey(userId)).catch(() => null)) || '0';
 }
 
 const MEMBERS_CACHE_TTL_SECS = 30;
@@ -249,6 +279,7 @@ async function listCommunityRealtimeTargets(communityId, userId) {
 // In-process singleflight: prevents thundering-herd when cache expires.
 // All concurrent requests for the same key share one DB query in flight.
 const communitiesInflight: Map<string, Promise<{ communities: any[] }>> = new Map();
+const communitiesPagedInflight: Map<string, Promise<any>> = new Map();
 
 async function cleanupCommunityUnreadCounterKeys(communityId) {
   try {
@@ -442,40 +473,80 @@ router.get('/', async (req, res, next) => {
 
   if (page.limit) {
     try {
-      let cursorName = null;
-      let cursorId = null;
-      if (page.after) {
-        const { rows: curRows } = await queryRead(
-          `WITH visible_communities AS (
-             SELECT c.id, c.name
-             FROM communities c
-             LEFT JOIN community_members cm
-               ON cm.community_id = c.id AND cm.user_id = $1
-             WHERE c.is_public = TRUE OR cm.user_id IS NOT NULL
-           )
-           SELECT name, id FROM visible_communities WHERE id = $2`,
-          [req.user.id, page.after],
-        );
-        if (!curRows.length) return res.status(400).json({ error: 'Invalid after cursor' });
-        cursorName = curRows[0].name;
-        cursorId = curRows[0].id;
+      const publicVersion = await getPublicCommunitiesVersion();
+      const userVersion = await getCommunitiesUserVersion(req.user.id);
+      const cacheKey = communitiesPagedCacheKey(
+        req.user.id,
+        publicVersion,
+        userVersion,
+        page.limit,
+        page.after || '',
+      );
+      const cached = await getJsonCache(redis, cacheKey);
+      if (cached) {
+        recordEndpointListCache('communities', 'hit');
+        return res.json(cached);
       }
 
-      const fetchLimit = page.limit + 1;
-      const { rows } = await queryCommunitiesListBase(
-        COMMUNITIES_LIST_BASE_CORE,
-        [req.user.id, cursorName, cursorId, fetchLimit],
-        `WHERE (($2::text IS NULL AND $3::uuid IS NULL) OR (vc.name, vc.id) > ($2::text, $3::uuid))
-       ORDER BY vc.name, vc.id
-       LIMIT $4`,
-      );
+      if (communitiesPagedInflight.has(cacheKey)) {
+        recordEndpointListCache('communities', 'coalesced');
+        return res.json(await communitiesPagedInflight.get(cacheKey));
+      }
 
-      const hasMore = rows.length > page.limit;
-      const slice = hasMore ? rows.slice(0, page.limit) : rows;
-      const body: any = await buildCommunitiesListPayload(req.user.id, slice);
-      if (hasMore) body.nextAfter = slice[slice.length - 1].id;
-      return res.json(body);
+      recordEndpointListCache('communities', 'miss');
+      const promise = withDistributedSingleflight({
+        redis,
+        cacheKey,
+        inflight: communitiesPagedInflight,
+        readFresh: async () => getJsonCache(redis, cacheKey),
+        readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+        load: async () => {
+          let cursorName = null;
+          let cursorId = null;
+          if (page.after) {
+            const { rows: curRows } = await queryRead(
+              `WITH visible_communities AS (
+                 SELECT c.id, c.name
+                 FROM communities c
+                 LEFT JOIN community_members cm
+                   ON cm.community_id = c.id AND cm.user_id = $1
+                 WHERE c.is_public = TRUE OR cm.user_id IS NOT NULL
+               )
+               SELECT name, id FROM visible_communities WHERE id = $2`,
+              [req.user.id, page.after],
+            );
+            if (!curRows.length) {
+              const error: any = new Error('Invalid after cursor');
+              error.statusCode = 400;
+              throw error;
+            }
+            cursorName = curRows[0].name;
+            cursorId = curRows[0].id;
+          }
+
+          const fetchLimit = page.limit + 1;
+          const { rows } = await queryCommunitiesListBase(
+            COMMUNITIES_LIST_BASE_CORE,
+            [req.user.id, cursorName, cursorId, fetchLimit],
+            `WHERE (($2::text IS NULL AND $3::uuid IS NULL) OR (vc.name, vc.id) > ($2::text, $3::uuid))
+           ORDER BY vc.name, vc.id
+           LIMIT $4`,
+          );
+
+          const hasMore = rows.length > page.limit;
+          const slice = hasMore ? rows.slice(0, page.limit) : rows;
+          const body: any = await buildCommunitiesListPayload(req.user.id, slice);
+          if (hasMore) body.nextAfter = slice[slice.length - 1].id;
+          await setJsonCacheWithStale(redis, cacheKey, body, COMMUNITIES_PAGED_CACHE_TTL_SECS);
+          return body;
+        },
+      });
+
+      return res.json(await promise);
     } catch (err) {
+      if (err?.statusCode === 400) {
+        return res.status(400).json({ error: 'Invalid after cursor' });
+      }
       if (isCommunitiesTransientFailure(err)) {
         logger.warn({ err, userId: req.user.id }, 'GET /communities (paged) transient failure');
         return res

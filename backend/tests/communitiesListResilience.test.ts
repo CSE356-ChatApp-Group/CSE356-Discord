@@ -9,11 +9,22 @@ jest.mock('../src/db/pool', () => ({
 
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(),
+  mget: jest.fn(),
   set: jest.fn(),
   setex: jest.fn(),
   del: jest.fn(),
   incr: jest.fn(),
   eval: jest.fn(),
+  smembers: jest.fn(),
+  pipeline: jest.fn(() => ({
+    set: jest.fn(),
+    setex: jest.fn(),
+    del: jest.fn(),
+    incr: jest.fn(),
+    sadd: jest.fn(),
+    expire: jest.fn(),
+    exec: jest.fn().mockResolvedValue([]),
+  })),
 }));
 
 jest.mock('../src/utils/logger', () => ({
@@ -51,7 +62,10 @@ const redis = require('../src/db/redis') as {
   get: jest.Mock;
   set: jest.Mock;
   setex: jest.Mock;
+  mget: jest.Mock;
+  del: jest.Mock;
   eval: jest.Mock;
+  smembers: jest.Mock;
 };
 
 function buildApp() {
@@ -68,6 +82,8 @@ describe('GET /communities resilience', () => {
     redis.setex.mockResolvedValue('OK');
     redis.set.mockResolvedValue('OK');
     redis.eval.mockResolvedValue(1);
+    redis.smembers.mockResolvedValue([]);
+    redis.mget.mockResolvedValue([null, null]);
   });
 
   it('serves last-good cached payload on transient main-list query failure', async () => {
@@ -129,5 +145,34 @@ describe('GET /communities resilience', () => {
       900,
       JSON.stringify({ communities: [] }),
     );
+  });
+
+  it('serves paged communities from cache on repeat request', async () => {
+    const pagedPayload = { communities: [{ id: 'c-1', name: 'A' }], nextAfter: 'c-1' };
+    let firstLoad = true;
+    redis.get.mockImplementation(async (key: string) => {
+      if (key === 'communities:list:public_version') return '0';
+      if (key === 'communities:list:user_version:user-1') return '0';
+      if (key === 'communities:list:user-1:v0:uv0:paged:l1:a_') {
+        if (firstLoad) return null;
+        return JSON.stringify(pagedPayload);
+      }
+      if (key === 'stale:communities:list:user-1:v0:uv0:paged:l1:a_') return null;
+      return null;
+    });
+    pool.queryRead
+      .mockResolvedValueOnce({ rows: [{ id: 'c-1', name: 'A' }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const app = buildApp();
+    const first = await request(app).get('/api/v1/communities?limit=1');
+    expect(first.status).toBe(200);
+    firstLoad = false;
+    const callsAfterFirst = pool.queryRead.mock.calls.length;
+
+    const second = await request(app).get('/api/v1/communities?limit=1');
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual(pagedPayload);
+    expect(pool.queryRead.mock.calls.length).toBe(callsAfterFirst);
   });
 });

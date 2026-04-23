@@ -2,6 +2,13 @@
 
 const { query, queryRead } = require('../db/pool');
 const redis = require('../db/redis');
+const {
+  channelAccessVersionKey,
+  toAccessVersion,
+  scopeVersionKey,
+  rowAccessScope,
+  readAccessVersion,
+} = require('../utils/accessVersionCache');
 
 // Message target cache: stores the full result of loadMessageTargetForUser (including
 // has_access) keyed by messageId+userId. TTL remains a backstop; membership/version
@@ -15,39 +22,6 @@ const MSG_TARGET_CACHE_TTL_SECS =
 // Cache the UUID→channelId resolution for the legacy conversationId= compat shim.
 // Per (uuid, userId) because access is user-specific (private channels).
 const CHANNEL_COMPAT_CACHE_TTL_SECS = parseInt(process.env.CHANNEL_COMPAT_CACHE_TTL_SECS || '60', 10);
-
-function channelAccessVersionKey(channelId: string) {
-  return `channel:${channelId}:user_fanout_targets_v`;
-}
-
-function conversationAccessVersionKey(conversationId: string) {
-  return `conversation:${conversationId}:fanout_targets_v`;
-}
-
-function toVersion(raw: string | null | undefined) {
-  const parsed = Number(raw || 0);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-}
-
-async function readVersion(versionKey: string) {
-  try {
-    return toVersion(await redis.get(versionKey));
-  } catch {
-    return 0;
-  }
-}
-
-function messageTargetScope(row: any): null | { kind: 'channel' | 'conversation'; id: string } {
-  if (row?.channel_id) return { kind: 'channel', id: String(row.channel_id) };
-  if (row?.conversation_id) return { kind: 'conversation', id: String(row.conversation_id) };
-  return null;
-}
-
-function scopeVersionKey(scope: { kind: 'channel' | 'conversation'; id: string }) {
-  return scope.kind === 'channel'
-    ? channelAccessVersionKey(scope.id)
-    : conversationAccessVersionKey(scope.id);
-}
 
 /**
  * Course harness / generated client compatibility: some clients call
@@ -73,7 +47,7 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
           parsed
           && typeof parsed === 'object'
           && Object.prototype.hasOwnProperty.call(parsed, 'channelId')
-          && toVersion(parsed.version) === toVersion(rawVersion)
+          && toAccessVersion(parsed.version) === toAccessVersion(rawVersion)
         ) {
           return parsed.channelId ?? null;
         }
@@ -104,7 +78,7 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
   const result = rows[0]?.id ?? null;
 
   if (CHANNEL_COMPAT_CACHE_TTL_SECS > 0) {
-    readVersion(versionKey)
+    readAccessVersion(redis, versionKey)
       .then((version) => redis.set(
         cacheKey,
         JSON.stringify({ channelId: result, version }),
@@ -144,8 +118,8 @@ async function loadMessageTargetForUser(messageId, userId) {
           && (scope.kind === 'channel' || scope.kind === 'conversation')
           && typeof scope.id === 'string'
         ) {
-          const currentVersion = await readVersion(scopeVersionKey(scope));
-          if (toVersion(parsed.version) === currentVersion) {
+          const currentVersion = await readAccessVersion(redis, scopeVersionKey(scope));
+          if (toAccessVersion(parsed.version) === currentVersion) {
             return parsed.data;
           }
           redis.del(cacheKey).catch(() => {});
@@ -197,9 +171,9 @@ async function loadMessageTargetForUser(messageId, userId) {
   const result = rows[0] || null;
 
   if (result && MSG_TARGET_CACHE_TTL_SECS > 0) {
-    const scope = messageTargetScope(result);
+    const scope = rowAccessScope(result);
     if (scope) {
-      readVersion(scopeVersionKey(scope))
+      readAccessVersion(redis, scopeVersionKey(scope))
         .then((version) => redis.set(
           cacheKey,
           JSON.stringify({ data: result, scope, version }),
