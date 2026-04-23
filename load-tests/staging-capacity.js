@@ -849,8 +849,8 @@ export function httpMix(data) {
 }
 
 // Delete the test community so stale public communities don't accumulate in the
-// DB across runs. Each run creating a new public community bloats the
-// GET /communities CTE query (it scans ALL public communities).
+// DB across runs. GET /communities (no limit) lists all visible rows; member_count
+// is denormalized on communities (no live aggregate over the full visible set).
 export function teardown(data) {
   if (!data || !data.communityId || !data.ownerToken) return;
   const delRes = http.del(

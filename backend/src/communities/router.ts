@@ -1,7 +1,7 @@
 /**
  * Communities routes
  *
- * GET    /api/v1/communities                    – list public + joined (optional ?limit=&after= for paging)
+ * GET    /api/v1/communities                    – list public + joined (full list; optional ?limit=&after= keyset paging)
  * POST   /api/v1/communities                    – create
  * GET    /api/v1/communities/:id                – get details
  * DELETE /api/v1/communities/:id                – delete (owner only)
@@ -282,6 +282,7 @@ const COMMUNITY_RETURNING_FIELDS = `
   icon_url,
   owner_id,
   is_public,
+  member_count,
   created_at,
   updated_at`;
 
@@ -293,6 +294,7 @@ const COMMUNITY_SELECT_FIELDS = `
   c.icon_url,
   c.owner_id,
   c.is_public,
+  c.member_count,
   c.created_at,
   c.updated_at`;
 
@@ -411,7 +413,6 @@ async function listCommunityRealtimeTargets(communityId, userId) {
 }
 
 // In-process singleflight: prevents thundering-herd when cache expires.
-// All concurrent requests for the same key share one DB query in flight.
 const communitiesInflight: Map<string, Promise<{ communities: any[] }>> = new Map();
 const communitiesPagedInflight: Map<string, Promise<any>> = new Map();
 
@@ -426,44 +427,53 @@ async function cleanupCommunityUnreadCounterKeys(communityId) {
   }
 }
 
-/** Shared list body (full list + keyset pages use the same SELECT list). */
-const COMMUNITIES_LIST_BASE_CORE = `
-       WITH visible_communities AS (
-         SELECT c.id,
-                c.slug,
-                c.name,
-                c.description,
-                c.icon_url,
-                c.is_public,
-                c.owner_id,
-                c.created_at,
-                c.updated_at,
-                cm.role AS my_role
-         FROM communities c
-         LEFT JOIN community_members cm
-           ON cm.community_id = c.id
-          AND cm.user_id = $1
-         WHERE c.is_public = TRUE OR cm.user_id IS NOT NULL
-       ),
-       member_counts AS (
-         SELECT cm.community_id, COUNT(*)::int AS member_count
-         FROM community_members cm
-         JOIN visible_communities vc ON vc.id = cm.community_id
-         GROUP BY cm.community_id
-       )
-       SELECT vc.id,
-              vc.slug,
-              vc.name,
-              vc.description,
-              vc.icon_url,
-              vc.is_public,
-              vc.owner_id,
-              vc.created_at,
-              vc.updated_at,
-              vc.my_role,
-              COALESCE(mc.member_count, 0) AS member_count
-       FROM visible_communities vc
-       LEFT JOIN member_counts mc ON mc.community_id = vc.id`;
+/**
+ * Full visible list (no limit). member_count is denormalized on communities (no live aggregate).
+ * $1 = user_id
+ */
+const COMMUNITIES_LIST_FULL_SQL = `
+SELECT c.id,
+       c.slug,
+       c.name,
+       c.description,
+       c.icon_url,
+       c.is_public,
+       c.owner_id,
+       c.created_at,
+       c.updated_at,
+       cm.role AS my_role,
+       c.member_count
+FROM communities c
+LEFT JOIN community_members cm
+  ON cm.community_id = c.id
+ AND cm.user_id = $1
+WHERE (c.is_public = TRUE OR cm.user_id IS NOT NULL)
+ORDER BY c.name, c.id`;
+
+/**
+ * Keyset page; member_count from denormalized column on communities.
+ * $1 user_id, $2 cursor name (nullable), $3 cursor id (nullable), $4 fetch limit (page size + 1).
+ */
+const COMMUNITIES_LIST_PAGE_SQL = `
+SELECT c.id,
+       c.slug,
+       c.name,
+       c.description,
+       c.icon_url,
+       c.is_public,
+       c.owner_id,
+       c.created_at,
+       c.updated_at,
+       cm.role AS my_role,
+       c.member_count
+FROM communities c
+LEFT JOIN community_members cm
+  ON cm.community_id = c.id
+ AND cm.user_id = $1
+WHERE (c.is_public = TRUE OR cm.user_id IS NOT NULL)
+  AND (($2::text IS NULL AND $3::uuid IS NULL) OR (c.name, c.id) > ($2::text, $3::uuid))
+ORDER BY c.name, c.id
+LIMIT $4`;
 
 function isCommunitiesTimeout(err) {
   const msg = String(err?.message || '').toLowerCase();
@@ -510,15 +520,18 @@ async function writeLastGoodCommunitiesPayload(userId, payload) {
     .catch(() => {});
 }
 
-async function queryCommunitiesListBase(baseSql, params, orderAndLimitSql) {
-  const fullSql = `${baseSql}
-       ${orderAndLimitSql}`;
-  // Must use primary: list includes `my_role` from `community_members`. With
-  // PG_READ_REPLICA_URL, queryRead can lag right after join/leave so the client
-  // would miss the sidebar until replication catches up.
+async function queryCommunitiesListFull(userId) {
   return query({
-    text: fullSql,
-    values: params,
+    text: COMMUNITIES_LIST_FULL_SQL,
+    values: [userId],
+    query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
+  });
+}
+
+async function queryCommunitiesListPage(userId, cursorName, cursorId, fetchLimit) {
+  return query({
+    text: COMMUNITIES_LIST_PAGE_SQL,
+    values: [userId, cursorName, cursorId, fetchLimit],
     query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
   });
 }
@@ -627,7 +640,29 @@ router.get('/', async (req, res, next) => {
 
       if (communitiesPagedInflight.has(cacheKey)) {
         recordEndpointListCache('communities', 'coalesced');
-        return res.json(await communitiesPagedInflight.get(cacheKey));
+        try {
+          return res.json(await communitiesPagedInflight.get(cacheKey));
+        } catch (err) {
+          if (isCommunitiesTransientFailure(err) && !page.after) {
+            const stale = await readLastGoodCommunitiesPayload(req.user.id);
+            if (stale) {
+              recordEndpointListCacheBypass('communities', 'timeout');
+              logger.warn(
+                { err, userId: req.user.id },
+                'GET /communities transient failure during coalesced fetch; serving stale cache',
+              );
+              return res.json(stale);
+            }
+          }
+          if (isCommunitiesTransientFailure(err)) {
+            logger.warn({ err, userId: req.user.id }, 'GET /communities transient failure during coalesced fetch');
+            return res
+              .status(503)
+              .set('Retry-After', '1')
+              .json({ error: 'Communities are briefly unavailable; please retry.', requestId: req.id });
+          }
+          return next(err);
+        }
       }
 
       recordEndpointListCache('communities', 'miss');
@@ -642,14 +677,12 @@ router.get('/', async (req, res, next) => {
           let cursorId = null;
           if (page.after) {
             const { rows: curRows } = await queryRead(
-              `WITH visible_communities AS (
-                 SELECT c.id, c.name
-                 FROM communities c
-                 LEFT JOIN community_members cm
-                   ON cm.community_id = c.id AND cm.user_id = $1
-                 WHERE c.is_public = TRUE OR cm.user_id IS NOT NULL
-               )
-               SELECT name, id FROM visible_communities WHERE id = $2`,
+              `SELECT c.name, c.id
+               FROM communities c
+               LEFT JOIN community_members cm
+                 ON cm.community_id = c.id AND cm.user_id = $1
+               WHERE c.id = $2
+                 AND (c.is_public = TRUE OR cm.user_id IS NOT NULL)`,
               [req.user.id, page.after],
             );
             if (!curRows.length) {
@@ -662,12 +695,11 @@ router.get('/', async (req, res, next) => {
           }
 
           const fetchLimit = page.limit + 1;
-          const { rows } = await queryCommunitiesListBase(
-            COMMUNITIES_LIST_BASE_CORE,
-            [req.user.id, cursorName, cursorId, fetchLimit],
-            `WHERE (($2::text IS NULL AND $3::uuid IS NULL) OR (vc.name, vc.id) > ($2::text, $3::uuid))
-           ORDER BY vc.name, vc.id
-           LIMIT $4`,
+          const { rows } = await queryCommunitiesListPage(
+            req.user.id,
+            cursorName,
+            cursorId,
+            fetchLimit,
           );
 
           const hasMore = rows.length > page.limit;
@@ -675,6 +707,9 @@ router.get('/', async (req, res, next) => {
           const body: any = await buildCommunitiesListPayload(req.user.id, slice);
           if (hasMore) body.nextAfter = slice[slice.length - 1].id;
           await setJsonCacheWithStale(redis, cacheKey, body, COMMUNITIES_PAGED_CACHE_TTL_SECS);
+          if (!page.after) {
+            writeLastGoodCommunitiesPayload(req.user.id, body);
+          }
           return body;
         },
       });
@@ -707,8 +742,6 @@ router.get('/', async (req, res, next) => {
     // cache miss – fall through to DB
   }
 
-  // Singleflight: if a DB query is already in-flight for this key, wait for it
-  // rather than spawning a second concurrent query (thundering-herd defence).
   if (communitiesInflight.has(cacheKey)) {
     recordEndpointListCache('communities', 'coalesced');
     try {
@@ -736,11 +769,7 @@ router.get('/', async (req, res, next) => {
 
   recordEndpointListCache('communities', 'miss');
   const promise: Promise<{ communities: any[] }> = (async () => {
-    const { rows } = await queryCommunitiesListBase(
-      COMMUNITIES_LIST_BASE_CORE,
-      [req.user.id],
-      `ORDER BY vc.name, vc.id`,
-    );
+    const { rows } = await queryCommunitiesListFull(req.user.id);
     const payload = await buildCommunitiesListPayload(req.user.id, rows);
     redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
     writeLastGoodCommunitiesPayload(req.user.id, payload);
@@ -748,8 +777,6 @@ router.get('/', async (req, res, next) => {
   })();
 
   communitiesInflight.set(cacheKey, promise);
-  // Avoid unhandledRejection when the shared in-flight query rejects: .finally()
-  // returns a new promise that mirrors rejection unless we attach a handler.
   promise.finally(() => communitiesInflight.delete(cacheKey)).catch(() => {});
 
   try {
@@ -810,6 +837,7 @@ router.post('/',
         `INSERT INTO community_members (community_id, user_id, role) VALUES ($1,$2,'owner')`,
         [community.id, req.user.id]
       );
+      community.member_count = 1;
 
       // Create a default #general channel
       await client.query(
@@ -848,7 +876,6 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
   try {
     const { rows } = await queryRead(
       `SELECT ${COMMUNITY_SELECT_FIELDS},
-              (SELECT COUNT(*) FROM community_members WHERE community_id = c.id) AS member_count,
               json_agg(
                 ${COMMUNITY_DETAIL_CHANNEL_JSON}
               ) FILTER (

@@ -96,8 +96,9 @@ describe('GET /communities resilience', () => {
 
     redis.get.mockImplementation(async (key: string) => {
       if (key === 'communities:list:public_version') return '0';
-      if (key === 'communities:list:user-1:v0') return null;
       if (key === 'communities:list:last_good:user-1') return JSON.stringify(stalePayload);
+      if (key === 'communities:list:user-1:v0') return null;
+      if (key.includes('paged:l')) return null;
       return null;
     });
 
@@ -113,6 +114,7 @@ describe('GET /communities resilience', () => {
   it('returns 503 (not 500) on transient main-list failure when no stale cache exists', async () => {
     redis.get.mockImplementation(async (key: string) => {
       if (key === 'communities:list:public_version') return '0';
+      if (key === 'communities:list:user-1:v0') return null;
       return null;
     });
 
