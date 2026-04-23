@@ -317,11 +317,17 @@ app.use((req, res, next) => {
   next();
 });
 
-// Harness logs "community=Galaxy Haxball" but may call join before an id exists
-// (e.g. "Timed out waiting for community creation") → POST .../communities//join → 404.
+// Harness may call join with no UUID: .../communities//join (empty segment),
+// .../communities/join (no :id — misses POST /:id/join and fell through to JSON 404),
+// or .../communities/undefined/join from stringified undefined.
 app.use((req, res, next) => {
+  if (req.method !== 'POST') return next();
   const pathOnly = (req.originalUrl || req.url || '').split('?')[0];
-  if (req.method === 'POST' && /^\/api\/v1\/communities\/+\/join\/?$/i.test(pathOnly)) {
+  const badJoin =
+    /^\/api\/v1\/communities\/+\/join\/?$/i.test(pathOnly)
+    || /^\/api\/v1\/communities\/join\/?$/i.test(pathOnly)
+    || /^\/api\/v1\/communities\/(?:undefined|null)\/join\/?$/i.test(pathOnly);
+  if (badJoin) {
     return res.status(400).json({ error: 'Missing community id', requestId: req.id });
   }
   next();

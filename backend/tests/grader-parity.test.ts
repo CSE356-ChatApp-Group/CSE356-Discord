@@ -206,6 +206,29 @@ describe('Grader parity: communities and channels', () => {
 
     expect(joinRes.status).toBe(200);
 
+    // Join by slug (non-UUID path segment) — harnesses that pass name/slug instead of id
+    const member2 = await createAuthenticatedUser('gradercommmember2');
+    const joinBySlugRes = await request(app)
+      .post(`/api/v1/communities/${encodeURIComponent(slug)}/join`)
+      .set('Authorization', `Bearer ${member2.accessToken}`)
+      .send({});
+    expect(joinBySlugRes.status).toBe(200);
+
+    const displayJoinName = `Display Join ${uniqueSuffix()}`;
+    const slugForDisplay = `slug-dj-${uniqueSuffix()}`;
+    const createNamedRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug: slugForDisplay, name: displayJoinName, description: 'join by display name' });
+    expect(createNamedRes.status).toBe(201);
+    const namedCommunityId = createNamedRes.body.community.id;
+    const member3 = await createAuthenticatedUser('gradercommmember3');
+    const joinByNameRes = await request(app)
+      .post(`/api/v1/communities/${encodeURIComponent(displayJoinName)}/join`)
+      .set('Authorization', `Bearer ${member3.accessToken}`)
+      .send({});
+    expect(joinByNameRes.status).toBe(200);
+
     const membersRes = await request(app)
       .get(`/api/v1/communities/${communityId}/members`)
       .set('Authorization', `Bearer ${owner.accessToken}`);

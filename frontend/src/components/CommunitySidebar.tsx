@@ -307,7 +307,28 @@ export default function CommunitySidebar() {
           onClose={() => setShowJoin(false)}
           onJoined={async (community) => {
             await fetchCommunities();
-            selectCommunity(community);
+            // Sidebar uses `communities.filter(c => c.my_role)`. Until the list reflects
+            // the new membership (replica lag or missing row), merge locally after a successful join.
+            const id = community?.id;
+            if (id) {
+              const list = useChatStore.getState().communities;
+              const row = list.find((c: any) => c.id === id);
+              if (!row) {
+                useChatStore.setState((s) => ({
+                  communities: [...s.communities, { ...community, my_role: 'member', myRole: 'member' }],
+                }));
+              } else if (!(row.my_role || row.myRole)) {
+                useChatStore.setState((s) => ({
+                  communities: s.communities.map((c: any) =>
+                    c.id === id ? { ...c, my_role: 'member', myRole: 'member' } : c
+                  ),
+                }));
+              }
+            }
+            const merged =
+              useChatStore.getState().communities.find((c: any) => c.id === id)
+              ?? { ...community, my_role: 'member', myRole: 'member' };
+            await selectCommunity(merged);
             setShowJoin(false);
           }}
         />

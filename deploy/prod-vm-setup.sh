@@ -117,6 +117,22 @@ server {
     client_max_body_size 10m;
   }
 
+  # Stops nginx 301 /api/v1/communities → …/communities/ (POST becomes GET without body in browsers).
+  location = /api/v1/communities {
+    limit_req zone=external_general burst=200 nodelay;
+    limit_conn external_conns 30;
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 30s;
+    client_max_body_size 10m;
+  }
+
   # REST API proxy
   location /api/ {
     limit_req zone=external_general burst=200 nodelay;

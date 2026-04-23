@@ -6,7 +6,7 @@
  * GET    /api/v1/communities/:id                – get details
  * DELETE /api/v1/communities/:id                – delete (owner only)
  * PATCH  /api/v1/communities/:id                – update (admin+)
- * POST   /api/v1/communities/:id/join           – join public community
+ * POST   /api/v1/communities/:id/join           – join public community (id UUID, or exact slug/name)
  * DELETE /api/v1/communities/:id/leave          – leave
  * GET    /api/v1/communities/:id/members        – list members + presence
  * PATCH  /api/v1/communities/:id/members/:userId – owner-only role update
@@ -46,6 +46,36 @@ function validate(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) { res.status(400).json({ errors: errors.array() }); return false; }
   return true;
+}
+
+/**
+ * Resolve :id for POST .../communities/:id/join: UUID looks up any community;
+ * non-UUID matches a public community by exact slug or exact name (LIMIT 2 → ambiguous).
+ */
+async function resolveCommunityIdForPublicJoin(rawId) {
+  const token = String(rawId ?? '').trim();
+  if (!token) return { ok: false, reason: 'missing' };
+  if (token.length > 512) return { ok: false, reason: 'invalid' };
+
+  if (uuidValidate(token)) {
+    const { rows } = await query(
+      'SELECT id, is_public FROM communities WHERE id = $1',
+      [token]
+    );
+    const row = rows[0];
+    if (!row) return { ok: false, reason: 'notfound' };
+    return { ok: true, id: row.id, isPublic: row.is_public };
+  }
+
+  const { rows } = await query(
+    `SELECT id FROM communities
+     WHERE is_public = true AND (slug = $1 OR name = $1)
+     LIMIT 2`,
+    [token]
+  );
+  if (rows.length === 0) return { ok: false, reason: 'notfound' };
+  if (rows.length > 1) return { ok: false, reason: 'ambiguous' };
+  return { ok: true, id: rows[0].id, isPublic: true };
 }
 
 function parsePositiveIntEnv(name, fallback) {
@@ -409,7 +439,10 @@ async function writeLastGoodCommunitiesPayload(userId, payload) {
 async function queryCommunitiesListBase(baseSql, params, orderAndLimitSql) {
   const fullSql = `${baseSql}
        ${orderAndLimitSql}`;
-  return queryRead({
+  // Must use primary: list includes `my_role` from `community_members`. With
+  // PG_READ_REPLICA_URL, queryRead can lag right after join/leave so the client
+  // would miss the sidebar until replication catches up.
+  return query({
     text: fullSql,
     values: params,
     query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
@@ -821,30 +854,38 @@ router.post(
   '/:id/join',
   communityJoinIpRateLimiter,
   communityJoinUserRateLimiter,
-  param('id').isUUID(),
+  param('id').trim().isLength({ min: 1, max: 512 }),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     try {
-      const { rows: [community] } = await query(
-        'SELECT id, is_public FROM communities WHERE id=$1', [req.params.id]
-      );
-      if (!community) return res.status(404).json({ error: 'Community not found' });
+      const resolved = await resolveCommunityIdForPublicJoin(req.params.id);
+      if (!resolved.ok) {
+        if (resolved.reason === 'missing' || resolved.reason === 'invalid') {
+          return res.status(400).json({ error: 'Invalid community id' });
+        }
+        if (resolved.reason === 'ambiguous') {
+          return res.status(409).json({ error: 'Multiple communities match; use id or slug' });
+        }
+        return res.status(404).json({ error: 'Community not found' });
+      }
 
-      if (!community.is_public) {
+      if (!resolved.isPublic) {
         return res.status(403).json({ error: 'Community is private' });
       }
 
+      const communityId = resolved.id;
+
       const { rowCount } = await query(
         `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-        [req.params.id, req.user.id]
+        [communityId, req.user.id]
       );
       if (!rowCount) {
         return res.json({ success: true });
       }
 
-      const realtimeTargets = await listCommunityRealtimeTargets(req.params.id, req.user.id);
+      const realtimeTargets = await listCommunityRealtimeTargets(communityId, req.user.id);
       await Promise.allSettled([
-        invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),
+        invalidateCommunityChannelUserFanoutTargetsCache(communityId),
         presenceService.invalidatePresenceFanoutTargets(req.user.id),
         invalidateWsBootstrapCache(req.user.id),
         publishUserFeedTargets([req.user.id], {
@@ -854,16 +895,16 @@ router.post(
           },
         }),
       ]);
-      invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
+      invalidateWsAclCache(req.user.id, `community:${communityId}`);
       {
         const publicVersion = await getPublicCommunitiesVersion();
         invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
       }
-      redis.del(membersCacheKey(req.params.id)).catch(() => {});
+      redis.del(membersCacheKey(communityId)).catch(() => {});
 
-      await fanout.publish(`community:${req.params.id}`, {
+      await fanout.publish(`community:${communityId}`, {
         event: 'community:member_joined',
-        data: { userId: req.user.id, communityId: req.params.id },
+        data: { userId: req.user.id, communityId },
       });
 
       res.json({ success: true });

@@ -604,10 +604,23 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async createCommunity(slug: string, name: string, description: string) {
-    const body = (await api.post('/communities', { slug, name, description })) as Record<string, any>;
+    // Trailing slash avoids nginx 301 /communities → /communities/ on POST (301 drops body → GET list → missing id).
+    const body = (await api.post('/communities/', { slug, name, description })) as Record<string, any>;
     invalidateApiCache('/communities');
-    const inner = body?.community && typeof body.community === 'object' ? body.community : {};
-    const id = String(inner.id ?? body.id ?? body.communityId ?? '').trim();
+    const inner =
+      body?.community && typeof body.community === 'object' && !Array.isArray(body.community)
+        ? body.community
+        : {};
+    const slugNorm = String(slug).trim();
+    let id = String(
+      inner.id ?? inner._id ?? body.id ?? body.communityId ?? body.data?.id ?? ''
+    ).trim();
+    // Older / proxied APIs may omit top-level id; slug is unique — recover from list after create.
+    if (!id && slugNorm) {
+      const list = await get().fetchCommunities();
+      const found = list.find((c: Entity) => String(c.slug ?? '').trim() === slugNorm);
+      if (found?.id) id = String(found.id).trim();
+    }
     if (!id) {
       const err = new Error('Create community response missing id') as Error & { status?: number };
       err.status = 422;

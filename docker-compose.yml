@@ -200,7 +200,8 @@ services:
   frontend:
     image: node:20-alpine
     working_dir: /app
-    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0 --port 5173"
+    # Monorepo lockfile lives at repo root; this service only mounts ./frontend — use npm install, not npm ci.
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules

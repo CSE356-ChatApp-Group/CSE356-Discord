@@ -3,9 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "workspaces": [
-    "."
-  ],
   "main": "src/main.tsx",
   "scripts": {
     "dev": "vite",
