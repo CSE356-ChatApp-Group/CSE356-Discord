@@ -73,9 +73,8 @@ services:
   api:
     image: node:20-alpine
     working_dir: /app
-    # npm ci + heal: named volume can retain a partial tree (missing esbuild for tsx, or
-    # iconv-lite/encodings for body-parser → "Cannot find module '../encodings'").
-    command: sh -c "npm ci && (node -e \"require('esbuild');require('iconv-lite')\" 2>/dev/null || npm install esbuild@^0.27.5 iconv-lite@~0.4.24 --no-audit --no-fund) && npm run dev"
+    # See backend/scripts/docker-api-boot.sh — partial node_modules volumes need full wipe + npm ci.
+    command: ["sh", "scripts/docker-api-boot.sh"]
     volumes:
       - ./backend:/app
       - ./migrations:/migrations
@@ -142,7 +141,7 @@ services:
   migrate:
     image: node:20-alpine
     working_dir: /app
-    command: sh -c "npm ci && npm run migrate"
+    command: sh -c "npm ci || (rm -rf node_modules && npm ci) && npm run migrate"
     volumes:
       - ./backend:/app
       - backend_node_modules:/app/node_modules
