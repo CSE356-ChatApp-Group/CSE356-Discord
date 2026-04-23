@@ -15,6 +15,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const os = require('os');
 const express = require('express');
 const { rateLimit } = require('express-rate-limit');
 const { RedisStore } = require('rate-limit-redis');
@@ -206,6 +207,66 @@ function isMessagePostInsertDbTimeout(err) {
   if (/canceling statement due to statement timeout/i.test(msg)) return true;
   if (code === '08P01' && /timeout/i.test(msg)) return true;
   return false;
+}
+
+function buildMessagePostTimeoutPhaseLog({
+  err,
+  req,
+  channelId,
+  conversationId,
+  attachments,
+  txPhases,
+}: {
+  err: any;
+  req: any;
+  channelId: string | null;
+  conversationId: string | null;
+  attachments: Array<unknown>;
+  txPhases: { t0: number; t_cte: number; t_attach: number };
+}) {
+  const now = Date.now();
+  const hadAttachments = attachments.length > 0;
+  const reachedCte = txPhases.t_cte > 0;
+  const reachedAttach = txPhases.t_attach > 0;
+  let timeoutPhase: 'cte' | 'attachments' | 'commit' = 'cte';
+  let tx_begin_to_cte_ms: number | null = null;
+  let tx_cte_to_attachments_ms: number | null = null;
+  let tx_commit_ms: number | null = null;
+
+  if (!reachedCte) {
+    tx_begin_to_cte_ms = Math.max(0, now - txPhases.t0);
+  } else if (hadAttachments && !reachedAttach) {
+    timeoutPhase = 'attachments';
+    tx_begin_to_cte_ms = Math.max(0, txPhases.t_cte - txPhases.t0);
+    tx_cte_to_attachments_ms = Math.max(0, now - txPhases.t_cte);
+  } else {
+    timeoutPhase = 'commit';
+    tx_begin_to_cte_ms = Math.max(0, txPhases.t_cte - txPhases.t0);
+    if (hadAttachments && reachedAttach) {
+      tx_cte_to_attachments_ms = Math.max(0, txPhases.t_attach - txPhases.t_cte);
+      tx_commit_ms = Math.max(0, now - txPhases.t_attach);
+    } else {
+      tx_cte_to_attachments_ms = 0;
+      tx_commit_ms = Math.max(0, now - txPhases.t_cte);
+    }
+  }
+
+  return {
+    event: 'post_messages_tx_timeout_phases',
+    gradingNote: 'correlate_with_post_messages_timeout',
+    requestId: req.id,
+    instance: `${os.hostname()}:${process.env.PORT || 'unknown'}`,
+    targetType: channelId ? 'channel' : 'conversation',
+    channelId: channelId ?? undefined,
+    conversationId: conversationId ?? undefined,
+    timeoutPhase,
+    tx_begin_to_cte_ms,
+    tx_cte_to_attachments_ms,
+    tx_commit_ms,
+    hadAttachments,
+    pgCode: err?.code,
+    pgMessage: err?.message,
+  };
 }
 
 async function flushConversationLastMessageUpdate(conversationId: string) {
@@ -1301,9 +1362,17 @@ router.post('/',
     if (!validate(req, res)) return;
     let idemRedisKey: string | null = null;
     let idemLease = false;
+    let channelId: string | null = null;
+    let conversationId: string | null = null;
+    let threadId: string | null = null;
+    let attachments: any[] = [];
+    const txPhases = { t0: 0, t_cte: 0, t_attach: 0 };
     try {
-      const { content, channelId, conversationId, threadId } = req.body;
-      const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
+      const { content } = req.body;
+      channelId = req.body.channelId ?? null;
+      conversationId = req.body.conversationId ?? null;
+      threadId = req.body.threadId ?? null;
+      attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
 
       if (!channelId && !conversationId) {
         return res.status(400).json({ error: 'channelId or conversationId required' });
@@ -1389,7 +1458,6 @@ router.post('/',
       // of the prior 5 (access-check, BEGIN, INSERT, COMMIT, hydrated-SELECT),
       // cutting connection hold time ~40% and improving throughput under contention.
       let communityId: string | null = null;
-      const txPhases = { t0: 0, t_cte: 0, t_attach: 0 };
       txPhases.t0 = Date.now();
       const baseMessage = await withTransaction(async (client) => {
         await client.query(`SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`);
@@ -1731,7 +1799,14 @@ router.post('/',
       }
       if (isMessagePostInsertDbTimeout(err)) {
         logger.warn(
-          { requestId: req.id, pgCode: err.code, pgMessage: err.message },
+          buildMessagePostTimeoutPhaseLog({
+            err,
+            req,
+            channelId,
+            conversationId,
+            attachments,
+            txPhases,
+          }),
           'POST /messages: insert hit statement/query timeout (likely lock contention on hot channel)',
         );
         return res
