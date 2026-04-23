@@ -22,6 +22,12 @@ const { invalidateConversationFanoutTargetsCache } = require('./conversationFano
 const { wrapFanoutPayload } = require('./realtimePayload');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 const logger = require('../utils/logger');
+const {
+  staleCacheKey,
+  getJsonCache,
+  setJsonCacheWithStale,
+  withDistributedSingleflight,
+} = require('../utils/distributedSingleflight');
 
 const router = express.Router();
 router.use(authenticate);
@@ -285,7 +291,10 @@ async function invalidateConversationsListCaches(userIds) {
   const keys = [...new Set(
     (Array.isArray(userIds) ? userIds : [])
       .filter((userId) => typeof userId === 'string' && userId)
-      .map((userId) => conversationsCacheKey(userId))
+      .flatMap((userId) => {
+        const key = conversationsCacheKey(userId);
+        return [key, staleCacheKey(key)];
+      })
   )];
   if (!keys.length) return;
   await redis.del(...keys);
@@ -297,14 +306,10 @@ const conversationsInflight: Map<string, Promise<{ conversations: any[] }>> = ne
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   const cacheKey = conversationsCacheKey(req.user.id);
-  try {
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      recordEndpointListCache('conversations', 'hit');
-      return res.json(JSON.parse(cached));
-    }
-  } catch {
-    // cache miss – fall through to DB
+  const cached = await getJsonCache(redis, cacheKey);
+  if (cached) {
+    recordEndpointListCache('conversations', 'hit');
+    return res.json(cached);
   }
 
   if (conversationsInflight.has(cacheKey)) {
@@ -317,9 +322,15 @@ router.get('/', async (req, res, next) => {
   }
 
   recordEndpointListCache('conversations', 'miss');
-  const promise: Promise<{ conversations: any[] }> = (async () => {
-    const { rows } = await queryRead(
-      `SELECT ${CONVERSATION_LIST_FIELDS},
+  const promise: Promise<{ conversations: any[] }> = withDistributedSingleflight({
+    redis,
+    cacheKey,
+    inflight: conversationsInflight,
+    readFresh: async () => getJsonCache(redis, cacheKey),
+    readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+    load: async () => {
+      const { rows } = await queryRead(
+        `SELECT ${CONVERSATION_LIST_FIELDS},
               COALESCE(m_denorm.id, lm.id) AS last_message_id,
               COALESCE(m_denorm.author_id, lm.author_id) AS last_message_author_id,
               COALESCE(m_denorm.created_at, lm.created_at) AS last_message_at,
@@ -367,15 +378,13 @@ router.get('/', async (req, res, next) => {
                  latest_other_rs.last_read_message_id, latest_other_rs.last_read_at
       HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
        ORDER  BY COALESCE(m_denorm.created_at, lm.created_at, c.updated_at) DESC`,
-      [req.user.id]
-    );
-    const payload = { conversations: rows };
-    redis.setex(cacheKey, CONVERSATIONS_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
-    return payload;
-  })();
-
-  conversationsInflight.set(cacheKey, promise);
-  promise.finally(() => conversationsInflight.delete(cacheKey));
+        [req.user.id]
+      );
+      const payload = { conversations: rows };
+      await setJsonCacheWithStale(redis, cacheKey, payload, CONVERSATIONS_CACHE_TTL_SECS);
+      return payload;
+    },
+  });
 
   try {
     res.json(await promise);

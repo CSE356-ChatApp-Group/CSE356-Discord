@@ -38,6 +38,12 @@ const fanout           = require('../websocket/fanout');
 const overload         = require('../utils/overload');
 const redis            = require('../db/redis');
 const logger           = require('../utils/logger');
+const {
+  staleCacheKey,
+  getJsonCache,
+  setJsonCacheWithStale,
+  withDistributedSingleflight,
+} = require('../utils/distributedSingleflight');
 
 function parsePositiveIntEnv(name, fallback) {
   const parsed = Number.parseInt(process.env[name] || '', 10);
@@ -957,13 +963,11 @@ router.get('/',
         const epochKey = channelMsgCacheEpochKey(channelId);
         const epochBefore = await readMessageCacheEpoch(redis, epochKey);
         const cacheKey = channelMsgCacheKey(channelId, { limit, epoch: epochBefore });
-        try {
-          const cached = await redis.get(cacheKey);
-          if (cached) {
-            recordEndpointListCache('messages_channel', 'hit');
-            return res.json(JSON.parse(cached));
-          }
-        } catch { /* cache miss – fall through */ }
+        const cached = await getJsonCache(redis, cacheKey);
+        if (cached) {
+          recordEndpointListCache('messages_channel', 'hit');
+          return res.json(cached);
+        }
 
         // Singleflight: if a DB query for this channel is already in-flight,
         // wait for it rather than spawning a duplicate concurrent query.
@@ -977,9 +981,15 @@ router.get('/',
         }
 
         recordEndpointListCache('messages_channel', 'miss');
-        const promise: Promise<{ messages: any[] }> = (async () => {
-          const params: any[] = [limit, req.user.id, channelId];
-          const sql = `
+        const promise: Promise<{ messages: any[] }> = withDistributedSingleflight({
+          redis,
+          cacheKey,
+          inflight: msgInflight,
+          readFresh: async () => getJsonCache(redis, cacheKey),
+          readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+          load: async () => {
+            const params: any[] = [limit, req.user.id, channelId];
+            const sql = `
             WITH access AS (
               SELECT EXISTS (
                 SELECT 1 FROM channels c
@@ -1008,26 +1018,21 @@ router.get('/',
               LIMIT $1
             ) AS msg ON access.has_access = TRUE
           `;
-          const { rows } = await messagesListQuery(req, sql, params);
-          if (!rows[0]?.has_access) {
-            const err: any = new Error('Access denied');
-            err.statusCode = 403;
-            throw err;
-          }
-          const messages = rows.filter((row) => row.id);
-          const body = { messages: messages.reverse() };
-          const epochAfter = await readMessageCacheEpoch(redis, epochKey);
-          if (epochBefore === epochAfter) {
-            redis.set(cacheKey, JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
-          }
-          return body;
-        })();
-
-        msgInflight.set(cacheKey, promise);
-        // .catch() is required: if the promise rejects (e.g. 403), .finally()
-        // creates a new rejected promise; without a handler Node fires
-        // unhandledRejection.  The caller below already handles the rejection.
-        promise.finally(() => msgInflight.delete(cacheKey)).catch(() => {});
+            const { rows } = await messagesListQuery(req, sql, params);
+            if (!rows[0]?.has_access) {
+              const err: any = new Error('Access denied');
+              err.statusCode = 403;
+              throw err;
+            }
+            const messages = rows.filter((row) => row.id);
+            const body = { messages: messages.reverse() };
+            const epochAfter = await readMessageCacheEpoch(redis, epochKey);
+            if (epochBefore === epochAfter) {
+              await setJsonCacheWithStale(redis, cacheKey, body, MESSAGES_CACHE_TTL_SECS);
+            }
+            return body;
+          },
+        });
 
         try {
           return res.json(await promise);
@@ -1047,13 +1052,11 @@ router.get('/',
         const epochKey = conversationMsgCacheEpochKey(conversationId);
         const epochBefore = await readMessageCacheEpoch(redis, epochKey);
         const cacheKey = conversationMsgCacheKey(conversationId, { limit, epoch: epochBefore });
-        try {
-          const cached = await redis.get(cacheKey);
-          if (cached) {
-            recordEndpointListCache('messages_conversation', 'hit');
-            return res.json(JSON.parse(cached));
-          }
-        } catch { /* cache miss – fall through */ }
+        const cached = await getJsonCache(redis, cacheKey);
+        if (cached) {
+          recordEndpointListCache('messages_conversation', 'hit');
+          return res.json(cached);
+        }
 
         if (convMsgInflight.has(cacheKey)) {
           recordEndpointListCache('messages_conversation', 'coalesced');
@@ -1065,8 +1068,14 @@ router.get('/',
         }
 
         recordEndpointListCache('messages_conversation', 'miss');
-        const promise: Promise<{ messages: any[] }> = (async () => {
-          const { rows } = await messagesListQuery(req, `
+        const promise: Promise<{ messages: any[] }> = withDistributedSingleflight({
+          redis,
+          cacheKey,
+          inflight: convMsgInflight,
+          readFresh: async () => getJsonCache(redis, cacheKey),
+          readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+          load: async () => {
+            const { rows } = await messagesListQuery(req, `
             WITH access AS (
               SELECT EXISTS (
                 SELECT 1 FROM conversation_participants cp
@@ -1089,23 +1098,21 @@ router.get('/',
               ORDER BY m.created_at DESC
               LIMIT $1
             ) AS msg ON access.has_access = TRUE
-          `, [limit, req.user.id, conversationId]);
-          if (!rows[0]?.has_access) {
-            const err: any = new Error('Not a participant');
-            err.statusCode = 403;
-            throw err;
-          }
-          const messages = rows.filter((row) => row.id);
-          const body = { messages: messages.reverse() };
-          const epochAfter = await readMessageCacheEpoch(redis, epochKey);
-          if (epochBefore === epochAfter) {
-            redis.set(cacheKey, JSON.stringify(body), 'EX', MESSAGES_CACHE_TTL_SECS).catch(() => {});
-          }
-          return body;
-        })();
-
-        convMsgInflight.set(cacheKey, promise);
-        promise.finally(() => convMsgInflight.delete(cacheKey)).catch(() => {});
+            `, [limit, req.user.id, conversationId]);
+            if (!rows[0]?.has_access) {
+              const err: any = new Error('Not a participant');
+              err.statusCode = 403;
+              throw err;
+            }
+            const messages = rows.filter((row) => row.id);
+            const body = { messages: messages.reverse() };
+            const epochAfter = await readMessageCacheEpoch(redis, epochKey);
+            if (epochBefore === epochAfter) {
+              await setJsonCacheWithStale(redis, cacheKey, body, MESSAGES_CACHE_TTL_SECS);
+            }
+            return body;
+          },
+        });
 
         try {
           return res.json(await promise);

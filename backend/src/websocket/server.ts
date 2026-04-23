@@ -68,6 +68,12 @@ const { WebSocketServer, WebSocket } = require("ws");
 const { authenticateAccessToken } = require("../utils/jwt");
 const redis = require("../db/redis");
 const { redisSub } = require("../db/redis");
+const {
+  staleCacheKey,
+  getJsonCache,
+  setJsonCacheWithStale,
+  withDistributedSingleflight,
+} = require("../utils/distributedSingleflight");
 const { query, poolStats } = require("../db/pool");
 const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
@@ -1338,9 +1344,13 @@ async function invalidateWsBootstrapCaches(userIds) {
   for (const userId of Array.isArray(userIds) ? userIds : []) {
     if (typeof userId !== 'string' || !userId || seen.has(userId)) continue;
     seen.add(userId);
+    const messagesKey = wsBootstrapCacheKey(userId, 'messages');
+    const fullKey = wsBootstrapCacheKey(userId, 'full');
     keys.push(
-      wsBootstrapCacheKey(userId, 'messages'),
-      wsBootstrapCacheKey(userId, 'full'),
+      messagesKey,
+      staleCacheKey(messagesKey),
+      fullKey,
+      staleCacheKey(fullKey),
     );
   }
   if (!keys.length) return;
@@ -1364,19 +1374,11 @@ function wsAutoSubscribeMode() {
 async function listAutoSubscriptionChannels(userId, mode = 'full') {
   const scope = mode === 'full' ? 'full' : 'messages';
   const cacheKey = wsBootstrapCacheKey(userId, scope);
-  const cached = await redis.get(cacheKey).catch(() => null);
-  if (cached) {
-    try {
-      const parsed = JSON.parse(cached);
-      if (Array.isArray(parsed)) {
-        wsBootstrapListCacheTotal.inc({ result: 'hit' });
-        wsBootstrapChannelsHistogram.observe(parsed.length);
-        return parsed.filter((value) => typeof value === 'string');
-      }
-    } catch {
-      // Fall through to invalidate + rebuild from Postgres below.
-    }
-    await redis.del(cacheKey).catch(() => {});
+  const cached = await getJsonCache(redis, cacheKey);
+  if (Array.isArray(cached)) {
+    wsBootstrapListCacheTotal.inc({ result: 'hit' });
+    wsBootstrapChannelsHistogram.observe(cached.length);
+    return cached.filter((value) => typeof value === 'string');
   }
 
   if (wsBootstrapListInFlight.has(cacheKey)) {
@@ -1387,55 +1389,60 @@ async function listAutoSubscriptionChannels(userId, mode = 'full') {
   }
 
   wsBootstrapListCacheTotal.inc({ result: 'miss' });
-  const load = (async () => {
-    const [conversationRes, communityRes, channelRes] = await Promise.all([
-      query(
-        `SELECT conversation_id::text AS id
-         FROM conversation_participants
-         WHERE user_id = $1 AND left_at IS NULL`,
-        [userId],
-      ),
-      scope === 'full'
-        ? query(
-          `SELECT community_id::text AS id
-           FROM community_members
-           WHERE user_id = $1`,
+  const load = withDistributedSingleflight({
+    redis,
+    cacheKey,
+    inflight: wsBootstrapListInFlight,
+    readFresh: async () => {
+      const parsed = await getJsonCache(redis, cacheKey);
+      return Array.isArray(parsed) ? parsed : null;
+    },
+    readStale: async () => {
+      const parsed = await getJsonCache(redis, staleCacheKey(cacheKey));
+      return Array.isArray(parsed) ? parsed : null;
+    },
+    load: async () => {
+      const [conversationRes, communityRes, channelRes] = await Promise.all([
+        query(
+          `SELECT conversation_id::text AS id
+           FROM conversation_participants
+           WHERE user_id = $1 AND left_at IS NULL`,
           [userId],
-        )
-        : Promise.resolve({ rows: [] }),
-      query(
-        `SELECT c.id::text AS id
-         FROM channels c
-         JOIN community_members cm
-           ON cm.community_id = c.community_id
-          AND cm.user_id = $1
-         LEFT JOIN channel_members chm
-           ON chm.channel_id = c.id
-          AND chm.user_id = $1
-         WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
-        [userId],
-      ),
-    ]);
+        ),
+        scope === 'full'
+          ? query(
+            `SELECT community_id::text AS id
+             FROM community_members
+             WHERE user_id = $1`,
+            [userId],
+          )
+          : Promise.resolve({ rows: [] }),
+        query(
+          `SELECT c.id::text AS id
+           FROM channels c
+           JOIN community_members cm
+             ON cm.community_id = c.community_id
+            AND cm.user_id = $1
+           LEFT JOIN channel_members chm
+             ON chm.channel_id = c.id
+            AND chm.user_id = $1
+           WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
+          [userId],
+        ),
+      ]);
 
-    // Subscribe channel topics first so message fanout can arrive before the tail
-    // of community/conversation Redis topics finishes (grading: many listeners).
-    const channels = [
-      ...channelRes.rows.map((row) => `channel:${row.id}`),
-      ...conversationRes.rows.map((row) => `conversation:${row.id}`),
-      ...communityRes.rows.map((row) => `community:${row.id}`),
-    ];
-    wsBootstrapChannelsHistogram.observe(channels.length);
-
-    // Cache for a short TTL. Invalidated explicitly on membership changes.
-    redis
-      .set(cacheKey, JSON.stringify(channels), 'EX', WS_BOOTSTRAP_CACHE_TTL_SECONDS)
-      .catch(() => {}); // fire-and-forget, non-critical
-
-    return channels;
-  })().finally(() => {
-    wsBootstrapListInFlight.delete(cacheKey);
+      // Subscribe channel topics first so message fanout can arrive before the tail
+      // of community/conversation Redis topics finishes (grading: many listeners).
+      const channels = [
+        ...channelRes.rows.map((row) => `channel:${row.id}`),
+        ...conversationRes.rows.map((row) => `conversation:${row.id}`),
+        ...communityRes.rows.map((row) => `community:${row.id}`),
+      ];
+      wsBootstrapChannelsHistogram.observe(channels.length);
+      await setJsonCacheWithStale(redis, cacheKey, channels, WS_BOOTSTRAP_CACHE_TTL_SECONDS);
+      return channels;
+    },
   });
-  wsBootstrapListInFlight.set(cacheKey, load);
   return load;
 }
 

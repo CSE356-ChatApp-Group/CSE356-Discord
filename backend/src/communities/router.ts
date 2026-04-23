@@ -28,6 +28,12 @@ const { publishUserFeedTargets } = require('../websocket/userFeed');
 const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
 const { invalidateCommunityChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
 const { recordEndpointListCache, recordEndpointListCacheBypass } = require('../utils/endpointCacheMetrics');
+const {
+  staleCacheKey,
+  getJsonCache,
+  setJsonCacheWithStale,
+  withDistributedSingleflight,
+} = require('../utils/distributedSingleflight');
 
 const router = express.Router();
 router.use(authenticate);
@@ -120,7 +126,10 @@ async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
   const keys = [...new Set(
     (Array.isArray(userIds) ? userIds : [])
       .filter((userId) => typeof userId === 'string' && userId)
-      .map((userId) => communitiesCacheKey(userId, publicVersion))
+      .flatMap((userId) => {
+        const key = communitiesCacheKey(userId, publicVersion);
+        return [key, staleCacheKey(key)];
+      })
   )];
   if (!keys.length) return;
   await redis.del(...keys);
@@ -440,18 +449,12 @@ router.get('/', async (req, res, next) => {
 
   const publicVersion = await getPublicCommunitiesVersion();
   const cacheKey = communitiesCacheKey(req.user.id, publicVersion);
-  try {
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      recordEndpointListCache('communities', 'hit');
-      return res.json(JSON.parse(cached));
-    }
-  } catch {
-    // cache miss – fall through to DB
+  const cached = await getJsonCache(redis, cacheKey);
+  if (cached) {
+    recordEndpointListCache('communities', 'hit');
+    return res.json(cached);
   }
 
-  // Singleflight: if a DB query is already in-flight for this key, wait for it
-  // rather than spawning a second concurrent query (thundering-herd defence).
   if (communitiesInflight.has(cacheKey)) {
     recordEndpointListCache('communities', 'coalesced');
     try {
@@ -478,22 +481,24 @@ router.get('/', async (req, res, next) => {
   }
 
   recordEndpointListCache('communities', 'miss');
-  const promise: Promise<{ communities: any[] }> = (async () => {
-    const { rows } = await queryCommunitiesListBase(
-      COMMUNITIES_LIST_BASE_CORE,
-      [req.user.id],
-      `ORDER BY vc.name, vc.id`,
-    );
-    const payload = await buildCommunitiesListPayload(req.user.id, rows);
-    redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
-    writeLastGoodCommunitiesPayload(req.user.id, payload);
-    return payload;
-  })();
-
-  communitiesInflight.set(cacheKey, promise);
-  // Avoid unhandledRejection when the shared in-flight query rejects: .finally()
-  // returns a new promise that mirrors rejection unless we attach a handler.
-  promise.finally(() => communitiesInflight.delete(cacheKey)).catch(() => {});
+  const promise: Promise<{ communities: any[] }> = withDistributedSingleflight({
+    redis,
+    cacheKey,
+    inflight: communitiesInflight,
+    readFresh: async () => getJsonCache(redis, cacheKey),
+    readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+    load: async () => {
+      const { rows } = await queryCommunitiesListBase(
+        COMMUNITIES_LIST_BASE_CORE,
+        [req.user.id],
+        `ORDER BY vc.name, vc.id`,
+      );
+      const payload = await buildCommunitiesListPayload(req.user.id, rows);
+      await setJsonCacheWithStale(redis, cacheKey, payload, COMMUNITIES_CACHE_TTL_SECS);
+      writeLastGoodCommunitiesPayload(req.user.id, payload);
+      return payload;
+    },
+  });
 
   try {
     res.json(await promise);

@@ -25,6 +25,12 @@ const {
 } = require('../websocket/server');
 const { invalidateChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
+const {
+  staleCacheKey,
+  getJsonCache,
+  setJsonCacheWithStale,
+  withDistributedSingleflight,
+} = require('../utils/distributedSingleflight');
 
 const router = express.Router();
 router.use(authenticate);
@@ -236,7 +242,10 @@ async function bustChannelListCache(communityId) {
       [communityId]
     );
     if (!rows.length) return;
-    const keys = rows.map(r => `channels:list:${communityId}:${r.user_id}`);
+    const keys = rows.flatMap((r) => {
+      const key = `channels:list:${communityId}:${r.user_id}`;
+      return [key, staleCacheKey(key)];
+    });
     await redis.del(...keys);
   } catch (err) {
     logger.warn({ err }, 'channels:list cache bust failed');
@@ -260,10 +269,10 @@ router.get('/',
       // Serve from Redis cache when warm. Channel structure changes are rare;
       // WS events keep the frontend state current.
       const cacheKey = `channels:list:${communityId}:${userId}`;
-      const cached = await redis.get(cacheKey).catch(() => null);
+      const cached = await getJsonCache(redis, cacheKey);
       if (cached) {
         recordEndpointListCache('channels', 'hit');
-        return res.json(JSON.parse(cached));
+        return res.json(cached);
       }
 
       if (channelsListInflight.has(cacheKey)) {
@@ -280,23 +289,29 @@ router.get('/',
       }
 
       recordEndpointListCache('channels', 'miss');
-      const promise = (async () => {
-        // Access control must read from primary to avoid replica lag causing false 403s
-        // immediately after a user joins a community.
-        const { rows: memberRows } = await query(
-          'SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2 LIMIT 1',
-          [communityId, userId]
-        );
-        if (memberRows.length === 0) {
-          return { ok: false };
-        }
+      const promise = withDistributedSingleflight({
+        redis,
+        cacheKey,
+        inflight: channelsListInflight,
+        readFresh: async () => getJsonCache(redis, cacheKey),
+        readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+        load: async () => {
+          // Access control must read from primary to avoid replica lag causing false 403s
+          // immediately after a user joins a community.
+          const { rows: memberRows } = await query(
+            'SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2 LIMIT 1',
+            [communityId, userId]
+          );
+          if (memberRows.length === 0) {
+            return { ok: false };
+          }
 
-        // Return all visible channel names. Private-channel metadata/content pointers
-        // are redacted for users who are not invited to that private channel.
-        // Fall back to primary if the replica returns 0 rows — this handles the
-        // replication lag window after community creation where the default channel
-        // exists on primary but hasn't replicated yet.
-        const channelListSql = `SELECT ${VISIBLE_CHANNEL_FIELDS},
+          // Return all visible channel names. Private-channel metadata/content pointers
+          // are redacted for users who are not invited to that private channel.
+          // Fall back to primary if the replica returns 0 rows — this handles the
+          // replication lag window after community creation where the default channel
+          // exists on primary but hasn't replicated yet.
+          const channelListSql = `SELECT ${VISIBLE_CHANNEL_FIELDS},
                   vc.can_access,
                   CASE WHEN vc.can_access THEN vc.last_message_id ELSE NULL END AS last_message_id,
                   CASE WHEN vc.can_access THEN vc.last_message_author_id ELSE NULL END AS last_message_author_id,
@@ -319,61 +334,59 @@ router.get('/',
                  AND rs.channel_id = vc.id
                  AND rs.user_id = $2
            ORDER  BY vc.position, vc.name`;
-        let { rows } = await queryRead(channelListSql, [communityId, userId]);
-        if (rows.length === 0) {
-          ({ rows } = await query(channelListSql, [communityId, userId]));
-        }
+          let { rows } = await queryRead(channelListSql, [communityId, userId]);
+          if (rows.length === 0) {
+            ({ rows } = await query(channelListSql, [communityId, userId]));
+          }
 
-        // Attach Redis-backed unread_message_count to each accessible channel
-        const accessibleRows = rows.filter(ch => ch.id && ch.can_access);
-        if (accessibleRows.length > 0) {
-          try {
-            const countKeys = accessibleRows.map((ch) => `channel:msg_count:${ch.id}`);
-            const readKeys = accessibleRows.map((ch) => `user:last_read_count:${ch.id}:${userId}`);
-            const [rawCounts, rawReads] = await Promise.all([
-              redis.mget(...countKeys),
-              redis.mget(...readKeys),
-            ]);
+          // Attach Redis-backed unread_message_count to each accessible channel
+          const accessibleRows = rows.filter(ch => ch.id && ch.can_access);
+          if (accessibleRows.length > 0) {
+            try {
+              const countKeys = accessibleRows.map((ch) => `channel:msg_count:${ch.id}`);
+              const readKeys = accessibleRows.map((ch) => `user:last_read_count:${ch.id}:${userId}`);
+              const [rawCounts, rawReads] = await Promise.all([
+                redis.mget(...countKeys),
+                redis.mget(...readKeys),
+              ]);
 
-            const missingChannels = [];
-            for (let i = 0; i < accessibleRows.length; i++) {
-              const ch = accessibleRows[i];
-              const rawCount = rawCounts[i];
-              const rawRead = rawReads[i];
-              if (rawCount === null || rawRead === null) {
-                missingChannels.push(ch);
-              } else {
-                ch.unread_message_count = Math.max(0, parseInt(rawCount, 10) - parseInt(rawRead, 10));
+              const missingChannels = [];
+              for (let i = 0; i < accessibleRows.length; i++) {
+                const ch = accessibleRows[i];
+                const rawCount = rawCounts[i];
+                const rawRead = rawReads[i];
+                if (rawCount === null || rawRead === null) {
+                  missingChannels.push(ch);
+                } else {
+                  ch.unread_message_count = Math.max(0, parseInt(rawCount, 10) - parseInt(rawRead, 10));
+                }
               }
-            }
 
-            if (missingChannels.length > 0) {
-              // Avoid cold COUNT(*) fallback in this hot path. When Redis counters
-              // are missing, infer an unread indicator from denormalized last-read
-              // metadata and let async write paths repopulate exact counters.
-              for (const ch of missingChannels) {
-                const hasUnread =
-                  Boolean(ch.last_message_id) &&
-                  ch.last_message_id !== ch.my_last_read_message_id &&
-                  ch.last_message_author_id !== userId;
-                ch.unread_message_count = hasUnread ? 1 : 0;
+              if (missingChannels.length > 0) {
+                // Avoid cold COUNT(*) fallback in this hot path. When Redis counters
+                // are missing, infer an unread indicator from denormalized last-read
+                // metadata and let async write paths repopulate exact counters.
+                for (const ch of missingChannels) {
+                  const hasUnread =
+                    Boolean(ch.last_message_id) &&
+                    ch.last_message_id !== ch.my_last_read_message_id &&
+                    ch.last_message_author_id !== userId;
+                  ch.unread_message_count = hasUnread ? 1 : 0;
+                }
               }
-            }
-          } catch (err) {
-            logger.warn({ err }, 'Failed to fetch unread counts from Redis; defaulting to 0');
-            for (const ch of accessibleRows) {
-              if (ch.unread_message_count === undefined) ch.unread_message_count = 0;
+            } catch (err) {
+              logger.warn({ err }, 'Failed to fetch unread counts from Redis; defaulting to 0');
+              for (const ch of accessibleRows) {
+                if (ch.unread_message_count === undefined) ch.unread_message_count = 0;
+              }
             }
           }
-        }
 
-        const response = { channels: rows.filter((row) => row.id) };
-        redis.set(cacheKey, JSON.stringify(response), 'EX', CHANNELS_LIST_CACHE_TTL_SECS).catch(() => {});
-        return { ok: true, body: response };
-      })();
-
-      channelsListInflight.set(cacheKey, promise);
-      promise.finally(() => channelsListInflight.delete(cacheKey));
+          const response = { channels: rows.filter((row) => row.id) };
+          await setJsonCacheWithStale(redis, cacheKey, response, CHANNELS_LIST_CACHE_TTL_SECS);
+          return { ok: true, body: response };
+        },
+      });
 
       const result = await promise;
       if (!result.ok) {
@@ -573,9 +586,11 @@ router.post('/:id/members',
             channels: [`channel:${req.params.id}`],
           },
         }).catch(() => {});
-        redis
-          .del(...insertedUserIds.map((userId) => `channels:list:${channel.community_id}:${userId}`))
-          .catch(() => {});
+        const keys = insertedUserIds.flatMap((userId) => {
+          const key = `channels:list:${channel.community_id}:${userId}`;
+          return [key, staleCacheKey(key)];
+        });
+        redis.del(...keys).catch(() => {});
       }
       for (const { user_id } of insertedRows) {
         // Expire the WS ACL cache so subsequent subscribe attempts are checked fresh.

@@ -9,9 +9,11 @@ jest.mock('../src/db/pool', () => ({
 
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(),
+  set: jest.fn(),
   setex: jest.fn(),
   del: jest.fn(),
   incr: jest.fn(),
+  eval: jest.fn(),
 }));
 
 jest.mock('../src/utils/logger', () => ({
@@ -53,9 +55,11 @@ const pool = require('../src/db/pool') as {
 };
 const redis = require('../src/db/redis') as {
   get: jest.Mock;
+  set: jest.Mock;
   setex: jest.Mock;
   del: jest.Mock;
   incr: jest.Mock;
+  eval: jest.Mock;
 };
 const presenceService = require('../src/presence/service') as {
   getBulkPresenceDetails: jest.Mock;
@@ -77,8 +81,10 @@ describe('community members roster caching', () => {
     jest.clearAllMocks();
     redis.get.mockResolvedValue(null);
     redis.setex.mockResolvedValue('OK');
+    redis.set.mockResolvedValue('OK');
     redis.del.mockResolvedValue(1);
     redis.incr.mockResolvedValue(1);
+    redis.eval.mockResolvedValue(1);
     fanout.publish.mockResolvedValue(1);
     presenceService.getBulkPresenceDetails.mockResolvedValue({});
   });

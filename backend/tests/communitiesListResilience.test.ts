@@ -9,9 +9,11 @@ jest.mock('../src/db/pool', () => ({
 
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(),
+  set: jest.fn(),
   setex: jest.fn(),
   del: jest.fn(),
   incr: jest.fn(),
+  eval: jest.fn(),
 }));
 
 jest.mock('../src/utils/logger', () => ({
@@ -47,7 +49,9 @@ const pool = require('../src/db/pool') as {
 };
 const redis = require('../src/db/redis') as {
   get: jest.Mock;
+  set: jest.Mock;
   setex: jest.Mock;
+  eval: jest.Mock;
 };
 
 function buildApp() {
@@ -62,6 +66,8 @@ describe('GET /communities resilience', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     redis.setex.mockResolvedValue('OK');
+    redis.set.mockResolvedValue('OK');
+    redis.eval.mockResolvedValue(1);
   });
 
   it('serves last-good cached payload on transient main-list query failure', async () => {
