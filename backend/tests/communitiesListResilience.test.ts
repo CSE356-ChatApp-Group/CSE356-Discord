@@ -56,6 +56,7 @@ jest.mock('../src/utils/endpointCacheMetrics', () => ({
 }));
 
 const pool = require('../src/db/pool') as {
+  query: jest.Mock;
   queryRead: jest.Mock;
 };
 const redis = require('../src/db/redis') as {
@@ -79,6 +80,8 @@ function buildApp() {
 describe('GET /communities resilience', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // List payload uses primary `query()`; unread counts still use `queryRead()`.
+    pool.query.mockImplementation((...args: unknown[]) => pool.queryRead(...args));
     redis.setex.mockResolvedValue('OK');
     redis.set.mockResolvedValue('OK');
     redis.eval.mockResolvedValue(1);
