@@ -1364,6 +1364,47 @@ ssh_prod "
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \
     --required /tmp/prod.required.env
+  # Keep Redis on the dedicated production VM across deploys while preserving
+  # the existing password/DB from the host-local secret file.
+  sudo env CHATAPP_REDIS_HOST='${PROD_REDIS_HOST:-10.0.1.233}' python3 - <<'PY'
+from pathlib import Path
+import os
+from urllib.parse import urlsplit, urlunsplit
+
+env_path = Path('/opt/chatapp/shared/.env')
+lines = env_path.read_text(encoding='utf-8', errors='replace').splitlines()
+redis_idx = None
+redis_url = None
+for idx, raw in enumerate(lines):
+    line = raw.strip()
+    if line.startswith('export '):
+        line = line[7:].strip()
+    if line.startswith('REDIS_URL='):
+        redis_idx = idx
+        redis_url = line.split('=', 1)[1]
+
+if redis_idx is None or not redis_url:
+    raise SystemExit('REDIS_URL missing from /opt/chatapp/shared/.env')
+
+target_host = os.environ.get('CHATAPP_REDIS_HOST') or '10.0.1.233'
+parts = urlsplit(redis_url)
+userinfo, sep, hostport = parts.netloc.rpartition('@')
+prefix = f'{userinfo}@' if sep else ''
+suffix = ''
+if hostport.startswith('['):
+    end = hostport.find(']')
+    if end != -1:
+        suffix = hostport[end + 1:]
+elif ':' in hostport:
+    maybe_host, maybe_port = hostport.rsplit(':', 1)
+    if maybe_port.isdigit():
+        suffix = f':{maybe_port}'
+
+new_url = urlunsplit((parts.scheme, f'{prefix}{target_host}{suffix}', parts.path, parts.query, parts.fragment))
+lines[redis_idx] = f'REDIS_URL={new_url}'
+env_path.write_text('\n'.join(lines).rstrip() + '\n', encoding='utf-8')
+PY
+  sudo /usr/bin/bash /opt/chatapp/shared/redis-wait.sh
   rm -f /tmp/apply-env-profile.py /tmp/prod.required.env
   sudo systemctl daemon-reload
   echo 'systemd unit installed'"
