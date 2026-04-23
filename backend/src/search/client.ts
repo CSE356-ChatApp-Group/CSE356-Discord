@@ -271,6 +271,18 @@ function p(params: any[], v: any): string {
   return `$${params.length}`;
 }
 
+function buildAuthorTimeFilters(
+  params: any[],
+  opts: Record<string, any>,
+  alias = 'm',
+): string {
+  const parts: string[] = [];
+  if (opts.authorId) parts.push(`AND ${alias}.author_id = ${p(params, opts.authorId)}`);
+  if (opts.after)    parts.push(`AND ${alias}.created_at >= ${p(params, opts.after)}::timestamptz`);
+  if (opts.before)   parts.push(`AND ${alias}.created_at <= ${p(params, opts.before)}::timestamptz`);
+  return parts.join('\n');
+}
+
 function buildFilters(params: any[], opts: Record<string, any>): string {
   const parts: string[] = [];
 
@@ -313,9 +325,8 @@ function buildFilters(params: any[], opts: Record<string, any>): string {
     )`);
   }
 
-  if (opts.authorId) parts.push(`AND m.author_id = ${p(params, opts.authorId)}`);
-  if (opts.after)    parts.push(`AND m.created_at >= ${p(params, opts.after)}::timestamptz`);
-  if (opts.before)   parts.push(`AND m.created_at <= ${p(params, opts.before)}::timestamptz`);
+  const authorTimeFilters = buildAuthorTimeFilters(params, opts);
+  if (authorTimeFilters) parts.push(authorTimeFilters);
 
   return parts.join('\n');
 }
@@ -493,6 +504,93 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   return { sql, params, limit, offset, q };
 }
 
+function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
+  const params: any[] = [];
+  const scope = buildScopedAccessParts(params, opts);
+  const limit = Number(opts.limit) || 20;
+  const offset = Number(opts.offset) || 0;
+  const rawQueryPh = p(params, q);
+  const limitPh = p(params, limit);
+  const offsetPh = p(params, offset);
+
+  if (!scope) {
+    return {
+      sql: `SELECT NULL WHERE FALSE`,
+      params,
+      limit,
+      offset,
+      q,
+    };
+  }
+
+  if (scope.scopeType === 'community') {
+    const authorTimeFilters = buildAuthorTimeFilters(params, opts);
+    return {
+      sql: `
+        WITH ${scope.cte.trim()},
+        community_channels AS MATERIALIZED (
+          SELECT ch.id,
+                 ch.community_id,
+                 ch.name
+          FROM channels ch
+          LEFT JOIN channel_members cm
+            ON cm.channel_id = ch.id
+           AND cm.user_id = ${scope.userIdPh}
+          WHERE ch.community_id = ${scope.targetIdPh}
+            AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
+        )
+        SELECT scope_access.has_access AS "__scopeAccess",
+          search_rows.*
+        FROM scope_access
+        LEFT JOIN LATERAL (
+          SELECT m.id,
+                 m.content,
+                 m.author_id        AS "authorId",
+                 COALESCE(NULLIF(u.display_name, ''), u.username) AS "authorDisplayName",
+                 m.channel_id       AS "channelId",
+                 m.conversation_id  AS "conversationId",
+                 m.created_at       AS "createdAt",
+                 cc.community_id    AS "communityId",
+                 cc.name            AS "channelName"
+          FROM community_channels cc
+          JOIN messages m ON m.channel_id = cc.id
+          JOIN users u ON u.id = m.author_id
+          WHERE m.deleted_at IS NULL
+            AND position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+            ${authorTimeFilters}
+          ORDER BY m.created_at DESC, m.id DESC
+          LIMIT ${limitPh} OFFSET ${offsetPh}
+        ) search_rows ON scope_access.has_access = TRUE`,
+      params,
+      limit,
+      offset,
+      q,
+    };
+  }
+
+  const filters = buildFilters(params, opts);
+  return {
+    sql: `
+      WITH ${scope.cte.trim()}
+      SELECT scope_access.has_access AS "__scopeAccess",
+        search_rows.*
+      FROM scope_access
+      LEFT JOIN LATERAL (
+        SELECT ${SELECT_COLS}
+        ${FROM_CLAUSE}
+        WHERE m.deleted_at IS NULL
+          AND position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+          ${filters}
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT ${limitPh} OFFSET ${offsetPh}
+      ) search_rows ON scope_access.has_access = TRUE`,
+    params,
+    limit,
+    offset,
+    q,
+  };
+}
+
 async function searchFilteredOnly(
   opts: Record<string, any>,
   forcePrimary = false,
@@ -542,8 +640,9 @@ function shouldRetrySearchOnPrimary(
  * search – main entry point. FTS-only.
  *
  * Stop-word-only queries (e.g. "the and is") collapse to ''::tsquery via
- * websearch_to_tsquery('english') and return an empty result immediately —
- * no fallback scan is attempted.
+ * websearch_to_tsquery('english'). Scoped requests use a bounded literal
+ * fallback inside the already-authorized scope only; unscoped requests still do
+ * not run a broad fallback scan.
  *
  * @param q     Raw query string (validated by caller: non-empty when present)
  * @param opts  { channelId?, conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset? }
@@ -558,12 +657,28 @@ async function searchOnce(
   }
 
   const trimmed = String(q).trim();
-  const scoped = Boolean(opts.channelId || opts.conversationId || opts.communityId);
-  const ftsMeta = buildFtsParts(trimmed, opts);
 
   return await runSearchTransaction(async (client) => {
+    const tsqueryMetaRes = await client.query(
+      `SELECT numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes`,
+      [trimmed],
+    );
+    const isStopwordOnlyQuery = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0) === 0;
+
+    if (isStopwordOnlyQuery) {
+      const literalMeta = buildScopedLiteralParts(trimmed, opts);
+      const literalRes = await client.query(literalMeta.sql, literalMeta.params);
+      if (literalRes.rows[0]?.__scopeAccess === false) {
+        const err: any = new Error('Access denied');
+        err.statusCode = 403;
+        throw err;
+      }
+      return buildResult(literalRes.rows, literalMeta.q, literalMeta.offset, literalMeta.limit);
+    }
+
+    const ftsMeta = buildFtsParts(trimmed, opts);
     const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
-    if (scoped && ftsRes.rows[0]?.__scopeAccess === false) {
+    if (ftsRes.rows[0]?.__scopeAccess === false) {
       const err: any = new Error('Access denied');
       err.statusCode = 403;
       throw err;

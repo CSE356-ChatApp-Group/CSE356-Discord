@@ -392,25 +392,28 @@ describe('Search – common phrases and all-term matching', () => {
     }
   });
 
-  it('stop-word-only query returns empty results (FTS-only behavior)', async () => {
+  it('stop-word-only query uses scoped literal fallback', async () => {
     // "more just about" are English stop words; websearch_to_tsquery('english') produces
-    // ''::tsquery which matches nothing. Correct FTS-only behavior — no fallback scan.
+    // ''::tsquery. Scoped searches fall back to an exact literal match inside
+    // the requested scope only.
     const res = await request(app)
       .get(`/api/v1/search?q=${encodeURIComponent(commonPhrase)}&channelId=${channelId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hits.length).toBe(0);
+    expect(res.body.hits.some((hit: any) => String(hit.content || '').includes(commonPhrase))).toBe(true);
   });
 
-  it('single stop-word query returns empty results (FTS-only behavior)', async () => {
-    // "be" is an English stop word; FTS returns 0 results. No fallback scan.
+  it('single stop-word query uses scoped literal fallback', async () => {
+    // "be" is an English stop word; the scoped literal fallback can still find
+    // messages containing that literal token/string.
     const res = await request(app)
       .get(`/api/v1/search?q=be&channelId=${channelId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hits.length).toBe(0);
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    expect(res.body.hits.some((hit: any) => String(hit.content || '').toLowerCase().includes('be'))).toBe(true);
   });
 
   it('FTS strips stop words from query; remaining terms match all containing messages', async () => {
