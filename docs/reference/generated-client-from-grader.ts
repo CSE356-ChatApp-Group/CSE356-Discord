@@ -556,7 +556,13 @@ export class GeneratedClient {
       throw new Error(`createCommunity failed: ${res.status} ${err}`);
     }
     const d = await res.json() as any;
-    return this.mapCommunity(d.community || d);
+    // Server returns `{ community, id, communityId }`; tolerate `body.id` only too.
+    const inner = d.community || d;
+    return this.mapCommunity({
+      ...inner,
+      id: inner.id || d.id || d.communityId || d.community_id,
+      owner_id: inner.owner_id ?? inner.ownerId,
+    });
   }
 
   async getCommunities(): Promise<CommunityInfo[]> {
@@ -567,7 +573,9 @@ export class GeneratedClient {
   }
 
   async joinCommunity(communityId: string): Promise<void> {
-    const res = await this.authedFetch(`${this.baseUrl}/api/v1/communities/${communityId}/join`, {
+    const id = String(communityId || '').trim();
+    if (!id) throw new Error('joinCommunity: missing communityId (createCommunity may have failed or parsed the wrong JSON field)');
+    const res = await this.authedFetch(`${this.baseUrl}/api/v1/communities/${id}/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),

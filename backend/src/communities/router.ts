@@ -692,7 +692,13 @@ router.post('/',
       }
       const publicVersion = await getPublicCommunitiesVersion();
       invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
-      res.status(201).json({ community });
+      // Redundant id fields: harness / generated clients sometimes read `body.id`
+      // or `body.communityId` instead of `body.community.id`, producing `/communities//join`.
+      res.status(201).json({
+        community,
+        id: community.id,
+        communityId: community.id,
+      });
     } catch (err) {
       await client?.query('ROLLBACK');
       if (err.code === '23505') return res.status(409).json({ error: 'Slug already taken' });

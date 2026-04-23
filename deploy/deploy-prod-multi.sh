@@ -142,9 +142,11 @@ echo "✓ PostgreSQL max_connections is adequate (${CURRENT_MAX})"
 echo ""
 
 # ── Phase 0: Deploy to VM3 first (after pre-flight PostgreSQL check) ─────────
-# VM3 has no shared services so a failed deploy has zero impact on live traffic.
+# VM3 has no shared services: a *failed* deploy does not take down Redis/PgBouncer on VM1.
+# Rolling Node workers here still drops connections on VM3 ports that VM1 nginx is
+# proxying to — expect brief 502/RST bursts for requests steered to a restarting peer.
 # SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
-echo "=== Phase 0: Deploy to VM3 (isolated — no live-traffic impact) ==="
+echo "=== Phase 0: Deploy to VM3 (workers only; brief client errors possible while rolling) ==="
 PROD_HOST=$VM3 \
   REDIS_HOST="${REDIS_HOST}" \
   PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
@@ -175,10 +177,11 @@ fi
 echo "✓ All VM3 workers healthy"
 
 # ── Phase 1: Deploy to VM2 ───────────────────────────────────────────────────
-# VM2 has no shared services so a failed deploy has zero impact on live traffic.
+# Same traffic caveat as Phase 0: VM1 nginx upstream lists VM2 workers; rolling them
+# can surface 502 from nginx while peers restart (not the same as isolating user traffic).
 # SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo ""
-echo "=== Phase 1: Deploy to VM2 (isolated — no live-traffic impact) ==="
+echo "=== Phase 1: Deploy to VM2 (workers only; brief client errors possible while rolling) ==="
 PROD_HOST=$VM2 \
   REDIS_HOST="${REDIS_HOST}" \
   PROM_REDIS_HOST="${PROM_REDIS_HOST}" \

@@ -476,18 +476,19 @@ function isConversationUnread(conv, active, currentUserId) {
 }
 
 function CommunityIcon({ community, unread, active, onClick }) {
-  const initials = community.name.slice(0, 2).toUpperCase();
+  const label = String(community?.name || community?.slug || 'Community');
+  const initials = label.slice(0, 2).toUpperCase();
   return (
     <button
       className={`${styles.icon} ${active ? styles.active : ''}`}
-      title={community.name}
+      title={label}
       onClick={onClick}
-      aria-label={`Open community ${community.name}`}
+      aria-label={`Open community ${label}`}
       data-testid={`community-item-${community.id}`}
       data-community-id={community.id}
     >
       {community.icon_url
-        ? <img src={community.icon_url} alt={community.name} className={styles.iconImg} />
+        ? <img src={community.icon_url} alt={label} className={styles.iconImg} />
         : <span className={styles.iconText}>{initials}</span>
       }
       {unread && (
@@ -691,7 +692,8 @@ function resolvePresenceStatus(status?: string, fallback?: 'online' | 'away') {
 }
 
 export function Avatar({ name = '?', size = 32, user }: { name?: string; size?: number; user?: any }) {
-  const initials = name.slice(0, 2).toUpperCase();
+  const safeName = name == null || name === '' ? '?' : String(name);
+  const initials = safeName.slice(0, 2).toUpperCase();
   const src = buildAvatarSrc(user);
   const [imgError, setImgError] = useState(false);
 
@@ -701,7 +703,7 @@ export function Avatar({ name = '?', size = 32, user }: { name?: string; size?: 
 
   // Deterministic hue from name
   let hash = 0;
-  for (const c of name) hash = c.charCodeAt(0) + ((hash << 5) - hash);
+  for (const c of safeName) hash = c.charCodeAt(0) + ((hash << 5) - hash);
   const hue = Math.abs(hash) % 360;
 
   return (
@@ -717,7 +719,7 @@ export function Avatar({ name = '?', size = 32, user }: { name?: string; size?: 
       {src && !imgError ? (
         <img
           src={src}
-          alt={name}
+          alt={safeName}
           style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           onError={() => setImgError(true)}
         />

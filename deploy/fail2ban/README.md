@@ -21,6 +21,7 @@ SCRIPT_DIR=/path/to/chatapp/deploy/fail2ban
 sudo install -m 0644 "$SCRIPT_DIR/filter.d/chatapp-nginx-ratelimit.conf" /etc/fail2ban/filter.d/
 sudo install -m 0644 "$SCRIPT_DIR/jail.d/chatapp-nginx-ratelimit.local" /etc/fail2ban/jail.d/
 sudo fail2ban-regex /var/log/nginx/access.log /etc/fail2ban/filter.d/chatapp-nginx-ratelimit.conf
+# Expect some “missed” normal lines; confirm 503 test lines show matched > 0.
 sudo fail2ban-client reload
 sudo fail2ban-client status chatapp-nginx-ratelimit
 ```

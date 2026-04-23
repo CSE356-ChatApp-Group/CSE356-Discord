@@ -604,12 +604,23 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   async createCommunity(slug: string, name: string, description: string) {
-    const { community } = await api.post('/communities', { slug, name, description });
+    const body = (await api.post('/communities', { slug, name, description })) as Record<string, any>;
     invalidateApiCache('/communities');
+    const inner = body?.community && typeof body.community === 'object' ? body.community : {};
+    const id = String(inner.id ?? body.id ?? body.communityId ?? '').trim();
+    if (!id) {
+      const err = new Error('Create community response missing id') as Error & { status?: number };
+      err.status = 422;
+      throw err;
+    }
     const created = {
-      ...community,
-      my_role: community?.my_role || 'owner',
-      myRole: community?.myRole || 'owner',
+      ...inner,
+      id,
+      slug: inner.slug ?? slug,
+      name: inner.name ?? name,
+      description: inner.description ?? description,
+      my_role: inner.my_role ?? inner.myRole ?? 'owner',
+      myRole: inner.myRole ?? inner.my_role ?? 'owner',
     };
     set(s => ({ communities: [...s.communities, created] }));
     return created;

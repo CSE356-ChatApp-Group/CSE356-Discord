@@ -189,6 +189,8 @@ describe('Grader parity: communities and channels', () => {
 
     expect(createCommunityRes.status).toBe(201);
     const communityId = createCommunityRes.body.community.id;
+    expect(createCommunityRes.body.id).toBe(communityId);
+    expect(createCommunityRes.body.communityId).toBe(communityId);
 
     const listRes = await request(app)
       .get('/api/v1/communities')

@@ -51,6 +51,7 @@ jobs:
           python3 -m py_compile deploy/ensure-pgdump-env.py
           python3 -m py_compile deploy/apply-env-profile.py
           python3 -m py_compile deploy/prometheus-db-file-sd.py
+          python3 deploy/fail2ban/verify_filter.py
           node --check backend/scripts/api-contract-harness.cjs
 
       - name: Validate Prometheus alert rules
