@@ -1,25 +1,32 @@
 #!/usr/bin/env bash
-# Raise max_connections (and work_mem) on the dedicated PostgreSQL VM so PgBouncer
-# can use default_pool_size + reserve_pool without sitting on the last few slots.
+# Tune the dedicated PostgreSQL VM after the app-side PgBouncer pools have already
+# been reduced. This keeps client demand below the post-restart connection ceiling
+# before we lower Postgres max_connections.
 #
-# Typical need: Per-VM PgBouncer architecture with 3 pools:
-#   - VM1: pool_size ~490 (4 workers, 8 vCPU)
-#   - VM2: pool_size ~500 (6 workers, 8 vCPU)
-#   - VM3: pool_size ~500 (6 workers, 8 vCPU)
-#   Total: 1490 + headroom for admin / monitoring = 1600
+# Typical safe rollback target on the current 16 GiB DB VM:
+#   - max_connections=450
+#   - shared_buffers=2GB
+#   - maintenance_work_mem=256MB
+#   - autovacuum_work_mem=256MB
 #
 # Usage:
 #   DB_SSH=root@130.245.136.21 ./deploy/tune-remote-db-postgres.sh
 #
 # Env:
-#   REMOTE_PG_MAX_CONNECTIONS  default 1600 (supports 3 independent per-VM PgBouncers)
+#   REMOTE_PG_MAX_CONNECTIONS  default 450
+#   REMOTE_SHARED_BUFFERS      default 2GB
+#   REMOTE_MAINTENANCE_WORK_MEM default 256MB
+#   REMOTE_AUTOVACUUM_WORK_MEM default 256MB
 #   ALLOW_DB_RESTART           default false — set true to restart Postgres when
 #                              max_connections requires it (otherwise prints instructions)
 #
 set -euo pipefail
 
 DB_SSH="${DB_SSH:?Set DB_SSH, e.g. root@db-host}"
-TARGET_MAX="${REMOTE_PG_MAX_CONNECTIONS:-1600}"
+TARGET_MAX="${REMOTE_PG_MAX_CONNECTIONS:-450}"
+TARGET_SHARED_BUFFERS="${REMOTE_SHARED_BUFFERS:-2GB}"
+TARGET_MAINTENANCE_WORK_MEM="${REMOTE_MAINTENANCE_WORK_MEM:-256MB}"
+TARGET_AUTOVACUUM_WORK_MEM="${REMOTE_AUTOVACUUM_WORK_MEM:-256MB}"
 ALLOW_DB_RESTART="${ALLOW_DB_RESTART:-false}"
 
 echo "=== Remote PostgreSQL tuning → ${DB_SSH} (target max_connections=${TARGET_MAX}) ==="
@@ -27,18 +34,20 @@ echo "=== Remote PostgreSQL tuning → ${DB_SSH} (target max_connections=${TARGE
 ssh -o BatchMode=yes -o ConnectTimeout=25 "${DB_SSH}" bash -s <<EOF
 set -euo pipefail
 TARGET_MAX=${TARGET_MAX}
+TARGET_SHARED_BUFFERS='${TARGET_SHARED_BUFFERS}'
+TARGET_MAINTENANCE_WORK_MEM='${TARGET_MAINTENANCE_WORK_MEM}'
+TARGET_AUTOVACUUM_WORK_MEM='${TARGET_AUTOVACUUM_WORK_MEM}'
 ALLOW_DB_RESTART=${ALLOW_DB_RESTART}
 CUR=\$(sudo -u postgres psql -qAt -c "SHOW max_connections;")
 echo "Current max_connections=\${CUR}"
-if [ "\${CUR}" -ge "\${TARGET_MAX}" ]; then
-  echo "Already >= \${TARGET_MAX} — nothing to do."
-  exit 0
-fi
 TOTAL_RAM_MB=\$(awk '/MemTotal/{printf "%d", \$2/1024}' /proc/meminfo)
 WRK_MB=\$(python3 -c "ram=int('\${TOTAL_RAM_MB}'); mc=int('\${TARGET_MAX}'); print(max(4, min(64, ram // max(mc * 4, 1))))")
-echo "RAM=\${TOTAL_RAM_MB}MB → setting max_connections=${TARGET_MAX}, work_mem=\${WRK_MB}MB"
+echo "RAM=\${TOTAL_RAM_MB}MB → setting max_connections=\${TARGET_MAX}, shared_buffers=\${TARGET_SHARED_BUFFERS}, maintenance_work_mem=\${TARGET_MAINTENANCE_WORK_MEM}, autovacuum_work_mem=\${TARGET_AUTOVACUUM_WORK_MEM}, work_mem=\${WRK_MB}MB"
 sudo -u postgres psql -qAt \
   -c "ALTER SYSTEM SET max_connections = '${TARGET_MAX}';" \
+  -c "ALTER SYSTEM SET shared_buffers = '\${TARGET_SHARED_BUFFERS}';" \
+  -c "ALTER SYSTEM SET maintenance_work_mem = '\${TARGET_MAINTENANCE_WORK_MEM}';" \
+  -c "ALTER SYSTEM SET autovacuum_work_mem = '\${TARGET_AUTOVACUUM_WORK_MEM}';" \
   -c "ALTER SYSTEM SET work_mem = '\${WRK_MB}MB';" \
   2>&1 | grep -v 'change directory' || true
 # Set statement_timeout on the app role so long-running queries are killed at the

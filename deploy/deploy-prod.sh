@@ -192,6 +192,8 @@ _REMOTE_NCPU=$(ssh_prod 'nproc --all' 2>/dev/null || echo 2)
 # Scale default_pool_size with **host vCPU** so 8 vCPU (etc.) actually gets more real PG
 # backends than 4 vCPU. Older `min(..., 80 + inst*45)` pinned the pool at 170 for any
 # 2-worker host with ≥4 cores — resizing the VM did nothing for DB capacity.
+_PGB_SIZE=${PGBOUNCER_POOL_SIZE:-}
+if ! [[ "${_PGB_SIZE}" =~ ^[0-9]+$ ]] || [ "${_PGB_SIZE}" -lt 1 ]; then
 _PGB_SIZE=$(python3 -c "
 ncpu = int('${_REMOTE_NCPU}')
 inst = int('${CHATAPP_INSTANCES}')
@@ -204,6 +206,9 @@ extra = max(0, inst - 1) * 30
 x = max(60, min(500, cpu_part + extra))
 print(x)
 ")
+fi
+PG_POOL_MAX_PER_INSTANCE=${PG_POOL_MAX_PER_INSTANCE:-}
+if ! [[ "${PG_POOL_MAX_PER_INSTANCE}" =~ ^[0-9]+$ ]] || [ "${PG_POOL_MAX_PER_INSTANCE}" -lt 1 ]; then
 PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
 p = int('${_PGB_SIZE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
@@ -214,6 +219,7 @@ ncpu = int('${_REMOTE_NCPU}')
 pool_cap = min(80, 70 + ncpu * 20)
 print(max(25, min(pool_cap, (p * 5) // (inst * 2))))
 ")
+fi
 POOL_CIRCUIT_BREAKER_QUEUE=$(python3 -c "
 pmi = int('${PG_POOL_MAX_PER_INSTANCE}')
 inst = max(1, int('${CHATAPP_INSTANCES}'))
@@ -223,12 +229,31 @@ inst = max(1, int('${CHATAPP_INSTANCES}'))
 # prevent accidental drift from nproc-derived pool sizing.
 print(max(96, min(100, pmi * 4 + inst * 80)))
 ")
+PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS:-}
+if ! [[ "${PG_MAX_CONNECTIONS}" =~ ^[0-9]+$ ]] || [ "${PG_MAX_CONNECTIONS}" -lt 1 ]; then
 PG_MAX_CONNECTIONS=$(python3 -c "
 b = int('${_PGB_SIZE}')
 # Headroom above PgBouncer default_pool_size for admin, stats, and burst.
 # Cap at 1600 to support per-VM PgBouncer architecture (3 × 500-pool = 1500 total).
 print(max(150, min(1600, b + 100)))
 ")
+fi
+PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS:-}
+if ! [[ "${PGBOUNCER_MAX_DB_CONNECTIONS}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_MAX_DB_CONNECTIONS}" -lt "${_PGB_SIZE}" ]; then
+PGBOUNCER_MAX_DB_CONNECTIONS=$(python3 -c "
+pool_size = int('${_PGB_SIZE}')
+pg_max_conn = int('${PG_MAX_CONNECTIONS}')
+print(max(pool_size, pg_max_conn - 10))
+")
+fi
+PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE:-}
+if ! [[ "${PGBOUNCER_MIN_POOL_SIZE}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_MIN_POOL_SIZE}" -lt 0 ]; then
+PGBOUNCER_MIN_POOL_SIZE=$(python3 -c "print(min(20, int('${_PGB_SIZE}')))")
+fi
+PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE:-}
+if ! [[ "${PGBOUNCER_RESERVE_SIZE}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_RESERVE_SIZE}" -lt 0 ]; then
+PGBOUNCER_RESERVE_SIZE=$(python3 -c "print(max(5, int('${_REMOTE_NCPU}') * 5))")
+fi
 FANOUT_QUEUE_CONCURRENCY=$(python3 -c "
 n = int('${_REMOTE_NCPU}')
 # Parallel fanout:critical workers (Redis publishes). 8 vCPU prod was ~5; raising
@@ -939,7 +964,7 @@ TMPFILES
   # PgBouncer SIGHUP is non-disruptive but we skip it when pool math is unchanged
   # (typical code-only redeploy) to eliminate any transient connection stall risk.
   _pgb_hash_before=\$(sha256sum /etc/pgbouncer/pgbouncer.ini 2>/dev/null | awk '{print \$1}' || echo none)
-  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
+  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS} PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE} PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE} PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
   _pgb_hash_after=\$(sha256sum /etc/pgbouncer/pgbouncer.ini 2>/dev/null | awk '{print \$1}' || echo none)
   sudo systemctl enable pgbouncer
   if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then

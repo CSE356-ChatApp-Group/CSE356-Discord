@@ -12,9 +12,6 @@ Usage:
 """
 
 import argparse
-import json
-import os
-import re
 import subprocess
 import sys
 import time
@@ -24,6 +21,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 metrics_cache = {}
 metrics_timestamp = 0
 CACHE_TTL = 10  # seconds
+
+
+def _prom_label_value(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def query_pgbouncer(host, port, sql):
@@ -84,7 +85,7 @@ def fetch_metrics(pgbouncer_host, pgbouncer_port):
                 if database == "pgbouncer":
                     continue  # Skip internal pgbouncer database
 
-                labels = f'database="{database}"'
+                labels = f'db="{_prom_label_value(database)}"'
 
                 try:
                     total_xact_count = int(row[1])
@@ -93,11 +94,11 @@ def fetch_metrics(pgbouncer_host, pgbouncer_port):
                     total_query_time = int(row[6])  # microseconds
                     total_wait_time = int(row[7])  # microseconds
 
-                    metrics[f"pgbouncer_stats_xact_count_total{{db={labels}}}"] = total_xact_count
-                    metrics[f"pgbouncer_stats_query_count_total{{db={labels}}}"] = total_query_count
-                    metrics[f"pgbouncer_stats_xact_time_seconds{{db={labels}}}"] = total_xact_time / 1000000.0
-                    metrics[f"pgbouncer_stats_query_time_seconds{{db={labels}}}"] = total_query_time / 1000000.0
-                    metrics[f"pgbouncer_stats_wait_time_seconds{{db={labels}}}"] = total_wait_time / 1000000.0
+                    metrics[f"pgbouncer_stats_xact_count_total{{{labels}}}"] = total_xact_count
+                    metrics[f"pgbouncer_stats_query_count_total{{{labels}}}"] = total_query_count
+                    metrics[f"pgbouncer_stats_xact_time_seconds{{{labels}}}"] = total_xact_time / 1000000.0
+                    metrics[f"pgbouncer_stats_query_time_seconds{{{labels}}}"] = total_query_time / 1000000.0
+                    metrics[f"pgbouncer_stats_wait_time_seconds{{{labels}}}"] = total_wait_time / 1000000.0
                 except (ValueError, IndexError):
                     pass
 
@@ -112,7 +113,7 @@ def fetch_metrics(pgbouncer_host, pgbouncer_port):
                 if database == "pgbouncer":
                     continue  # Skip internal pgbouncer database
 
-                labels = f'database="{database}"'
+                labels = f'db="{_prom_label_value(database)}"'
 
                 try:
                     cl_active = int(row[2])
@@ -123,14 +124,14 @@ def fetch_metrics(pgbouncer_host, pgbouncer_port):
                     sv_tested = int(row[11])
                     sv_login = int(row[12])
 
-                    metrics[f"pgbouncer_client_active{{db={labels}}}"] = cl_active
-                    metrics[f"pgbouncer_client_waiting{{db={labels}}}"] = cl_waiting
-                    metrics[f"pgbouncer_server_active{{db={labels}}}"] = sv_active
-                    metrics[f"pgbouncer_server_idle{{db={labels}}}"] = sv_idle
-                    metrics[f"pgbouncer_server_used{{db={labels}}}"] = sv_used
-                    metrics[f"pgbouncer_server_tested{{db={labels}}}"] = sv_tested
-                    metrics[f"pgbouncer_server_login{{db={labels}}}"] = sv_login
-                    metrics[f"pgbouncer_queue_depth{{db={labels}}}"] = cl_waiting
+                    metrics[f"pgbouncer_client_active{{{labels}}}"] = cl_active
+                    metrics[f"pgbouncer_client_waiting{{{labels}}}"] = cl_waiting
+                    metrics[f"pgbouncer_server_active{{{labels}}}"] = sv_active
+                    metrics[f"pgbouncer_server_idle{{{labels}}}"] = sv_idle
+                    metrics[f"pgbouncer_server_used{{{labels}}}"] = sv_used
+                    metrics[f"pgbouncer_server_tested{{{labels}}}"] = sv_tested
+                    metrics[f"pgbouncer_server_login{{{labels}}}"] = sv_login
+                    metrics[f"pgbouncer_queue_depth{{{labels}}}"] = cl_waiting
                 except (ValueError, IndexError):
                     pass
 
@@ -235,4 +236,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

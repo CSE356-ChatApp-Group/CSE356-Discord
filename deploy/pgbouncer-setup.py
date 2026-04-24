@@ -97,13 +97,26 @@ if os.environ.get('PGBOUNCER_POOL_SIZE'):
     PGBOUNCER_POOL_SIZE = min(int(os.environ['PGBOUNCER_POOL_SIZE']), _HARD_CAP)
 else:
     PGBOUNCER_POOL_SIZE = _default_pool_size
-PGBOUNCER_RESERVE_SIZE = max(5, _ncpu * 5)
+if os.environ.get('PGBOUNCER_RESERVE_SIZE'):
+    PGBOUNCER_RESERVE_SIZE = max(0, int(os.environ['PGBOUNCER_RESERVE_SIZE']))
+else:
+    PGBOUNCER_RESERVE_SIZE = max(5, _ncpu * 5)
+if os.environ.get('PGBOUNCER_MIN_POOL_SIZE'):
+    PGBOUNCER_MIN_POOL_SIZE = max(0, int(os.environ['PGBOUNCER_MIN_POOL_SIZE']))
+else:
+    PGBOUNCER_MIN_POOL_SIZE = min(20, PGBOUNCER_POOL_SIZE)
 # max_db_connections: cap total PgBouncer→PG connections per database so a bug in
 # pool-size math can never cause PgBouncer to exceed PG's max_connections.
 # Deploy passes PG_MAX_CONNECTIONS; standalone defaults to pool_size + 100.
 _pg_max_conn = int(os.environ.get('PG_MAX_CONNECTIONS', str(PGBOUNCER_POOL_SIZE + 100)))
 # Leave 10 connections for superuser / monitoring / pg_stat_activity overhead.
-PGBOUNCER_MAX_DB_CONNECTIONS = max(PGBOUNCER_POOL_SIZE, _pg_max_conn - 10)
+if os.environ.get('PGBOUNCER_MAX_DB_CONNECTIONS'):
+    PGBOUNCER_MAX_DB_CONNECTIONS = max(
+        PGBOUNCER_POOL_SIZE,
+        int(os.environ['PGBOUNCER_MAX_DB_CONNECTIONS']),
+    )
+else:
+    PGBOUNCER_MAX_DB_CONNECTIONS = max(PGBOUNCER_POOL_SIZE, _pg_max_conn - 10)
 print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} max_db_connections={PGBOUNCER_MAX_DB_CONNECTIONS} (PGBOUNCER_POOL_SIZE env={os.environ.get("PGBOUNCER_POOL_SIZE", "not set")})')
 
 # ── Write pgbouncer.ini ─────────────────────────────────────────────────────────
@@ -112,10 +125,9 @@ ini = f"""\
 {pg_db} = host={pg_host} port={pg_backend_port} dbname={_pgbouncer_conn_value(pg_db)} user={_pgbouncer_conn_value(pg_user)} password={_pgbouncer_conn_value(pg_pass)}
 
 [pgbouncer]
-; Listen on all interfaces (0.0.0.0) to allow both local workers on VM1 and remote
-; workers on VM2/VM3 to reach PgBouncer. In multi-VM architectures, only VM1 runs
-; PgBouncer, so this enables cross-VM worker connectivity. Loopback-only (127.0.0.1)
-; would break remote workers' ability to establish database connections.
+; Listen on all interfaces (0.0.0.0) to allow local workers and multi-VM deployments
+; to reach PgBouncer. Single-host deployments can still rewrite DATABASE_URL to
+; 127.0.0.1 via PGBOUNCER_BIND_ADDR without exposing PgBouncer publicly.
 listen_addr = 0.0.0.0
 listen_port = 6432
 
@@ -145,7 +157,7 @@ default_pool_size   = {PGBOUNCER_POOL_SIZE}
 max_db_connections  = {PGBOUNCER_MAX_DB_CONNECTIONS}
 ; Keep a warm floor of connections so the first burst after an idle period does not
 ; pay the cost of establishing new PG connections (~100-300 ms each on a remote DB).
-min_pool_size       = 20
+min_pool_size       = {PGBOUNCER_MIN_POOL_SIZE}
 reserve_pool_size   = {PGBOUNCER_RESERVE_SIZE}
 ; 0.5 s instead of the 3.0 s default: activate reserve connections almost immediately
 ; when the main pool is saturated instead of waiting 3 idle seconds.
