@@ -508,6 +508,21 @@ const pgPoolCircuitBreakerRejectsTotal = new client.Counter({
   help: 'Requests rejected because the pg pool waiting queue exceeded the circuit breaker threshold',
 });
 
+const pgQueryGateActive = new client.Gauge({
+  name: 'pg_query_gate_active',
+  help: 'Number of queries currently passing through the query gate',
+});
+
+const pgQueryGateWaiting = new client.Gauge({
+  name: 'pg_query_gate_waiting',
+  help: 'Number of queries waiting at the query gate',
+});
+
+const pgQueryGateRejectsTotal = new client.Counter({
+  name: 'pg_query_gate_rejects_total',
+  help: 'Queries rejected by the query gate due to saturation',
+});
+
 /**
  * Errors from pool.query after checkout (timeouts, refused, etc.).
  * Use this with pg_pool_waiting and circuit_breaker_rejects to see whether bursts are DB path vs JS.
@@ -854,6 +869,9 @@ module.exports = {
   pgPoolCircuitBreakerRejectsTotal,
   pgPoolOperationErrorsTotal,
   pgQueriesTotal,
+  pgQueryGateActive,
+  pgQueryGateWaiting,
+  pgQueryGateRejectsTotal,
   pgQueriesPerRequestHistogram,
   pgBusinessSqlQueriesPerRequestHistogram,
   endpointListCacheTotal,

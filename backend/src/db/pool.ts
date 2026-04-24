@@ -42,7 +42,7 @@
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
 const { incrementDbQuery } = require('../utils/requestDbContext');
-const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal, pgQueriesTotal } = require('../utils/metrics');
+const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal, pgQueriesTotal, pgQueryGateActive, pgQueryGateWaiting, pgQueryGateRejectsTotal } = require('../utils/metrics');
 
 function extractSqlText(queryArg) {
   if (!queryArg) return '';
@@ -228,6 +228,81 @@ function checkCircuitBreaker(operation) {
   }
 }
 
+// ── Query gate (optional concurrency limiter) ──────────────────────────────────
+
+const QUERY_GATE_MAX = parseInt(process.env.PG_QUERY_GATE_MAX_CONCURRENT || '0', 10);
+const QUERY_GATE_MAX_WAITERS = parseInt(process.env.PG_QUERY_GATE_MAX_WAITERS || '0', 10);
+const QUERY_GATE_WAIT_TIMEOUT_MS = parseInt(process.env.PG_QUERY_GATE_WAIT_TIMEOUT_MS || '5000', 10);
+
+class QueryGateSaturatedError extends Error {
+  code: string;
+  statusCode: number;
+  constructor() {
+    super('Database query gate saturated – server busy, please retry');
+    this.name       = 'QueryGateSaturatedError';
+    this.code       = 'PG_QUERY_GATE_SATURATED';
+    this.statusCode = 503;
+  }
+}
+
+let _gateActive = 0;
+let _gateWaiting = 0;
+const _gateWaiters: Array<() => void> = [];
+
+function queryGateStats() {
+  return { active: _gateActive, waiting: _gateWaiting };
+}
+
+async function acquireQueryGate(): Promise<void> {
+  if (!QUERY_GATE_MAX) return; // gate disabled
+  if (_gateActive < QUERY_GATE_MAX) {
+    _gateActive++;
+    pgQueryGateActive.set(_gateActive);
+    return;
+  }
+  // At capacity — try to wait
+  if (QUERY_GATE_MAX_WAITERS !== undefined && _gateWaiting >= QUERY_GATE_MAX_WAITERS) {
+    pgQueryGateRejectsTotal.inc();
+    throw new QueryGateSaturatedError();
+  }
+  await new Promise<void>((resolve, reject) => {
+    _gateWaiting++;
+    pgQueryGateWaiting.set(_gateWaiting);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const idx = _gateWaiters.indexOf(admit);
+      if (idx !== -1) _gateWaiters.splice(idx, 1);
+      _gateWaiting--;
+      pgQueryGateWaiting.set(_gateWaiting);
+      pgQueryGateRejectsTotal.inc();
+      reject(new QueryGateSaturatedError());
+    }, QUERY_GATE_WAIT_TIMEOUT_MS);
+    const admit = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      _gateActive++;
+      pgQueryGateActive.set(_gateActive);
+      resolve();
+    };
+    _gateWaiters.push(admit);
+  });
+}
+
+function releaseQueryGate(): void {
+  if (!QUERY_GATE_MAX) return;
+  _gateActive--;
+  pgQueryGateActive.set(_gateActive);
+  if (_gateWaiters.length > 0) {
+    const next = _gateWaiters.shift()!;
+    _gateWaiting--;
+    pgQueryGateWaiting.set(_gateWaiting);
+    next();
+  }
+}
+
 // ── Wrapped single query ───────────────────────────────────────────────────────
 
 /**
@@ -260,6 +335,7 @@ async function queryRead(sql, params) {
 
 async function query(sql, params) {
   checkCircuitBreaker('query');
+  await acquireQueryGate();
   const start = Date.now();
   try {
     const result = await pool.query(sql, params);
@@ -279,6 +355,8 @@ async function query(sql, params) {
       'pg: query error',
     );
     throw err;
+  } finally {
+    releaseQueryGate();
   }
 }
 
@@ -286,7 +364,21 @@ async function query(sql, params) {
 
 async function getClient() {
   checkCircuitBreaker('getClient');
-  return wrapPoolClientForRequestMetrics(await pool.connect());
+  await acquireQueryGate();
+  let client;
+  try {
+    client = wrapPoolClientForRequestMetrics(await pool.connect());
+  } catch (err) {
+    releaseQueryGate();
+    throw err;
+  }
+  const origRelease = client.release.bind(client);
+  let released = false;
+  client.release = (...args) => {
+    if (!released) { released = true; releaseQueryGate(); }
+    return origRelease(...args);
+  };
+  return client;
 }
 
 /** Checkout + `acquire_ms` (ms waiting for a pool slot from PgBouncer). */
@@ -329,5 +421,6 @@ module.exports = {
   getClientTimed,
   withTransaction,
   poolStats,
+  queryGateStats,
   PoolCircuitBreakerError,
 };
