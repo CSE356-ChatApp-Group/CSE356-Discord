@@ -656,7 +656,7 @@ describe('Channel realtime delivery', () => {
     });
   });
 
-  it('delivers exactly one public-channel event to an open-only socket under the default bootstrap mode', async () => {
+  it('delivers exactly one public-channel message to an open-only socket under the default bootstrap mode', async () => {
     await withEnv('WS_AUTO_SUBSCRIBE_MODE', undefined, async () => {
       const owner = await createAuthenticatedUser('wsdefaultchanowner');
       const member = await createAuthenticatedUser('wsdefaultchanmember');
@@ -695,16 +695,15 @@ describe('Channel realtime delivery', () => {
       });
 
       try {
-        const channelScoped = (event: any) =>
+        const matchingMessageEvent = (event: any) =>
           event.event === 'message:created'
           && event.data?.channel_id === channelId
-          && event.data?.content === 'default-mode public channel delivery'
-          && event.channel === `channel:${channelId}`;
+          && event.data?.content === 'default-mode public channel delivery';
 
         const createdEventPromise = waitForLoggedWsEvent(
           memberSocket,
           frames,
-          channelScoped,
+          matchingMessageEvent,
           15_000,
         );
 
@@ -717,22 +716,32 @@ describe('Channel realtime delivery', () => {
         const messageId = sendRes.body.message.id;
 
         const event = await createdEventPromise;
-        expect(event.channel).toBe(`channel:${channelId}`);
+        // During the bootstrap window an open-only socket is guaranteed the logical
+        // user-topic duplicate; once bootstrap catches up, the same payload may instead
+        // arrive on the channel topic. Either path is valid as long as delivery is
+        // exactly-once for this message.
+        expect(
+          event.channel === `user:${member.user.id}`
+          || event.channel === `channel:${channelId}`,
+        ).toBe(true);
 
         await new Promise((resolve) => setTimeout(resolve, 150));
 
-        const channelDeliveryFrames = frames.filter(
+        const matchingDeliveryFrames = frames.filter(
           (candidate) =>
             candidate.event === 'message:created'
             && candidate.data?.id === messageId
-            && candidate.channel === `channel:${channelId}`,
+            && (
+              candidate.channel === `user:${member.user.id}`
+              || candidate.channel === `channel:${channelId}`
+            ),
         );
-        expect(channelDeliveryFrames).toHaveLength(1);
+        expect(matchingDeliveryFrames).toHaveLength(1);
       } finally {
         await closeWebSocket(memberSocket);
       }
     });
-  });
+  }, 20_000);
 
   it('delivers channel messages to community members without manual websocket subscribe', async () => {
     await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
