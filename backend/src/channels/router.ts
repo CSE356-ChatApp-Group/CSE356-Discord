@@ -252,6 +252,15 @@ async function bustChannelListCache(communityId) {
   }
 }
 
+async function bustChannelListCacheForUser(communityId, userId) {
+  try {
+    const key = `channels:list:${communityId}:${userId}`;
+    await redis.del(key, staleCacheKey(key));
+  } catch (err) {
+    logger.warn({ err, communityId, userId }, 'channels:list per-user cache bust failed');
+  }
+}
+
 /** Same idea as communities/messages list: load tests pin many VUs to one reader user. */
 const _channelsListTtl = parseInt(process.env.CHANNELS_LIST_CACHE_TTL_SECS || '60', 10);
 const CHANNELS_LIST_CACHE_TTL_SECS =
@@ -441,6 +450,7 @@ router.post('/',
       await client.query('COMMIT');
       client.release();
       client = null;
+      await bustChannelListCacheForUser(communityId, req.user.id);
       const affectedUserIds = await listCommunityUserIds(communityId);
       await invalidateWsBootstrapCaches(affectedUserIds);
       await publishChannelLifecycleEvent(communityId, 'channel:created', channel);
