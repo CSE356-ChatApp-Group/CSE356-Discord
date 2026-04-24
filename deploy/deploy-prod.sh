@@ -1788,6 +1788,128 @@ echo "9.07: inserted auth location + reloaded nginx"
 REMOTE
 echo "✓ Nginx auth route OK"
 
+# 9.071 Idempotent: critical OAuth/auth flow routes must bypass strict generic auth
+# throttles so start + callback redirects are not dropped by nginx before the app.
+echo "9.071 Nginx: ensure critical OAuth/auth flow routes bypass strict auth rate limits..."
+ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; bash -s" <<'REMOTE'
+set -euo pipefail
+if ! sudo test -f "$SITE"; then
+  echo "9.071: skip — $SITE missing"
+  exit 0
+fi
+TMP=$(mktemp)
+sudo cp "$SITE" "$TMP"
+export TMP
+python3 <<'PY'
+import os
+import re
+from pathlib import Path
+
+p = Path(os.environ['TMP'])
+text = p.read_text()
+needles = [
+    r'location\s+\^~\s+/api/v1/auth/course/callback',
+    r'location\s+\^~\s+/api/v1/auth/course',
+    r'location\s+\^~\s+/api/v1/auth/oauth/complete-create',
+    r'location\s+\^~\s+/api/v1/auth/login',
+    r'location\s+\^~\s+/api/v1/auth/register',
+]
+if all(re.search(pattern, text) for pattern in needles):
+    raise SystemExit(0)
+needle = '  location ^~ /api/v1/auth/ {'
+block = """  location ^~ /api/v1/auth/course/callback {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ^~ /api/v1/auth/course {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ^~ /api/v1/auth/oauth/complete-create {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ^~ /api/v1/auth/login {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ^~ /api/v1/auth/register {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+"""
+if needle not in text:
+    raise SystemExit('9.071: could not find critical auth insertion point')
+p.write_text(text.replace(needle, block + needle, 1))
+PY
+sudo install -m 644 "$TMP" "$SITE"
+rm -f "$TMP"
+sudo nginx -t >/dev/null
+sudo systemctl reload nginx
+echo "9.071: inserted critical auth flow routes + reloaded nginx"
+REMOTE
+echo "✓ Nginx critical auth routes OK"
+
 # 9.075 Idempotent: fix auth block — `non_idempotent` must be on proxy_next_upstream,
 # and remove invalid standalone proxy_next_upstream_non_idempotent if present.
 echo "9.075 Nginx: ensure auth proxy_next_upstream includes non_idempotent..."

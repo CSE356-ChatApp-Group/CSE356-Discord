@@ -101,6 +101,88 @@ server {
     client_max_body_size 10m;
   }
 
+  # Critical OAuth/auth flow routes: bypass the strict generic auth throttle so
+  # start/callback redirects do not get nginx 503 under normal multi-step flows.
+  location ^~ /api/v1/auth/course/callback {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ^~ /api/v1/auth/course {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ^~ /api/v1/auth/oauth/complete-create {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ^~ /api/v1/auth/login {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
+  location ^~ /api/v1/auth/register {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 2;
+    proxy_read_timeout 75s;
+    proxy_send_timeout 75s;
+    client_max_body_size 10m;
+  }
+
   location ~ ^/api/v1/communities/[^/]+/join/?$ {
     limit_req zone=community_join_direct burst=60 nodelay;
     limit_conn external_expensive_conns 5;
