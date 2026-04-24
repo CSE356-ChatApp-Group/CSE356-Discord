@@ -6,7 +6,7 @@ import { randomUUID } from 'crypto';
 import { request, app, wsServer, pool, redis, closeRedisConnections } from './runtime';
 
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
-const { flushDirtyReadStatesToDB } = require('../src/messages/batchReadState');
+const { flushDirtyReadStatesToDB, enqueueBatchReadStateUpdate } = require('../src/messages/batchReadState');
 
 afterAll(async () => {
   await wsServer.shutdown();
@@ -174,6 +174,55 @@ describe('Read state writes', () => {
       [owner.user.id, channelId],
     );
     expect(flushedRows[0]?.last_read_message_id).toBe(secondMessageId);
+  });
+
+  it('flush silently drops dirty entry when referenced message has been hard-deleted', async () => {
+    const owner = await createAuthenticatedUser('rsdeleted');
+    const slug = `rsdel-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'deleted msg flush' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `rsdel-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const msgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'to be deleted' });
+    expect(msgRes.status).toBe(201);
+    const messageId = msgRes.body.message.id;
+    const messageCreatedAt = msgRes.body.message.created_at;
+
+    const delRes = await request(app)
+      .delete(`/api/v1/messages/${messageId}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(delRes.status).toBe(200);
+
+    // Enqueue read state pointing to the now-deleted message (simulates stale Redis entry)
+    await enqueueBatchReadStateUpdate(owner.user.id, channelId, null, messageId, messageCreatedAt);
+
+    // Must not throw; must not produce an FK violation
+    await expect(flushDirtyReadStatesToDB()).resolves.toBeUndefined();
+
+    // Dirty key must be removed — no infinite retry loop
+    const dirtyKey = `${owner.user.id}|${channelId}`;
+    const isMember = await redis.sismember('rs:dirty', dirtyKey);
+    expect(isMember).toBe(0);
+
+    // No read_states row referencing the deleted message should exist
+    const { rows: rsRows } = await pool.query(
+      `SELECT last_read_message_id::text FROM read_states WHERE user_id = $1 AND channel_id = $2`,
+      [owner.user.id, channelId],
+    );
+    expect(rsRows[0]?.last_read_message_id ?? null).not.toBe(messageId);
   });
 });
 
