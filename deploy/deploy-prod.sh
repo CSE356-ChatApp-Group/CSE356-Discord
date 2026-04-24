@@ -187,12 +187,63 @@ else
   CHATAPP_INSTANCES=${CHATAPP_INSTANCES:-5}
 fi
 unset _chatapp_remote
+
+remote_env_value() {
+  local key="$1"
+  ssh_prod "python3 - '$key' <<'PY'
+import sys
+from pathlib import Path
+
+key = sys.argv[1]
+path = Path('/opt/chatapp/shared/.env')
+if not path.exists():
+    raise SystemExit(0)
+for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
+    line = raw.strip()
+    if not line or line.startswith('#'):
+        continue
+    if line.startswith('export '):
+        line = line[7:].strip()
+    if '=' not in line:
+        continue
+    k, v = line.split('=', 1)
+    if k.strip() == key:
+        print(v.strip())
+        raise SystemExit(0)
+PY" 2>/dev/null || true
+}
+
+remote_pgbouncer_ini_value() {
+  local key="$1"
+  ssh_prod "python3 - '$key' <<'PY'
+import sys
+from pathlib import Path
+
+key = sys.argv[1]
+path = Path('/etc/pgbouncer/pgbouncer.ini')
+if not path.exists():
+    raise SystemExit(0)
+for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
+    line = raw.strip()
+    if not line or line.startswith(';') or '=' not in line:
+        continue
+    k, v = line.split('=', 1)
+    if k.strip() == key:
+        print(v.strip())
+        raise SystemExit(0)
+PY" 2>/dev/null || true
+}
+
 _REMOTE_NCPU=$(ssh_prod 'nproc --all' 2>/dev/null || echo 2)
 # PgBouncer pool + Node pool math matches deploy-staging.sh (same caps, different host).
 # Scale default_pool_size with **host vCPU** so 8 vCPU (etc.) actually gets more real PG
 # backends than 4 vCPU. Older `min(..., 80 + inst*45)` pinned the pool at 170 for any
 # 2-worker host with ≥4 cores — resizing the VM did nothing for DB capacity.
 _PGB_SIZE=${PGBOUNCER_POOL_SIZE:-}
+if ! [[ "${_PGB_SIZE}" =~ ^[0-9]+$ ]] || [ "${_PGB_SIZE}" -lt 1 ]; then
+  _PGB_SIZE="$(remote_pgbouncer_ini_value default_pool_size)"
+  _PGB_SIZE="$(printf '%s' "${_PGB_SIZE}" | tr -d '[:space:]' | tr -d '\r')"
+fi
 if ! [[ "${_PGB_SIZE}" =~ ^[0-9]+$ ]] || [ "${_PGB_SIZE}" -lt 1 ]; then
 _PGB_SIZE=$(python3 -c "
 ncpu = int('${_REMOTE_NCPU}')
@@ -208,6 +259,10 @@ print(x)
 ")
 fi
 PG_POOL_MAX_PER_INSTANCE=${PG_POOL_MAX_PER_INSTANCE:-}
+if ! [[ "${PG_POOL_MAX_PER_INSTANCE}" =~ ^[0-9]+$ ]] || [ "${PG_POOL_MAX_PER_INSTANCE}" -lt 1 ]; then
+PG_POOL_MAX_PER_INSTANCE="$(remote_env_value PG_POOL_MAX)"
+PG_POOL_MAX_PER_INSTANCE="$(printf '%s' "${PG_POOL_MAX_PER_INSTANCE}" | tr -d '[:space:]' | tr -d '\r')"
+fi
 if ! [[ "${PG_POOL_MAX_PER_INSTANCE}" =~ ^[0-9]+$ ]] || [ "${PG_POOL_MAX_PER_INSTANCE}" -lt 1 ]; then
 PG_POOL_MAX_PER_INSTANCE=$(python3 -c "
 p = int('${_PGB_SIZE}')
@@ -240,6 +295,10 @@ print(max(150, min(1600, b + 100)))
 fi
 PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS:-}
 if ! [[ "${PGBOUNCER_MAX_DB_CONNECTIONS}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_MAX_DB_CONNECTIONS}" -lt "${_PGB_SIZE}" ]; then
+PGBOUNCER_MAX_DB_CONNECTIONS="$(remote_pgbouncer_ini_value max_db_connections)"
+PGBOUNCER_MAX_DB_CONNECTIONS="$(printf '%s' "${PGBOUNCER_MAX_DB_CONNECTIONS}" | tr -d '[:space:]' | tr -d '\r')"
+fi
+if ! [[ "${PGBOUNCER_MAX_DB_CONNECTIONS}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_MAX_DB_CONNECTIONS}" -lt "${_PGB_SIZE}" ]; then
 PGBOUNCER_MAX_DB_CONNECTIONS=$(python3 -c "
 pool_size = int('${_PGB_SIZE}')
 pg_max_conn = int('${PG_MAX_CONNECTIONS}')
@@ -248,9 +307,17 @@ print(max(pool_size, pg_max_conn - 10))
 fi
 PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE:-}
 if ! [[ "${PGBOUNCER_MIN_POOL_SIZE}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_MIN_POOL_SIZE}" -lt 0 ]; then
+PGBOUNCER_MIN_POOL_SIZE="$(remote_pgbouncer_ini_value min_pool_size)"
+PGBOUNCER_MIN_POOL_SIZE="$(printf '%s' "${PGBOUNCER_MIN_POOL_SIZE}" | tr -d '[:space:]' | tr -d '\r')"
+fi
+if ! [[ "${PGBOUNCER_MIN_POOL_SIZE}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_MIN_POOL_SIZE}" -lt 0 ]; then
 PGBOUNCER_MIN_POOL_SIZE=$(python3 -c "print(min(20, int('${_PGB_SIZE}')))")
 fi
 PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE:-}
+if ! [[ "${PGBOUNCER_RESERVE_SIZE}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_RESERVE_SIZE}" -lt 0 ]; then
+PGBOUNCER_RESERVE_SIZE="$(remote_pgbouncer_ini_value reserve_pool_size)"
+PGBOUNCER_RESERVE_SIZE="$(printf '%s' "${PGBOUNCER_RESERVE_SIZE}" | tr -d '[:space:]' | tr -d '\r')"
+fi
 if ! [[ "${PGBOUNCER_RESERVE_SIZE}" =~ ^[0-9]+$ ]] || [ "${PGBOUNCER_RESERVE_SIZE}" -lt 0 ]; then
 PGBOUNCER_RESERVE_SIZE=$(python3 -c "print(max(5, int('${_REMOTE_NCPU}') * 5))")
 fi
@@ -1256,6 +1323,18 @@ ssh_prod "
   sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
     || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^PGBOUNCER_POOL_SIZE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^PGBOUNCER_POOL_SIZE=.*/PGBOUNCER_POOL_SIZE=${_PGB_SIZE}/' /opt/chatapp/shared/.env \
+    || echo 'PGBOUNCER_POOL_SIZE=${_PGB_SIZE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^PGBOUNCER_MAX_DB_CONNECTIONS=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^PGBOUNCER_MAX_DB_CONNECTIONS=.*/PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS}/' /opt/chatapp/shared/.env \
+    || echo 'PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^PGBOUNCER_MIN_POOL_SIZE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^PGBOUNCER_MIN_POOL_SIZE=.*/PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE}/' /opt/chatapp/shared/.env \
+    || echo 'PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  sudo grep -q '^PGBOUNCER_RESERVE_SIZE=' /opt/chatapp/shared/.env \
+    && sudo sed -i 's/^PGBOUNCER_RESERVE_SIZE=.*/PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE}/' /opt/chatapp/shared/.env \
+    || echo 'PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # POOL_CIRCUIT_BREAKER_QUEUE: number of requests allowed to wait for a pool
   # connection before returning 503. Keep this moderate so overload degrades
   # quickly instead of building multi-second queue latency.
@@ -1371,14 +1450,11 @@ ssh_prod "
     && sudo sed -i 's/^WS_BOOTSTRAP_CACHE_TTL_SECONDS=.*/WS_BOOTSTRAP_CACHE_TTL_SECONDS=180/' /opt/chatapp/shared/.env \
     || echo 'WS_BOOTSTRAP_CACHE_TTL_SECONDS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^DISABLE_RATE_LIMITS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^DISABLE_RATE_LIMITS=.*/DISABLE_RATE_LIMITS=true/' /opt/chatapp/shared/.env \
-    || echo 'DISABLE_RATE_LIMITS=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    || echo 'DISABLE_RATE_LIMITS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^AUTH_GLOBAL_PER_IP_RATE_LIMIT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^AUTH_GLOBAL_PER_IP_RATE_LIMIT=.*/AUTH_GLOBAL_PER_IP_RATE_LIMIT=false/' /opt/chatapp/shared/.env \
     || echo 'AUTH_GLOBAL_PER_IP_RATE_LIMIT=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Throughput-first grading profile: skip bcrypt for newly written passwords.
   sudo grep -q '^AUTH_PASSWORD_STORAGE_MODE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^AUTH_PASSWORD_STORAGE_MODE=.*/AUTH_PASSWORD_STORAGE_MODE=plain/' /opt/chatapp/shared/.env \
     || echo 'AUTH_PASSWORD_STORAGE_MODE=plain' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer fires.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
