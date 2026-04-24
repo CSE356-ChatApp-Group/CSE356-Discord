@@ -331,9 +331,9 @@ router.get('/', async (req, res, next) => {
     load: async () => {
       const { rows } = await queryRead(
         `SELECT ${CONVERSATION_LIST_FIELDS},
-              COALESCE(m_denorm.id, lm.id) AS last_message_id,
-              COALESCE(m_denorm.author_id, lm.author_id) AS last_message_author_id,
-              COALESCE(m_denorm.created_at, lm.created_at) AS last_message_at,
+              lm.id AS last_message_id,
+              lm.author_id AS last_message_author_id,
+              lm.created_at AS last_message_at,
               my_rs.last_read_message_id AS my_last_read_message_id,
               my_rs.last_read_at AS my_last_read_at,
               latest_other_rs.last_read_message_id AS other_last_read_message_id,
@@ -347,37 +347,35 @@ router.get('/', async (req, res, next) => {
        JOIN   conversation_participants cp2 ON cp2.conversation_id = c.id
                                             AND cp2.left_at IS NULL
        JOIN   users u ON u.id = cp2.user_id
-       LEFT JOIN messages m_denorm
-         ON m_denorm.id = c.last_message_id
-        AND m_denorm.conversation_id = c.id
-        AND m_denorm.deleted_at IS NULL
        LEFT JOIN LATERAL (
          SELECT m.id, m.author_id, m.created_at
          FROM messages m
          WHERE m.conversation_id = c.id AND m.deleted_at IS NULL
          ORDER BY m.created_at DESC
          LIMIT 1
-       ) lm ON m_denorm.id IS NULL
+       ) lm ON TRUE
        LEFT JOIN read_states my_rs
               ON my_rs.conversation_id = c.id
              AND my_rs.user_id = $1
        LEFT JOIN LATERAL (
          SELECT rs.last_read_message_id, rs.last_read_at
          FROM read_states rs
-         JOIN conversation_participants cp_other
-           ON cp_other.conversation_id = c.id
-          AND cp_other.user_id = rs.user_id
-          AND cp_other.left_at IS NULL
          WHERE rs.conversation_id = c.id
            AND rs.user_id <> $1
+           AND EXISTS (
+             SELECT 1
+             FROM conversation_participants cp_other
+             WHERE cp_other.conversation_id = c.id
+               AND cp_other.user_id = rs.user_id
+               AND cp_other.left_at IS NULL
+           )
          ORDER BY rs.last_read_at DESC NULLS LAST
          LIMIT 1
        ) latest_other_rs ON TRUE
-       GROUP  BY c.id, m_denorm.id, m_denorm.author_id, m_denorm.created_at,
-                 lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at,
+       GROUP  BY c.id, lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at,
                  latest_other_rs.last_read_message_id, latest_other_rs.last_read_at
       HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
-       ORDER  BY COALESCE(m_denorm.created_at, lm.created_at, c.updated_at) DESC`,
+       ORDER  BY COALESCE(lm.created_at, c.updated_at) DESC`,
         [req.user.id]
       );
       const payload = { conversations: rows };
