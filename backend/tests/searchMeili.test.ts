@@ -359,6 +359,7 @@ describe('Search – Meili path: author + time filters enforced in Postgres', ()
   let channelId: string;
   let ownerMsgId: string;
   let otherMsgId: string;
+  let ownerUserId: string;
   const marker = `meilifilters${uniqueSuffix()}`;
 
   beforeAll(async () => {
@@ -366,6 +367,7 @@ describe('Search – Meili path: author + time filters enforced in Postgres', ()
     const other  = await createAuthenticatedUser('meili-filter-other');
     ownerToken  = owner.accessToken;
     otherToken  = other.accessToken;
+    ownerUserId = owner.user.id;
 
     const community = await createCommunity(ownerToken);
     await joinCommunity(otherToken, community.id);
@@ -380,16 +382,6 @@ describe('Search – Meili path: author + time filters enforced in Postgres', ()
 
   it('authorId filter restricts results to that author even if Meili returns both IDs', async () => {
     setMeiliMode([ownerMsgId, otherMsgId]);
-
-    // get actual author id
-    const meRes = await request(app)
-      .get('/api/v1/communities')
-      .set('Authorization', `Bearer ${ownerToken}`);
-    // Use profile endpoint to get userId
-    const meReq = await request(app)
-      .get('/api/v1/auth/me')
-      .set('Authorization', `Bearer ${ownerToken}`);
-    const ownerUserId = meReq.body?.user?.id as string;
 
     const res = await request(app)
       .get(`/api/v1/search?q=${marker}&channelId=${channelId}&authorId=${ownerUserId}`)

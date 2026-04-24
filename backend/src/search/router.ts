@@ -80,6 +80,11 @@ router.get('/', async (req, res, next) => {
       return res.status(400).json({ error: 'Provide a query or at least one search filter' });
     }
 
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (authorId && !UUID_RE.test(String(authorId))) {
+      return res.status(400).json({ error: 'authorId must be a valid UUID' });
+    }
+
     const { limit: clampedLimit, offset: clampedOffset } = clampSearchPaging(limit, offset);
     const adjustedLimit = overload.searchLimit(clampedLimit);
     const results = await searchClient.search(normalizedQuery, {
