@@ -838,6 +838,44 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "gridPos": { "h": 6, "w": 12, "x": 0, "y": 107 },
+      "id": 46,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(channel_access_cache_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Channel access cache (rate by result)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 107 },
+      "id": 47,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (pool) (rate(pg_queries_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "PG queries ({{pool}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Postgres query rate (total successful)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 113 },
       "id": 37,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -856,7 +894,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 107 },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 113 },
       "id": 38,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -874,7 +912,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 113 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 119 },
       "id": 39,
       "title": "VM Host Vitals — all prod VMs (filter with $vm dropdown)",
       "type": "row"
@@ -891,7 +929,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 114 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 120 },
       "id": 40,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -919,7 +957,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 114 },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 120 },
       "id": 41,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -947,7 +985,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 114 },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 120 },
       "id": 42,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -975,7 +1013,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 121 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 127 },
       "id": 43,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -1003,7 +1041,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 121 },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 127 },
       "id": 44,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -1025,7 +1063,7 @@
         "defaults": { "unit": "ops", "min": 0 },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 121 },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 127 },
       "id": 45,
       "options": {
         "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },

@@ -29,7 +29,8 @@ const presenceService  = require('../presence/service');
 const fanout           = require('../websocket/fanout');
 const { publishUserFeedTargets } = require('../websocket/userFeed');
 const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
-const { invalidateCommunityChannelUserFanoutTargetsCache } = require('../messages/channelRealtimeFanout');
+const { invalidateCommunityChannelUserFanoutTargetsCache, getCommunityChannelIds } = require('../messages/channelRealtimeFanout');
+const { warmChannelAccessCacheForUser, evictChannelAccessCacheForUser } = require('../messages/channelAccessCache');
 const { recordEndpointListCache, recordEndpointListCacheBypass } = require('../utils/endpointCacheMetrics');
 const { apiRateLimitHitsTotal } = require('../utils/metrics');
 const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
@@ -121,6 +122,10 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
     if (!rowCount) {
       return res.json({ success: true });
     }
+
+    getCommunityChannelIds(communityId)
+      .then((ids) => warmChannelAccessCacheForUser(redis, ids, req.user.id))
+      .catch(() => {});
 
     const realtimeTargets = await listCommunityRealtimeTargets(communityId, req.user.id);
     await Promise.allSettled([
@@ -1011,6 +1016,10 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
 
     const publicVersion = await getPublicCommunitiesVersion();
+
+    getCommunityChannelIds(req.params.id)
+      .then((ids) => evictChannelAccessCacheForUser(redis, ids, req.user.id))
+      .catch(() => {});
 
     await Promise.allSettled([
       invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),

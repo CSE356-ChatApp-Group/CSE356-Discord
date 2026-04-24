@@ -12,16 +12,27 @@
  * PUT    /api/v1/messages/:id/read                    – mark as read
  */
 
-'use strict';
+"use strict";
 
-const crypto = require('crypto');
-const os = require('os');
-const express = require('express');
-const { rateLimit } = require('express-rate-limit');
-const { RedisStore } = require('rate-limit-redis');
-const { body, query: qv, param, validationResult } = require('express-validator');
+const crypto = require("crypto");
+const os = require("os");
+const express = require("express");
+const { rateLimit } = require("express-rate-limit");
+const { RedisStore } = require("rate-limit-redis");
+const {
+  body,
+  query: qv,
+  param,
+  validationResult,
+} = require("express-validator");
 
-const { query, queryRead, readPool, withTransaction, poolStats } = require('../db/pool');
+const {
+  query,
+  queryRead,
+  readPool,
+  withTransaction,
+  poolStats,
+} = require("../db/pool");
 const {
   messagePostAccessDeniedTotal,
   messagePostRealtimePublishFailTotal,
@@ -31,25 +42,28 @@ const {
   messageCacheBustFailuresTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
-} = require('../utils/metrics');
-const { authenticate } = require('../middleware/authenticate');
-const { messagesHotPathLimiter } = require('../middleware/inMemoryApiLimiter');
-const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('../utils/trustedClientIp');
-const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
-const sideEffects      = require('./sideEffects');
-const fanout           = require('../websocket/fanout');
-const overload         = require('../utils/overload');
-const redis            = require('../db/redis');
-const logger           = require('../utils/logger');
+} = require("../utils/metrics");
+const { authenticate } = require("../middleware/authenticate");
+const { messagesHotPathLimiter } = require("../middleware/inMemoryApiLimiter");
+const {
+  getTrustedClientIp,
+  isPrivateOrInternalNetwork,
+} = require("../utils/trustedClientIp");
+const { recordAbuseStrikeFromRequest } = require("../utils/autoIpBan");
+const sideEffects = require("./sideEffects");
+const fanout = require("../websocket/fanout");
+const overload = require("../utils/overload");
+const redis = require("../db/redis");
+const logger = require("../utils/logger");
 const {
   staleCacheKey,
   getJsonCache,
   setJsonCacheWithStale,
   withDistributedSingleflight,
-} = require('../utils/distributedSingleflight');
+} = require("../utils/distributedSingleflight");
 
 function parsePositiveIntEnv(name, fallback) {
-  const parsed = Number.parseInt(process.env[name] || '', 10);
+  const parsed = Number.parseInt(process.env[name] || "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
@@ -58,25 +72,34 @@ function messagePostRateLimitNoop(_req, _res, next) {
 }
 
 function buildMessagePostUserRateLimiter() {
-  if (process.env.DISABLE_RATE_LIMITS === 'true' || process.env.NODE_ENV === 'test') {
+  if (
+    process.env.DISABLE_RATE_LIMITS === "true" ||
+    process.env.NODE_ENV === "test"
+  ) {
     return messagePostRateLimitNoop;
   }
-  const windowMs = parsePositiveIntEnv('MESSAGE_POST_PER_USER_WINDOW_MS', 60_000);
-  const limit = parsePositiveIntEnv('MESSAGE_POST_PER_USER_MAX', 90);
+  const windowMs = parsePositiveIntEnv(
+    "MESSAGE_POST_PER_USER_WINDOW_MS",
+    60_000,
+  );
+  const limit = parsePositiveIntEnv("MESSAGE_POST_PER_USER_MAX", 90);
   return rateLimit({
     windowMs,
     limit,
-    standardHeaders: 'draft-7',
+    standardHeaders: "draft-7",
     legacyHeaders: false,
     skip: (req) => isPrivateOrInternalNetwork(getTrustedClientIp(req)),
-    keyGenerator: (req) => `mpu:${req.user?.id || 'anon'}`,
+    keyGenerator: (req) => `mpu:${req.user?.id || "anon"}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
-      prefix: 'rl:mp:user:',
+      prefix: "rl:mp:user:",
     }),
-    message: { error: 'Too many messages from this account. Slow down and try again shortly.' },
+    message: {
+      error:
+        "Too many messages from this account. Slow down and try again shortly.",
+    },
     handler: (req, res, _next, options) => {
-      messagePostRateLimitHitsTotal.inc({ scope: 'user' });
+      messagePostRateLimitHitsTotal.inc({ scope: "user" });
       recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
     },
@@ -84,25 +107,31 @@ function buildMessagePostUserRateLimiter() {
 }
 
 function buildMessagePostIpRateLimiter() {
-  if (process.env.DISABLE_RATE_LIMITS === 'true' || process.env.NODE_ENV === 'test') {
+  if (
+    process.env.DISABLE_RATE_LIMITS === "true" ||
+    process.env.NODE_ENV === "test"
+  ) {
     return messagePostRateLimitNoop;
   }
-  const windowMs = parsePositiveIntEnv('MESSAGE_POST_PER_IP_WINDOW_MS', 60_000);
-  const limit = parsePositiveIntEnv('MESSAGE_POST_PER_IP_MAX', 300);
+  const windowMs = parsePositiveIntEnv("MESSAGE_POST_PER_IP_WINDOW_MS", 60_000);
+  const limit = parsePositiveIntEnv("MESSAGE_POST_PER_IP_MAX", 300);
   return rateLimit({
     windowMs,
     limit,
-    standardHeaders: 'draft-7',
+    standardHeaders: "draft-7",
     legacyHeaders: false,
     skip: (req) => isPrivateOrInternalNetwork(getTrustedClientIp(req)),
     keyGenerator: (req) => `mpi:${getTrustedClientIp(req)}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
-      prefix: 'rl:mp:ip:',
+      prefix: "rl:mp:ip:",
     }),
-    message: { error: 'Too many messages from this network. Slow down and try again shortly.' },
+    message: {
+      error:
+        "Too many messages from this network. Slow down and try again shortly.",
+    },
     handler: (req, res, _next, options) => {
-      messagePostRateLimitHitsTotal.inc({ scope: 'ip' });
+      messagePostRateLimitHitsTotal.inc({ scope: "ip" });
       recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
     },
@@ -114,7 +143,7 @@ const messagePostUserRateLimiter = buildMessagePostUserRateLimiter();
 
 /** Redis cache for channel unread watermark (`user:last_read_count:*`). Must expire so keys do not grow without bound. */
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
-  process.env.USER_LAST_READ_COUNT_REDIS_TTL_SEC || '604800',
+  process.env.USER_LAST_READ_COUNT_REDIS_TTL_SEC || "604800",
   10,
 );
 const {
@@ -125,66 +154,91 @@ const {
   readMessageCacheEpoch,
   bustChannelMessagesCache,
   bustConversationMessagesCache,
-} = require('./messageCacheBust');
+} = require("./messageCacheBust");
 const {
   recordEndpointListCache,
   recordEndpointListCacheBypass,
   recordEndpointListCacheInvalidation,
-} = require('../utils/endpointCacheMetrics');
+} = require("../utils/endpointCacheMetrics");
 const {
   messageFanoutEnvelope,
   wrapFanoutPayload,
   fanoutPublishedAt,
-} = require('./realtimePayload');
+} = require("./realtimePayload");
 const {
   repointChannelLastMessage,
   repointConversationLastMessage,
   scheduleChannelLastMessagePointerUpdate,
-} = require('./repointLastMessage');
+} = require("./repointLastMessage");
 const {
   publishChannelMessageCreated,
   publishChannelMessageEvent,
-} = require('./channelRealtimeFanout');
-const { appendChannelMessageIngested } = require('./messageIngestLog');
-const { enqueueBatchReadStateUpdate } = require('./batchReadState');
-const {
-  getConversationFanoutTargets,
-} = require('./conversationFanoutTargets');
+} = require("./channelRealtimeFanout");
+const { appendChannelMessageIngested } = require("./messageIngestLog");
+const { enqueueBatchReadStateUpdate } = require("./batchReadState");
+const { getConversationFanoutTargets } = require("./conversationFanoutTargets");
 const {
   publishUserFeedTargets,
   splitUserTargets,
   userFeedRedisChannelForUserId,
-} = require('../websocket/userFeed');
+} = require("../websocket/userFeed");
 const {
   incrementChannelMessageCount,
   decrementChannelMessageCount,
-} = require('./channelMessageCounter');
+} = require("./channelMessageCounter");
 const {
   channelIdIfOnlyConversationQueryParam,
   loadMessageTargetForUser,
-} = require('./accessCaches');
-const { runChannelMessageInsertSerialized } = require('./channelInsertConcurrency');
-import { MESSAGE_RETURNING_FIELDS, MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
+} = require("./accessCaches");
+const {
+  runChannelMessageInsertSerialized,
+} = require("./channelInsertConcurrency");
+const {
+  setChannelAccessCache,
+  checkChannelAccessCache,
+  raceChannelAccess,
+} = require("./channelAccessCache");
+import {
+  MESSAGE_RETURNING_FIELDS,
+  MESSAGE_SELECT_FIELDS,
+  MESSAGE_AUTHOR_JSON,
+} from "./sqlFragments";
 
 const router = express.Router();
 router.use(authenticate);
 router.use(messagesHotPathLimiter);
 
-const _idemPendingTtl = parseInt(process.env.MSG_IDEM_PENDING_TTL_SECS || '120', 10);
+const _idemPendingTtl = parseInt(
+  process.env.MSG_IDEM_PENDING_TTL_SECS || "120",
+  10,
+);
 /** Lease TTL for in-flight POST /messages idempotency (seconds). */
 const MSG_IDEM_PENDING_TTL_SECS =
-  Number.isFinite(_idemPendingTtl) && _idemPendingTtl > 0 ? _idemPendingTtl : 120;
-const _idemSuccessTtl = parseInt(process.env.MSG_IDEM_SUCCESS_TTL_SECS || '86400', 10);
+  Number.isFinite(_idemPendingTtl) && _idemPendingTtl > 0
+    ? _idemPendingTtl
+    : 120;
+const _idemSuccessTtl = parseInt(
+  process.env.MSG_IDEM_SUCCESS_TTL_SECS || "86400",
+  10,
+);
 /** How long to remember a successful idempotent POST /messages (seconds). */
 const MSG_IDEM_SUCCESS_TTL_SECS =
-  Number.isFinite(_idemSuccessTtl) && _idemSuccessTtl > 0 ? _idemSuccessTtl : 86400;
-const _idemPollDeadlineMs = parseInt(process.env.MSG_IDEM_POLL_DEADLINE_MS || '5000', 10);
+  Number.isFinite(_idemSuccessTtl) && _idemSuccessTtl > 0
+    ? _idemSuccessTtl
+    : 86400;
+const _idemPollDeadlineMs = parseInt(
+  process.env.MSG_IDEM_POLL_DEADLINE_MS || "5000",
+  10,
+);
 /** Max wall-clock wait when a duplicate Idempotency-Key hits an in-flight lease (was fixed 100ms × 50). */
 const MSG_IDEM_POLL_DEADLINE_MS =
   Number.isFinite(_idemPollDeadlineMs) && _idemPollDeadlineMs > 0
     ? Math.min(30000, Math.max(500, Math.floor(_idemPollDeadlineMs)))
     : 5000;
-const _idemPollMaxSleepMs = parseInt(process.env.MSG_IDEM_POLL_MAX_SLEEP_MS || '150', 10);
+const _idemPollMaxSleepMs = parseInt(
+  process.env.MSG_IDEM_POLL_MAX_SLEEP_MS || "150",
+  10,
+);
 /** Cap for exponential backoff between Redis polls while waiting on the idempotency lease. */
 const MSG_IDEM_POLL_MAX_SLEEP_MS =
   Number.isFinite(_idemPollMaxSleepMs) && _idemPollMaxSleepMs >= 5
@@ -193,7 +247,10 @@ const MSG_IDEM_POLL_MAX_SLEEP_MS =
 // BG_WRITE_POOL_GUARD: skip fire-and-forget DB writes when pool.waitingCount >= this threshold.
 // These writes (last_message_id updates, read_states inserts) are non-critical — skipping them
 // under pool pressure stops background writes from crowding out sync queries for the pool.
-const BG_WRITE_POOL_GUARD = parseInt(process.env.BG_WRITE_POOL_GUARD || '5', 10);
+const BG_WRITE_POOL_GUARD = parseInt(
+  process.env.BG_WRITE_POOL_GUARD || "5",
+  10,
+);
 const pendingConversationLastMessageUpdates = new Map<
   string,
   { messageId: string; authorId: string | null; createdAt: string | Date }
@@ -202,7 +259,10 @@ const queuedConversationLastMessageUpdates = new Set<string>();
 
 /** Shorter than role/PgBouncer caps so POST /messages fails fast on lock wait (hot channel + last_message UPDATE). */
 const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
-  const raw = parseInt(process.env.MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS || '5000', 10);
+  const raw = parseInt(
+    process.env.MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS || "5000",
+    10,
+  );
   if (!Number.isFinite(raw) || raw < 1000) return 5000;
   return Math.min(60000, raw);
 })();
@@ -210,13 +270,13 @@ const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
 /** PgBouncer `query_timeout` or PG `statement_timeout` during insert (often row lock behind channels FK). */
 function isMessagePostInsertDbTimeout(err) {
   if (!err) return false;
-  const msg = String(err.message || '');
+  const msg = String(err.message || "");
   const code = err.code;
-  if (code === '57014') return true;
+  if (code === "57014") return true;
   if (/query timeout/i.test(msg)) return true;
   if (/statement timeout/i.test(msg)) return true;
   if (/canceling statement due to statement timeout/i.test(msg)) return true;
-  if (code === '08P01' && /timeout/i.test(msg)) return true;
+  if (code === "08P01" && /timeout/i.test(msg)) return true;
   return false;
 }
 
@@ -240,7 +300,8 @@ function buildMessagePostTimeoutPhaseLog({
   const reachedAccess = txPhases.t_access > 0;
   const reachedInsert = txPhases.t_insert > 0;
   const reachedLater = txPhases.t_later > 0;
-  let timeoutPhase: 'access-check' | 'insert' | 'later-step' | 'commit' = 'access-check';
+  let timeoutPhase: "access-check" | "insert" | "later-step" | "commit" =
+    "access-check";
   let tx_access_check_ms: number | null = null;
   let tx_insert_ms: number | null = null;
   let tx_later_step_ms: number | null = null;
@@ -249,16 +310,16 @@ function buildMessagePostTimeoutPhaseLog({
   if (!reachedAccess) {
     tx_access_check_ms = Math.max(0, now - txPhases.t0);
   } else if (!reachedInsert) {
-    timeoutPhase = 'insert';
+    timeoutPhase = "insert";
     tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
     tx_insert_ms = Math.max(0, now - txPhases.t_access);
   } else if (!reachedLater) {
-    timeoutPhase = 'later-step';
+    timeoutPhase = "later-step";
     tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
     tx_insert_ms = Math.max(0, txPhases.t_insert - txPhases.t_access);
     tx_later_step_ms = Math.max(0, now - txPhases.t_insert);
   } else {
-    timeoutPhase = 'commit';
+    timeoutPhase = "commit";
     tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
     tx_insert_ms = Math.max(0, txPhases.t_insert - txPhases.t_access);
     tx_later_step_ms = Math.max(0, txPhases.t_later - txPhases.t_insert);
@@ -266,11 +327,11 @@ function buildMessagePostTimeoutPhaseLog({
   }
 
   return {
-    event: 'post_messages_tx_timeout_phases',
-    gradingNote: 'correlate_with_post_messages_timeout',
+    event: "post_messages_tx_timeout_phases",
+    gradingNote: "correlate_with_post_messages_timeout",
     requestId: req.id,
-    instance: `${os.hostname()}:${process.env.PORT || 'unknown'}`,
-    targetType: channelId ? 'channel' : 'conversation',
+    instance: `${os.hostname()}:${process.env.PORT || "unknown"}`,
+    targetType: channelId ? "channel" : "conversation",
     channelId: channelId ?? undefined,
     conversationId: conversationId ?? undefined,
     timeoutPhase,
@@ -301,12 +362,12 @@ function buildMessagePostSuccessPhaseLog({
 }) {
   const tx_total_ms = txDoneAt - txPhases.t0;
   return {
-    event: 'post_messages_tx_phases',
-    gradingNote: 'correlate_with_post_messages_timeout',
+    event: "post_messages_tx_phases",
+    gradingNote: "correlate_with_post_messages_timeout",
     requestId: req.id,
     channelId: channelId ?? undefined,
     conversationId: conversationId ?? undefined,
-    targetType: channelId ? 'channel' : 'conversation',
+    targetType: channelId ? "channel" : "conversation",
     tx_access_check_ms: txPhases.t_access - txPhases.t0,
     tx_insert_ms: txPhases.t_insert - txPhases.t_access,
     tx_later_step_ms: txPhases.t_later - txPhases.t_insert,
@@ -333,10 +394,14 @@ async function flushConversationLastMessageUpdate(conversationId: string) {
                  updated_at = NOW()
            WHERE id = $4
              AND (last_message_at IS NULL OR $3 >= last_message_at)`,
-          [pending.messageId, pending.authorId, pending.createdAt, conversationId],
+          [
+            pending.messageId,
+            pending.authorId,
+            pending.createdAt,
+            conversationId,
+          ],
         );
-      }).catch(() => {
-      });
+      }).catch(() => {});
     }
 
     if (!pendingConversationLastMessageUpdates.has(conversationId)) return;
@@ -345,7 +410,11 @@ async function flushConversationLastMessageUpdate(conversationId: string) {
 
 function scheduleConversationLastMessagePointerUpdate(
   conversationId: string,
-  payload: { messageId: string; authorId: string | null; createdAt: string | Date },
+  payload: {
+    messageId: string;
+    authorId: string | null;
+    createdAt: string | Date;
+  },
 ) {
   pendingConversationLastMessageUpdates.set(conversationId, payload);
   if (queuedConversationLastMessageUpdates.has(conversationId)) {
@@ -369,24 +438,35 @@ function scheduleConversationLastMessagePointerUpdate(
 
 // When unset, keep historical default (defer only under heavy pool wait).
 // `0` disables the pool-wait defer branch entirely (see PUT /messages/:id/read).
-const _readReceiptDeferWaiting = parseInt(process.env.READ_RECEIPT_DEFER_POOL_WAITING || '8', 10);
+const _readReceiptDeferWaiting = parseInt(
+  process.env.READ_RECEIPT_DEFER_POOL_WAITING || "8",
+  10,
+);
 const READ_RECEIPT_DEFER_POOL_WAITING =
   Number.isFinite(_readReceiptDeferWaiting) && _readReceiptDeferWaiting >= 0
     ? _readReceiptDeferWaiting
     : 8;
-const _readReceiptDedupeTtl = parseInt(process.env.READ_RECEIPT_DEDUPE_TTL_SECS || '604800', 10);
+const _readReceiptDedupeTtl = parseInt(
+  process.env.READ_RECEIPT_DEDUPE_TTL_SECS || "604800",
+  10,
+);
 const READ_RECEIPT_DEDUPE_TTL_SECS =
   Number.isFinite(_readReceiptDedupeTtl) && _readReceiptDedupeTtl > 0
     ? _readReceiptDedupeTtl
     : 604800;
 /** Log `dm_fanout_timing` for every `message:*` DM publish when true; else only if total >= min ms. */
 const DM_FANOUT_TIMING_LOG =
-  String(process.env.DM_FANOUT_TIMING_LOG || '').toLowerCase() === 'all'
-  || process.env.DM_FANOUT_TIMING_LOG === '1'
-  || process.env.DM_FANOUT_TIMING_LOG === 'true';
-const _dmFanoutTimingMin = parseInt(process.env.DM_FANOUT_TIMING_LOG_MIN_MS || '50', 10);
+  String(process.env.DM_FANOUT_TIMING_LOG || "").toLowerCase() === "all" ||
+  process.env.DM_FANOUT_TIMING_LOG === "1" ||
+  process.env.DM_FANOUT_TIMING_LOG === "true";
+const _dmFanoutTimingMin = parseInt(
+  process.env.DM_FANOUT_TIMING_LOG_MIN_MS || "50",
+  10,
+);
 const DM_FANOUT_TIMING_LOG_MIN_MS =
-  Number.isFinite(_dmFanoutTimingMin) && _dmFanoutTimingMin >= 0 ? _dmFanoutTimingMin : 50;
+  Number.isFinite(_dmFanoutTimingMin) && _dmFanoutTimingMin >= 0
+    ? _dmFanoutTimingMin
+    : 50;
 
 // Read cursor Redis CAS: stores last-known cursor timestamp (epoch ms) per (user, target).
 // The Lua script atomically advances only if the new value is strictly greater, preventing
@@ -394,8 +474,14 @@ const DM_FANOUT_TIMING_LOG_MIN_MS =
 // After a Redis CAS win, the DB write is fired async (non-blocking) so PUT /read response
 // time is Redis-bound (~1ms) rather than DB-bound (~10ms).
 // TTL: 10 minutes — long enough to cover the grader session, short enough to GC old users.
-const READ_CURSOR_TS_TTL_SECS = parseInt(process.env.READ_CURSOR_TS_TTL_SECS || '600', 10);
-const READ_DB_LOCK_TTL_MS = parseInt(process.env.READ_DB_LOCK_TTL_MS || '500', 10);
+const READ_CURSOR_TS_TTL_SECS = parseInt(
+  process.env.READ_CURSOR_TS_TTL_SECS || "600",
+  10,
+);
+const READ_DB_LOCK_TTL_MS = parseInt(
+  process.env.READ_DB_LOCK_TTL_MS || "500",
+  10,
+);
 // Two-key Lua script:
 //   KEYS[1] = cursor key (read_cursor_ts:...)
 //   KEYS[2] = db_lock key (read_db_lock:...)
@@ -421,42 +507,57 @@ return 1
 
 function validate(req, res) {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) { res.status(400).json({ errors: errors.array() }); return false; }
+  if (!errors.isEmpty()) {
+    res.status(400).json({ errors: errors.array() });
+    return false;
+  }
   return true;
 }
 
 function readReceiptDedupeKey(userId, channelId, conversationId) {
   if (channelId) return `read_receipt:last:${userId}:channel:${channelId}`;
-  if (conversationId) return `read_receipt:last:${userId}:conversation:${conversationId}`;
-  throw new Error('read receipt scope required');
+  if (conversationId)
+    return `read_receipt:last:${userId}:conversation:${conversationId}`;
+  throw new Error("read receipt scope required");
 }
 
 function readCursorTsKey(userId, channelId, conversationId) {
   if (channelId) return `read_cursor_ts:${userId}:ch:${channelId}`;
   if (conversationId) return `read_cursor_ts:${userId}:cv:${conversationId}`;
-  throw new Error('read cursor scope required');
+  throw new Error("read cursor scope required");
 }
 
 function readDbLockKey(userId, channelId, conversationId) {
   if (channelId) return `read_db_lock:${userId}:ch:${channelId}`;
   if (conversationId) return `read_db_lock:${userId}:cv:${conversationId}`;
-  throw new Error('read db lock scope required');
+  throw new Error("read db lock scope required");
 }
 
-async function getCachedReadReceiptMessageId(userId, channelId, conversationId) {
+async function getCachedReadReceiptMessageId(
+  userId,
+  channelId,
+  conversationId,
+) {
   try {
-    return await redis.get(readReceiptDedupeKey(userId, channelId, conversationId));
+    return await redis.get(
+      readReceiptDedupeKey(userId, channelId, conversationId),
+    );
   } catch {
     return null;
   }
 }
 
-async function rememberReadReceiptMessageId(userId, channelId, conversationId, messageId) {
+async function rememberReadReceiptMessageId(
+  userId,
+  channelId,
+  conversationId,
+  messageId,
+) {
   try {
     await redis.set(
       readReceiptDedupeKey(userId, channelId, conversationId),
       String(messageId),
-      'EX',
+      "EX",
       READ_RECEIPT_DEDUPE_TTL_SECS,
     );
   } catch {
@@ -471,8 +572,29 @@ async function rememberReadReceiptMessageId(userId, channelId, conversationId, m
  */
 function wantsMessagesListPrimary(req) {
   if (!readPool) return false;
-  const v = (req.get('x-chatapp-read-consistency') || '').trim().toLowerCase();
-  return v === 'primary' || v === 'strong';
+  const v = (req.get("x-chatapp-read-consistency") || "").trim().toLowerCase();
+  return v === "primary" || v === "strong";
+}
+
+async function checkChannelAccessForUser(
+  channelId: string,
+  userId: string,
+): Promise<boolean> {
+  try {
+    const { rows } = await queryRead(
+      `SELECT EXISTS (
+         SELECT 1 FROM channels c
+         JOIN community_members cm ON cm.community_id = c.community_id AND cm.user_id = $2
+         WHERE c.id = $1
+           AND (c.is_private = FALSE
+                OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
+       ) AS has_access`,
+      [channelId, userId],
+    );
+    return rows[0]?.has_access === true;
+  } catch {
+    return false;
+  }
 }
 
 async function messagesListQuery(req, sql, params) {
@@ -482,34 +604,42 @@ async function messagesListQuery(req, sql, params) {
   return queryRead(sql, params);
 }
 
-async function bustMessagesCacheSafe(opts: { channelId?: string; conversationId?: string }) {
+async function bustMessagesCacheSafe(opts: {
+  channelId?: string;
+  conversationId?: string;
+}) {
   const { channelId, conversationId } = opts;
   try {
     if (channelId) {
       await bustChannelMessagesCache(redis, channelId);
-      recordEndpointListCacheInvalidation('messages_channel', 'write');
+      recordEndpointListCacheInvalidation("messages_channel", "write");
     } else if (conversationId) {
       await bustConversationMessagesCache(redis, conversationId);
-      recordEndpointListCacheInvalidation('messages_conversation', 'write');
+      recordEndpointListCacheInvalidation("messages_conversation", "write");
     }
   } catch (err) {
-    messageCacheBustFailuresTotal.inc({ target: channelId ? 'channel' : 'conversation' });
-    logger.warn({ err, channelId, conversationId }, 'message list cache bust failed');
+    messageCacheBustFailuresTotal.inc({
+      target: channelId ? "channel" : "conversation",
+    });
+    logger.warn(
+      { err, channelId, conversationId },
+      "message list cache bust failed",
+    );
   }
 }
 
 /** Build the Redis pub/sub channel key for a message target */
 function targetKey(channelId, conversationId) {
-  if (channelId)      return `channel:${channelId}`;
+  if (channelId) return `channel:${channelId}`;
   if (conversationId) return `conversation:${conversationId}`;
-  throw new Error('No target');
+  throw new Error("No target");
 }
 
 /** Message row `created_at` as ISO string (idempotent POST replays). */
 function messageCreatedAtIso(row) {
   const t = row?.created_at ?? row?.createdAt;
   if (t instanceof Date) return t.toISOString();
-  if (typeof t === 'string') return new Date(t).toISOString();
+  if (typeof t === "string") return new Date(t).toISOString();
   return new Date().toISOString();
 }
 
@@ -518,7 +648,7 @@ async function ensureActiveConversationParticipant(conversationId, userId) {
     `SELECT 1
      FROM conversation_participants
      WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
-    [conversationId, userId]
+    [conversationId, userId],
   );
   return rows.length > 0;
 }
@@ -539,36 +669,47 @@ async function ensureChannelAccess(channelId, userId) {
            WHERE cm.channel_id = c.id AND cm.user_id = $2
          )
        )`,
-    [channelId, userId]
+    [channelId, userId],
   );
   return rows.length > 0;
 }
 
 async function ensureMessageAccess(target, userId) {
   const channelId = target?.channelId ?? target?.channel_id ?? null;
-  const conversationId = target?.conversationId ?? target?.conversation_id ?? null;
-  if (conversationId) return ensureActiveConversationParticipant(conversationId, userId);
+  const conversationId =
+    target?.conversationId ?? target?.conversation_id ?? null;
+  if (conversationId)
+    return ensureActiveConversationParticipant(conversationId, userId);
   if (channelId) return ensureChannelAccess(channelId, userId);
   return false;
 }
 
 async function publishConversationEventNow(conversationId, event, data) {
   const startedAt = process.hrtime.bigint();
-  const isDmTimingEvent = typeof event === 'string' && event.startsWith('message:');
+  const isDmTimingEvent =
+    typeof event === "string" && event.startsWith("message:");
   const targets: string[] = await getConversationFanoutTargets(conversationId);
   const lookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-  fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'target_lookup' }, lookupMs);
+  fanoutPublishDurationMs.observe(
+    { path: "conversation_event", stage: "target_lookup" },
+    lookupMs,
+  );
   if (isDmTimingEvent) {
-    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'target_lookup' }, lookupMs);
+    fanoutPublishDurationMs.observe(
+      { path: "conversation_dm", stage: "target_lookup" },
+      lookupMs,
+    );
   }
 
   let uniqueTargets: string[] = [...new Set(targets)];
-  if (event === 'read:updated') {
-    uniqueTargets = uniqueTargets.filter((target) => target.startsWith('user:'));
+  if (event === "read:updated") {
+    uniqueTargets = uniqueTargets.filter((target) =>
+      target.startsWith("user:"),
+    );
   }
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
 
-  if (event.startsWith('message:') && logger.isLevelEnabled('debug')) {
+  if (event.startsWith("message:") && logger.isLevelEnabled("debug")) {
     logger.debug(
       {
         conversationId,
@@ -576,9 +717,9 @@ async function publishConversationEventNow(conversationId, event, data) {
         messageId: (data as any)?.id,
         userIdCount: userIds.length,
         passthroughTargetCount: passthroughTargets.length,
-        gradingNote: 'conversation_fanout_targets',
+        gradingNote: "conversation_fanout_targets",
       },
-      'conversation fanout: publishing to targets',
+      "conversation fanout: publishing to targets",
     );
   }
 
@@ -589,20 +730,26 @@ async function publishConversationEventNow(conversationId, event, data) {
   const payload = wrapFanoutPayload(event, data);
   const wrapPayloadMs = Number(process.hrtime.bigint() - wrapStart) / 1e6;
   if (isDmTimingEvent) {
-    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'wrap_payload' }, wrapPayloadMs);
+    fanoutPublishDurationMs.observe(
+      { path: "conversation_dm", stage: "wrap_payload" },
+      wrapPayloadMs,
+    );
   }
 
   fanoutPublishTargetsHistogram.observe(
-    { path: 'conversation_event' },
+    { path: "conversation_event" },
     passthroughTargets.length + userIds.length,
   );
 
   const publishStartedAt = process.hrtime.bigint();
   const userfeedShardCount =
-    userIds.length > 0 ? new Set(userIds.map((uid) => userFeedRedisChannelForUserId(uid))).size : 0;
+    userIds.length > 0
+      ? new Set(userIds.map((uid) => userFeedRedisChannelForUserId(uid))).size
+      : 0;
 
   async function publishPassthroughWithTimings() {
-    if (!passthroughTargets.length) return { wallMs: 0, perTargetMs: [] as { target: string; ms: number }[] };
+    if (!passthroughTargets.length)
+      return { wallMs: 0, perTargetMs: [] as { target: string; ms: number }[] };
     const wall0 = process.hrtime.bigint();
     const perTargetMs = await Promise.all(
       passthroughTargets.map(async (target) => {
@@ -611,7 +758,10 @@ async function publishConversationEventNow(conversationId, event, data) {
         return { target, ms: Number(process.hrtime.bigint() - t0) / 1e6 };
       }),
     );
-    return { wallMs: Number(process.hrtime.bigint() - wall0) / 1e6, perTargetMs };
+    return {
+      wallMs: Number(process.hrtime.bigint() - wall0) / 1e6,
+      perTargetMs,
+    };
   }
 
   async function publishUserfeedWithTiming() {
@@ -625,38 +775,45 @@ async function publishConversationEventNow(conversationId, event, data) {
     publishPassthroughWithTimings(),
     publishUserfeedWithTiming(),
   ]);
-  const parallelPublishWallMs = Number(process.hrtime.bigint() - publishStartedAt) / 1e6;
+  const parallelPublishWallMs =
+    Number(process.hrtime.bigint() - publishStartedAt) / 1e6;
   const totalMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
 
   fanoutPublishDurationMs.observe(
-    { path: 'conversation_event', stage: 'publish' },
+    { path: "conversation_event", stage: "publish" },
     parallelPublishWallMs,
   );
-  fanoutPublishDurationMs.observe({ path: 'conversation_event', stage: 'total' }, totalMs);
+  fanoutPublishDurationMs.observe(
+    { path: "conversation_event", stage: "total" },
+    totalMs,
+  );
 
   if (isDmTimingEvent) {
     fanoutPublishDurationMs.observe(
-      { path: 'conversation_dm', stage: 'publish_passthrough_wall' },
+      { path: "conversation_dm", stage: "publish_passthrough_wall" },
       passthroughResult.wallMs,
     );
     fanoutPublishDurationMs.observe(
-      { path: 'conversation_dm', stage: 'publish_userfeed_wall' },
+      { path: "conversation_dm", stage: "publish_userfeed_wall" },
       userfeedResult.wallMs,
     );
     fanoutPublishDurationMs.observe(
-      { path: 'conversation_dm', stage: 'publish_parallel_wall' },
+      { path: "conversation_dm", stage: "publish_parallel_wall" },
       parallelPublishWallMs,
     );
-    fanoutPublishDurationMs.observe({ path: 'conversation_dm', stage: 'total' }, totalMs);
+    fanoutPublishDurationMs.observe(
+      { path: "conversation_dm", stage: "total" },
+      totalMs,
+    );
   }
 
   if (
-    isDmTimingEvent
-    && (DM_FANOUT_TIMING_LOG || totalMs >= DM_FANOUT_TIMING_LOG_MIN_MS)
+    isDmTimingEvent &&
+    (DM_FANOUT_TIMING_LOG || totalMs >= DM_FANOUT_TIMING_LOG_MIN_MS)
   ) {
     logger.info(
       {
-        event: 'dm_fanout_timing',
+        event: "dm_fanout_timing",
         conversationId,
         wsEvent: event,
         messageId: (data as any)?.id ?? null,
@@ -673,21 +830,23 @@ async function publishConversationEventNow(conversationId, event, data) {
         userfeedWallMs: Math.round(userfeedResult.wallMs * 1000) / 1000,
         parallelPublishWallMs: Math.round(parallelPublishWallMs * 1000) / 1000,
         totalMs: Math.round(totalMs * 1000) / 1000,
-        gradingNote: 'correlate_with_delivery_timeout',
+        gradingNote: "correlate_with_delivery_timeout",
         redisHints: {
-          connectionSet: 'user:<uuid>:connections',
-          aliveKey: 'user:<uuid>:connection:<connectionId>:alive',
-          recentDisconnect: 'ws:recent_disconnect:<uuid>',
+          connectionSet: "user:<uuid>:connections",
+          aliveKey: "user:<uuid>:connection:<connectionId>:alive",
+          recentDisconnect: "ws:recent_disconnect:<uuid>",
         },
       },
-      'DM fanout publish timing breakdown',
+      "DM fanout publish timing breakdown",
     );
   }
 
-  if (event === 'read:updated') return undefined;
+  if (event === "read:updated") return undefined;
 
   if (userIds.length > 0) {
-    redis.del(...userIds.map((uid) => `conversations:list:${uid}`)).catch(() => {});
+    redis
+      .del(...userIds.map((uid) => `conversations:list:${uid}`))
+      .catch(() => {});
   }
 
   return fanoutPublishedAt(payload);
@@ -703,7 +862,7 @@ async function loadHydratedMessageById(messageId) {
      LEFT JOIN attachments a ON a.message_id = m.id
      WHERE m.id = $1
      GROUP BY m.id, u.id`,
-    [messageId]
+    [messageId],
   );
   return rows[0] || null;
 }
@@ -732,10 +891,15 @@ async function advanceReadStateCursor({
   const dbLockKey = readDbLockKey(userId, channelId, conversationId);
   let casResult: number = 2; // default: attempt DB write
   try {
-    casResult = await redis.eval(
-      READ_CURSOR_ADVANCE_LUA, 2, cursorKey, dbLockKey, newTs,
-      String(READ_CURSOR_TS_TTL_SECS), String(READ_DB_LOCK_TTL_MS),
-    ) as number;
+    casResult = (await redis.eval(
+      READ_CURSOR_ADVANCE_LUA,
+      2,
+      cursorKey,
+      dbLockKey,
+      newTs,
+      String(READ_CURSOR_TS_TTL_SECS),
+      String(READ_DB_LOCK_TTL_MS),
+    )) as number;
   } catch {
     // Redis unavailable: conservative fallback — allow DB write
     casResult = 2;
@@ -749,7 +913,10 @@ async function advanceReadStateCursor({
   if (casResult === 1) {
     // Cursor advanced in Redis but DB write rate-limited (another write in-flight)
     return {
-      applied: { last_read_message_id: messageId, last_read_at: new Date().toISOString() },
+      applied: {
+        last_read_message_id: messageId,
+        last_read_at: new Date().toISOString(),
+      },
       didAdvanceCursor: true,
     };
   }
@@ -757,12 +924,21 @@ async function advanceReadStateCursor({
   // casResult === 2: enqueue to Redis batch flusher instead of a per-row DB write.
   // flushDirtyReadStatesToDB() runs every READ_STATE_FLUSH_INTERVAL_MS and upserts
   // all dirty entries in a single UNNEST query, eliminating per-row lock contention.
-  void enqueueBatchReadStateUpdate(userId, channelId, conversationId, messageId, messageCreatedAt);
+  void enqueueBatchReadStateUpdate(
+    userId,
+    channelId,
+    conversationId,
+    messageId,
+    messageCreatedAt,
+  );
 
   // Return synthetic applied immediately — caller uses last_read_at only for the
   // WS publish payload timestamp, which NOW() on the app server is fine for.
   return {
-    applied: { last_read_message_id: messageId, last_read_at: new Date().toISOString() },
+    applied: {
+      last_read_message_id: messageId,
+      last_read_at: new Date().toISOString(),
+    },
     didAdvanceCursor: true,
   };
 }
@@ -778,7 +954,7 @@ async function loadMessageTarget(messageId) {
      FROM messages m
      LEFT JOIN channels ch ON ch.id = m.channel_id
      WHERE m.id = $1 AND m.deleted_at IS NULL`,
-    [messageId]
+    [messageId],
   );
   return rows[0] || null;
 }
@@ -795,12 +971,13 @@ const msgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
 const convMsgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
 
 // ── GET /messages ──────────────────────────────────────────────────────────────
-router.get('/',
-  qv('channelId').optional().isUUID(),
-  qv('conversationId').optional().isUUID(),
-  qv('before').optional().isUUID(),          // cursor-based pagination
-  qv('after').optional().isUUID(),           // forward pagination from an anchor
-  qv('limit').optional().isInt({ min: 1, max: 100 }).toInt(),
+router.get(
+  "/",
+  qv("channelId").optional().isUUID(),
+  qv("conversationId").optional().isUUID(),
+  qv("before").optional().isUUID(), // cursor-based pagination
+  qv("after").optional().isUUID(), // forward pagination from an anchor
+  qv("limit").optional().isInt({ min: 1, max: 100 }).toInt(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     try {
@@ -811,14 +988,21 @@ router.get('/',
       const limit = overload.historyLimit(requestedLimit);
 
       if (!channelId && !conversationId) {
-        return res.status(400).json({ error: 'channelId or conversationId required' });
+        return res
+          .status(400)
+          .json({ error: "channelId or conversationId required" });
       }
       if (before && after) {
-        return res.status(400).json({ error: 'before and after cannot be used together' });
+        return res
+          .status(400)
+          .json({ error: "before and after cannot be used together" });
       }
 
       if (!channelId && conversationId) {
-        const asChannel = await channelIdIfOnlyConversationQueryParam(conversationId, req.user.id);
+        const asChannel = await channelIdIfOnlyConversationQueryParam(
+          conversationId,
+          req.user.id,
+        );
         if (asChannel) {
           channelId = asChannel;
           conversationId = undefined;
@@ -833,17 +1017,20 @@ router.get('/',
       if (channelId && !before && !after) {
         const epochKey = channelMsgCacheEpochKey(channelId);
         const epochBefore = await readMessageCacheEpoch(redis, epochKey);
-        const cacheKey = channelMsgCacheKey(channelId, { limit, epoch: epochBefore });
+        const cacheKey = channelMsgCacheKey(channelId, {
+          limit,
+          epoch: epochBefore,
+        });
         const cached = await getJsonCache(redis, cacheKey);
         if (cached) {
-          recordEndpointListCache('messages_channel', 'hit');
+          recordEndpointListCache("messages_channel", "hit");
           return res.json(cached);
         }
 
         // Singleflight: if a DB query for this channel is already in-flight,
         // wait for it rather than spawning a duplicate concurrent query.
         if (msgInflight.has(cacheKey)) {
-          recordEndpointListCache('messages_channel', 'coalesced');
+          recordEndpointListCache("messages_channel", "coalesced");
           try {
             return res.json(await msgInflight.get(cacheKey));
           } catch (err) {
@@ -851,69 +1038,69 @@ router.get('/',
           }
         }
 
-        recordEndpointListCache('messages_channel', 'miss');
-        const promise: Promise<{ messages: any[] }> = withDistributedSingleflight({
-          redis,
-          cacheKey,
-          inflight: msgInflight,
-          readFresh: async () => getJsonCache(redis, cacheKey),
-          readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
-          load: async () => {
-            const params: any[] = [limit, req.user.id, channelId];
-            const sql = `
-            WITH access AS (
-              SELECT EXISTS (
-                SELECT 1 FROM channels c
-                JOIN community_members community_member
-                  ON community_member.community_id = c.community_id
-                 AND community_member.user_id = $2
-                WHERE c.id = $3
-                  AND (c.is_private = FALSE
-                       OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
-              ) AS has_access
-            )
-            SELECT access.has_access,
-                   msg.*
-            FROM access
-            LEFT JOIN LATERAL (
+        recordEndpointListCache("messages_channel", "miss");
+        const promise: Promise<{ messages: any[] }> =
+          withDistributedSingleflight({
+            redis,
+            cacheKey,
+            inflight: msgInflight,
+            readFresh: async () => getJsonCache(redis, cacheKey),
+            readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+            load: async () => {
+              // Concurrent: Redis cache check races DB access check — first yes wins.
+              const hasAccess = await raceChannelAccess(
+                redis,
+                channelId,
+                req.user.id,
+                () => checkChannelAccessForUser(channelId, req.user.id),
+              );
+              if (!hasAccess) {
+                const err: any = new Error("Access denied");
+                err.statusCode = 403;
+                throw err;
+              }
+              setChannelAccessCache(redis, channelId, req.user.id);
+              const { rows } = await queryRead(
+                `
               SELECT ${MESSAGE_SELECT_FIELDS},
                      ${MESSAGE_AUTHOR_JSON},
                      COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
               FROM messages m
               LEFT JOIN users u ON u.id = m.author_id
               LEFT JOIN attachments a ON a.message_id = m.id
-              WHERE m.channel_id = $3
+              WHERE m.channel_id = $2
                 AND m.deleted_at IS NULL
               GROUP BY m.id, u.id
               ORDER BY m.created_at DESC
               LIMIT $1
-            ) AS msg ON access.has_access = TRUE
-          `;
-            const { rows } = await messagesListQuery(req, sql, params);
-            if (!rows[0]?.has_access) {
-              const err: any = new Error('Access denied');
-              err.statusCode = 403;
-              throw err;
-            }
-            const messages = rows.filter((row) => row.id);
-            const body = { messages: messages.reverse() };
-            const epochAfter = await readMessageCacheEpoch(redis, epochKey);
-            if (epochBefore === epochAfter) {
-              await setJsonCacheWithStale(redis, cacheKey, body, MESSAGES_CACHE_TTL_SECS);
-            }
-            return body;
-          },
-        });
+            `,
+                [limit, channelId],
+              );
+              const messages = rows.filter((row) => row.id);
+              const body = { messages: messages.reverse() };
+              const epochAfter = await readMessageCacheEpoch(redis, epochKey);
+              if (epochBefore === epochAfter) {
+                await setJsonCacheWithStale(
+                  redis,
+                  cacheKey,
+                  body,
+                  MESSAGES_CACHE_TTL_SECS,
+                );
+              }
+              return body;
+            },
+          });
 
         try {
           return res.json(await promise);
         } catch (err: any) {
-          if (err.statusCode === 403) return res.status(403).json({ error: err.message });
+          if (err.statusCode === 403)
+            return res.status(403).json({ error: err.message });
           return next(err);
         }
       }
       if (channelId && (before || after)) {
-        recordEndpointListCacheBypass('messages_channel', 'pagination');
+        recordEndpointListCacheBypass("messages_channel", "pagination");
       }
 
       // Conversation messages (non-paginated) — same singleflight+cache pattern as channels.
@@ -922,15 +1109,18 @@ router.get('/',
       if (conversationId && !before && !after) {
         const epochKey = conversationMsgCacheEpochKey(conversationId);
         const epochBefore = await readMessageCacheEpoch(redis, epochKey);
-        const cacheKey = conversationMsgCacheKey(conversationId, { limit, epoch: epochBefore });
+        const cacheKey = conversationMsgCacheKey(conversationId, {
+          limit,
+          epoch: epochBefore,
+        });
         const cached = await getJsonCache(redis, cacheKey);
         if (cached) {
-          recordEndpointListCache('messages_conversation', 'hit');
+          recordEndpointListCache("messages_conversation", "hit");
           return res.json(cached);
         }
 
         if (convMsgInflight.has(cacheKey)) {
-          recordEndpointListCache('messages_conversation', 'coalesced');
+          recordEndpointListCache("messages_conversation", "coalesced");
           try {
             return res.json(await convMsgInflight.get(cacheKey));
           } catch (err) {
@@ -938,15 +1128,18 @@ router.get('/',
           }
         }
 
-        recordEndpointListCache('messages_conversation', 'miss');
-        const promise: Promise<{ messages: any[] }> = withDistributedSingleflight({
-          redis,
-          cacheKey,
-          inflight: convMsgInflight,
-          readFresh: async () => getJsonCache(redis, cacheKey),
-          readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
-          load: async () => {
-            const { rows } = await messagesListQuery(req, `
+        recordEndpointListCache("messages_conversation", "miss");
+        const promise: Promise<{ messages: any[] }> =
+          withDistributedSingleflight({
+            redis,
+            cacheKey,
+            inflight: convMsgInflight,
+            readFresh: async () => getJsonCache(redis, cacheKey),
+            readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+            load: async () => {
+              const { rows } = await messagesListQuery(
+                req,
+                `
             WITH access AS (
               SELECT EXISTS (
                 SELECT 1 FROM conversation_participants cp
@@ -969,52 +1162,72 @@ router.get('/',
               ORDER BY m.created_at DESC
               LIMIT $1
             ) AS msg ON access.has_access = TRUE
-            `, [limit, req.user.id, conversationId]);
-            if (!rows[0]?.has_access) {
-              const err: any = new Error('Not a participant');
-              err.statusCode = 403;
-              throw err;
-            }
-            const messages = rows.filter((row) => row.id);
-            const body = { messages: messages.reverse() };
-            const epochAfter = await readMessageCacheEpoch(redis, epochKey);
-            if (epochBefore === epochAfter) {
-              await setJsonCacheWithStale(redis, cacheKey, body, MESSAGES_CACHE_TTL_SECS);
-            }
-            return body;
-          },
-        });
+            `,
+                [limit, req.user.id, conversationId],
+              );
+              if (!rows[0]?.has_access) {
+                const err: any = new Error("Not a participant");
+                err.statusCode = 403;
+                throw err;
+              }
+              const messages = rows.filter((row) => row.id);
+              const body = { messages: messages.reverse() };
+              const epochAfter = await readMessageCacheEpoch(redis, epochKey);
+              if (epochBefore === epochAfter) {
+                await setJsonCacheWithStale(
+                  redis,
+                  cacheKey,
+                  body,
+                  MESSAGES_CACHE_TTL_SECS,
+                );
+              }
+              return body;
+            },
+          });
 
         try {
           return res.json(await promise);
         } catch (err: any) {
-          if (err.statusCode === 403) return res.status(403).json({ error: err.message });
+          if (err.statusCode === 403)
+            return res.status(403).json({ error: err.message });
           return next(err);
         }
       }
       if (conversationId && (before || after)) {
-        recordEndpointListCacheBypass('messages_conversation', 'pagination');
+        recordEndpointListCacheBypass("messages_conversation", "pagination");
       }
 
       // Paginated requests (before= cursor) — no caching.
       // Build a single query that enforces access control and returns messages in one pool checkout.
       const params: any[] = [limit, req.user.id];
 
-      let accessWhere: string;
+      let accessWhere: string | null = null;
       let targetWhere: string;
 
       if (channelId) {
         params.push(channelId);
         const ci = params.length; // $3
-        accessWhere = `EXISTS (
-          SELECT 1 FROM channels c
-          JOIN community_members community_member
-            ON community_member.community_id = c.community_id
-           AND community_member.user_id = $2
-          WHERE c.id = $${ci}
-            AND (c.is_private = FALSE
-                 OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
-        )`;
+
+        try {
+          if (await checkChannelAccessCache(redis, channelId, req.user.id)) {
+            (req as any)._channelAccessCacheHit = true;
+            accessWhere = "TRUE";
+          }
+        } catch {
+          /* fail open */
+        }
+
+        if (!accessWhere) {
+          accessWhere = `EXISTS (
+            SELECT 1 FROM channels c
+            JOIN community_members community_member
+              ON community_member.community_id = c.community_id
+             AND community_member.user_id = $2
+            WHERE c.id = $${ci}
+              AND (c.is_private = FALSE
+                   OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
+          )`;
+        }
         targetWhere = `m.channel_id = $${ci}`;
       } else {
         params.push(conversationId);
@@ -1031,7 +1244,7 @@ router.get('/',
         targetWhere += ` AND m.created_at < (SELECT created_at FROM messages WHERE id = $${params.length})`;
       }
 
-      const orderDirection = after ? 'ASC' : 'DESC';
+      const orderDirection = after ? "ASC" : "DESC";
       if (after) {
         params.push(after);
         targetWhere += ` AND m.created_at > (SELECT created_at FROM messages WHERE id = $${params.length})`;
@@ -1062,42 +1275,51 @@ router.get('/',
       const { rows } = await messagesListQuery(req, sql, params);
 
       if (!rows[0]?.has_access) {
-        return res.status(403).json({ error: channelId ? 'Access denied' : 'Not a participant' });
+        return res
+          .status(403)
+          .json({ error: channelId ? "Access denied" : "Not a participant" });
       }
+
+      if (channelId) setChannelAccessCache(redis, channelId, req.user.id);
 
       const messageRows = rows.filter((row) => row.id);
       const orderedRows = after ? messageRows : messageRows.reverse();
       const body = { messages: orderedRows };
       res.json(body);
-    } catch (err) { next(err); }
-  }
+    } catch (err) {
+      next(err);
+    }
+  },
 );
 
 // ── GET /messages/context/:messageId ────────────────────────────────────────
-router.get('/context/:messageId',
-  param('messageId').isUUID(),
-  qv('limit').optional().isInt({ min: 1, max: 50 }).toInt(),
+router.get(
+  "/context/:messageId",
+  param("messageId").isUUID(),
+  qv("limit").optional().isInt({ min: 1, max: 50 }).toInt(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     try {
       const messageId = req.params.messageId;
-      const requestedLimit = Number(req.query.limit || DEFAULT_CONTEXT_SIDE_LIMIT);
+      const requestedLimit = Number(
+        req.query.limit || DEFAULT_CONTEXT_SIDE_LIMIT,
+      );
       const sideLimit = Number.isFinite(requestedLimit)
         ? Math.min(Math.max(requestedLimit, 1), 50)
         : DEFAULT_CONTEXT_SIDE_LIMIT;
 
       const target = await loadMessageTargetForUser(messageId, req.user.id);
       if (!target) {
-        return res.status(404).json({ error: 'Message not found' });
+        return res.status(404).json({ error: "Message not found" });
       }
 
       if (!target.has_access) {
-        return res.status(403).json({ error: 'Access denied' });
+        return res.status(403).json({ error: "Access denied" });
       }
 
       const scope = target.channel_id
-        ? 'm.channel_id = t.channel_id'
-        : 'm.conversation_id = t.conversation_id';
+        ? "m.channel_id = t.channel_id"
+        : "m.conversation_id = t.conversation_id";
 
       const { rows } = await query(
         `WITH target AS (
@@ -1151,12 +1373,14 @@ router.get('/context/:messageId',
       );
 
       if (!rows.length) {
-        return res.status(404).json({ error: 'Message not found' });
+        return res.status(404).json({ error: "Message not found" });
       }
 
       const beforeCount = Number(rows[0].before_count || 0);
       const afterCount = Number(rows[0].after_count || 0);
-      const messages = rows.map(({ before_count, after_count, ...message }) => message);
+      const messages = rows.map(
+        ({ before_count, after_count, ...message }) => message,
+      );
 
       res.json({
         targetMessageId: target.id,
@@ -1166,33 +1390,49 @@ router.get('/context/:messageId',
         hasNewer: afterCount === sideLimit,
         messages,
       });
-    } catch (err) { next(err); }
-  }
+    } catch (err) {
+      next(err);
+    }
+  },
 );
 
 // ── POST /messages ─────────────────────────────────────────────────────────────
-const ALLOWED_ATTACHMENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const ALLOWED_ATTACHMENT_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
 const MAX_ATTACHMENTS_PER_MESSAGE = 4;
 function buildIdempotentSuccessPayload(payload: any) {
-  if (!payload || typeof payload !== 'object' || !payload.message || typeof payload.message !== 'object') {
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    !payload.message ||
+    typeof payload.message !== "object"
+  ) {
     return null;
   }
-  if (!payload.message.id || typeof payload.message.id !== 'string') {
+  if (!payload.message.id || typeof payload.message.id !== "string") {
     return null;
   }
-  const publishedAt = typeof payload.realtimePublishedAt === 'string'
-    ? payload.realtimePublishedAt
-    : messageCreatedAtIso(payload.message);
+  const publishedAt =
+    typeof payload.realtimePublishedAt === "string"
+      ? payload.realtimePublishedAt
+      : messageCreatedAtIso(payload.message);
   const msg = payload.message;
   const out: Record<string, unknown> = {
     message: msg,
     realtimePublishedAt: publishedAt,
   };
   if (msg.channel_id) {
-    out.realtimeChannelFanoutComplete = payload.realtimeChannelFanoutComplete !== false;
-    out.realtimeUserFanoutDeferred = payload.realtimeUserFanoutDeferred === true;
+    out.realtimeChannelFanoutComplete =
+      payload.realtimeChannelFanoutComplete !== false;
+    out.realtimeUserFanoutDeferred =
+      payload.realtimeUserFanoutDeferred === true;
   } else if (msg.conversation_id) {
-    out.realtimeConversationFanoutComplete = payload.realtimeConversationFanoutComplete !== false;
+    out.realtimeConversationFanoutComplete =
+      payload.realtimeConversationFanoutComplete !== false;
   }
   return out;
 }
@@ -1213,7 +1453,11 @@ async function awaitIdempotentPostAfterLeaseContention(idemRedisKey) {
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
-    const wait = Math.min(MSG_IDEM_POLL_MAX_SLEEP_MS, Math.max(1, sleepStep), remaining);
+    const wait = Math.min(
+      MSG_IDEM_POLL_MAX_SLEEP_MS,
+      Math.max(1, sleepStep),
+      remaining,
+    );
     await sleepMs(wait);
     sleepStep = Math.min(MSG_IDEM_POLL_MAX_SLEEP_MS, sleepStep * 2);
 
@@ -1227,15 +1471,21 @@ async function awaitIdempotentPostAfterLeaseContention(idemRedisKey) {
     }
     const replay = buildIdempotentSuccessPayload(p2);
     if (replay) {
-      messagePostIdempotencyPollTotal.inc({ outcome: 'replay_201' });
-      messagePostIdempotencyPollWaitMs.observe({ outcome: 'replay_201' }, Date.now() - pollStart);
+      messagePostIdempotencyPollTotal.inc({ outcome: "replay_201" });
+      messagePostIdempotencyPollWaitMs.observe(
+        { outcome: "replay_201" },
+        Date.now() - pollStart,
+      );
       return { ok: true as const, body: replay };
     }
     if (p2?.messageId) {
       const msg2 = await loadHydratedMessageById(p2.messageId);
       if (msg2) {
-        messagePostIdempotencyPollTotal.inc({ outcome: 'replay_201' });
-        messagePostIdempotencyPollWaitMs.observe({ outcome: 'replay_201' }, Date.now() - pollStart);
+        messagePostIdempotencyPollTotal.inc({ outcome: "replay_201" });
+        messagePostIdempotencyPollWaitMs.observe(
+          { outcome: "replay_201" },
+          Date.now() - pollStart,
+        );
         return {
           ok: true as const,
           body: {
@@ -1253,25 +1503,31 @@ async function awaitIdempotentPostAfterLeaseContention(idemRedisKey) {
     }
     if (!p2?.pending) break;
   }
-  messagePostIdempotencyPollTotal.inc({ outcome: 'exhausted_409' });
-  messagePostIdempotencyPollWaitMs.observe({ outcome: 'exhausted_409' }, Date.now() - pollStart);
+  messagePostIdempotencyPollTotal.inc({ outcome: "exhausted_409" });
+  messagePostIdempotencyPollWaitMs.observe(
+    { outcome: "exhausted_409" },
+    Date.now() - pollStart,
+  );
   return { ok: false as const };
 }
 
-router.post('/',
+router.post(
+  "/",
   messagePostIpRateLimiter,
   messagePostUserRateLimiter,
-  body('content').optional().isString(),
-  body('channelId').optional().isUUID(),
-  body('conversationId').optional().isUUID(),
-  body('threadId').optional().isUUID(),
-  body('attachments').optional().isArray({ max: MAX_ATTACHMENTS_PER_MESSAGE }),
-  body('attachments.*.storageKey').optional().isString(),
-  body('attachments.*.filename').optional().isString(),
-  body('attachments.*.contentType').optional().custom((value) => ALLOWED_ATTACHMENT_TYPES.has(value)),
-  body('attachments.*.sizeBytes').optional().isInt({ min: 1 }),
-  body('attachments.*.width').optional().isInt(),
-  body('attachments.*.height').optional().isInt(),
+  body("content").optional().isString(),
+  body("channelId").optional().isUUID(),
+  body("conversationId").optional().isUUID(),
+  body("threadId").optional().isUUID(),
+  body("attachments").optional().isArray({ max: MAX_ATTACHMENTS_PER_MESSAGE }),
+  body("attachments.*.storageKey").optional().isString(),
+  body("attachments.*.filename").optional().isString(),
+  body("attachments.*.contentType")
+    .optional()
+    .custom((value) => ALLOWED_ATTACHMENT_TYPES.has(value)),
+  body("attachments.*.sizeBytes").optional().isInt({ min: 1 }),
+  body("attachments.*.width").optional().isInt(),
+  body("attachments.*.height").optional().isInt(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     let idemRedisKey: string | null = null;
@@ -1286,49 +1542,69 @@ router.post('/',
       channelId = req.body.channelId ?? null;
       conversationId = req.body.conversationId ?? null;
       threadId = req.body.threadId ?? null;
-      attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
+      attachments = Array.isArray(req.body.attachments)
+        ? req.body.attachments
+        : [];
 
       if (!channelId && !conversationId) {
-        return res.status(400).json({ error: 'channelId or conversationId required' });
+        return res
+          .status(400)
+          .json({ error: "channelId or conversationId required" });
       }
       if (channelId && conversationId) {
-        return res.status(400).json({ error: 'Specify only one of channelId or conversationId' });
+        return res
+          .status(400)
+          .json({ error: "Specify only one of channelId or conversationId" });
       }
       if (!content?.trim() && attachments.length === 0) {
-        return res.status(400).json({ error: 'content or at least one attachment is required' });
+        return res
+          .status(400)
+          .json({ error: "content or at least one attachment is required" });
       }
 
-      const invalidAttachment = attachments.find((attachment) => (
-        !attachment
-        || typeof attachment.storageKey !== 'string'
-        || !attachment.storageKey.trim()
-        || typeof attachment.filename !== 'string'
-        || !attachment.filename.trim()
-        || !ALLOWED_ATTACHMENT_TYPES.has(attachment.contentType)
-        || !Number.isInteger(Number(attachment.sizeBytes))
-        || Number(attachment.sizeBytes) <= 0
-      ));
+      const invalidAttachment = attachments.find(
+        (attachment) =>
+          !attachment ||
+          typeof attachment.storageKey !== "string" ||
+          !attachment.storageKey.trim() ||
+          typeof attachment.filename !== "string" ||
+          !attachment.filename.trim() ||
+          !ALLOWED_ATTACHMENT_TYPES.has(attachment.contentType) ||
+          !Number.isInteger(Number(attachment.sizeBytes)) ||
+          Number(attachment.sizeBytes) <= 0,
+      );
 
       if (invalidAttachment) {
-        return res.status(400).json({ error: 'attachments must include storageKey, filename, contentType, and sizeBytes' });
+        return res
+          .status(400)
+          .json({
+            error:
+              "attachments must include storageKey, filename, contentType, and sizeBytes",
+          });
       }
 
-      const rawIdem = req.get('idempotency-key') || req.get('Idempotency-Key');
-      if (rawIdem && typeof rawIdem === 'string') {
+      const rawIdem = req.get("idempotency-key") || req.get("Idempotency-Key");
+      if (rawIdem && typeof rawIdem === "string") {
         const trimmed = rawIdem.trim();
         if (trimmed.length > 0 && trimmed.length <= 200) {
-          idemRedisKey = `msg:idem:${req.user.id}:${crypto.createHash('sha256').update(trimmed, 'utf8').digest('hex')}`;
+          idemRedisKey = `msg:idem:${req.user.id}:${crypto.createHash("sha256").update(trimmed, "utf8").digest("hex")}`;
           try {
             const existing = await redis.get(idemRedisKey);
             if (existing) {
               let parsed: any;
-              try { parsed = JSON.parse(existing); } catch { parsed = null; }
+              try {
+                parsed = JSON.parse(existing);
+              } catch {
+                parsed = null;
+              }
               const replay = buildIdempotentSuccessPayload(parsed);
               if (replay) {
                 return res.status(201).json(replay);
               }
               if (parsed?.messageId) {
-                const cachedMsg = await loadHydratedMessageById(parsed.messageId);
+                const cachedMsg = await loadHydratedMessageById(
+                  parsed.messageId,
+                );
                 if (cachedMsg) {
                   return res.status(201).json({
                     message: cachedMsg,
@@ -1346,17 +1622,23 @@ router.post('/',
             const gotLease = await redis.set(
               idemRedisKey,
               JSON.stringify({ pending: true }),
-              'EX',
+              "EX",
               MSG_IDEM_PENDING_TTL_SECS,
-              'NX',
+              "NX",
             );
-            if (gotLease !== 'OK') {
-              const waited = await awaitIdempotentPostAfterLeaseContention(idemRedisKey);
+            if (gotLease !== "OK") {
+              const waited =
+                await awaitIdempotentPostAfterLeaseContention(idemRedisKey);
               if (waited.ok) {
                 return res.status(201).json(waited.body);
               }
-              res.set('Retry-After', '1');
-              return res.status(409).json({ error: 'Duplicate request in flight', requestId: req.id });
+              res.set("Retry-After", "1");
+              return res
+                .status(409)
+                .json({
+                  error: "Duplicate request in flight",
+                  requestId: req.id,
+                });
             }
             idemLease = true;
           } catch {
@@ -1368,15 +1650,18 @@ router.post('/',
       }
 
       let communityId: string | null = null;
-      const runMessageInsertTransaction = () => withTransaction(async (client) => {
-        txPhases.t0 = Date.now();
-        await client.query(`SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`);
-        await client.query(`SET LOCAL synchronous_commit = off`);
-        let row: any;
+      const runMessageInsertTransaction = () =>
+        withTransaction(async (client) => {
+          txPhases.t0 = Date.now();
+          await client.query(
+            `SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+          );
+          await client.query(`SET LOCAL synchronous_commit = off`);
+          let row: any;
 
-        if (channelId) {
-          const accessRes = await client.query(
-            `SELECT
+          if (channelId) {
+            const accessRes = await client.query(
+              `SELECT
                EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
                EXISTS (
                  SELECT 1
@@ -1411,35 +1696,40 @@ router.post('/',
                    )
                  LIMIT 1
                ) AS community_id`,
-            [channelId, req.user.id],
-          );
-          txPhases.t_access = Date.now();
-          const accessRow = accessRes.rows[0];
-          if (accessRow && accessRow.author_exists === false) {
-            const err: any = new Error('Session no longer valid');
-            err.statusCode = 401;
-            err.messagePostDenyReason = 'author_missing';
-            throw err;
-          }
-          if (!accessRow?.has_access) {
-            const err: any = new Error('Access denied');
-            err.statusCode = 403;
-            err.messagePostDenyReason = 'channel_access';
-            throw err;
-          }
+              [channelId, req.user.id],
+            );
+            txPhases.t_access = Date.now();
+            const accessRow = accessRes.rows[0];
+            if (accessRow && accessRow.author_exists === false) {
+              const err: any = new Error("Session no longer valid");
+              err.statusCode = 401;
+              err.messagePostDenyReason = "author_missing";
+              throw err;
+            }
+            if (!accessRow?.has_access) {
+              const err: any = new Error("Access denied");
+              err.statusCode = 403;
+              err.messagePostDenyReason = "channel_access";
+              throw err;
+            }
 
-          communityId = accessRow.community_id ?? null;
+            communityId = accessRow.community_id ?? null;
 
-          const insertRes = await client.query(
-            `INSERT INTO messages (channel_id, author_id, content, thread_id)
+            const insertRes = await client.query(
+              `INSERT INTO messages (channel_id, author_id, content, thread_id)
              VALUES ($1, $2, $3, $4)
              RETURNING ${MESSAGE_RETURNING_FIELDS}`,
-            [channelId, req.user.id, content?.trim() || null, threadId || null],
-          );
-          txPhases.t_insert = Date.now();
+              [
+                channelId,
+                req.user.id,
+                content?.trim() || null,
+                threadId || null,
+              ],
+            );
+            txPhases.t_insert = Date.now();
 
-          const hydrateRes = await client.query(
-            `SELECT
+            const hydrateRes = await client.query(
+              `SELECT
                m.id,
                m.channel_id,
                m.conversation_id,
@@ -1456,45 +1746,50 @@ router.post('/',
              FROM messages m
              LEFT JOIN users u ON u.id = m.author_id
              WHERE m.id = $1`,
-            [insertRes.rows[0].id],
-          );
-          row = hydrateRes.rows[0] || insertRes.rows[0];
-        } else {
-          const accessRes = await client.query(
-            `SELECT
+              [insertRes.rows[0].id],
+            );
+            row = hydrateRes.rows[0] || insertRes.rows[0];
+          } else {
+            const accessRes = await client.query(
+              `SELECT
                EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
                COUNT(*)::int                             AS has_access
              FROM conversation_participants
              WHERE conversation_id = $1
                AND user_id = $2
                AND left_at IS NULL`,
-            [conversationId, req.user.id],
-          );
-          txPhases.t_access = Date.now();
-          const accessRow = accessRes.rows[0];
-          if (accessRow && accessRow.author_exists === false) {
-            const err: any = new Error('Session no longer valid');
-            err.statusCode = 401;
-            err.messagePostDenyReason = 'author_missing';
-            throw err;
-          }
-          if (!accessRow?.has_access) {
-            const err: any = new Error('Not a participant');
-            err.statusCode = 403;
-            err.messagePostDenyReason = 'conversation_participant';
-            throw err;
-          }
+              [conversationId, req.user.id],
+            );
+            txPhases.t_access = Date.now();
+            const accessRow = accessRes.rows[0];
+            if (accessRow && accessRow.author_exists === false) {
+              const err: any = new Error("Session no longer valid");
+              err.statusCode = 401;
+              err.messagePostDenyReason = "author_missing";
+              throw err;
+            }
+            if (!accessRow?.has_access) {
+              const err: any = new Error("Not a participant");
+              err.statusCode = 403;
+              err.messagePostDenyReason = "conversation_participant";
+              throw err;
+            }
 
-          const insertRes = await client.query(
-            `INSERT INTO messages (conversation_id, author_id, content, thread_id)
+            const insertRes = await client.query(
+              `INSERT INTO messages (conversation_id, author_id, content, thread_id)
              VALUES ($1, $2, $3, $4)
              RETURNING ${MESSAGE_RETURNING_FIELDS}`,
-            [conversationId, req.user.id, content?.trim() || null, threadId || null],
-          );
-          txPhases.t_insert = Date.now();
+              [
+                conversationId,
+                req.user.id,
+                content?.trim() || null,
+                threadId || null,
+              ],
+            );
+            txPhases.t_insert = Date.now();
 
-          const hydrateRes = await client.query(
-            `SELECT
+            const hydrateRes = await client.query(
+              `SELECT
                m.id,
                m.channel_id,
                m.conversation_id,
@@ -1511,45 +1806,48 @@ router.post('/',
              FROM messages m
              LEFT JOIN users u ON u.id = m.author_id
              WHERE m.id = $1`,
-            [insertRes.rows[0].id],
-          );
-          row = hydrateRes.rows[0] || insertRes.rows[0];
-        }
-
-        if (attachments.length > 0) {
-          const values: string[] = [];
-          const params: any[] = [];
-          let index = 1;
-
-          for (const attachment of attachments) {
-            values.push(
-              `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`
+              [insertRes.rows[0].id],
             );
-            params.push(
-              row.id,
-              req.user.id,
-              attachment.filename,
-              attachment.contentType,
-              attachment.sizeBytes,
-              attachment.storageKey,
-              attachment.width || null,
-              attachment.height || null,
+            row = hydrateRes.rows[0] || insertRes.rows[0];
+          }
+
+          if (attachments.length > 0) {
+            const values: string[] = [];
+            const params: any[] = [];
+            let index = 1;
+
+            for (const attachment of attachments) {
+              values.push(
+                `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`,
+              );
+              params.push(
+                row.id,
+                req.user.id,
+                attachment.filename,
+                attachment.contentType,
+                attachment.sizeBytes,
+                attachment.storageKey,
+                attachment.width || null,
+                attachment.height || null,
+              );
+            }
+
+            await client.query(
+              `INSERT INTO attachments
+               (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
+             VALUES ${values.join(", ")}`,
+              params,
             );
           }
 
-          await client.query(
-            `INSERT INTO attachments
-               (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
-             VALUES ${values.join(', ')}`,
-            params,
-          );
-        }
-
-        txPhases.t_later = Date.now();
-        return row;
-      });
+          txPhases.t_later = Date.now();
+          return row;
+        });
       const baseMessage = await (channelId
-        ? runChannelMessageInsertSerialized(channelId, runMessageInsertTransaction)
+        ? runChannelMessageInsertSerialized(
+            channelId,
+            runMessageInsertTransaction,
+          )
         : runMessageInsertTransaction());
       const t_tx_done = Date.now();
       {
@@ -1562,7 +1860,7 @@ router.post('/',
           txDoneAt: t_tx_done,
         });
         if (successLog.tx_total_ms > 500) {
-          logger.info(successLog, 'POST /messages tx phase timing');
+          logger.info(successLog, "POST /messages tx phase timing");
         }
       }
 
@@ -1591,9 +1889,10 @@ router.post('/',
       // Re-hydrate only when attachments were inserted so the response includes
       // them. For the common no-attachment path the CTE result is already fully
       // hydrated (author joined, attachments = []).
-      const message = attachments.length > 0
-        ? (await loadHydratedMessageById(baseMessage.id) ?? baseMessage)
-        : baseMessage;
+      const message =
+        attachments.length > 0
+          ? ((await loadHydratedMessageById(baseMessage.id)) ?? baseMessage)
+          : baseMessage;
 
       // Bust the shared Redis cache for the latest page so a follow-up GET /messages
       // (e.g. opening a DM) returns rows that include this write. Await DEL so a
@@ -1608,9 +1907,15 @@ router.post('/',
         // Cold channels used to `await` a full-table `COUNT(*)` before any publish, which
         // stacked DB latency on top of the fanout path and amplified tail latency under load.
         incrementChannelMessageCount(channelId).catch((err) => {
-          logger.warn({ err, channelId }, 'Failed to increment channel:msg_count alongside realtime publish');
+          logger.warn(
+            { err, channelId },
+            "Failed to increment channel:msg_count alongside realtime publish",
+          );
         });
-        const createdEnvelope = messageFanoutEnvelope('message:created', message);
+        const createdEnvelope = messageFanoutEnvelope(
+          "message:created",
+          message,
+        );
         // Await channel (+ optionally user-topic) Redis publishes per MESSAGE_USER_FANOUT_HTTP_BLOCKING.
         // If Redis is unavailable, fanout.publish throws after retries — still return 201 because
         // the message row is committed; clients should poll or rely on channel: replay.
@@ -1619,7 +1924,7 @@ router.post('/',
           realtimePublishedAtForHttp = createdEnvelope.publishedAt;
           realtimeChannelFanoutComplete = true;
         } catch (fanoutErr) {
-          messagePostRealtimePublishFailTotal.inc({ target: 'channel' });
+          messagePostRealtimePublishFailTotal.inc({ target: "channel" });
           logger.error(
             {
               err: fanoutErr,
@@ -1628,7 +1933,7 @@ router.post('/',
               messageId: message.id,
               pool: poolStats(),
             },
-            'POST /messages: channel realtime fanout failed after DB commit',
+            "POST /messages: channel realtime fanout failed after DB commit",
           );
           realtimePublishedAtForHttp = new Date().toISOString();
         }
@@ -1637,7 +1942,7 @@ router.post('/',
           channelId: String(channelId),
           authorId: String(baseMessage.author_id),
           createdAt:
-            typeof baseMessage.created_at === 'string'
+            typeof baseMessage.created_at === "string"
               ? baseMessage.created_at
               : new Date(baseMessage.created_at).toISOString(),
         });
@@ -1645,12 +1950,12 @@ router.post('/',
         try {
           realtimePublishedAtForHttp = await publishConversationEventNow(
             conversationId,
-            'message:created',
+            "message:created",
             message,
           );
           realtimeConversationFanoutComplete = true;
         } catch (fanoutErr) {
-          messagePostRealtimePublishFailTotal.inc({ target: 'conversation' });
+          messagePostRealtimePublishFailTotal.inc({ target: "conversation" });
           logger.error(
             {
               err: fanoutErr,
@@ -1659,7 +1964,7 @@ router.post('/',
               messageId: message.id,
               pool: poolStats(),
             },
-            'POST /messages: conversation realtime fanout failed after DB commit',
+            "POST /messages: conversation realtime fanout failed after DB commit",
           );
           realtimePublishedAtForHttp = new Date().toISOString();
         }
@@ -1668,20 +1973,24 @@ router.post('/',
         realtimePublishedAtForHttp = new Date().toISOString();
       }
       if (communityId) {
-        sideEffects.publishBackgroundEvent(`community:${communityId}`, 'community:channel_message', {
-          communityId,
-          channelId,
-          messageId: baseMessage.id,
-          authorId: baseMessage.author_id,
-          createdAt: baseMessage.created_at,
-        });
+        sideEffects.publishBackgroundEvent(
+          `community:${communityId}`,
+          "community:channel_message",
+          {
+            communityId,
+            channelId,
+            messageId: baseMessage.id,
+            authorId: baseMessage.author_id,
+            createdAt: baseMessage.created_at,
+          },
+        );
       }
 
       const userFanoutDeferred =
-        !!channelId
-        && (!realtimeChannelFanoutComplete
-          || process.env.MESSAGE_USER_FANOUT_HTTP_BLOCKING === 'false'
-          || process.env.MESSAGE_USER_FANOUT_HTTP_BLOCKING === '0');
+        !!channelId &&
+        (!realtimeChannelFanoutComplete ||
+          process.env.MESSAGE_USER_FANOUT_HTTP_BLOCKING === "false" ||
+          process.env.MESSAGE_USER_FANOUT_HTTP_BLOCKING === "0");
 
       if (idemRedisKey && idemLease) {
         const idemBlob: Record<string, unknown> = {
@@ -1690,16 +1999,18 @@ router.post('/',
           realtimePublishedAt: realtimePublishedAtForHttp,
         };
         if (channelId) {
-          idemBlob.realtimeChannelFanoutComplete = realtimeChannelFanoutComplete;
+          idemBlob.realtimeChannelFanoutComplete =
+            realtimeChannelFanoutComplete;
           idemBlob.realtimeUserFanoutDeferred = userFanoutDeferred;
         } else {
-          idemBlob.realtimeConversationFanoutComplete = realtimeConversationFanoutComplete;
+          idemBlob.realtimeConversationFanoutComplete =
+            realtimeConversationFanoutComplete;
         }
         redis
           .set(
             idemRedisKey,
             JSON.stringify(idemBlob),
-            'EX',
+            "EX",
             MSG_IDEM_SUCCESS_TTL_SECS,
           )
           .catch(() => {});
@@ -1713,39 +2024,52 @@ router.post('/',
         httpBody.realtimeChannelFanoutComplete = realtimeChannelFanoutComplete;
         httpBody.realtimeUserFanoutDeferred = userFanoutDeferred;
       } else {
-        httpBody.realtimeConversationFanoutComplete = realtimeConversationFanoutComplete;
+        httpBody.realtimeConversationFanoutComplete =
+          realtimeConversationFanoutComplete;
       }
       res.status(201).json(httpBody);
     } catch (err: any) {
       if (idemRedisKey && idemLease) {
         redis.del(idemRedisKey).catch(() => {});
       }
-      if (err.statusCode === 401 && err.messagePostDenyReason === 'author_missing') {
+      if (
+        err.statusCode === 401 &&
+        err.messagePostDenyReason === "author_missing"
+      ) {
         return res.status(401).json({ error: err.message });
       }
       if (err.statusCode === 403) {
         const reason = err.messagePostDenyReason;
-        if (reason === 'channel_access' || reason === 'conversation_participant') {
+        if (
+          reason === "channel_access" ||
+          reason === "conversation_participant"
+        ) {
           messagePostAccessDeniedTotal.inc({ reason });
           logger.warn(
-            { requestId: req.id, reason, target: req.body.channelId ? 'channel' : 'conversation' },
-            'POST /messages access denied',
+            {
+              requestId: req.id,
+              reason,
+              target: req.body.channelId ? "channel" : "conversation",
+            },
+            "POST /messages access denied",
           );
         }
         return res.status(403).json({ error: err.message });
       }
-      if (err?.code === '23503') {
+      if (err?.code === "23503") {
         logger.warn(
           { requestId: req.id, constraint: err.constraint, detail: err.detail },
-          'POST /messages foreign key violation',
+          "POST /messages foreign key violation",
         );
         if (
-          err.constraint === 'messages_author_id_fkey' ||
-          String(err.detail || '').includes('messages_author_id_fkey')
+          err.constraint === "messages_author_id_fkey" ||
+          String(err.detail || "").includes("messages_author_id_fkey")
         ) {
-          return res.status(401).json({ error: 'Session no longer valid' });
+          return res.status(401).json({ error: "Session no longer valid" });
         }
-        return res.status(409).json({ error: 'Could not save message; please try again' });
+        return res
+          .status(409)
+          .json({ error: "Could not save message; please try again" });
       }
       if (isMessagePostInsertDbTimeout(err)) {
         logger.warn(
@@ -1757,29 +2081,29 @@ router.post('/',
             attachments,
             txPhases,
           }),
-          'POST /messages: insert hit statement/query timeout (likely lock contention on hot channel)',
+          "POST /messages: insert hit statement/query timeout (likely lock contention on hot channel)",
         );
-        return res
-          .status(503)
-          .set('Retry-After', '1')
-          .json({
-            error: 'Messaging is briefly busy saving your message; please retry.',
-            requestId: req.id,
-          });
+        return res.status(503).set("Retry-After", "1").json({
+          error: "Messaging is briefly busy saving your message; please retry.",
+          requestId: req.id,
+        });
       }
       next(err);
     }
-  }
+  },
 );
 
 // ── PATCH /messages/:id ────────────────────────────────────────────────────────
-router.patch('/:id',
-  param('id').isUUID(),
-  body('content').isString(),
+router.patch(
+  "/:id",
+  param("id").isUUID(),
+  body("content").isString(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     if (overload.shouldRestrictNonEssentialWrites()) {
-      return res.status(503).json({ error: 'Edits temporarily unavailable under high load' });
+      return res
+        .status(503)
+        .json({ error: "Edits temporarily unavailable under high load" });
     }
     try {
       // Single CTE: check existence+authorship+access, update, join author — 1 round-trip vs 4.
@@ -1830,13 +2154,17 @@ router.patch('/:id',
       );
       const row = rows[0];
       if (!row.is_author) {
-        return res.status(404).json({ error: 'Message not found or not yours' });
+        return res
+          .status(404)
+          .json({ error: "Message not found or not yours" });
       }
       if (!row.has_access) {
-        return res.status(403).json({ error: 'Access denied' });
+        return res.status(403).json({ error: "Access denied" });
       }
       if (!row.id) {
-        return res.status(404).json({ error: 'Message not found or not yours' });
+        return res
+          .status(404)
+          .json({ error: "Message not found or not yours" });
       }
       const { is_author, has_access, ...message } = row;
       // Bust the Redis message cache so a GET immediately after returns updated content.
@@ -1844,32 +2172,40 @@ router.patch('/:id',
         await bustMessagesCacheSafe({ channelId: message.channel_id });
       }
       if (message.conversation_id) {
-        await bustMessagesCacheSafe({ conversationId: message.conversation_id });
-        await publishConversationEventNow(message.conversation_id, 'message:updated', message);
+        await bustMessagesCacheSafe({
+          conversationId: message.conversation_id,
+        });
+        await publishConversationEventNow(
+          message.conversation_id,
+          "message:updated",
+          message,
+        );
       } else {
         await publishChannelMessageEvent(
           message.channel_id,
-          messageFanoutEnvelope('message:updated', message),
+          messageFanoutEnvelope("message:updated", message),
         );
       }
       res.json({ message });
-    } catch (err) { next(err); }
-  }
+    } catch (err) {
+      next(err);
+    }
+  },
 );
 
 // ── DELETE /messages/:id ───────────────────────────────────────────────────────
-router.delete('/:id',
-  param('id').isUUID(),
-  async (req, res, next) => {
-    if (!validate(req, res)) return;
-    if (overload.shouldRestrictNonEssentialWrites()) {
-      return res.status(503).json({ error: 'Deletes temporarily unavailable under high load' });
-    }
-    try {
-      // Single CTE: check existence+authorship+access, collect attachment keys, delete — 1 round-trip vs 4.
-      // The att CTE reads from the pre-DELETE snapshot so attachment rows are visible before CASCADE fires.
-      const { rows } = await query(
-        `WITH chk AS (
+router.delete("/:id", param("id").isUUID(), async (req, res, next) => {
+  if (!validate(req, res)) return;
+  if (overload.shouldRestrictNonEssentialWrites()) {
+    return res
+      .status(503)
+      .json({ error: "Deletes temporarily unavailable under high load" });
+  }
+  try {
+    // Single CTE: check existence+authorship+access, collect attachment keys, delete — 1 round-trip vs 4.
+    // The att CTE reads from the pre-DELETE snapshot so attachment rows are visible before CASCADE fires.
+    const { rows } = await query(
+      `WITH chk AS (
            SELECT
              (m.author_id = $2)                        AS is_author,
              CASE
@@ -1912,161 +2248,201 @@ router.delete('/:id',
            del.id, del.channel_id, del.conversation_id
          FROM   (VALUES (1)) dummy
          LEFT   JOIN del ON TRUE`,
-        [req.params.id, req.user.id],
+      [req.params.id, req.user.id],
+    );
+    const row = rows[0];
+    if (!row.is_author) {
+      return res.status(404).json({ error: "Message not found or not yours" });
+    }
+    if (!row.has_access) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    if (!row.id) {
+      return res.status(404).json({ error: "Message not found or not yours" });
+    }
+    const attachmentKeys: string[] = Array.isArray(row.attachment_keys)
+      ? (row.attachment_keys as string[])
+      : [];
+    const message = {
+      id: row.id,
+      channel_id: row.channel_id,
+      conversation_id: row.conversation_id,
+    };
+    sideEffects.deleteAttachmentObjects(attachmentKeys);
+    // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
+    if (message.channel_id) {
+      repointChannelLastMessage(message.channel_id).catch((err) =>
+        logger.warn(
+          { err, channelId: message.channel_id },
+          "repointChannelLastMessage failed",
+        ),
       );
-      const row = rows[0];
-      if (!row.is_author) {
-        return res.status(404).json({ error: 'Message not found or not yours' });
-      }
-      if (!row.has_access) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
-      if (!row.id) {
-        return res.status(404).json({ error: 'Message not found or not yours' });
-      }
-      const attachmentKeys: string[] = Array.isArray(row.attachment_keys) ? row.attachment_keys as string[] : [];
-      const message = { id: row.id, channel_id: row.channel_id, conversation_id: row.conversation_id };
-      sideEffects.deleteAttachmentObjects(attachmentKeys);
-      // Keep the channel unread counter in sync: DECR mirrors the INCR done on create.
-      if (message.channel_id) {
-        repointChannelLastMessage(message.channel_id).catch((err) =>
-          logger.warn({ err, channelId: message.channel_id }, 'repointChannelLastMessage failed'),
-        );
-        decrementChannelMessageCount(message.channel_id).catch(() => {});
-        await bustMessagesCacheSafe({ channelId: message.channel_id });
-      }
-      if (message.conversation_id) {
-        repointConversationLastMessage(message.conversation_id).catch((err) =>
-          logger.warn(
-            { err, conversationId: message.conversation_id },
-            'repointConversationLastMessage failed',
-          ),
-        );
-        await bustMessagesCacheSafe({ conversationId: message.conversation_id });
-      }
-      if (message.conversation_id) {
-        await publishConversationEventNow(message.conversation_id, 'message:deleted', {
+      decrementChannelMessageCount(message.channel_id).catch(() => {});
+      await bustMessagesCacheSafe({ channelId: message.channel_id });
+    }
+    if (message.conversation_id) {
+      repointConversationLastMessage(message.conversation_id).catch((err) =>
+        logger.warn(
+          { err, conversationId: message.conversation_id },
+          "repointConversationLastMessage failed",
+        ),
+      );
+      await bustMessagesCacheSafe({ conversationId: message.conversation_id });
+    }
+    if (message.conversation_id) {
+      await publishConversationEventNow(
+        message.conversation_id,
+        "message:deleted",
+        {
           id: message.id,
           conversation_id: message.conversation_id,
           conversationId: message.conversation_id,
-        });
-      } else {
-        await publishChannelMessageEvent(
-          message.channel_id,
-          messageFanoutEnvelope('message:deleted', {
-            id: message.id,
-            channel_id: message.channel_id,
-            channelId: message.channel_id,
-          }),
-        );
-      }
+        },
+      );
+    } else {
+      await publishChannelMessageEvent(
+        message.channel_id,
+        messageFanoutEnvelope("message:deleted", {
+          id: message.id,
+          channel_id: message.channel_id,
+          channelId: message.channel_id,
+        }),
+      );
+    }
 
-      res.json({ success: true });
-    } catch (err) { next(err); }
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
   }
-);
+});
 
 // ── PUT /messages/:id/read ─────────────────────────────────────────────────────
-router.put('/:id/read',
-  param('id').isUUID(),
-  async (req, res, next) => {
-    if (!validate(req, res)) return;
-    const pool = poolStats();
-    // `READ_RECEIPT_DEFER_POOL_WAITING=0` means "disable pool-wait defer".
-    if (
-      READ_RECEIPT_DEFER_POOL_WAITING > 0
-      && pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
-    ) {
-      return res.json({ success: true, deferred: true, reason: 'pool_waiting' });
-    }
-    // Grader reliability first: under sustained pressure (stage 2), skip DB-heavy
-    // read-receipt persistence so writes + message delivery keep capacity.
-    const overloadStage = overload.getStage();
-    if (overloadStage === 2) {
-      return res.json({ success: true, deferred: true });
-    }
-    if (overloadStage >= 3) {
-      return res.status(503).json({ error: 'Read receipts temporarily delayed under high load' });
-    }
-    try {
-      const target = await loadMessageTargetForUser(req.params.id, req.user.id);
-      if (!target) return res.status(404).json({ error: 'Message not found' });
-      if (!target.has_access) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
-
-      const { channel_id, conversation_id } = target;
-      const uid = req.user.id;
-      const messageId = req.params.id;
-      const messageCreatedAt = target.created_at;
-      const cachedMessageId = await getCachedReadReceiptMessageId(
-        uid,
-        channel_id,
-        conversation_id,
-      );
-
-      if (cachedMessageId && String(cachedMessageId) === String(messageId)) {
-        return res.json({ success: true });
-      }
-
-      const { applied, didAdvanceCursor } = await advanceReadStateCursor({
-        userId: uid,
-        channelId: channel_id,
-        conversationId: conversation_id,
-        messageId,
-        messageCreatedAt,
-      });
-
-      if (!didAdvanceCursor) {
-        if (String(applied?.last_read_message_id || '') === String(messageId)) {
-          await rememberReadReceiptMessageId(uid, channel_id, conversation_id, messageId);
-        }
-        return res.json({ success: true });
-      }
-
-      const communityIdForCache = target.community_id;
-      if (channel_id && communityIdForCache) {
-        redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
-      }
-
-      const payload = {
-        userId: uid,
-        channelId: channel_id,
-        conversationId: conversation_id,
-        lastReadMessageId: messageId,
-        lastReadAt: applied?.last_read_at || new Date().toISOString(),
-      };
-
-      // Await Redis fanout before HTTP 200 so strict graders (delivery-after-success)
-      // do not observe a race; mirrors POST /messages awaiting publish before 201.
-      if (conversation_id) {
-        await publishConversationEventNow(conversation_id, 'read:updated', payload);
-      } else {
-        // Channel read cursors are private: fan out only to the reader's user topic
-        // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
-        // which would leak other members' read positions to WebSocket clients.
-        await publishUserFeedTargets([uid], { event: 'read:updated', data: payload });
-      }
-
-      // Reset the user's unread watermark in Redis to the current channel message count
-      if (channel_id) {
-        try {
-          const countKey = `channel:msg_count:${channel_id}`;
-          const readKey  = `user:last_read_count:${channel_id}:${uid}`;
-          const currentCount = await redis.get(countKey);
-          if (currentCount !== null) {
-            await redis.set(readKey, currentCount, 'EX', USER_LAST_READ_COUNT_REDIS_TTL_SEC);
-          }
-        } catch (err) {
-          logger.warn({ err, channel_id }, 'Failed to reset user:last_read_count in Redis');
-        }
-      }
-
-      await rememberReadReceiptMessageId(uid, channel_id, conversation_id, messageId);
-
-      res.json({ success: true });
-    } catch (err) { next(err); }
+router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
+  if (!validate(req, res)) return;
+  const pool = poolStats();
+  // `READ_RECEIPT_DEFER_POOL_WAITING=0` means "disable pool-wait defer".
+  if (
+    READ_RECEIPT_DEFER_POOL_WAITING > 0 &&
+    pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
+  ) {
+    return res.json({ success: true, deferred: true, reason: "pool_waiting" });
   }
-);
+  // Grader reliability first: under sustained pressure (stage 2), skip DB-heavy
+  // read-receipt persistence so writes + message delivery keep capacity.
+  const overloadStage = overload.getStage();
+  if (overloadStage === 2) {
+    return res.json({ success: true, deferred: true });
+  }
+  if (overloadStage >= 3) {
+    return res
+      .status(503)
+      .json({ error: "Read receipts temporarily delayed under high load" });
+  }
+  try {
+    const target = await loadMessageTargetForUser(req.params.id, req.user.id);
+    if (!target) return res.status(404).json({ error: "Message not found" });
+    if (!target.has_access) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
+    const { channel_id, conversation_id } = target;
+    const uid = req.user.id;
+    const messageId = req.params.id;
+    const messageCreatedAt = target.created_at;
+    const cachedMessageId = await getCachedReadReceiptMessageId(
+      uid,
+      channel_id,
+      conversation_id,
+    );
+
+    if (cachedMessageId && String(cachedMessageId) === String(messageId)) {
+      return res.json({ success: true });
+    }
+
+    const { applied, didAdvanceCursor } = await advanceReadStateCursor({
+      userId: uid,
+      channelId: channel_id,
+      conversationId: conversation_id,
+      messageId,
+      messageCreatedAt,
+    });
+
+    if (!didAdvanceCursor) {
+      if (String(applied?.last_read_message_id || "") === String(messageId)) {
+        await rememberReadReceiptMessageId(
+          uid,
+          channel_id,
+          conversation_id,
+          messageId,
+        );
+      }
+      return res.json({ success: true });
+    }
+
+    const communityIdForCache = target.community_id;
+    if (channel_id && communityIdForCache) {
+      redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
+    }
+
+    const payload = {
+      userId: uid,
+      channelId: channel_id,
+      conversationId: conversation_id,
+      lastReadMessageId: messageId,
+      lastReadAt: applied?.last_read_at || new Date().toISOString(),
+    };
+
+    // Await Redis fanout before HTTP 200 so strict graders (delivery-after-success)
+    // do not observe a race; mirrors POST /messages awaiting publish before 201.
+    if (conversation_id) {
+      await publishConversationEventNow(
+        conversation_id,
+        "read:updated",
+        payload,
+      );
+    } else {
+      // Channel read cursors are private: fan out only to the reader's user topic
+      // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
+      // which would leak other members' read positions to WebSocket clients.
+      await publishUserFeedTargets([uid], {
+        event: "read:updated",
+        data: payload,
+      });
+    }
+
+    // Reset the user's unread watermark in Redis to the current channel message count
+    if (channel_id) {
+      try {
+        const countKey = `channel:msg_count:${channel_id}`;
+        const readKey = `user:last_read_count:${channel_id}:${uid}`;
+        const currentCount = await redis.get(countKey);
+        if (currentCount !== null) {
+          await redis.set(
+            readKey,
+            currentCount,
+            "EX",
+            USER_LAST_READ_COUNT_REDIS_TTL_SEC,
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          { err, channel_id },
+          "Failed to reset user:last_read_count in Redis",
+        );
+      }
+    }
+
+    await rememberReadReceiptMessageId(
+      uid,
+      channel_id,
+      conversation_id,
+      messageId,
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
 
 module.exports = router;

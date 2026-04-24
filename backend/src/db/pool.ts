@@ -42,7 +42,7 @@
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
 const { incrementDbQuery } = require('../utils/requestDbContext');
-const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal } = require('../utils/metrics');
+const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal, pgQueriesTotal } = require('../utils/metrics');
 
 function extractSqlText(queryArg) {
   if (!queryArg) return '';
@@ -239,6 +239,7 @@ async function queryRead(sql, params) {
   const start = Date.now();
   try {
     const result = await readPool.query(sql, params);
+    pgQueriesTotal.inc({ pool: 'read' });
     incrementDbQuery(isTransactionControlSql(sql) ? 'all' : 'business_sql');
     const durationMs = Date.now() - start;
     if (durationMs >= SLOW_QUERY_MS) {
@@ -262,6 +263,7 @@ async function query(sql, params) {
   const start = Date.now();
   try {
     const result = await pool.query(sql, params);
+    pgQueriesTotal.inc({ pool: 'primary' });
     incrementDbQuery(isTransactionControlSql(sql) ? 'all' : 'business_sql');
     const durationMs = Date.now() - start;
     if (durationMs >= SLOW_QUERY_MS) {

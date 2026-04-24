@@ -1232,3 +1232,4 @@ describe('search filters', () => {
     expect(list.find((m: any) => m.id === 'm-ws')?.content).toBe('from websocket first');
   });
 });
+

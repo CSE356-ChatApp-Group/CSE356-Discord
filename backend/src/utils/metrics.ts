@@ -445,6 +445,13 @@ const searchQueryDurationMs = new client.Histogram({
   buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
 });
 
+/** Cache outcomes for the new channel access Redis cache. */
+const channelAccessCacheTotal = new client.Counter({
+  name: 'channel_access_cache_total',
+  help: 'Cache outcomes for the channel access Redis cache',
+  labelNames: ['result'],
+});
+
 /** How many channels a websocket auto-subscribes to on connect. */
 const wsBootstrapChannelsHistogram = new client.Histogram({
   name: 'ws_bootstrap_channels',
@@ -472,6 +479,13 @@ const pgPoolIdle = new client.Gauge({
 const pgPoolWaiting = new client.Gauge({
   name: 'pg_pool_waiting',
   help: 'Number of requests waiting for a pg pool client (queue depth)',
+});
+
+/** Total successful Postgres queries executed across all pools (primary + read). */
+const pgQueriesTotal = new client.Counter({
+  name: 'pg_queries_total',
+  help: 'Total number of successful Postgres queries executed',
+  labelNames: ['pool'],
 });
 
 /** Immediate rejects when checkout queue hits POOL_CIRCUIT_BREAKER_QUEUE (scale DB vs app). */
@@ -662,6 +676,8 @@ function startPgPoolMetrics(pool) {
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'connection' }, 0);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'shutdown' }, 0);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason: 'other' }, 0);
+    pgQueriesTotal.inc({ pool: 'primary' }, 0);
+    pgQueriesTotal.inc({ pool: 'read' }, 0);
     endpointListCacheTotal.inc({ endpoint: 'communities', result: 'hit' }, 0);
     endpointListCacheTotal.inc({ endpoint: 'communities', result: 'miss' }, 0);
     endpointListCacheTotal.inc({ endpoint: 'communities', result: 'coalesced' }, 0);
@@ -681,6 +697,8 @@ function startPgPoolMetrics(pool) {
     endpointListCacheBypassTotal.inc({ endpoint: 'messages_conversation', reason: 'pagination' }, 0);
     endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_channel', reason: 'write' }, 0);
     endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_conversation', reason: 'write' }, 0);
+    channelAccessCacheTotal.inc({ result: 'hit' }, 0);
+    channelAccessCacheTotal.inc({ result: 'miss' }, 0);
     fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'hit' }, 0);
     fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'miss' }, 0);
     fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'coalesced' }, 0);
@@ -778,6 +796,7 @@ module.exports = {
   messagePostRateLimitHitsTotal,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
+  channelAccessCacheTotal,
   wsOutboundQueueDepthHistogram,
   wsOutboundQueuedFramesGauge,
   wsOutboundQueueBlockWaitsTotal,
@@ -809,6 +828,7 @@ module.exports = {
   startPgPoolMetrics,
   pgPoolCircuitBreakerRejectsTotal,
   pgPoolOperationErrorsTotal,
+  pgQueriesTotal,
   pgQueriesPerRequestHistogram,
   pgBusinessSqlQueriesPerRequestHistogram,
   endpointListCacheTotal,

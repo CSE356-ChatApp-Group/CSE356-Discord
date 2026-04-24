@@ -90,22 +90,21 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
 
 /**
  * Load message target and caller access in one query for hot read-receipt path.
- * Cache is keyed by (messageId, userId) and version-validated against channel/
- * conversation membership version keys before serving.
+ * Races the versioned Redis cache against a concurrent Postgres check — first
+ * "yes" (access granted) wins.
  */
 async function loadMessageTargetForUser(messageId, userId) {
   const cacheKey = `msg_target:${messageId}:${userId}`;
 
-  if (MSG_TARGET_CACHE_TTL_SECS > 0) {
-    const cached = await readScopedVersionedJsonCache({
-      redis,
-      cacheKey,
-      isPayload: isMessageTargetCachePayload,
-    });
-    if (cached) return cached.data;
-  }
+  const cachedPromise = MSG_TARGET_CACHE_TTL_SECS > 0
+    ? readScopedVersionedJsonCache({
+        redis,
+        cacheKey,
+        isPayload: isMessageTargetCachePayload,
+      })
+    : Promise.resolve(null);
 
-  const { rows } = await queryRead(
+  const dbPromise = queryRead(
     `SELECT m.id,
             m.author_id,
             m.channel_id,
@@ -140,9 +139,47 @@ async function loadMessageTargetForUser(messageId, userId) {
        AND m.deleted_at IS NULL`,
     [messageId, userId],
   );
-  const result = rows[0] || null;
 
-  if (result && MSG_TARGET_CACHE_TTL_SECS > 0) {
+  // Concurrent race: resolve as soon as either gives us a definitive "yes" (with access).
+  // If either returns null or has_access=false, wait for the other.
+  const result = await new Promise<any>((resolve, reject) => {
+    let pending = 2;
+    let dbResult: any = null;
+    let cachedResult: any = null;
+
+    function checkDone() {
+      if (--pending === 0) {
+        // Both finished. Prefer DB result for freshness if both returned something,
+        // but either one is better than nothing.
+        resolve(dbResult || (cachedResult ? cachedResult.data : null));
+      }
+    }
+
+    cachedPromise.then((cached) => {
+      if (cached && cached.data && cached.data.has_access) {
+        resolve(cached.data);
+      } else {
+        cachedResult = cached;
+        checkDone();
+      }
+    }).catch(checkDone);
+
+    dbPromise.then(({ rows }) => {
+      const row = rows[0] || null;
+      if (row && row.has_access) {
+        resolve(row);
+      } else {
+        dbResult = row;
+        checkDone();
+      }
+    }).catch((err) => {
+      // DB error: still allow Redis to win if it hits.
+      checkDone();
+    });
+  });
+
+  // Background: if DB load succeeded and we don't have a fresh cache entry, write it.
+  if (result && result.has_access && MSG_TARGET_CACHE_TTL_SECS > 0) {
     const scope = rowAccessScope(result);
     if (scope) {
       writeScopedVersionedJsonCache({
@@ -151,8 +188,7 @@ async function loadMessageTargetForUser(messageId, userId) {
         scope,
         ttlSeconds: MSG_TARGET_CACHE_TTL_SECS,
         payloadWithoutVersion: { data: result },
-      })
-        .catch(() => {});
+      }).catch(() => {});
     }
   }
 

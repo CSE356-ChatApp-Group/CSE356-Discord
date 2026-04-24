@@ -118,27 +118,28 @@ async function invalidateChannelUserFanoutTargetsCache(channelId: string) {
   }
 }
 
-async function invalidateCommunityChannelUserFanoutTargetsCache(communityId: string) {
+async function getCommunityChannelIds(communityId: string): Promise<string[]> {
   const { rows } = await query(
-    `SELECT id::text AS id
-     FROM channels
-     WHERE community_id = $1`,
+    `SELECT id::text AS id FROM channels WHERE community_id = $1`,
     [communityId],
   );
+  return rows.map((row: { id: string }) => row.id);
+}
 
-  if (!rows.length) return;
+async function invalidateCommunityChannelUserFanoutTargetsCache(communityId: string) {
+  const ids = await getCommunityChannelIds(communityId);
+
+  if (!ids.length) return;
 
   try {
     const pipeline = redis.pipeline();
-    rows.forEach((row: { id: string }) => {
-      pipeline.del(channelUserFanoutTargetsCacheKey(row.id));
-      pipeline.incr(channelUserFanoutTargetsVersionKey(row.id));
+    ids.forEach((id) => {
+      pipeline.del(channelUserFanoutTargetsCacheKey(id));
+      pipeline.incr(channelUserFanoutTargetsVersionKey(id));
     });
     await pipeline.exec();
   } catch {
-    await Promise.allSettled(
-      rows.map((row: { id: string }) => invalidateChannelUserFanoutTargetsCache(row.id)),
-    );
+    await Promise.allSettled(ids.map((id) => invalidateChannelUserFanoutTargetsCache(id)));
   }
 }
 
@@ -462,4 +463,5 @@ module.exports = {
   getChannelUserFanoutTargetKeys,
   invalidateChannelUserFanoutTargetsCache,
   invalidateCommunityChannelUserFanoutTargetsCache,
+  getCommunityChannelIds,
 };
