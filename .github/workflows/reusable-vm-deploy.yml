@@ -212,13 +212,17 @@ jobs:
           DEPLOY_SCRIPT_PATH: ${{ inputs.script_path }}
         run: |
           set -euo pipefail
+          # Match deploy-prod-multi.sh: accept-new so VM2/VM3 work when SSH_KNOWN_HOSTS
+          # only lists the primary ingress host (otherwise this step fails in ~1s).
           if [[ "${DEPLOY_SCRIPT_PATH}" == "deploy/deploy-prod-multi.sh" ]]; then
             for vm in 130.245.136.44 130.245.136.137 130.245.136.54; do
-              ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${vm}" \
+              ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+                "${PROD_USER}@${vm}" \
                 'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
             done
           else
-            ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" \
+            ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+              "${PROD_USER}@${PROD_HOST}" \
               'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
           fi
 
