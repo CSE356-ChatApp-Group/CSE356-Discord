@@ -30,6 +30,15 @@ MEILI_LOG_DIR="/var/log/meilisearch"
 MEILI_USER="meilisearch"
 MEILI_PORT="7700"
 PRIVATE_IP="${PRIVATE_IP:-10.0.0.146}"
+MEILI_RW_ROOTS=("$MEILI_DATA_DIR" "$MEILI_LOG_DIR")
+
+if [[ "$MEILI_DATA_DIR" == /mnt/*/* ]]; then
+  MEILI_MOUNT_ROOT="$(printf '%s\n' "$MEILI_DATA_DIR" | cut -d/ -f1-3)"
+  MEILI_RW_ROOTS=("$MEILI_MOUNT_ROOT" "${MEILI_RW_ROOTS[@]}")
+fi
+
+MEILI_RW_PATHS_LINE="$(printf '%s ' "${MEILI_RW_ROOTS[@]}")"
+MEILI_RW_PATHS_LINE="${MEILI_RW_PATHS_LINE% }"
 
 if [[ -z "${MEILI_MASTER_KEY:-}" ]]; then
   echo "ERROR: MEILI_MASTER_KEY must be set (min 16 chars)."
@@ -117,7 +126,7 @@ echo "   Written (permissions: 600, owner: root)."
 # ── 6 · systemd unit ─────────────────────────────────────────────────────────
 echo ""
 echo "6) Installing systemd service..."
-sudo tee /etc/systemd/system/meilisearch.service > /dev/null <<'UNIT'
+sudo tee /etc/systemd/system/meilisearch.service > /dev/null <<UNIT
 [Unit]
 Description=Meilisearch search engine
 Documentation=https://www.meilisearch.com/docs
@@ -129,6 +138,7 @@ Type=simple
 User=meilisearch
 Group=meilisearch
 EnvironmentFile=/etc/meilisearch/env
+WorkingDirectory=${MEILI_DATA_DIR}
 ExecStart=/usr/local/bin/meilisearch
 Restart=on-failure
 RestartSec=5
@@ -139,7 +149,7 @@ LimitNOFILE=65536
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/meilisearch /var/log/meilisearch
+ReadWritePaths=${MEILI_RW_PATHS_LINE}
 
 [Install]
 WantedBy=multi-user.target
