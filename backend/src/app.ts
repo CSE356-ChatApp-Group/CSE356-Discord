@@ -262,9 +262,9 @@ app.get('/metrics', async (_req, res) => {
 
 // ── Health check (no auth required) ───────────────────────────────────────────
 app.get('/health', async (req, res) => {
-  const callerIp = getTrustedClientIp(req);
+  const ip = getTrustedClientIp(req);
   const diagnostic =
-    isPrivateOrInternalNetwork(callerIp) &&
+    isPrivateOrInternalNetwork(ip) &&
     (req.query.diagnostic === '1' ||
      req.query.diagnostic === 'true' ||
      req.query.capacity === '1');

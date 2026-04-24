@@ -20,8 +20,8 @@ const presenceLimiter = createUserIpTokenLimiter({
   ipPerSecond: 30,
   userBurst: 20,
   ipBurst: 60,
-  userScopeLabel: 'presence_user',
-  ipScopeLabel: 'presence_ip',
+  userScopeLabel: 'presence_inmem_user',
+  ipScopeLabel: 'presence_inmem_ip',
 });
 
 const router = express.Router();
