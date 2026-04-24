@@ -1,54 +1,309 @@
-import { runChannelMessageInsertSerialized } from '../src/messages/channelInsertConcurrency';
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class FakeRedisLockClient {
+  private store = new Map<string, { value: string; expiresAt: number | null }>();
+
+  private purgeExpired(key: string) {
+    const entry = this.store.get(key);
+    if (!entry) return;
+    if (entry.expiresAt !== null && entry.expiresAt <= Date.now()) {
+      this.store.delete(key);
+    }
+  }
+
+  async set(key: string, value: string, ...args: any[]) {
+    this.purgeExpired(key);
+    let onlyIfMissing = false;
+    let ttlMs: number | null = null;
+
+    for (let i = 0; i < args.length; i += 1) {
+      const token = String(args[i]).toUpperCase();
+      if (token === 'NX') {
+        onlyIfMissing = true;
+      } else if (token === 'PX') {
+        ttlMs = Number(args[i + 1]);
+        i += 1;
+      } else if (token === 'EX') {
+        ttlMs = Number(args[i + 1]) * 1000;
+        i += 1;
+      }
+    }
+
+    if (onlyIfMissing && this.store.has(key)) return null;
+
+    this.store.set(key, {
+      value,
+      expiresAt: ttlMs ? Date.now() + ttlMs : null,
+    });
+    return 'OK';
+  }
+
+  async eval(_script: string, _numKeys: number, key: string, token: string) {
+    this.purgeExpired(key);
+    const entry = this.store.get(key);
+    if (!entry || entry.value !== token) return 0;
+    this.store.delete(key);
+    return 1;
+  }
+}
+
+class ThrowingRedisLockClient extends FakeRedisLockClient {
+  override async set(
+    _key: string,
+    _value: string,
+    ..._args: any[]
+  ): Promise<string> {
+    throw new Error('redis down');
+  }
+}
+
+function withEnv(env: Record<string, string>, fn: () => void) {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(env)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  try {
+    fn();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function loadWorker(
+  redisClient: FakeRedisLockClient,
+  env: Record<string, string> = {},
+) {
+  const metrics = {
+    messageChannelInsertLockTotal: { inc: jest.fn() },
+    messageChannelInsertLockWaitMs: { observe: jest.fn() },
+  };
+  const logger = {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+  };
+  let loaded: any;
+
+  withEnv(env, () => {
+    jest.isolateModules(() => {
+      jest.doMock('../src/db/redis', () => redisClient);
+      jest.doMock('../src/utils/logger', () => logger);
+      jest.doMock('../src/utils/metrics', () => metrics);
+      loaded = require('../src/messages/channelInsertConcurrency');
+    });
+  });
+
+  return {
+    ...loaded,
+    logger,
+    metrics,
+  };
+}
 
 describe('runChannelMessageInsertSerialized', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    jest.unmock('../src/db/redis');
+    jest.unmock('../src/utils/logger');
+    jest.unmock('../src/utils/metrics');
+    jest.resetModules();
+  });
+
   it('runs immediately when channelId is null', async () => {
+    const worker = loadWorker(new FakeRedisLockClient());
     let ran = false;
-    await runChannelMessageInsertSerialized(null, async () => {
+
+    await worker.runChannelMessageInsertSerialized(null, async () => {
       ran = true;
     });
+
     expect(ran).toBe(true);
   });
 
-  it('serializes same-channel jobs in order', async () => {
-    const order: number[] = [];
+  it('serializes same-channel jobs across workers sharing Redis', async () => {
+    const redisClient = new FakeRedisLockClient();
+    const workerA = loadWorker(redisClient);
+    const workerB = loadWorker(redisClient);
+    const order: string[] = [];
     const ch = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 
-    const p1 = runChannelMessageInsertSerialized(ch, async () => {
-      order.push(1);
-      await new Promise((r) => setTimeout(r, 25));
-      order.push(2);
-    });
-    const p2 = runChannelMessageInsertSerialized(ch, async () => {
-      order.push(3);
-    });
-    await Promise.all([p1, p2]);
-    expect(order).toEqual([1, 2, 3]);
-  });
-
-  it('does not serialize different channels', async () => {
-    const order: string[] = [];
-    const chA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-    const chB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
-
-    const pA = runChannelMessageInsertSerialized(chA, async () => {
+    const p1 = workerA.runChannelMessageInsertSerialized(ch, async () => {
       order.push('a-start');
-      await new Promise((r) => setTimeout(r, 40));
+      await sleep(40);
       order.push('a-end');
     });
-    const pB = runChannelMessageInsertSerialized(chB, async () => {
-      order.push('b');
+    await sleep(5);
+    const p2 = workerB.runChannelMessageInsertSerialized(ch, async () => {
+      order.push('b-start');
+      order.push('b-end');
     });
+
+    await Promise.all([p1, p2]);
+
+    expect(order).toEqual(['a-start', 'a-end', 'b-start', 'b-end']);
+  });
+
+  it('does not serialize different channels across workers', async () => {
+    const redisClient = new FakeRedisLockClient();
+    const workerA = loadWorker(redisClient);
+    const workerB = loadWorker(redisClient);
+    const order: string[] = [];
+
+    const pA = workerA.runChannelMessageInsertSerialized(
+      'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      async () => {
+        order.push('a-start');
+        await sleep(40);
+        order.push('a-end');
+      },
+    );
+    const pB = workerB.runChannelMessageInsertSerialized(
+      'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      async () => {
+        order.push('b');
+      },
+    );
+
     await Promise.all([pA, pB]);
+
     expect(order).toContain('b');
     expect(order.indexOf('b')).toBeLessThan(order.indexOf('a-end'));
   });
 
-  it('continues chain after rejection', async () => {
+  it('returns a retryable timeout when the lock cannot be acquired quickly', async () => {
+    const redisClient = new FakeRedisLockClient();
+    const env = {
+      MESSAGE_INSERT_LOCK_TTL_MS: '6000',
+      MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS: '80',
+      MESSAGE_INSERT_LOCK_POLL_MIN_MS: '10',
+      MESSAGE_INSERT_LOCK_POLL_MAX_MS: '10',
+    };
+    const workerA = loadWorker(redisClient, env);
+    const workerB = loadWorker(redisClient, env);
     const ch = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+
+    const p1 = workerA.runChannelMessageInsertSerialized(ch, async () => {
+      await sleep(150);
+    });
+    await sleep(5);
+
+    await expect(
+      workerB.runChannelMessageInsertSerialized(ch, async () => 'never'),
+    ).rejects.toMatchObject({
+      code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
+      statusCode: 503,
+    });
+    await p1;
+
+    expect(
+      workerB.isChannelInsertLockTimeoutError(
+        Object.assign(new Error('busy'), { code: 'MESSAGE_INSERT_LOCK_TIMEOUT' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('fails safe when Redis is unavailable and still runs the insert locally', async () => {
+    const worker = loadWorker(new ThrowingRedisLockClient());
+    const fn = jest.fn(async () => 'ok');
+
+    await expect(
+      worker.runChannelMessageInsertSerialized(
+        'abababab-abab-abab-abab-abababababab',
+        fn,
+        { requestId: 'req-redis-down' },
+      ),
+    ).resolves.toBe('ok');
+
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(worker.logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelId: 'abababab-abab-abab-abab-abababababab',
+        requestId: 'req-redis-down',
+      }),
+      'POST /messages channel insert lock Redis error; falling back to local serialization',
+    );
+  });
+
+  it('reacquires after a stale lock expires', async () => {
+    const redisClient = new FakeRedisLockClient();
+    const worker = loadWorker(redisClient, {
+      MESSAGE_INSERT_LOCK_TTL_MS: '40',
+      MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS: '250',
+      MESSAGE_INSERT_LOCK_POLL_MIN_MS: '5',
+      MESSAGE_INSERT_LOCK_POLL_MAX_MS: '5',
+    });
+    const ch = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+
+    await redisClient.set(`message_insert_lock:${ch}`, 'stale-token', 'PX', 40);
+    const startedAt = Date.now();
+
+    await worker.runChannelMessageInsertSerialized(ch, async () => undefined);
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(35);
+  });
+
+  it("does not delete another worker's token on release", async () => {
+    const redisClient = new FakeRedisLockClient();
+    const env = {
+      MESSAGE_INSERT_LOCK_TTL_MS: '40',
+      MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS: '250',
+      MESSAGE_INSERT_LOCK_POLL_MIN_MS: '5',
+      MESSAGE_INSERT_LOCK_POLL_MAX_MS: '5',
+    };
+    const workerA = loadWorker(redisClient, env);
+    const workerB = loadWorker(redisClient, env);
+    const workerC = loadWorker(redisClient, env);
+    const order: string[] = [];
+    const ch = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+    let resolveBStarted: (() => void) | null = null;
+    const bStarted = new Promise<void>((resolve) => {
+      resolveBStarted = resolve;
+    });
+
+    const p1 = workerA.runChannelMessageInsertSerialized(ch, async () => {
+      order.push('a-start');
+      await sleep(80);
+      order.push('a-end');
+    });
+    await sleep(5);
+
+    const p2 = workerB.runChannelMessageInsertSerialized(ch, async () => {
+      order.push('b-start');
+      resolveBStarted?.();
+      await sleep(80);
+      order.push('b-end');
+    });
+    await bStarted;
+
+    const p3 = workerC.runChannelMessageInsertSerialized(ch, async () => {
+      order.push('c-start');
+      order.push('c-end');
+    });
+
+    await Promise.all([p1, p2, p3]);
+
+    expect(order.indexOf('b-start')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('b-start')).toBeLessThan(order.indexOf('b-end'));
+    expect(order.indexOf('c-start')).toBeGreaterThan(order.indexOf('b-end'));
+  });
+
+  it('continues local same-worker chain after rejection', async () => {
+    const worker = loadWorker(new FakeRedisLockClient());
+    const ch = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
     const order: string[] = [];
 
     try {
-      await runChannelMessageInsertSerialized(ch, async () => {
+      await worker.runChannelMessageInsertSerialized(ch, async () => {
         order.push('a');
         throw new Error('fail');
       });
@@ -56,9 +311,10 @@ describe('runChannelMessageInsertSerialized', () => {
       expect(e?.message).toBe('fail');
     }
 
-    await runChannelMessageInsertSerialized(ch, async () => {
+    await worker.runChannelMessageInsertSerialized(ch, async () => {
       order.push('b');
     });
+
     expect(order).toEqual(['a', 'b']);
   });
 });

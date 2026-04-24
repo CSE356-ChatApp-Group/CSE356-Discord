@@ -188,6 +188,20 @@ const messagePostRateLimitHitsTotal = new client.Counter({
   labelNames: ['scope'],
 });
 
+/** POST /messages channel-only cross-worker insert lock outcomes. */
+const messageChannelInsertLockTotal = new client.Counter({
+  name: 'message_channel_insert_lock_total',
+  help: 'Cross-worker Redis lease outcomes for channel-scoped POST /messages inserts',
+  labelNames: ['result'],
+});
+
+const messageChannelInsertLockWaitMs = new client.Histogram({
+  name: 'message_channel_insert_lock_wait_ms',
+  help: 'Milliseconds spent waiting on the channel-scoped POST /messages insert lock',
+  labelNames: ['result'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
 /** WebSocket connection outcomes (upgrade + auth + bootstrap failures). */
 const wsConnectionResultTotal = new client.Counter({
   name: 'ws_connection_result_total',
@@ -667,6 +681,15 @@ function startPgPoolMetrics(pool) {
     messagePostIdempotencyPollTotal.inc({ outcome: 'exhausted_409' }, 0);
     messagePostIdempotencyPollWaitMs.observe({ outcome: 'replay_201' }, 0);
     messagePostIdempotencyPollWaitMs.observe({ outcome: 'exhausted_409' }, 0);
+    messageChannelInsertLockTotal.inc({ result: 'acquired_immediate' }, 0);
+    messageChannelInsertLockTotal.inc({ result: 'acquired_after_wait' }, 0);
+    messageChannelInsertLockTotal.inc({ result: 'timeout' }, 0);
+    messageChannelInsertLockTotal.inc({ result: 'redis_error' }, 0);
+    messageChannelInsertLockTotal.inc({ result: 'release_mismatch' }, 0);
+    messageChannelInsertLockTotal.inc({ result: 'release_error' }, 0);
+    messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, 0);
+    messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, 0);
+    messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, 0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
     messageIngestStreamAppendedTotal.inc({ result: 'error' }, 0);
     messageIngestStreamConsumedTotal.inc({ result: 'ack' }, 0);
@@ -794,6 +817,8 @@ module.exports = {
   messagePostIdempotencyPollTotal,
   messagePostIdempotencyPollWaitMs,
   messagePostRateLimitHitsTotal,
+  messageChannelInsertLockTotal,
+  messageChannelInsertLockWaitMs,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
   channelAccessCacheTotal,
