@@ -18,16 +18,13 @@
 import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
 
-// Mock meiliClient before any imports load it
-const mockSearchCandidates = jest.fn();
-const mockIsSearchBackend  = jest.fn();
-const mockIncFallbackTotal = jest.fn();
-
+// jest.mock is hoisted — cannot reference const/let variables from outer scope.
+// Use jest.fn() directly in the factory; capture references via require() after.
 jest.mock('../src/search/meiliClient', () => ({
   isEnabled:               jest.fn(() => false),
-  isSearchBackend:         mockIsSearchBackend,
-  searchMessageCandidates: mockSearchCandidates,
-  incFallbackTotal:        mockIncFallbackTotal,
+  isSearchBackend:         jest.fn(() => false),
+  searchMessageCandidates: jest.fn(),
+  incFallbackTotal:        jest.fn(),
   indexMessage:            jest.fn().mockResolvedValue(undefined),
   deleteMessage:           jest.fn().mockResolvedValue(undefined),
   batchIndexMessages:      jest.fn().mockResolvedValue(undefined),
@@ -36,6 +33,12 @@ jest.mock('../src/search/meiliClient', () => ({
   setupIndex:              jest.fn().mockResolvedValue(undefined),
   MEILI_INDEX_MESSAGES:    'messages',
 }));
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const _meiliMock = require('../src/search/meiliClient');
+const mockSearchCandidates  = _meiliMock.searchMessageCandidates as jest.Mock;
+const mockIsSearchBackend   = _meiliMock.isSearchBackend         as jest.Mock;
+const mockIncFallbackTotal  = _meiliMock.incFallbackTotal        as jest.Mock;
 
 afterAll(async () => {
   await wsServer.shutdown();
