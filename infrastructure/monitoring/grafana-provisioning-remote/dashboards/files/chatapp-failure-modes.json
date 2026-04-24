@@ -38,7 +38,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(chatapp_overload_stage{job=\"chatapp-api\",instance=~\"$worker\"}) or vector(0)"
+          "expr": "max(chatapp_overload_stage{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}) or vector(0)"
         }
       ],
       "options": {
@@ -96,7 +96,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * sum(increase(http_server_requests_total{job=\"chatapp-api\",instance=~\"$worker\",status_class=\"5xx\"}[5m])) / clamp_min(sum(increase(http_server_requests_total{job=\"chatapp-api\",instance=~\"$worker\"}[5m])), 1)"
+          "expr": "100 * sum(increase(http_server_requests_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\",status_class=\"5xx\"}[5m])) / clamp_min(sum(increase(http_server_requests_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])), 1)"
         }
       ],
       "options": {
@@ -159,7 +159,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",instance=~\"$worker\",method=\"POST\",route=~\"/api/v1/messages/?\"}[2m])))"
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\",method=\"POST\",route=~\"/api/v1/messages/?\"}[2m])))"
         }
       ],
       "options": {
@@ -221,7 +221,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ws_replay_query_total{job=\"chatapp-api\",instance=~\"$worker\",result=\"timeout\"}[2m]))"
+          "expr": "sum(rate(ws_replay_query_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\",result=\"timeout\"}[2m]))"
         }
       ],
       "options": {
@@ -292,8 +292,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "pg_pool_waiting{job=\"chatapp-api\",instance=~\"$worker\"}",
-          "legendFormat": "{{instance}}"
+          "expr": "max by (vm, worker_port) (pg_pool_waiting{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
+          "legendFormat": "{{vm}}:{{worker_port}}"
         },
         {
           "refId": "B",
@@ -392,8 +392,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (instance) (rate(pg_pool_circuit_breaker_rejects_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
-          "legendFormat": "{{instance}}"
+          "expr": "sum by (vm, worker_port) (rate(pg_pool_circuit_breaker_rejects_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
+          "legendFormat": "{{vm}}:{{worker_port}}"
         }
       ],
       "options": {
@@ -482,7 +482,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (reason) (rate(pg_pool_operation_errors_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (reason) (rate(pg_pool_operation_errors_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "{{reason}}"
         }
       ],
@@ -572,7 +572,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (status_code) (rate(message_post_response_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (vm, status_code) (rate(message_post_response_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "{{status_code}}"
         }
       ],
@@ -723,12 +723,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",instance=~\"$worker\",method=\"POST\",route=~\"/api/v1/messages/?\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\",method=\"POST\",route=~\"/api/v1/messages/?\"}[2m])))",
           "legendFormat": "p95"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",instance=~\"$worker\",method=\"POST\",route=~\"/api/v1/messages/?\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\",method=\"POST\",route=~\"/api/v1/messages/?\"}[2m])))",
           "legendFormat": "p99"
         },
         {
@@ -828,8 +828,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "chatapp_overload_stage{job=\"chatapp-api\",instance=~\"$worker\"}",
-          "legendFormat": "{{instance}}"
+          "expr": "max by (vm, worker_port) (chatapp_overload_stage{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
+          "legendFormat": "{{vm}}:{{worker_port}}"
         }
       ],
       "options": {
@@ -931,7 +931,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (result) (rate(ws_replay_query_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (result) (rate(ws_replay_query_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "{{result}}"
         }
       ],
@@ -1052,8 +1052,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (instance) (rate(ws_outbound_queue_block_waits_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
-          "legendFormat": "{{instance}}"
+          "expr": "sum by (vm, worker_port) (rate(ws_outbound_queue_block_waits_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
+          "legendFormat": "{{vm}}:{{worker_port}}"
         }
       ],
       "options": {
@@ -1142,7 +1142,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (action) (rate(ws_backpressure_events_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (action) (rate(ws_backpressure_events_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "{{action}}"
         }
       ],
@@ -1263,7 +1263,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (code) (rate(ws_disconnects_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (code) (rate(ws_disconnects_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "code {{code}}"
         }
       ],
@@ -1369,7 +1369,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (window) (rate(ws_reconnects_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (window) (rate(ws_reconnects_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "{{window}}"
         }
       ],
@@ -1459,7 +1459,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job=\"chatapp-api\",instance=~\"$worker\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m])))",
           "legendFormat": "{{path}} / {{stage}}"
         }
       ],
@@ -1562,7 +1562,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (path, result) (rate(fanout_target_cache_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (path, result) (rate(fanout_target_cache_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "{{path}} / {{result}}"
         }
       ],
@@ -1652,7 +1652,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (endpoint, result) (rate(endpoint_list_cache_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (endpoint, result) (rate(endpoint_list_cache_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "{{endpoint}} / {{result}}"
         }
       ],
@@ -1742,7 +1742,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(conversation_fanout_targets_cache_version_retry_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum by (outcome) (rate(conversation_fanout_targets_cache_version_retry_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "{{outcome}}"
         }
       ],
@@ -1832,7 +1832,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(fanout_publish_duration_ms_bucket{job=\"chatapp-api\",instance=~\"$worker\",path=\"conversation_dm\"}[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(fanout_publish_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\",path=\"conversation_dm\"}[2m])))",
           "legendFormat": "{{stage}} p95"
         }
       ],
@@ -1922,7 +1922,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(fanout_publish_duration_ms_bucket{job=\"chatapp-api\",instance=~\"$worker\",path=\"conversation_dm\"}[2m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(fanout_publish_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\",path=\"conversation_dm\"}[2m])))",
           "legendFormat": "{{stage}} p99"
         }
       ],
@@ -2025,8 +2025,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (instance) (nodejs_eventloop_lag_p99_seconds{job=\"chatapp-api\",instance=~\"$worker\"}) * 1000",
-          "legendFormat": "{{instance}}"
+          "expr": "1000 * max by (vm, worker_port) (nodejs_eventloop_lag_p99_seconds{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
+          "legendFormat": "{{vm}}:{{worker_port}}"
         },
         {
           "refId": "B",
@@ -2094,12 +2094,12 @@
                 "value": null
               },
               {
-                "color": "yellow",
-                "value": 20
+                "color": "orange",
+                "value": 120
               },
               {
                 "color": "red",
-                "value": 40
+                "value": 250
               }
             ]
           }
@@ -2125,8 +2125,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "process_resident_memory_bytes{job=\"chatapp-api\",instance=~\"$worker\"} / 1024 / 1024",
-          "legendFormat": "{{instance}}"
+          "expr": "max by (vm, worker_port) (process_resident_memory_bytes{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}) / 1024 / 1024",
+          "legendFormat": "{{vm}}:{{worker_port}}"
         },
         {
           "refId": "B",
@@ -2194,12 +2194,12 @@
                 "value": null
               },
               {
-                "color": "yellow",
-                "value": 350
+                "color": "orange",
+                "value": 650
               },
               {
                 "color": "red",
-                "value": 500
+                "value": 800
               }
             ]
           }
@@ -2225,12 +2225,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "completed"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",instance=~\"$worker\"}[2m]))",
+          "expr": "sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
           "legendFormat": "aborted"
         }
       ],
@@ -2482,6 +2482,495 @@
         "overrides": []
       },
       "description": "Host-level DB disk iowait from node exporter if available."
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "WS Replay Query p95 / p99 by Result",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 81
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, result) (rate(ws_replay_query_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m])))",
+          "legendFormat": "p95 {{result}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, result) (rate(ws_replay_query_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m])))",
+          "legendFormat": "p99 {{result}}",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "timeout"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ok"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Reconnect replay outcomes, especially timeout versus ok."
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "WS Replay Fail-Open Rate by Reason",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 81
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(ws_replay_fail_open_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[2m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "timeout"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ok"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Reconnect replay outcomes, especially timeout versus ok."
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "WS Replay Inflight by VM",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 89
+      },
+      "targets": [
+        {
+          "expr": "sum by (vm) (chatapp_ws_replay_inflight{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
+          "legendFormat": "{{vm}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "timeout"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ok"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Reconnect replay outcomes, especially timeout versus ok."
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "PG Pool Waiting by VM",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 89
+      },
+      "targets": [
+        {
+          "expr": "max by (vm) (pg_pool_waiting{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
+          "legendFormat": "{{vm}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "timeout"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ok"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Reconnect replay outcomes, especially timeout versus ok."
     }
   ],
   "refresh": "30s",
@@ -2504,18 +2993,47 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(up{job=\"chatapp-api\"}, instance)",
+        "definition": "label_values(up{job=\"chatapp-api\"}, vm)",
         "hide": 0,
         "includeAll": true,
-        "label": "Worker instance",
-        "multi": false,
+        "allValue": ".*",
+        "label": "VM",
+        "multi": true,
+        "name": "vm",
+        "options": [],
+        "query": {
+          "query": "label_values(up{job=\"chatapp-api\"}, vm)",
+          "refId": "PromVarVm"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up{job=\"chatapp-api\",vm=~\"$vm\"}, worker_port)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Worker port",
+        "multi": true,
         "name": "worker",
         "options": [],
         "query": {
-          "query": "label_values(up{job=\"chatapp-api\"}, instance)",
+          "query": "label_values(up{job=\"chatapp-api\",vm=~\"$vm\"}, worker_port)",
           "refId": "PromVarWorker"
         },
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 1,

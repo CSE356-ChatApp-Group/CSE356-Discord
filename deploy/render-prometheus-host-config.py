@@ -30,7 +30,7 @@ def _node_label(port: int) -> str:
     return f"worker-{port}"
 
 
-def _api_block(host: str, workers: int) -> str:
+def _api_block(host: str, workers: int, vm_label: str) -> str:
     if workers < 1:
         raise SystemExit("--workers must be >= 1")
     lines: list[str] = []
@@ -38,25 +38,29 @@ def _api_block(host: str, workers: int) -> str:
         port = 4000 + i
         lines.append(f"      - targets: ['{host}:{port}']")
         lines.append("        labels:")
+        lines.append(f"          vm: {vm_label}")
+        lines.append(f"          worker_port: '{port}'")
         lines.append(f"          node: {_node_label(port)}")
     return "\n".join(lines) + "\n"
 
 
-def _api_block_multi_vm(hosts_and_workers: list[tuple[str, int]]) -> str:
+def _api_block_multi_vm(hosts_and_workers: list[tuple[str, int, str]]) -> str:
     """Generate chatapp-api scrape targets for multiple VMs.
 
     Args:
-        hosts_and_workers: list of (host, worker_count) tuples
-        Example: [("10.0.0.237", 4), ("10.0.3.243", 6), ("10.0.2.164", 6)]
+        hosts_and_workers: list of (host, worker_count, vm_label) tuples
+        Example: [("10.0.0.237", 4, "vm1"), ("10.0.3.243", 6, "vm2"), ("10.0.2.164", 6, "vm3")]
     """
     lines: list[str] = []
-    for host, workers in hosts_and_workers:
+    for host, workers, vm_label in hosts_and_workers:
         if workers < 1:
             continue
         for i in range(workers):
             port = 4000 + i
             lines.append(f"      - targets: ['{host}:{port}']")
             lines.append("        labels:")
+            lines.append(f"          vm: {vm_label}")
+            lines.append(f"          worker_port: '{port}'")
             lines.append(f"          node: {_node_label(port)}")
     return "\n".join(lines) + "\n"
 
@@ -123,22 +127,21 @@ def main() -> None:
     multi_vm = args.vm1_workers > 0
 
     if multi_vm:
-        hosts_and_workers = [(args.app_host, args.vm1_workers)]
+        hosts_and_workers = [(args.app_host, args.vm1_workers, "vm1")]
         if args.vm2_host and args.vm2_workers > 0:
-            hosts_and_workers.append((args.vm2_host, args.vm2_workers))
+            hosts_and_workers.append((args.vm2_host, args.vm2_workers, "vm2"))
         if args.vm3_host and args.vm3_workers > 0:
-            hosts_and_workers.append((args.vm3_host, args.vm3_workers))
+            hosts_and_workers.append((args.vm3_host, args.vm3_workers, "vm3"))
         api_config = _api_block_multi_vm(hosts_and_workers)
 
         # Build (host, label) pairs for node_exporter and pgbouncer
-        vm_labels = ["vm1", "vm2", "vm3"]
-        node_hosts = [(h, vm_labels[i]) for i, (h, _) in enumerate(hosts_and_workers)]
+        node_hosts = [(host, vm_label) for host, _, vm_label in hosts_and_workers]
         node_config = _node_exporter_targets(node_hosts)
         pgb_config = _pgbouncer_targets(node_hosts)
     else:
         if vm1_workers < 1:
             raise SystemExit("--workers (or --vm1-workers) must be >= 1")
-        api_config = _api_block(args.app_host, vm1_workers)
+        api_config = _api_block(args.app_host, vm1_workers, "vm1")
         node_config = _node_exporter_targets([(args.app_host, "vm1")])
         pgb_config = _pgbouncer_targets([(args.app_host, "vm1")])
 

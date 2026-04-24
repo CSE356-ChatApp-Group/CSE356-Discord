@@ -34,16 +34,30 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 500 },
-              { "color": "red", "value": 2000 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 500
+              },
+              {
+                "color": "red",
+                "value": 2000
+              }
             ]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "options": {
         "colorMode": "background",
@@ -51,7 +65,9 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["max"],
+          "calcs": [
+            "max"
+          ],
           "fields": "",
           "values": false
         },
@@ -59,7 +75,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(http_server_request_duration_ms_bucket{route=~\"/api/v1/search.*\", status_class=\"2xx\"}[5m]))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",status_class=\"2xx\"}[5m])))",
           "refId": "A"
         }
       ],
@@ -79,16 +95,30 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 1000 },
-              { "color": "red", "value": 5000 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1000
+              },
+              {
+                "color": "red",
+                "value": 5000
+              }
             ]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
       "id": 2,
       "options": {
         "colorMode": "background",
@@ -96,7 +126,9 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["max"],
+          "calcs": [
+            "max"
+          ],
           "fields": "",
           "values": false
         },
@@ -104,7 +136,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, rate(http_server_request_duration_ms_bucket{route=~\"/api/v1/search.*\", status_class=\"2xx\"}[5m]))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",status_class=\"2xx\"}[5m])))",
           "refId": "A"
         }
       ],
@@ -155,18 +187,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
       "id": 3,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -178,17 +221,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(http_server_request_duration_ms_bucket{route=~\"/api/v1/search.*\"}[5m]))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\"}[5m])))",
           "legendFormat": "Search p95",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, rate(http_server_request_duration_ms_bucket{route=~\"/api/v1/search.*\"}[5m]))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\"}[5m])))",
           "legendFormat": "Search p99",
           "refId": "B"
         }
       ],
-      "title": "Search Latency Trend",
+      "title": "/api/v1/search latency trend p95 / p99 (global)",
       "type": "timeseries"
     },
     {
@@ -235,18 +278,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
       "id": 4,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -258,12 +312,12 @@
       },
       "targets": [
         {
-          "expr": "rate(search_results_returned_sum{scope=~\"conversation|channel|community\"}[5m]) / rate(search_results_returned_count{scope=~\"conversation|channel|community\"}[5m])",
-          "legendFormat": "{{scope}} - avg results",
+          "expr": "sum by (scope, fallback_method) (rate(search_results_returned_sum{job=\"chatapp-api\"}[5m])) / clamp_min(sum by (scope, fallback_method) (rate(search_results_returned_count{job=\"chatapp-api\"}[5m])), 1e-9)",
+          "legendFormat": "{{scope}} {{fallback_method}}",
           "refId": "A"
         }
       ],
-      "title": "Search Results Returned (Average)",
+      "title": "Search Results Returned (Average) \u2014 no live series yet if empty",
       "type": "timeseries"
     },
     {
@@ -310,20 +364,37 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 1 },
-              { "color": "red", "value": 10 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
             ]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
       "id": 5,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -335,12 +406,12 @@
       },
       "targets": [
         {
-          "expr": "rate(search_replica_retry_total[5m])",
-          "legendFormat": "{{scope}} - {{reason}}",
+          "expr": "sum by (scope, reason) (rate(search_replica_retry_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{scope}} {{reason}}",
           "refId": "A"
         }
       ],
-      "title": "Replica Retry Rate (Higher = Stale Data Issues)",
+      "title": "Replica Retry Rate \u2014 no live series yet if empty",
       "type": "timeseries"
     },
     {
@@ -387,20 +458,37 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 5 },
-              { "color": "red", "value": 50 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
             ]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
       "id": 6,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -412,21 +500,316 @@
       },
       "targets": [
         {
-          "expr": "rate(search_throttled_total[5m])",
-          "legendFormat": "stage {{stage}} - {{reason}}",
+          "expr": "sum by (stage, reason) (rate(search_throttled_total{job=\"chatapp-api\"}[5m]))",
+          "legendFormat": "{{stage}} {{reason}}",
           "refId": "A"
         }
       ],
-      "title": "Search Throttling Rate (Load Shedding)",
+      "title": "Search Throttling Rate \u2014 no live series yet if empty",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Latency (ms)",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[5m])))",
+          "legendFormat": "p95 {{vm}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[5m])))",
+          "legendFormat": "p99 {{vm}}",
+          "refId": "B"
+        }
+      ],
+      "title": "/api/v1/search p95 / p99 latency by vm",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Latency (ms)",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, scope, fallback_method, stage) (rate(search_query_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\"}[5m])))",
+          "legendFormat": "{{scope}} {{fallback_method}} {{stage}}",
+          "refId": "A"
+        }
+      ],
+      "title": "search_query_duration_ms p95 by scope / fallback / stage \u2014 no live series yet if empty",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Latency (ms)",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(meili_search_fallback_total{job=\"chatapp-api\",vm=~\"$vm\"}[5m]))",
+          "legendFormat": "fallback",
+          "refId": "A"
+        }
+      ],
+      "title": "Meili fallback rate \u2014 no live series yet if empty",
       "type": "timeseries"
     }
   ],
   "refresh": "10s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["search", "performance"],
+  "tags": [
+    "search",
+    "performance"
+  ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up{job=\"chatapp-api\"}, vm)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "VM",
+        "multi": true,
+        "name": "vm",
+        "options": [],
+        "query": {
+          "query": "label_values(up{job=\"chatapp-api\"}, vm)",
+          "refId": "VarVm"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-1h",

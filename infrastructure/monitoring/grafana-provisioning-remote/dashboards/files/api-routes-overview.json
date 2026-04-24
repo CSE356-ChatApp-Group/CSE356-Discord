@@ -38,13 +38,19 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "p95 Latency (ms)" },
+            "matcher": {
+              "id": "byName",
+              "options": "p95 Latency (ms)"
+            },
             "properties": [
               {
                 "id": "custom.displayMode",
@@ -52,23 +58,37 @@
               },
               {
                 "id": "color",
-                "value": { "mode": "thresholds" }
+                "value": {
+                  "mode": "thresholds"
+                }
               },
               {
                 "id": "thresholds",
                 "value": {
                   "mode": "absolute",
                   "steps": [
-                    { "color": "green", "value": null },
-                    { "color": "orange", "value": 100 },
-                    { "color": "red", "value": 500 }
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 100
+                    },
+                    {
+                      "color": "red",
+                      "value": 500
+                    }
                   ]
                 }
               }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "Error Rate (%)" },
+            "matcher": {
+              "id": "byName",
+              "options": "Error Rate (%)"
+            },
             "properties": [
               {
                 "id": "custom.displayMode",
@@ -79,9 +99,18 @@
                 "value": {
                   "mode": "absolute",
                   "steps": [
-                    { "color": "green", "value": null },
-                    { "color": "orange", "value": 1 },
-                    { "color": "red", "value": 5 }
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
                   ]
                 }
               }
@@ -89,13 +118,20 @@
           }
         ]
       },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "options": {
         "footer": {
           "countRows": false,
           "fields": "",
-          "reducer": ["sum"],
+          "reducer": [
+            "sum"
+          ],
           "show": false
         },
         "showHeader": true,
@@ -108,19 +144,19 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum(rate(http_server_requests_total[5m])) by (route))",
+          "expr": "topk(20, sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m])) by (route))",
           "format": "table",
           "instant": true,
           "refId": "A"
         },
         {
-          "expr": "topk(20, histogram_quantile(0.95, sum(rate(http_server_request_duration_ms_bucket[5m])) by (route, le)))",
+          "expr": "topk(20, histogram_quantile(0.95, sum(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\"}[5m])) by (route, le)))",
           "format": "table",
           "instant": true,
           "refId": "B"
         },
         {
-          "expr": "topk(20, (sum(rate(http_server_requests_total{status_class=\"5xx\"}[5m])) by (route) / sum(rate(http_server_requests_total[5m])) by (route)) * 100)",
+          "expr": "topk(20, (100 * sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m])) by (route) / clamp_min(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m])) by (route), 1e-9)))",
           "format": "table",
           "instant": true,
           "refId": "C"
@@ -188,18 +224,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           },
           "unit": "ms"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
       "id": 2,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -211,7 +258,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_ms_bucket[5m])) by (route, le))",
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\"}[5m])) by (route, le))",
           "legendFormat": "{{route}} (p95)",
           "refId": "A"
         }
@@ -263,18 +310,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           },
           "unit": "percentunit"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
       "id": 3,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -286,7 +344,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(rate(http_server_requests_total{status_class=\"5xx\"}[5m])) by (route) / sum(rate(http_server_requests_total[5m])) by (route))",
+          "expr": "(100 * sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m])) by (route) / clamp_min(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m])) by (route), 1e-9))",
           "legendFormat": "{{route}} (5xx errors)",
           "refId": "A"
         }
@@ -298,7 +356,11 @@
   "refresh": "10s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["api", "routes", "performance"],
+  "tags": [
+    "api",
+    "routes",
+    "performance"
+  ],
   "templating": {
     "list": []
   },

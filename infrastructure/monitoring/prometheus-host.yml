@@ -27,6 +27,10 @@ rule_files:
 scrape_configs:
   - job_name: 'chatapp-api'
     metrics_path: '/metrics'
+    # Each worker target carries:
+    #   vm          — vm1 / vm2 / vm3
+    #   worker_port — 4000..4005
+    #   node        — legacy worker-role label kept for compatibility
     static_configs:
 __CHATAPP_API_STATIC_CONFIGS__
   # MinIO is intentionally not scraped here: on prod/staging the app VM binds the S3 API

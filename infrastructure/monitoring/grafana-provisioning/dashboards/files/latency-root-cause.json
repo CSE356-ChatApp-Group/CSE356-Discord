@@ -178,13 +178,13 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le, instance)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by(le, vm, worker_port)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[1m])))",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
-      "title": "p99 Latency by Instance",
+      "title": "p99 Latency by Worker",
       "type": "timeseries"
     },
     {
@@ -427,13 +427,13 @@
       },
       "targets": [
         {
-          "expr": "sum by(instance)(rate(http_server_requests_total{job=\"chatapp-api\"}[1m]))",
+          "expr": "sum by(vm, worker_port)(rate(http_server_requests_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[1m]))",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
-      "title": "Request Rate by Instance",
+      "title": "Request Rate by Worker",
       "type": "timeseries"
     },
     {
@@ -510,9 +510,9 @@
       },
       "targets": [
         {
-          "expr": "nodejs_eventloop_lag_p99_seconds{job=\"chatapp-api\"} * 1000",
+          "expr": "1000 * max by (vm, worker_port) (nodejs_eventloop_lag_p99_seconds{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
@@ -593,13 +593,13 @@
       },
       "targets": [
         {
-          "expr": "topk(8, rate(process_cpu_seconds_total{job=\"chatapp-api\"}[1m]) * 100)",
+          "expr": "topk(8, sum by(vm, worker_port)(rate(process_cpu_seconds_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[1m]) * 100))",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
-      "title": "CPU by Instance (Top 8)",
+      "title": "CPU by Worker (Top 8)",
       "type": "barchart"
     },
     {
@@ -759,13 +759,13 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le, instance)(rate(nodejs_gc_duration_seconds_bucket{job=\"chatapp-api\"}[1m]))) * 1000",
+          "expr": "histogram_quantile(0.99, sum by(le, vm, worker_port)(rate(nodejs_gc_duration_seconds_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[1m]))) * 1000",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
-      "title": "GC Duration p99 by Instance",
+      "title": "GC Duration p99 by Worker",
       "type": "timeseries"
     },
     {
@@ -916,7 +916,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le)(rate(http_server_request_duration_ms_bucket{route=\"/api/v1/search/\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by(le, vm)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=\"/api/v1/search/\",vm=~\"$vm\"}[1m])))",
           "legendFormat": "p99"
         }
       ],
@@ -951,7 +951,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_request_duration_ms_sum{route=\"/api/v1/search/\"}[1m])) / sum(rate(http_server_request_duration_ms_count{route=\"/api/v1/search/\"}[1m]))",
+          "expr": "sum by(vm)(rate(http_server_request_duration_ms_sum{job=\"chatapp-api\",route=\"/api/v1/search/\",vm=~\"$vm\"}[1m])) / clamp_min(sum by(vm)(rate(http_server_request_duration_ms_count{job=\"chatapp-api\",route=\"/api/v1/search/\",vm=~\"$vm\"}[1m])), 1e-9)",
           "legendFormat": "avg"
         }
       ],
@@ -986,7 +986,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_total{route=\"/api/v1/search/\"}[1m]))",
+          "expr": "sum by(vm)(rate(http_server_requests_total{job=\"chatapp-api\",route=\"/api/v1/search/\",vm=~\"$vm\"}[1m]))",
           "legendFormat": "RPS"
         }
       ],
@@ -1015,7 +1015,64 @@
     "root-cause"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up{job=\"chatapp-api\"}, vm)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "VM",
+        "multi": true,
+        "name": "vm",
+        "options": [],
+        "query": {
+          "query": "label_values(up{job=\"chatapp-api\"}, vm)",
+          "refId": "VarVm"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up{job=\"chatapp-api\",vm=~\"$vm\"}, worker_port)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Worker port",
+        "multi": true,
+        "name": "worker",
+        "options": [],
+        "query": {
+          "query": "label_values(up{job=\"chatapp-api\",vm=~\"$vm\"}, worker_port)",
+          "refId": "VarWorker"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-1h",

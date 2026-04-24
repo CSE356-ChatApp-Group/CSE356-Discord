@@ -34,16 +34,30 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 1 },
-              { "color": "red", "value": 2 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "options": {
         "colorMode": "background",
@@ -51,7 +65,9 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -59,7 +75,7 @@
       },
       "targets": [
         {
-          "expr": "overload_stage_gauge",
+          "expr": "max(chatapp_overload_stage{job=\"chatapp-api\"}) or vector(0)",
           "refId": "A"
         }
       ],
@@ -79,15 +95,26 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
       "id": 2,
       "options": {
         "colorMode": "background",
@@ -95,7 +122,9 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -103,7 +132,7 @@
       },
       "targets": [
         {
-          "expr": "rate(http_overload_shed_total[5m])",
+          "expr": "sum(rate(http_overload_shed_total{job=\"chatapp-api\"}[5m]))",
           "refId": "A"
         }
       ],
@@ -154,16 +183,30 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 1 },
-              { "color": "red", "value": 2 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
       "id": 3,
       "options": {
         "legend": {
@@ -179,7 +222,7 @@
       },
       "targets": [
         {
-          "expr": "overload_stage_gauge",
+          "expr": "max by (vm) (chatapp_overload_stage{job=\"chatapp-api\"})",
           "legendFormat": "Overload Stage",
           "refId": "A"
         }
@@ -231,18 +274,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
       "id": 4,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -254,7 +308,7 @@
       },
       "targets": [
         {
-          "expr": "rate(http_overload_shed_total[5m])",
+          "expr": "sum by (stage) (rate(http_overload_shed_total{job=\"chatapp-api\"}[5m]))",
           "legendFormat": "Requests Shed (503)",
           "refId": "A"
         }
@@ -306,18 +360,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           },
           "unit": "cps"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
       "id": 5,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -329,7 +394,7 @@
       },
       "targets": [
         {
-          "expr": "rate(search_throttled_total[5m])",
+          "expr": "sum by (stage, reason) (rate(search_throttled_total{job=\"chatapp-api\"}[5m]))",
           "legendFormat": "{{stage}} - {{reason}}",
           "refId": "A"
         }
@@ -381,18 +446,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           },
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
       "id": 6,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -404,13 +480,13 @@
       },
       "targets": [
         {
-          "expr": "pg_pool_total",
-          "legendFormat": "Total Pool Size",
+          "expr": "sum by (vm) (pg_pool_total{job=\"chatapp-api\"})",
+          "legendFormat": "pool total {{vm}}",
           "refId": "A"
         },
         {
-          "expr": "pg_pool_waiting",
-          "legendFormat": "Waiting for Connection",
+          "expr": "max by (vm) (pg_pool_waiting{job=\"chatapp-api\"})",
+          "legendFormat": "pool waiting {{vm}}",
           "refId": "B"
         }
       ],
@@ -421,7 +497,11 @@
   "refresh": "10s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["overload", "load-shedding", "system"],
+  "tags": [
+    "overload",
+    "load-shedding",
+    "system"
+  ],
   "templating": {
     "list": []
   },

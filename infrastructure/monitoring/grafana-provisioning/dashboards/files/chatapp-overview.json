@@ -419,7 +419,7 @@
       "targets": [
         {
           "expr": "max by (vm, worker_port) (auth_bcrypt_waiters{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
-          "legendFormat": "{{vm}}:{{worker_port}}",
+          "legendFormat": "waiters {{vm}}:{{worker_port}}",
           "refId": "A"
         },
         {
@@ -429,7 +429,7 @@
         },
         {
           "expr": "max by (vm, worker_port) (auth_bcrypt_active{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
-          "legendFormat": "{{vm}}:{{worker_port}}",
+          "legendFormat": "active {{vm}}:{{worker_port}}",
           "refId": "C"
         }
       ],
@@ -601,7 +601,7 @@
       "targets": [
         {
           "expr": "sum by (action, vm, worker_port) (rate(ws_backpressure_events_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m]))",
-          "legendFormat": "{{vm}}:{{worker_port}}",
+          "legendFormat": "{{action}} {{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
@@ -678,12 +678,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (status_code) (rate(message_post_response_total{job=\"chatapp-api\"}[5m]))",
-          "legendFormat": "HTTP {{status_code}}",
+          "expr": "sum by (vm, status_code) (rate(message_post_response_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m]))",
+          "legendFormat": "{{vm}} {{status_code}}",
           "refId": "A"
         }
       ],
-      "title": "POST /api/v1/messages responses (rate) by status \u2014 grader send failures",
+      "title": "POST /api/v1/messages responses (rate) by status + vm \u2014 grader send failures",
       "type": "timeseries"
     },
     {
@@ -756,12 +756,12 @@
       },
       "targets": [
         {
-          "expr": "max(side_effect_queue_depth{job=\"chatapp-api\",queue=\"fanout:critical\"}) by (instance)",
-          "legendFormat": "{{instance}}",
+          "expr": "max by (vm, worker_port) (side_effect_queue_depth{job=\"chatapp-api\",queue=\"fanout:critical\",vm=~\"$vm\",worker_port=~\"$worker\"})",
+          "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
-      "title": "fanout:critical queue depth (max per instance)",
+      "title": "fanout:critical queue depth (max per worker)",
       "type": "timeseries"
     },
     {
@@ -873,12 +873,12 @@
       },
       "targets": [
         {
-          "expr": "max(pg_pool_waiting{job=\"chatapp-api\"}) by (instance)",
-          "legendFormat": "{{instance}}",
+          "expr": "max by (vm, worker_port) (pg_pool_waiting{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
+          "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
-      "title": "Postgres pool waiting (max per instance) \u2014 503 / timeouts",
+      "title": "Postgres pool waiting (max per worker) \u2014 503 / timeouts",
       "type": "timeseries"
     },
     {
@@ -951,12 +951,12 @@
       },
       "targets": [
         {
-          "expr": "max(chatapp_overload_stage{job=\"chatapp-api\"}) by (instance)",
-          "legendFormat": "stage {{instance}}",
+          "expr": "max by (vm) (chatapp_overload_stage{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"})",
+          "legendFormat": "{{vm}}",
           "refId": "A"
         }
       ],
-      "title": "Overload stage (0\u20133) \u2014 search/write restrictions",
+      "title": "Overload stage (0\u20133) by vm \u2014 search/write restrictions",
       "type": "timeseries"
     },
     {
@@ -1207,12 +1207,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\"}[5m])))",
-          "legendFormat": "search p95",
+          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[5m])))",
+          "legendFormat": "p95 {{vm}}",
           "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[5m])))",
+          "legendFormat": "p99 {{vm}}",
+          "refId": "B"
         }
       ],
-      "title": "Search route p95 latency (ms)",
+      "title": "/api/v1/search p95 / p99 latency by vm (ms)",
       "type": "timeseries"
     },
     {
@@ -1693,8 +1698,8 @@
       },
       "targets": [
         {
-          "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job=\"node\",mode=\"idle\",instance=~\"$vm\"}[5m])))",
-          "legendFormat": "{{instance}}",
+          "expr": "100 * (1 - avg by (vm) (rate(node_cpu_seconds_total{job=\"node\",mode=\"idle\",vm=~\"$vm\"}[5m])))",
+          "legendFormat": "{{vm}}",
           "refId": "A"
         }
       ],
@@ -1750,8 +1755,8 @@
       },
       "targets": [
         {
-          "expr": "node_memory_MemAvailable_bytes{job=\"node\",instance=~\"$vm\"}",
-          "legendFormat": "{{instance}}",
+          "expr": "node_memory_MemAvailable_bytes{job=\"node\",vm=~\"$vm\"}",
+          "legendFormat": "{{vm}}",
           "refId": "A"
         }
       ],
@@ -1808,8 +1813,8 @@
       },
       "targets": [
         {
-          "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"node\",mountpoint=\"/\",fstype!~\"tmpfs|overlay\",instance=~\"$vm\"} / node_filesystem_size_bytes{job=\"node\",mountpoint=\"/\",fstype!~\"tmpfs|overlay\",instance=~\"$vm\"})",
-          "legendFormat": "{{instance}}",
+          "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"node\",mountpoint=\"/\",fstype!~\"tmpfs|overlay\",vm=~\"$vm\"} / node_filesystem_size_bytes{job=\"node\",mountpoint=\"/\",fstype!~\"tmpfs|overlay\",vm=~\"$vm\"})",
+          "legendFormat": "{{vm}}",
           "refId": "A"
         }
       ],
@@ -1865,8 +1870,8 @@
       },
       "targets": [
         {
-          "expr": "node_load5{job=\"node\",instance=~\"$vm\"} / clamp_min(machine_cpu_cores{job=\"node\",instance=~\"$vm\"}, 1)",
-          "legendFormat": "{{instance}}",
+          "expr": "node_load5{job=\"node\",vm=~\"$vm\"} / clamp_min(machine_cpu_cores{job=\"node\",vm=~\"$vm\"}, 1)",
+          "legendFormat": "{{vm}}",
           "refId": "A"
         }
       ],
@@ -1922,8 +1927,8 @@
       },
       "targets": [
         {
-          "expr": "100 * avg by (instance) (rate(node_cpu_seconds_total{job=\"node\",mode=\"iowait\",instance=~\"$vm\"}[5m]))",
-          "legendFormat": "{{instance}}",
+          "expr": "100 * avg by (vm) (rate(node_cpu_seconds_total{job=\"node\",mode=\"iowait\",vm=~\"$vm\"}[5m]))",
+          "legendFormat": "{{vm}}",
           "refId": "A"
         }
       ],
@@ -1962,12 +1967,634 @@
       },
       "targets": [
         {
-          "expr": "rate(node_vmstat_pswpin{job=\"node\",instance=~\"$vm\"}[5m]) + rate(node_vmstat_pswpout{job=\"node\",instance=~\"$vm\"}[5m])",
-          "legendFormat": "{{instance}} swap pages/s",
+          "expr": "rate(node_vmstat_pswpin{job=\"node\",vm=~\"$vm\"}[5m]) + rate(node_vmstat_pswpout{job=\"node\",vm=~\"$vm\"}[5m])",
+          "legendFormat": "{{vm}} swap pages/s",
           "refId": "A"
         }
       ],
       "title": "Swap I/O per VM (pages/s) \u2014 alert threshold 200",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 90
+              },
+              {
+                "color": "yellow",
+                "value": 99
+              },
+              {
+                "color": "green",
+                "value": 99.9
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 134
+      },
+      "id": 48,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(up{job=\"node\"}) / clamp_min(count(up{job=\"node\"}), 1)",
+          "refId": "A"
+        }
+      ],
+      "title": "Node exporter scrape healthy %",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 90
+              },
+              {
+                "color": "yellow",
+                "value": 99
+              },
+              {
+                "color": "green",
+                "value": 99.9
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 134
+      },
+      "id": 49,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(up{job=\"pgbouncer\"}) / clamp_min(count(up{job=\"pgbouncer\"}), 1)",
+          "refId": "A"
+        }
+      ],
+      "title": "PgBouncer exporter scrape healthy %",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 90
+              },
+              {
+                "color": "yellow",
+                "value": 99
+              },
+              {
+                "color": "green",
+                "value": 99.9
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 134
+      },
+      "id": 50,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(up{job=\"db-node\"}) / clamp_min(count(up{job=\"db-node\"}), 1)",
+          "refId": "A"
+        }
+      ],
+      "title": "DB node exporter scrape healthy %",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 90
+              },
+              {
+                "color": "yellow",
+                "value": 99
+              },
+              {
+                "color": "green",
+                "value": 99.9
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 134
+      },
+      "id": 51,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(up{job=\"db-postgres\"}) / clamp_min(count(up{job=\"db-postgres\"}), 1)",
+          "refId": "A"
+        }
+      ],
+      "title": "DB postgres exporter scrape healthy %",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 139
+      },
+      "id": 52,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (vm) (up{job=\"chatapp-api\"})",
+          "legendFormat": "{{vm}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Workers Up by VM",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 139
+      },
+      "id": 53,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (vm, route) (rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m]))",
+          "legendFormat": "{{vm}} {{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "API 5xx req/s by route + vm",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 147
+      },
+      "id": 54,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "API p95 latency by route (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 147
+      },
+      "id": 55,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "API p99 latency by route (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 155
+      },
+      "id": 56,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "legendFormat": "p95 {{vm}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "legendFormat": "p99 {{vm}}",
+          "refId": "B"
+        }
+      ],
+      "title": "API p95 / p99 latency by vm (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 155
+      },
+      "id": 57,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",method=\"POST\",route=~\"/api/v1/messages/?\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "legendFormat": "p95 {{vm}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",method=\"POST\",route=~\"/api/v1/messages/?\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "legendFormat": "p99 {{vm}}",
+          "refId": "B"
+        }
+      ],
+      "title": "POST /messages p95 / p99 by vm (ms)",
       "type": "timeseries"
     }
   ],
