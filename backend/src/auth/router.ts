@@ -24,10 +24,11 @@ const redis            = require('../db/redis');
 const { signAccess, signRefresh, verifyRefresh, denyToken } = require('../utils/jwt');
 const { authenticate } = require('../middleware/authenticate');
 const { authRateLimitHitsTotal } = require('../utils/metrics');
+const logger = require('../utils/logger');
 const { hashPassword, comparePassword } = require('./passwords');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('./bypass');
 const { verifyOAuthPending, signOAuthPending, signOAuthLinkIntent, verifyOAuthLinkIntent } = require('./oauthTokens');
-const { getTrustedClientIp } = require('../utils/trustedClientIp');
+const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('../utils/trustedClientIp');
 const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
 
 const router = express.Router();
@@ -103,6 +104,23 @@ function buildAuthKey(req, route) {
   return `${route}:${clientIp}:${credential}`;
 }
 
+function buildAuthIpKey(req, route) {
+  return `${route}:${getTrustedClientIp(req)}`;
+}
+
+function getAuthRateLimitContext(req, route, scope = 'credential') {
+  const trustedClientIp = getTrustedClientIp(req);
+  const isInternal = isPrivateOrInternalNetwork(trustedClientIp);
+  const limiterKey = scope === 'ip'
+    ? buildAuthIpKey(req, route)
+    : buildAuthKey(req, route);
+  return { trustedClientIp, isInternal, limiterKey };
+}
+
+function shouldSkipAuthRateLimit(req) {
+  return getAuthRateLimitContext(req, 'skip-check', 'ip').isInternal;
+}
+
 function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
   if (process.env.DISABLE_RATE_LIMITS === 'true') {
     return (_req, _res, next) => next();
@@ -112,6 +130,7 @@ function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
     limit: parsePositiveIntEnv(process.env[limitEnv], limit),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    skip: shouldSkipAuthRateLimit,
     keyGenerator: (req) => buildAuthKey(req, route),
     // Shared Redis store so the limit is consistent across all Node.js instances.
     // Falls back to the default in-memory store if Redis is unavailable.
@@ -121,6 +140,16 @@ function buildAuthLimiter(route, { limit, windowMs, limitEnv, windowEnv }) {
     }),
     message: { error: 'Too many auth attempts. Please wait a minute and try again.' },
     handler: (req, res, _next, options) => {
+      const { trustedClientIp, isInternal, limiterKey } = getAuthRateLimitContext(req, route, 'credential');
+      logger.warn({
+        requestId: req.id || req.requestId,
+        route: req.originalUrl || req.path || req.url,
+        trustedClientIp,
+        isInternal,
+        limiterKey,
+        reason: 'auth_rate_limit_exceeded',
+        scope: route,
+      }, 'auth rate limiter blocked request');
       authRateLimitHitsTotal.inc({ route });
       recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
@@ -158,13 +187,24 @@ function buildAuthIpLimiter(
     limit: parsePositiveIntEnv(process.env[limitEnv], limit),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: (req) => `${route}:${getTrustedClientIp(req)}`,
+    skip: shouldSkipAuthRateLimit,
+    keyGenerator: (req) => buildAuthIpKey(req, route),
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
       prefix: `rl:${route}-global-ip:`,
     }),
     message: { error: 'Too many auth attempts from this network. Please wait and try again.' },
     handler: (req, res, _next, options) => {
+      const { trustedClientIp, isInternal, limiterKey } = getAuthRateLimitContext(req, route, 'ip');
+      logger.warn({
+        requestId: req.id || req.requestId,
+        route: req.originalUrl || req.path || req.url,
+        trustedClientIp,
+        isInternal,
+        limiterKey,
+        reason: 'auth_rate_limit_exceeded',
+        scope: route,
+      }, 'auth rate limiter blocked request');
       authRateLimitHitsTotal.inc({ route });
       recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
