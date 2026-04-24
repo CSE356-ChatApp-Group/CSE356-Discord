@@ -1211,8 +1211,7 @@ router.get(
 
         try {
           if (await checkChannelAccessCache(redis, channelId, req.user.id)) {
-            (req as any)._channelAccessCacheHit = true;
-            accessWhere = "TRUE";
+            accessWhere = "$2::uuid IS NOT NULL";
           }
         } catch {
           /* fail open */
@@ -1576,12 +1575,10 @@ router.post(
       );
 
       if (invalidAttachment) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "attachments must include storageKey, filename, contentType, and sizeBytes",
-          });
+        return res.status(400).json({
+          error:
+            "attachments must include storageKey, filename, contentType, and sizeBytes",
+        });
       }
 
       const rawIdem = req.get("idempotency-key") || req.get("Idempotency-Key");
@@ -1634,12 +1631,10 @@ router.post(
                 return res.status(201).json(waited.body);
               }
               res.set("Retry-After", "1");
-              return res
-                .status(409)
-                .json({
-                  error: "Duplicate request in flight",
-                  requestId: req.id,
-                });
+              return res.status(409).json({
+                error: "Duplicate request in flight",
+                requestId: req.id,
+              });
             }
             idemLease = true;
           } catch {

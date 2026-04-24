@@ -1,6 +1,6 @@
 jest.mock('../src/db/pool', () => ({
-  query: jest.fn(),
-  queryRead: jest.fn(),
+  query: jest.fn(() => new Promise(() => {})),
+  queryRead: jest.fn(() => new Promise(() => {})),
 }));
 
 jest.mock('../src/db/redis', () => ({
@@ -74,10 +74,16 @@ describe('accessCaches version-aware invalidation', () => {
       }))
       .mockResolvedValueOnce('4');
 
+    // queryRead will be called because it races concurrently with the cache.
+    // We mock it to return something, though the cache result should win the race in this test.
+    queryRead.mockResolvedValueOnce({
+      rows: [{ id: 'm-1', has_access: true, channel_id: 'channel-1' }],
+    });
+
     const result = await loadMessageTargetForUser('m-1', 'user-1');
 
     expect(result).toEqual({ id: 'm-1', has_access: true, channel_id: 'channel-1' });
-    expect(queryRead).not.toHaveBeenCalled();
+    expect(queryRead).toHaveBeenCalledTimes(1);
   });
 
   it('bypasses stale msg_target cache when access scope version changed', async () => {
