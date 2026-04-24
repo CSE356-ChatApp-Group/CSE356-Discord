@@ -1516,6 +1516,48 @@ describe('Multi-socket fanout', () => {
     }
   });
 
+  it('delivers conversation:participant_added to the newly invited participant', async () => {
+    const owner = await createAuthenticatedUser('wspartaddowner');
+    const existing = await createAuthenticatedUser('wspartaddexisting');
+    const base = await createAuthenticatedUser('wspartaddbase');
+    const invitee = await createAuthenticatedUser('wspartaddinvitee');
+
+    const inviteeSocket = await connectWebSocket(port, invitee.accessToken);
+
+    try {
+      const createRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [existing.user.id, base.user.id] });
+
+      expect(createRes.status).toBe(201);
+      const groupConversationId = createRes.body.conversation.id;
+
+      const participantAddedPromise = waitForWsEvent(
+        inviteeSocket,
+        (event) =>
+          event.event === 'conversation:participant_added'
+          && event.data?.conversationId === groupConversationId
+          && Array.isArray(event.data?.participantIds)
+          && event.data.participantIds.includes(invitee.user.id),
+      );
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/conversations/${groupConversationId}/invite`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [invitee.user.id] });
+
+      expect(inviteRes.status).toBe(200);
+
+      const participantAddedEvent = await participantAddedPromise;
+      expect(participantAddedEvent.data.conversationId).toBe(groupConversationId);
+      expect(participantAddedEvent.data.invitedBy).toBe(owner.user.id);
+      expect(participantAddedEvent.data.participantIds).toContain(invitee.user.id);
+    } finally {
+      await closeWebSocket(inviteeSocket);
+    }
+  });
+
   it('delivers user-channel events after the user reconnects', async () => {
     const owner = await createAuthenticatedUser('wsreconnectowner');
     const existing = await createAuthenticatedUser('wsreconnectexisting');

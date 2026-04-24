@@ -91,7 +91,7 @@ describe('community members roster caching', () => {
 
   it('caches roster on miss and overlays presence from Redis', async () => {
     const communityId = '11111111-1111-4111-8111-111111111111';
-    pool.queryRead
+    pool.query
       .mockResolvedValueOnce({ rows: [{ my_role: 'member' }] })
       .mockResolvedValueOnce({
         rows: [
@@ -113,7 +113,7 @@ describe('community members roster caching', () => {
     const res = await request(app).get(`/api/v1/communities/${communityId}/members`);
 
     expect(res.status).toBe(200);
-    expect(pool.queryRead).toHaveBeenCalledTimes(2);
+    expect(pool.query).toHaveBeenCalledTimes(2);
     expect(redis.setex).toHaveBeenCalledTimes(1);
     expect(redis.setex).toHaveBeenCalledWith(
       `community:${communityId}:members`,
@@ -142,7 +142,7 @@ describe('community members roster caching', () => {
         },
       ]),
     );
-    pool.queryRead.mockResolvedValueOnce({ rows: [{ my_role: 'member' }] });
+    pool.query.mockResolvedValueOnce({ rows: [{ my_role: 'member' }] });
     presenceService.getBulkPresenceDetails.mockResolvedValue({
       'u-2': { status: 'online', awayMessage: null },
     });
@@ -151,7 +151,7 @@ describe('community members roster caching', () => {
     const res = await request(app).get(`/api/v1/communities/${communityId}/members`);
 
     expect(res.status).toBe(200);
-    expect(pool.queryRead).toHaveBeenCalledTimes(1);
+    expect(pool.query).toHaveBeenCalledTimes(1);
     expect(redis.setex).not.toHaveBeenCalled();
     expect(presenceService.getBulkPresenceDetails).toHaveBeenCalledWith(['u-2']);
     expect(res.body.members[0]).toMatchObject({

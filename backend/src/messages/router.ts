@@ -570,12 +570,14 @@ async function rememberReadReceiptMessageId(
 /**
  * When `PG_READ_REPLICA_URL` is set, list queries default to the replica (eventual consistency).
  * Send `X-ChatApp-Read-Consistency: primary` (or `strong`) to force the primary for read-your-writes
- * after a POST (grading / UX).
+ * after a POST (grading / UX). Direct-message history defaults to the primary because
+ * both participants expect immediate visibility after conversation creation/invite/send.
  */
 function wantsMessagesListPrimary(req) {
   if (!readPool) return false;
   const v = (req.get("x-chatapp-read-consistency") || "").trim().toLowerCase();
-  return v === "primary" || v === "strong";
+  if (v === "primary" || v === "strong") return true;
+  return Boolean(req?.query?.conversationId);
 }
 
 async function checkChannelAccessForUser(

@@ -391,7 +391,7 @@ async function loadCommunityMembersRoster(communityId) {
       return Array.isArray(fresh) ? fresh : null;
     },
     load: async () => {
-      const { rows } = await queryRead(COMMUNITY_MEMBERS_ROSTER_SQL, [communityId]);
+      const { rows } = await query(COMMUNITY_MEMBERS_ROSTER_SQL, [communityId]);
       redis.setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify(rows)).catch(() => {});
       return rows;
     },
@@ -1042,8 +1042,7 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
-    // One round-trip for community existence + caller membership (replaces loadMembership + EXISTS).
-    const { rows: accessRows } = await queryRead(
+    const { rows: accessRows } = await query(
       `SELECT cm.role AS my_role
        FROM communities c
        LEFT JOIN community_members cm

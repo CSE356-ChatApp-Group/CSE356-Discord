@@ -21,6 +21,7 @@ const { authenticate } = require('../middleware/authenticate');
 const { hashPassword } = require('./passwords');
 const presenceService  = require('../presence/service');
 const { BUCKET, s3 } = require('../attachments/storage');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 
@@ -85,6 +86,20 @@ async function uploadAvatarObject(userId, file) {
   return storageKey;
 }
 
+async function saveAvatarInline(userId, file) {
+  const avatarUrl = `/api/v1/users/${userId}/avatar`;
+  await query(
+    `UPDATE users
+     SET avatar_url=$2,
+         avatar_storage_key=NULL,
+         avatar_data=$3,
+         avatar_content_type=$4,
+         updated_at=NOW()
+     WHERE id=$1`,
+    [userId, avatarUrl, file.buffer, file.mimetype]
+  );
+}
+
 async function saveAvatarForUser(userId, file) {
   const { rows: existingRows } = await query(
     'SELECT avatar_storage_key FROM users WHERE id = $1',
@@ -95,8 +110,22 @@ async function saveAvatarForUser(userId, file) {
   }
 
   const previousStorageKey = existingRows[0].avatar_storage_key || null;
-  const storageKey = await uploadAvatarObject(userId, file);
   const avatarUrl = `/api/v1/users/${userId}/avatar`;
+  let storageKey = null;
+
+  try {
+    storageKey = await uploadAvatarObject(userId, file);
+  } catch (err) {
+    logger.warn({ err, userId }, 'avatar upload to object storage failed; falling back to inline DB storage');
+    await saveAvatarInline(userId, file);
+
+    if (previousStorageKey) {
+      s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: previousStorageKey })).catch(() => {});
+    }
+
+    const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [userId]);
+    return rows[0];
+  }
 
   try {
     await query(

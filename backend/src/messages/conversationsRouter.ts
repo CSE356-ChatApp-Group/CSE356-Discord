@@ -10,7 +10,7 @@
 
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
-const { query, queryRead, getClient } = require('../db/pool');
+const { query, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const fanout           = require('../websocket/fanout');
@@ -329,7 +329,7 @@ router.get('/', async (req, res, next) => {
     readFresh: async () => getJsonCache(redis, cacheKey),
     readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
     load: async () => {
-      const { rows } = await queryRead(
+      const { rows } = await query(
         `SELECT ${CONVERSATION_LIST_FIELDS},
               lm.id AS last_message_id,
               lm.author_id AS last_message_author_id,
@@ -512,7 +512,7 @@ router.post('/',
 // ── Get single ─────────────────────────────────────────────────────────────────
 router.get('/:id', async (req, res, next) => {
   try {
-    const { rows } = await queryRead(
+    const { rows } = await query(
       `SELECT ${CONVERSATION_FIELDS},
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name))
                 AS participants
@@ -702,7 +702,11 @@ async function addParticipantsHandler(req, res, next) {
 
     if (participantIdsToAdd.length) {
       await publishConversationEvents(
-        [`conversation:${req.params.id}`, ...currentParticipantIds.map((participantId) => `user:${participantId}`)],
+        [
+          `conversation:${req.params.id}`,
+          ...currentParticipantIds.map((participantId) => `user:${participantId}`),
+          ...participantIdsToAdd.map((participantId) => `user:${participantId}`),
+        ],
         'conversation:participant_added',
         sharedEventData
       );
