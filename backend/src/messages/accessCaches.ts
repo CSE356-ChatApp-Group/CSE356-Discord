@@ -88,11 +88,52 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
   return result;
 }
 
-/**
- * Load message target and caller access in one query for hot read-receipt path.
- * Races the versioned Redis cache against a concurrent Postgres check — first
- * "yes" (access granted) wins.
- */
+const MESSAGE_TARGET_SQL = `SELECT m.id,
+        m.author_id,
+        m.channel_id,
+        m.conversation_id,
+        m.created_at,
+        ch.community_id,
+        CASE
+          WHEN m.conversation_id IS NOT NULL THEN EXISTS (
+            SELECT 1
+            FROM conversation_participants cp
+            WHERE cp.conversation_id = m.conversation_id
+              AND cp.user_id = $2
+              AND cp.left_at IS NULL
+          )
+          WHEN m.channel_id IS NOT NULL THEN EXISTS (
+            SELECT 1
+            FROM channels c
+            JOIN community_members community_member
+              ON community_member.community_id = c.community_id
+             AND community_member.user_id = $2
+            LEFT JOIN channel_members cm
+              ON cm.channel_id = c.id
+             AND cm.user_id = $2
+            WHERE c.id = m.channel_id
+              AND (c.is_private = FALSE OR cm.user_id IS NOT NULL)
+          )
+          ELSE FALSE
+        END AS has_access
+ FROM messages m
+ LEFT JOIN channels ch ON ch.id = m.channel_id
+ WHERE m.id = $1
+   AND m.deleted_at IS NULL`;
+
+async function loadMessageTargetFromPrimary(messageId, userId) {
+  const { rows } = await query(MESSAGE_TARGET_SQL, [messageId, userId]);
+  return rows[0] || null;
+}
+
+async function loadMessageTargetFromReplicaThenPrimary(messageId, userId) {
+  const { rows } = await queryRead(MESSAGE_TARGET_SQL, [messageId, userId]);
+  const replicaRow = rows[0] || null;
+  if (replicaRow) return replicaRow;
+  
+  return loadMessageTargetFromPrimary(messageId, userId);
+}
+
 async function loadMessageTargetForUser(messageId, userId) {
   const cacheKey = `msg_target:${messageId}:${userId}`;
 
@@ -104,41 +145,7 @@ async function loadMessageTargetForUser(messageId, userId) {
       })
     : Promise.resolve(null);
 
-  const dbPromise = queryRead(
-    `SELECT m.id,
-            m.author_id,
-            m.channel_id,
-            m.conversation_id,
-            m.created_at,
-            ch.community_id,
-            CASE
-              WHEN m.conversation_id IS NOT NULL THEN EXISTS (
-                SELECT 1
-                FROM conversation_participants cp
-                WHERE cp.conversation_id = m.conversation_id
-                  AND cp.user_id = $2
-                  AND cp.left_at IS NULL
-              )
-              WHEN m.channel_id IS NOT NULL THEN EXISTS (
-                SELECT 1
-                FROM channels c
-                JOIN community_members community_member
-                  ON community_member.community_id = c.community_id
-                 AND community_member.user_id = $2
-                LEFT JOIN channel_members cm
-                  ON cm.channel_id = c.id
-                 AND cm.user_id = $2
-                WHERE c.id = m.channel_id
-                  AND (c.is_private = FALSE OR cm.user_id IS NOT NULL)
-              )
-              ELSE FALSE
-            END AS has_access
-     FROM messages m
-     LEFT JOIN channels ch ON ch.id = m.channel_id
-     WHERE m.id = $1
-       AND m.deleted_at IS NULL`,
-    [messageId, userId],
-  );
+  const dbPromise = loadMessageTargetFromReplicaThenPrimary(messageId, userId);
 
   // Concurrent race: resolve as soon as either gives us a definitive "yes" (with access).
   // If either returns null or has_access=false, wait for the other.
@@ -164,8 +171,7 @@ async function loadMessageTargetForUser(messageId, userId) {
       }
     }).catch(checkDone);
 
-    dbPromise.then(({ rows }) => {
-      const row = rows[0] || null;
+    dbPromise.then((row) => {
       if (row && row.has_access) {
         resolve(row);
       } else {

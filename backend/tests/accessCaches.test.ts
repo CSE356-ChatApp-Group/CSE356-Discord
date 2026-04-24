@@ -86,6 +86,30 @@ describe('accessCaches version-aware invalidation', () => {
     expect(queryRead).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to primary when the read replica misses a fresh message target', async () => {
+    redis.get.mockResolvedValue(null);
+    queryRead.mockResolvedValueOnce({ rows: [] });
+    query.mockResolvedValueOnce({
+      rows: [{
+        id: 'm-fresh',
+        has_access: true,
+        channel_id: 'channel-fresh',
+        conversation_id: null,
+        community_id: 'community-fresh',
+      }],
+    });
+
+    const result = await loadMessageTargetForUser('m-fresh', 'user-fresh');
+
+    expect(queryRead).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      id: 'm-fresh',
+      has_access: true,
+      channel_id: 'channel-fresh',
+    });
+  });
+
   it('bypasses stale msg_target cache when access scope version changed', async () => {
     redis.get
       .mockResolvedValueOnce(JSON.stringify({
