@@ -1027,6 +1027,16 @@ router.get(
         });
         const cached = await getJsonCache(redis, cacheKey);
         if (cached) {
+          const hasAccess = await raceChannelAccess(
+            redis,
+            channelId,
+            req.user.id,
+            () => checkChannelAccessForUser(channelId, req.user.id),
+          );
+          if (!hasAccess) {
+            return res.status(403).json({ error: "Access denied" });
+          }
+          setChannelAccessCache(redis, channelId, req.user.id);
           recordEndpointListCache("messages_channel", "hit");
           return res.json(cached);
         }
@@ -1051,35 +1061,61 @@ router.get(
             readFresh: async () => getJsonCache(redis, cacheKey),
             readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
             load: async () => {
-              // Concurrent: Redis cache check races DB access check — first yes wins.
-              const hasAccess = await raceChannelAccess(
-                redis,
-                channelId,
-                req.user.id,
-                () => checkChannelAccessForUser(channelId, req.user.id),
+              let accessWhere = `EXISTS (
+                SELECT 1
+                FROM channels c
+                JOIN community_members community_member
+                  ON community_member.community_id = c.community_id
+                 AND community_member.user_id = $2
+                WHERE c.id = $3
+                  AND (
+                    c.is_private = FALSE
+                    OR EXISTS (
+                      SELECT 1
+                      FROM channel_members cm
+                      WHERE cm.channel_id = c.id
+                        AND cm.user_id = $2
+                    )
+                  )
+              )`;
+              try {
+                if (await checkChannelAccessCache(redis, channelId, req.user.id)) {
+                  accessWhere = "$2::uuid IS NOT NULL";
+                }
+              } catch {
+                /* fail open */
+              }
+
+              const { rows } = await queryRead(
+                `
+              WITH access AS (
+                SELECT ${accessWhere} AS has_access
+              )
+              SELECT access.has_access,
+                     msg.*
+              FROM access
+              LEFT JOIN LATERAL (
+                SELECT ${MESSAGE_SELECT_FIELDS},
+                       ${MESSAGE_AUTHOR_JSON},
+                       COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
+                FROM messages m
+                LEFT JOIN users u ON u.id = m.author_id
+                LEFT JOIN attachments a ON a.message_id = m.id
+                WHERE m.channel_id = $3
+                  AND m.deleted_at IS NULL
+                GROUP BY m.id, u.id
+                ORDER BY m.created_at DESC
+                LIMIT $1
+              ) AS msg ON access.has_access = TRUE
+            `,
+                [limit, req.user.id, channelId],
               );
-              if (!hasAccess) {
+              if (!rows[0]?.has_access) {
                 const err: any = new Error("Access denied");
                 err.statusCode = 403;
                 throw err;
               }
               setChannelAccessCache(redis, channelId, req.user.id);
-              const { rows } = await queryRead(
-                `
-              SELECT ${MESSAGE_SELECT_FIELDS},
-                     ${MESSAGE_AUTHOR_JSON},
-                     COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
-              FROM messages m
-              LEFT JOIN users u ON u.id = m.author_id
-              LEFT JOIN attachments a ON a.message_id = m.id
-              WHERE m.channel_id = $2
-                AND m.deleted_at IS NULL
-              GROUP BY m.id, u.id
-              ORDER BY m.created_at DESC
-              LIMIT $1
-            `,
-                [limit, channelId],
-              );
               const messages = rows.filter((row) => row.id);
               const body = { messages: messages.reverse() };
               const epochAfter = await readMessageCacheEpoch(redis, epochKey);
@@ -1119,6 +1155,13 @@ router.get(
         });
         const cached = await getJsonCache(redis, cacheKey);
         if (cached) {
+          const hasAccess = await ensureActiveConversationParticipant(
+            conversationId,
+            req.user.id,
+          );
+          if (!hasAccess) {
+            return res.status(403).json({ error: "Not a participant" });
+          }
           recordEndpointListCache("messages_conversation", "hit");
           return res.json(cached);
         }

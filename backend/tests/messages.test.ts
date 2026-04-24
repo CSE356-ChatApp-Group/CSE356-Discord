@@ -7,6 +7,20 @@ import { request, app, wsServer, pool, redis, closeRedisConnections } from './ru
 
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
 const { flushDirtyReadStatesToDB, enqueueBatchReadStateUpdate } = require('../src/messages/batchReadState');
+const { pgBusinessSqlQueriesPerRequestHistogram } = require('../src/utils/metrics');
+
+function messagesRouteSqlHistogramSnapshot() {
+  let count = 0;
+  let sum = 0;
+  for (const entry of Object.values(pgBusinessSqlQueriesPerRequestHistogram.hashMap || {})) {
+    const route = (entry as any)?.labels?.route;
+    if (route === '/api/v1/messages' || route === '/api/v1/messages/') {
+      count += Number((entry as any)?.count || 0);
+      sum += Number((entry as any)?.sum || 0);
+    }
+  }
+  return { count, sum };
+}
 
 afterAll(async () => {
   await wsServer.shutdown();
@@ -499,6 +513,408 @@ describe('GET /messages channel id as conversationId (generated-client compatibi
       .set('Authorization', `Bearer ${stranger.accessToken}`);
 
     expect(getRes.status).toBe(403);
+  });
+});
+
+describe('GET /messages cache-hit authorization regressions', () => {
+  it('does not serve cached channel history to a non-member', async () => {
+    const owner = await createAuthenticatedUser('cacheauthchanown');
+    const member = await createAuthenticatedUser('cacheauthchanmem');
+    const outsider = await createAuthenticatedUser('cacheauthchanout');
+    const slug = `cache-auth-chan-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'channel cache auth regression' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(joinRes.status).toBe(200);
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `cache-auth-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: `cache-auth-chan-${uniqueSuffix()}` });
+    expect(postRes.status).toBe(201);
+
+    const warmRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(warmRes.status).toBe(200);
+    expect(warmRes.body.messages.map((message: any) => message.id)).toContain(postRes.body.message.id);
+
+    const outsiderRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+    expect(outsiderRes.status).toBe(403);
+  });
+
+  it('does not serve cached conversation history to a non-participant', async () => {
+    const owner = await createAuthenticatedUser('cacheauthdmown');
+    const participant = await createAuthenticatedUser('cacheauthdmpart');
+    const outsider = await createAuthenticatedUser('cacheauthdmout');
+
+    const conversationRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [participant.user.id] });
+    expect(conversationRes.status).toBe(201);
+    const conversationId = conversationRes.body.conversation.id;
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ conversationId, content: `cache-auth-dm-${uniqueSuffix()}` });
+    expect(postRes.status).toBe(201);
+
+    const warmRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${participant.accessToken}`);
+    expect(warmRes.status).toBe(200);
+    expect(warmRes.body.messages.map((message: any) => message.id)).toContain(postRes.body.message.id);
+
+    const outsiderRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+    expect(outsiderRes.status).toBe(403);
+  });
+});
+
+describe('GET /messages access and pagination equivalence', () => {
+  it('returns public-channel history for a community member and 403 for a non-member', async () => {
+    const owner = await createAuthenticatedUser('histpubowner');
+    const member = await createAuthenticatedUser('histpubmember');
+    const outsider = await createAuthenticatedUser('histpuboutsider');
+    const slug = `hist-pub-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'public channel history access' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(joinRes.status).toBe(200);
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `hist-pub-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const createdIds: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const postRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: `public-history-${i}-${uniqueSuffix()}` });
+      expect(postRes.status).toBe(201);
+      createdIds.push(postRes.body.message.id);
+    }
+
+    const memberRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(memberRes.status).toBe(200);
+    expect(memberRes.body.messages.map((message: any) => message.id)).toEqual(createdIds);
+
+    const outsiderRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+    expect(outsiderRes.status).toBe(403);
+  });
+
+  it('returns private-channel history only to invited members', async () => {
+    const owner = await createAuthenticatedUser('histprivowner');
+    const member = await createAuthenticatedUser('histprivmember');
+    const outsider = await createAuthenticatedUser('histprivoutsider');
+    const slug = `hist-priv-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'private channel history access' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(joinRes.status).toBe(200);
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `hist-priv-${uniqueSuffix()}`.slice(0, 32), isPrivate: true });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const addRes = await request(app)
+      .post(`/api/v1/channels/${channelId}/members`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ userIds: [member.user.id] });
+    expect(addRes.status).toBe(200);
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: `private-history-${uniqueSuffix()}` });
+    expect(postRes.status).toBe(201);
+    const messageId = postRes.body.message.id;
+
+    const memberRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(memberRes.status).toBe(200);
+    expect(memberRes.body.messages.map((message: any) => message.id)).toContain(messageId);
+
+    const outsiderRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+    expect(outsiderRes.status).toBe(403);
+  });
+
+  it('returns DM history only to participants', async () => {
+    const owner = await createAuthenticatedUser('histdmowner');
+    const participant = await createAuthenticatedUser('histdmpart');
+    const outsider = await createAuthenticatedUser('histdmout');
+
+    const conversationRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [participant.user.id] });
+    expect(conversationRes.status).toBe(201);
+    const conversationId = conversationRes.body.conversation.id;
+
+    const createdIds: string[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      const postRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ conversationId, content: `dm-history-${i}-${uniqueSuffix()}` });
+      expect(postRes.status).toBe(201);
+      createdIds.push(postRes.body.message.id);
+    }
+
+    const participantRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${participant.accessToken}`);
+    expect(participantRes.status).toBe(200);
+    expect(participantRes.body.messages.map((message: any) => message.id)).toEqual(createdIds);
+
+    const outsiderRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+    expect(outsiderRes.status).toBe(403);
+  });
+
+  it('preserves before/after pagination chronology around an anchor message', async () => {
+    const owner = await createAuthenticatedUser('histpageowner');
+    const slug = `hist-page-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'history pagination' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `hist-page-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const createdIds: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const postRes = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: `history-page-${i}-${uniqueSuffix()}` });
+      expect(postRes.status).toBe(201);
+      createdIds.push(postRes.body.message.id);
+    }
+
+    const beforeRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .query({ channelId, before: createdIds[4], limit: 2 });
+    expect(beforeRes.status).toBe(200);
+    expect(beforeRes.body.messages.map((message: any) => message.id)).toEqual([createdIds[2], createdIds[3]]);
+
+    const afterRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .query({ channelId, after: createdIds[1], limit: 2 });
+    expect(afterRes.status).toBe(200);
+    expect(afterRes.body.messages.map((message: any) => message.id)).toEqual([createdIds[2], createdIds[3]]);
+  });
+
+  it('excludes deleted messages from channel and DM histories', async () => {
+    const owner = await createAuthenticatedUser('histdeleteowner');
+    const partner = await createAuthenticatedUser('histdeletepartner');
+    const slug = `hist-delete-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'history deletes' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `hist-delete-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const keepChannelRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: `keep-channel-${uniqueSuffix()}` });
+    expect(keepChannelRes.status).toBe(201);
+
+    const deleteChannelRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: `delete-channel-${uniqueSuffix()}` });
+    expect(deleteChannelRes.status).toBe(201);
+
+    const deleteChannelMsgRes = await request(app)
+      .delete(`/api/v1/messages/${deleteChannelRes.body.message.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(deleteChannelMsgRes.status).toBe(200);
+
+    const channelHistoryRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(channelHistoryRes.status).toBe(200);
+    expect(channelHistoryRes.body.messages.map((message: any) => message.id)).toContain(keepChannelRes.body.message.id);
+    expect(channelHistoryRes.body.messages.map((message: any) => message.id)).not.toContain(deleteChannelRes.body.message.id);
+
+    const conversationRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [partner.user.id] });
+    expect(conversationRes.status).toBe(201);
+    const conversationId = conversationRes.body.conversation.id;
+
+    const keepDmRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ conversationId, content: `keep-dm-${uniqueSuffix()}` });
+    expect(keepDmRes.status).toBe(201);
+
+    const deleteDmRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ conversationId, content: `delete-dm-${uniqueSuffix()}` });
+    expect(deleteDmRes.status).toBe(201);
+
+    const deleteDmMsgRes = await request(app)
+      .delete(`/api/v1/messages/${deleteDmRes.body.message.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(deleteDmMsgRes.status).toBe(200);
+
+    const dmHistoryRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${partner.accessToken}`);
+    expect(dmHistoryRes.status).toBe(200);
+    expect(dmHistoryRes.body.messages.map((message: any) => message.id)).toContain(keepDmRes.body.message.id);
+    expect(dmHistoryRes.body.messages.map((message: any) => message.id)).not.toContain(deleteDmRes.body.message.id);
+  });
+
+  it('returns 200 [] for empty accessible channel and DM histories', async () => {
+    const owner = await createAuthenticatedUser('histemptyowner');
+    const partner = await createAuthenticatedUser('histemptypartner');
+    const slug = `hist-empty-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'empty history access' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `hist-empty-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const channelHistoryRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(channelHistoryRes.status).toBe(200);
+    expect(channelHistoryRes.body).toEqual({ messages: [] });
+
+    const conversationRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [partner.user.id] });
+    expect(conversationRes.status).toBe(201);
+    const conversationId = conversationRes.body.conversation.id;
+
+    const dmHistoryRes = await request(app)
+      .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
+      .set('Authorization', `Bearer ${partner.accessToken}`);
+    expect(dmHistoryRes.status).toBe(200);
+    expect(dmHistoryRes.body).toEqual({ messages: [] });
+  });
+});
+
+describe('GET /messages query count', () => {
+  it('uses one business-SQL query for a direct channel first-page cache miss', async () => {
+    const owner = await createAuthenticatedUser('histqcount');
+    const slug = `hist-qc-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'query count channel history' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `hist-qc-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: `query-count-${uniqueSuffix()}` });
+    expect(postRes.status).toBe(201);
+
+    const before = messagesRouteSqlHistogramSnapshot();
+    const listRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    const after = messagesRouteSqlHistogramSnapshot();
+
+    expect(listRes.status).toBe(200);
+    expect(after.count - before.count).toBe(1);
+    expect(after.sum - before.sum).toBe(1);
   });
 });
 
