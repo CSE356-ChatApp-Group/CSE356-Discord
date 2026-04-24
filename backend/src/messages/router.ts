@@ -51,6 +51,7 @@ const {
 } = require("../utils/trustedClientIp");
 const { recordAbuseStrikeFromRequest } = require("../utils/autoIpBan");
 const sideEffects = require("./sideEffects");
+const meiliClient = require("../search/meiliClient");
 const fanout = require("../websocket/fanout");
 const overload = require("../utils/overload");
 const redis = require("../db/redis");
@@ -2028,6 +2029,23 @@ router.post(
           realtimeConversationFanoutComplete;
       }
       res.status(201).json(httpBody);
+
+      // Fire-and-forget: index the committed message in Meilisearch.
+      // Runs after the response is sent so it never adds to POST latency.
+      if (meiliClient.isEnabled() && message.id) {
+        setImmediate(() => {
+          meiliClient.indexMessage({
+            id: message.id,
+            content: message.content || '',
+            authorId: message.author_id,
+            channelId: message.channel_id || null,
+            communityId: communityId || null,
+            conversationId: message.conversation_id || null,
+            createdAt: new Date(message.created_at).getTime(),
+            updatedAt: null,
+          }).catch(() => {});
+        });
+      }
     } catch (err: any) {
       if (idemRedisKey && idemLease) {
         redis.del(idemRedisKey).catch(() => {});
@@ -2187,6 +2205,35 @@ router.patch(
         );
       }
       res.json({ message });
+
+      // Fire-and-forget: update Meilisearch with edited content.
+      // communityId requires a channel lookup since it's not in MESSAGE_RETURNING_FIELDS.
+      if (meiliClient.isEnabled() && message.id) {
+        setImmediate(() => {
+          (async () => {
+            let communityId: string | null = null;
+            if (message.channel_id) {
+              try {
+                const { rows: chRows } = await query(
+                  "SELECT community_id FROM channels WHERE id = $1",
+                  [message.channel_id],
+                );
+                communityId = chRows[0]?.community_id || null;
+              } catch { /* non-fatal */ }
+            }
+            await meiliClient.indexMessage({
+              id: message.id,
+              content: message.content || "",
+              authorId: message.author_id,
+              channelId: message.channel_id || null,
+              communityId,
+              conversationId: message.conversation_id || null,
+              createdAt: new Date(message.created_at).getTime(),
+              updatedAt: new Date(message.updated_at || Date.now()).getTime(),
+            });
+          })().catch(() => {});
+        });
+      }
     } catch (err) {
       next(err);
     }
@@ -2311,6 +2358,11 @@ router.delete("/:id", param("id").isUUID(), async (req, res, next) => {
     }
 
     res.json({ success: true });
+
+    // Fire-and-forget: remove deleted message from Meilisearch.
+    if (meiliClient.isEnabled() && message.id) {
+      setImmediate(() => { meiliClient.deleteMessage(message.id).catch(() => {}); });
+    }
   } catch (err) {
     next(err);
   }

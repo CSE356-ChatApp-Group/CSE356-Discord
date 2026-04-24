@@ -47,4 +47,36 @@ else
 fi
 
 echo "=== Smoke tests passed ==="
+
+# ── Meilisearch verification (only when SEARCH_BACKEND=meili) ─────────────────
+if [ "${SEARCH_BACKEND:-postgres}" = "meili" ]; then
+  echo ""
+  echo "=== Meilisearch verification (SEARCH_BACKEND=meili) ==="
+  MEILI_HOST="${MEILI_HOST:-http://10.0.0.146:7700}"
+  MEILI_KEY="${MEILI_MASTER_KEY:-}"
+
+  if [ -z "$MEILI_KEY" ]; then
+    echo "FAIL: MEILI_MASTER_KEY not set but SEARCH_BACKEND=meili"
+    exit 1
+  fi
+
+  echo "Checking Meilisearch health at ${MEILI_HOST}..."
+  MEILI_STATUS=$(curl -sf -H "Authorization: Bearer ${MEILI_KEY}" "${MEILI_HOST}/health" || echo '{}')
+  if ! echo "$MEILI_STATUS" | grep -q '"available"'; then
+    echo "FAIL: Meilisearch not healthy (${MEILI_HOST}): ${MEILI_STATUS}"
+    exit 1
+  fi
+  echo "✓ Meilisearch healthy"
+
+  INDEX="${MEILI_INDEX_MESSAGES:-messages}"
+  echo "Checking index '${INDEX}'..."
+  IDX_STATUS=$(curl -sf -H "Authorization: Bearer ${MEILI_KEY}" "${MEILI_HOST}/indexes/${INDEX}" || echo '{}')
+  if ! echo "$IDX_STATUS" | grep -q '"uid"'; then
+    echo "FAIL: Meilisearch index '${INDEX}' not found"
+    exit 1
+  fi
+  echo "✓ Index '${INDEX}' exists"
+  echo "=== Meilisearch verification passed ==="
+fi
+
 exit 0

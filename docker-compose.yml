@@ -36,6 +36,7 @@ volumes:
   #   docker compose down && docker volume rm <project>_backend_node_modules && docker compose up -d
   #   docker compose exec -u root api sh -c 'cd /app && rm -rf node_modules/* && npm ci' && docker compose restart api
   backend_node_modules:
+  meili_data:
 
 services:
   # ── Node 1 · Database ─────────────────────────────────────────────────────────
@@ -115,6 +116,13 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      # Meilisearch (only active when COMPOSE_PROFILES=meili; defaults keep MEILI_ENABLED=false)
+      MEILI_ENABLED: ${MEILI_ENABLED:-false}
+      SEARCH_BACKEND: ${SEARCH_BACKEND:-postgres}
+      MEILI_HOST: ${MEILI_HOST:-http://meilisearch:7700}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-meili_dev_key}
+      MEILI_INDEX_MESSAGES: ${MEILI_INDEX_MESSAGES:-messages}
+      MEILI_CANDIDATE_LIMIT: ${MEILI_CANDIDATE_LIMIT:-200}
     depends_on:
       migrate: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
@@ -219,6 +227,26 @@ services:
     depends_on:
       nginx: { condition: service_started }
       api: { condition: service_healthy }
+
+  # ── Meilisearch (local dev / optional CI integration tests) ─────────────────
+  # Mirrors the dedicated meilisearch-vm (10.0.0.146) in production.
+  # Not required for normal CI — gated by COMPOSE_PROFILES=meili or explicit
+  #   docker compose --profile meili up
+  meilisearch:
+    image: getmeili/meilisearch:v1.8
+    profiles: [meili]
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-meili_dev_key}
+      MEILI_ENV: development
+    volumes:
+      - meili_data:/meili_data
+    networks: [chatapp]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7700/health | grep -q available"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── Node 4 · Monitoring ───────────────────────────────────────────────────────
   prometheus:

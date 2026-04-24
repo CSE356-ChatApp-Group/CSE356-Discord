@@ -227,6 +227,13 @@ REDIS_URL=redis://127.0.0.1:6379/0
 JWT_SECRET=replace-me
 REFRESH_SECRET=replace-me
 CORS_ORIGIN=http://localhost
+# Meilisearch (off by default; enable after backfill is complete)
+MEILI_ENABLED=false
+SEARCH_BACKEND=postgres
+MEILI_HOST=http://10.0.0.146:7700
+MEILI_MASTER_KEY=replace-me-meili
+MEILI_INDEX_MESSAGES=messages
+MEILI_CANDIDATE_LIMIT=200
 ENV
   chmod 600 /opt/chatapp/shared/.env
 fi

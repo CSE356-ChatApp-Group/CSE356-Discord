@@ -19,6 +19,7 @@ const db = require('../db/pool');
 const { getClientTimed } = db;
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
+const meiliClient = require('./meiliClient');
 
 const SEARCH_USE_READ_REPLICA =
   String(process.env.SEARCH_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
@@ -781,8 +782,164 @@ async function searchOnce(
   }, { forcePrimary });
 }
 
+// ── Meili-backed search path ──────────────────────────────────────────────────
+
+/**
+ * Given candidate IDs returned by Meilisearch, recheck every one in Postgres:
+ *   – permission gates (community membership, channel access, DM participation)
+ *   – deleted_at IS NULL
+ *   – author / time filters
+ *   – returns newest-first within the candidate set
+ *
+ * This function must always be called before returning search results to a client
+ * when SEARCH_BACKEND=meili is active.  It is the sole permission enforcement point
+ * for the Meili path.
+ */
+function buildRecheckFromCandidates(
+  ids: string[],
+  q: string,
+  opts: Record<string, any>,
+) {
+  const params: any[] = [];
+  const scope = buildScopedAccessParts(params, opts);
+  const idsPh = p(params, ids);
+  const filters = buildFilters(params, opts);
+  const limit   = Number(opts.limit)  || 20;
+  const offset  = Number(opts.offset) || 0;
+  const limitPh  = p(params, limit);
+  const offsetPh = p(params, offset);
+
+  const sql = `
+    WITH candidates AS (
+      SELECT unnest(${idsPh}::uuid[]) AS id
+    )
+    ${scope ? `, ${scope.cte.trim()}` : ''}
+    SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
+      recheck_rows.*
+    ${scope ? scope.fromClause : 'FROM'}
+    ${scope ? 'LEFT JOIN LATERAL (' : '('}
+      SELECT ${SELECT_COLS}
+      ${FROM_CLAUSE}
+      JOIN candidates c ON c.id = m.id
+      WHERE m.deleted_at IS NULL
+        ${filters}
+      ORDER BY m.created_at DESC, m.id DESC
+      LIMIT ${limitPh} OFFSET ${offsetPh}
+    ) recheck_rows ${scope ? scope.onClause : ''}`;
+
+  return { sql, params, limit, offset, q };
+}
+
+async function searchWithMeiliBackend(
+  q: string,
+  opts: Record<string, any> = {},
+): Promise<any> {
+  const tAll = Date.now();
+  const requestId = opts.requestId != null ? String(opts.requestId) : undefined;
+  const scopeLabel = resolvedSearchScope(opts);
+
+  // 1 – Candidate generation via Meilisearch
+  const tMeili = Date.now();
+  let candidateResult: { ids: string[]; estimatedTotal: number };
+  try {
+    candidateResult = await meiliClient.searchMessageCandidates(q, opts);
+  } catch (err: any) {
+    const meiliMs = Date.now() - tMeili;
+    meiliClient.incFallbackTotal();
+    logger.warn(
+      { err: { message: err?.message }, requestId, query: q, meili_ms: meiliMs },
+      'search: meili candidate fetch failed, falling back to postgres',
+    );
+    // Throw a typed sentinel so the caller knows to use the Postgres path.
+    const fe: any = new Error('meili_unavailable');
+    fe.meiliUnavailable = true;
+    throw fe;
+  }
+  const meiliMs = Date.now() - tMeili;
+  const { ids } = candidateResult;
+
+  if (ids.length === 0) {
+    const totalMs = Date.now() - tAll;
+    logger.info(
+      {
+        search_trace: true,
+        requestId,
+        query: q,
+        resolved_scope: scopeLabel,
+        search_backend: 'meili',
+        meili_candidate_count: 0,
+        postgres_rechecked_count: 0,
+        final_hit_count: 0,
+        meili_ms: meiliMs,
+        postgres_recheck_ms: 0,
+        fallback_to_postgres: false,
+        total_ms: totalMs,
+      },
+      'search_trace',
+    );
+    return buildResult([], q, Number(opts.offset) || 0, Number(opts.limit) || 20);
+  }
+
+  // 2 – Postgres recheck (permission enforcement + freshness)
+  const tRecheck = Date.now();
+  const recheckMeta = buildRecheckFromCandidates(ids, q, opts);
+  const rows = await runSearchQuery(recheckMeta.sql, recheckMeta.params);
+  const recheckMs = Date.now() - tRecheck;
+
+  if (rows[0]?.__scopeAccess === false) {
+    const err: any = new Error('Access denied');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const finalHits = rows.filter((r: any) => r && r.id);
+  const totalMs = Date.now() - tAll;
+
+  logger.info(
+    {
+      search_trace: true,
+      requestId,
+      query: q,
+      resolved_scope: scopeLabel,
+      search_backend: 'meili',
+      meili_candidate_count: ids.length,
+      postgres_rechecked_count: ids.length,
+      final_hit_count: finalHits.length,
+      meili_ms: meiliMs,
+      postgres_recheck_ms: recheckMs,
+      fallback_to_postgres: false,
+      total_ms: totalMs,
+    },
+    'search_trace',
+  );
+
+  return buildResult(rows, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+}
+
 async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   const trimmed = String(q || '').trim();
+
+  // Meili path: attempt Meili-backed candidate generation with Postgres recheck.
+  // Falls back to Postgres on any Meili error.
+  if (meiliClient.isSearchBackend()) {
+    try {
+      return await searchWithMeiliBackend(trimmed, opts);
+    } catch (err: any) {
+      if (err?.meiliUnavailable) {
+        // Already logged; fall through to Postgres search below.
+      } else if (err?.statusCode === 403) {
+        throw err;
+      } else {
+        meiliClient.incFallbackTotal();
+        logger.warn(
+          { err: { message: err?.message }, query: trimmed },
+          'search: meili recheck error, falling back to postgres',
+        );
+      }
+    }
+  }
+
+  // Postgres path (default and fallback).
   const initialForcePrimary = !SEARCH_USE_READ_REPLICA;
 
   try {
