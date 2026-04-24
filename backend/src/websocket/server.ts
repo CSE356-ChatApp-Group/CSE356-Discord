@@ -820,6 +820,18 @@ function extractInternalUserFeedCommand(payload) {
   return internal as { kind: string; channels?: unknown };
 }
 
+function isReliableRealtimeEvent(eventName) {
+  if (typeof eventName !== "string" || !eventName) return false;
+  if (eventName.startsWith("message:")) return true;
+
+  return (
+    eventName === "conversation:invited"
+    || eventName === "conversation:invite"
+    || eventName === "conversation:created"
+    || eventName === "conversation:participant_added"
+  );
+}
+
 function prepareSocketPayload(logicalChannel, parsed, rawMessage) {
   const dedupeKey = socketMessageDedupeKey(parsed);
   let payloadEventName;
@@ -834,7 +846,7 @@ function prepareSocketPayload(logicalChannel, parsed, rawMessage) {
     const ev = (parsed as { event?: unknown }).event;
     if (typeof ev === "string") {
       payloadEventName = ev;
-      if (ev.startsWith("message:")) {
+      if (isReliableRealtimeEvent(ev)) {
         skipDropForBackpressure = true;
       }
     }
