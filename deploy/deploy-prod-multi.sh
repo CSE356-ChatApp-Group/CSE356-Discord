@@ -454,7 +454,7 @@ for vm in "$VM1" "$VM2" "$VM3"; do
   # shellcheck disable=SC2029
   ssh_vm "$vm" "for p in ${ports_list}; do
     echo -n \"  Worker \$p: \"
-    curl -sf --max-time 8 http://127.0.0.1:\$p/health 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); c=d[\"capacity\"]; print(d[\"status\"], \"lag=\"+str(c[\"event_loop_lag_p99_ms\"])+\"ms stage=\"+str(c[\"overload_stage\"]))' 2>/dev/null || echo \"DEAD\"
+    curl -sf --max-time 8 http://127.0.0.1:\$p/health 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); c=d.get("capacity",{}); print(d["status"], "lag="+str(c.get("event_loop_lag_p99_ms","?"))+"ms stage="+str(c.get("overload_stage","?")))' 2>/dev/null || echo \"DEAD\"
   done" || overall_ok=0
 done
 
