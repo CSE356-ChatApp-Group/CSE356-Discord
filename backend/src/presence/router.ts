@@ -10,13 +10,27 @@
 const express = require('express');
 const { authenticate } = require('../middleware/authenticate');
 const presence = require('./service');
+const { createUserIpTokenLimiter } = require('../middleware/inMemoryApiLimiter');
+
+const PRESENCE_MAX_IDS = 100;
+
+const presenceLimiter = createUserIpTokenLimiter({
+  name: 'presence',
+  userPerSecond: 10,
+  ipPerSecond: 30,
+  userBurst: 20,
+  ipBurst: 60,
+  userScopeLabel: 'presence_user',
+  ipScopeLabel: 'presence_ip',
+});
 
 const router = express.Router();
 router.use(authenticate);
+router.use(presenceLimiter);
 
 router.get('/', async (req, res, next) => {
   try {
-    const ids = (req.query.userIds || '').split(',').filter(Boolean);
+    const ids = (req.query.userIds || '').split(',').filter(Boolean).slice(0, PRESENCE_MAX_IDS);
     if (!ids.length) return res.status(400).json({ error: 'userIds query param required' });
     const details = await presence.getBulkPresenceDetails(ids) as Record<string, { status: string; awayMessage: string | null }>;
     const map = Object.fromEntries(Object.entries(details).map(([id, d]) => [id, d.status]));

@@ -78,6 +78,7 @@ const searchLimiter = createUserIpTokenLimiter({
 });
 
 module.exports = {
+  createUserIpTokenLimiter,
   messagesHotPathLimiter,
   searchLimiter,
   /** @deprecated use getTrustedClientIp from ../utils/trustedClientIp */

@@ -32,7 +32,7 @@ const app = express();
 app.set('trust proxy', 1);
 
 const { isIpBlocked } = require('./utils/abuseKillSwitch');
-const { getTrustedClientIp } = require('./utils/trustedClientIp');
+const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('./utils/trustedClientIp');
 
 app.use((req, res, next) => {
   const pathOnly = (req.path || '').split('?')[0];
@@ -262,10 +262,12 @@ app.get('/metrics', async (_req, res) => {
 
 // ── Health check (no auth required) ───────────────────────────────────────────
 app.get('/health', async (req, res) => {
+  const callerIp = getTrustedClientIp(req);
   const diagnostic =
-    req.query.diagnostic === '1' ||
-    req.query.diagnostic === 'true' ||
-    req.query.capacity === '1';
+    isPrivateOrInternalNetwork(callerIp) &&
+    (req.query.diagnostic === '1' ||
+     req.query.diagnostic === 'true' ||
+     req.query.capacity === '1');
   try {
     const { query, poolStats } = require('./db/pool');
     await query('SELECT 1');
