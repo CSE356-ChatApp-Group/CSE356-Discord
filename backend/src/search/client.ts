@@ -784,6 +784,28 @@ async function searchOnce(
 
 // ── Meili-backed search path ──────────────────────────────────────────────────
 
+const MEILI_STRICT_TERM_MIN_LEN = 2;
+
+/**
+ * Split a user query into lowercase terms for strict substring AND matching
+ * (Postgres FTS uses stemming/stopwords; Meili is permissive on typos — this
+ * layer enforces "every meaningful token appears in content" before returning).
+ */
+function tokenizeStrictSearchTerms(raw: string): string[] {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.replace(/^[^\p{L}\p{N}]+/gu, '').replace(/[^\p{L}\p{N}]+$/gu, ''))
+    .filter((t) => t.length >= MEILI_STRICT_TERM_MIN_LEN);
+}
+
+function messageMatchesAllStrictTerms(content: unknown, terms: string[]): boolean {
+  if (!terms.length) return true;
+  const c = String(content || '').toLowerCase();
+  return terms.every((t) => c.includes(t));
+}
+
 /**
  * Given candidate IDs returned by Meilisearch, recheck every one in Postgres:
  *   – permission gates (community membership, channel access, DM participation)
@@ -860,24 +882,21 @@ async function searchWithMeiliBackend(
 
   if (ids.length === 0) {
     const totalMs = Date.now() - tAll;
-    logger.info(
+    meiliClient.incFallbackTotal();
+    logger.warn(
       {
-        search_trace: true,
         requestId,
         query: q,
         resolved_scope: scopeLabel,
-        search_backend: 'meili',
         meili_candidate_count: 0,
-        postgres_rechecked_count: 0,
-        final_hit_count: 0,
         meili_ms: meiliMs,
-        postgres_recheck_ms: 0,
-        fallback_to_postgres: false,
         total_ms: totalMs,
       },
-      'search_trace',
+      'search: meili returned zero candidates, falling back to postgres',
     );
-    return buildResult([], q, Number(opts.offset) || 0, Number(opts.limit) || 20);
+    const fe: any = new Error('meili_empty_candidates');
+    fe.meiliUnavailable = true;
+    throw fe;
   }
 
   // 2 – Postgres recheck (permission enforcement + freshness)
@@ -892,7 +911,41 @@ async function searchWithMeiliBackend(
     throw err;
   }
 
-  const finalHits = rows.filter((r: any) => r && r.id);
+  const terms = tokenizeStrictSearchTerms(q);
+  let strictRows = rows;
+  if (terms.length > 0) {
+    strictRows = rows.filter(
+      (r: any) => r && r.id && messageMatchesAllStrictTerms(r.content, terms),
+    );
+  }
+
+  if (strictRows.length === 0 && ids.length > 0) {
+    meiliClient.incFallbackTotal();
+    const totalMs = Date.now() - tAll;
+    logger.warn(
+      {
+        search_trace: true,
+        requestId,
+        query: q,
+        resolved_scope: scopeLabel,
+        search_backend: 'meili',
+        meili_candidate_count: ids.length,
+        postgres_rechecked_count: rows.filter((r: any) => r && r.id).length,
+        strict_term_count: terms.length,
+        strict_pass_count: 0,
+        reason: 'meili_strict_token_mismatch_fallback_postgres',
+        meili_ms: meiliMs,
+        postgres_recheck_ms: recheckMs,
+        fallback_to_postgres: true,
+        total_ms: totalMs,
+      },
+      'search_trace',
+    );
+    const initialForcePrimary = !SEARCH_USE_READ_REPLICA;
+    return searchOnce(q, opts, initialForcePrimary);
+  }
+
+  const finalHits = strictRows.filter((r: any) => r && r.id);
   const totalMs = Date.now() - tAll;
 
   logger.info(
@@ -903,7 +956,9 @@ async function searchWithMeiliBackend(
       resolved_scope: scopeLabel,
       search_backend: 'meili',
       meili_candidate_count: ids.length,
-      postgres_rechecked_count: ids.length,
+      postgres_rechecked_count: rows.filter((r: any) => r && r.id).length,
+      strict_term_count: terms.length,
+      strict_pass_count: finalHits.length,
       final_hit_count: finalHits.length,
       meili_ms: meiliMs,
       postgres_recheck_ms: recheckMs,
@@ -913,7 +968,7 @@ async function searchWithMeiliBackend(
     'search_trace',
   );
 
-  return buildResult(rows, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+  return buildResult(strictRows, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
 }
 
 async function search(q: string, opts: Record<string, any> = {}): Promise<any> {

@@ -105,6 +105,15 @@ async function main() {
   if (sort.status >= 400) { console.error('ERROR:', sort.body); process.exit(1); }
   console.log('   OK (taskUid:', sort.body?.taskUid, ')');
 
+  // 6 – Typo tolerance (stricter than defaults; app still validates tokens on read path)
+  console.log('\n6) Setting typoTolerance...');
+  const typo = await req(`/indexes/${INDEX}/settings/typo-tolerance`, 'PATCH', {
+    enabled: true,
+    minWordSizeForTypos: { oneTypo: 6, twoTypos: 12 },
+  });
+  if (typo.status >= 400) { console.error('ERROR:', typo.body); process.exit(1); }
+  console.log('   OK (taskUid:', typo.body?.taskUid, ')');
+
   console.log('\n✅ Index setup complete.');
 }
 

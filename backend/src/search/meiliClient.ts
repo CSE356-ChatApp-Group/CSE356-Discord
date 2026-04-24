@@ -33,6 +33,14 @@ const MEILI_TIMEOUT_MS = Math.min(
   5000,
   Math.max(500, parseInt(process.env.MEILI_TIMEOUT_MS || '2000', 10) || 2000),
 );
+const MEILI_WRITE_BATCH_SIZE = Math.max(
+  1,
+  parseInt(process.env.MEILI_WRITE_BATCH_SIZE || '64', 10) || 64,
+);
+const MEILI_WRITE_FLUSH_MS = Math.max(
+  5,
+  parseInt(process.env.MEILI_WRITE_FLUSH_MS || '50', 10) || 50,
+);
 
 function isEnabled(): boolean {
   return (
@@ -80,6 +88,88 @@ const meiliCandidateCount = new client.Histogram({
   help: 'Number of candidate IDs returned by Meilisearch before Postgres recheck',
   buckets: [0, 5, 10, 25, 50, 100, 200, 500],
 });
+
+// ── In-process write batching ────────────────────────────────────────────────
+
+const pendingUpserts = new Map<string, MeiliMessageDoc>();
+let writeFlushTimer: NodeJS.Timeout | null = null;
+let writeFlushInFlight = false;
+let writeFlushQueued = false;
+
+function pendingWriteCount(): number {
+  return pendingUpserts.size;
+}
+
+function clearWriteFlushTimer() {
+  if (!writeFlushTimer) return;
+  clearTimeout(writeFlushTimer);
+  writeFlushTimer = null;
+}
+
+function takePendingUpserts(max: number): MeiliMessageDoc[] {
+  const docs: MeiliMessageDoc[] = [];
+  for (const [id, doc] of pendingUpserts) {
+    pendingUpserts.delete(id);
+    docs.push(doc);
+    if (docs.length >= max) break;
+  }
+  return docs;
+}
+
+function scheduleWriteFlush(immediate = false) {
+  if (immediate || pendingWriteCount() >= MEILI_WRITE_BATCH_SIZE) {
+    clearWriteFlushTimer();
+    setImmediate(() => {
+      void flushPendingWrites();
+    });
+    return;
+  }
+
+  if (writeFlushTimer) return;
+  writeFlushTimer = setTimeout(() => {
+    writeFlushTimer = null;
+    void flushPendingWrites();
+  }, MEILI_WRITE_FLUSH_MS);
+  if (typeof writeFlushTimer.unref === 'function') writeFlushTimer.unref();
+}
+
+async function flushPendingWrites(): Promise<void> {
+  clearWriteFlushTimer();
+  if (writeFlushInFlight) {
+    writeFlushQueued = true;
+    return;
+  }
+
+  writeFlushInFlight = true;
+  try {
+    while (pendingWriteCount() > 0) {
+      writeFlushQueued = false;
+      const docs = takePendingUpserts(MEILI_WRITE_BATCH_SIZE);
+      if (!docs.length) break;
+
+      const t0 = Date.now();
+      try {
+        await batchIndexMessages(docs);
+        meiliIndexDurationMs.observe({ op: 'index' }, Date.now() - t0);
+      } catch (err: any) {
+        meiliIndexFailuresTotal.inc({ op: 'index' }, docs.length);
+        logger.warn(
+          {
+            err: { message: err?.message },
+            messageIds: docs.slice(0, 5).map((doc) => doc.id),
+            batchSize: docs.length,
+          },
+          'meili: batch indexMessage flush failed',
+        );
+      }
+
+      if (!writeFlushQueued && pendingWriteCount() === 0) break;
+    }
+  } finally {
+    writeFlushInFlight = false;
+    if (pendingWriteCount() > 0) scheduleWriteFlush(true);
+  }
+}
 
 // ── Internal HTTP helper ──────────────────────────────────────────────────────
 
@@ -177,6 +267,17 @@ async function setupIndex(): Promise<void> {
     body: ['createdAt'],
     timeoutMs: 5000,
   });
+
+  // Stricter typo behavior than Meili defaults — still a candidate generator; the
+  // app applies strict token AND on Postgres-rechecked rows before returning.
+  await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/settings/typo-tolerance`, {
+    method: 'PATCH',
+    body: {
+      enabled: true,
+      minWordSizeForTypos: { oneTypo: 6, twoTypos: 12 },
+    },
+    timeoutMs: 5000,
+  });
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
@@ -204,21 +305,13 @@ async function checkIndex(): Promise<{ ok: boolean; uid?: string; error?: string
 
 async function indexMessage(msg: MeiliMessageDoc): Promise<void> {
   if (!isEnabled()) return;
-  const t0 = Date.now();
-  try {
-    await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/documents`, {
-      method: 'POST',
-      body: [toDoc(msg)],
-    });
-    meiliIndexDurationMs.observe({ op: 'index' }, Date.now() - t0);
-  } catch (err: any) {
-    meiliIndexFailuresTotal.inc({ op: 'index' });
-    logger.warn({ err: { message: err?.message }, messageId: msg.id }, 'meili: indexMessage failed');
-  }
+  pendingUpserts.set(String(msg.id), toDoc(msg));
+  scheduleWriteFlush();
 }
 
 async function deleteMessage(id: string): Promise<void> {
   if (!isEnabled()) return;
+  pendingUpserts.delete(String(id));
   const t0 = Date.now();
   try {
     await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/documents/${id}`, {

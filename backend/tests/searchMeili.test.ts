@@ -145,7 +145,7 @@ describe('Search – SEARCH_BACKEND=meili basic path', () => {
     expect(res.body.hits[0].id).toBe(messageId);
   });
 
-  it('returns empty results when Meili returns no candidates', async () => {
+  it('falls back to Postgres when Meili returns no candidates', async () => {
     setMeiliMode([]);
 
     const res = await request(app)
@@ -153,7 +153,8 @@ describe('Search – SEARCH_BACKEND=meili basic path', () => {
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hits.length).toBe(0);
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    expect(mockIncFallbackTotal).toHaveBeenCalled();
   });
 
   it('calls meiliClient.searchMessageCandidates with the correct scope', async () => {
@@ -508,5 +509,81 @@ describe('Search – Meili path: Meili error falls back to Postgres', () => {
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBeLessThan(500);
+  });
+});
+
+describe('Search – Meili path: strict token AND + Postgres fallback', () => {
+  it('falls back to Postgres when Meili candidates lack every query term', async () => {
+    const owner = await createAuthenticatedUser('meili-strict-fallback-owner');
+    const community = await createCommunity(owner.accessToken);
+    const channel = await createChannel(owner.accessToken, community.id);
+
+    const partial = await sendMessage(
+      owner.accessToken,
+      channel.id,
+      'strictalpha strictbeta partialonly',
+    );
+    await sendMessage(
+      owner.accessToken,
+      channel.id,
+      'strictalpha strictbeta strictgamma fullphrase',
+    );
+
+    setMeiliMode([partial.id]);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('strictalpha strictbeta strictgamma')}&channelId=${channel.id}`,
+      )
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes('strictgamma'))).toBe(true);
+    expect(mockIncFallbackTotal).toHaveBeenCalled();
+  });
+
+  it('returns Meili-backed rows when every term appears in Postgres-rechecked content', async () => {
+    const owner = await createAuthenticatedUser('meili-strict-pass-owner');
+    const community = await createCommunity(owner.accessToken);
+    const channel = await createChannel(owner.accessToken, community.id);
+    const msg = await sendMessage(
+      owner.accessToken,
+      channel.id,
+      'strictpass one two three',
+    );
+
+    setMeiliMode([msg.id]);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('strictpass one three')}&channelId=${channel.id}`,
+      )
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => h.id === msg.id)).toBe(true);
+  });
+
+  it('strict filter still respects deleted messages from Postgres recheck', async () => {
+    const owner = await createAuthenticatedUser('meili-strict-del-owner');
+    const community = await createCommunity(owner.accessToken);
+    const channel = await createChannel(owner.accessToken, community.id);
+    const msg = await sendMessage(owner.accessToken, channel.id, 'strictdel alpha beta gamma');
+    await request(app)
+      .delete(`/api/v1/messages/${msg.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .expect(200);
+
+    setMeiliMode([msg.id]);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('strictdel alpha beta gamma')}&channelId=${channel.id}`,
+      )
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => h.id === msg.id)).toBe(false);
+    expect(mockIncFallbackTotal).toHaveBeenCalled();
   });
 });
