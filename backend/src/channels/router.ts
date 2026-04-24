@@ -31,6 +31,7 @@ const {
   setJsonCacheWithStale,
   withDistributedSingleflight,
 } = require('../utils/distributedSingleflight');
+const { raceChannelAccess } = require('../messages/channelAccessCache');
 
 const router = express.Router();
 router.use(authenticate);
@@ -102,6 +103,24 @@ async function loadChannelContext(channelId, userId) {
     [channelId, userId]
   );
   return rows[0] || null;
+}
+
+async function checkChannelAccessForUser(channelId: string, userId: string): Promise<boolean> {
+  try {
+    const { rows } = await queryRead(
+      `SELECT EXISTS (
+         SELECT 1 FROM channels c
+         JOIN community_members cm ON cm.community_id = c.community_id AND cm.user_id = $2
+         WHERE c.id = $1
+           AND (c.is_private = FALSE
+                OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
+       ) AS has_access`,
+      [channelId, userId],
+    );
+    return rows[0]?.has_access === true;
+  } catch {
+    return false;
+  }
 }
 
 function canManagePrivateMembership(role) {
@@ -482,12 +501,20 @@ router.get('/:id/members',
   async (req, res, next) => {
     if (!v(req, res)) return;
     try {
-      const channel = await loadChannelContext(req.params.id, req.user.id);
+      const { rows: channelRows } = await queryRead(
+        `SELECT id, community_id, is_private FROM channels WHERE id = $1`,
+        [req.params.id],
+      );
+      const channel = channelRows[0];
       if (!channel) return res.status(404).json({ error: 'Channel not found' });
-      if (!channel.community_role) return res.status(403).json({ error: 'Not a community member' });
-      if (channel.is_private && !channel.is_channel_member && !canManagePrivateMembership(channel.community_role)) {
-        return res.status(403).json({ error: 'Channel not allowed' });
-      }
+
+      const hasAccess = await raceChannelAccess(
+        redis,
+        req.params.id,
+        req.user.id,
+        () => checkChannelAccessForUser(req.params.id, req.user.id),
+      );
+      if (!hasAccess) return res.status(403).json({ error: 'Forbidden' });
 
       const { rows } = await queryRead(
         channel.is_private
