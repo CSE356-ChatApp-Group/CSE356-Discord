@@ -637,18 +637,10 @@ async function ensureChannelAccess(channelId, userId) {
   const { rows } = await query(
     `SELECT 1
      FROM channels c
-     JOIN community_members community_member
-       ON community_member.community_id = c.community_id
-      AND community_member.user_id = $2
      WHERE c.id = $1
-       AND (
-         c.is_private = FALSE
-         OR EXISTS (
-           SELECT 1
-           FROM channel_members cm
-           WHERE cm.channel_id = c.id AND cm.user_id = $2
-         )
-       )`,
+       AND (c.is_private = FALSE
+            OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
+       AND EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2)`,
     [channelId, userId],
   );
   return rows.length > 0;
@@ -1691,34 +1683,18 @@ router.post(
                EXISTS (
                  SELECT 1
                  FROM channels c
-                 JOIN community_members community_member
-                   ON community_member.community_id = c.community_id
-                  AND community_member.user_id = $2
                  WHERE c.id = $1
-                   AND (
-                     c.is_private = FALSE
-                     OR EXISTS (
-                       SELECT 1
-                       FROM channel_members
-                       WHERE channel_id = c.id AND user_id = $2
-                     )
-                   )
+                   AND (c.is_private = FALSE
+                        OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
+                   AND EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2)
                ) AS has_access,
                (
                  SELECT c.community_id
                  FROM channels c
-                 JOIN community_members community_member
-                   ON community_member.community_id = c.community_id
-                  AND community_member.user_id = $2
                  WHERE c.id = $1
-                   AND (
-                     c.is_private = FALSE
-                     OR EXISTS (
-                       SELECT 1
-                       FROM channel_members
-                       WHERE channel_id = c.id AND user_id = $2
-                     )
-                   )
+                   AND (c.is_private = FALSE
+                        OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
+                   AND EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2)
                  LIMIT 1
                ) AS community_id`,
               [channelId, req.user.id],
