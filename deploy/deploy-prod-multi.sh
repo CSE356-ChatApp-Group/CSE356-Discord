@@ -17,6 +17,7 @@
 #
 # Canary: set DEPLOY_STOP_AFTER_VM3=1 to run Phase -1 + Phase 0 + Phase 0.5 only, then exit
 # (deploy VM3 workers, pause rollout, observe before VM2/VM1). Unset for a normal full rollout.
+# SSH: PROD_USER defaults to ubuntu (DB + app hosts); override only if your hosts use another login.
 #
 # VM3 (130.245.136.54)  runs Node workers only; no shared services.
 # VM2 (130.245.136.137) runs Node workers only; no shared services.

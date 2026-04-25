@@ -4,7 +4,7 @@ Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastr
 
 **Metric names, PromQL, and how to export a snapshot for debugging:** [`operations-monitoring.md`](operations-monitoring.md).
 
-**Canary (read receipt shedding vs insert-lock pressure):** [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md) — **prod VM3 first** (`DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>`), 10–15m soak, PromQL `vm3` vs `vm1|vm2`; POST **503** flat/down + correctness are the hard gates (zero read defers during low pressure is OK).
+**Canary (read receipt shedding vs insert-lock pressure):** [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md) — **prod VM3 first** (`PROD_USER=ubuntu DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>`), 10–15m soak, PromQL `vm3` vs `vm1|vm2`; POST **503** flat/down + correctness are the hard gates (zero read defers during low pressure is OK).
 
 ## ChatAppSyntheticProbeFailed
 

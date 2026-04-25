@@ -6,7 +6,7 @@ Conservative `PUT /api/v1/messages/:id/read` soft-defer under per-process channe
 
 ## Prerequisites
 
-- **SSH:** Run deploy from a host that can reach prod over SSH. Keys are usually for **`ubuntu@`** hosts; if your access is **`root@`**, set **`PROD_USER=root`** (and matching `MONITORING_VM_USER` if needed) when invoking `deploy-prod-multi.sh` / `deploy-prod.sh`. Phase -1 hits the **DB VM** (`PROD_DB_HOST`, default `130.245.136.21`); Phase 0 uses **`PROD_HOST`** VM3.
+- **SSH user:** **`ubuntu`** — `deploy-prod-multi.sh` and `deploy-prod.sh` default to **`PROD_USER=ubuntu`** (and `MONITORING_VM_USER` follows `PROD_USER`). Use **`ubuntu@`** on the DB VM, app VMs, and monitoring VM unless your infra overrides `PROD_USER`. Phase -1 SSHs to **`${PROD_USER}@${PROD_DB_HOST}`** (default DB `130.245.136.21`); Phase 0 deploys to **`PROD_HOST`** VM3 as **`${PROD_USER}@<host>`**.
 - **Release = GitHub SHA, not your working tree:** `deploy-prod-multi.sh` installs the artifact **`release-<sha>`** from GitHub Releases. **Commit, push, and wait for CI** to publish that asset before deploying. An uncommitted local tree is not what the script installs.
 
 ## Procedure (VM3 only → pause → observe)
@@ -15,7 +15,7 @@ Conservative `PUT /api/v1/messages/:id/read` soft-defer under per-process channe
 2. **Deploy VM3 only, then stop** — from repo root:
 
    ```bash
-   DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>
+   PROD_USER=ubuntu DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>
    ```
 
    This runs **Phase -1** (Postgres `max_connections` check), **Phase 0** (deploy `130.245.136.54` workers only), **Phase 0.5** (health on all six VM3 ports), then **exits** before VM2/VM1. VM1/nginx unchanged; traffic is still split across all 16 workers, so **~6/16** requests hit the new build.
@@ -29,7 +29,7 @@ Conservative `PUT /api/v1/messages/:id/read` soft-defer under per-process channe
 6. **Resume full rollout** (if gates pass):
 
    ```bash
-   ./deploy/deploy-prod-multi.sh <sha>
+   PROD_USER=ubuntu ./deploy/deploy-prod-multi.sh <sha>
    ```
 
    This runs VM3 again (same sha, typically quick), then VM2, VM1, monitoring sync, etc.
