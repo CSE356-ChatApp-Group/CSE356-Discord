@@ -6,6 +6,7 @@ This document exists so operators (and the coding agent) can **ground decisions 
 
 | Resource | Location |
 |----------|----------|
+| Canary: read receipt insert-lock shedding | [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md) |
 | Alert rules (PromQL) | [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) |
 | Incident steps | [`RUNBOOKS.md`](RUNBOOKS.md) |
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
@@ -40,6 +41,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    Paste the **stdout** or the contents of `var/metrics-snapshot.txt` into the chat. The `var/` directory is gitignored.
 
    The snapshot now includes:
+   - read-receipt insert-lock shed rates, insert-lock timeout/wait quantiles, POST `/messages` p95/p99 by `vm`, and related gauges
    - route p95 latency and request rate
    - p95 business-SQL round-trips per request
    - realtime fanout cache hit/miss/coalesced rates
@@ -76,6 +78,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 | Abuse (auto-ban) | `abuse_auto_ban_blocks_total`, `abuse_auto_ban_issued_total` | **403** from temporary Redis IP ban (`AUTO_IP_BAN_ENABLED`); bans issued after sustained rate-limit **429** strikes (external IPs only). |
 | Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_candidates`, `fanout_target_cache_total`, `conversation_fanout_targets_cache_version_retry_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total` | Fanout health, Redis publish multiplier, candidate audience size before recent-connect filtering, target-cache effectiveness, conversation fanout cache invalidation races, WS bootstrap breadth, and slow clients. |
 | Messages | `message_post_response_total`, `message_post_idempotency_poll_total`, `message_post_idempotency_poll_wait_ms`, `message_cache_bust_failures_total` | POST outcomes; idempotency duplicate-lease polls (`outcome=replay_201|exhausted_409`) and wait histogram; cache bust issues. |
+| Read receipts (insert lock) | `read_receipt_shed_total{reason="message_channel_insert_lock_pressure"}`, `read_receipt_requests_total{result="deferred_message_channel_insert_lock_pressure"}`, `message_channel_insert_lock_total`, `message_channel_insert_lock_wait_ms`, `message_channel_insert_lock_pressure_wait_p95_ms`, `message_channel_insert_lock_pressure_recent_timeout_count` | Soft-defer `PUT /messages/:id/read` under per-process lock pressure; see [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md). |
 | Optional RUM | `client_web_vital_*`, `client_rum_batches_total` | Browser-side; requires `ENABLE_CLIENT_RUM` + built frontend flags. |
 | Memory | `process_resident_memory_bytes{job="chatapp-api"}` | **Per Node process** (each `chatapp@` port is a target). **`ChatAppHighMemoryUsage`** in [`alerts.yml`](../infrastructure/monitoring/alerts.yml) fires when RSS **> ~650 MiB for 10m** per target — tune if VM RAM or worker count changes. Grafana overview panel overlays the same threshold. |
 

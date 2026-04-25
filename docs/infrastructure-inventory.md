@@ -1,6 +1,6 @@
 # Infrastructure Inventory
 
-Last updated: 2026-04-23
+Last updated: 2026-04-25
 
 This is the source of truth for current environment shape. Update this file whenever VM sizing, hosts, or provider changes.
 
@@ -23,5 +23,5 @@ This is the source of truth for current environment shape. Update this file when
 
 - Capacity comparisons should use staging app VM (8 vCPU) vs production app VM (8 vCPU).
 - Staging default shape is dual-worker (`CHATAPP_INSTANCES=2`); for production worker-scaling experiments, temporarily match the intended prod worker count.
-- **Multi-VM production** (`deploy/deploy-prod-multi.sh`): **16** Node workers total — VM1 **`chatapp@4000`–`chatapp@4003`** (4), VM2 and VM3 **`chatapp@4000`–`chatapp@4005`** (6 each); nginx on VM1 `upstream app` lists VM1 localhost ports plus VM2/VM3 private IPs. The **monitoring VM** Prometheus scrapes **`/metrics` on every worker port on each app private IP** (see `deploy/render-prometheus-host-config.py` and Phase 5 in `deploy-prod-multi.sh`). Single-VM `deploy-prod.sh` still uses **`CHATAPP_INSTANCES`** from the host’s `/opt/chatapp/shared/.env` (often 2–5 workers).
+- **Multi-VM production** (`deploy/deploy-prod-multi.sh`): **16** Node workers total — VM1 **`chatapp@4000`–`chatapp@4003`** (4), VM2 and VM3 **`chatapp@4000`–`chatapp@4005`** (6 each); nginx on VM1 `upstream app` lists VM1 localhost ports plus VM2/VM3 private IPs. The **monitoring VM** Prometheus scrapes **`/metrics` on every worker port on each app private IP** (see `deploy/render-prometheus-host-config.py` and Phase 5 in `deploy-prod-multi.sh`). Each scrape target is labeled **`vm`** (`vm1` \| `vm2` \| `vm3`) for canary slices. **VM3-only prod canary:** `DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>` runs Phase -1 + VM3 deploy + health, then **exits**; soak 10–15m comparing **`vm="vm3"`** vs **`vm=~"vm1|vm2"`** (see [`docs/canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md)). For insert-lock / read-receipt changes, **prefer this prod VM3 path over staging**—staging has not matched prod pressure reliably. Single-VM `deploy-prod.sh` still uses **`CHATAPP_INSTANCES`** from the host’s `/opt/chatapp/shared/.env` (often 2–5 workers).
 - If infra changes, update this file and mention the date in the "Last updated" line.

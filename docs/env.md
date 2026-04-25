@@ -93,6 +93,9 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PG_POOL_MAX`, `POOL_CIRCUIT_BREAKER_QUEUE` | Pool size and circuit-breaker queue |
 | `PG_SLOW_QUERY_MS`, `PG_CONNECTION_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS` | Pool behavior |
 | `READ_RECEIPT_DEFER_POOL_WAITING` | Soft-defer `PUT /messages/:id/read` when pool waiters reach this threshold (default 8) to protect message-post and read/list latency under burst |
+| `MESSAGE_INSERT_LOCK_PRESSURE_WINDOW_MS` | Rolling window (ms) for in-process channel insert lock wait samples and timeout markers used for read-receipt shedding (default **30000**, clamped **5000–120000**) |
+| `READ_SHED_MESSAGE_INSERT_LOCK_WAIT_P95_MS` | When successful insert-lock waits in the window reach this **p95** (ms), soft-defer `PUT /messages/:id/read` (default **400**, clamped **250–500**). Also defers if **any** lock timeout occurred in the window |
+| `READ_SHED_MESSAGE_INSERT_LOCK_MIN_SAMPLES_FOR_P95` | Minimum acquire samples in the window before the p95 rule can trigger (default **8**, max **100**); timeout-in-window always triggers alone |
 | **Overload / degradation** | |
 | `OVERLOAD_RSS_WARN_MB`, `OVERLOAD_RSS_HIGH_MB`, `OVERLOAD_RSS_CRITICAL_MB` | RSS thresholds (MB) |
 | `OVERLOAD_LAG_WARN_MS`, `OVERLOAD_LAG_HIGH_MS`, `OVERLOAD_LAG_CRITICAL_MS` | Event-loop p99 lag (ms) |

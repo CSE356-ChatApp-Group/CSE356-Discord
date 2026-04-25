@@ -15,6 +15,9 @@
 #   --rollback    Pass through to all VM deploys (fast rollback mode)
 #   --dry-run     Show what will be deployed without making changes
 #
+# Canary: set DEPLOY_STOP_AFTER_VM3=1 to run Phase -1 + Phase 0 + Phase 0.5 only, then exit
+# (deploy VM3 workers, pause rollout, observe before VM2/VM1). Unset for a normal full rollout.
+#
 # VM3 (130.245.136.54)  runs Node workers only; no shared services.
 # VM2 (130.245.136.137) runs Node workers only; no shared services.
 # VM1 (130.245.136.44)  runs Node workers + PgBouncer + MinIO + nginx.
@@ -102,6 +105,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "    Phase -1:  Pre-flight PostgreSQL check"
   echo "    Phase  0:  Deploy to VM3 (6 workers: 4000-4005)"
   echo "    Phase 0.5: Verify VM3 workers"
+  if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
+    echo "    (CANARY) STOP after VM3 — DEPLOY_STOP_AFTER_VM3=1"
+  fi
   echo "    Phase  1:  Deploy to VM2 (6 workers: 4000-4005)"
   echo "    Phase  2:  Verify VM2 workers"
   echo "    Phase  3:  Deploy to VM1 (4 workers: 4000-4003)"
@@ -195,6 +201,17 @@ if [ "$all_ok" -ne 1 ]; then
   exit 1
 fi
 echo "✓ All VM3 workers healthy"
+
+if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
+  echo ""
+  echo "======================================================================"
+  echo "=== CANARY: DEPLOY_STOP_AFTER_VM3=1 — rollout paused here.        ==="
+  echo "=== VM3 (${VM3}) runs the new build; VM1/VM2 unchanged.            ==="
+  echo "=== Soak 10–15m; compare Prometheus vm=vm3 vs vm=~\"vm1|vm2\".      ==="
+  echo "=== Resume: unset DEPLOY_STOP_AFTER_VM3 && ./deploy/deploy-prod-multi.sh ${SHA}"
+  echo "======================================================================"
+  exit 0
+fi
 
 # ── Phase 1: Deploy to VM2 ───────────────────────────────────────────────────
 # Same traffic caveat as Phase 0: VM1 nginx upstream lists VM2 workers; rolling them

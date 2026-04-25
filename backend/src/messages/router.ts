@@ -42,7 +42,12 @@ const {
   messageCacheBustFailuresTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
+  readReceiptShedTotal,
+  readReceiptRequestsTotal,
 } = require("../utils/metrics");
+const {
+  getShouldDeferReadReceiptForInsertLockPressure,
+} = require("./messageInsertLockPressure");
 const { authenticate } = require("../middleware/authenticate");
 const { messagesHotPathLimiter } = require("../middleware/inMemoryApiLimiter");
 const {
@@ -2394,6 +2399,19 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
   ) {
     return res.json({ success: true, deferred: true, reason: "pool_waiting" });
+  }
+  if (getShouldDeferReadReceiptForInsertLockPressure()) {
+    readReceiptShedTotal.inc({
+      reason: "message_channel_insert_lock_pressure",
+    });
+    readReceiptRequestsTotal.inc({
+      result: "deferred_message_channel_insert_lock_pressure",
+    });
+    return res.json({
+      success: true,
+      deferred: true,
+      reason: "message_channel_insert_lock_pressure",
+    });
   }
   // Under sustained pressure, keep the cheap cursor advance but drop realtime
   // read-receipt fanout so Redis pub/sub does not sit in the request amplifier.

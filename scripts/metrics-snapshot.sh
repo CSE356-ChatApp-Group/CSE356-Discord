@@ -49,6 +49,17 @@ queries=(
   'sum(rate(endpoint_list_cache_total{job="chatapp-api"}[5m])) by (endpoint, result)'
   'sum by (outcome) (rate(message_post_idempotency_poll_total{job="chatapp-api"}[5m]))'
   'histogram_quantile(0.95, sum by (le, outcome) (rate(message_post_idempotency_poll_wait_ms_bucket{job="chatapp-api"}[5m])))'
+  # Read-receipt insert-lock shedding + POST/read SLO helpers (canary gates)
+  'sum by (vm) (rate(read_receipt_shed_total{job="chatapp-api",reason="message_channel_insert_lock_pressure"}[5m]))'
+  'sum by (vm, status_code) (rate(message_post_response_total{job="chatapp-api"}[5m]))'
+  'sum by (vm, status_class) (rate(http_server_requests_total{job="chatapp-api",method="PUT",route="/api/v1/messages/:id/read"}[5m]))'
+  'sum by (vm, result) (rate(message_channel_insert_lock_total{job="chatapp-api"}[5m]))'
+  'histogram_quantile(0.95, sum by (le, vm) (rate(message_channel_insert_lock_wait_ms_bucket{job="chatapp-api",result="acquired"}[5m])))'
+  'histogram_quantile(0.99, sum by (le, vm) (rate(message_channel_insert_lock_wait_ms_bucket{job="chatapp-api",result="acquired"}[5m])))'
+  'histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))'
+  'histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))'
+  'max by (vm, instance) (message_channel_insert_lock_pressure_recent_timeout_count{job="chatapp-api"})'
+  'max by (vm, instance) (message_channel_insert_lock_pressure_wait_p95_ms{job="chatapp-api"})'
 )
 
 run() {

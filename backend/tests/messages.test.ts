@@ -7,6 +7,12 @@ import { request, app, wsServer, pool, redis, closeRedisConnections } from './ru
 
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
 const { flushDirtyReadStatesToDB, enqueueBatchReadStateUpdate } = require('../src/messages/batchReadState');
+const {
+  recordMessageChannelInsertLockAcquireWait,
+  recordMessageChannelInsertLockTimeoutEvent,
+  resetMessageChannelInsertLockPressureForTests,
+  getShouldDeferReadReceiptForInsertLockPressure,
+} = require('../src/messages/messageInsertLockPressure');
 const { pgBusinessSqlQueriesPerRequestHistogram } = require('../src/utils/metrics');
 
 function messagesRouteSqlHistogramSnapshot() {
@@ -237,6 +243,173 @@ describe('Read state writes', () => {
       [owner.user.id, channelId],
     );
     expect(rsRows[0]?.last_read_message_id ?? null).not.toBe(messageId);
+  });
+});
+
+describe('Read receipt insert lock pressure shedding', () => {
+  afterEach(() => {
+    resetMessageChannelInsertLockPressureForTests();
+  });
+
+  it('defers PUT /read when channel insert lock p95 pressure is high', async () => {
+    resetMessageChannelInsertLockPressureForTests();
+    const owner = await createAuthenticatedUser('readlockshed');
+    const slug = `read-lock-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'insert lock read shed' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `read-lock-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const msgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'before pressure' });
+    expect(msgRes.status).toBe(201);
+    const messageId = msgRes.body.message.id;
+
+    for (let i = 0; i < 8; i += 1) {
+      recordMessageChannelInsertLockAcquireWait(450);
+    }
+    expect(getShouldDeferReadReceiptForInsertLockPressure()).toBe(true);
+
+    const readRes = await request(app)
+      .put(`/api/v1/messages/${messageId}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(readRes.status).toBe(200);
+    expect(readRes.body).toMatchObject({
+      success: true,
+      deferred: true,
+      reason: 'message_channel_insert_lock_pressure',
+    });
+  });
+
+  it('defers PUT /read after a recent channel insert lock timeout marker', async () => {
+    resetMessageChannelInsertLockPressureForTests();
+    const owner = await createAuthenticatedUser('readlockto');
+    const slug = `read-lock-to-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'insert lock timeout read shed' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `read-lock-to-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const msgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'timeout pressure' });
+    expect(msgRes.status).toBe(201);
+
+    recordMessageChannelInsertLockTimeoutEvent();
+    const readRes = await request(app)
+      .put(`/api/v1/messages/${msgRes.body.message.id}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(readRes.status).toBe(200);
+    expect(readRes.body.reason).toBe('message_channel_insert_lock_pressure');
+  });
+
+  it('does not advance read cursor when PUT /read is deferred for insert lock pressure', async () => {
+    resetMessageChannelInsertLockPressureForTests();
+    const owner = await createAuthenticatedUser('readlockcursor');
+    const slug = `read-lock-cur-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'cursor skip under shed' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `read-lock-cur-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const m1 = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'c1' });
+    const m2 = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'c2' });
+    const m3 = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'c3' });
+    expect([m1.status, m2.status, m3.status].every((s) => s === 201)).toBe(true);
+    const id2 = m2.body.message.id;
+    const id3 = m3.body.message.id;
+
+    await request(app)
+      .put(`/api/v1/messages/${id2}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    await flushDirtyReadStatesToDB();
+    const mid = await pool.query(
+      `SELECT last_read_message_id::text AS id FROM read_states WHERE user_id = $1 AND channel_id = $2`,
+      [owner.user.id, channelId],
+    );
+    expect(mid.rows[0]?.id).toBe(id2);
+
+    for (let i = 0; i < 8; i += 1) {
+      recordMessageChannelInsertLockAcquireWait(450);
+    }
+    const deferredRead = await request(app)
+      .put(`/api/v1/messages/${id3}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(deferredRead.body.deferred).toBe(true);
+    await flushDirtyReadStatesToDB();
+    const after = await pool.query(
+      `SELECT last_read_message_id::text AS id FROM read_states WHERE user_id = $1 AND channel_id = $2`,
+      [owner.user.id, channelId],
+    );
+    expect(after.rows[0]?.id).toBe(id2);
+  });
+
+  it('still accepts POST /messages when read shedding is active from insert lock pressure', async () => {
+    resetMessageChannelInsertLockPressureForTests();
+    const owner = await createAuthenticatedUser('readlockpost');
+    const slug = `read-lock-post-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'post under read shed' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `read-lock-post-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    for (let i = 0; i < 8; i += 1) {
+      recordMessageChannelInsertLockAcquireWait(450);
+    }
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'posted under pressure' });
+    expect(postRes.status).toBe(201);
+    expect(postRes.body.message.content).toBe('posted under pressure');
   });
 });
 

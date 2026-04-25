@@ -267,6 +267,8 @@ CHATAPP_INSTANCES=4 ./deploy/deploy-prod.sh <commit-sha>
 
 **GitHub Actions:** manual prod deploy passes `chatapp_instances` (default **4** via `CHATAPP_INSTANCES_PROD` repo variable or literal `4` in `deploy-manual.yml`). Set repo variable `CHATAPP_INSTANCES_PROD` lower only if you intentionally run a smaller worker pool.
 
+**Three-app-VM production** (`./deploy/deploy-prod-multi.sh <sha>`): deploys VM3 → VM2 → VM1 with per-VM PgBouncer. For a **VM3-only canary** (pause before VM2/VM1), run `DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>`; see [`docs/canary-read-receipt-insert-lock-shedding.md`](../docs/canary-read-receipt-insert-lock-shedding.md).
+
 This:
 1. Confirms you want to deploy to production (interactive prompt)
 2. Backs up production database

@@ -15,6 +15,10 @@ const {
   messageChannelInsertLockTotal,
   messageChannelInsertLockWaitMs,
 } = require('../utils/metrics');
+const {
+  recordMessageChannelInsertLockAcquireWait,
+  recordMessageChannelInsertLockTimeoutEvent,
+} = require('./messageInsertLockPressure');
 
 const tail = new Map<string, Promise<unknown>>();
 
@@ -116,6 +120,7 @@ async function acquireChannelInsertLease(
           result: waitMs === 0 ? 'acquired_immediate' : 'acquired_after_wait',
         });
         messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, waitMs);
+        recordMessageChannelInsertLockAcquireWait(waitMs);
         if (waitMs >= 100) {
           logger.info(
             { channelId, requestId: opts.requestId, waitMs },
@@ -144,6 +149,7 @@ async function acquireChannelInsertLease(
   const waitMs = Math.max(0, Date.now() - startedAt);
   messageChannelInsertLockTotal.inc({ result: 'timeout' });
   messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, waitMs);
+  recordMessageChannelInsertLockTimeoutEvent();
   logger.warn(
     { channelId, requestId: opts.requestId, waitMs },
     'POST /messages channel insert lock timed out',

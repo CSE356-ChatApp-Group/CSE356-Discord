@@ -202,6 +202,32 @@ const messageChannelInsertLockWaitMs = new client.Histogram({
   buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 });
 
+/** PUT /messages/:id/read early soft-defer events by reason. */
+const readReceiptShedTotal = new client.Counter({
+  name: 'read_receipt_shed_total',
+  help: 'PUT /messages/:id/read requests soft-deferred before handler work, by reason',
+  labelNames: ['reason'],
+});
+
+/** PUT /messages/:id/read labeled outcomes (sparse priming for deferred paths). */
+const readReceiptRequestsTotal = new client.Counter({
+  name: 'read_receipt_requests_total',
+  help: 'PUT /messages/:id/read outcomes by result label',
+  labelNames: ['result'],
+});
+
+/** Rolling-window p95 insert-lock wait (ms) on this worker; updated when evaluating read shed. */
+const messageChannelInsertLockPressureWaitP95MsGauge = new client.Gauge({
+  name: 'message_channel_insert_lock_pressure_wait_p95_ms',
+  help: 'Rolling-window p95 wait for successful channel insert lock acquires (read shed signal)',
+});
+
+/** Count of insert-lock timeouts in the rolling pressure window on this worker. */
+const messageChannelInsertLockPressureRecentTimeoutsGauge = new client.Gauge({
+  name: 'message_channel_insert_lock_pressure_recent_timeout_count',
+  help: 'Channel insert lock timeouts in the rolling MESSAGE_INSERT_LOCK_PRESSURE_WINDOW_MS window',
+});
+
 /** WebSocket connection outcomes (upgrade + auth + bootstrap failures). */
 const wsConnectionResultTotal = new client.Counter({
   name: 'ws_connection_result_total',
@@ -705,6 +731,13 @@ function startPgPoolMetrics(pool) {
     messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, 0);
     messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, 0);
     messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, 0);
+    readReceiptShedTotal.inc({ reason: 'message_channel_insert_lock_pressure' }, 0);
+    readReceiptRequestsTotal.inc(
+      { result: 'deferred_message_channel_insert_lock_pressure' },
+      0,
+    );
+    messageChannelInsertLockPressureWaitP95MsGauge.set(0);
+    messageChannelInsertLockPressureRecentTimeoutsGauge.set(0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
     messageIngestStreamAppendedTotal.inc({ result: 'error' }, 0);
     messageIngestStreamConsumedTotal.inc({ result: 'ack' }, 0);
@@ -834,6 +867,10 @@ module.exports = {
   messagePostRateLimitHitsTotal,
   messageChannelInsertLockTotal,
   messageChannelInsertLockWaitMs,
+  readReceiptShedTotal,
+  readReceiptRequestsTotal,
+  messageChannelInsertLockPressureWaitP95MsGauge,
+  messageChannelInsertLockPressureRecentTimeoutsGauge,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
   channelAccessCacheTotal,
