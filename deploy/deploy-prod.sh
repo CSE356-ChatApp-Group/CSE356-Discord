@@ -767,6 +767,10 @@ gate_current_symlink_ok() {
 }
 
 gate_ingress_post_deploy() {
+  if [ "${SKIP_INGRESS_POST_DEPLOY:-0}" = "1" ]; then
+    echo "Gate: ingress /health burst skipped (SKIP_INGRESS_POST_DEPLOY=1 — worker-only host, no local nginx :80)"
+    return 0
+  fi
   local secs="${INGRESS_POST_DEPLOY_SECONDS:-20}"
   echo "Gate: ingress /health burst (${secs}s via nginx :80)..."
   if ! ssh_prod "
@@ -2764,13 +2768,17 @@ fi
 # 12. Final health check
 echo "12. Final verification..."
 if gate_same_release && gate_all_worker_health && gate_upstream_parity && gate_current_symlink_ok && gate_ingress_post_deploy; then
-  echo "Running prod nginx parity audit after deploy..."
-  if ! run_local_prod_nginx_audit; then
-    echo "ERROR: post-deploy prod nginx parity audit failed."
-    rollback_cutover
-    exit 1
+  if [ "${SKIP_INGRESS_POST_DEPLOY:-0}" = "1" ]; then
+    echo "Skipping post-deploy prod nginx parity audit (SKIP_INGRESS_POST_DEPLOY=1 — worker-only host)"
+  else
+    echo "Running prod nginx parity audit after deploy..."
+    if ! run_local_prod_nginx_audit; then
+      echo "ERROR: post-deploy prod nginx parity audit failed."
+      rollback_cutover
+      exit 1
+    fi
+    echo "✓ Prod nginx parity audit passed"
   fi
-  echo "✓ Prod nginx parity audit passed"
   deploy_log_phase "final gates + nginx audit OK"
   notify_discord_prod ":white_check_mark: **Prod deploy succeeded** \`${RELEASE_SHA:0:7}\` · ${CHATAPP_INSTANCES} workers"
   echo "✓ Production deployment SUCCESSFUL"
