@@ -13,7 +13,6 @@
 "use strict";
 
 const redis = require("../db/redis");
-const fanout = require("../websocket/fanout");
 const { publishUserFeedTargets } = require("../websocket/userFeed");
 const { query, withTransaction } = require("../db/pool");
 const overload = require("../utils/overload");
@@ -119,6 +118,36 @@ async function getPresenceFanoutTargets(userId) {
   return targets;
 }
 
+async function getPresenceFanoutRecipientUserIds(userId, targets) {
+  const communityIds = [...new Set(
+    (targets?.communityIds || []).filter((communityId) => typeof communityId === 'string' && communityId)
+  )];
+  const conversationIds = [...new Set(
+    (targets?.conversationIds || []).filter((conversationId) => typeof conversationId === 'string' && conversationId)
+  )];
+
+  const { rows } = await query(
+    `SELECT DISTINCT recipient_id::text AS user_id
+       FROM (
+         SELECT $1::uuid AS recipient_id
+         UNION
+         SELECT cm.user_id AS recipient_id
+           FROM community_members cm
+          WHERE cm.community_id = ANY($2::uuid[])
+         UNION
+         SELECT cp.user_id AS recipient_id
+           FROM conversation_participants cp
+          WHERE cp.conversation_id = ANY($3::uuid[])
+            AND cp.left_at IS NULL
+       ) recipients`,
+    [userId, communityIds, conversationIds],
+  );
+
+  return rows
+    .map((row) => row.user_id)
+    .filter((value) => typeof value === 'string' && value);
+}
+
 function normalizeAwayMessage(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -217,21 +246,16 @@ async function setPresence(userId, status, awayMessage) {
       },
     };
 
-    // Publish to the user's personal channel first.
-    await publishUserFeedTargets([userId], payload);
-
     try {
-      const { communityIds, conversationIds } = await getPresenceFanoutTargets(userId);
-      await Promise.allSettled([
-        ...communityIds.map((communityId) =>
-          fanout.publish(`community:${communityId}`, payload),
-        ),
-        ...conversationIds.map((conversationId) =>
-          fanout.publish(`conversation:${conversationId}`, payload),
-        ),
-      ]);
+      const targets = await getPresenceFanoutTargets(userId);
+      const recipientUserIds = await getPresenceFanoutRecipientUserIds(userId, targets);
+      await publishUserFeedTargets(
+        recipientUserIds.length ? recipientUserIds : [userId],
+        payload,
+      );
     } catch (err) {
-      logger.debug({ err, userId }, 'Presence secondary fanout lookup failed');
+      logger.debug({ err, userId }, 'Presence recipient fanout lookup failed');
+      await publishUserFeedTargets([userId], payload);
     }
   }
 

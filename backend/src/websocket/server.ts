@@ -825,7 +825,8 @@ function isReliableRealtimeEvent(eventName) {
   if (eventName.startsWith("message:")) return true;
 
   return (
-    eventName === "conversation:invited"
+    eventName === "read:updated"
+    || eventName === "conversation:invited"
     || eventName === "conversation:invite"
     || eventName === "conversation:created"
     || eventName === "conversation:participant_added"
