@@ -1726,16 +1726,22 @@ wss.on("connection", async (ws, req) => {
       logger.warn({ err, userId: user.id }, "WS presence setup failed"),
     );
 
-  bootstrapWithRetry(ws, user.id)
-    .then(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws._lastDataFrameAt = Date.now();
-        ws.send(JSON.stringify({ event: 'ready' }));
-      }
-    })
+  const bootstrapSubscriptionsPromise = bootstrapWithRetry(ws, user.id);
+  bootstrapSubscriptionsPromise
     .catch((err) => {
       wsConnectionResultTotal.inc({ result: "bootstrap_failed" });
       logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed");
+    });
+
+  Promise.all([ws._bootstrapPromise, bootstrapSubscriptionsPromise])
+    .then(() => {
+      if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) {
+        return;
+      }
+      ws._lastDataFrameAt = Date.now();
+      ws.send(JSON.stringify({ event: 'ready' }));
+    })
+    .catch(() => {
     });
 });
 

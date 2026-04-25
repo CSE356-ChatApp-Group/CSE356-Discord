@@ -48,12 +48,32 @@ function publishConversationEvents(targets, event, data) {
   ]);
 }
 
-async function publishConversationInviteNotifications(targets, data) {
+async function publishConversationEventsStrict(targets, event, data) {
+  const uniqueTargets = [...new Set(targets.filter(Boolean))];
+  if (!uniqueTargets.length) return;
+
+  const payload = wrapFanoutPayload(event, data);
+  const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
+
+  await Promise.all([
+    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
+    ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
+  ]);
+}
+
+async function publishConversationInviteNotifications(
+  targets,
+  data,
+  options: { strict?: boolean } = {}
+) {
   // Emit compatibility aliases because different clients/tests may listen for
   // either invited/invite/created when a user is added to a DM conversation.
   const inviteEvents = ['conversation:invited', 'conversation:invite', 'conversation:created'];
-  await Promise.allSettled(
-    inviteEvents.map((event) => publishConversationEvents(targets, event, data))
+  const publishEvent = options.strict
+    ? publishConversationEventsStrict
+    : publishConversationEvents;
+  await Promise.all(
+    inviteEvents.map((event) => publishEvent(targets, event, data))
   );
 }
 
@@ -497,7 +517,8 @@ router.post('/',
             conversationId: conversation.id,
             invitedBy: req.user.id,
             participantIds: invitedUserIds,
-          }
+          },
+          { strict: true }
         );
       }
 
@@ -705,8 +726,12 @@ async function addParticipantsHandler(req, res, next) {
         [
           `conversation:${req.params.id}`,
           ...currentParticipantIds.map((participantId) => `user:${participantId}`),
-          ...participantIdsToAdd.map((participantId) => `user:${participantId}`),
         ],
+        'conversation:participant_added',
+        sharedEventData
+      );
+      await publishConversationEventsStrict(
+        participantIdsToAdd.map((participantId) => `user:${participantId}`),
         'conversation:participant_added',
         sharedEventData
       );
@@ -715,15 +740,23 @@ async function addParticipantsHandler(req, res, next) {
     if (participantIdsToAdd.length) {
       // Push subscribe_channels to newly added participants so active WS sessions
       // subscribe to the conversation channel without waiting for a reconnect.
-      publishUserFeedTargets(participantIdsToAdd, {
-        __wsInternal: {
-          kind: 'subscribe_channels',
-          channels: [`conversation:${req.params.id}`],
-        },
-      }).catch(() => {});
+      try {
+        await publishUserFeedTargets(participantIdsToAdd, {
+          __wsInternal: {
+            kind: 'subscribe_channels',
+            channels: [`conversation:${req.params.id}`],
+          },
+        });
+      } catch (err) {
+        logger.warn(
+          { err, conversationId: req.params.id, participantCount: participantIdsToAdd.length },
+          'subscribe_channels push failed (group DM invite)',
+        );
+      }
       await publishConversationInviteNotifications(
         participantIdsToAdd.map((participantId) => `user:${participantId}`),
-        sharedEventData
+        sharedEventData,
+        { strict: true }
       );
     }
 
