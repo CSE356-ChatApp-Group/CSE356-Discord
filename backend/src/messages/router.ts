@@ -176,7 +176,7 @@ const {
   publishChannelMessageEvent,
 } = require("./channelRealtimeFanout");
 const { appendChannelMessageIngested } = require("./messageIngestLog");
-const { enqueueBatchReadStateUpdate } = require("./batchReadState");
+const { batchReadStateRedisKeys } = require("./batchReadState");
 const { getConversationFanoutTargets } = require("./conversationFanoutTargets");
 const {
   publishUserFeedTargets,
@@ -448,14 +448,6 @@ const READ_RECEIPT_DEFER_POOL_WAITING =
   Number.isFinite(_readReceiptDeferWaiting) && _readReceiptDeferWaiting >= 0
     ? _readReceiptDeferWaiting
     : 8;
-const _readReceiptDedupeTtl = parseInt(
-  process.env.READ_RECEIPT_DEDUPE_TTL_SECS || "604800",
-  10,
-);
-const READ_RECEIPT_DEDUPE_TTL_SECS =
-  Number.isFinite(_readReceiptDedupeTtl) && _readReceiptDedupeTtl > 0
-    ? _readReceiptDedupeTtl
-    : 604800;
 /** Log `dm_fanout_timing` for every `message:*` DM publish when true; else only if total >= min ms. */
 const DM_FANOUT_TIMING_LOG =
   String(process.env.DM_FANOUT_TIMING_LOG || "").toLowerCase() === "all" ||
@@ -484,14 +476,18 @@ const READ_DB_LOCK_TTL_MS = parseInt(
   process.env.READ_DB_LOCK_TTL_MS || "500",
   10,
 );
-// Two-key Lua script:
+// Four-key Lua script:
 //   KEYS[1] = cursor key (read_cursor_ts:...)
 //   KEYS[2] = db_lock key (read_db_lock:...)
+//   KEYS[3] = pending read-state hash key (rs:pending:...)
+//   KEYS[4] = dirty set key (rs:dirty)
 //   ARGV[1] = new timestamp ms, ARGV[2] = cursor TTL secs, ARGV[3] = db_lock TTL ms
+//   ARGV[4] = dirty member, ARGV[5] = message id, ARGV[6] = message created_at
+//   ARGV[7] = channel id, ARGV[8] = conversation id, ARGV[9] = pending TTL secs
 // Returns 0: cursor already at/ahead — skip entirely.
 //         1: cursor advanced, but DB write rate-limited by lock — skip DB.
-//         2: cursor advanced AND db_lock acquired — fire DB write.
-const READ_CURSOR_ADVANCE_LUA = `
+//         2: cursor advanced AND dirty read-state payload enqueued.
+const READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA = `
 local current = redis.call('GET', KEYS[1])
 local new_ts = tonumber(ARGV[1])
 if current and tonumber(current) >= new_ts then
@@ -500,9 +496,28 @@ end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
 local locked = redis.call('SET', KEYS[2], '1', 'NX', 'PX', tonumber(ARGV[3]))
 if locked then
+  redis.call(
+    'HSET',
+    KEYS[3],
+    'msg_id', ARGV[5],
+    'msg_created_at', ARGV[6],
+    'channel_id', ARGV[7],
+    'conversation_id', ARGV[8]
+  )
+  redis.call('EXPIRE', KEYS[3], tonumber(ARGV[9]))
+  redis.call('SADD', KEYS[4], ARGV[4])
   return 2
 end
 return 1
+`;
+
+const RESET_UNREAD_WATERMARK_LUA = `
+local current = redis.call('GET', KEYS[1])
+if current then
+  redis.call('SET', KEYS[2], current, 'EX', tonumber(ARGV[1]))
+  return 1
+end
+return 0
 `;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -516,13 +531,6 @@ function validate(req, res) {
   return true;
 }
 
-function readReceiptDedupeKey(userId, channelId, conversationId) {
-  if (channelId) return `read_receipt:last:${userId}:channel:${channelId}`;
-  if (conversationId)
-    return `read_receipt:last:${userId}:conversation:${conversationId}`;
-  throw new Error("read receipt scope required");
-}
-
 function readCursorTsKey(userId, channelId, conversationId) {
   if (channelId) return `read_cursor_ts:${userId}:ch:${channelId}`;
   if (conversationId) return `read_cursor_ts:${userId}:cv:${conversationId}`;
@@ -533,52 +541,6 @@ function readDbLockKey(userId, channelId, conversationId) {
   if (channelId) return `read_db_lock:${userId}:ch:${channelId}`;
   if (conversationId) return `read_db_lock:${userId}:cv:${conversationId}`;
   throw new Error("read db lock scope required");
-}
-
-async function getCachedReadReceiptMessageId(
-  userId,
-  channelId,
-  conversationId,
-) {
-  try {
-    return await redis.get(
-      readReceiptDedupeKey(userId, channelId, conversationId),
-    );
-  } catch {
-    return null;
-  }
-}
-
-async function getCachedReadCursorTs(
-  userId,
-  channelId,
-  conversationId,
-) {
-  try {
-    const raw = await redis.get(readCursorTsKey(userId, channelId, conversationId));
-    const parsed = Number(raw || 0);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-  } catch {
-    return 0;
-  }
-}
-
-async function rememberReadReceiptMessageId(
-  userId,
-  channelId,
-  conversationId,
-  messageId,
-) {
-  try {
-    await redis.set(
-      readReceiptDedupeKey(userId, channelId, conversationId),
-      String(messageId),
-      "EX",
-      READ_RECEIPT_DEDUPE_TTL_SECS,
-    );
-  } catch {
-    // Fail open: dedupe cache is an optimization only.
-  }
 }
 
 /**
@@ -903,23 +865,40 @@ async function advanceReadStateCursor({
   // PUT /read response time is Redis-bound (~1ms) rather than DB-bound (~10ms).
   // The DB write still happens — it's just not in the critical path.
   //
-  // Fail-open: Redis unavailable → redisAdvanced=true → fall through to sync DB.
+  // Fail-open matches the previous behavior: if Redis fails, acknowledge the
+  // read without blocking HTTP on a direct read_states write.
   const newTs = String(new Date(messageCreatedAt).getTime());
   const cursorKey = readCursorTsKey(userId, channelId, conversationId);
   const dbLockKey = readDbLockKey(userId, channelId, conversationId);
+  const batchKeys = batchReadStateRedisKeys(userId, channelId, conversationId);
+  const messageCreatedAtStr =
+    typeof messageCreatedAt === "string"
+      ? messageCreatedAt
+      : new Date(messageCreatedAt).toISOString();
   let casResult: number = 2; // default: attempt DB write
   try {
+    if (!batchKeys) {
+      return { applied: null, didAdvanceCursor: false };
+    }
     casResult = (await redis.eval(
-      READ_CURSOR_ADVANCE_LUA,
-      2,
+      READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA,
+      4,
       cursorKey,
       dbLockKey,
+      batchKeys.pendingKey,
+      batchKeys.dirtySetKey,
       newTs,
       String(READ_CURSOR_TS_TTL_SECS),
       String(READ_DB_LOCK_TTL_MS),
+      batchKeys.dirtyKey,
+      messageId,
+      messageCreatedAtStr,
+      channelId ?? "",
+      conversationId ?? "",
+      String(batchKeys.pendingTtlSeconds),
     )) as number;
   } catch {
-    // Redis unavailable: conservative fallback — allow DB write
+    // Redis unavailable: preserve fail-open read receipt behavior.
     casResult = 2;
   }
 
@@ -939,19 +918,9 @@ async function advanceReadStateCursor({
     };
   }
 
-  // casResult === 2: enqueue to Redis batch flusher instead of a per-row DB write.
-  // flushDirtyReadStatesToDB() runs every READ_STATE_FLUSH_INTERVAL_MS and upserts
-  // all dirty entries in a single UNNEST query, eliminating per-row lock contention.
-  void enqueueBatchReadStateUpdate(
-    userId,
-    channelId,
-    conversationId,
-    messageId,
-    messageCreatedAt,
-  );
-
-  // Return synthetic applied immediately — caller uses last_read_at only for the
-  // WS publish payload timestamp, which NOW() on the app server is fine for.
+  // casResult === 2: the same Redis script already enqueued the dirty read-state
+  // payload for the background DB flusher. Return synthetic applied immediately;
+  // caller uses last_read_at only for the WS publish payload timestamp.
   return {
     applied: {
       last_read_message_id: messageId,
@@ -2474,28 +2443,6 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     const uid = req.user.id;
     const messageId = req.params.id;
     const messageCreatedAt = target.created_at;
-    const cachedMessageId = await getCachedReadReceiptMessageId(
-      uid,
-      channel_id,
-      conversation_id,
-    );
-
-    if (cachedMessageId && String(cachedMessageId) === String(messageId)) {
-      return res.json({ success: true });
-    }
-
-    const messageCreatedAtMs = new Date(messageCreatedAt).getTime();
-    const cachedCursorTs = await getCachedReadCursorTs(
-      uid,
-      channel_id,
-      conversation_id,
-    );
-    if (
-      Number.isFinite(messageCreatedAtMs) &&
-      cachedCursorTs >= messageCreatedAtMs
-    ) {
-      return res.json({ success: true });
-    }
 
     const { applied, didAdvanceCursor } = await advanceReadStateCursor({
       userId: uid,
@@ -2506,14 +2453,6 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     });
 
     if (!didAdvanceCursor) {
-      if (String(applied?.last_read_message_id || "") === String(messageId)) {
-        await rememberReadReceiptMessageId(
-          uid,
-          channel_id,
-          conversation_id,
-          messageId,
-        );
-      }
       return res.json({ success: true });
     }
 
@@ -2530,21 +2469,37 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
       lastReadAt: applied?.last_read_at || new Date().toISOString(),
     };
 
-    // Await Redis fanout before HTTP 200 so strict graders (delivery-after-success)
-    // do not observe a race; mirrors POST /messages awaiting publish before 201.
+    const publishReadUpdated = async () => {
+      if (conversation_id) {
+        await publishConversationEventNow(
+          conversation_id,
+          "read:updated",
+          payload,
+        );
+      } else {
+        // Channel read cursors are private: fan out only to the reader's user topic
+        // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
+        // which would leak other members' read positions to WebSocket clients.
+        await publishUserFeedTargets([uid], {
+          event: "read:updated",
+          data: payload,
+        });
+      }
+    };
+
+    // Read receipts are best-effort realtime hints. Do not put Redis pub/sub
+    // fanout on the HTTP critical path for the dominant read-state route.
     if (conversation_id) {
-      await publishConversationEventNow(
-        conversation_id,
-        "read:updated",
-        payload,
-      );
+      setImmediate(() => {
+        publishReadUpdated().catch((err) => {
+          logger.warn({ err, conversation_id, messageId }, "read receipt fanout failed");
+        });
+      });
     } else {
-      // Channel read cursors are private: fan out only to the reader's user topic
-      // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
-      // which would leak other members' read positions to WebSocket clients.
-      await publishUserFeedTargets([uid], {
-        event: "read:updated",
-        data: payload,
+      setImmediate(() => {
+        publishReadUpdated().catch((err) => {
+          logger.warn({ err, channel_id, messageId }, "read receipt fanout failed");
+        });
       });
     }
 
@@ -2553,15 +2508,13 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
       try {
         const countKey = `channel:msg_count:${channel_id}`;
         const readKey = `user:last_read_count:${channel_id}:${uid}`;
-        const currentCount = await redis.get(countKey);
-        if (currentCount !== null) {
-          await redis.set(
-            readKey,
-            currentCount,
-            "EX",
-            USER_LAST_READ_COUNT_REDIS_TTL_SEC,
-          );
-        }
+        await redis.eval(
+          RESET_UNREAD_WATERMARK_LUA,
+          2,
+          countKey,
+          readKey,
+          String(USER_LAST_READ_COUNT_REDIS_TTL_SEC),
+        );
       } catch (err) {
         logger.warn(
           { err, channel_id },
@@ -2569,13 +2522,6 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
         );
       }
     }
-
-    await rememberReadReceiptMessageId(
-      uid,
-      channel_id,
-      conversation_id,
-      messageId,
-    );
 
     res.json({ success: true });
   } catch (err) {

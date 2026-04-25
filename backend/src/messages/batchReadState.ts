@@ -20,6 +20,7 @@ const logger = require('../utils/logger');
 const RS_DIRTY_SET = 'rs:dirty';
 const RS_PENDING_KEY_PREFIX = 'rs:pending:';
 const RS_FLUSH_LOCK_KEY = 'rs:flush:lock';
+const RS_PENDING_TTL_SECS = 86400;
 
 const READ_STATE_FLUSH_INTERVAL_MS = parseInt(
   process.env.READ_STATE_FLUSH_INTERVAL_MS || '10000', 10,
@@ -27,6 +28,13 @@ const READ_STATE_FLUSH_INTERVAL_MS = parseInt(
 const READ_STATE_FLUSH_BATCH_SIZE = Math.min(
   200,
   Math.max(25, parseInt(process.env.READ_STATE_FLUSH_BATCH_SIZE || '100', 10) || 100),
+);
+const READ_STATE_FLUSH_SCAN_COUNT = Math.min(
+  1000,
+  Math.max(
+    READ_STATE_FLUSH_BATCH_SIZE,
+    parseInt(process.env.READ_STATE_FLUSH_SCAN_COUNT || '200', 10) || 200,
+  ),
 );
 const READ_STATE_FLUSH_LOCK_TTL_MS = Math.min(
   60000,
@@ -150,6 +158,20 @@ async function runReadStateBatchUpsert(params: [
   }
 }
 
+async function readDirtyKeysBatch(): Promise<string[]> {
+  if (typeof redis.sscan === 'function') {
+    const result = await redis.sscan(
+      RS_DIRTY_SET,
+      '0',
+      'COUNT',
+      READ_STATE_FLUSH_SCAN_COUNT,
+    );
+    const keys = Array.isArray(result) ? result[1] : [];
+    return Array.isArray(keys) ? keys : [];
+  }
+  return redis.smembers(RS_DIRTY_SET);
+}
+
 /**
  * Enqueue a read_state update to Redis. Returns immediately (sub-ms).
  * The background flush interval will upsert to DB within READ_STATE_FLUSH_INTERVAL_MS.
@@ -182,12 +204,27 @@ async function enqueueBatchReadStateUpdate(
         'channel_id', channelId ?? '',
         'conversation_id', conversationId ?? '',
       )
-      .expire(pendingKey, 86400) // 24h TTL — prevents unbounded memory from inactive (user, target) pairs
+      .expire(pendingKey, RS_PENDING_TTL_SECS) // 24h TTL — prevents unbounded memory from inactive (user, target) pairs
       .sadd(RS_DIRTY_SET, dirtyKey)
       .exec();
   } catch (err: any) {
     logger.warn({ err, userId, channelId, conversationId, messageId }, 'batchReadState Redis enqueue failed');
   }
+}
+
+function batchReadStateRedisKeys(
+  userId: string,
+  channelId: string | null | undefined,
+  conversationId: string | null | undefined,
+) {
+  const targetId = channelId ?? conversationId;
+  if (!targetId) return null;
+  return {
+    dirtySetKey: RS_DIRTY_SET,
+    dirtyKey: `${userId}|${targetId}`,
+    pendingKey: `${RS_PENDING_KEY_PREFIX}${userId}:${targetId}`,
+    pendingTtlSeconds: RS_PENDING_TTL_SECS,
+  };
 }
 
 /**
@@ -204,7 +241,7 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
     if (!flushLockToken) return;
 
     try {
-      dirtyKeys = await redis.smembers(RS_DIRTY_SET);
+      dirtyKeys = await readDirtyKeysBatch();
     } catch {
       return;
     }
@@ -318,6 +355,7 @@ function startReadStateFlushInterval(intervalMs: number = READ_STATE_FLUSH_INTER
 
 module.exports = {
   enqueueBatchReadStateUpdate,
+  batchReadStateRedisKeys,
   flushDirtyReadStatesToDB,
   startReadStateFlushInterval,
 };
