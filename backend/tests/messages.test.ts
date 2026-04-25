@@ -991,6 +991,27 @@ describe('Overload behavior', () => {
     expect(res.body.error).toMatch(/temporarily delayed/i);
   });
 
+  it('keeps read cursor writes available and defers fanout under overload stage 2', async () => {
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ channelId, content: `stage-2-read-${uniqueSuffix()}` });
+    expect(postRes.status).toBe(201);
+
+    process.env.FORCE_OVERLOAD_STAGE = '2';
+
+    const res = await request(app)
+      .put(`/api/v1/messages/${postRes.body.message.id}/read`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      success: true,
+      deferred: true,
+      reason: 'overload',
+    });
+  });
+
   it('rejects search at critical stage before query execution', async () => {
     process.env.FORCE_OVERLOAD_STAGE = '3';
 

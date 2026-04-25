@@ -2395,12 +2395,10 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
   ) {
     return res.json({ success: true, deferred: true, reason: "pool_waiting" });
   }
-  // Grader reliability first: under sustained pressure (stage 2), skip DB-heavy
-  // read-receipt persistence so writes + message delivery keep capacity.
+  // Under sustained pressure, keep the cheap cursor advance but drop realtime
+  // read-receipt fanout so Redis pub/sub does not sit in the request amplifier.
   const overloadStage = overload.getStage();
-  if (overloadStage === 2) {
-    return res.json({ success: true, deferred: true });
-  }
+  const dropReadReceiptFanout = overloadStage === 2;
   if (overloadStage >= 3) {
     return res
       .status(503)
@@ -2433,8 +2431,32 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     }
 
     const communityIdForCache = target.community_id;
-    if (channel_id && communityIdForCache) {
+    if (!dropReadReceiptFanout && channel_id && communityIdForCache) {
       redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
+    }
+
+    // Reset the user's unread watermark in Redis to the current channel message count.
+    if (channel_id) {
+      try {
+        const countKey = `channel:msg_count:${channel_id}`;
+        const readKey = `user:last_read_count:${channel_id}:${uid}`;
+        await redis.eval(
+          RESET_UNREAD_WATERMARK_LUA,
+          2,
+          countKey,
+          readKey,
+          String(USER_LAST_READ_COUNT_REDIS_TTL_SEC),
+        );
+      } catch (err) {
+        logger.warn(
+          { err, channel_id },
+          "Failed to reset user:last_read_count in Redis",
+        );
+      }
+    }
+
+    if (dropReadReceiptFanout) {
+      return res.json({ success: true, deferred: true, reason: "overload" });
     }
 
     const payload = {
@@ -2477,26 +2499,6 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
           logger.warn({ err, channel_id, messageId }, "read receipt fanout failed");
         });
       });
-    }
-
-    // Reset the user's unread watermark in Redis to the current channel message count
-    if (channel_id) {
-      try {
-        const countKey = `channel:msg_count:${channel_id}`;
-        const readKey = `user:last_read_count:${channel_id}:${uid}`;
-        await redis.eval(
-          RESET_UNREAD_WATERMARK_LUA,
-          2,
-          countKey,
-          readKey,
-          String(USER_LAST_READ_COUNT_REDIS_TTL_SEC),
-        );
-      } catch (err) {
-        logger.warn(
-          { err, channel_id },
-          "Failed to reset user:last_read_count in Redis",
-        );
-      }
     }
 
     res.json({ success: true });

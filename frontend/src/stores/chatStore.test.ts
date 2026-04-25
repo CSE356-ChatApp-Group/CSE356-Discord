@@ -2,10 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { wsManager } from '../lib/ws';
 import { resetChatStore, useChatStore } from './chatStore';
 
-const { apiDelete, apiGet, apiPost, invalidateApiCache } = vi.hoisted(() => ({
+const { apiDelete, apiGet, apiPost, apiPut, invalidateApiCache } = vi.hoisted(() => ({
   apiDelete: vi.fn(),
   apiGet: vi.fn(),
   apiPost: vi.fn(),
+  apiPut: vi.fn(),
   invalidateApiCache: vi.fn(),
 }));
 
@@ -15,7 +16,7 @@ vi.mock('../lib/api', () => ({
     post: apiPost,
     postForm: vi.fn(),
     patch: vi.fn(),
-    put: vi.fn(),
+    put: apiPut,
     delete: apiDelete,
   },
   invalidateApiCache,
@@ -24,6 +25,7 @@ vi.mock('../lib/api', () => ({
 import { useAuthStore } from './authStore';
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   useAuthStore.setState({ user: null });
   resetChatStore();
@@ -569,6 +571,95 @@ describe('chatStore quick actions', () => {
     } as any);
 
     expect(apiGet).toHaveBeenCalledWith('/messages?channelId=ch-1&limit=50');
+  });
+});
+
+describe('chatStore read mark suppression', () => {
+  it('coalesces live-tail read updates to the newest visible message per channel', async () => {
+    vi.useFakeTimers();
+    apiPut.mockResolvedValue({ success: true });
+    useAuthStore.setState({
+      user: { id: 'user-1', username: 'sam', displayName: 'Sam', email: 'sam@example.com' },
+    } as any);
+    useChatStore.setState({
+      activeChannel: { id: 'ch-1', community_id: 'comm-1', name: 'general' },
+      channels: [{ id: 'ch-1', community_id: 'comm-1', name: 'general' }],
+      messages: { 'ch-1': [] },
+      messagePagination: { 'ch-1': { hasOlder: false, hasNewer: false } },
+    } as any);
+
+    for (const [id, seconds] of [
+      ['m-1', 1],
+      ['m-2', 2],
+      ['m-3', 3],
+    ] as const) {
+      useChatStore.getState()._handleWsEvent({
+        event: 'message:created',
+        data: {
+          id,
+          channel_id: 'ch-1',
+          author_id: 'user-2',
+          content: id,
+          created_at: `2026-01-01T00:00:0${seconds}.000Z`,
+        },
+      });
+    }
+
+    expect(apiPut).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(apiPut).toHaveBeenCalledTimes(1);
+    expect(apiPut).toHaveBeenCalledWith('/messages/m-3/read');
+  });
+
+  it('sends a read update on channel-open when the latest message is ahead of the last read cursor', async () => {
+    apiPut.mockResolvedValue({ success: true });
+    const messages = [
+      { id: 'm-old', channel_id: 'ch-1', content: 'old', created_at: '2026-01-01T00:00:01.000Z' },
+      { id: 'm-new', channel_id: 'ch-1', content: 'new', created_at: '2026-01-01T00:00:02.000Z' },
+    ];
+    const channel = {
+      id: 'ch-1',
+      community_id: 'comm-1',
+      name: 'general',
+      my_last_read_message_id: 'm-old',
+    };
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'Community' },
+      channels: [channel],
+      messages: { 'ch-1': messages },
+      messagePagination: { 'ch-1': { hasOlder: false, hasNewer: false } },
+    } as any);
+
+    await useChatStore.getState().selectChannel(channel as any);
+
+    expect(apiPut).toHaveBeenCalledWith('/messages/m-new/read');
+  });
+
+  it('does not send a channel-open read update when the latest loaded message is already read', async () => {
+    apiPut.mockResolvedValue({ success: true });
+    const latest = {
+      id: 'm-read',
+      channel_id: 'ch-1',
+      content: 'already read',
+      created_at: '2026-01-01T00:00:00.000Z',
+    };
+    const channel = {
+      id: 'ch-1',
+      community_id: 'comm-1',
+      name: 'general',
+      my_last_read_message_id: 'm-read',
+    };
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'Community' },
+      channels: [channel],
+      messages: { 'ch-1': [latest] },
+      messagePagination: { 'ch-1': { hasOlder: false, hasNewer: false } },
+    } as any);
+
+    await useChatStore.getState().selectChannel(channel as any);
+
+    expect(apiPut).not.toHaveBeenCalled();
   });
 });
 
@@ -1232,4 +1323,3 @@ describe('search filters', () => {
     expect(list.find((m: any) => m.id === 'm-ws')?.content).toBe('from websocket first');
   });
 });
-
