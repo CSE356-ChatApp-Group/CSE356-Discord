@@ -134,8 +134,11 @@ async function loadMessageTargetFromReplicaThenPrimary(messageId, userId) {
   return loadMessageTargetFromPrimary(messageId, userId);
 }
 
-async function loadMessageTargetForUser(messageId, userId) {
+async function loadMessageTargetForUser(messageId, userId, options: {
+  preferCache?: boolean;
+} = {}) {
   const cacheKey = `msg_target:${messageId}:${userId}`;
+  const preferCache = options.preferCache === true;
 
   const cachedPromise = MSG_TARGET_CACHE_TTL_SECS > 0
     ? readScopedVersionedJsonCache({
@@ -144,6 +147,28 @@ async function loadMessageTargetForUser(messageId, userId) {
         isPayload: isMessageTargetCachePayload,
       })
     : Promise.resolve(null);
+
+  if (preferCache) {
+    const cached = await cachedPromise;
+    if (cached?.data?.has_access) {
+      return cached.data;
+    }
+
+    const row = await loadMessageTargetFromReplicaThenPrimary(messageId, userId);
+    if (row && row.has_access && MSG_TARGET_CACHE_TTL_SECS > 0) {
+      const scope = rowAccessScope(row);
+      if (scope) {
+        writeScopedVersionedJsonCache({
+          redis,
+          cacheKey,
+          scope,
+          ttlSeconds: MSG_TARGET_CACHE_TTL_SECS,
+          payloadWithoutVersion: { data: row },
+        }).catch(() => {});
+      }
+    }
+    return row;
+  }
 
   const dbPromise = loadMessageTargetFromReplicaThenPrimary(messageId, userId);
 

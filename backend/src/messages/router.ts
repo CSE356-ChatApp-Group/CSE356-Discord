@@ -549,6 +549,20 @@ async function getCachedReadReceiptMessageId(
   }
 }
 
+async function getCachedReadCursorTs(
+  userId,
+  channelId,
+  conversationId,
+) {
+  try {
+    const raw = await redis.get(readCursorTsKey(userId, channelId, conversationId));
+    const parsed = Number(raw || 0);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function rememberReadReceiptMessageId(
   userId,
   channelId,
@@ -2448,7 +2462,9 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
       .json({ error: "Read receipts temporarily delayed under high load" });
   }
   try {
-    const target = await loadMessageTargetForUser(req.params.id, req.user.id);
+    const target = await loadMessageTargetForUser(req.params.id, req.user.id, {
+      preferCache: true,
+    });
     if (!target) return res.status(404).json({ error: "Message not found" });
     if (!target.has_access) {
       return res.status(403).json({ error: "Access denied" });
@@ -2465,6 +2481,19 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     );
 
     if (cachedMessageId && String(cachedMessageId) === String(messageId)) {
+      return res.json({ success: true });
+    }
+
+    const messageCreatedAtMs = new Date(messageCreatedAt).getTime();
+    const cachedCursorTs = await getCachedReadCursorTs(
+      uid,
+      channel_id,
+      conversation_id,
+    );
+    if (
+      Number.isFinite(messageCreatedAtMs) &&
+      cachedCursorTs >= messageCreatedAtMs
+    ) {
       return res.json({ success: true });
     }
 

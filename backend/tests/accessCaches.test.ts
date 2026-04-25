@@ -28,7 +28,11 @@ const {
   loadMessageTargetForUser,
 } = require('../src/messages/accessCaches') as {
   channelIdIfOnlyConversationQueryParam: (uuid: string, userId: string) => Promise<string | null>;
-  loadMessageTargetForUser: (messageId: string, userId: string) => Promise<any>;
+  loadMessageTargetForUser: (
+    messageId: string,
+    userId: string,
+    options?: { preferCache?: boolean },
+  ) => Promise<any>;
 };
 
 describe('accessCaches version-aware invalidation', () => {
@@ -84,6 +88,28 @@ describe('accessCaches version-aware invalidation', () => {
 
     expect(result).toEqual({ id: 'm-1', has_access: true, channel_id: 'channel-1' });
     expect(queryRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('avoids the replica query on fresh msg_target cache hits when preferCache is enabled', async () => {
+    redis.get
+      .mockResolvedValueOnce(JSON.stringify({
+        data: { id: 'm-hot', has_access: true, channel_id: 'channel-hot' },
+        scope: { kind: 'channel', id: 'channel-hot' },
+        version: 9,
+      }))
+      .mockResolvedValueOnce('9');
+
+    const result = await loadMessageTargetForUser('m-hot', 'user-hot', {
+      preferCache: true,
+    });
+
+    expect(result).toEqual({
+      id: 'm-hot',
+      has_access: true,
+      channel_id: 'channel-hot',
+    });
+    expect(queryRead).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('falls back to primary when the read replica misses a fresh message target', async () => {
