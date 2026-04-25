@@ -75,8 +75,18 @@ const READ_STATE_BATCH_UPSERT_SQL = `
     last_read_message_created_at = EXCLUDED.last_read_message_created_at,
     last_read_at = NOW()
   WHERE
-    read_states.last_read_message_created_at IS NULL
-    OR EXCLUDED.last_read_message_created_at >= read_states.last_read_message_created_at
+    (
+      read_states.last_read_message_created_at IS NULL
+      OR EXCLUDED.last_read_message_created_at > read_states.last_read_message_created_at
+      OR (
+        EXCLUDED.last_read_message_created_at = read_states.last_read_message_created_at
+        AND read_states.last_read_message_id IS DISTINCT FROM EXCLUDED.last_read_message_id
+      )
+    )
+    AND (
+      read_states.last_read_message_id IS DISTINCT FROM EXCLUDED.last_read_message_id
+      OR read_states.last_read_message_created_at IS DISTINCT FROM EXCLUDED.last_read_message_created_at
+    )
 `;
 
 function sleep(ms: number) {
