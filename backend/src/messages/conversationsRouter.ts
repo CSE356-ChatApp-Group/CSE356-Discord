@@ -37,6 +37,7 @@ const CONVERSATION_FIELDS =
   'c.id, c.name, c.created_by, c.created_at, c.updated_at, c.is_group, c.last_message_id, c.last_message_author_id, c.last_message_at';
 const CONVERSATION_LIST_FIELDS =
   'c.id, c.name, c.created_by, c.created_at, c.updated_at, c.is_group';
+const INVITE_NOTIFICATION_RETRY_DELAY_MS = 75;
 
 function publishConversationEvents(targets, event, data) {
   const uniqueTargets = [...new Set(targets.filter(Boolean))];
@@ -75,6 +76,26 @@ async function publishConversationInviteNotifications(
   await Promise.all(
     inviteEvents.map((event) => publishEvent(targets, event, data))
   );
+}
+
+function scheduleInvitedUserRealtimeRetry(targets, data) {
+  const uniqueTargets = [...new Set((Array.isArray(targets) ? targets : []).filter(Boolean))];
+  if (!uniqueTargets.length) return;
+
+  setTimeout(() => {
+    Promise.allSettled([
+      publishConversationEventsStrict(uniqueTargets, 'conversation:participant_added', data),
+      publishConversationInviteNotifications(uniqueTargets, data, { strict: true }),
+    ]).then((results) => {
+      const rejected = results.find((result) => result.status === 'rejected');
+      if (rejected?.status === 'rejected') {
+        logger.warn(
+          { err: rejected.reason, targetCount: uniqueTargets.length, conversationId: data?.conversationId },
+          'group DM invite realtime retry failed',
+        );
+      }
+    }).catch(() => {});
+  }, INVITE_NOTIFICATION_RETRY_DELAY_MS);
 }
 
 function getParticipantInputs(body: Record<string, any> = {}) {
@@ -722,6 +743,7 @@ async function addParticipantsHandler(req, res, next) {
     };
 
     if (participantIdsToAdd.length) {
+      const invitedUserTargets = participantIdsToAdd.map((participantId) => `user:${participantId}`);
       await publishConversationEvents(
         [
           `conversation:${req.params.id}`,
@@ -731,13 +753,15 @@ async function addParticipantsHandler(req, res, next) {
         sharedEventData
       );
       await publishConversationEventsStrict(
-        participantIdsToAdd.map((participantId) => `user:${participantId}`),
+        invitedUserTargets,
         'conversation:participant_added',
         sharedEventData
       );
+      scheduleInvitedUserRealtimeRetry(invitedUserTargets, sharedEventData);
     }
 
     if (participantIdsToAdd.length) {
+      const invitedUserTargets = participantIdsToAdd.map((participantId) => `user:${participantId}`);
       // Push subscribe_channels to newly added participants so active WS sessions
       // subscribe to the conversation channel without waiting for a reconnect.
       try {
@@ -754,7 +778,7 @@ async function addParticipantsHandler(req, res, next) {
         );
       }
       await publishConversationInviteNotifications(
-        participantIdsToAdd.map((participantId) => `user:${participantId}`),
+        invitedUserTargets,
         sharedEventData,
         { strict: true }
       );
