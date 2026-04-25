@@ -68,6 +68,7 @@ const READ_STATE_BATCH_UPSERT_SQL = `
       UNNEST($4::uuid[])        AS msg_id,
       UNNEST($5::timestamptz[]) AS msg_created_at
   ) v
+  JOIN messages ON messages.id = v.msg_id
   ORDER BY v.user_id, COALESCE(v.channel_id, v.conversation_id)
   ON CONFLICT (user_id, COALESCE(channel_id, conversation_id)) DO UPDATE SET
     last_read_message_id = EXCLUDED.last_read_message_id,
