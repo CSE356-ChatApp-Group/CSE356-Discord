@@ -1359,7 +1359,17 @@ async function invalidateWsBootstrapCaches(userIds) {
     );
   }
   if (!keys.length) return;
-  await redis.unlink(...keys);
+  // Batch into ≤500 keys per UNLINK to avoid blocking Redis event loop on large community invalidations.
+  const UNLINK_BATCH = 500;
+  if (keys.length <= UNLINK_BATCH) {
+    await redis.unlink(...keys);
+    return;
+  }
+  const pipeline = redis.pipeline();
+  for (let i = 0; i < keys.length; i += UNLINK_BATCH) {
+    pipeline.unlink(...keys.slice(i, i + UNLINK_BATCH));
+  }
+  await pipeline.exec();
 }
 
 function wsAutoSubscribeMode() {
