@@ -3,6 +3,10 @@
 # Deploy to production using candidate-port cutover.
 # Usage: ./deploy-prod.sh <release-sha> [--rollback]
 #
+# Avoid GitHub at deploy time (no gh / rate limits): build a tarball that matches CI
+# (see scripts/package-release-artifact.sh), then:
+#   LOCAL_ARTIFACT_PATH=/abs/path/to/releases/chatapp-<sha>.tar.gz ./deploy-prod.sh <sha>
+#
 # Flags:
 #   --rollback     Fast rollback to <release-sha> (already on server). Skips backup,
 #                  artifact download, npm ci, migrations, pgbouncer, monitoring.
@@ -1205,14 +1209,31 @@ if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
   echo "3. Using local artifact..."
   cp "$LOCAL_ARTIFACT_PATH" "$DOWNLOAD_PATH"
 else
-  echo "3. Downloading artifact..."
-  gh release download "release-${RELEASE_SHA}" -R "$GITHUB_REPO" \
-    -p "chatapp-${RELEASE_SHA}.tar.gz" -O "$DOWNLOAD_PATH" || {
-    echo "ERROR: Failed to download artifact."
+  echo "3. Downloading artifact from GitHub Releases..."
+  _gh_download_ok=0
+  for _attempt in 1 2 3 4 5; do
+    if gh release download "release-${RELEASE_SHA}" -R "$GITHUB_REPO" \
+      -p "chatapp-${RELEASE_SHA}.tar.gz" -O "$DOWNLOAD_PATH"; then
+      _gh_download_ok=1
+      break
+    fi
+    if [[ "${_attempt}" -lt 5 ]]; then
+      echo "WARN: gh release download failed (attempt ${_attempt}/5); sleeping 30s..."
+      sleep 30
+    fi
+  done
+  if [[ "${_gh_download_ok}" -ne 1 ]]; then
+    echo "ERROR: Failed to download artifact after 5 attempts."
+    echo "      Build locally: ./scripts/package-release-artifact.sh"
+    echo "      Then: LOCAL_ARTIFACT_PATH=\$PWD/releases/chatapp-${RELEASE_SHA}.tar.gz ./deploy/deploy-prod.sh ${RELEASE_SHA}"
     exit 1
-  }
+  fi
 fi
 echo "✓ Artifact ready locally"
+
+# 3b. SHA-256 of bytes we are about to ship (detect local corruption / truncates before scp).
+ARTIFACT_SHA256=$(openssl dgst -sha256 "$DOWNLOAD_PATH" | awk '{print $2}')
+echo "Artifact SHA256 (local): ${ARTIFACT_SHA256}"
 
 # 4. Copy to production server
 echo "4. Copying to production..."
@@ -1231,11 +1252,20 @@ echo "✓ Copied to production"
 echo "5. Unpacking candidate release..."
 ssh_prod "
   set -e
+  REMOTE_TGZ=/tmp/chatapp-${RELEASE_SHA}.tar.gz
+  GOT=\$(openssl dgst -sha256 \"\$REMOTE_TGZ\" | awk '{print \$2}')
+  if [ \"\$GOT\" != \"${ARTIFACT_SHA256}\" ]; then
+    echo \"ERROR: artifact SHA256 mismatch after copy (truncated or corrupted transfer)\"
+    echo \"  expected: ${ARTIFACT_SHA256}\"
+    echo \"  actual:   \$GOT\"
+    exit 1
+  fi
+  echo \"✓ Artifact SHA256 verified on host\"
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
   
   mkdir -p $RELEASE_DIR
   mkdir -p \$RELEASE_PATH
-  tar xzf /tmp/chatapp-${RELEASE_SHA}.tar.gz -C \$RELEASE_PATH
+  tar xzf \"\$REMOTE_TGZ\" -C \$RELEASE_PATH
   
   # Install backend dependencies
   cd \$RELEASE_PATH/backend

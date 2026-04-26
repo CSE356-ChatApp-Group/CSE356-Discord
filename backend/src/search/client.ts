@@ -25,10 +25,22 @@ const meiliClient = require('./meiliClient');
 
 const SEARCH_USE_READ_REPLICA =
   String(process.env.SEARCH_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
-const STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT = Math.min(
-  Math.max(parseInt(process.env.STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT || '750', 10), 500),
-  1000,
-);
+/**
+ * Max recent messages scanned per scope before applying literal substring
+ * (community: per channel). Evaluated per query (not at module load).
+ * Default 750, clamped 10..2000 so tests can lower the cap; production should
+ * keep STOPWORD_LITERAL_RECENT_* unset or within ~500–1000 per ops guidance.
+ */
+function literalRecentCandidateCap(): number {
+  const raw = parseInt(
+    process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT ||
+      process.env.STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT ||
+      '750',
+    10,
+  );
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 750;
+  return Math.min(Math.max(v, 10), 2000);
+}
 
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
@@ -548,9 +560,6 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
   const scope = buildScopedAccessParts(params, opts);
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
-  const rawQueryPh = p(params, q);
-  const limitPh = p(params, limit);
-  const offsetPh = p(params, offset);
 
   if (!scope) {
     return {
@@ -562,9 +571,15 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
     };
   }
 
+  // Parameter order must match SQL text: scope ids (in CTE), author/time, query string,
+  // recent candidate cap, page limit, offset.
+  const authorTimeFilters = buildAuthorTimeFilters(params, opts, 'm0');
+  const rawQueryPh = p(params, q);
+  const recentCapPh = p(params, literalRecentCandidateCap());
+  const limitPh = p(params, limit);
+  const offsetPh = p(params, offset);
+
   if (scope.scopeType === 'community') {
-    const authorTimeFilters = buildAuthorTimeFilters(params, opts, 'm0');
-    const recentPerChannelLimitPh = p(params, STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT);
     return {
       sql: `
         WITH ${scope.cte.trim()},
@@ -605,7 +620,7 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
               AND m0.channel_id = cc.id
               ${authorTimeFilters}
             ORDER BY m0.created_at DESC, m0.id DESC
-            LIMIT ${recentPerChannelLimitPh}
+            LIMIT ${recentCapPh}
           ) m ON TRUE
           JOIN users u ON u.id = m.author_id
           WHERE position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
@@ -619,22 +634,92 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
     };
   }
 
-  const filters = buildFilters(params, opts);
+  if (scope.scopeType === 'conversation' && scope.targetIdPh && scope.userIdPh) {
+    return {
+      sql: `
+        WITH ${scope.cte.trim()}
+        SELECT scope_access.has_access AS "__scopeAccess",
+          search_rows.*
+        FROM scope_access
+        LEFT JOIN LATERAL (
+          SELECT ${SELECT_COLS}
+          FROM (
+            SELECT m0.id,
+                   m0.content,
+                   m0.author_id,
+                   m0.channel_id,
+                   m0.conversation_id,
+                   m0.created_at
+            FROM messages m0
+            INNER JOIN conversation_participants cp_gate
+              ON cp_gate.conversation_id = m0.conversation_id
+             AND cp_gate.conversation_id = ${scope.targetIdPh}
+             AND cp_gate.user_id = ${scope.userIdPh}
+             AND cp_gate.left_at IS NULL
+            WHERE m0.deleted_at IS NULL
+              AND m0.conversation_id = ${scope.targetIdPh}
+              ${authorTimeFilters}
+            ORDER BY m0.created_at DESC, m0.id DESC
+            LIMIT ${recentCapPh}
+          ) m
+          JOIN users u ON u.id = m.author_id
+          LEFT JOIN channels ch ON ch.id = m.channel_id
+          WHERE position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+          ORDER BY m.created_at DESC, m.id DESC
+          LIMIT ${limitPh} OFFSET ${offsetPh}
+        ) search_rows ON scope_access.has_access = TRUE`,
+      params,
+      limit,
+      offset,
+      q,
+    };
+  }
+
+  if (scope.scopeType === 'channel' && scope.targetIdPh && scope.userIdPh) {
+    return {
+      sql: `
+        WITH ${scope.cte.trim()}
+        SELECT scope_access.has_access AS "__scopeAccess",
+          search_rows.*
+        FROM scope_access
+        LEFT JOIN LATERAL (
+          SELECT ${SELECT_COLS}
+          FROM (
+            SELECT m0.id,
+                   m0.content,
+                   m0.author_id,
+                   m0.channel_id,
+                   m0.conversation_id,
+                   m0.created_at
+            FROM messages m0
+            INNER JOIN channels ch_gate
+              ON ch_gate.id = m0.channel_id
+             AND ch_gate.id = ${scope.targetIdPh}
+            LEFT JOIN channel_members cm_gate
+              ON cm_gate.channel_id = ch_gate.id
+             AND cm_gate.user_id = ${scope.userIdPh}
+            WHERE m0.deleted_at IS NULL
+              AND m0.channel_id = ${scope.targetIdPh}
+              AND (ch_gate.is_private = FALSE OR cm_gate.user_id IS NOT NULL)
+              ${authorTimeFilters}
+            ORDER BY m0.created_at DESC, m0.id DESC
+            LIMIT ${recentCapPh}
+          ) m
+          JOIN users u ON u.id = m.author_id
+          LEFT JOIN channels ch ON ch.id = m.channel_id
+          WHERE position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+          ORDER BY m.created_at DESC, m.id DESC
+          LIMIT ${limitPh} OFFSET ${offsetPh}
+        ) search_rows ON scope_access.has_access = TRUE`,
+      params,
+      limit,
+      offset,
+      q,
+    };
+  }
+
   return {
-    sql: `
-      WITH ${scope.cte.trim()}
-      SELECT scope_access.has_access AS "__scopeAccess",
-        search_rows.*
-      FROM scope_access
-      LEFT JOIN LATERAL (
-        SELECT ${SELECT_COLS}
-        ${FROM_CLAUSE}
-        WHERE m.deleted_at IS NULL
-          AND position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
-          ${filters}
-        ORDER BY m.created_at DESC, m.id DESC
-        LIMIT ${limitPh} OFFSET ${offsetPh}
-      ) search_rows ON scope_access.has_access = TRUE`,
+    sql: `SELECT NULL WHERE FALSE`,
     params,
     limit,
     offset,
@@ -1053,4 +1138,7 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   }
 }
 
-module.exports = { search };
+module.exports =
+  process.env.NODE_ENV === 'test'
+    ? { search, __testBuildScopedLiteralParts: buildScopedLiteralParts }
+    : { search };

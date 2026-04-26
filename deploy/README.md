@@ -69,6 +69,30 @@ Every push to `main` runs full CI.
 ### Artifact
 Each release is immutable and tagged by commit SHA. The **same artifact** is deployed to both staging and production.
 
+## Deploy without GitHub (recommended for canaries)
+
+GitHub’s unauthenticated API is easy to rate-limit; **`gh release download`** can fail mid-rollout.
+
+**Preferred:** build the same tarball CI produces, then point `deploy-prod.sh` at it (no `gh` on the release step; preflight skips `gh` when this is set):
+
+```bash
+./scripts/package-release-artifact.sh
+SHA=$(git rev-parse HEAD)
+export LOCAL_ARTIFACT_PATH="$PWD/releases/chatapp-${SHA}.tar.gz"
+
+# VM3-only canary
+DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh "$SHA"
+
+# Full multi-VM rollout
+./deploy/deploy-prod-multi.sh "$SHA"
+```
+
+Optional: **`SKIP_BUILD=1`** if `backend/dist` and `frontend/dist` are already fresh.
+
+**Also useful:** keep last *N* tarballs on VM1 (or object storage) and `scp` between hosts (**option 2**). **`GITHUB_TOKEN`** / `gh auth login` still helps CI and ad-hoc `gh` use (**option 3**). **`deploy-prod.sh`** retries `gh release download` up to **five times** with **30s** backoff before failing.
+
+**Integrity:** `deploy-prod.sh` and `deploy-staging.sh` compute **SHA-256** (`openssl dgst`) of the tarball **before** `scp` and **re-check on the remote** immediately before `tar` extract, so a partial copy fails fast. `package-release-artifact.sh` also writes **`releases/chatapp-<sha>.tar.gz.sha256`** for manual `shasum -a 256 -c` / `sha256sum -c` checks.
+
 ## GitHub Button Deploys
 
 Staging deploys automatically from GitHub Actions after **CI Build & Package** succeeds on pushes to `main` via `.github/workflows/ci-deploy.yml` (reusable deploy job).

@@ -67,6 +67,17 @@ async function joinCommunity(token: string, communityId: string) {
   expect(res.status).toBe(200);
 }
 
+async function sendDmMessage(token: string, conversationId: string, content: string) {
+  const res = await request(app)
+    .post('/api/v1/messages')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ conversationId, content });
+  expect(res.status).toBe(201);
+  return res.body.message as { id: string };
+}
+
+const searchClientMod = require('../src/search/client');
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('Search – basic FTS', () => {
@@ -637,5 +648,268 @@ describe('Search – communityId + conversationId (DM vs mislabeled channel)', (
     expect((res.body.hits || []).length).toBeGreaterThan(0);
     expect(res.body.hits[0].content).toContain(marker);
     expect(res.body.hits[0].channelId).toBe(ch.id);
+  });
+});
+
+describe('Search – scoped literal fallback (hardened)', () => {
+  const prevCap = process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT;
+  const stopPhrase = 'more just about';
+  const commonPhrase = `${stopPhrase} scoped literal body`;
+
+  afterAll(() => {
+    if (prevCap === undefined) delete process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT;
+    else process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT = prevCap;
+  });
+
+  it('community scope: FTS miss (stopwords) still finds literal phrase in community', async () => {
+    const owner = await createAuthenticatedUser('srchlitcomm');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    await sendMessage(token, channel.id, commonPhrase);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent(stopPhrase)}&communityId=${community.id}&limit=20`,
+      )
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(stopPhrase))).toBe(
+      true,
+    );
+    expect(res.body.hits.every((h: any) => h.communityId === community.id)).toBe(true);
+  });
+
+  it('conversation scope: FTS miss still finds literal phrase in DM', async () => {
+    const a = await createAuthenticatedUser('srchlitdmA');
+    const b = await createAuthenticatedUser('srchlitdmB');
+    const convRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.username] });
+    expect(convRes.status).toBe(201);
+    const convId = convRes.body.conversation.id as string;
+    await sendDmMessage(a.accessToken, convId, `${commonPhrase} dm`);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(stopPhrase)}&conversationId=${convId}`)
+      .set('Authorization', `Bearer ${a.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(stopPhrase))).toBe(
+      true,
+    );
+    expect(res.body.hits.every((h: any) => h.conversationId === convId)).toBe(true);
+  });
+
+  it('community literal does not expose inaccessible private channel content', async () => {
+    const owner = await createAuthenticatedUser('srchlitprivowner');
+    const member = await createAuthenticatedUser('srchlitprivmember');
+    const ownerTok = owner.accessToken;
+    const community = await createCommunity(ownerTok, uniqueSuffix());
+    const publicCh = await createChannel(ownerTok, community.id, { isPrivate: false });
+    const privateCh = await createChannel(ownerTok, community.id, { isPrivate: true });
+    await joinCommunity(member.accessToken, community.id);
+    const marker = `privlitscoped${uniqueSuffix()}`;
+    await sendMessage(ownerTok, privateCh.id, `${marker} secret`);
+    await sendMessage(member.accessToken, publicCh.id, 'hello public');
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBe(0);
+  });
+
+  it('literal fallback respects authorId filter (conversation)', async () => {
+    const a = await createAuthenticatedUser('srchlitauthA');
+    const b = await createAuthenticatedUser('srchlitauthB');
+    const convRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.username] });
+    expect(convRes.status).toBe(201);
+    const convId = convRes.body.conversation.id as string;
+    const tail = uniqueSuffix();
+    await sendDmMessage(b.accessToken, convId, `more just about from b ${tail}`);
+    await sendDmMessage(a.accessToken, convId, `more just about from a ${tail}`);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('more just about')}&conversationId=${convId}&authorId=${a.user.id}`,
+      )
+      .set('Authorization', `Bearer ${a.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.hits.every((h: any) => h.authorId === a.user.id)).toBe(true);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes('from a'))).toBe(true);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes('from b'))).toBe(false);
+  });
+
+  it('literal fallback respects after/before window (community)', async () => {
+    const owner = await createAuthenticatedUser('srchlittime');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const phrase = `so nor yet time ${uniqueSuffix()}`;
+    await sendMessage(token, channel.id, `${phrase} old`);
+    const mid = new Date();
+    await new Promise((r) => setTimeout(r, 25));
+    await sendMessage(token, channel.id, `${phrase} new`);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('so nor yet')}&communityId=${
+          community.id
+        }&after=${encodeURIComponent(mid.toISOString())}`,
+      )
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes('new'))).toBe(true);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes('old'))).toBe(false);
+  });
+
+  it('literal fallback excludes soft-deleted messages (channel)', async () => {
+    const owner = await createAuthenticatedUser('srchlitdel');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const phrase = `yet nor scoped del ${uniqueSuffix()}`;
+    const msg = await sendMessage(token, channel.id, `${phrase} doomed`);
+    const del = await request(app)
+      .delete(`/api/v1/messages/${msg.id}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(del.status).toBe(200);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('yet nor')}&channelId=${channel.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => h.id === msg.id)).toBe(false);
+  });
+
+  it('literal fallback reflects edited message content (channel)', async () => {
+    const owner = await createAuthenticatedUser('srchlatedit');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const tail = uniqueSuffix();
+    const msg = await sendMessage(token, channel.id, `so nor yet pre ${tail}`);
+    const patch = await request(app)
+      .patch(`/api/v1/messages/${msg.id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ content: `so nor yet postedit ${tail}` });
+    expect(patch.status).toBe(200);
+
+    const resOld = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(`pre ${tail}`)}&channelId=${channel.id}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(resOld.status).toBe(200);
+    expect(resOld.body.hits.some((h: any) => h.id === msg.id)).toBe(false);
+
+    const resNew = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(`postedit ${tail}`)}&channelId=${channel.id}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(resNew.status).toBe(200);
+    expect(resNew.body.hits.some((h: any) => h.id === msg.id)).toBe(true);
+  });
+
+  it('tight recent cap can miss literal beyond candidate window (community)', async () => {
+    process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT = '10';
+    const owner = await createAuthenticatedUser('srchlitbound');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const tail = uniqueSuffix();
+    await sendMessage(token, channel.id, `more just about anchor ${tail}`);
+    for (let i = 0; i < 11; i += 1) {
+      await sendMessage(token, channel.id, `litbound filler ${tail} ${i}`);
+    }
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('more just about')}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBe(0);
+  });
+
+  it('unscoped search still rejected (no literal global path)', async () => {
+    const u = await createAuthenticatedUser('srchlitunsc');
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('so nor yet')}`)
+      .set('Authorization', `Bearer ${u.accessToken}`);
+
+    expect(res.status).toBe(400);
+    expect(String(res.body.error || '')).toContain('Search must be scoped');
+  });
+});
+
+describe('Search – scoped literal EXPLAIN (index-friendly)', () => {
+  it('community / conversation literal plans avoid seq scan on messages when seqscan disabled', async () => {
+    const owner = await createAuthenticatedUser('srchlitplan');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const b = await createAuthenticatedUser('srchlitplanB');
+    const convRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ participantIds: [b.username] });
+    expect(convRes.status).toBe(201);
+    const convId = convRes.body.conversation.id as string;
+
+    const build = searchClientMod.__testBuildScopedLiteralParts as (
+      q: string,
+      opts: Record<string, unknown>,
+    ) => { sql: string; params: unknown[] };
+
+    const runExplain = async (meta: { sql: string; params: unknown[] }) => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        try {
+          await client.query('SET LOCAL enable_seqscan = off');
+          const { rows } = await client.query(`EXPLAIN (FORMAT JSON) ${meta.sql}`, meta.params);
+          const planJson = rows[0]?.['QUERY PLAN'];
+          const text = JSON.stringify(planJson);
+          expect(text).not.toMatch(/Seq Scan on messages/i);
+        } finally {
+          await client.query('ROLLBACK').catch(() => {});
+        }
+      } finally {
+        client.release();
+      }
+    };
+
+    await runExplain(
+      build('so nor test', {
+        userId: owner.user.id,
+        communityId: community.id,
+        limit: 5,
+        offset: 0,
+      }),
+    );
+    await runExplain(
+      build('so nor test', {
+        userId: owner.user.id,
+        conversationId: convId,
+        limit: 5,
+        offset: 0,
+      }),
+    );
+    await runExplain(
+      build('so nor test', {
+        userId: owner.user.id,
+        channelId: channel.id,
+        limit: 5,
+        offset: 0,
+      }),
+    );
   });
 });
