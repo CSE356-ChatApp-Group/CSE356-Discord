@@ -352,6 +352,24 @@ const wsReconnectGapMs = new client.Histogram({
   buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000],
 });
 
+/** Reconnect replay duplicate suppressed within short TTL (same replay window fingerprint). */
+const wsReplayDedupedTotal = new client.Counter({
+  name: 'ws_replay_deduped_total',
+  help: 'WS reconnect replay skipped as duplicate of a very recent identical replay for the same user',
+});
+
+/** WS reconnect replay served from short-TTL cache before DB. */
+const wsReplayCachedTotal = new client.Counter({
+  name: 'ws_replay_cached_total',
+  help: 'WS reconnect replay served from short-TTL cache by user+cursor before DB',
+});
+
+/** Reconnect replay Postgres round-trips actually started (after dedupe admission). */
+const wsReplayDbQueryTotal = new client.Counter({
+  name: 'ws_replay_db_query_total',
+  help: 'WS reconnect replay DB transactions started (excludes dedupe and pre-DB skips)',
+});
+
 /** Reconnect replay query outcomes so we can verify replay is bounded under load. */
 const wsReplayQueryTotal = new client.Counter({
   name: 'ws_replay_query_total',
@@ -496,6 +514,26 @@ const wsBootstrapListCacheTotal = new client.Counter({
   name: 'ws_bootstrap_list_cache_total',
   help: 'Cache outcomes for websocket auto-subscribe channel lists',
   labelNames: ['result'],
+});
+
+/** WS bootstrap blocked/degraded before DB by ingress gating. */
+const wsBootstrapBlockedTotal = new client.Counter({
+  name: 'ws_bootstrap_blocked_total',
+  help: 'WebSocket bootstrap blocked/degraded before DB due to ingress concurrency gating',
+  labelNames: ['reason'],
+});
+
+/** WS bootstrap reused cached/inflight response before DB. */
+const wsBootstrapCachedTotal = new client.Counter({
+  name: 'ws_bootstrap_cached_total',
+  help: 'WebSocket bootstrap reused cached or inflight response before DB list query',
+  labelNames: ['source'],
+});
+
+/** WS bootstrap DB list loads started (cache miss path only). */
+const wsBootstrapDbTotal = new client.Counter({
+  name: 'ws_bootstrap_db_total',
+  help: 'WebSocket bootstrap DB list loads started',
 });
 
 // ── Search performance ─────────────────────────────────────────────────────
@@ -768,6 +806,9 @@ function startPgPoolMetrics(pool) {
     wsReconnectsTotal.inc({ window: 'le_30s' }, 0);
     wsReconnectsTotal.inc({ window: 'le_120s' }, 0);
     wsReconnectGapMs.observe(0);
+    wsReplayDedupedTotal.inc(0);
+    wsReplayCachedTotal.inc(0);
+    wsReplayDbQueryTotal.inc(0);
     wsReplayQueryTotal.inc({ result: 'ok' }, 0);
     wsReplayQueryTotal.inc({ result: 'skipped' }, 0);
     wsReplayQueryTotal.inc({ result: 'timeout' }, 0);
@@ -799,6 +840,7 @@ function startPgPoolMetrics(pool) {
     lastMessagePgReconcileTotal.inc({ target: 'conversation', result: 'error' }, 0);
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_disabled' }, 0);
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_pressure' }, 0);
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'insert_lock_pressure' }, 0);
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_disabled' }, 0);
     lastMessageCacheTotal.inc({ target: 'channel', result: 'hit' }, 0);
     lastMessageCacheTotal.inc({ target: 'channel', result: 'miss' }, 0);
@@ -829,10 +871,12 @@ function startPgPoolMetrics(pool) {
     messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, 0);
     messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, 0);
     readReceiptShedTotal.inc({ reason: 'message_channel_insert_lock_pressure' }, 0);
+    readReceiptShedTotal.inc({ reason: 'overload_stage_high' }, 0);
     readReceiptRequestsTotal.inc(
       { result: 'deferred_message_channel_insert_lock_pressure' },
       0,
     );
+    readReceiptRequestsTotal.inc({ result: 'deferred_overload_stage_high' }, 0);
     messageChannelInsertLockPressureWaitP95MsGauge.set(0);
     messageChannelInsertLockPressureRecentTimeoutsGauge.set(0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
@@ -900,6 +944,11 @@ function startPgPoolMetrics(pool) {
     wsBootstrapListCacheTotal.inc({ result: 'hit' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'miss' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'coalesced' }, 0);
+    wsBootstrapBlockedTotal.inc({ reason: 'concurrency_cap' }, 0);
+    wsBootstrapBlockedTotal.inc({ reason: 'concurrency_wait_timeout' }, 0);
+    wsBootstrapCachedTotal.inc({ source: 'ttl' }, 0);
+    wsBootstrapCachedTotal.inc({ source: 'inflight' }, 0);
+    wsBootstrapDbTotal.inc(0);
     wsBootstrapChannelsHistogram.observe(0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
@@ -920,6 +969,7 @@ function startPgPoolMetrics(pool) {
     wsReplayFailOpenTotal.inc({ reason: 'per_ip' }, 0);
     wsReplayFailOpenTotal.inc({ reason: 'per_socket' }, 0);
     wsReplayFailOpenTotal.inc({ reason: 'global_concurrency' }, 0);
+    wsReplayFailOpenTotal.inc({ reason: 'insert_lock_pressure' }, 0);
     wsReplayStartedTotal.inc(0);
     wsReplayConcurrentGauge.set(0);
     abuseBlockedSubnetTotal.inc(0);
@@ -936,6 +986,7 @@ function startPgPoolMetrics(pool) {
     communityCountPgReconcileTotal.inc({ result: 'error' }, 0);
     communityCountPgReconcileSkippedTotal.inc({ reason: 'lock' }, 0);
     communityCountPgReconcileSkippedTotal.inc({ reason: 'pressure' }, 0);
+    communityCountPgReconcileSkippedTotal.inc({ reason: 'insert_lock_pressure' }, 0);
     communityCountPgReconcileSkippedTotal.inc({ reason: 'empty' }, 0);
     communityCountCacheTotal.inc({ result: 'hit' }, 0);
     communityCountCacheTotal.inc({ result: 'miss' }, 0);
@@ -989,6 +1040,9 @@ module.exports = {
   wsConnectionLifetimeMs,
   wsReconnectsTotal,
   wsReconnectGapMs,
+  wsReplayDedupedTotal,
+  wsReplayCachedTotal,
+  wsReplayDbQueryTotal,
   wsReplayQueryTotal,
   wsReplayQueryDurationMs,
   redisFanoutPublishFailuresTotal,
@@ -1009,6 +1063,9 @@ module.exports = {
   fanoutRecentConnectCacheTotal,
   fanoutRecentConnectZsetSize,
   wsBootstrapListCacheTotal,
+  wsBootstrapBlockedTotal,
+  wsBootstrapCachedTotal,
+  wsBootstrapDbTotal,
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,
   searchReplicaRetryTotal,

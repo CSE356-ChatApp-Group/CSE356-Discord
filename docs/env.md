@@ -94,8 +94,10 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PG_SLOW_QUERY_MS`, `PG_CONNECTION_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS` | Pool behavior |
 | `READ_RECEIPT_DEFER_POOL_WAITING` | Soft-defer `PUT /messages/:id/read` when pool waiters reach this threshold (default 8) to protect message-post and read/list latency under burst |
 | `MESSAGE_INSERT_LOCK_PRESSURE_WINDOW_MS` | Rolling window (ms) for in-process channel insert lock wait samples and timeout markers used for read-receipt shedding (default **30000**, clamped **5000–120000**) |
-| `READ_SHED_MESSAGE_INSERT_LOCK_WAIT_P95_MS` | When successful insert-lock waits in the window reach this **p95** (ms), soft-defer `PUT /messages/:id/read` (default **400**, clamped **250–500**). Also defers if **any** lock timeout occurred in the window |
-| `READ_SHED_MESSAGE_INSERT_LOCK_MIN_SAMPLES_FOR_P95` | Minimum acquire samples in the window before the p95 rule can trigger (default **8**, max **100**); timeout-in-window always triggers alone |
+| `MESSAGE_INSERT_LOCK_TTL_MS` | Redis NX lock TTL for per-channel `POST /messages` serialization (default **45000**, clamped **5000–120000**). Must cover slow commits under DB I/O pressure; too low causes `release_mismatch` when the lock expires mid-transaction. |
+| `MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS` | Max time to wait for the Redis insert lock before `503` on `POST /messages` (default **4000**, clamped **500–15000**). |
+| `READ_SHED_MESSAGE_INSERT_LOCK_WAIT_P95_MS` | When successful insert-lock waits in the window reach this **p95** (ms), soft-defer `PUT /messages/:id/read` (default **320**, clamped **200–500**). Also defers if **any** lock timeout occurred in the window, or **≥4** samples include any wait **≥380ms** |
+| `READ_SHED_MESSAGE_INSERT_LOCK_MIN_SAMPLES_FOR_P95` | Minimum acquire samples in the window before the p95 rule can trigger (default **6**, max **100**); timeout-in-window always triggers alone |
 | **Overload / degradation** | |
 | `OVERLOAD_RSS_WARN_MB`, `OVERLOAD_RSS_HIGH_MB`, `OVERLOAD_RSS_CRITICAL_MB` | RSS thresholds (MB) |
 | `OVERLOAD_LAG_WARN_MS`, `OVERLOAD_LAG_HIGH_MS`, `OVERLOAD_LAG_CRITICAL_MS` | Event-loop p99 lag (ms) |
@@ -135,6 +137,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning (code default recent-connect bridge window `20`; staging/prod deploy profiles pin bootstrap TTL `180`, batch size `64`, and recent-connect bridge window `300`) |
 | `WS_AUTO_SUBSCRIBE_MODE` | `messages` (default) subscribes **`channel:`** + **`conversation:`** + **`user:<self>`** during connect; `user_only` keeps just **`user:<self>`**; `full` also eager-subscribes accessible **`community:`** topics. |
 | `WS_APP_KEEPALIVE_INTERVAL_MS` | When `>=5000`, sends a tiny `{"event":"keepalive"}` data frame to otherwise-idle sockets on that cadence. Leave `0` to disable. Useful when intermediaries churn idle WebSocket upgrades despite normal control ping/pong. |
+| `WS_REPLAY_DEDUP_TTL_SEC` | Redis key `ws:replay:recent:<userId>` TTL (**2–5** seconds, default **3**) suppressing a second identical reconnect-replay DB scan (same replay window fingerprint). Fail-open if Redis errors. |
 | `WS_MESSAGE_REPLAY_LIMIT`, `WS_MESSAGE_REPLAY_MAX_WINDOW_MS`, `WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS` | Reconnect replay scan bounds (defaults **150** rows, **60000** ms window, **15000** ms grace before `disconnectedAt`). Set **`WS_MESSAGE_REPLAY_LIMIT=0`** to disable replay entirely (emergency relief on tiny hosts; clients rely on normal fanout + refetch). |
 | `WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS` | Per-replay transaction uses `SET LOCAL statement_timeout = '<N>ms'` (default **8000**; **clamped to 1000–8000ms**) so replay fails before a typical role **15s** timeout under load. |
 | `WS_MESSAGE_REPLAY_TIMEOUT_RETRY_MS` | After a replay statement timeout, delay this many ms before **one** retry (default **75**; set **0** to disable retry). |

@@ -22,6 +22,9 @@ const {
   communityCountPgReconcileSkippedTotal,
   communityCountCacheTotal,
 } = require('../utils/metrics');
+const {
+  getShouldDeferReadReceiptForInsertLockPressure,
+} = require('../messages/messageInsertLockPressure');
 
 const COMMUNITY_COUNTS_KEY = 'community:counts';
 const COMMUNITY_COUNTS_DIRTY_KEY = 'community:counts:dirty';
@@ -169,6 +172,10 @@ async function runReconcile(): Promise<void> {
     const stats = poolStats();
     if (stats.waiting >= COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE) {
       communityCountPgReconcileSkippedTotal.inc({ reason: 'pressure' });
+      return;
+    }
+    if (getShouldDeferReadReceiptForInsertLockPressure()) {
+      communityCountPgReconcileSkippedTotal.inc({ reason: 'insert_lock_pressure' });
       return;
     }
 

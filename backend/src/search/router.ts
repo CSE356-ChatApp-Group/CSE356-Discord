@@ -21,6 +21,9 @@ const searchClient = require('./client');
 const { query } = require('../db/pool');
 const overload = require('../utils/overload');
 const logger = require('../utils/logger');
+const {
+  getShouldDeferReadReceiptForInsertLockPressure,
+} = require('../messages/messageInsertLockPressure');
 
 const router = express.Router();
 router.use(authenticate);
@@ -37,6 +40,11 @@ function clampSearchPaging(limitRaw, offsetRaw) {
 router.get('/', async (req, res, next) => {
   const startMs = Date.now();
   try {
+    if (getShouldDeferReadReceiptForInsertLockPressure()) {
+      return res.status(503).json({
+        error: 'Search temporarily unavailable while messaging is under load; please retry.',
+      });
+    }
     let { q, communityId, channelId, conversationId, authorId, after, before, limit, offset } = req.query;
     // COMPAS generated client sends `channelId=<id>&conversationId=<id>` with the same UUID
     // for DM/conversation-scoped search; we must not treat that id as a channel first.

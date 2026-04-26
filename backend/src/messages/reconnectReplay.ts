@@ -1,12 +1,17 @@
 'use strict';
 
 const { withTransaction } = require('../db/pool');
+const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
 const {
   wsReplayQueryTotal,
   wsReplayQueryDurationMs,
   wsReplayFailOpenTotal,
+  wsReplayDedupedTotal,
+  wsReplayCachedTotal,
+  wsReplayDbQueryTotal,
+  wsReplayStartedTotal,
 } = require('../utils/metrics');
 import { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
@@ -60,10 +65,132 @@ const WS_REPLAY_DB_MAX_GLOBAL =
     ? Math.min(2, Math.floor(rawReplayDbMaxGlobal))
     : 2;
 
+const rawReplayDedupTtlSec = Number(process.env.WS_REPLAY_DEDUP_TTL_SEC || '3');
+const WS_REPLAY_DEDUP_TTL_SEC =
+  Number.isFinite(rawReplayDedupTtlSec) && rawReplayDedupTtlSec >= 2 && rawReplayDedupTtlSec <= 5
+    ? Math.floor(rawReplayDedupTtlSec)
+    : Number.isFinite(rawReplayDedupTtlSec) && rawReplayDedupTtlSec > 0
+      ? Math.min(5, Math.max(2, Math.floor(rawReplayDedupTtlSec)))
+      : 3;
+
 /** @deprecated use WS_REPLAY_DB_MAX_GLOBAL — kept for tests / metrics parity */
 const WS_MESSAGE_REPLAY_MAX_CONCURRENT = WS_REPLAY_DB_MAX_GLOBAL;
 
 let replayDbInFlight = 0;
+
+/** In-process fallback when Redis is unavailable (same worker only). */
+const replayDedupeMem = new Map();
+const replayResultMem = new Map();
+
+function isRedisReplayDedupeOperational() {
+  return ['wait', 'connecting', 'connect', 'ready', 'reconnecting'].includes(redis.status);
+}
+
+function replayDedupeRedisKey(userId) {
+  return `ws:replay:recent:${userId}`;
+}
+
+function replayCursorKey(userId, cursor) {
+  return `ws:replay:${userId}:${cursor}`;
+}
+
+function replayDedupeFingerprint(
+  disconnectedAtMs,
+  reconnectObservedMs,
+  replayLowerBoundMs,
+  upperBoundMs,
+  limit,
+  stage,
+  closeCode,
+) {
+  return [
+    disconnectedAtMs,
+    reconnectObservedMs,
+    replayLowerBoundMs,
+    upperBoundMs,
+    limit,
+    stage,
+    closeCode ?? '',
+  ].join('|');
+}
+
+async function readReplayDedupe(userId) {
+  if (isRedisReplayDedupeOperational()) {
+    try {
+      const v = await redis.get(replayDedupeRedisKey(userId));
+      return typeof v === 'string' ? v : null;
+    } catch {
+      return null;
+    }
+  }
+  const ent = replayDedupeMem.get(userId);
+  if (!ent) return null;
+  if (Date.now() >= ent.expiresAt) {
+    replayDedupeMem.delete(userId);
+    return null;
+  }
+  return ent.fp;
+}
+
+async function writeReplayDedupe(userId, fingerprint) {
+  if (isRedisReplayDedupeOperational()) {
+    try {
+      await redis.set(replayDedupeRedisKey(userId), fingerprint, 'EX', WS_REPLAY_DEDUP_TTL_SEC);
+    } catch {
+      /* fail open: do not block replay */
+    }
+    return;
+  }
+  replayDedupeMem.set(userId, {
+    fp: fingerprint,
+    expiresAt: Date.now() + WS_REPLAY_DEDUP_TTL_SEC * 1000,
+  });
+}
+
+async function readReplayResultCache(userId, cursor) {
+  if (isRedisReplayDedupeOperational()) {
+    try {
+      const raw = await redis.get(replayCursorKey(userId, cursor));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  const ent = replayResultMem.get(`${userId}:${cursor}`);
+  if (!ent) return null;
+  if (Date.now() >= ent.expiresAt) {
+    replayResultMem.delete(`${userId}:${cursor}`);
+    return null;
+  }
+  return Array.isArray(ent.rows) ? ent.rows : null;
+}
+
+async function writeReplayResultCache(userId, cursor, rows) {
+  if (isRedisReplayDedupeOperational()) {
+    try {
+      await redis.set(
+        replayCursorKey(userId, cursor),
+        JSON.stringify(Array.isArray(rows) ? rows : []),
+        'EX',
+        WS_REPLAY_DEDUP_TTL_SEC,
+      );
+      return;
+    } catch {
+      // fail-open
+    }
+  }
+  replayResultMem.set(`${userId}:${cursor}`, {
+    rows: Array.isArray(rows) ? rows : [],
+    expiresAt: Date.now() + WS_REPLAY_DEDUP_TTL_SEC * 1000,
+  });
+}
+
+function resetReplayDedupeMemForTests() {
+  replayDedupeMem.clear();
+  replayResultMem.clear();
+}
 
 function replayQueryProfile(gapMs, stage = overload.getStage(), closeCode?: number) {
   let windowMs = WS_MESSAGE_REPLAY_MAX_WINDOW_MS;
@@ -148,6 +275,12 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   if (lowerBoundMs <= 0 || reconnectObservedMs <= lowerBoundMs) return [];
 
   const gapMs = reconnectObservedMs - lowerBoundMs;
+  const cursor = `${lowerBoundMs}:${reconnectObservedMs}:${closeCode ?? ''}`;
+  const cachedRows = await readReplayResultCache(userId, cursor);
+  if (cachedRows) {
+    wsReplayCachedTotal.inc();
+    return cachedRows;
+  }
 
   if (replayDbInFlight >= WS_REPLAY_DB_MAX_GLOBAL) {
     wsReplayFailOpenTotal.inc({ reason: 'global_concurrency' });
@@ -178,7 +311,29 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   );
   if (upperBoundMs <= lowerBoundMs) return [];
 
+  const fingerprint = replayDedupeFingerprint(
+    lowerBoundMs,
+    reconnectObservedMs,
+    replayLowerBoundMs,
+    upperBoundMs,
+    profile.limit,
+    profile.stage,
+    closeCode,
+  );
+  const recentFingerprint = await readReplayDedupe(userId);
+  if (recentFingerprint === fingerprint) {
+    wsReplayDedupedTotal.inc();
+    const dedupedCachedRows = await readReplayResultCache(userId, cursor);
+    if (dedupedCachedRows) {
+      wsReplayCachedTotal.inc();
+      return dedupedCachedRows;
+    }
+    return [];
+  }
+
   const startedAt = Date.now();
+  wsReplayStartedTotal.inc();
+  wsReplayDbQueryTotal.inc();
   replayDbInFlight += 1;
   try {
     const statementTimeoutMs = WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED;
@@ -254,6 +409,8 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
     }
     wsReplayQueryTotal.inc({ result: 'ok' });
     wsReplayQueryDurationMs.observe({ result: 'ok' }, Date.now() - startedAt);
+    await writeReplayDedupe(userId, fingerprint);
+    await writeReplayResultCache(userId, cursor, rows);
     return rows;
   } finally {
     replayDbInFlight -= 1;
@@ -264,10 +421,12 @@ module.exports = {
   loadReplayableMessagesForUser,
   replayQueryProfile,
   classifyReplayError,
+  resetReplayDedupeMemForTests,
   WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
   WS_MESSAGE_REPLAY_LIMIT,
   WS_MESSAGE_REPLAY_MAX_WINDOW_MS,
   WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS,
   WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED,
   WS_MESSAGE_REPLAY_MAX_CONCURRENT,
+  WS_REPLAY_DEDUP_TTL_SEC,
 };

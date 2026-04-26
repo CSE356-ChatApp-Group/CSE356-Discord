@@ -19,6 +19,9 @@ const {
   lastMessageCacheTotal,
 } = require('../utils/metrics');
 const sideEffects = require('./sideEffects');
+const {
+  getShouldDeferReadReceiptForInsertLockPressure,
+} = require('./messageInsertLockPressure');
 
 // Redis keys for deferred channel last_message pointer updates.
 // Hot path writes to Redis (loopback); a background interval batch-flushes to DB.
@@ -221,6 +224,10 @@ async function flushDirtyTargetsToDB(
   }
   if (target === 'conversation' && !CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED) {
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_disabled' });
+    return;
+  }
+  if (getShouldDeferReadReceiptForInsertLockPressure()) {
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'insert_lock_pressure' });
     return;
   }
   let ids: string[];

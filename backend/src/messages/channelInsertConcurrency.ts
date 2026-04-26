@@ -24,15 +24,15 @@ const tail = new Map<string, Promise<unknown>>();
 
 const MESSAGE_INSERT_LOCK_TTL_MS = parseIntEnv(
   'MESSAGE_INSERT_LOCK_TTL_MS',
-  6000,
-  2000,
-  6000,
+  45000,
+  5000,
+  120000,
 );
 const MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS = parseIntEnv(
   'MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS',
-  1500,
-  100,
-  5000,
+  4000,
+  500,
+  15000,
 );
 const MESSAGE_INSERT_LOCK_POLL_MIN_MS = parseIntEnv(
   'MESSAGE_INSERT_LOCK_POLL_MIN_MS',

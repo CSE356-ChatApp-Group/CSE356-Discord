@@ -28,14 +28,14 @@ function parseWindowMs(): number {
   return Math.min(120000, Math.max(5000, v));
 }
 
-/** p95 wait threshold (ms); default 400, clamped to 250–500. */
+/** p95 wait threshold (ms); default 320, clamped to 200–500. */
 function parseP95ThresholdMs(): number {
   const v = Number.parseInt(
     process.env.READ_SHED_MESSAGE_INSERT_LOCK_WAIT_P95_MS || '',
     10,
   );
-  if (!Number.isFinite(v)) return 400;
-  return Math.min(500, Math.max(250, v));
+  if (!Number.isFinite(v)) return 320;
+  return Math.min(500, Math.max(200, v));
 }
 
 function parseMinSamplesForP95(): number {
@@ -43,7 +43,7 @@ function parseMinSamplesForP95(): number {
     process.env.READ_SHED_MESSAGE_INSERT_LOCK_MIN_SAMPLES_FOR_P95 || '',
     10,
   );
-  if (!Number.isFinite(v)) return 8;
+  if (!Number.isFinite(v)) return 6;
   return Math.min(100, Math.max(1, v));
 }
 
@@ -95,12 +95,14 @@ function getShouldDeferReadReceiptForInsertLockPressure(): boolean {
   const waits = acquireSamples.map((s) => s.waitMs);
   const p95 = percentile95(waits);
   const recentTimeoutCount = timeoutTimestamps.length;
-  messageChannelInsertLockPressureWaitP95MsGauge.set(p95);
-  messageChannelInsertLockPressureRecentTimeoutsGauge.set(recentTimeoutCount);
+  messageChannelInsertLockPressureWaitP95MsGauge?.set?.(p95);
+  messageChannelInsertLockPressureRecentTimeoutsGauge?.set?.(recentTimeoutCount);
 
   if (recentTimeoutCount >= 1) return true;
   const minS = parseMinSamplesForP95();
   if (waits.length >= minS && p95 > parseP95ThresholdMs()) return true;
+  // Any sustained tail wait in-window implies contention even before p95 crosses.
+  if (waits.length >= 4 && waits.some((w) => w >= 380)) return true;
   return false;
 }
 
@@ -109,9 +111,15 @@ function resetMessageChannelInsertLockPressureForTests() {
   timeoutTimestamps.length = 0;
 }
 
+/** Alias: same signal used to shed read receipts, WS replay, search, etc. */
+function isMessageChannelInsertLockPressureHigh() {
+  return getShouldDeferReadReceiptForInsertLockPressure();
+}
+
 module.exports = {
   recordMessageChannelInsertLockAcquireWait,
   recordMessageChannelInsertLockTimeoutEvent,
   getShouldDeferReadReceiptForInsertLockPressure,
+  isMessageChannelInsertLockPressureHigh,
   resetMessageChannelInsertLockPressureForTests,
 };

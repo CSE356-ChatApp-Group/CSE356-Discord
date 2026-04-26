@@ -105,8 +105,10 @@ const {
   wsBootstrapWallDurationMs,
   wsBootstrapListCacheTotal,
   wsBootstrapChannelsHistogram,
+  wsBootstrapBlockedTotal,
+  wsBootstrapCachedTotal,
+  wsBootstrapDbTotal,
   wsReplayFailOpenTotal,
-  wsReplayStartedTotal,
   wsReplayConcurrentGauge,
 } = require("../utils/metrics");
 
@@ -1332,7 +1334,77 @@ const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
   process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '180',
   10,
 );
+const WS_BOOTSTRAP_INGRESS_TTL_SECONDS = 3;
+const rawBootstrapIngressJitterMs = Number(process.env.WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS || 200);
+const WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS =
+  Number.isFinite(rawBootstrapIngressJitterMs) && rawBootstrapIngressJitterMs >= 0
+    ? Math.min(500, Math.floor(rawBootstrapIngressJitterMs))
+    : 200;
+const rawBootstrapDbConcurrencyCap = Number(process.env.WS_BOOTSTRAP_DB_MAX_IN_FLIGHT || 50);
+const WS_BOOTSTRAP_DB_MAX_IN_FLIGHT =
+  Number.isFinite(rawBootstrapDbConcurrencyCap) && rawBootstrapDbConcurrencyCap > 0
+    ? Math.min(200, Math.floor(rawBootstrapDbConcurrencyCap))
+    : 50;
+const rawBootstrapDbConcurrencyWaitMs = Number(process.env.WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS || 300);
+const WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS =
+  Number.isFinite(rawBootstrapDbConcurrencyWaitMs) && rawBootstrapDbConcurrencyWaitMs >= 0
+    ? Math.min(2000, Math.floor(rawBootstrapDbConcurrencyWaitMs))
+    : 300;
 const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
+const wsBootstrapIngressInFlight: Map<string, Promise<string[]>> = new Map();
+let wsBootstrapDbInFlight = 0;
+
+function wsBootstrapIngressKey(userId) {
+  return `ws:bootstrap:${userId}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function readWsBootstrapIngressCache(userId) {
+  if (!isRedisOperational(redis)) return null;
+  try {
+    const raw = await redis.get(wsBootstrapIngressKey(userId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((value) => typeof value === "string");
+  } catch {
+    return null;
+  }
+}
+
+async function writeWsBootstrapIngressCache(userId, channels) {
+  if (!isRedisOperational(redis)) return;
+  try {
+    await redis.set(
+      wsBootstrapIngressKey(userId),
+      JSON.stringify(channels),
+      "EX",
+      WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
+    );
+  } catch {
+    // fail-open
+  }
+}
+
+async function tryAcquireBootstrapDbSlot() {
+  let waited = 0;
+  while (wsBootstrapDbInFlight >= WS_BOOTSTRAP_DB_MAX_IN_FLIGHT) {
+    if (waited === 0) {
+      wsBootstrapBlockedTotal.inc({ reason: "concurrency_cap" });
+    }
+    const step = Math.min(50, Math.max(10, WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS || 20));
+    waited += step;
+    await sleep(step + Math.floor(Math.random() * 15));
+  }
+  wsBootstrapDbInFlight += 1;
+}
+
+function releaseBootstrapDbSlot() {
+  wsBootstrapDbInFlight = Math.max(0, wsBootstrapDbInFlight - 1);
+}
 
 function wsBootstrapCacheKey(userId, scope = 'full') {
   return `ws:bootstrap:${userId}:${scope}`;
@@ -1418,6 +1490,7 @@ async function listAutoSubscriptionChannels(userId, mode = 'full') {
       return Array.isArray(parsed) ? parsed : null;
     },
     load: async () => {
+      wsBootstrapDbTotal.inc();
       const [conversationRes, communityRes, channelRes] = await Promise.all([
         query(
           `SELECT conversation_id::text AS id
@@ -1465,7 +1538,40 @@ async function listAutoSubscriptionChannels(userId, mode = 'full') {
 async function bootstrapUserSubscriptions(ws, userId) {
   const mode = wsAutoSubscribeMode();
   if (mode === 'user_only') return;
-  const channels = await listAutoSubscriptionChannels(userId, mode);
+  const ingressCached = await readWsBootstrapIngressCache(userId);
+  if (Array.isArray(ingressCached)) {
+    wsBootstrapCachedTotal.inc({ source: 'ttl' });
+    warmWsAclCacheFromChannelList(userId, ingressCached);
+    for (let i = 0; i < ingressCached.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
+      const batch = ingressCached.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
+      await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
+      if (ws.readyState !== WebSocket.OPEN) return;
+    }
+    return;
+  }
+
+  if (wsBootstrapIngressInFlight.has(userId)) {
+    wsBootstrapCachedTotal.inc({ source: 'inflight' });
+    const channels = await wsBootstrapIngressInFlight.get(userId);
+    warmWsAclCacheFromChannelList(userId, channels);
+    for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
+      const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
+      await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
+      if (ws.readyState !== WebSocket.OPEN) return;
+    }
+    return;
+  }
+
+  await tryAcquireBootstrapDbSlot();
+  const loadPromise = listAutoSubscriptionChannels(userId, mode)
+    .finally(() => {
+      wsBootstrapIngressInFlight.delete(userId);
+      releaseBootstrapDbSlot();
+    });
+  wsBootstrapIngressInFlight.set(userId, loadPromise);
+
+  const channels = await loadPromise;
+  await writeWsBootstrapIngressCache(userId, channels);
   warmWsAclCacheFromChannelList(userId, channels);
   
   // Populate channel:recent_connect ZSETs immediately for all channel: topics
@@ -1669,7 +1775,6 @@ wss.on("connection", async (ws, req) => {
             } else {
               wsReplayInFlightCount += 1;
               wsReplayConcurrentGauge.set(wsReplayInFlightCount);
-              wsReplayStartedTotal.inc();
               try {
                 await replayMissedMessagesToSocket(
                   ws,
@@ -1737,7 +1842,12 @@ wss.on("connection", async (ws, req) => {
       logger.warn({ err, userId: user.id }, "WS presence setup failed"),
     );
 
-  const bootstrapSubscriptionsPromise = bootstrapWithRetry(ws, user.id);
+  const bootstrapSubscriptionsPromise = (async () => {
+    if (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS > 0) {
+      await sleep(Math.floor(Math.random() * (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS + 1)));
+    }
+    return bootstrapWithRetry(ws, user.id);
+  })();
   bootstrapSubscriptionsPromise
     .catch((err) => {
       wsConnectionResultTotal.inc({ result: "bootstrap_failed" });

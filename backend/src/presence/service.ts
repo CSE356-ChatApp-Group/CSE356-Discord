@@ -18,6 +18,9 @@ const { query, withTransaction } = require("../db/pool");
 const overload = require("../utils/overload");
 const logger = require("../utils/logger");
 const { presenceFanoutTotal } = require("../utils/metrics");
+const {
+  getShouldDeferReadReceiptForInsertLockPressure,
+} = require("../messages/messageInsertLockPressure");
 
 const TTL_SECONDS = 90;
 const PRESENCE_DB_CURSOR_TTL_SECS = parseInt(process.env.PRESENCE_DB_CURSOR_TTL_SECS || '300', 10);
@@ -259,7 +262,10 @@ async function setPresence(userId, status, awayMessage) {
     }
   }
 
-  if (!overload.shouldSkipPresenceMirror()) {
+  const skipPresenceDbMirror =
+    overload.shouldSkipPresenceMirror() ||
+    getShouldDeferReadReceiptForInsertLockPressure();
+  if (!skipPresenceDbMirror) {
     // Redis CAS gate: deduplicate presence DB writes across workers for the same user.
     // Only the first worker to observe a new status value fires the DB upsert.
     const dbCursorKey = presenceDbCursorKey(userId);

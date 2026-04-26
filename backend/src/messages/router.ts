@@ -2328,14 +2328,6 @@ router.delete("/:id", param("id").isUUID(), async (req, res, next) => {
 // ── PUT /messages/:id/read ─────────────────────────────────────────────────────
 router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
-  const pool = poolStats();
-  // `READ_RECEIPT_DEFER_POOL_WAITING=0` means "disable pool-wait defer".
-  if (
-    READ_RECEIPT_DEFER_POOL_WAITING > 0 &&
-    pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
-  ) {
-    return res.json({ success: true, deferred: true, reason: "pool_waiting" });
-  }
   if (getShouldDeferReadReceiptForInsertLockPressure()) {
     readReceiptShedTotal.inc({
       reason: "message_channel_insert_lock_pressure",
@@ -2349,14 +2341,26 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
       reason: "message_channel_insert_lock_pressure",
     });
   }
+  const pool = poolStats();
+  // `READ_RECEIPT_DEFER_POOL_WAITING=0` means "disable pool-wait defer".
+  if (
+    READ_RECEIPT_DEFER_POOL_WAITING > 0 &&
+    pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
+  ) {
+    return res.json({ success: true, deferred: true, reason: "pool_waiting" });
+  }
   // Under sustained pressure, keep the cheap cursor advance but drop realtime
   // read-receipt fanout so Redis pub/sub does not sit in the request amplifier.
   const overloadStage = overload.getStage();
   const dropReadReceiptFanout = overloadStage === 2;
   if (overloadStage >= 3) {
-    return res
-      .status(503)
-      .json({ error: "Read receipts temporarily delayed under high load" });
+    readReceiptShedTotal.inc({ reason: "overload_stage_high" });
+    readReceiptRequestsTotal.inc({ result: "deferred_overload_stage_high" });
+    return res.json({
+      success: true,
+      deferred: true,
+      reason: "overload_stage_high",
+    });
   }
   try {
     const target = await loadMessageTargetForUser(req.params.id, req.user.id, {
