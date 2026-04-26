@@ -1843,7 +1843,7 @@ describe('channel/conversation last_message async metadata update', () => {
     expect(listed?.last_message_id).toBe(messageId);
   });
 
-  it('metadata eventually updates for DM conversation after flush', async () => {
+  it('conversation list shows Redis latest-message metadata while DB reconcile is disabled', async () => {
     const a = await createAuthenticatedUser('lm-dm-a');
     const b = await createAuthenticatedUser('lm-dm-b');
     const convRes = await request(app)
@@ -1875,11 +1875,18 @@ describe('channel/conversation last_message async metadata update', () => {
     expect(fetchRes.status).toBe(200);
     expect(fetchRes.body.messages.some((m: any) => m.id === messageId)).toBe(true);
 
-    // Flush and verify metadata updated.
+    // Flush should not write conversations.last_message_* when reconcile is disabled.
     await drainAllQueuesForTests();
     await flushDirtyLastMessagePointers();
     const after = await getConversationMeta(conversationId);
-    expect(after.last_message_id).toBe(messageId);
+    expect(after.last_message_id).toBeNull();
+
+    const listRes = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(listRes.status).toBe(200);
+    const listed = (listRes.body.conversations || []).find((c: any) => c.id === conversationId);
+    expect(listed?.last_message_id).toBe(messageId);
   });
 
   it('newer message wins in Redis channel latest metadata', async () => {
@@ -1962,6 +1969,39 @@ describe('channel/conversation last_message async metadata update', () => {
     expect(listed?.last_message_id).toBe(messageId);
   });
 
+  it('conversation list falls back to DB last_message metadata when Redis key is missing', async () => {
+    const a = await createAuthenticatedUser('lm-fallback-dm-a');
+    const b = await createAuthenticatedUser('lm-fallback-dm-b');
+    const convRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.user.id] });
+    expect(convRes.status).toBe(201);
+    const conversationId = convRes.body.conversation.id;
+
+    const msgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ conversationId, content: 'dm fallback source' });
+    expect(msgRes.status).toBe(201);
+    const messageId = msgRes.body.message.id;
+
+    await pool.query(
+      `UPDATE conversations
+       SET last_message_id = $1, last_message_author_id = $2, last_message_at = NOW()
+       WHERE id = $3`,
+      [messageId, a.user.id, conversationId],
+    );
+    await redis.del(`conv:last_msg:${conversationId}`);
+
+    const listRes = await request(app)
+      .get('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(listRes.status).toBe(200);
+    const listed = (listRes.body.conversations || []).find((c: any) => c.id === conversationId);
+    expect(listed?.last_message_id).toBe(messageId);
+  });
+
   it('channel PG reconcile is skipped when disabled', async () => {
     const skippedBefore = lastMessagePgReconcileSkippedTotal.hashMap
       ? Object.values(lastMessagePgReconcileSkippedTotal.hashMap as Record<string, any>)
@@ -1977,6 +2017,48 @@ describe('channel/conversation last_message async metadata update', () => {
           .reduce((s: number, e: any) => s + Number(e.value || 0), 0)
       : 0;
     expect(skippedAfter).toBeGreaterThanOrEqual(skippedBefore);
+  });
+
+  it('conversation PG reconcile is skipped when disabled', async () => {
+    const skippedBefore = lastMessagePgReconcileSkippedTotal.hashMap
+      ? Object.values(lastMessagePgReconcileSkippedTotal.hashMap as Record<string, any>)
+          .filter((e: any) => e?.labels?.reason === 'conversation_disabled')
+          .reduce((s: number, e: any) => s + Number(e.value || 0), 0)
+      : 0;
+
+    await flushDirtyLastMessagePointers();
+
+    const skippedAfter = lastMessagePgReconcileSkippedTotal.hashMap
+      ? Object.values(lastMessagePgReconcileSkippedTotal.hashMap as Record<string, any>)
+          .filter((e: any) => e?.labels?.reason === 'conversation_disabled')
+          .reduce((s: number, e: any) => s + Number(e.value || 0), 0)
+      : 0;
+    expect(skippedAfter).toBeGreaterThanOrEqual(skippedBefore);
+  });
+
+  it('newer message overwrites older metadata in Redis for conversations', async () => {
+    const a = await createAuthenticatedUser('lm-dm-newer-a');
+    const b = await createAuthenticatedUser('lm-dm-newer-b');
+    const convRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ participantIds: [b.user.id] });
+    expect(convRes.status).toBe(201);
+    const conversationId = convRes.body.conversation.id;
+
+    const m1 = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ conversationId, content: 'first dm' });
+    const m2 = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ conversationId, content: 'second dm' });
+    expect([m1.status, m2.status]).toEqual([201, 201]);
+
+    await drainAllQueuesForTests();
+    const latest = await redis.hgetall(`conv:last_msg:${conversationId}`);
+    expect(latest.msg_id).toBe(m2.body.message.id);
   });
 
   it('POST /messages returns 201 even when the metadata Redis write would fail (channel)', async () => {

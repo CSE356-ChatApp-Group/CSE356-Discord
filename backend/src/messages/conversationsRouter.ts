@@ -28,6 +28,7 @@ const {
   setJsonCacheWithStale,
   withDistributedSingleflight,
 } = require('../utils/distributedSingleflight');
+const { getConversationLastMessageMetaMapFromRedis } = require('./repointLastMessage');
 
 const router = express.Router();
 router.use(authenticate);
@@ -36,7 +37,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const CONVERSATION_FIELDS =
   'c.id, c.name, c.created_by, c.created_at, c.updated_at, c.is_group, c.last_message_id, c.last_message_author_id, c.last_message_at';
 const CONVERSATION_LIST_FIELDS =
-  'c.id, c.name, c.created_by, c.created_at, c.updated_at, c.is_group';
+  'c.id, c.name, c.created_by, c.created_at, c.updated_at, c.is_group, c.last_message_id, c.last_message_author_id, c.last_message_at';
 const INVITE_NOTIFICATION_RETRY_DELAY_MS = 75;
 
 function publishConversationEvents(targets, event, data) {
@@ -344,6 +345,30 @@ async function invalidateConversationsListCaches(userIds) {
 // In-process singleflight: prevents thundering-herd on cache expiry.
 const conversationsInflight: Map<string, Promise<{ conversations: any[] }>> = new Map();
 
+function applyConversationLastMessageMetadata(conversations, latestByConversation) {
+  if (!Array.isArray(conversations) || !conversations.length || !latestByConversation?.size) return;
+  for (const c of conversations) {
+    const latest = latestByConversation.get(c.id);
+    if (!latest) continue;
+    c.last_message_id = latest.msg_id;
+    c.last_message_author_id = latest.author_id || null;
+    c.last_message_at = latest.at || null;
+  }
+}
+
+function sortConversationRowsByLatest(rows) {
+  const toMillis = (value) => {
+    const ms = new Date(value || 0).getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  };
+  rows.sort((a, b) => {
+    const aTs = toMillis(a.last_message_at || a.updated_at);
+    const bTs = toMillis(b.last_message_at || b.updated_at);
+    if (aTs !== bTs) return bTs - aTs;
+    return String(b.id || '').localeCompare(String(a.id || ''));
+  });
+}
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   const cacheKey = conversationsCacheKey(req.user.id);
@@ -372,9 +397,6 @@ router.get('/', async (req, res, next) => {
     load: async () => {
       const { rows } = await query(
         `SELECT ${CONVERSATION_LIST_FIELDS},
-              lm.id AS last_message_id,
-              lm.author_id AS last_message_author_id,
-              lm.created_at AS last_message_at,
               my_rs.last_read_message_id AS my_last_read_message_id,
               my_rs.last_read_at AS my_last_read_at,
               latest_other_rs.last_read_message_id AS other_last_read_message_id,
@@ -388,13 +410,6 @@ router.get('/', async (req, res, next) => {
        JOIN   conversation_participants cp2 ON cp2.conversation_id = c.id
                                             AND cp2.left_at IS NULL
        JOIN   users u ON u.id = cp2.user_id
-       LEFT JOIN LATERAL (
-         SELECT m.id, m.author_id, m.created_at
-         FROM messages m
-         WHERE m.conversation_id = c.id AND m.deleted_at IS NULL
-         ORDER BY m.created_at DESC
-         LIMIT 1
-       ) lm ON TRUE
        LEFT JOIN read_states my_rs
               ON my_rs.conversation_id = c.id
              AND my_rs.user_id = $1
@@ -413,12 +428,17 @@ router.get('/', async (req, res, next) => {
          ORDER BY rs.last_read_at DESC NULLS LAST
          LIMIT 1
        ) latest_other_rs ON TRUE
-       GROUP  BY c.id, lm.id, lm.author_id, lm.created_at, my_rs.last_read_message_id, my_rs.last_read_at,
+       GROUP  BY c.id, my_rs.last_read_message_id, my_rs.last_read_at,
                  latest_other_rs.last_read_message_id, latest_other_rs.last_read_at
       HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
-       ORDER  BY COALESCE(lm.created_at, c.updated_at) DESC`,
+       ORDER  BY COALESCE(c.last_message_at, c.updated_at) DESC`,
         [req.user.id]
       );
+      const latestByConversation = await getConversationLastMessageMetaMapFromRedis(
+        rows.map((row) => row.id),
+      );
+      applyConversationLastMessageMetadata(rows, latestByConversation);
+      sortConversationRowsByLatest(rows);
       const payload = { conversations: rows };
       await setJsonCacheWithStale(redis, cacheKey, payload, CONVERSATIONS_CACHE_TTL_SECS);
       return payload;
@@ -570,6 +590,8 @@ router.get('/:id', async (req, res, next) => {
       [req.params.id, req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const latestByConversation = await getConversationLastMessageMetaMapFromRedis([rows[0].id]);
+    applyConversationLastMessageMetadata(rows, latestByConversation);
     res.json({ conversation: rows[0] });
   } catch (err) { next(err); }
 });

@@ -35,6 +35,8 @@ const CHANNEL_FLUSH_INTERVAL_MS = parseInt(
 const CHANNEL_FLUSH_BATCH_SIZE = 50;
 const LAST_MESSAGE_PG_RECONCILE_ENABLED =
   String(process.env.LAST_MESSAGE_PG_RECONCILE_ENABLED || 'false').toLowerCase() === 'true';
+const CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED =
+  String(process.env.CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED || 'false').toLowerCase() === 'true';
 
 // SQL for background flush — no 1 ms lock_timeout, normal lock wait is fine
 // because this runs out of the hot path.
@@ -215,6 +217,10 @@ async function flushDirtyTargetsToDB(
 ) {
   if (target === 'channel' && !LAST_MESSAGE_PG_RECONCILE_ENABLED) {
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_disabled' });
+    return;
+  }
+  if (target === 'conversation' && !CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED) {
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_disabled' });
     return;
   }
   let ids: string[];
@@ -452,6 +458,32 @@ async function getChannelLastMessageMetaMapFromRedis(
   return out;
 }
 
+async function getConversationLastMessageMetaMapFromRedis(conversationIds: string[]) {
+  const out = new Map<string, LastMessageMeta>();
+  if (!Array.isArray(conversationIds) || conversationIds.length === 0) return out;
+  const ids = [...new Set(conversationIds.filter((id) => typeof id === 'string' && id))];
+  if (ids.length === 0) return out;
+  try {
+    const pipeline = redis.pipeline();
+    for (const id of ids) pipeline.hgetall(`${CONV_LAST_MSG_KEY_PREFIX}${id}`);
+    const results = await pipeline.exec();
+    for (let i = 0; i < ids.length; i += 1) {
+      const [err, data] = results[i] || [];
+      if (err || !data || !data.msg_id) {
+        lastMessageCacheTotal.inc({ target: 'conversation', result: err ? 'error' : 'miss' });
+        continue;
+      }
+      out.set(ids[i], data as LastMessageMeta);
+      lastMessageCacheTotal.inc({ target: 'conversation', result: 'hit' });
+    }
+  } catch {
+    for (const _id of ids) {
+      lastMessageCacheTotal.inc({ target: 'conversation', result: 'error' });
+    }
+  }
+  return out;
+}
+
 module.exports = {
   repointChannelLastMessage,
   repointConversationLastMessage,
@@ -460,4 +492,5 @@ module.exports = {
   startChannelLastMessageFlushInterval,
   flushDirtyLastMessagePointers,
   getChannelLastMessageMetaMapFromRedis,
+  getConversationLastMessageMetaMapFromRedis,
 };

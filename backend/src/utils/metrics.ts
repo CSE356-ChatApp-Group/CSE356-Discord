@@ -773,9 +773,13 @@ function startPgPoolMetrics(pool) {
     lastMessagePgReconcileTotal.inc({ target: 'conversation', result: 'error' }, 0);
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_disabled' }, 0);
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_pressure' }, 0);
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_disabled' }, 0);
     lastMessageCacheTotal.inc({ target: 'channel', result: 'hit' }, 0);
     lastMessageCacheTotal.inc({ target: 'channel', result: 'miss' }, 0);
     lastMessageCacheTotal.inc({ target: 'channel', result: 'error' }, 0);
+    lastMessageCacheTotal.inc({ target: 'conversation', result: 'hit' }, 0);
+    lastMessageCacheTotal.inc({ target: 'conversation', result: 'miss' }, 0);
+    lastMessageCacheTotal.inc({ target: 'conversation', result: 'error' }, 0);
     lastMessageCacheTotal.inc({ target: 'community_channel', result: 'hit' }, 0);
     lastMessageCacheTotal.inc({ target: 'community_channel', result: 'miss' }, 0);
     lastMessageCacheTotal.inc({ target: 'community_channel', result: 'error' }, 0);
