@@ -82,7 +82,7 @@ app.use((req, res, next) => {
   if (overload.shouldShedIncomingRequests()) {
     httpOverloadShedTotal.inc();
     res.set('Retry-After', '1');
-    return res.status(503).json({ error: 'Server busy, please retry' });
+    return res.status(429).json({ error: 'Server busy, please retry' });
   }
   next();
 });

@@ -109,7 +109,7 @@ function shouldRestrictNonEssentialWrites() {
 /**
  * shouldShedIncomingRequests – **opt-in only** (`OVERLOAD_HTTP_SHED_ENABLED=true`).
  * When enabled, returns true if event-loop p99 lag exceeds OVERLOAD_LAG_SHED_MS
- * (default 250 ms). Responds with 503 + Retry-After.
+ * (default 250 ms). Responds with 429 + Retry-After.
  *
  * **Default is off:** without the env var set to `true`, the app absorbs load via
  * the PG pool and event-loop queue (higher tail latency, fewer artificial 503s).

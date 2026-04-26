@@ -33,7 +33,7 @@ const httpRequestsAbortedTotal = new client.Counter({
 /** Incremented when middleware rejects a request due to event-loop lag (overload shed). */
 const httpOverloadShedTotal = new client.Counter({
   name: 'http_overload_shed_total',
-  help: 'HTTP requests rejected early by event-loop lag shedding (503 before route handlers)',
+  help: 'HTTP requests rejected early by event-loop lag shedding (429 before route handlers)',
 });
 
 // ── Presence fanout ────────────────────────────────────────────────────────────
