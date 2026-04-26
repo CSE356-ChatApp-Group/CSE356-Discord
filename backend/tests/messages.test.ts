@@ -1163,15 +1163,19 @@ describe('Overload behavior', () => {
     expect(res.body.error).toMatch(/temporarily unavailable/i);
   });
 
-  it('rejects read-state write under critical stage', async () => {
+  it('defers read-state write under critical stage', async () => {
     process.env.FORCE_OVERLOAD_STAGE = '3';
 
     const res = await request(app)
       .put(`/api/v1/messages/${randomUUID()}/read`)
       .set('Authorization', `Bearer ${token}`);
 
-    expect(res.status).toBe(503);
-    expect(res.body.error).toMatch(/temporarily delayed/i);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      success: true,
+      deferred: true,
+      reason: 'overload_stage_high',
+    });
   });
 
   it('keeps read cursor writes available and defers fanout under overload stage 2', async () => {
