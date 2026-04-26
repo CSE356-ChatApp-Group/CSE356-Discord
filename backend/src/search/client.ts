@@ -28,18 +28,31 @@ const SEARCH_USE_READ_REPLICA =
 /**
  * Max recent messages scanned per scope before applying literal substring
  * (community: per channel). Evaluated per query (not at module load).
- * Default 750, clamped 10..2000 so tests can lower the cap; production should
- * keep STOPWORD_LITERAL_RECENT_* unset or within ~500–1000 per ops guidance.
+ * Default 200, clamped 10..1000 so tests can lower the cap.
  */
 function literalRecentCandidateCap(): number {
   const raw = parseInt(
     process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT ||
       process.env.STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT ||
-      '750',
+      '200',
     10,
   );
-  const v = Number.isFinite(raw) && raw > 0 ? raw : 750;
-  return Math.min(Math.max(v, 10), 2000);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 200;
+  return Math.min(Math.max(v, 10), 1000);
+}
+
+/**
+ * Community fallback only: cap how many channels we probe per query.
+ * This bounds the LATERAL-per-channel work and avoids scanning long-tail
+ * inactive channels on stopword literal fallback.
+ */
+function literalCommunityChannelCap(): number {
+  const raw = parseInt(
+    process.env.STOPWORD_LITERAL_COMMUNITY_CHANNELS_LIMIT || '8',
+    10,
+  );
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 8;
+  return Math.min(Math.max(v, 1), 32);
 }
 
 function getSearchStatementTimeoutMs() {
@@ -580,6 +593,7 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
   const offsetPh = p(params, offset);
 
   if (scope.scopeType === 'community') {
+    const communityChannelCapPh = p(params, literalCommunityChannelCap());
     return {
       sql: `
         WITH ${scope.cte.trim()},
@@ -593,6 +607,22 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
            AND cm.user_id = ${scope.userIdPh}
           WHERE ch.community_id = ${scope.targetIdPh}
             AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
+        ),
+        community_channels_limited AS MATERIALIZED (
+          SELECT cc.id,
+                 cc.community_id,
+                 cc.name
+          FROM community_channels cc
+          LEFT JOIN LATERAL (
+            SELECT m1.created_at
+            FROM messages m1
+            WHERE m1.deleted_at IS NULL
+              AND m1.channel_id = cc.id
+            ORDER BY m1.created_at DESC, m1.id DESC
+            LIMIT 1
+          ) latest ON TRUE
+          ORDER BY latest.created_at DESC NULLS LAST, cc.id ASC
+          LIMIT (${communityChannelCapPh})::int
         )
         SELECT scope_access.has_access AS "__scopeAccess",
           search_rows.*
@@ -607,7 +637,7 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
                  m.created_at       AS "createdAt",
                  cc.community_id    AS "communityId",
                  cc.name            AS "channelName"
-          FROM community_channels cc
+          FROM community_channels_limited cc
           JOIN LATERAL (
             SELECT m0.id,
                    m0.content,
