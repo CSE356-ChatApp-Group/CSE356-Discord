@@ -202,6 +202,31 @@ const messageChannelInsertLockWaitMs = new client.Histogram({
   buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 });
 
+/** Current number of in-process POST /messages lock waiters across channels. */
+const messageInsertLockWaitersCurrentGauge = new client.Gauge({
+  name: 'message_insert_lock_waiters_current',
+  help: 'Current number of in-process channel insert lock waiters',
+});
+
+/** Requests rejected early because per-channel lock waiter cap was reached. */
+const messageInsertLockQueueRejectTotal = new client.Counter({
+  name: 'message_insert_lock_queue_reject_total',
+  help: 'POST /messages rejects when channel insert lock waiter cap is exceeded',
+  labelNames: ['reason'],
+});
+
+/** Number of channel insert lock wait timeout events. */
+const messageInsertLockWaitTimeoutTotal = new client.Counter({
+  name: 'message_insert_lock_wait_timeout_total',
+  help: 'POST /messages lock wait timeout events',
+});
+
+/** Successful lock acquires that had to wait at least one poll interval. */
+const messageInsertLockAcquiredAfterWaitTotal = new client.Counter({
+  name: 'message_insert_lock_acquired_after_wait_total',
+  help: 'POST /messages lock acquires after non-zero waiting time',
+});
+
 /** PUT /messages/:id/read early soft-defer events by reason. */
 const readReceiptShedTotal = new client.Counter({
   name: 'read_receipt_shed_total',
@@ -867,9 +892,14 @@ function startPgPoolMetrics(pool) {
     messageChannelInsertLockTotal.inc({ result: 'redis_error' }, 0);
     messageChannelInsertLockTotal.inc({ result: 'release_mismatch' }, 0);
     messageChannelInsertLockTotal.inc({ result: 'release_error' }, 0);
+    messageChannelInsertLockTotal.inc({ result: 'queue_reject' }, 0);
     messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, 0);
     messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, 0);
     messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, 0);
+    messageInsertLockWaitersCurrentGauge.set(0);
+    messageInsertLockQueueRejectTotal.inc({ reason: 'per_channel_waiter_cap' }, 0);
+    messageInsertLockWaitTimeoutTotal.inc(0);
+    messageInsertLockAcquiredAfterWaitTotal.inc(0);
     readReceiptShedTotal.inc({ reason: 'message_channel_insert_lock_pressure' }, 0);
     readReceiptShedTotal.inc({ reason: 'overload_stage_high' }, 0);
     readReceiptRequestsTotal.inc(
@@ -1024,6 +1054,10 @@ module.exports = {
   messagePostRateLimitHitsTotal,
   messageChannelInsertLockTotal,
   messageChannelInsertLockWaitMs,
+  messageInsertLockWaitersCurrentGauge,
+  messageInsertLockQueueRejectTotal,
+  messageInsertLockWaitTimeoutTotal,
+  messageInsertLockAcquiredAfterWaitTotal,
   readReceiptShedTotal,
   readReceiptRequestsTotal,
   messageChannelInsertLockPressureWaitP95MsGauge,

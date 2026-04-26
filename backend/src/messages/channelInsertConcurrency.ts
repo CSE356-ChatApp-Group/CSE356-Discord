@@ -14,6 +14,10 @@ const logger = require('../utils/logger');
 const {
   messageChannelInsertLockTotal,
   messageChannelInsertLockWaitMs,
+  messageInsertLockWaitersCurrentGauge,
+  messageInsertLockQueueRejectTotal,
+  messageInsertLockWaitTimeoutTotal,
+  messageInsertLockAcquiredAfterWaitTotal,
 } = require('../utils/metrics');
 const {
   recordMessageChannelInsertLockAcquireWait,
@@ -46,6 +50,12 @@ const MESSAGE_INSERT_LOCK_POLL_MAX_MS = parseIntEnv(
   MESSAGE_INSERT_LOCK_POLL_MIN_MS,
   1000,
 );
+const MESSAGE_INSERT_LOCK_MAX_WAITERS_PER_CHANNEL = parseIntEnv(
+  'MESSAGE_INSERT_LOCK_MAX_WAITERS_PER_CHANNEL',
+  32,
+  1,
+  1000,
+);
 const MESSAGE_INSERT_LOCK_RELEASE_LUA = `
 if redis.call("get", KEYS[1]) == ARGV[1] then
   return redis.call("del", KEYS[1])
@@ -53,6 +63,13 @@ else
   return 0
 end`;
 const MESSAGE_INSERT_LOCK_TIMEOUT_CODE = 'MESSAGE_INSERT_LOCK_TIMEOUT';
+const MESSAGE_INSERT_LOCK_QUEUE_REJECT_CODE = 'MESSAGE_INSERT_LOCK_QUEUE_REJECT';
+const channelWaiters = new Map<string, number>();
+let waitersTotal = 0;
+const MESSAGE_INSERT_LOCK_WAITERS_KEY_TTL_MS = Math.min(
+  180000,
+  MESSAGE_INSERT_LOCK_TTL_MS + MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS + 1000,
+);
 
 function parseIntEnv(
   name: string,
@@ -89,72 +106,157 @@ function buildInsertLockTimeoutError(channelId: string, waitMs: number) {
   return err;
 }
 
+function buildInsertLockQueueRejectError(channelId: string, waiters: number) {
+  const err: any = new Error(
+    'Messaging is briefly busy saving your message; please retry.',
+  );
+  err.code = MESSAGE_INSERT_LOCK_QUEUE_REJECT_CODE;
+  err.statusCode = 503;
+  err.channelId = channelId;
+  err.messageInsertLockWaiters = waiters;
+  return err;
+}
+
+function incrementWaiters(channelId: string) {
+  const next = (channelWaiters.get(channelId) || 0) + 1;
+  channelWaiters.set(channelId, next);
+  waitersTotal += 1;
+  messageInsertLockWaitersCurrentGauge.set(waitersTotal);
+  return next;
+}
+
+function decrementWaiters(channelId: string) {
+  const current = channelWaiters.get(channelId) || 0;
+  if (current <= 1) channelWaiters.delete(channelId);
+  else channelWaiters.set(channelId, current - 1);
+  waitersTotal = Math.max(0, waitersTotal - 1);
+  messageInsertLockWaitersCurrentGauge.set(waitersTotal);
+}
+
 type MessageInsertLease = {
   lockKey: string;
   token: string;
   waitMs: number;
 };
 
+type MessageInsertWaitQueueLease = {
+  waitersKey: string;
+  tracked: boolean;
+};
+
+async function enterChannelInsertWaitQueue(
+  channelId: string,
+  opts: { requestId?: string } = {},
+): Promise<MessageInsertWaitQueueLease> {
+  const waitersKey = `message_insert_lock_waiters:${channelId}`;
+  try {
+    const waiterCount = Number(await redis.incr(waitersKey));
+    await redis.pexpire(waitersKey, MESSAGE_INSERT_LOCK_WAITERS_KEY_TTL_MS);
+    if (waiterCount > MESSAGE_INSERT_LOCK_MAX_WAITERS_PER_CHANNEL) {
+      await redis.decr(waitersKey);
+      messageChannelInsertLockTotal.inc({ result: 'queue_reject' });
+      messageInsertLockQueueRejectTotal.inc({ reason: 'per_channel_waiter_cap' });
+      logger.warn(
+        {
+          channelId,
+          requestId: opts.requestId,
+          waiters: waiterCount,
+          waiterCap: MESSAGE_INSERT_LOCK_MAX_WAITERS_PER_CHANNEL,
+        },
+        'POST /messages channel insert lock queue rejected (waiter cap reached)',
+      );
+      throw buildInsertLockQueueRejectError(channelId, waiterCount);
+    }
+    return { waitersKey, tracked: true };
+  } catch (err: any) {
+    if (err?.code === MESSAGE_INSERT_LOCK_QUEUE_REJECT_CODE) throw err;
+    logger.warn(
+      { err, channelId, requestId: opts.requestId },
+      'POST /messages channel insert lock waiter admission check failed; continuing without cap enforcement',
+    );
+    return { waitersKey, tracked: false };
+  }
+}
+
+async function leaveChannelInsertWaitQueue(lease: MessageInsertWaitQueueLease) {
+  if (!lease.tracked) return;
+  try {
+    await redis.decr(lease.waitersKey);
+  } catch {
+    // best effort cleanup; key TTL handles stale counters
+  }
+}
+
 async function acquireChannelInsertLease(
   channelId: string,
   opts: { requestId?: string } = {},
 ): Promise<MessageInsertLease | null> {
+  const waitQueueLease = await enterChannelInsertWaitQueue(channelId, opts);
+  incrementWaiters(channelId);
   const lockKey = `message_insert_lock:${channelId}`;
   const token = `${process.pid}:${crypto.randomUUID()}`;
   const startedAt = Date.now();
   const deadline = startedAt + MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS;
   let attempt = 0;
-
-  while (Date.now() <= deadline) {
-    try {
-      const acquired = await redis.set(
-        lockKey,
-        token,
-        'NX',
-        'PX',
-        MESSAGE_INSERT_LOCK_TTL_MS,
-      );
-      if (acquired === 'OK') {
-        const waitMs = Math.max(0, Date.now() - startedAt);
-        messageChannelInsertLockTotal.inc({
-          result: waitMs === 0 ? 'acquired_immediate' : 'acquired_after_wait',
-        });
-        messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, waitMs);
-        recordMessageChannelInsertLockAcquireWait(waitMs);
-        if (waitMs >= 100) {
-          logger.info(
-            { channelId, requestId: opts.requestId, waitMs },
-            'POST /messages channel insert lock acquired after wait',
-          );
+  try {
+    while (Date.now() <= deadline) {
+      try {
+        const acquired = await redis.set(
+          lockKey,
+          token,
+          'NX',
+          'PX',
+          MESSAGE_INSERT_LOCK_TTL_MS,
+        );
+        if (acquired === 'OK') {
+          const waitMs = Math.max(0, Date.now() - startedAt);
+          messageChannelInsertLockTotal.inc({
+            result: waitMs === 0 ? 'acquired_immediate' : 'acquired_after_wait',
+          });
+          messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, waitMs);
+          if (waitMs > 0) {
+            messageInsertLockAcquiredAfterWaitTotal.inc();
+          }
+          recordMessageChannelInsertLockAcquireWait(waitMs);
+          if (waitMs >= 100) {
+            logger.info(
+              { channelId, requestId: opts.requestId, waitMs },
+              'POST /messages channel insert lock acquired after wait',
+            );
+          }
+          return { lockKey, token, waitMs };
         }
-        return { lockKey, token, waitMs };
+      } catch (err) {
+        const waitMs = Math.max(0, Date.now() - startedAt);
+        messageChannelInsertLockTotal.inc({ result: 'redis_error' });
+        messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, waitMs);
+        logger.error(
+          { err, channelId, requestId: opts.requestId, waitMs },
+          'POST /messages channel insert lock Redis error; falling back to local serialization',
+        );
+        return null;
       }
-    } catch (err) {
-      const waitMs = Math.max(0, Date.now() - startedAt);
-      messageChannelInsertLockTotal.inc({ result: 'redis_error' });
-      messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, waitMs);
-      logger.error(
-        { err, channelId, requestId: opts.requestId, waitMs },
-        'POST /messages channel insert lock Redis error; falling back to local serialization',
-      );
-      return null;
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      await sleep(Math.min(remainingMs, jitteredSleepMs(attempt)));
+      attempt += 1;
     }
 
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) break;
-    await sleep(Math.min(remainingMs, jitteredSleepMs(attempt)));
-    attempt += 1;
+    const waitMs = Math.max(0, Date.now() - startedAt);
+    messageChannelInsertLockTotal.inc({ result: 'timeout' });
+    messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, waitMs);
+    messageInsertLockWaitTimeoutTotal.inc();
+    recordMessageChannelInsertLockTimeoutEvent();
+    logger.warn(
+      { channelId, requestId: opts.requestId, waitMs },
+      'POST /messages channel insert lock timed out',
+    );
+    throw buildInsertLockTimeoutError(channelId, waitMs);
+  } finally {
+    decrementWaiters(channelId);
+    await leaveChannelInsertWaitQueue(waitQueueLease);
   }
-
-  const waitMs = Math.max(0, Date.now() - startedAt);
-  messageChannelInsertLockTotal.inc({ result: 'timeout' });
-  messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, waitMs);
-  recordMessageChannelInsertLockTimeoutEvent();
-  logger.warn(
-    { channelId, requestId: opts.requestId, waitMs },
-    'POST /messages channel insert lock timed out',
-  );
-  throw buildInsertLockTimeoutError(channelId, waitMs);
 }
 
 async function releaseChannelInsertLease(
@@ -220,4 +322,8 @@ export function runChannelMessageInsertSerialized<T>(
 
 export function isChannelInsertLockTimeoutError(err: any) {
   return err?.code === MESSAGE_INSERT_LOCK_TIMEOUT_CODE;
+}
+
+export function isChannelInsertLockQueueRejectError(err: any) {
+  return err?.code === MESSAGE_INSERT_LOCK_QUEUE_REJECT_CODE;
 }

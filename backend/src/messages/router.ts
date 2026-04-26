@@ -200,6 +200,7 @@ const {
 const {
   runChannelMessageInsertSerialized,
   isChannelInsertLockTimeoutError,
+  isChannelInsertLockQueueRejectError,
 } = require("./channelInsertConcurrency");
 const {
   setChannelAccessCache,
@@ -2057,6 +2058,21 @@ router.post(
             waitMs: err.messageInsertLockWaitMs || null,
           },
           "POST /messages: channel insert lock timed out before DB transaction",
+        );
+        return res.status(503).set("Retry-After", "1").json({
+          error: "Messaging is briefly busy saving your message; please retry.",
+          requestId: req.id,
+        });
+      }
+      if (isChannelInsertLockQueueRejectError(err)) {
+        logger.warn(
+          {
+            requestId: req.id,
+            channelId,
+            conversationId,
+            waiters: err.messageInsertLockWaiters || null,
+          },
+          "POST /messages: channel insert lock waiter cap exceeded before DB transaction",
         );
         return res.status(503).set("Retry-After", "1").json({
           error: "Messaging is briefly busy saving your message; please retry.",
