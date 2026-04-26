@@ -27,32 +27,18 @@ const SEARCH_USE_READ_REPLICA =
   String(process.env.SEARCH_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
 /**
  * Max recent messages scanned per scope before applying literal substring
- * (community: per channel). Evaluated per query (not at module load).
- * Default 200, clamped 10..1000 so tests can lower the cap.
+ * (scoped total candidate set). Evaluated per query (not at module load).
+ * Default 1500, clamped 1000..2000.
  */
 function literalRecentCandidateCap(): number {
   const raw = parseInt(
     process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT ||
       process.env.STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT ||
-      '200',
+      '1500',
     10,
   );
-  const v = Number.isFinite(raw) && raw > 0 ? raw : 200;
-  return Math.min(Math.max(v, 10), 1000);
-}
-
-/**
- * Community fallback only: cap how many channels we probe per query.
- * This bounds the LATERAL-per-channel work and avoids scanning long-tail
- * inactive channels on stopword literal fallback.
- */
-function literalCommunityChannelCap(): number {
-  const raw = parseInt(
-    process.env.STOPWORD_LITERAL_COMMUNITY_CHANNELS_LIMIT || '8',
-    10,
-  );
-  const v = Number.isFinite(raw) && raw > 0 ? raw : 8;
-  return Math.min(Math.max(v, 1), 32);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 1500;
+  return Math.min(Math.max(v, 1000), 2000);
 }
 
 function getSearchStatementTimeoutMs() {
@@ -407,6 +393,16 @@ function buildResult(rows: any[], q: string, offset: number, limit: number) {
   };
 }
 
+function ftsRecentCandidateCap(limit: number, offset: number): number {
+  const raw = parseInt(process.env.SEARCH_FTS_RECENT_CANDIDATES_LIMIT || '800', 10);
+  const minNeeded = Math.max(offset + limit, limit);
+  const clamped = Math.min(
+    Math.max(Number.isFinite(raw) && raw > 0 ? raw : 800, 500),
+    1000,
+  );
+  return Math.max(clamped, minNeeded);
+}
+
 /** Statement + paging metadata for FTS (content_tsv GIN). */
 function buildFtsParts(q: string, opts: Record<string, any>) {
   const params: any[] = [q]; // $1 reserved for the query string
@@ -416,15 +412,8 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   const ctes = [`search_query AS (SELECT websearch_to_tsquery('english', $1) AS q)`];
   if (scope) ctes.push(scope.cte.trim());
 
-  // Keep the expensive result phase bounded. For community-scoped FTS we first
-  // materialize TSV hits only within accessible community channels, then cap
-  // recency before fetching message/user rows for highlighting.
-  const rawCandidatesLimit = parseInt(process.env.SEARCH_FTS_CANDIDATES_LIMIT || '200', 10);
-  const minimumCandidates = Math.max(offset + limit, limit);
-  const candidatesLimit = Math.max(
-    Number.isFinite(rawCandidatesLimit) && rawCandidatesLimit > 0 ? rawCandidatesLimit : 200,
-    minimumCandidates,
-  );
+  // Bound the scoped working set before FTS ranking/highlight work.
+  const recentCandidatesLimit = ftsRecentCandidateCap(limit, offset);
 
   const candidateFilters: string[] = [];
   if (opts.authorId) candidateFilters.push(`AND m0.author_id = ${p(params, opts.authorId)}`);
@@ -454,20 +443,32 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
         AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
     )`);
 
-    ctes.push(`fts_candidates AS MATERIALIZED (
-      SELECT m0.id, m0.created_at, m0.channel_id
+    ctes.push(`scoped_recent_candidates AS MATERIALIZED (
+      SELECT m0.id,
+             m0.created_at,
+             m0.channel_id
       FROM messages m0
-      CROSS JOIN search_query sq0
-      INNER JOIN community_channels cc0 ON cc0.id = m0.channel_id
+      INNER JOIN community_channels cc0
+        ON cc0.id = m0.channel_id
       WHERE m0.deleted_at IS NULL
-        AND m0.content_tsv @@ sq0.q
         ${candidateFilters.join('\n        ')}
       ORDER BY m0.created_at DESC, m0.id DESC
-      LIMIT ${candidatesLimit}
+      LIMIT ${recentCandidatesLimit}
+    )`);
+
+    ctes.push(`fts_candidates AS MATERIALIZED (
+      SELECT src.id,
+             src.created_at,
+             src.channel_id
+      FROM scoped_recent_candidates src
+      CROSS JOIN search_query sq0
+      JOIN messages m0 ON m0.id = src.id
+      WHERE m0.content_tsv @@ sq0.q
+      ORDER BY src.created_at DESC, src.id DESC
     )`);
 
     ctes.push(`fts_candidate_stats AS (
-      SELECT COUNT(*)::int AS fts_candidate_count FROM fts_candidates
+      SELECT COUNT(*)::int AS fts_candidate_count FROM scoped_recent_candidates
     )`);
 
     ctes.push(`scoped_candidates AS MATERIALIZED (
@@ -479,7 +480,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       FROM fts_candidates fc
       JOIN community_channels cc ON cc.id = fc.channel_id
       ORDER BY fc.created_at DESC, fc.id DESC
-      LIMIT ${candidatesLimit}
+      LIMIT ${recentCandidatesLimit}
     )`);
 
     selectCols = SELECT_COLS_FROM_SCOPED_CANDIDATE;
@@ -490,10 +491,10 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       JOIN users u ON u.id = m.author_id`;
     orderBy = 'sc.created_at DESC, m.id DESC';
   } else if (scope.scopeType === 'channel' && scope.targetIdPh && scope.userIdPh) {
-    ctes.push(`fts_candidates AS MATERIALIZED (
-      SELECT m0.id, m0.created_at
+    ctes.push(`scoped_recent_candidates AS MATERIALIZED (
+      SELECT m0.id,
+             m0.created_at
       FROM messages m0
-      CROSS JOIN search_query sq0
       INNER JOIN channels ch_gate ON ch_gate.id = m0.channel_id
         AND ch_gate.id = ${scope.targetIdPh}
       LEFT JOIN channel_members cm_gate
@@ -502,17 +503,25 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       WHERE m0.deleted_at IS NULL
         AND m0.channel_id = ${scope.targetIdPh}
         AND (ch_gate.is_private = FALSE OR cm_gate.user_id IS NOT NULL)
-        AND m0.content_tsv @@ sq0.q
         ${candidateFilters.join('\n        ')}
       ORDER BY m0.created_at DESC, m0.id DESC
-      LIMIT ${candidatesLimit}
+      LIMIT ${recentCandidatesLimit}
+    )`);
+    ctes.push(`fts_candidates AS MATERIALIZED (
+      SELECT src.id,
+             src.created_at
+      FROM scoped_recent_candidates src
+      CROSS JOIN search_query sq0
+      JOIN messages m0 ON m0.id = src.id
+      WHERE m0.content_tsv @@ sq0.q
+      ORDER BY src.created_at DESC, src.id DESC
     )`);
     filters = '';
   } else if (scope.scopeType === 'conversation' && scope.targetIdPh && scope.userIdPh) {
-    ctes.push(`fts_candidates AS MATERIALIZED (
-      SELECT m0.id, m0.created_at
+    ctes.push(`scoped_recent_candidates AS MATERIALIZED (
+      SELECT m0.id,
+             m0.created_at
       FROM messages m0
-      CROSS JOIN search_query sq0
       INNER JOIN conversation_participants cp_gate
         ON cp_gate.conversation_id = m0.conversation_id
        AND cp_gate.conversation_id = ${scope.targetIdPh}
@@ -520,10 +529,18 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
        AND cp_gate.left_at IS NULL
       WHERE m0.deleted_at IS NULL
         AND m0.conversation_id = ${scope.targetIdPh}
-        AND m0.content_tsv @@ sq0.q
         ${candidateFilters.join('\n        ')}
       ORDER BY m0.created_at DESC, m0.id DESC
-      LIMIT ${candidatesLimit}
+      LIMIT ${recentCandidatesLimit}
+    )`);
+    ctes.push(`fts_candidates AS MATERIALIZED (
+      SELECT src.id,
+             src.created_at
+      FROM scoped_recent_candidates src
+      CROSS JOIN search_query sq0
+      JOIN messages m0 ON m0.id = src.id
+      WHERE m0.content_tsv @@ sq0.q
+      ORDER BY src.created_at DESC, src.id DESC
     )`);
     filters = '';
   } else {
@@ -585,7 +602,7 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
   }
 
   // Parameter order must match SQL text: scope ids (in CTE), author/time, query string,
-  // recent candidate cap, page limit, offset.
+  // scoped candidate cap, page limit, offset.
   const authorTimeFilters = buildAuthorTimeFilters(params, opts, 'm0');
   const rawQueryPh = p(params, q);
   const recentCapPh = p(params, literalRecentCandidateCap());
@@ -593,7 +610,6 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
   const offsetPh = p(params, offset);
 
   if (scope.scopeType === 'community') {
-    const communityChannelCapPh = p(params, literalCommunityChannelCap());
     return {
       sql: `
         WITH ${scope.cte.trim()},
@@ -608,53 +624,41 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
           WHERE ch.community_id = ${scope.targetIdPh}
             AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
         ),
-        community_channels_limited AS MATERIALIZED (
-          SELECT cc.id,
-                 cc.community_id,
-                 cc.name
-          FROM community_channels cc
-          LEFT JOIN LATERAL (
-            SELECT m1.created_at
-            FROM messages m1
-            WHERE m1.deleted_at IS NULL
-              AND m1.channel_id = cc.id
-            ORDER BY m1.created_at DESC, m1.id DESC
-            LIMIT 1
-          ) latest ON TRUE
-          ORDER BY latest.created_at DESC NULLS LAST, cc.id ASC
-          LIMIT (${communityChannelCapPh})::int
+        community_candidates AS MATERIALIZED (
+          SELECT m0.id,
+                 m0.content,
+                 m0.author_id,
+                 m0.channel_id,
+                 m0.conversation_id,
+                 m0.created_at
+          FROM messages m0
+          INNER JOIN community_channels cc0
+            ON cc0.id = m0.channel_id
+          WHERE m0.deleted_at IS NULL
+            ${authorTimeFilters}
+          ORDER BY m0.created_at DESC, m0.id DESC
+          LIMIT ${recentCapPh}
         )
         SELECT scope_access.has_access AS "__scopeAccess",
           search_rows.*
         FROM scope_access
         LEFT JOIN LATERAL (
-          SELECT m.id,
-                 m.content,
-                 m.author_id        AS "authorId",
+          SELECT mc.id,
+                 mc.content,
+                 mc.author_id        AS "authorId",
                  COALESCE(NULLIF(u.display_name, ''), u.username) AS "authorDisplayName",
-                 m.channel_id       AS "channelId",
-                 m.conversation_id  AS "conversationId",
-                 m.created_at       AS "createdAt",
+                 mc.channel_id       AS "channelId",
+                 mc.conversation_id  AS "conversationId",
+                 mc.created_at       AS "createdAt",
                  cc.community_id    AS "communityId",
                  cc.name            AS "channelName"
-          FROM community_channels_limited cc
-          JOIN LATERAL (
-            SELECT m0.id,
-                   m0.content,
-                   m0.author_id,
-                   m0.channel_id,
-                   m0.conversation_id,
-                   m0.created_at
-            FROM messages m0
-            WHERE m0.deleted_at IS NULL
-              AND m0.channel_id = cc.id
-              ${authorTimeFilters}
-            ORDER BY m0.created_at DESC, m0.id DESC
-            LIMIT ${recentCapPh}
-          ) m ON TRUE
-          JOIN users u ON u.id = m.author_id
-          WHERE position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
-          ORDER BY m.created_at DESC, m.id DESC
+          FROM community_candidates mc
+          JOIN community_channels cc
+            ON cc.id = mc.channel_id
+          JOIN users u ON u.id = mc.author_id
+          WHERE lower(coalesce(mc.content, '')) LIKE ('%' || lower(${rawQueryPh}) || '%')
+             OR position(lower(${rawQueryPh}) in lower(coalesce(mc.content, ''))) > 0
+          ORDER BY mc.created_at DESC, mc.id DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
         ) search_rows ON scope_access.has_access = TRUE`,
       params,
@@ -694,7 +698,8 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
           ) m
           JOIN users u ON u.id = m.author_id
           LEFT JOIN channels ch ON ch.id = m.channel_id
-          WHERE position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+          WHERE lower(coalesce(m.content, '')) LIKE ('%' || lower(${rawQueryPh}) || '%')
+             OR position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
           ORDER BY m.created_at DESC, m.id DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
         ) search_rows ON scope_access.has_access = TRUE`,
@@ -737,7 +742,8 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
           ) m
           JOIN users u ON u.id = m.author_id
           LEFT JOIN channels ch ON ch.id = m.channel_id
-          WHERE position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+          WHERE lower(coalesce(m.content, '')) LIKE ('%' || lower(${rawQueryPh}) || '%')
+             OR position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
           ORDER BY m.created_at DESC, m.id DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
         ) search_rows ON scope_access.has_access = TRUE`,

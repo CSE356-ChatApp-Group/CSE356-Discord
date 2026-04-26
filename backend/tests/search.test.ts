@@ -819,16 +819,16 @@ describe('Search – scoped literal fallback (hardened)', () => {
     expect(resNew.body.hits.some((h: any) => h.id === msg.id)).toBe(true);
   });
 
-  it('tight recent cap can miss literal beyond candidate window (community)', async () => {
-    process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT = '10';
-    const owner = await createAuthenticatedUser('srchlitbound');
+  it('older message is still returned from community fallback when newer chatter exists in other channels', async () => {
+    const owner = await createAuthenticatedUser('srchlitold');
     const token = owner.accessToken;
     const community = await createCommunity(token, uniqueSuffix());
-    const channel = await createChannel(token, community.id);
+    const oldChannel = await createChannel(token, community.id);
+    const noisyChannel = await createChannel(token, community.id);
     const tail = uniqueSuffix();
-    await sendMessage(token, channel.id, `more just about anchor ${tail}`);
-    for (let i = 0; i < 11; i += 1) {
-      await sendMessage(token, channel.id, `litbound filler ${tail} ${i}`);
+    await sendMessage(token, oldChannel.id, `more just about older anchor ${tail}`);
+    for (let i = 0; i < 60; i += 1) {
+      await sendMessage(token, noisyChannel.id, `noise ${tail} ${i}`);
     }
 
     const res = await request(app)
@@ -836,7 +836,55 @@ describe('Search – scoped literal fallback (hardened)', () => {
       .set('Authorization', `Bearer ${token}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hits.length).toBe(0);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(`anchor ${tail}`))).toBe(true);
+  });
+
+  it('typo phrase fallback ("controll") returns existing community message', async () => {
+    const owner = await createAuthenticatedUser('srchlittypo');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const marker = `controll typo ${uniqueSuffix()}`;
+    await sendMessage(token, channel.id, `operator note: ${marker}`);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('controll typo')}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(marker))).toBe(true);
+  });
+
+  it('multi-language phrase fallback returns existing message', async () => {
+    const owner = await createAuthenticatedUser('srchlitde');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const phrase = `straße über größe ${uniqueSuffix()}`;
+    await sendMessage(token, channel.id, `de note: ${phrase}`);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('straße über')}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(phrase))).toBe(true);
+  });
+
+  it('phrase split by punctuation fallback returns existing message', async () => {
+    const owner = await createAuthenticatedUser('srchlitpunct');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const marker = uniqueSuffix();
+    await sendMessage(token, channel.id, `ping--pong controll ${marker}`);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('ping--pong controll')}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(marker))).toBe(true);
   });
 
   it('unscoped search still rejected (no literal global path)', async () => {
