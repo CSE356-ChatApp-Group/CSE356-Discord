@@ -1,6 +1,6 @@
 'use strict';
 
-const { withTransaction } = require('../db/pool');
+const { withTransaction, poolStats } = require('../db/pool');
 const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const overload = require('../utils/overload');
@@ -12,6 +12,7 @@ const {
   wsReplayCachedTotal,
   wsReplayDbQueryTotal,
   wsReplayStartedTotal,
+  wsReplayErrorClassTotal,
 } = require('../utils/metrics');
 import { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from './sqlFragments';
 
@@ -33,6 +34,14 @@ const WS_MESSAGE_REPLAY_MAX_WINDOW_MS =
   Number.isFinite(rawReplayMaxWindowMs) && rawReplayMaxWindowMs > 0
     ? Math.floor(rawReplayMaxWindowMs)
     : 3600000;
+// Hard cap for DB safety under long disconnect gaps (default 5 min).
+const rawReplayWindowHardCapMs = Number(
+  process.env.WS_MESSAGE_REPLAY_WINDOW_HARD_CAP_MS || '300000',
+);
+const WS_MESSAGE_REPLAY_WINDOW_HARD_CAP_MS =
+  Number.isFinite(rawReplayWindowHardCapMs) && rawReplayWindowHardCapMs > 0
+    ? Math.floor(rawReplayWindowHardCapMs)
+    : 300000;
 // A socket can die on the client/intermediary side before the server records
 // the disconnect on heartbeat. Looking back slightly prevents messages created
 // in that blind window from being skipped during reconnect replay.
@@ -72,6 +81,12 @@ const WS_REPLAY_DEDUP_TTL_SEC =
     : Number.isFinite(rawReplayDedupTtlSec) && rawReplayDedupTtlSec > 0
       ? Math.min(5, Math.max(2, Math.floor(rawReplayDedupTtlSec)))
       : 3;
+
+const rawReplayErrorLogSampleRate = Number(process.env.WS_REPLAY_ERROR_LOG_SAMPLE_RATE || '0.1');
+const WS_REPLAY_ERROR_LOG_SAMPLE_RATE =
+  Number.isFinite(rawReplayErrorLogSampleRate)
+    ? Math.min(1, Math.max(0, rawReplayErrorLogSampleRate))
+    : 0.1;
 
 /** @deprecated use WS_REPLAY_DB_MAX_GLOBAL — kept for tests / metrics parity */
 const WS_MESSAGE_REPLAY_MAX_CONCURRENT = WS_REPLAY_DB_MAX_GLOBAL;
@@ -243,6 +258,9 @@ function replayQueryProfile(gapMs, stage = overload.getStage(), closeCode?: numb
     limit = Math.min(limit, 10);
   }
 
+  // Final guardrail so pathological reconnect gaps cannot force huge scans.
+  windowMs = Math.min(windowMs, WS_MESSAGE_REPLAY_WINDOW_HARD_CAP_MS);
+
   return {
     stage,
     limit: Math.min(50, Math.max(0, limit)),
@@ -264,6 +282,10 @@ function classifyReplayError(err) {
     return 'pool_busy';
   }
   return 'error';
+}
+
+function shouldSampleReplayErrorLog() {
+  return Math.random() < WS_REPLAY_ERROR_LOG_SAMPLE_RATE;
 }
 
 async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnectObservedAtMs, closeCode?: number) {
@@ -337,44 +359,61 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   replayDbInFlight += 1;
   try {
     const statementTimeoutMs = WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED;
+    const branchCandidateLimit = Math.min(200, Math.max(profile.limit * 4, 50));
     const runReplayTransaction = () =>
       withTransaction(async (client) => {
       await client.query(`SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`);
       const result = await client.query(
-        `WITH accessible AS (
+        `WITH accessible_conversations AS MATERIALIZED (
+           SELECT cp.conversation_id
+           FROM conversation_participants cp
+           WHERE cp.user_id = $1
+             AND cp.left_at IS NULL
+         ),
+         accessible_channels AS MATERIALIZED (
+           SELECT ch.id AS channel_id
+           FROM community_members cm
+           JOIN channels ch ON ch.community_id = cm.community_id
+           LEFT JOIN channel_members chm
+             ON chm.channel_id = ch.id
+            AND chm.user_id = $1
+           WHERE cm.user_id = $1
+             AND (ch.is_private = FALSE OR chm.user_id IS NOT NULL)
+         ),
+         conversation_candidates AS MATERIALIZED (
            SELECT m.id, m.created_at
-           FROM messages m
+           FROM accessible_conversations ac
+           JOIN messages m ON m.conversation_id = ac.conversation_id
            WHERE m.deleted_at IS NULL
              AND m.created_at > to_timestamp($2::double precision / 1000.0)
              AND m.created_at <= to_timestamp($3::double precision / 1000.0)
-             AND (
-               (
-                 m.conversation_id IS NOT NULL
-                 AND EXISTS (
-                   SELECT 1 FROM conversation_participants cp
-                   WHERE cp.conversation_id = m.conversation_id
-                     AND cp.user_id = $1
-                     AND cp.left_at IS NULL
-                 )
-               )
-               OR
-               (
-                 m.channel_id IS NOT NULL
-                 AND EXISTS (
-                   SELECT 1
-                   FROM channels ch
-                   INNER JOIN community_members cm
-                     ON cm.community_id = ch.community_id
-                    AND cm.user_id = $1
-                   LEFT JOIN channel_members chm
-                     ON chm.channel_id = ch.id
-                    AND chm.user_id = $1
-                   WHERE ch.id = m.channel_id
-                     AND (ch.is_private = FALSE OR chm.user_id IS NOT NULL)
-                 )
-               )
-             )
            ORDER BY m.created_at ASC, m.id ASC
+           LIMIT $5
+         ),
+         channel_candidates AS MATERIALIZED (
+           SELECT m.id, m.created_at
+           FROM accessible_channels ach
+           JOIN messages m ON m.channel_id = ach.channel_id
+           WHERE m.deleted_at IS NULL
+             AND m.created_at > to_timestamp($2::double precision / 1000.0)
+             AND m.created_at <= to_timestamp($3::double precision / 1000.0)
+           ORDER BY m.created_at ASC, m.id ASC
+           LIMIT $5
+         ),
+         merged_candidates AS (
+           SELECT id, created_at FROM conversation_candidates
+           UNION ALL
+           SELECT id, created_at FROM channel_candidates
+         ),
+         deduped_candidates AS MATERIALIZED (
+           SELECT id, MIN(created_at) AS created_at
+           FROM merged_candidates
+           GROUP BY id
+         ),
+         accessible AS MATERIALIZED (
+           SELECT id, created_at
+           FROM deduped_candidates
+           ORDER BY created_at ASC, id ASC
            LIMIT $4
          )
          SELECT ${MESSAGE_SELECT_FIELDS},
@@ -387,7 +426,7 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
          LEFT JOIN attachments a ON a.message_id = m.id
          GROUP BY accessible.created_at, m.id, u.id
          ORDER BY accessible.created_at ASC, m.id ASC`,
-        [userId, replayLowerBoundMs, upperBoundMs, profile.limit],
+        [userId, replayLowerBoundMs, upperBoundMs, profile.limit, branchCandidateLimit],
       );
       return result.rows;
     });
@@ -397,9 +436,32 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
       rows = await runReplayTransaction();
     } catch (err) {
       const kind = classifyReplayError(err);
+      wsReplayErrorClassTotal.inc({ error_class: kind });
       if (kind === 'timeout' || kind === 'pool_busy') {
         wsReplayQueryTotal.inc({ result: kind });
         wsReplayQueryDurationMs.observe({ result: kind }, Date.now() - startedAt);
+        if (shouldSampleReplayErrorLog()) {
+          const pool = poolStats();
+          logger.warn(
+            {
+              replay_error_instrumentation: true,
+              replay_error_class: kind,
+              userId,
+              gapMs,
+              replayLowerBoundMs,
+              upperBoundMs,
+              replayWindowMs: upperBoundMs - replayLowerBoundMs,
+              replayLimit: profile.limit,
+              overloadStage: profile.stage,
+              statementTimeoutMs,
+              inFlight: replayDbInFlight,
+              poolWaiting: pool.waiting,
+              poolIdle: pool.idle,
+              poolTotal: pool.total,
+            },
+            'WS replay error sample',
+          );
+        }
         logger.warn(
           {
             err,
@@ -415,6 +477,28 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
           'WS reconnect replay skipped after bounded DB failure',
         );
         return [];
+      }
+      if (shouldSampleReplayErrorLog()) {
+        const pool = poolStats();
+        logger.error(
+          {
+            replay_error_instrumentation: true,
+            replay_error_class: kind,
+            userId,
+            gapMs,
+            replayLowerBoundMs,
+            upperBoundMs,
+            replayWindowMs: upperBoundMs - replayLowerBoundMs,
+            replayLimit: profile.limit,
+            overloadStage: profile.stage,
+            statementTimeoutMs,
+            inFlight: replayDbInFlight,
+            poolWaiting: pool.waiting,
+            poolIdle: pool.idle,
+            poolTotal: pool.total,
+          },
+          'WS replay unexpected error sample',
+        );
       }
       throw err;
     }

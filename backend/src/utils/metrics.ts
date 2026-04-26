@@ -410,6 +410,13 @@ const wsReplayQueryTotal = new client.Counter({
   labelNames: ['result'],
 });
 
+/** Replay DB/query errors grouped by classified root cause. */
+const wsReplayErrorClassTotal = new client.Counter({
+  name: 'ws_replay_error_class_total',
+  help: 'Reconnect replay errors by classified root cause (timeout, pool_busy, error)',
+  labelNames: ['error_class'],
+});
+
 /** Wall-clock duration for reconnect replay DB work (successful or failed-open). */
 const wsReplayQueryDurationMs = new client.Histogram({
   name: 'ws_replay_query_duration_ms',
@@ -846,6 +853,9 @@ function startPgPoolMetrics(pool) {
     wsReplayQueryTotal.inc({ result: 'skipped' }, 0);
     wsReplayQueryTotal.inc({ result: 'timeout' }, 0);
     wsReplayQueryTotal.inc({ result: 'pool_busy' }, 0);
+    wsReplayErrorClassTotal.inc({ error_class: 'timeout' }, 0);
+    wsReplayErrorClassTotal.inc({ error_class: 'pool_busy' }, 0);
+    wsReplayErrorClassTotal.inc({ error_class: 'error' }, 0);
     wsReplayQueryDurationMs.observe({ result: 'ok' }, 0);
     wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
     wsReplayQueryDurationMs.observe({ result: 'timeout' }, 0);
@@ -1093,6 +1103,7 @@ module.exports = {
   wsReplayCachedTotal,
   wsReplayDbQueryTotal,
   wsReplayQueryTotal,
+  wsReplayErrorClassTotal,
   wsReplayQueryDurationMs,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,

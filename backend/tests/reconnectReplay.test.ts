@@ -43,6 +43,7 @@ jest.mock('../src/db/redis', () => {
 jest.mock('../src/utils/metrics', () => ({
   wsReplayQueryTotal: { inc: jest.fn() },
   wsReplayQueryDurationMs: { observe: jest.fn() },
+  wsReplayErrorClassTotal: { inc: jest.fn() },
   wsReplayFailOpenTotal: { inc: jest.fn() },
   wsReplayDedupedTotal: { inc: jest.fn() },
   wsReplayCachedTotal: { inc: jest.fn() },
@@ -58,6 +59,7 @@ const logger = require('../src/utils/logger') as { warn: jest.Mock };
 const metrics = require('../src/utils/metrics') as {
   wsReplayQueryTotal: { inc: jest.Mock };
   wsReplayQueryDurationMs: { observe: jest.Mock };
+  wsReplayErrorClassTotal: { inc: jest.Mock };
   wsReplayDedupedTotal: { inc: jest.Mock };
   wsReplayCachedTotal: { inc: jest.Mock };
   wsReplayDbQueryTotal: { inc: jest.Mock };
@@ -133,11 +135,15 @@ describe('reconnectReplay bounds', () => {
       `SET LOCAL statement_timeout = '${WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED}ms'`,
     );
     const replayQueryArgs = recordedClient?.query.mock.calls[1];
+    expect(String(replayQueryArgs?.[0] || '')).toContain('conversation_candidates');
+    expect(String(replayQueryArgs?.[0] || '')).toContain('channel_candidates');
+    expect(String(replayQueryArgs?.[0] || '')).toContain('UNION ALL');
     expect(replayQueryArgs?.[1]).toEqual([
       'user-2',
       disconnectedAtMs - WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
       disconnectedAtMs + 12_000,
       10,
+      50,
     ]);
     expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'ok' });
   });
