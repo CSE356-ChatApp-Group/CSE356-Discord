@@ -204,6 +204,83 @@ describe('Search – community scope', () => {
   });
 });
 
+describe('Search – community FTS candidates stay in-community before LIMIT', () => {
+  const prevCandidatesLimit = process.env.SEARCH_FTS_CANDIDATES_LIMIT;
+
+  beforeAll(() => {
+    process.env.SEARCH_FTS_CANDIDATES_LIMIT = '5';
+  });
+
+  afterAll(() => {
+    if (prevCandidatesLimit === undefined) delete process.env.SEARCH_FTS_CANDIDATES_LIMIT;
+    else process.env.SEARCH_FTS_CANDIDATES_LIMIT = prevCandidatesLimit;
+  });
+
+  it('finds an older in-community match when many newer matches exist only outside that community', async () => {
+    const owner = await createAuthenticatedUser('srchcommftslim');
+    const token = owner.accessToken;
+    const communityA = await createCommunity(token, uniqueSuffix());
+    const communityB = await createCommunity(token, uniqueSuffix());
+    const channelA = await createChannel(token, communityA.id);
+    const channelB = await createChannel(token, communityB.id);
+    const marker = `commftscapmarker${uniqueSuffix()}`;
+
+    await sendMessage(token, channelA.id, `alpha in-community anchor ${marker}`);
+    for (let i = 0; i < 8; i += 1) {
+      await sendMessage(token, channelB.id, `beta outside-community flood ${marker} ${i}`);
+    }
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${communityA.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.hits.some((h: any) => h.channelId === channelA.id)).toBe(true);
+    for (const hit of res.body.hits) {
+      expect(hit.communityId).toBe(communityA.id);
+    }
+  });
+
+  it('still returns 403 for community search when the user is not a community member', async () => {
+    const owner = await createAuthenticatedUser('srchcommfts403');
+    const outsider = await createAuthenticatedUser('srchcommfts403out');
+    const token = owner.accessToken;
+    const communityA = await createCommunity(token, uniqueSuffix());
+    const channelA = await createChannel(token, communityA.id);
+    const marker = `commfts403marker${uniqueSuffix()}`;
+    await sendMessage(token, channelA.id, `gated ${marker}`);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${communityA.id}`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+
+    expect(res.status).toBe(403);
+  });
+
+  it('channel-scoped FTS still finds an older in-channel match when many newer matches exist in another channel (non-community SQL path unchanged)', async () => {
+    const owner = await createAuthenticatedUser('srchcommftschan');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channelA = await createChannel(token, community.id);
+    const channelB = await createChannel(token, community.id);
+    const marker = `chanftspathmarker${uniqueSuffix()}`;
+
+    await sendMessage(token, channelA.id, `anchor ${marker}`);
+    for (let i = 0; i < 8; i += 1) {
+      await sendMessage(token, channelB.id, `flood ${marker} ${i}`);
+    }
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&channelId=${channelA.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.hits.every((h: any) => h.channelId === channelA.id)).toBe(true);
+  });
+});
+
 describe('Search – access control', () => {
   let ownerToken: string;
   let privateChannelId: string;
