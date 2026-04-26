@@ -227,6 +227,14 @@ const messageInsertLockAcquiredAfterWaitTotal = new client.Counter({
   help: 'POST /messages lock acquires after non-zero waiting time',
 });
 
+/** Time spent holding the channel insert lease (acquire -> release attempt). */
+const messageInsertLockHolderDurationMs = new client.Histogram({
+  name: 'message_insert_lock_holder_duration_ms',
+  help: 'Milliseconds spent holding the channel-scoped POST /messages insert lock',
+  labelNames: ['result'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
 /** PUT /messages/:id/read early soft-defer events by reason. */
 const readReceiptShedTotal = new client.Counter({
   name: 'read_receipt_shed_total',
@@ -867,6 +875,8 @@ function startPgPoolMetrics(pool) {
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_pressure' }, 0);
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'insert_lock_pressure' }, 0);
     lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_disabled' }, 0);
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_repoint_disabled' }, 0);
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_repoint_disabled' }, 0);
     lastMessageCacheTotal.inc({ target: 'channel', result: 'hit' }, 0);
     lastMessageCacheTotal.inc({ target: 'channel', result: 'miss' }, 0);
     lastMessageCacheTotal.inc({ target: 'channel', result: 'error' }, 0);
@@ -900,6 +910,10 @@ function startPgPoolMetrics(pool) {
     messageInsertLockQueueRejectTotal.inc({ reason: 'per_channel_waiter_cap' }, 0);
     messageInsertLockWaitTimeoutTotal.inc(0);
     messageInsertLockAcquiredAfterWaitTotal.inc(0);
+    messageInsertLockHolderDurationMs.observe({ result: 'released' }, 0);
+    messageInsertLockHolderDurationMs.observe({ result: 'release_mismatch' }, 0);
+    messageInsertLockHolderDurationMs.observe({ result: 'release_error' }, 0);
+    messageInsertLockHolderDurationMs.observe({ result: 'no_lease' }, 0);
     readReceiptShedTotal.inc({ reason: 'message_channel_insert_lock_pressure' }, 0);
     readReceiptShedTotal.inc({ reason: 'overload_stage_high' }, 0);
     readReceiptRequestsTotal.inc(
@@ -1058,6 +1072,7 @@ module.exports = {
   messageInsertLockQueueRejectTotal,
   messageInsertLockWaitTimeoutTotal,
   messageInsertLockAcquiredAfterWaitTotal,
+  messageInsertLockHolderDurationMs,
   readReceiptShedTotal,
   readReceiptRequestsTotal,
   messageChannelInsertLockPressureWaitP95MsGauge,

@@ -36,10 +36,27 @@ const CHANNEL_FLUSH_INTERVAL_MS = parseInt(
   process.env.CHANNEL_LAST_MSG_FLUSH_INTERVAL_MS || '10000', 10
 );
 const CHANNEL_FLUSH_BATCH_SIZE = 50;
-const LAST_MESSAGE_PG_RECONCILE_ENABLED =
-  String(process.env.LAST_MESSAGE_PG_RECONCILE_ENABLED || 'false').toLowerCase() === 'true';
-const CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED =
-  String(process.env.CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED || 'false').toLowerCase() === 'true';
+
+/** Primary env wins when both primary and legacy are set (including `primary=` empty). */
+function parseBoolEnv(primary: string, legacyAlias?: string): boolean {
+  if (process.env[primary] !== undefined) {
+    return String(process.env[primary]).toLowerCase() === 'true';
+  }
+  if (legacyAlias !== undefined && process.env[legacyAlias] !== undefined) {
+    return String(process.env[legacyAlias]).toLowerCase() === 'true';
+  }
+  return false;
+}
+
+/** DB writes for channel last_message_* (flush + delete repoint). Alias matches ops naming. */
+const LAST_MESSAGE_PG_RECONCILE_ENABLED = parseBoolEnv(
+  'LAST_MESSAGE_PG_RECONCILE_ENABLED',
+  'CHANNEL_LAST_MESSAGE_PG_RECONCILE_ENABLED',
+);
+/** DB writes for conversation last_message_* (flush + delete repoint). */
+const CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED = parseBoolEnv(
+  'CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED',
+);
 
 // SQL for background flush — no 1 ms lock_timeout, normal lock wait is fine
 // because this runs out of the hot path.
@@ -358,6 +375,10 @@ function scheduleConversationLastMessagePointerUpdate(
 }
 
 async function repointChannelLastMessage(channelId: string) {
+  if (!LAST_MESSAGE_PG_RECONCILE_ENABLED) {
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_repoint_disabled' });
+    return;
+  }
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
       const { rowCount } = await query(CHANNEL_REPOINT_SQL, [channelId]);
@@ -386,6 +407,10 @@ async function repointChannelLastMessage(channelId: string) {
 }
 
 async function repointConversationLastMessage(conversationId: string) {
+  if (!CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED) {
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_repoint_disabled' });
+    return;
+  }
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
       const { rowCount } = await query(CONVERSATION_REPOINT_SQL, [conversationId]);

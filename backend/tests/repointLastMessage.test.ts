@@ -19,6 +19,10 @@ const { query } = require('../src/db/pool') as { query: jest.Mock };
 const { messageLastMessageRepointFkRetryTotal } = require('../src/utils/metrics') as {
   messageLastMessageRepointFkRetryTotal: { inc: jest.Mock };
 };
+
+process.env.LAST_MESSAGE_PG_RECONCILE_ENABLED = 'true';
+process.env.CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED = 'true';
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   repointChannelLastMessage,
