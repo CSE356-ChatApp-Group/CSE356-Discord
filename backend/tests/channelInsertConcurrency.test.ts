@@ -95,6 +95,11 @@ function loadWorker(
       jest.doMock('../src/db/redis', () => redisClient);
       jest.doMock('../src/utils/logger', () => logger);
       jest.doMock('../src/utils/metrics', () => metrics);
+      jest.doMock('../src/messages/messageInsertLockPressure', () => ({
+        recordMessageChannelInsertLockAcquireWait: jest.fn(),
+        recordMessageChannelInsertLockTimeoutEvent: jest.fn(),
+        getShouldDeferReadReceiptForInsertLockPressure: jest.fn().mockReturnValue(false),
+      }));
       loaded = require('../src/messages/channelInsertConcurrency');
     });
   });
@@ -116,6 +121,7 @@ describe('runChannelMessageInsertSerialized', () => {
     jest.unmock('../src/db/redis');
     jest.unmock('../src/utils/logger');
     jest.unmock('../src/utils/metrics');
+    jest.unmock('../src/messages/messageInsertLockPressure');
     jest.resetModules();
   });
 
@@ -182,9 +188,11 @@ describe('runChannelMessageInsertSerialized', () => {
 
   it('returns a retryable timeout when the lock cannot be acquired quickly', async () => {
     const redisClient = new FakeRedisLockClient();
+    // MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS min is 500ms — Worker A must hold past that.
+    // Use a manually-released promise so the lock is held until after Worker B times out.
     const env = {
       MESSAGE_INSERT_LOCK_TTL_MS: '6000',
-      MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS: '80',
+      MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS: '500',
       MESSAGE_INSERT_LOCK_POLL_MIN_MS: '10',
       MESSAGE_INSERT_LOCK_POLL_MAX_MS: '10',
     };
@@ -192,8 +200,10 @@ describe('runChannelMessageInsertSerialized', () => {
     const workerB = loadWorker(redisClient, env);
     const ch = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
 
+    let releaseA!: () => void;
+    const holdUntilReleased = new Promise<void>((resolve) => { releaseA = resolve; });
     const p1 = workerA.runChannelMessageInsertSerialized(ch, async () => {
-      await sleep(150);
+      await holdUntilReleased;
     });
     await sleep(5);
 
@@ -203,6 +213,7 @@ describe('runChannelMessageInsertSerialized', () => {
       code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
       statusCode: 503,
     });
+    releaseA();
     await p1;
 
     expect(
