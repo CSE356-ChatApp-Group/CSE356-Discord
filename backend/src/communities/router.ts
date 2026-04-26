@@ -41,6 +41,11 @@ const {
   withDistributedSingleflight,
 } = require('../utils/distributedSingleflight');
 const { getChannelLastMessageMetaMapFromRedis } = require('../messages/repointLastMessage');
+const {
+  incrCommunityMemberCount,
+  decrCommunityMemberCount,
+  getCommunityMemberCountsFromRedis,
+} = require('./communityMemberCount');
 
 const router = express.Router();
 
@@ -123,6 +128,8 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
     if (!rowCount) {
       return res.json({ success: true });
     }
+
+    incrCommunityMemberCount(communityId).catch(() => {});
 
     getCommunityChannelIds(communityId)
       .then((ids) => warmChannelAccessCacheForUser(redis, ids, req.user.id))
@@ -585,15 +592,18 @@ async function fetchUnreadCountsForCommunities(userId, communityIds) {
 }
 
 async function buildCommunitiesListPayload(userId, rows) {
-  const unreadByCommunity = await fetchUnreadCountsForCommunities(
-    userId,
-    rows.map((row) => row.id),
-  );
+  const communityIds = rows.map((row) => row.id);
+  const [unreadByCommunity, memberCountByRedis] = await Promise.all([
+    fetchUnreadCountsForCommunities(userId, communityIds),
+    getCommunityMemberCountsFromRedis(communityIds),
+  ]);
   return {
     communities: rows.map((row) => {
       const unread = unreadByCommunity.get(row.id) || 0;
+      const redisCount = memberCountByRedis.get(row.id);
       return {
         ...row,
+        member_count: redisCount !== undefined ? redisCount : row.member_count,
         unread_channel_count: unread,
         has_unread_channels: unread > 0,
       };
@@ -917,6 +927,9 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     const community = rows[0];
+    const redisCounts = await getCommunityMemberCountsFromRedis([community.id]);
+    const redisCount = redisCounts.get(community.id);
+    if (redisCount !== undefined) community.member_count = redisCount;
     if (Array.isArray(community.channels) && community.channels.length > 0) {
       const latestByChannel = await getChannelLastMessageMetaMapFromRedis(
         community.channels.map((ch) => ch.id),
@@ -1025,6 +1038,8 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     if (!rowCount) {
       return res.json({ success: true });
     }
+
+    decrCommunityMemberCount(req.params.id).catch(() => {});
 
     const { rows: remainingMembers } = await query(
       'SELECT user_id FROM community_members WHERE community_id=$1',

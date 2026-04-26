@@ -656,6 +656,32 @@ const apiRateLimitHitsTotal = new client.Counter({
   labelNames: ['scope'],
 });
 
+// ── Community member count async counter ──────────────────────────────────────
+
+const communityCountRedisUpdateTotal = new client.Counter({
+  name: 'community_count_redis_update_total',
+  help: 'Community member count Redis HINCRBY outcomes (join/leave hot path)',
+  labelNames: ['result'],
+});
+
+const communityCountPgReconcileTotal = new client.Counter({
+  name: 'community_count_pg_reconcile_total',
+  help: 'Community member count DB reconcile batch outcomes',
+  labelNames: ['result'],
+});
+
+const communityCountPgReconcileSkippedTotal = new client.Counter({
+  name: 'community_count_pg_reconcile_skipped_total',
+  help: 'Community member count DB reconcile skipped by reason',
+  labelNames: ['reason'],
+});
+
+const communityCountCacheTotal = new client.Counter({
+  name: 'community_count_cache_total',
+  help: 'Community member count Redis HMGET read outcomes',
+  labelNames: ['result'],
+});
+
 /** Browser timing vitals (LCP, INP, FCP, TTFB) in seconds. */
 const clientWebVitalTimingSeconds = new client.Histogram({
   name: 'client_web_vital_timing_seconds',
@@ -904,6 +930,15 @@ function startPgPoolMetrics(pool) {
     clientWebVitalClsScore.observe({ name: 'CLS' }, 0);
     authBcryptQueueRejectsTotal.inc({ reason: 'saturated' }, 0);
     authBcryptQueueRejectsTotal.inc({ reason: 'timeout' }, 0);
+    communityCountRedisUpdateTotal.inc({ result: 'ok' }, 0);
+    communityCountRedisUpdateTotal.inc({ result: 'error' }, 0);
+    communityCountPgReconcileTotal.inc({ result: 'ok' }, 0);
+    communityCountPgReconcileTotal.inc({ result: 'error' }, 0);
+    communityCountPgReconcileSkippedTotal.inc({ reason: 'lock' }, 0);
+    communityCountPgReconcileSkippedTotal.inc({ reason: 'pressure' }, 0);
+    communityCountPgReconcileSkippedTotal.inc({ reason: 'empty' }, 0);
+    communityCountCacheTotal.inc({ result: 'hit' }, 0);
+    communityCountCacheTotal.inc({ result: 'miss' }, 0);
   } catch {
     /* ignore during unusual test setups */
   }
@@ -1004,4 +1039,8 @@ module.exports = {
   clientWebVitalTimingSeconds,
   clientWebVitalClsScore,
   clientRumBatchesTotal,
+  communityCountRedisUpdateTotal,
+  communityCountPgReconcileTotal,
+  communityCountPgReconcileSkippedTotal,
+  communityCountCacheTotal,
 };
