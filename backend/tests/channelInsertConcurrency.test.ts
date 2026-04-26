@@ -125,6 +125,7 @@ function loadWorker(
     messageInsertLockQueueRejectTotal: { inc: jest.fn() },
     messageInsertLockWaitTimeoutTotal: { inc: jest.fn() },
     messageInsertLockAcquiredAfterWaitTotal: { inc: jest.fn() },
+    messageInsertLockHolderDurationMs: { observe: jest.fn() },
   };
   const logger = {
     info: jest.fn(),
@@ -313,34 +314,32 @@ describe('runChannelMessageInsertSerialized', () => {
   it('rejects when per-channel waiter cap is exceeded', async () => {
     const redisClient = new FakeRedisLockClient();
     const env = {
-      MESSAGE_INSERT_LOCK_MAX_WAITERS_PER_CHANNEL: '1',
+      MESSAGE_INSERT_LOCK_MAX_WAITERS_PER_CHANNEL: '2',
       MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS: '5000',
       MESSAGE_INSERT_LOCK_POLL_MIN_MS: '10',
       MESSAGE_INSERT_LOCK_POLL_MAX_MS: '10',
       MESSAGE_INSERT_LOCK_TTL_MS: '10000',
     };
-    const workerA = loadWorker(redisClient, env);
-    const workerB = loadWorker(redisClient, env);
-    const workerC = loadWorker(redisClient, env);
+    const worker = loadWorker(redisClient, env);
     const ch = '12121212-3434-5656-7878-909090909090';
 
     let releaseA!: () => void;
     const holdA = new Promise<void>((resolve) => { releaseA = resolve; });
-    const p1 = workerA.runChannelMessageInsertSerialized(ch, async () => {
+    const p1 = worker.runChannelMessageInsertSerialized(ch, async () => {
       await holdA;
     });
     await sleep(5);
 
     let releaseB!: () => void;
     const holdB = new Promise<void>((resolve) => { releaseB = resolve; });
-    const p2 = workerB.runChannelMessageInsertSerialized(ch, async () => {
+    const p2 = worker.runChannelMessageInsertSerialized(ch, async () => {
       await holdB;
       return 'b';
     });
     await sleep(25);
 
     await expect(
-      workerC.runChannelMessageInsertSerialized(ch, async () => 'c'),
+      worker.runChannelMessageInsertSerialized(ch, async () => 'c'),
     ).rejects.toMatchObject({
       code: 'MESSAGE_INSERT_LOCK_QUEUE_REJECT',
       statusCode: 503,
@@ -350,7 +349,7 @@ describe('runChannelMessageInsertSerialized', () => {
     await p1;
     releaseB();
     await expect(p2).resolves.toBe('b');
-    expect(workerC.metrics.messageInsertLockQueueRejectTotal.inc).toHaveBeenCalled();
+    expect(worker.metrics.messageInsertLockQueueRejectTotal.inc).toHaveBeenCalled();
   });
 
   it('increments acquired-after-wait metric for queued waiters', async () => {
@@ -361,26 +360,25 @@ describe('runChannelMessageInsertSerialized', () => {
       MESSAGE_INSERT_LOCK_POLL_MAX_MS: '10',
       MESSAGE_INSERT_LOCK_TTL_MS: '10000',
     };
-    const workerA = loadWorker(redisClient, env);
-    const workerB = loadWorker(redisClient, env);
+    const worker = loadWorker(redisClient, env);
     const ch = '99999999-8888-7777-6666-555555555555';
     const order: string[] = [];
 
-    const p1 = workerA.runChannelMessageInsertSerialized(ch, async () => {
+    const p1 = worker.runChannelMessageInsertSerialized(ch, async () => {
       order.push('a-start');
       await sleep(80);
       order.push('a-end');
       return 'a';
     });
     await sleep(5);
-    const p2 = workerB.runChannelMessageInsertSerialized(ch, async () => {
+    const p2 = worker.runChannelMessageInsertSerialized(ch, async () => {
       order.push('b');
       return 'b';
     });
 
     await expect(Promise.all([p1, p2])).resolves.toEqual(['a', 'b']);
     expect(order).toEqual(['a-start', 'a-end', 'b']);
-    expect(workerB.metrics.messageInsertLockAcquiredAfterWaitTotal.inc).toHaveBeenCalled();
+    expect(worker.metrics.messageInsertLockAcquiredAfterWaitTotal.inc).toHaveBeenCalled();
   });
 
   it('reacquires after a stale lock expires', async () => {
