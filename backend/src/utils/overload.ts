@@ -85,6 +85,7 @@ function shouldSkipPresenceMirror() {
   return getStage() >= 2;
 }
 
+/** Stage ≥3: search router returns 429 (retry) instead of accepting work. */
 function shouldRejectSearchRequests() {
   return getStage() >= 3;
 }

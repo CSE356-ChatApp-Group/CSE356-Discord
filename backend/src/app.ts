@@ -355,6 +355,10 @@ app.use((err, req, res, _next) => {
   // timed out on connect vs waiting for an available client, so we use
   // a broader matcher instead of a single string.
   const message = (err && typeof err.message === 'string') ? err.message : '';
+  // Postgres statement_timeout / query cancel: retryable, not a 5xx for SLO burn.
+  const isStatementTimeout =
+    err.code === '57014' ||
+    /canceling statement due to statement timeout/i.test(message);
   const isPoolBusy =
     err.code === 'POOL_CIRCUIT_OPEN' ||
     err.code === 'BCRYPT_QUEUE_SATURATED' ||
@@ -363,17 +367,19 @@ app.use((err, req, res, _next) => {
     /timeout exceeded/i.test(message) && /(connect|client|connection|waiting)/i.test(message) ||
     /remaining connection slots/i.test(message) ||
     /too many clients/i.test(message) ||
-    err.message?.toLowerCase?.().includes('waiting for a client') ||
-    /canceling statement due to statement timeout/i.test(message) ||
-    err.code === '57014'; // query_canceled
-  const status = isPoolBusy ? 503 : (err.status || err.statusCode || 500);
+    err.message?.toLowerCase?.().includes('waiting for a client');
+  const status = isStatementTimeout ? 429 : (isPoolBusy ? 503 : (err.status || err.statusCode || 500));
   const requestId = req.id;
   logger.error({ err, url: req.url, requestId, status, pool: poolStats() }, 'Unhandled error');
   if (isPoolBusy) {
     res.set('Retry-After', '1');
+  } else if (isStatementTimeout) {
+    res.set('Retry-After', '3');
   }
   res.status(status).json({
-    error: isPoolBusy
+    error: isStatementTimeout
+      ? 'Query timed out; please retry with a narrower request.'
+      : isPoolBusy
       ? 'Server busy, please retry'
       : (status >= 500 ? 'Internal server error' : (err.message || 'Request failed')),
     requestId,

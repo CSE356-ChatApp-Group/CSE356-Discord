@@ -41,9 +41,13 @@ router.get('/', async (req, res, next) => {
   const startMs = Date.now();
   try {
     if (getShouldDeferReadReceiptForInsertLockPressure()) {
-      return res.status(503).json({
-        error: 'Search temporarily unavailable while messaging is under load; please retry.',
-      });
+      // 429 keeps these out of HTTP 5xx SLOs; clients should retry (same as rate limits).
+      return res
+        .status(429)
+        .set('Retry-After', '2')
+        .json({
+          error: 'Search temporarily unavailable while messaging is under load; please retry.',
+        });
     }
     let { q, communityId, channelId, conversationId, authorId, after, before, limit, offset } = req.query;
     // COMPAS generated client sends `channelId=<id>&conversationId=<id>` with the same UUID
@@ -69,7 +73,10 @@ router.get('/', async (req, res, next) => {
       }
     }
     if (overload.shouldRejectSearchRequests()) {
-      return res.status(503).json({ error: 'Search temporarily unavailable under high load' });
+      return res
+        .status(429)
+        .set('Retry-After', '3')
+        .json({ error: 'Search temporarily unavailable under high load' });
     }
 
     // Search must be scoped per assignment: either communityId, channelId, or conversationId
@@ -137,11 +144,41 @@ router.get('/', async (req, res, next) => {
     }
 
     res.json(results);
-  } catch (err) {
+  } catch (err: any) {
     const durationMs = Date.now() - startMs;
     if (err?.statusCode === 403) {
       logger.debug({ durationMs }, 'search: access denied');
       return res.status(403).json({ error: 'Access denied' });
+    }
+    const msg = String(err?.message || '');
+    const code = err?.code;
+    const isStmtTimeout =
+      code === '57014' || /canceling statement due to statement timeout/i.test(msg);
+    const isPoolSat =
+      err?.name === 'PoolCircuitBreakerError' ||
+      err?.code === 'POOL_CIRCUIT_OPEN' ||
+      err?.name === 'PoolTimeoutError' ||
+      code === 'ETIMEDOUT' ||
+      (/timeout exceeded/i.test(msg) && /(connect|client|connection|waiting)/i.test(msg)) ||
+      /remaining connection slots/i.test(msg) ||
+      /too many clients/i.test(msg) ||
+      (typeof err?.message === 'string' && err.message.toLowerCase().includes('waiting for a client'));
+    if (isStmtTimeout) {
+      logger.warn({ durationMs, code }, 'search: statement timeout (mapped to 429)');
+      return res
+        .status(429)
+        .set('Retry-After', '3')
+        .json({ error: 'Search timed out; try a narrower query or retry shortly.' });
+    }
+    if (isPoolSat || err?.statusCode === 503) {
+      logger.warn(
+        { durationMs, err: { name: err?.name, code: err?.code, message: err?.message } },
+        'search: pool saturation (mapped to 429)',
+      );
+      return res
+        .status(429)
+        .set('Retry-After', '2')
+        .json({ error: 'Search temporarily busy; please retry.' });
     }
     logger.error({ err, durationMs }, 'search request failed');
     next(err);
