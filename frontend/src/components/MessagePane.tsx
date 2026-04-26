@@ -799,12 +799,9 @@ export default function MessagePane() {
     };
   }, [clearJumpTargetMessage, jumpTargetMessageId, key, messageVirtualizer, msgList]);
 
-  const searchScope = activeChannel
-    ? `#${activeChannel.name}`
-    : activeConv?.name
-      ? `@${activeConv.name}`
-      : 'messages';
-  const searchLabel = `Search ${searchScope}`;
+  const searchLabel = activeConv
+    ? (activeConv.name ? `Search @${activeConv.name}` : 'Search this conversation')
+    : (activeCommunity?.name ? `Search in ${activeCommunity.name}` : 'Search messages');
 
   const placeholder = activeChannel
     ? `Message #${activeChannel.name}`

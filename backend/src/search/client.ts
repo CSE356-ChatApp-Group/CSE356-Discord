@@ -61,13 +61,12 @@ function logSearchDbTiming(
 
 function resolvedSearchScope(opts: Record<string, any>): string {
   if (opts.communityId) return 'community';
-  if (opts.channelId) return 'channel';
   if (opts.conversationId) return 'conversation';
   return 'unscoped';
 }
 
 function isScopedSearch(opts: Record<string, any>): boolean {
-  return Boolean(opts.communityId || opts.channelId || opts.conversationId);
+  return Boolean(opts.communityId || opts.conversationId);
 }
 
 function logSearchTrace(payload: Record<string, unknown>) {
@@ -216,33 +215,6 @@ const FTS_FROM_CLAUSE = `
   LEFT JOIN channels ch ON ch.id = m.channel_id`;
 
 function buildScopedAccessParts(params: any[], opts: Record<string, any>) {
-  if (opts.channelId) {
-    const channelId = p(params, opts.channelId);
-    const userId = p(params, opts.userId);
-    return {
-      scopeType: 'channel',
-      targetIdPh: channelId,
-      userIdPh: userId,
-      cte: `
-        scope_access AS (
-          SELECT EXISTS (
-            SELECT 1
-            FROM channels ch
-            JOIN community_members community_member
-              ON community_member.community_id = ch.community_id
-             AND community_member.user_id = ${userId}
-            LEFT JOIN channel_members cm
-              ON cm.channel_id = ch.id
-             AND cm.user_id = ${userId}
-            WHERE ch.id = ${channelId}
-              AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
-          ) AS has_access
-        )`,
-      fromClause: 'FROM scope_access',
-      onClause: 'ON scope_access.has_access = TRUE',
-    };
-  }
-
   if (opts.conversationId) {
     const conversationId = p(params, opts.conversationId);
     const userId = p(params, opts.userId);
@@ -309,9 +281,7 @@ function buildAuthorTimeFilters(
 function buildFilters(params: any[], opts: Record<string, any>): string {
   const parts: string[] = [];
 
-  if (opts.channelId) {
-    parts.push(`AND m.channel_id = ${p(params, opts.channelId)}`);
-  } else if (opts.conversationId) {
+  if (opts.conversationId) {
     parts.push(`AND m.conversation_id = ${p(params, opts.conversationId)}`);
   } else if (opts.communityId) {
     const cid = p(params, opts.communityId);
@@ -479,9 +449,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       JOIN users u ON u.id = m.author_id`;
     orderBy = 'sc.created_at DESC, m.id DESC';
   } else {
-    if (opts.channelId) {
-      candidateFilters.push(`AND m0.channel_id = ${p(params, opts.channelId)}`);
-    } else if (opts.conversationId) {
+    if (opts.conversationId) {
       candidateFilters.push(`AND m0.conversation_id = ${p(params, opts.conversationId)}`);
     }
 
@@ -679,7 +647,7 @@ function shouldRetrySearchOnPrimary(
  * Unscoped text queries do not run literal fallback.
  *
  * @param q     Raw query string (validated by caller: non-empty when present)
- * @param opts  { channelId?, conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset?, requestId? }
+ * @param opts  { conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset?, requestId? }
  */
 async function searchOnce(
   q: string,
@@ -1006,7 +974,6 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       {
         query: trimmed,
         communityId: opts.communityId,
-        channelId: opts.channelId,
         conversationId: opts.conversationId,
       },
       'search: replica returned empty result set, retrying on primary',
@@ -1020,7 +987,6 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       {
         query: trimmed,
         communityId: opts.communityId,
-        channelId: opts.channelId,
         conversationId: opts.conversationId,
       },
       'search: replica access check may be stale, retrying on primary',

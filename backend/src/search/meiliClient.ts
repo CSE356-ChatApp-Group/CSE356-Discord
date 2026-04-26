@@ -337,7 +337,6 @@ async function batchIndexMessages(msgs: MeiliMessageDoc[]): Promise<void> {
 
 interface SearchCandidateOpts {
   communityId?: string;
-  channelId?: string;
   conversationId?: string;
   authorId?: string;
   after?: string;
@@ -365,8 +364,6 @@ async function searchMessageCandidates(
   const filters: string[] = [];
   if (opts.communityId) {
     filters.push(`communityId = "${opts.communityId}"`);
-  } else if (opts.channelId) {
-    filters.push(`channelId = "${opts.channelId}"`);
   } else if (opts.conversationId) {
     filters.push(`conversationId = "${opts.conversationId}"`);
   }
@@ -409,7 +406,7 @@ async function searchMessageCandidates(
       meili_search_ms: ms,
       candidate_count: hits.length,
       estimated_total: data?.estimatedTotalHits ?? 0,
-      scope: opts.communityId ? 'community' : opts.channelId ? 'channel' : 'conversation',
+      scope: opts.communityId ? 'community' : 'conversation',
     },
     'meili_search',
   );

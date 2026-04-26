@@ -67,6 +67,14 @@ async function joinCommunity(token: string, communityId: string) {
   expect(res.status).toBe(200);
 }
 
+async function inviteToChannel(token: string, channelId: string, userIds: string[]) {
+  const res = await request(app)
+    .post(`/api/v1/channels/${channelId}/members`)
+    .set('Authorization', `Bearer ${token}`)
+    .send({ userIds });
+  expect(res.status).toBe(200);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('Search – basic FTS', () => {
@@ -487,8 +495,8 @@ describe('Search – common phrases and all-term matching', () => {
   });
 });
 
-describe('Search – COMPAS duplicate scope query', () => {
-  it('treats channelId=conversationId (same UUID) as conversation-scoped search', async () => {
+describe('Search – channel scope is unsupported', () => {
+  it('rejects requests that include channelId (including channelId=conversationId)', async () => {
     const a = await createAuthenticatedUser('srchcompasa');
     const b = await createAuthenticatedUser('srchcompasb');
     const convRes = await request(app)
@@ -509,14 +517,13 @@ describe('Search – COMPAS duplicate scope query', () => {
         `/api/v1/search?q=${encodeURIComponent(marker)}&channelId=${convId}&conversationId=${convId}`,
       )
       .set('Authorization', `Bearer ${a.accessToken}`);
-    expect(res.status).toBe(200);
-    expect((res.body.hits || []).length).toBeGreaterThan(0);
-    expect(res.body.hits[0].content).toContain(marker);
+    expect(res.status).toBe(400);
+    expect(String(res.body.error || '')).toContain('channelId scope is no longer supported');
   });
 });
 
-describe('Search – communityId + conversationId (DM vs mislabeled channel)', () => {
-  it('keeps conversation scope for a real DM when communityId is also present', async () => {
+describe('Search – mutually exclusive community and conversation scopes', () => {
+  it('rejects a real DM search when communityId and conversationId are both present', async () => {
     const a = await createAuthenticatedUser('srchdmscopea');
     const b = await createAuthenticatedUser('srchdmscopeb');
     const community = await createCommunity(a.accessToken, uniqueSuffix());
@@ -539,12 +546,11 @@ describe('Search – communityId + conversationId (DM vs mislabeled channel)', (
         `/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}&conversationId=${convId}`,
       )
       .set('Authorization', `Bearer ${a.accessToken}`);
-    expect(res.status).toBe(200);
-    expect((res.body.hits || []).length).toBeGreaterThan(0);
-    expect(res.body.hits[0].content).toContain(marker);
+    expect(res.status).toBe(400);
+    expect(String(res.body.error || '')).toContain('either communityId or conversationId');
   });
 
-  it('promotes conversationId to channelId when that UUID is a channel in the community', async () => {
+  it('rejects mixed scope even when conversationId happens to equal a channel id', async () => {
     const owner = await createAuthenticatedUser('srchmislabel');
     const community = await createCommunity(owner.accessToken, uniqueSuffix());
     const ch = await createChannel(owner.accessToken, community.id);
@@ -556,9 +562,83 @@ describe('Search – communityId + conversationId (DM vs mislabeled channel)', (
         `/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}&conversationId=${ch.id}`,
       )
       .set('Authorization', `Bearer ${owner.accessToken}`);
-    expect(res.status).toBe(200);
-    expect((res.body.hits || []).length).toBeGreaterThan(0);
-    expect(res.body.hits[0].content).toContain(marker);
-    expect(res.body.hits[0].channelId).toBe(ch.id);
+    expect(res.status).toBe(400);
+    expect(String(res.body.error || '')).toContain('either communityId or conversationId');
+  });
+});
+
+describe('Search – community scope access and freshness', () => {
+  it('includes public channels plus private channels the user can access (and excludes inaccessible private channels)', async () => {
+    const owner = await createAuthenticatedUser('srchcommowner');
+    const memberNoPriv = await createAuthenticatedUser('srchcommmember');
+    const memberWithPriv = await createAuthenticatedUser('srchcommpriv');
+
+    const community = await createCommunity(owner.accessToken, uniqueSuffix());
+    await joinCommunity(memberNoPriv.accessToken, community.id);
+    await joinCommunity(memberWithPriv.accessToken, community.id);
+
+    const publicChannel = await createChannel(owner.accessToken, community.id, { isPrivate: false });
+    const privateChannel = await createChannel(owner.accessToken, community.id, { isPrivate: true });
+    await inviteToChannel(owner.accessToken, privateChannel.id, [memberWithPriv.user.id]);
+
+    const pubMarker = `communitypub${uniqueSuffix()}`;
+    const privMarker = `communitypriv${uniqueSuffix()}`;
+    const pubMsg = await sendMessage(owner.accessToken, publicChannel.id, `public ${pubMarker}`);
+    const privMsg = await sendMessage(owner.accessToken, privateChannel.id, `private ${privMarker}`);
+
+    const withoutPrivate = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('community')}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${memberNoPriv.accessToken}`);
+    expect(withoutPrivate.status).toBe(200);
+    const withoutIds = (withoutPrivate.body.hits || []).map((hit: any) => String(hit.id));
+    expect(withoutIds).toContain(pubMsg.id);
+    expect(withoutIds).not.toContain(privMsg.id);
+
+    const withPrivate = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('community')}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${memberWithPriv.accessToken}`);
+    expect(withPrivate.status).toBe(200);
+    const withIds = (withPrivate.body.hits || []).map((hit: any) => String(hit.id));
+    expect(withIds).toContain(pubMsg.id);
+    expect(withIds).toContain(privMsg.id);
+  });
+
+  it('community-scoped results reflect edits and deletions immediately after update operations', async () => {
+    const owner = await createAuthenticatedUser('srchfreshowner');
+    const community = await createCommunity(owner.accessToken, uniqueSuffix());
+    const channel = await createChannel(owner.accessToken, community.id);
+
+    const oldMarker = `freshold${uniqueSuffix()}`;
+    const newMarker = `freshnew${uniqueSuffix()}`;
+    const message = await sendMessage(owner.accessToken, channel.id, `before edit ${oldMarker}`);
+
+    const editRes = await request(app)
+      .patch(`/api/v1/messages/${message.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ content: `after edit ${newMarker}` });
+    expect(editRes.status).toBe(200);
+
+    const searchNew = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(newMarker)}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(searchNew.status).toBe(200);
+    expect((searchNew.body.hits || []).some((hit: any) => String(hit.id) === message.id)).toBe(true);
+
+    const searchOld = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(oldMarker)}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(searchOld.status).toBe(200);
+    expect((searchOld.body.hits || []).some((hit: any) => String(hit.id) === message.id)).toBe(false);
+
+    const deleteRes = await request(app)
+      .delete(`/api/v1/messages/${message.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(deleteRes.status).toBe(200);
+
+    const searchAfterDelete = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(newMarker)}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(searchAfterDelete.status).toBe(200);
+    expect((searchAfterDelete.body.hits || []).some((hit: any) => String(hit.id) === message.id)).toBe(false);
   });
 });

@@ -1,15 +1,12 @@
 /**
  * Search routes
  *
- * GET /api/v1/search?q=&communityId=&channelId=&conversationId=&authorId=&after=&before=&limit=&offset=
+ * GET /api/v1/search?q=&communityId=&conversationId=&authorId=&after=&before=&limit=&offset=
  *
- * Scope: communityId, channelId, and/or conversationId (see handler: when
- * channelId === conversationId, only conversation scope is used — matches
- * COMPAS generated client searchMessages URL).
- * When communityId + conversationId are sent without channelId, we only treat
- * conversationId as a channel UUID if `channels(id, community_id)` matches — otherwise
- * it stays conversation-scoped (DM messages use conversation_id, not channel_id).
- * Omitting all three is rejected; this route is intentionally scoped-only.
+ * Scope: communityId or conversationId (exactly one required).
+ * communityId and conversationId are mutually exclusive; requests that
+ * include both are rejected with 400.
+ * Omitting both is rejected; this route is intentionally scoped-only.
  */
 
 'use strict';
@@ -18,7 +15,6 @@ const express = require('express');
 const { authenticate } = require('../middleware/authenticate');
 const { searchLimiter } = require('../middleware/inMemoryApiLimiter');
 const searchClient = require('./client');
-const { query } = require('../db/pool');
 const overload = require('../utils/overload');
 const logger = require('../utils/logger');
 const {
@@ -45,39 +41,19 @@ router.get('/', async (req, res, next) => {
         error: 'Search temporarily unavailable while messaging is under load; please retry.',
       });
     }
-    let { q, communityId, channelId, conversationId, authorId, after, before, limit, offset } = req.query;
-    // COMPAS generated client sends `channelId=<id>&conversationId=<id>` with the same UUID
-    // for DM/conversation-scoped search; we must not treat that id as a channel first.
-    if (
-      channelId
-      && conversationId
-      && String(channelId) === String(conversationId)
-    ) {
-      channelId = undefined;
-    }
-    // COMPAS sometimes sends communityId + a channel UUID in conversationId (no channelId).
-    // Only promote when that UUID is actually a row in `channels` for this community — otherwise
-    // keep conversationId for real DMs (messages live on conversation_id, not channel_id).
-    if (communityId && conversationId && !channelId) {
-      const { rows } = await query(
-        `SELECT 1 FROM channels WHERE id = $1::uuid AND community_id = $2::uuid LIMIT 1`,
-        [conversationId, communityId],
-      );
-      if (rows.length > 0) {
-        channelId = conversationId;
-        conversationId = undefined;
-      }
-    }
+    let { q, communityId, conversationId, authorId, after, before, limit, offset } = req.query;
     if (overload.shouldRejectSearchRequests()) {
       return res.status(503).json({ error: 'Search temporarily unavailable under high load' });
     }
 
-    // Search must be scoped per assignment: either communityId, channelId, or conversationId
-    // Unscoped searches (omitting all three) are disallowed to prevent expensive cross-scope scans.
-    const isScoped = Boolean(communityId || channelId || conversationId);
-    if (!isScoped) {
+    if (communityId && conversationId) {
       return res.status(400).json({
-        error: 'Search must be scoped: provide communityId, channelId, or conversationId'
+        error: 'Search must be scoped: provide either communityId or conversationId, not both'
+      });
+    }
+    if (!communityId && !conversationId) {
+      return res.status(400).json({
+        error: 'Search must be scoped: provide either communityId or conversationId'
       });
     }
 
@@ -96,7 +72,7 @@ router.get('/', async (req, res, next) => {
     const { limit: clampedLimit, offset: clampedOffset } = clampSearchPaging(limit, offset);
     const adjustedLimit = overload.searchLimit(clampedLimit);
     const results = await searchClient.search(normalizedQuery, {
-      communityId, channelId, conversationId, authorId, after, before,
+      communityId, conversationId, authorId, after, before,
       userId: req.user.id,
       limit: adjustedLimit,
       offset: clampedOffset,
@@ -107,7 +83,7 @@ router.get('/', async (req, res, next) => {
     const queryMeta = {
       queryLength: normalizedQuery.length,
       hasQueryText: Boolean(normalizedQuery),
-      scope: communityId ? 'community' : (channelId ? 'channel' : (conversationId ? 'conversation' : 'unknown')),
+      scope: communityId ? 'community' : (conversationId ? 'conversation' : 'unknown'),
       hasFilters: Boolean(authorId || after || before),
       hitCount: results?.hits?.length || 0,
       durationMs,

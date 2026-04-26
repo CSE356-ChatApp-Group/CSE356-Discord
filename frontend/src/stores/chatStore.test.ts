@@ -1100,7 +1100,7 @@ describe('search filters', () => {
     });
   });
 
-  it('uses channel scope when a channel is active', async () => {
+  it('uses community scope when a channel is active', async () => {
     apiGet.mockResolvedValue({ hits: [] });
 
     useChatStore.setState({
@@ -1114,8 +1114,8 @@ describe('search filters', () => {
 
     const requestedPath = apiGet.mock.calls[0]?.[0] as string;
     expect(requestedPath).toContain('/search?');
-    expect(requestedPath).toContain('channelId=ch-1');
-    expect(requestedPath).not.toContain('communityId=comm-1');
+    expect(requestedPath).toContain('communityId=comm-1');
+    expect(requestedPath).not.toContain('channelId=ch-1');
   });
 
   it('includes a single-character text query instead of dropping it in favor of filters', async () => {
