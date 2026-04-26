@@ -32,6 +32,7 @@ const {
   withDistributedSingleflight,
 } = require('../utils/distributedSingleflight');
 const { raceChannelAccess } = require('../messages/channelAccessCache');
+const { getChannelLastMessageMetaMapFromRedis } = require('../messages/repointLastMessage');
 
 const router = express.Router();
 router.use(authenticate);
@@ -150,6 +151,20 @@ async function hasExactChannelNameConflict(communityId, name, excludeChannelId =
   sql += ' LIMIT 1';
   const { rows } = await query(sql, params);
   return rows.length > 0;
+}
+
+function applyChannelLastMessageMetadata(
+  channels,
+  latestByChannel,
+) {
+  if (!Array.isArray(channels) || !channels.length || !latestByChannel?.size) return;
+  for (const ch of channels) {
+    const latest = latestByChannel.get(ch.id);
+    if (!latest) continue;
+    ch.last_message_id = latest.msg_id;
+    ch.last_message_author_id = latest.author_id || null;
+    ch.last_message_at = latest.at || null;
+  }
 }
 
 async function listCommunityUserIds(communityId, client = { query }) {
@@ -367,8 +382,14 @@ router.get('/',
             ({ rows } = await query(channelListSql, [communityId, userId]));
           }
 
+          const accessibleRows = rows.filter((ch) => ch.id && ch.can_access);
+          const latestByChannel = await getChannelLastMessageMetaMapFromRedis(
+            accessibleRows.map((ch) => ch.id),
+            'channel',
+          );
+          applyChannelLastMessageMetadata(accessibleRows, latestByChannel);
+
           // Attach Redis-backed unread_message_count to each accessible channel
-          const accessibleRows = rows.filter(ch => ch.id && ch.can_access);
           if (accessibleRows.length > 0) {
             try {
               const countKeys = accessibleRows.map((ch) => `channel:msg_count:${ch.id}`);

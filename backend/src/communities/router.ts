@@ -40,6 +40,7 @@ const {
   setJsonCacheWithStale,
   withDistributedSingleflight,
 } = require('../utils/distributedSingleflight');
+const { getChannelLastMessageMetaMapFromRedis } = require('../messages/repointLastMessage');
 
 const router = express.Router();
 
@@ -600,6 +601,17 @@ async function buildCommunitiesListPayload(userId, rows) {
   };
 }
 
+function applyCommunityChannelLastMessageMetadata(channels, latestByChannel) {
+  if (!Array.isArray(channels) || !channels.length || !latestByChannel?.size) return;
+  for (const ch of channels) {
+    const latest = latestByChannel.get(ch.id);
+    if (!latest) continue;
+    ch.last_message_id = latest.msg_id;
+    ch.last_message_author_id = latest.author_id || null;
+    ch.last_message_at = latest.at || null;
+  }
+}
+
 function parseCommunitiesPageQuery(req) {
   const rawL = req.query.limit;
   const rawA = req.query.after;
@@ -904,7 +916,15 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
       [req.params.id, req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    res.json({ community: rows[0] });
+    const community = rows[0];
+    if (Array.isArray(community.channels) && community.channels.length > 0) {
+      const latestByChannel = await getChannelLastMessageMetaMapFromRedis(
+        community.channels.map((ch) => ch.id),
+        'community_channel',
+      );
+      applyCommunityChannelLastMessageMetadata(community.channels, latestByChannel);
+    }
+    res.json({ community });
   } catch (err) { next(err); }
 });
 

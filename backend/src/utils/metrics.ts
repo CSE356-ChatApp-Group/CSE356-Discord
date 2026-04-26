@@ -384,6 +384,51 @@ const messageLastMessageRepointFkRetryTotal = new client.Counter({
   labelNames: ['scope'],
 });
 
+/** last_message pointer update written to the async queue (Redis-backed, deferred from the POST /messages path). */
+const channelLastMessageUpdateDeferredTotal = new client.Counter({
+  name: 'channel_last_message_update_deferred_total',
+  help: 'last_message pointer update enqueued to async Redis-backed queue (channel or conversation)',
+  labelNames: ['target'],
+});
+
+/** last_message pointer update successfully written to DB by the background flush. */
+const channelLastMessageUpdateFlushedTotal = new client.Counter({
+  name: 'channel_last_message_update_flushed_total',
+  help: 'last_message pointer DB UPDATE committed by the background interval flush (channel or conversation)',
+  labelNames: ['target'],
+});
+
+/** last_message pointer DB flush failed (Redis error or query error). */
+const channelLastMessageUpdateFailedTotal = new client.Counter({
+  name: 'channel_last_message_update_failed_total',
+  help: 'last_message pointer flush failed (Redis write or DB UPDATE error) for channel or conversation',
+  labelNames: ['target'],
+});
+
+const lastMessageRedisUpdateTotal = new client.Counter({
+  name: 'last_message_redis_update_total',
+  help: 'Latest-message metadata writes to Redis by target and outcome',
+  labelNames: ['target', 'result'],
+});
+
+const lastMessagePgReconcileTotal = new client.Counter({
+  name: 'last_message_pg_reconcile_total',
+  help: 'Latest-message metadata DB reconcile attempts by target and outcome',
+  labelNames: ['target', 'result'],
+});
+
+const lastMessagePgReconcileSkippedTotal = new client.Counter({
+  name: 'last_message_pg_reconcile_skipped_total',
+  help: 'Latest-message metadata DB reconcile skips by reason',
+  labelNames: ['reason'],
+});
+
+const lastMessageCacheTotal = new client.Counter({
+  name: 'last_message_cache_total',
+  help: 'Latest-message metadata cache outcomes in read paths',
+  labelNames: ['target', 'result'],
+});
+
 /** Wall-clock time for WS auto-subscribe bootstrap (list + batched subscribe, incl. retries). */
 const wsBootstrapWallDurationMs = new client.Histogram({
   name: 'ws_bootstrap_wall_duration_ms',
@@ -712,6 +757,28 @@ function startPgPoolMetrics(pool) {
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'unknown' }, 0);
     messageLastMessageRepointFkRetryTotal.inc({ scope: 'channel' }, 0);
     messageLastMessageRepointFkRetryTotal.inc({ scope: 'conversation' }, 0);
+    channelLastMessageUpdateDeferredTotal.inc({ target: 'channel' }, 0);
+    channelLastMessageUpdateDeferredTotal.inc({ target: 'conversation' }, 0);
+    channelLastMessageUpdateFlushedTotal.inc({ target: 'channel' }, 0);
+    channelLastMessageUpdateFlushedTotal.inc({ target: 'conversation' }, 0);
+    channelLastMessageUpdateFailedTotal.inc({ target: 'channel' }, 0);
+    channelLastMessageUpdateFailedTotal.inc({ target: 'conversation' }, 0);
+    lastMessageRedisUpdateTotal.inc({ target: 'channel', result: 'ok' }, 0);
+    lastMessageRedisUpdateTotal.inc({ target: 'channel', result: 'error' }, 0);
+    lastMessageRedisUpdateTotal.inc({ target: 'conversation', result: 'ok' }, 0);
+    lastMessageRedisUpdateTotal.inc({ target: 'conversation', result: 'error' }, 0);
+    lastMessagePgReconcileTotal.inc({ target: 'channel', result: 'ok' }, 0);
+    lastMessagePgReconcileTotal.inc({ target: 'channel', result: 'error' }, 0);
+    lastMessagePgReconcileTotal.inc({ target: 'conversation', result: 'ok' }, 0);
+    lastMessagePgReconcileTotal.inc({ target: 'conversation', result: 'error' }, 0);
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_disabled' }, 0);
+    lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_pressure' }, 0);
+    lastMessageCacheTotal.inc({ target: 'channel', result: 'hit' }, 0);
+    lastMessageCacheTotal.inc({ target: 'channel', result: 'miss' }, 0);
+    lastMessageCacheTotal.inc({ target: 'channel', result: 'error' }, 0);
+    lastMessageCacheTotal.inc({ target: 'community_channel', result: 'hit' }, 0);
+    lastMessageCacheTotal.inc({ target: 'community_channel', result: 'miss' }, 0);
+    lastMessageCacheTotal.inc({ target: 'community_channel', result: 'error' }, 0);
     messageCacheBustFailuresTotal.inc({ target: 'channel' }, 0);
     messageCacheBustFailuresTotal.inc({ target: 'conversation' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
@@ -887,6 +954,13 @@ module.exports = {
   wsReplayQueryDurationMs,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,
+  channelLastMessageUpdateDeferredTotal,
+  channelLastMessageUpdateFlushedTotal,
+  channelLastMessageUpdateFailedTotal,
+  lastMessageRedisUpdateTotal,
+  lastMessagePgReconcileTotal,
+  lastMessagePgReconcileSkippedTotal,
+  lastMessageCacheTotal,
   wsBootstrapWallDurationMs,
   fanoutTargetCacheTotal,
   conversationFanoutTargetsCacheVersionRetryTotal,

@@ -205,6 +205,21 @@ function enqueueFanoutJob(name, fn) {
   return enqueue(name, fn);
 }
 
+/**
+ * Drain all queued and in-flight jobs across every queue. For use in tests only.
+ * Polls until every queue is empty AND no workers are active, then resolves.
+ */
+async function drainAllQueuesForTests(timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const allEmpty = Object.keys(queues).every(
+      (qn) => queues[qn].length === 0 && activeWorkers[qn] === 0,
+    );
+    if (allEmpty) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 module.exports = {
   publishMessageEvent,
   publishMessageEventsToUsers,
@@ -213,4 +228,5 @@ module.exports = {
   getQueueDepth,
   getQueueStats,
   enqueueFanoutJob,
+  drainAllQueuesForTests,
 };

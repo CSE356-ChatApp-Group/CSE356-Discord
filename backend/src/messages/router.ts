@@ -175,6 +175,7 @@ const {
   repointChannelLastMessage,
   repointConversationLastMessage,
   scheduleChannelLastMessagePointerUpdate,
+  scheduleConversationLastMessagePointerUpdate,
 } = require("./repointLastMessage");
 const {
   publishChannelMessageCreated,
@@ -258,12 +259,6 @@ const BG_WRITE_POOL_GUARD = parseInt(
   process.env.BG_WRITE_POOL_GUARD || "5",
   10,
 );
-const pendingConversationLastMessageUpdates = new Map<
-  string,
-  { messageId: string; authorId: string | null; createdAt: string | Date }
->();
-const queuedConversationLastMessageUpdates = new Set<string>();
-
 /** Shorter than role/PgBouncer caps so POST /messages fails fast on lock wait (hot channel + last_message UPDATE). */
 const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
   const raw = parseInt(
@@ -382,65 +377,6 @@ function buildMessagePostSuccessPhaseLog({
     tx_total_ms,
     had_attachments: attachments.length > 0,
   };
-}
-
-async function flushConversationLastMessageUpdate(conversationId: string) {
-  while (true) {
-    const pending = pendingConversationLastMessageUpdates.get(conversationId);
-    if (!pending) return;
-    pendingConversationLastMessageUpdates.delete(conversationId);
-
-    if (poolStats().waiting < BG_WRITE_POOL_GUARD) {
-      await withTransaction(async (client) => {
-        await client.query(`SET LOCAL lock_timeout = '1ms'`);
-        await client.query(
-          `UPDATE conversations
-             SET last_message_id = $1,
-                 last_message_author_id = $2,
-                 last_message_at = $3,
-                 updated_at = NOW()
-           WHERE id = $4
-             AND (last_message_at IS NULL OR $3 >= last_message_at)`,
-          [
-            pending.messageId,
-            pending.authorId,
-            pending.createdAt,
-            conversationId,
-          ],
-        );
-      }).catch(() => {});
-    }
-
-    if (!pendingConversationLastMessageUpdates.has(conversationId)) return;
-  }
-}
-
-function scheduleConversationLastMessagePointerUpdate(
-  conversationId: string,
-  payload: {
-    messageId: string;
-    authorId: string | null;
-    createdAt: string | Date;
-  },
-) {
-  pendingConversationLastMessageUpdates.set(conversationId, payload);
-  if (queuedConversationLastMessageUpdates.has(conversationId)) {
-    return true;
-  }
-
-  queuedConversationLastMessageUpdates.add(conversationId);
-  setImmediate(() => {
-    void flushConversationLastMessageUpdate(conversationId).finally(() => {
-      queuedConversationLastMessageUpdates.delete(conversationId);
-      if (pendingConversationLastMessageUpdates.has(conversationId)) {
-        scheduleConversationLastMessagePointerUpdate(
-          conversationId,
-          pendingConversationLastMessageUpdates.get(conversationId)!,
-        );
-      }
-    });
-  });
-  return true;
 }
 
 // When unset, keep historical default (defer only under heavy pool wait).
