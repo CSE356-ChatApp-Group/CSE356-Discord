@@ -8,6 +8,41 @@ const USER_FEED_SHARD_COUNT =
     ? Math.max(1, Math.min(256, Math.floor(rawUserFeedShardCount)))
     : 64;
 
+/** Max concurrent Redis `PUBLISH`es per `publishUserFeedTargets` call (1–4, default 3). */
+function userFeedPublishConcurrency() {
+  const raw = parseInt(String(process.env.USER_FEED_PUBLISH_CONCURRENCY ?? '3'), 10);
+  if (!Number.isFinite(raw)) return 3;
+  return Math.min(4, Math.max(1, Math.floor(raw)));
+}
+
+/**
+ * Run async thunks with at most `limit` in flight (shared index pool).
+ * Preserves one invocation per job; order of completion is undefined.
+ */
+async function runWithConcurrencyLimit(jobs, limit) {
+  if (!jobs.length) return;
+  const cap = Math.min(Math.max(1, limit), jobs.length);
+  let nextIndex = 0;
+  let firstErr = null;
+
+  async function worker() {
+    while (nextIndex < jobs.length && !firstErr) {
+      const idx = nextIndex;
+      nextIndex += 1;
+      if (idx >= jobs.length) return;
+      try {
+        await jobs[idx]();
+      } catch (e) {
+        firstErr = firstErr || e;
+        break;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: cap }, () => worker()));
+  if (firstErr) throw firstErr;
+}
+
 function normalizeUserId(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -90,12 +125,12 @@ async function publishUserFeedTargets(userTargets, payload) {
     shardGroups.get(shardChannel).push(userId);
   }
 
-  // Sequential publishes: each payload can be large (message + many UUIDs). Redis
-  // executes pubsub on one thread; parallel Promise.all only stacks commands and
-  // worsens tail latency under multi-worker bursts (see Redis SLOWLOG PUBLISH).
-  for (const [shardChannel, shardUserIds] of shardGroups.entries()) {
-    await fanout.publish(shardChannel, userFeedEnvelope(shardUserIds, payload));
-  }
+  const concurrency = userFeedPublishConcurrency();
+  const jobs = Array.from(shardGroups.entries()).map(
+    ([shardChannel, shardUserIds]) => async () =>
+      fanout.publish(shardChannel, userFeedEnvelope(shardUserIds, payload)),
+  );
+  await runWithConcurrencyLimit(jobs, concurrency);
 }
 
 function isUserFeedEnvelope(value) {
@@ -117,7 +152,9 @@ module.exports = {
   USER_FEED_SHARD_COUNT,
   isUserFeedEnvelope,
   publishUserFeedTargets,
+  runWithConcurrencyLimit,
   splitUserTargets,
+  userFeedPublishConcurrency,
   userFeedRedisChannelForUserId,
   userIdFromTarget,
 };
