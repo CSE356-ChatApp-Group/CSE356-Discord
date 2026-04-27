@@ -79,6 +79,7 @@ const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { loadReplayableMessagesForUser } = require("../messages/reconnectReplay");
+const { drainPendingMessagesForUser } = require("../messages/realtimePending");
 const { markWsRecentConnect, markChannelRecentConnect } = require("./recentConnect");
 const {
   parseReplayAdmissionConfig,
@@ -563,6 +564,22 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
       { bypassLogicalDuplicateSuppression: true },
     );
   }
+}
+
+async function replayPendingMessagesToSocket(ws, userId) {
+  const pendingPayloads = await drainPendingMessagesForUser(userId);
+  if (!pendingPayloads.length) return 0;
+  for (const payload of pendingPayloads) {
+    if (ws.readyState !== WebSocket.OPEN) return 0;
+    sendPayloadToSocket(
+      ws,
+      `user:${userId}`,
+      payload,
+      null,
+      { bypassLogicalDuplicateSuppression: true },
+    );
+  }
+  return pendingPayloads.length;
 }
 
 async function markConnectionAlive(userId, connectionId) {
@@ -1816,11 +1833,23 @@ wss.on("connection", async (ws, req) => {
               wsReplayInFlightCount += 1;
               wsReplayConcurrentGauge.set(wsReplayInFlightCount);
               try {
+                const replayStartedAt = Date.now();
                 await replayMissedMessagesToSocket(
                   ws,
                   user.id,
                   recentDisconnect,
                   replayUpperBoundMs,
+                );
+                const pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
+                logger.info(
+                  {
+                    event: "ws.replay.pending_drain",
+                    userId: user.id,
+                    connectionId: ws._connectionId,
+                    replayAndDrainMs: Date.now() - replayStartedAt,
+                    pendingReplayed,
+                  },
+                  "WS reconnect replay + pending drain completed before ready",
                 );
               } catch (err) {
                 logger.warn({ err, userId: user.id }, "WS reconnect replay failed");

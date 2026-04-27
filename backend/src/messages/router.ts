@@ -196,6 +196,7 @@ const {
   incrementChannelMessageCount,
   decrementChannelMessageCount,
 } = require("./channelMessageCounter");
+const { enqueuePendingMessageForUsers } = require("./realtimePending");
 const {
   channelIdIfOnlyConversationQueryParam,
   loadMessageTargetForUser,
@@ -380,6 +381,77 @@ function buildMessagePostSuccessPhaseLog({
     tx_commit_ms: txDoneAt - txPhases.t_later,
     tx_total_ms,
     had_attachments: attachments.length > 0,
+  };
+}
+
+function buildMessagePostSlowHolderLog({
+  req,
+  channelId,
+  message,
+  txLog,
+  postInsertMs,
+  postInsertBreakdown,
+  fanoutMeta,
+  cacheHit,
+  searchIndexingTriggered,
+  readStatesWriteTriggered,
+}: {
+  req: any;
+  channelId: string | null;
+  message: any;
+  txLog: any;
+  postInsertMs: number;
+  postInsertBreakdown: {
+    cache_bust_ms: number;
+    fanout_publish_ms: number;
+    side_effects_enqueue_ms: number;
+    idempotency_cache_ms: number;
+    response_build_ms: number;
+  };
+  fanoutMeta: any;
+  cacheHit: boolean | null;
+  searchIndexingTriggered: boolean;
+  readStatesWriteTriggered: boolean;
+}) {
+  const preInsertMs = Number(txLog.tx_access_check_ms || 0);
+  const insertMs = Number(txLog.tx_insert_ms || 0);
+  const txCommitMs = Number(txLog.tx_commit_ms || 0);
+  const txTotalMs = Number(txLog.tx_total_ms || 0);
+  const postMs = Math.max(0, Number(postInsertMs || 0));
+  const messageSizeBytes =
+    Buffer.byteLength(String(message?.content || ""), "utf8") +
+    Number((Array.isArray(message?.attachments) ? message.attachments : []).reduce(
+      (sum: number, a: any) => sum + Number(a?.size_bytes || a?.sizeBytes || 0),
+      0,
+    ));
+  const phases = [
+    { phase: "pre_insert_work", ms: preInsertMs },
+    { phase: "db_insert", ms: insertMs },
+    { phase: "post_insert_work", ms: postMs },
+  ];
+  phases.sort((a, b) => b.ms - a.ms);
+  return {
+    event: "post_messages_lock_holder_slow",
+    requestId: req.id,
+    channelId: channelId ?? undefined,
+    messageId: message?.id,
+    message_size_bytes: messageSizeBytes,
+    tx_total_ms: txTotalMs,
+    tx_commit_ms: txCommitMs,
+    time_before_insert_ms: preInsertMs,
+    time_inside_insert_ms: insertMs,
+    time_after_insert_ms: postMs,
+    dominant_holder_phase: phases[0]?.phase || "unknown",
+    fanout_count:
+      Number(fanoutMeta?.totalTargetCount) ||
+      Number(fanoutMeta?.inlineTargetCount) ||
+      0,
+    fanout_cache_result: fanoutMeta?.cacheResult || "unknown",
+    fanout_cache_hit: cacheHit,
+    fanout_mode: fanoutMeta?.mode || "unknown",
+    search_indexing_triggered: searchIndexingTriggered,
+    read_states_write_triggered: readStatesWriteTriggered,
+    post_insert_breakdown_ms: postInsertBreakdown,
   };
 }
 
@@ -687,6 +759,14 @@ async function publishConversationEventNow(conversationId, event, data) {
   // write failed when Postgres already committed (see channel path try/catch too).
   const wrapStart = process.hrtime.bigint();
   const payload = wrapFanoutPayload(event, data);
+  if (event === "message:created" && userIds.length > 0) {
+    enqueuePendingMessageForUsers(userIds, payload).catch((err) => {
+      logger.warn(
+        { err, conversationId, userCount: userIds.length },
+        "Failed to enqueue conversation message pending replay pointers",
+      );
+    });
+  }
   const wrapPayloadMs = Number(process.hrtime.bigint() - wrapStart) / 1e6;
   if (isDmTimingEvent) {
     fanoutPublishDurationMs.observe(
@@ -1841,6 +1921,11 @@ router.post(
           )
         : runMessageInsertTransaction());
       const t_tx_done = Date.now();
+      let t_after_cache_bust = t_tx_done;
+      let t_after_fanout = t_tx_done;
+      let t_after_side_effects = t_tx_done;
+      let t_after_idem_cache = t_tx_done;
+      let fanoutMeta: any = null;
       {
         const successLog = buildMessagePostSuccessPhaseLog({
           req,
@@ -1889,6 +1974,7 @@ router.post(
       // (e.g. opening a DM) returns rows that include this write. Await DEL so a
       // client cannot GET stale JSON between commit and eviction (grader polling).
       await bustMessagesCacheSafe({ channelId, conversationId });
+      t_after_cache_bust = Date.now();
 
       let realtimePublishedAtForHttp;
       let realtimeChannelFanoutComplete = false;
@@ -1911,7 +1997,7 @@ router.post(
         // If Redis is unavailable, fanout.publish throws after retries — still return 201 because
         // the message row is committed; clients should poll or rely on channel: replay.
         try {
-          await publishChannelMessageCreated(channelId, createdEnvelope);
+          fanoutMeta = await publishChannelMessageCreated(channelId, createdEnvelope);
           realtimePublishedAtForHttp = createdEnvelope.publishedAt;
           realtimeChannelFanoutComplete = true;
         } catch (fanoutErr) {
@@ -1928,6 +2014,7 @@ router.post(
           );
           realtimePublishedAtForHttp = new Date().toISOString();
         }
+        t_after_fanout = Date.now();
         appendChannelMessageIngested({
           messageId: String(message.id),
           channelId: String(channelId),
@@ -1959,6 +2046,7 @@ router.post(
           );
           realtimePublishedAtForHttp = new Date().toISOString();
         }
+        t_after_fanout = Date.now();
       }
       if (!realtimePublishedAtForHttp) {
         realtimePublishedAtForHttp = new Date().toISOString();
@@ -1976,6 +2064,7 @@ router.post(
           },
         );
       }
+      t_after_side_effects = Date.now();
 
       const userFanoutDeferred =
         !!channelId &&
@@ -2006,6 +2095,7 @@ router.post(
           )
           .catch(() => {});
       }
+      t_after_idem_cache = Date.now();
 
       const httpBody: Record<string, unknown> = {
         message,
@@ -2019,6 +2109,56 @@ router.post(
           realtimeConversationFanoutComplete;
       }
       res.status(201).json(httpBody);
+      const t_response_sent = Date.now();
+
+      if (channelId) {
+        const successLog = buildMessagePostSuccessPhaseLog({
+          req,
+          channelId,
+          conversationId,
+          attachments,
+          txPhases,
+          txDoneAt: t_tx_done,
+        });
+        if (successLog.tx_total_ms > 1000) {
+          const postInsertBreakdown = {
+            cache_bust_ms: Math.max(0, t_after_cache_bust - t_tx_done),
+            fanout_publish_ms: Math.max(0, t_after_fanout - t_after_cache_bust),
+            side_effects_enqueue_ms: Math.max(
+              0,
+              t_after_side_effects - t_after_fanout,
+            ),
+            idempotency_cache_ms: Math.max(
+              0,
+              t_after_idem_cache - t_after_side_effects,
+            ),
+            response_build_ms: Math.max(
+              0,
+              t_response_sent - t_after_idem_cache,
+            ),
+          };
+          logger.warn(
+            buildMessagePostSlowHolderLog({
+              req,
+              channelId,
+              message,
+              txLog: successLog,
+              postInsertMs: Math.max(0, t_response_sent - t_tx_done),
+              postInsertBreakdown,
+              fanoutMeta,
+              cacheHit:
+                fanoutMeta?.cacheResult === "hit"
+                  ? true
+                  : fanoutMeta?.cacheResult === "miss"
+                    ? false
+                    : null,
+              searchIndexingTriggered: !!(meiliClient.isEnabled() && message?.id),
+              readStatesWriteTriggered: false,
+            }),
+            "POST /messages slow lock-holder phase breakdown",
+          );
+        }
+      }
 
       // Fire-and-forget: index the committed message in Meilisearch.
       // Runs after the response is sent so it never adds to POST latency.

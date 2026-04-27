@@ -10,6 +10,7 @@ const redis = require('../db/redis');
 const fanout = require('../websocket/fanout');
 const { publishUserFeedTargets } = require('../websocket/userFeed');
 const sideEffects = require('./sideEffects');
+const { enqueuePendingMessageForUsers } = require('./realtimePending');
 const {
   wsRecentConnectKey,
   channelRecentConnectKey,
@@ -148,6 +149,14 @@ async function invalidateCommunityChannelUserFanoutTargetsCache(communityId: str
  * all community members; private: channel_members only).
  */
 async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string[]> {
+  const { targets } = await getChannelUserFanoutTargetKeysWithMeta(channelId);
+  return targets;
+}
+
+async function getChannelUserFanoutTargetKeysWithMeta(channelId: string): Promise<{
+  targets: string[];
+  cacheResult: 'hit' | 'miss' | 'coalesced';
+}> {
   const cacheKey = channelUserFanoutTargetsCacheKey(channelId);
   const versionKey = channelUserFanoutTargetsVersionKey(channelId);
   const { cached, version: cachedVersion } = await readChannelUserFanoutCacheState(cacheKey, versionKey);
@@ -156,7 +165,10 @@ async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string
       const parsed = JSON.parse(cached);
       if (Array.isArray(parsed)) {
         fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'hit' });
-        return parsed.filter((value) => typeof value === 'string');
+        return {
+          targets: parsed.filter((value) => typeof value === 'string'),
+          cacheResult: 'hit',
+        };
       }
     } catch {
       // Ignore parse failures and repopulate from Postgres below.
@@ -166,7 +178,10 @@ async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string
 
   if (channelUserFanoutTargetsInflight.has(cacheKey)) {
     fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'coalesced' });
-    return channelUserFanoutTargetsInflight.get(cacheKey);
+    return {
+      targets: await channelUserFanoutTargetsInflight.get(cacheKey),
+      cacheResult: 'coalesced',
+    };
   }
 
   fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'miss' });
@@ -223,7 +238,7 @@ async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string
   });
 
   channelUserFanoutTargetsInflight.set(cacheKey, load);
-  return load;
+  return { targets: await load, cacheResult: 'miss' };
 }
 
 async function publishUserTopicTargets(
@@ -336,7 +351,12 @@ async function recentConnectTargets(channelId: string, targets: string[]) {
 
 async function resolveUserTopicTargets(channelId: string) {
   if (!channelMessageUserFanoutEnabled()) {
-    return { allTargets: [], recentTargets: [] };
+    return {
+      allTargets: [],
+      recentTargets: [],
+      candidateCount: 0,
+      cacheResult: 'miss' as const,
+    };
   }
 
   const mode = userFanoutMode();
@@ -346,7 +366,8 @@ async function resolveUserTopicTargets(channelId: string) {
       : 'channel_message_recent_connect_user_topics';
   const startedAt = process.hrtime.bigint();
   const lookupStartedAt = startedAt;
-  const targets = await getChannelUserFanoutTargetKeys(channelId);
+  const targetLookup = await getChannelUserFanoutTargetKeysWithMeta(channelId);
+  const targets = targetLookup.targets;
   fanoutPublishDurationMs.observe(
     { path: 'channel_message_user_topics', stage: 'target_lookup' },
     Number(process.hrtime.bigint() - lookupStartedAt) / 1e6,
@@ -360,7 +381,12 @@ async function resolveUserTopicTargets(channelId: string) {
       { path: 'channel_message_user_topics', stage: 'total' },
       Number(process.hrtime.bigint() - startedAt) / 1e6,
     );
-    return { allTargets: [], recentTargets: [] };
+    return {
+      allTargets: [],
+      recentTargets: [],
+      candidateCount: 0,
+      cacheResult: targetLookup.cacheResult,
+    };
   }
 
   if (mode === 'all') {
@@ -368,7 +394,12 @@ async function resolveUserTopicTargets(channelId: string) {
       { path: 'channel_message_user_topics', stage: 'total' },
       Number(process.hrtime.bigint() - startedAt) / 1e6,
     );
-    return { allTargets: capped, recentTargets: [] };
+    return {
+      allTargets: capped,
+      recentTargets: [],
+      candidateCount: capped.length,
+      cacheResult: targetLookup.cacheResult,
+    };
   }
 
   const recentLookupStartedAt = process.hrtime.bigint();
@@ -382,7 +413,12 @@ async function resolveUserTopicTargets(channelId: string) {
     Number(process.hrtime.bigint() - startedAt) / 1e6,
   );
 
-  return { allTargets: inlineTargets, recentTargets: inlineTargets };
+  return {
+    allTargets: inlineTargets,
+    recentTargets: inlineTargets,
+    candidateCount: capped.length,
+    cacheResult: targetLookup.cacheResult,
+  };
 }
 
 async function publishDeferredUserTopics(
@@ -408,6 +444,8 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
   const userTargetsPromise = resolveUserTopicTargets(channelId);
   let allTargets: string[] = [];
   let hintedRecentTargets: string[] = [];
+  let candidateCount = 0;
+  let cacheResult: 'hit' | 'miss' | 'coalesced' = 'miss';
 
   if (firstChannel) {
     const channelPublishStartedAt = process.hrtime.bigint();
@@ -418,7 +456,23 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
     );
   }
 
-  ({ allTargets, recentTargets: hintedRecentTargets } = await userTargetsPromise);
+  ({
+    allTargets,
+    recentTargets: hintedRecentTargets,
+    candidateCount,
+    cacheResult,
+  } = await userTargetsPromise);
+
+  if (envelope?.event === 'message:created' && allTargets.length > 0) {
+    // Reconnect bridge: keep a short-lived per-user pending pointer so reconnect
+    // drain can recover missed live fanout quickly before marking socket ready.
+    enqueuePendingMessageForUsers(allTargets, envelope).catch((err) => {
+      logger.warn(
+        { err, channelId, targetCount: allTargets.length },
+        'Failed to enqueue channel message pending replay pointers',
+      );
+    });
+  }
 
   const blocking = userFanoutHttpBlocking();
   const recentTargets =
@@ -464,6 +518,14 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
     { path: 'channel_message', stage: 'total' },
     Number(process.hrtime.bigint() - startedAt) / 1e6,
   );
+  return {
+    mode,
+    cacheResult,
+    candidateCount,
+    inlineTargetCount: inlineTargets.length,
+    deferredTargetCount: deferredTargets.length,
+    totalTargetCount: allTargets.length,
+  };
 }
 
 async function publishChannelMessageCreated(channelId: string, envelope: Record<string, unknown>) {

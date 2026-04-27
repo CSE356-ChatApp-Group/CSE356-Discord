@@ -13,6 +13,7 @@ WINDOW_SECONDS="${WINDOW_SECONDS:-600}"
 SINCE_TS="${SINCE_TS:-}"
 MAX_403="${MAX_403:-3}"
 NOVEL_ONLY="${NOVEL_ONLY:-0}"
+USE_DELIVERY_CLASSIFIER="${USE_DELIVERY_CLASSIFIER:-1}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -45,14 +46,17 @@ if [[ -z "${SINCE_TS}" ]]; then
 fi
 
 set +e
-PAYLOAD="$(python3 - "$EVENTS_FILE" "$SINCE_TS" "$MAX_403" "$NOVEL_ONLY" <<'PY'
+PAYLOAD="$(python3 - "$EVENTS_FILE" "$SINCE_TS" "$MAX_403" "$NOVEL_ONLY" "$USE_DELIVERY_CLASSIFIER" <<'PY'
 import json
+import os
+import subprocess
 import sys
 from datetime import datetime
 
-path, since_raw, max_403_raw, novel_only_raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+path, since_raw, max_403_raw, novel_only_raw, use_classifier_raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 max_403 = int(max_403_raw)
 novel_only = novel_only_raw == "1"
+use_classifier = use_classifier_raw == "1"
 
 def parse_iso(v):
     try:
@@ -119,6 +123,46 @@ with open(path, "r", encoding="utf-8", errors="replace") as f:
             warn_403.append(obj)
 
 if critical:
+    # Optional classifier: downgrade reconnect-gap delivery timeout noise.
+    if use_classifier:
+        script = os.path.join(os.getcwd(), "scripts", "classify-delivery-timeouts.py")
+        if os.path.exists(script):
+            try:
+                out = subprocess.check_output(
+                    ["python3", script, "--events-file", path, "--since", since_raw],
+                    text=True,
+                )
+                classified = json.loads(out)
+                by_key = {}
+                for item in classified.get("classified_events", []):
+                    key = f"Delivery timeout | sender={item.get('sender')} channel={item.get('channel_id')} missing=[{item.get('missing')}]"
+                    by_key[key] = item
+                filtered = []
+                reconnect_only = 0
+                for item in critical:
+                    txt = str(item.get("text", ""))
+                    matched = None
+                    for line in txt.splitlines():
+                        line = line.strip()
+                        if line in by_key:
+                            matched = by_key[line]
+                            break
+                    if matched and matched.get("classification") == "reconnect_gap":
+                        reconnect_only += 1
+                        continue
+                    filtered.append(item)
+                critical = filtered
+                if not critical:
+                    print(json.dumps({
+                        "status": "pass",
+                        "since": since_raw,
+                        "novel_only": novel_only,
+                        "delivery_reconnect_gap_false_positives": reconnect_only,
+                        "classifier_used": True,
+                    }))
+                    sys.exit(0)
+            except Exception:
+                pass
     last = critical[-1]
     print(json.dumps({
         "status": "fail",

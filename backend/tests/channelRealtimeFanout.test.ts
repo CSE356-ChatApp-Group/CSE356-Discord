@@ -65,6 +65,9 @@ const {
 describe('channelRealtimeFanout', () => {
   let pipelineDel: jest.Mock;
   let pipelineIncr: jest.Mock;
+  let pipelineSet: jest.Mock;
+  let pipelineZadd: jest.Mock;
+  let pipelineExpire: jest.Mock;
   let pipelineExec: jest.Mock;
 
   beforeEach(() => {
@@ -90,12 +93,19 @@ describe('channelRealtimeFanout', () => {
     redis.incr.mockResolvedValue(1);
     pipelineDel = jest.fn();
     pipelineIncr = jest.fn();
+    pipelineSet = jest.fn();
+    pipelineZadd = jest.fn();
+    pipelineExpire = jest.fn();
     pipelineExec = jest.fn(() => Promise.resolve([]));
-    redis.pipeline.mockReturnValue({
-      del: pipelineDel,
-      incr: pipelineIncr,
+    const pipelineObj: any = {
+      del: (...args: any[]) => { pipelineDel(...args); return pipelineObj; },
+      incr: (...args: any[]) => { pipelineIncr(...args); return pipelineObj; },
+      set: (...args: any[]) => { pipelineSet(...args); return pipelineObj; },
+      zadd: (...args: any[]) => { pipelineZadd(...args); return pipelineObj; },
+      expire: (...args: any[]) => { pipelineExpire(...args); return pipelineObj; },
       exec: pipelineExec,
-    });
+    };
+    redis.pipeline.mockReturnValue(pipelineObj);
     redis.multi.mockReturnValue({
       zremrangebyscore: jest.fn().mockReturnThis(),
       zadd: jest.fn().mockReturnThis(),
