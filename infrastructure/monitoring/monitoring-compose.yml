@@ -10,12 +10,12 @@ services:
     depends_on: [alertmanager]
     network_mode: host
     # Defaults assume prod monitoring VM ≥8 GiB / 4 vCPU (see docs/infrastructure-inventory.md).
-    # On smaller hosts set PROMETHEUS_* / LOKI_* / GRAFANA_* in /opt/chatapp-monitoring/.env.
-    mem_limit: ${PROMETHEUS_MEM_LIMIT:-4g}
+    # No mem_limit: prod Prometheus RSS exceeded 7g cgroup (memcg OOM on 8 GiB host). Use GOMEMLIMIT; add a cap via
+    # compose override or deploy env only if the VM has enough RAM (see docs/infrastructure-inventory.md).
     cpus: ${PROMETHEUS_CPU_LIMIT:-3}
     environment:
       ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-prod}
-      GOMEMLIMIT: ${PROMETHEUS_GOMEMLIMIT:-3800MiB}
+      GOMEMLIMIT: ${PROMETHEUS_GOMEMLIMIT:-6200MiB}
     entrypoint: ["sh", "-ec"]
     command:
       - |
