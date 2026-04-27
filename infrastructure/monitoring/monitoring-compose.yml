@@ -9,9 +9,10 @@ services:
     restart: unless-stopped
     depends_on: [alertmanager]
     network_mode: host
-    # 4 GB monitoring VMs OOM-kill Prometheus (~3 GiB RSS) and take down sshd/journald.
-    # Cap RSS + shorten retention; GOMEMLIMIT nudges Go GC before hard cgroup OOM.
-    mem_limit: ${PROMETHEUS_MEM_LIMIT:-2560m}
+    # 4 GB host: a ~3.4 GiB Prometheus cgroup still exhausts RAM because Loki/Grafana/kernel
+    # need hundreds of MiB — sum of limits must stay below ~3.5 GiB physical. Cap sibling
+    # services below; raise PROMETHEUS_MEM_LIMIT only after upgrading this VM (e.g. 8 GiB).
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-2520m}
     cpus: ${PROMETHEUS_CPU_LIMIT:-1.75}
     environment:
       ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-prod}
@@ -21,7 +22,7 @@ services:
       - |
         sed "s/__ALERT_ENVIRONMENT__/$${ALERT_ENVIRONMENT:-prod}/g" /etc/prometheus/prometheus.yml.template >/tmp/prometheus.yml
         exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --web.listen-address=127.0.0.1:9090 \
-          --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+          --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-5d}
     volumes:
       - ./prometheus-host.yml:/etc/prometheus/prometheus.yml.template:ro
       - ./alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -64,6 +65,8 @@ services:
   grafana:
     image: grafana/grafana:11.1.0
     restart: unless-stopped
+    mem_limit: ${GRAFANA_MEM_LIMIT:-320m}
+    cpus: ${GRAFANA_CPU_LIMIT:-0.75}
     network_mode: host
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
@@ -79,6 +82,8 @@ services:
   loki:
     image: grafana/loki:3.1.0
     restart: unless-stopped
+    mem_limit: ${LOKI_MEM_LIMIT:-448m}
+    cpus: ${LOKI_CPU_LIMIT:-1.0}
     volumes:
       - ./loki-config.yml:/etc/loki/local-config.yaml:ro
       - loki_data:/loki
@@ -88,6 +93,8 @@ services:
   tempo:
     image: grafana/tempo:2.5.0
     restart: unless-stopped
+    mem_limit: ${TEMPO_MEM_LIMIT:-192m}
+    cpus: ${TEMPO_CPU_LIMIT:-0.5}
     command: ["-config.file=/etc/tempo/config.yml"]
     volumes:
       - ./tempo-config.yml:/etc/tempo/config.yml:ro
