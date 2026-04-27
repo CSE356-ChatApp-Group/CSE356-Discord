@@ -10,6 +10,7 @@ const {
   sideEffectQueueDelayMs,
   sideEffectJobDurationMs,
   sideEffectQueueDroppedTotal,
+  fanoutQueueDepth,
 } = require('../utils/metrics');
 
 const queues: Record<string, Array<{ name: string; fn: () => Promise<void>; enqueuedAt: number; queueName: string }>> = {
@@ -58,6 +59,11 @@ function queueConfig(queueName) {
 function refreshQueueMetrics(queueName) {
   sideEffectQueueDepth.set({ queue: queueName }, queues[queueName].length);
   sideEffectQueueActiveWorkers.set({ queue: queueName }, activeWorkers[queueName]);
+  const critDepth = queues['fanout:critical'].length;
+  const bgDepth = queues['fanout:background'].length;
+  fanoutQueueDepth.set({ queue: 'fanout:critical' }, critDepth);
+  fanoutQueueDepth.set({ queue: 'fanout:background' }, bgDepth);
+  fanoutQueueDepth.set({ queue: 'fanout:all' }, critDepth + bgDepth);
 }
 
 function maybeStartWorkers(queueName) {

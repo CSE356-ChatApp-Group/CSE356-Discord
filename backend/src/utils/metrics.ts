@@ -164,6 +164,64 @@ const messagePostRealtimePublishFailTotal = new client.Counter({
   labelNames: ['target'],
 });
 
+/** POST /messages async fanout: enqueue outcome (queued vs critical queue full fallback). */
+const messagePostFanoutAsyncEnqueueTotal = new client.Counter({
+  name: 'message_post_fanout_async_enqueue_total',
+  help: 'POST /messages deferred fanout enqueue by path and result',
+  labelNames: ['path', 'result'],
+});
+
+/** Deferred POST /messages fanout job terminal outcomes (after dedupe lock acquired). */
+const messagePostFanoutJobTotal = new client.Counter({
+  name: 'message_post_fanout_job_total',
+  help: 'Deferred POST /messages fanout job outcomes',
+  labelNames: ['path', 'result'],
+});
+
+const messagePostFanoutJobRetriesTotal = new client.Counter({
+  name: 'message_post_fanout_job_retries_total',
+  help: 'Deferred POST /messages fanout publish retries after transient failure',
+  labelNames: ['path'],
+});
+
+const messagePostFanoutJobDurationMs = new client.Histogram({
+  name: 'message_post_fanout_job_duration_ms',
+  help: 'Wall-clock duration of deferred POST /messages fanout job',
+  labelNames: ['path', 'result'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000],
+});
+
+/** POST message fanout job wall time (success / dead_letter / error); SLO alerts use p99 on `result=success`. */
+const fanoutJobLatencyMs = new client.Histogram({
+  name: 'fanout_job_latency_ms',
+  help: 'Deferred POST /messages fanout job wall-clock latency',
+  labelNames: ['path', 'result'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000],
+});
+
+/** Fanout side-effect queue depth (mirrors fanout:* segment of side_effect_queue_depth). */
+const fanoutQueueDepth = new client.Gauge({
+  name: 'fanout_queue_depth',
+  help: 'Pending jobs on fanout side-effect queues',
+  labelNames: ['queue'],
+});
+
+const fanoutRetryTotal = new client.Counter({
+  name: 'fanout_retry_total',
+  help: 'Retries inside deferred POST /messages fanout job after publish failure',
+  labelNames: ['path'],
+});
+
+/**
+ * Post-insert work hit a wall-clock budget (cache bust or legacy timed publish).
+ * Informational only — HTTP 201 still returned when the message row is committed.
+ */
+const deliveryTimeoutTotal = new client.Counter({
+  name: 'delivery_timeout_total',
+  help: 'Post-insert delivery-path wall-clock timeouts (does not imply HTTP failure)',
+  labelNames: ['phase'],
+});
+
 /**
  * Second POST /messages with the same Idempotency-Key while the first holds the
  * Redis NX lease: polls until replay or deadline (see router exponential backoff).
@@ -929,6 +987,22 @@ function startPgPoolMetrics(pool) {
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
     messagePostRealtimePublishFailTotal.inc({ target: 'channel' }, 0);
     messagePostRealtimePublishFailTotal.inc({ target: 'conversation' }, 0);
+    for (const path of ['channel', 'conversation'] as const) {
+      for (const result of ['queued', 'queue_full', 'sync'] as const) {
+        messagePostFanoutAsyncEnqueueTotal.inc({ path, result }, 0);
+      }
+      for (const result of ['success', 'dedup_skip', 'dead_letter', 'error'] as const) {
+        messagePostFanoutJobTotal.inc({ path, result }, 0);
+        messagePostFanoutJobDurationMs.observe({ path, result }, 0);
+        fanoutJobLatencyMs.observe({ path, result }, 0);
+      }
+      messagePostFanoutJobRetriesTotal.inc({ path }, 0);
+      fanoutRetryTotal.inc({ path }, 0);
+    }
+    deliveryTimeoutTotal.inc({ phase: 'cache_bust' }, 0);
+    fanoutQueueDepth.set({ queue: 'fanout:critical' }, 0);
+    fanoutQueueDepth.set({ queue: 'fanout:background' }, 0);
+    fanoutQueueDepth.set({ queue: 'fanout:all' }, 0);
     messagePostIdempotencyPollTotal.inc({ outcome: 'replay_201' }, 0);
     messagePostIdempotencyPollTotal.inc({ outcome: 'exhausted_409' }, 0);
     messagePostIdempotencyPollWaitMs.observe({ outcome: 'replay_201' }, 0);
@@ -1111,6 +1185,14 @@ module.exports = {
   messageIngestStreamConsumedTotal,
   messagePostResponseTotal,
   messagePostRealtimePublishFailTotal,
+  messagePostFanoutAsyncEnqueueTotal,
+  messagePostFanoutJobTotal,
+  messagePostFanoutJobRetriesTotal,
+  messagePostFanoutJobDurationMs,
+  fanoutJobLatencyMs,
+  fanoutQueueDepth,
+  fanoutRetryTotal,
+  deliveryTimeoutTotal,
   messagePostIdempotencyPollTotal,
   messagePostIdempotencyPollWaitMs,
   messagePostRateLimitHitsTotal,

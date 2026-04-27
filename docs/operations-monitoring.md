@@ -19,7 +19,7 @@ This document exists so operators (and the coding agent) can **ground decisions 
 Under load, **PostgreSQL is usually the limiting factor**, not nginx or Node in isolation:
 
 1. **Postgres / PgBouncer** — API logs show `query timeout`; metrics show **`pg_pool_waiting`** high and **`pg_pool_idle`** near zero with **`pg_pool_total`** at max; **`pg_pool_circuit_breaker_rejects_total`** and HTTP **503** “pool queue” / circuit-open errors follow. Several **`chatapp@`** workers each hold a large pool; slow statements or contention on the DB multiply waits across all processes.
-2. **Redis** — secondary; publish lag or connection counts can affect realtime delivery but rarely drives **multi-second** HTTP stalls alone.
+2. **Redis** — publish lag affects **deferred** `POST /messages` fanout (`fanout_job_latency_ms`, `fanout_queue_depth`, `fanout_retry_total`) and WS delivery; the HTTP **201** path is decoupled. **`delivery_timeout_total`** counts only **cache-bust** wall-clock overruns (informational). PromQL SLO examples: `histogram_quantile(0.99, sum by (le,path) (rate(fanout_job_latency_ms_bucket{result="success"}[5m])))`; alerts **`ChatAppMessagePostFanoutJobLatencyP99High`** / **`ChatAppMessagePostFanoutJobLatencyP999High`** in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml).
 3. **App CPU** — bcrypt login stampedes and WS fanout can spike CPU; check **`route=/api/v1/auth/login`** and event-loop lag before attributing everything to Postgres.
 
 **MinIO:** Prometheus on the DB VM does **not** scrape MinIO health (S3 API is **127.0.0.1** on the app VM). Use **`curl -sS http://127.0.0.1:9000/minio/health/live`** on the app host or app-level errors for object storage.
@@ -46,6 +46,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - p95 business-SQL round-trips per request
    - realtime fanout cache hit/miss/coalesced rates
    - realtime fanout stage/target p95 plus candidate-audience p95 before recent-connect filtering
+   - deferred POST fanout: `fanout_job_latency_ms` p99, `fanout_queue_depth`, `fanout_retry_total`, `delivery_timeout_total`
    - websocket bootstrap wall-time, breadth, and cache-hit rate
 
 2. **Grafana / Prometheus UI** — export panel data or run the same PromQL as in the snapshot script and paste results.

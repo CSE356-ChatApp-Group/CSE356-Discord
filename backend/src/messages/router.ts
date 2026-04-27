@@ -36,6 +36,8 @@ const {
 const {
   messagePostAccessDeniedTotal,
   messagePostRealtimePublishFailTotal,
+  deliveryTimeoutTotal,
+  messagePostFanoutAsyncEnqueueTotal,
   messagePostIdempotencyPollTotal,
   messagePostIdempotencyPollWaitMs,
   messagePostRateLimitHitsTotal,
@@ -184,6 +186,8 @@ const {
   publishChannelMessageCreated,
   publishChannelMessageEvent,
 } = require("./channelRealtimeFanout");
+const { loadHydratedMessageById } = require("./messageHydrate");
+const messagePostFanoutAsync = require("./messagePostFanoutAsync");
 const { appendChannelMessageIngested } = require("./messageIngestLog");
 const { batchReadStateRedisKeys } = require("./batchReadState");
 const { getConversationFanoutTargets } = require("./conversationFanoutTargets");
@@ -273,9 +277,12 @@ const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
   if (!Number.isFinite(raw) || raw < 1000) return 5000;
   return Math.min(60000, raw);
 })();
-const POST_INSERT_REDIS_WORK_TIMEOUT_MS = (() => {
+/** Wall-clock cap for post-commit **message list cache bust** only (not fanout publish). */
+const MESSAGE_POST_CACHE_BUST_TIMEOUT_MS = (() => {
   const raw = parseInt(
-    process.env.POST_INSERT_REDIS_WORK_TIMEOUT_MS || "350",
+    process.env.MESSAGE_POST_CACHE_BUST_TIMEOUT_MS ||
+      process.env.POST_INSERT_REDIS_WORK_TIMEOUT_MS ||
+      "350",
     10,
   );
   if (!Number.isFinite(raw) || raw < 50) return 350;
@@ -699,7 +706,7 @@ async function bustMessagesCacheSafe(opts: {
 async function withBoundedPostInsertTimeout<T>(
   opName: string,
   work: Promise<T>,
-  timeoutMs = POST_INSERT_REDIS_WORK_TIMEOUT_MS,
+  timeoutMs: number,
 ): Promise<{ ok: boolean; timedOut: boolean; value?: T }> {
   let timeoutHandle: NodeJS.Timeout | null = null;
   try {
@@ -717,8 +724,18 @@ async function withBoundedPostInsertTimeout<T>(
   } catch (err: any) {
     const timedOut = err?.code === "POST_INSERT_REDIS_TIMEOUT";
     logger.warn(
-      { err, opName, timeoutMs, timedOut },
-      "POST /messages post-insert work failed",
+      {
+        err,
+        opName,
+        timeoutMs,
+        timedOut,
+        gradingNote: timedOut
+          ? "post_insert_delivery_timeout_not_http_failure"
+          : "post_insert_work_error",
+      },
+      timedOut
+        ? "POST /messages post-insert work exceeded wall budget (message still persisted)"
+        : "POST /messages post-insert work failed",
     );
     return { ok: false, timedOut };
   } finally {
@@ -950,19 +967,11 @@ async function publishConversationEventNow(conversationId, event, data) {
   return fanoutPublishedAt(payload);
 }
 
-async function loadHydratedMessageById(messageId) {
-  const { rows } = await query(
-    `SELECT ${MESSAGE_SELECT_FIELDS},
-            ${MESSAGE_AUTHOR_JSON},
-            COALESCE(json_agg(a.*) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
-     FROM messages m
-     LEFT JOIN users u ON u.id = m.author_id
-     LEFT JOIN attachments a ON a.message_id = m.id
-     WHERE m.id = $1
-     GROUP BY m.id, u.id`,
-    [messageId],
-  );
-  return rows[0] || null;
+function messagePostAsyncFanoutEnabled() {
+  const v = String(process.env.MESSAGE_POST_SYNC_FANOUT || "")
+    .trim()
+    .toLowerCase();
+  return v !== "true" && v !== "1";
 }
 
 async function advanceReadStateCursor({
@@ -2030,12 +2039,26 @@ router.post(
           : baseMessage;
 
       // Bust the shared Redis cache for the latest page so a follow-up GET /messages
-      // (e.g. opening a DM) returns rows that include this write. Await DEL so a
-      // client cannot GET stale JSON between commit and eviction (grader polling).
-      await withBoundedPostInsertTimeout(
+      // (e.g. opening a DM) returns rows that include this write. Bounded wait only —
+      // on timeout the row is still durable in Postgres; clients using replay/primary read see it.
+      const cacheBustRun = await withBoundedPostInsertTimeout(
         "cache_bust",
         bustMessagesCacheSafe({ channelId, conversationId }),
+        MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
       );
+      if (!cacheBustRun.ok && cacheBustRun.timedOut) {
+        deliveryTimeoutTotal.inc({ phase: "cache_bust" });
+        logger.warn(
+          {
+            requestId: req.id,
+            channelId: channelId ?? undefined,
+            conversationId: conversationId ?? undefined,
+            timeoutMs: MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
+            gradingNote: "post_insert_delivery_timeout_not_http_failure",
+          },
+          "POST /messages: cache_bust wall budget exceeded (201 still returned after commit)",
+        );
+      }
       t_after_cache_bust = Date.now();
 
       let realtimePublishedAtForHttp;
@@ -2051,27 +2074,94 @@ router.post(
             "Failed to increment channel:msg_count alongside realtime publish",
           );
         });
-        const createdEnvelope = messageFanoutEnvelope(
-          "message:created",
-          message,
-        );
-        // Await channel (+ optionally user-topic) Redis publishes per MESSAGE_USER_FANOUT_HTTP_BLOCKING.
-        // If Redis is unavailable, fanout.publish throws after retries — still return 201 because
-        // the message row is committed; clients should poll or rely on channel: replay.
+        // Default: defer heavy Redis channel + userfeed publishes to fanout:critical worker
+        // (dedupe + retries in messagePostFanoutAsync). Set MESSAGE_POST_SYNC_FANOUT=1 for
+        // legacy inline await (no wall-clock cap — success = DB + enqueue or full publish).
         try {
-          const fanoutRun = await withBoundedPostInsertTimeout(
-            "channel_fanout_publish",
-            publishChannelMessageCreated(channelId, createdEnvelope),
-          );
-          if (fanoutRun.ok) fanoutMeta = fanoutRun.value;
-          realtimePublishedAtForHttp = createdEnvelope.publishedAt;
-          realtimeChannelFanoutComplete = fanoutRun.ok;
-          if (!fanoutRun.ok) {
-            sideEffects.publishBackgroundEvent(
-              `channel:${channelId}`,
+          if (messagePostAsyncFanoutEnabled()) {
+            const enqueued = sideEffects.enqueueFanoutJob(
+              `fanout.message_post.channel:${baseMessage.id}`,
+              async () => {
+                await messagePostFanoutAsync.runPostMessageFanoutJob(
+                  "channel",
+                  String(baseMessage.id),
+                  async () => {
+                    const msg = await loadHydratedMessageById(String(baseMessage.id));
+                    if (!msg) {
+                      logger.warn(
+                        { channelId, messageId: baseMessage.id },
+                        "POST /messages fanout job: message row missing",
+                      );
+                      return;
+                    }
+                    if (String(msg.channel_id) !== String(channelId)) {
+                      logger.warn(
+                        { channelId, messageId: baseMessage.id },
+                        "POST /messages fanout job: channel mismatch",
+                      );
+                      return;
+                    }
+                    const envelope = messageFanoutEnvelope(
+                      "message:created",
+                      msg,
+                    );
+                    await publishChannelMessageCreated(channelId, envelope);
+                  },
+                );
+              },
+            );
+            realtimePublishedAtForHttp = new Date().toISOString();
+            realtimeChannelFanoutComplete = false;
+            if (enqueued) {
+              messagePostFanoutAsyncEnqueueTotal.inc({
+                path: "channel",
+                result: "queued",
+              });
+            } else {
+              messagePostFanoutAsyncEnqueueTotal.inc({
+                path: "channel",
+                result: "queue_full",
+              });
+              sideEffects.publishBackgroundEvent(
+                `channel:${channelId}`,
+                "message:created",
+                message,
+              );
+            }
+          } else {
+            messagePostFanoutAsyncEnqueueTotal.inc({
+              path: "channel",
+              result: "sync",
+            });
+            const createdEnvelope = messageFanoutEnvelope(
               "message:created",
               message,
             );
+            realtimePublishedAtForHttp = createdEnvelope.publishedAt;
+            try {
+              fanoutMeta = await publishChannelMessageCreated(
+                channelId,
+                createdEnvelope,
+              );
+              realtimeChannelFanoutComplete = true;
+            } catch (syncFanoutErr) {
+              realtimeChannelFanoutComplete = false;
+              logger.warn(
+                {
+                  err: syncFanoutErr,
+                  requestId: req.id,
+                  channelId,
+                  messageId: message.id,
+                  gradingNote: "sync_fanout_publish_failed_background_fallback",
+                },
+                "POST /messages sync channel fanout failed after commit (background publish)",
+              );
+              sideEffects.publishBackgroundEvent(
+                `channel:${channelId}`,
+                "message:created",
+                message,
+              );
+            }
           }
         } catch (fanoutErr) {
           messagePostRealtimePublishFailTotal.inc({ target: "channel" });
@@ -2099,24 +2189,87 @@ router.post(
         });
       } else {
         try {
-          const fanoutRun = await withBoundedPostInsertTimeout(
-            "conversation_fanout_publish",
-            publishConversationEventNow(
-              conversationId,
-              "message:created",
-              message,
-            ),
-          );
-          realtimePublishedAtForHttp = fanoutRun.ok
-            ? fanoutRun.value
-            : new Date().toISOString();
-          realtimeConversationFanoutComplete = fanoutRun.ok;
-          if (!fanoutRun.ok) {
-            sideEffects.publishBackgroundEvent(
-              `conversation:${conversationId}`,
-              "message:created",
-              message,
+          if (messagePostAsyncFanoutEnabled()) {
+            const enqueued = sideEffects.enqueueFanoutJob(
+              `fanout.message_post.conversation:${baseMessage.id}`,
+              async () => {
+                await messagePostFanoutAsync.runPostMessageFanoutJob(
+                  "conversation",
+                  String(baseMessage.id),
+                  async () => {
+                    const msg = await loadHydratedMessageById(String(baseMessage.id));
+                    if (!msg) {
+                      logger.warn(
+                        { conversationId, messageId: baseMessage.id },
+                        "POST /messages fanout job: message row missing",
+                      );
+                      return;
+                    }
+                    if (String(msg.conversation_id) !== String(conversationId)) {
+                      logger.warn(
+                        { conversationId, messageId: baseMessage.id },
+                        "POST /messages fanout job: conversation mismatch",
+                      );
+                      return;
+                    }
+                    await publishConversationEventNow(
+                      conversationId,
+                      "message:created",
+                      msg,
+                    );
+                  },
+                );
+              },
             );
+            realtimePublishedAtForHttp = new Date().toISOString();
+            realtimeConversationFanoutComplete = false;
+            if (enqueued) {
+              messagePostFanoutAsyncEnqueueTotal.inc({
+                path: "conversation",
+                result: "queued",
+              });
+            } else {
+              messagePostFanoutAsyncEnqueueTotal.inc({
+                path: "conversation",
+                result: "queue_full",
+              });
+              sideEffects.publishBackgroundEvent(
+                `conversation:${conversationId}`,
+                "message:created",
+                message,
+              );
+            }
+          } else {
+            messagePostFanoutAsyncEnqueueTotal.inc({
+              path: "conversation",
+              result: "sync",
+            });
+            try {
+              realtimePublishedAtForHttp = await publishConversationEventNow(
+                conversationId,
+                "message:created",
+                message,
+              );
+              realtimeConversationFanoutComplete = true;
+            } catch (syncFanoutErr) {
+              realtimeConversationFanoutComplete = false;
+              realtimePublishedAtForHttp = new Date().toISOString();
+              logger.warn(
+                {
+                  err: syncFanoutErr,
+                  requestId: req.id,
+                  conversationId,
+                  messageId: message.id,
+                  gradingNote: "sync_fanout_publish_failed_background_fallback",
+                },
+                "POST /messages sync conversation fanout failed after commit (background publish)",
+              );
+              sideEffects.publishBackgroundEvent(
+                `conversation:${conversationId}`,
+                "message:created",
+                message,
+              );
+            }
           }
         } catch (fanoutErr) {
           messagePostRealtimePublishFailTotal.inc({ target: "conversation" });

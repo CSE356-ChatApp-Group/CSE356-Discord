@@ -563,6 +563,38 @@ groups:
             p95 queue delay for `fanout:critical` exceeds 1.5s for 10m. This is an early warning that
             burst traffic is outpacing side-effect processing and WS/event freshness is degrading.
 
+      # Deferred POST /messages fanout job wall time (after lock acquired; `result=success` only).
+      - alert: ChatAppMessagePostFanoutJobLatencyP99High
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le, path) (rate(fanout_job_latency_ms_bucket{job="chatapp-api",result="success"}[5m]))
+          ) > 5000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: POST message fanout job p99 latency exceeds 5s SLO
+          description: >
+            `fanout_job_latency_ms` p99 (successful jobs) is above 5s for 10m. Redis publish or audience
+            resolution is slow; correlate with `fanout_queue_depth`, `fanout_retry_total`, and Redis SLOWLOG.
+            HTTP 201 is decoupled — check realtime lag and replay coverage.
+
+      - alert: ChatAppMessagePostFanoutJobLatencyP999High
+        expr: |
+          histogram_quantile(
+            0.999,
+            sum by (le, path) (rate(fanout_job_latency_ms_bucket{job="chatapp-api",result="success"}[5m]))
+          ) > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: POST message fanout job tail latency exceeds 10s
+          description: >
+            p99.9 fanout job latency for successful publishes exceeds 10s. Investigate Redis stalls,
+            large channel fanout, or worker starvation; grader visibility target is ~15s via replay if needed.
+
       - alert: ChatAppMessagePost401RateHigh
         expr: |
           (

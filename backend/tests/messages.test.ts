@@ -73,8 +73,9 @@ describe('POST /messages idempotency', () => {
       .send(body);
     expect(r1.status).toBe(201);
     const id1 = r1.body.message.id;
-    expect(r1.body.realtimeChannelFanoutComplete).toBe(true);
-    expect(r1.body.realtimeUserFanoutDeferred).toBe(false);
+    // Channel `message:created` fanout runs on fanout:critical after HTTP 201 (default).
+    expect(r1.body.realtimeChannelFanoutComplete).toBe(false);
+    expect(r1.body.realtimeUserFanoutDeferred).toBe(true);
     expect(typeof r1.body.realtimePublishedAt).toBe('string');
 
     const r2 = await request(app)
@@ -84,8 +85,8 @@ describe('POST /messages idempotency', () => {
       .send(body);
     expect(r2.status).toBe(201);
     expect(r2.body.message.id).toBe(id1);
-    expect(r2.body.realtimeChannelFanoutComplete).toBe(true);
-    expect(r2.body.realtimeUserFanoutDeferred).toBe(false);
+    expect(r2.body.realtimeChannelFanoutComplete).toBe(false);
+    expect(r2.body.realtimeUserFanoutDeferred).toBe(true);
     expect(typeof r2.body.realtimePublishedAt).toBe('string');
   });
 
@@ -1206,7 +1207,7 @@ describe('Overload behavior', () => {
       .get('/api/v1/search')
       .set('Authorization', `Bearer ${token}`);
 
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(429);
     expect(res.body.error).toMatch(/temporarily unavailable/i);
   });
 });
