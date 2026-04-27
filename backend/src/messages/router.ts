@@ -273,6 +273,14 @@ const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
   if (!Number.isFinite(raw) || raw < 1000) return 5000;
   return Math.min(60000, raw);
 })();
+const POST_INSERT_REDIS_WORK_TIMEOUT_MS = (() => {
+  const raw = parseInt(
+    process.env.POST_INSERT_REDIS_WORK_TIMEOUT_MS || "350",
+    10,
+  );
+  if (!Number.isFinite(raw) || raw < 50) return 350;
+  return Math.min(2000, raw);
+})();
 
 /** PgBouncer `query_timeout` or PG `statement_timeout` during insert (often row lock behind channels FK). */
 function isMessagePostInsertDbTimeout(err) {
@@ -664,6 +672,36 @@ async function bustMessagesCacheSafe(opts: {
       { err, channelId, conversationId },
       "message list cache bust failed",
     );
+  }
+}
+
+async function withBoundedPostInsertTimeout<T>(
+  opName: string,
+  work: Promise<T>,
+  timeoutMs = POST_INSERT_REDIS_WORK_TIMEOUT_MS,
+): Promise<{ ok: boolean; timedOut: boolean; value?: T }> {
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    const value = await Promise.race([
+      work,
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          const err: any = new Error(`post-insert ${opName} timed out`);
+          err.code = "POST_INSERT_REDIS_TIMEOUT";
+          reject(err);
+        }, timeoutMs);
+      }),
+    ]);
+    return { ok: true, timedOut: false, value };
+  } catch (err: any) {
+    const timedOut = err?.code === "POST_INSERT_REDIS_TIMEOUT";
+    logger.warn(
+      { err, opName, timeoutMs, timedOut },
+      "POST /messages post-insert work failed",
+    );
+    return { ok: false, timedOut };
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 }
 
@@ -1973,7 +2011,10 @@ router.post(
       // Bust the shared Redis cache for the latest page so a follow-up GET /messages
       // (e.g. opening a DM) returns rows that include this write. Await DEL so a
       // client cannot GET stale JSON between commit and eviction (grader polling).
-      await bustMessagesCacheSafe({ channelId, conversationId });
+      await withBoundedPostInsertTimeout(
+        "cache_bust",
+        bustMessagesCacheSafe({ channelId, conversationId }),
+      );
       t_after_cache_bust = Date.now();
 
       let realtimePublishedAtForHttp;
@@ -1997,9 +2038,20 @@ router.post(
         // If Redis is unavailable, fanout.publish throws after retries — still return 201 because
         // the message row is committed; clients should poll or rely on channel: replay.
         try {
-          fanoutMeta = await publishChannelMessageCreated(channelId, createdEnvelope);
+          const fanoutRun = await withBoundedPostInsertTimeout(
+            "channel_fanout_publish",
+            publishChannelMessageCreated(channelId, createdEnvelope),
+          );
+          if (fanoutRun.ok) fanoutMeta = fanoutRun.value;
           realtimePublishedAtForHttp = createdEnvelope.publishedAt;
-          realtimeChannelFanoutComplete = true;
+          realtimeChannelFanoutComplete = fanoutRun.ok;
+          if (!fanoutRun.ok) {
+            sideEffects.publishBackgroundEvent(
+              `channel:${channelId}`,
+              "message:created",
+              message,
+            );
+          }
         } catch (fanoutErr) {
           messagePostRealtimePublishFailTotal.inc({ target: "channel" });
           logger.error(
@@ -2026,12 +2078,25 @@ router.post(
         });
       } else {
         try {
-          realtimePublishedAtForHttp = await publishConversationEventNow(
-            conversationId,
-            "message:created",
-            message,
+          const fanoutRun = await withBoundedPostInsertTimeout(
+            "conversation_fanout_publish",
+            publishConversationEventNow(
+              conversationId,
+              "message:created",
+              message,
+            ),
           );
-          realtimeConversationFanoutComplete = true;
+          realtimePublishedAtForHttp = fanoutRun.ok
+            ? fanoutRun.value
+            : new Date().toISOString();
+          realtimeConversationFanoutComplete = fanoutRun.ok;
+          if (!fanoutRun.ok) {
+            sideEffects.publishBackgroundEvent(
+              `conversation:${conversationId}`,
+              "message:created",
+              message,
+            );
+          }
         } catch (fanoutErr) {
           messagePostRealtimePublishFailTotal.inc({ target: "conversation" });
           logger.error(

@@ -67,6 +67,12 @@ const MESSAGE_INSERT_LOCK_HOLDER_LOG_MIN_MS = parseIntEnv(
   1,
   60000,
 );
+const MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS = parseIntEnv(
+  'MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS',
+  250,
+  25,
+  2000,
+);
 const MESSAGE_INSERT_LOCK_RELEASE_LUA = `
 if redis.call("get", KEYS[1]) == ARGV[1] then
   return redis.call("del", KEYS[1])
@@ -102,6 +108,24 @@ function parseFloatEnv(
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRedisOpTimeout<T>(op: Promise<T>, timeoutMs: number, opName: string) {
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      op,
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          const err: any = new Error(`Redis ${opName} timed out`);
+          err.code = 'REDIS_OP_TIMEOUT';
+          reject(err);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }
 
 function jitteredSleepMs(attempt: number) {
@@ -273,12 +297,16 @@ async function acquireChannelInsertLease(
   let attempt = 0;
   while (Date.now() <= deadline) {
     try {
-      const acquired = await redis.set(
-        lockKey,
-        token,
-        'NX',
-        'PX',
-        MESSAGE_INSERT_LOCK_TTL_MS,
+      const acquired = await withRedisOpTimeout(
+        redis.set(
+          lockKey,
+          token,
+          'NX',
+          'PX',
+          MESSAGE_INSERT_LOCK_TTL_MS,
+        ),
+        MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS,
+        'set',
       );
       if (acquired === 'OK') {
         const waitMs = Math.max(0, Date.now() - startedAt);
@@ -336,11 +364,15 @@ async function releaseChannelInsertLease(
   if (!lease) return 'no_lease';
   let result: 'released' | 'release_mismatch' | 'release_error' = 'released';
   try {
-    const released = await redis.eval(
-      MESSAGE_INSERT_LOCK_RELEASE_LUA,
-      1,
-      lease.lockKey,
-      lease.token,
+    const released = await withRedisOpTimeout(
+      redis.eval(
+        MESSAGE_INSERT_LOCK_RELEASE_LUA,
+        1,
+        lease.lockKey,
+        lease.token,
+      ),
+      MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS,
+      'eval',
     );
     if (Number(released) === 0) {
       messageChannelInsertLockTotal.inc({ result: 'release_mismatch' });

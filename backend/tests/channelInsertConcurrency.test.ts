@@ -98,6 +98,22 @@ class ThrowingRedisLockClient extends FakeRedisLockClient {
   }
 }
 
+class SlowReleaseRedisLockClient extends FakeRedisLockClient {
+  constructor(private readonly delayMs: number) {
+    super();
+  }
+
+  override async eval(
+    _script: string,
+    _numKeys: number,
+    key: string,
+    token: string,
+  ): Promise<0 | 1> {
+    await sleep(this.delayMs);
+    return super.eval(_script, _numKeys, key, token);
+  }
+}
+
 function withEnv(env: Record<string, string>, fn: () => void) {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(env)) {
@@ -463,5 +479,24 @@ describe('runChannelMessageInsertSerialized', () => {
     });
 
     expect(order).toEqual(['a', 'b']);
+  });
+
+  it('releases promptly when Redis lock release is slow', async () => {
+    const worker = loadWorker(new SlowReleaseRedisLockClient(1500), {
+      MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS: '50',
+      MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS: '1000',
+      MESSAGE_INSERT_LOCK_POLL_MIN_MS: '5',
+      MESSAGE_INSERT_LOCK_POLL_MAX_MS: '5',
+    });
+    const ch = 'ababcdcd-abcd-abcd-abcd-abcdabcdabcd';
+    const startedAt = Date.now();
+    await worker.runChannelMessageInsertSerialized(ch, async () => {
+      await sleep(10);
+    });
+    const elapsedMs = Date.now() - startedAt;
+    expect(elapsedMs).toBeLessThan(500);
+    expect(worker.metrics.messageChannelInsertLockTotal.inc).toHaveBeenCalledWith({
+      result: 'release_error',
+    });
   });
 });
