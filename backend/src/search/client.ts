@@ -41,6 +41,21 @@ function literalRecentCandidateCap(): number {
   return Math.min(Math.max(v, 1000), 2000);
 }
 
+/**
+ * Deeper bounded scan for scoped literal rescue when FTS misses or is too weak.
+ * Default 3000, clamped 2000..4000.
+ */
+function literalRecentCandidateCapDeep(): number {
+  const raw = parseInt(
+    process.env.STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT_DEEP ||
+      process.env.SEARCH_LITERAL_RECENT_CANDIDATES_LIMIT_DEEP ||
+      '3000',
+    10,
+  );
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 3000;
+  return Math.min(Math.max(v, 2000), 4000);
+}
+
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
   const configuredMs = Math.min(2000, Math.max(1500, parseInt(rawMs || '1750', 10) || 1750));
@@ -585,7 +600,11 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   return { sql, params, limit, offset, q };
 }
 
-function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
+function buildScopedLiteralParts(
+  q: string,
+  opts: Record<string, any>,
+  recentCapOverride?: number,
+) {
   const params: any[] = [];
   const scope = buildScopedAccessParts(params, opts);
   const limit = Number(opts.limit) || 20;
@@ -605,7 +624,10 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
   // scoped candidate cap, page limit, offset.
   const authorTimeFilters = buildAuthorTimeFilters(params, opts, 'm0');
   const rawQueryPh = p(params, q);
-  const recentCapPh = p(params, literalRecentCandidateCap());
+  const scopedRecentCap = Number.isFinite(recentCapOverride as number) && (recentCapOverride as number) > 0
+    ? Number(recentCapOverride)
+    : literalRecentCandidateCap();
+  const recentCapPh = p(params, scopedRecentCap);
   const limitPh = p(params, limit);
   const offsetPh = p(params, offset);
 
@@ -763,6 +785,31 @@ function buildScopedLiteralParts(q: string, opts: Record<string, any>) {
   };
 }
 
+function mergeSearchRowsPreferLiteral(
+  literalRows: any[],
+  ftsRows: any[],
+  limit: number,
+  offset: number,
+) {
+  const merged: any[] = [];
+  const seen = new Set<string>();
+  for (const row of literalRows || []) {
+    if (!row || !row.id) continue;
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push(row);
+  }
+  for (const row of ftsRows || []) {
+    if (!row || !row.id) continue;
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push(row);
+  }
+  return merged.slice(offset, offset + limit);
+}
+
 async function searchFilteredOnly(
   opts: Record<string, any>,
   forcePrimary = false,
@@ -853,6 +900,8 @@ async function searchOnce(
     queryMsAccum += Date.now() - tMeta;
     const tsqueryText = String(tsqueryMetaRes.rows[0]?.tsquery_text ?? '');
     const tsqueryNodes = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0);
+    const strictTerms = tokenizeStrictSearchTerms(trimmed);
+    const weakTsquery = strictTerms.length > 1 && tsqueryNodes <= 1;
 
     const ftsMeta = buildFtsParts(trimmed, opts);
     const tFts = Date.now();
@@ -871,7 +920,7 @@ async function searchOnce(
         ? ftsRes.rows.find((r: any) => r && r.fts_candidate_count != null)?.fts_candidate_count
         : undefined;
 
-    if (ftsHitCount > 0) {
+    if (ftsHitCount > 0 && !weakTsquery) {
       const totalMs = Date.now() - tSearchStart;
       logSearchTrace({
         requestId,
@@ -894,7 +943,7 @@ async function searchOnce(
       return buildResult(ftsRes.rows, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
     }
 
-    const literalMeta = buildScopedLiteralParts(trimmed, opts);
+    const literalMeta = buildScopedLiteralParts(trimmed, opts, literalRecentCandidateCapDeep());
     const tLit = Date.now();
     const literalRes = await client.query(literalMeta.sql, literalMeta.params);
     queryMsAccum += Date.now() - tLit;
@@ -904,6 +953,9 @@ async function searchOnce(
       throw err;
     }
     const fallbackHits = literalRes.rows.filter((row: any) => row && row.id);
+    const combinedHits = weakTsquery
+      ? mergeSearchRowsPreferLiteral(fallbackHits, ftsHits, limit, offset)
+      : fallbackHits;
     const totalMs = Date.now() - tSearchStart;
     logSearchTrace({
       requestId,
@@ -911,19 +963,20 @@ async function searchOnce(
       resolved_scope: scopeLabel,
       tsquery_text: tsqueryText,
       tsquery_node_count: tsqueryNodes,
-      fts_hit_count: 0,
+      fts_hit_count: ftsHitCount,
       fallback_used: true,
       fallback_hit_count: fallbackHits.length,
+      weak_tsquery: weakTsquery,
       total_ms: totalMs,
       query_ms: queryMsAccum,
       ...(scopeLabel === 'community'
         ? {
             fts_candidate_count: communityFtsCandidateCount,
-            result_count: fallbackHits.length,
+            result_count: combinedHits.length,
           }
         : {}),
     });
-    return buildResult(literalRes.rows, literalMeta.q, literalMeta.offset, literalMeta.limit);
+    return buildResult(combinedHits, literalMeta.q, literalMeta.offset, literalMeta.limit);
   }, { forcePrimary });
 }
 

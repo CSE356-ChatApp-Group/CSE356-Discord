@@ -296,6 +296,105 @@ describe('Search – community FTS candidates stay in-community before LIMIT', (
   });
 });
 
+describe('Search – scoped literal rescue for deep history and weak tsquery', () => {
+  it('returns an exact community-scoped phrase match around rank ~2000', async () => {
+    const owner = await createAuthenticatedUser('srchdeepowner');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const marker = `deep exact marker ${uniqueSuffix()}`;
+
+    // Seed many newer rows so the exact match is far from newest.
+    for (let i = 0; i < 2200; i += 1) {
+      await pool.query(
+        `INSERT INTO messages (channel_id, author_id, content, created_at)
+         VALUES ($1, $2, $3, NOW() - ($4::int || ' seconds')::interval)`,
+        [channel.id, owner.user.id, `noise row ${i}`, i + 1],
+      );
+    }
+    await pool.query(
+      `INSERT INTO messages (channel_id, author_id, content, created_at)
+       VALUES ($1, $2, $3, NOW() - interval '2205 seconds')`,
+      [channel.id, owner.user.id, marker],
+    );
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}&limit=20`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(marker))).toBe(true);
+  });
+
+  it('weak tsquery query "still will have" includes exact literal and not only "still" matches', async () => {
+    const owner = await createAuthenticatedUser('srchweakowner');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+
+    await sendMessage(token, channel.id, 'still waters run deep');
+    await sendMessage(token, channel.id, 'still here, still waiting');
+    await sendMessage(token, channel.id, 'this still exists but not all terms');
+    await sendMessage(token, channel.id, 'still will have all three words present');
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent('still will have')}&communityId=${community.id}&limit=10`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(
+      res.body.hits.some((h: any) =>
+        String(h.content || '').toLowerCase().includes('still will have'),
+      ),
+    ).toBe(true);
+  });
+
+  it('community literal fallback still excludes inaccessible private channels', async () => {
+    const owner = await createAuthenticatedUser('srchweakprivowner');
+    const member = await createAuthenticatedUser('srchweakprivmember');
+    const tokenOwner = owner.accessToken;
+    const tokenMember = member.accessToken;
+    const community = await createCommunity(tokenOwner, uniqueSuffix());
+    await joinCommunity(tokenMember, community.id);
+    const privateChannel = await createChannel(tokenOwner, community.id, { isPrivate: true });
+    const marker = `private old marker ${uniqueSuffix()}`;
+
+    await pool.query(
+      `INSERT INTO messages (channel_id, author_id, content, created_at)
+       VALUES ($1, $2, $3, NOW() - interval '2300 seconds')`,
+      [privateChannel.id, owner.user.id, marker],
+    );
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${tokenMember}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(marker))).toBe(false);
+  });
+
+  it('deleted messages are excluded from scoped literal rescue', async () => {
+    const owner = await createAuthenticatedUser('srchweakdelowner');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+    const marker = `deleted literal marker ${uniqueSuffix()}`;
+
+    const msg = await sendMessage(token, channel.id, marker);
+    const delRes = await request(app)
+      .delete(`/api/v1/messages/${msg.id}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(delRes.status).toBe(200);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes(marker))).toBe(false);
+  });
+});
+
 describe('Search – access control', () => {
   let ownerToken: string;
   let privateChannelId: string;
