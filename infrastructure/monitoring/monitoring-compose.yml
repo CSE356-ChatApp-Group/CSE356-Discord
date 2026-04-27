@@ -9,13 +9,19 @@ services:
     restart: unless-stopped
     depends_on: [alertmanager]
     network_mode: host
+    # 4 GB monitoring VMs OOM-kill Prometheus (~3 GiB RSS) and take down sshd/journald.
+    # Cap RSS + shorten retention; GOMEMLIMIT nudges Go GC before hard cgroup OOM.
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-2560m}
+    cpus: ${PROMETHEUS_CPU_LIMIT:-1.75}
     environment:
       ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-prod}
+      GOMEMLIMIT: ${PROMETHEUS_GOMEMLIMIT:-2400MiB}
     entrypoint: ["sh", "-ec"]
     command:
       - |
         sed "s/__ALERT_ENVIRONMENT__/$${ALERT_ENVIRONMENT:-prod}/g" /etc/prometheus/prometheus.yml.template >/tmp/prometheus.yml
-        exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --web.listen-address=127.0.0.1:9090
+        exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --web.listen-address=127.0.0.1:9090 \
+          --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
     volumes:
       - ./prometheus-host.yml:/etc/prometheus/prometheus.yml.template:ro
       - ./alerts.yml:/etc/prometheus/alerts.yml:ro
