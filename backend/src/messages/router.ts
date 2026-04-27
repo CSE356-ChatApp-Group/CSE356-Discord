@@ -219,6 +219,7 @@ import {
   MESSAGE_RETURNING_FIELDS,
   MESSAGE_SELECT_FIELDS,
   MESSAGE_AUTHOR_JSON,
+  MESSAGE_INSERT_RETURNING_AUTHOR,
 } from "./sqlFragments";
 
 const router = express.Router();
@@ -1856,9 +1857,10 @@ router.post(
             communityId = accessRow.community_id ?? null;
 
             const insertRes = await client.query(
-              `INSERT INTO messages (channel_id, author_id, content, thread_id)
+              `INSERT INTO messages AS m (channel_id, author_id, content, thread_id)
              VALUES ($1, $2, $3, $4)
-             RETURNING ${MESSAGE_RETURNING_FIELDS}`,
+             RETURNING ${MESSAGE_INSERT_RETURNING_AUTHOR},
+               '[]'::json AS attachments`,
               [
                 channelId,
                 req.user.id,
@@ -1867,28 +1869,7 @@ router.post(
               ],
             );
             txPhases.t_insert = Date.now();
-
-            const hydrateRes = await client.query(
-              `SELECT
-               m.id,
-               m.channel_id,
-               m.conversation_id,
-               m.author_id,
-               m.content,
-               m.type,
-               m.thread_id,
-               m.edited_at,
-               m.deleted_at,
-               m.created_at,
-               m.updated_at,
-               ${MESSAGE_AUTHOR_JSON},
-               '[]'::json AS attachments
-             FROM messages m
-             LEFT JOIN users u ON u.id = m.author_id
-             WHERE m.id = $1`,
-              [insertRes.rows[0].id],
-            );
-            row = hydrateRes.rows[0] || insertRes.rows[0];
+            row = insertRes.rows[0];
           } else {
             const accessRes = await client.query(
               `SELECT
@@ -1916,9 +1897,10 @@ router.post(
             }
 
             const insertRes = await client.query(
-              `INSERT INTO messages (conversation_id, author_id, content, thread_id)
+              `INSERT INTO messages AS m (conversation_id, author_id, content, thread_id)
              VALUES ($1, $2, $3, $4)
-             RETURNING ${MESSAGE_RETURNING_FIELDS}`,
+             RETURNING ${MESSAGE_INSERT_RETURNING_AUTHOR},
+               '[]'::json AS attachments`,
               [
                 conversationId,
                 req.user.id,
@@ -1927,28 +1909,7 @@ router.post(
               ],
             );
             txPhases.t_insert = Date.now();
-
-            const hydrateRes = await client.query(
-              `SELECT
-               m.id,
-               m.channel_id,
-               m.conversation_id,
-               m.author_id,
-               m.content,
-               m.type,
-               m.thread_id,
-               m.edited_at,
-               m.deleted_at,
-               m.created_at,
-               m.updated_at,
-               ${MESSAGE_AUTHOR_JSON},
-               '[]'::json AS attachments
-             FROM messages m
-             LEFT JOIN users u ON u.id = m.author_id
-             WHERE m.id = $1`,
-              [insertRes.rows[0].id],
-            );
-            row = hydrateRes.rows[0] || insertRes.rows[0];
+            row = insertRes.rows[0];
           }
 
           if (attachments.length > 0) {
