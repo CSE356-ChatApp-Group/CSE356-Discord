@@ -320,6 +320,12 @@ const wsReplayConcurrentGauge = new client.Gauge({
   help: 'Concurrent WS reconnect replay DB transactions on this worker',
 });
 
+/** Effective reconnect replay semaphore cap configured on this process. */
+const wsReplaySemaphoreCapGauge = new client.Gauge({
+  name: 'chatapp_ws_replay_semaphore_cap',
+  help: 'Configured max concurrent WS reconnect replay DB transactions on this worker',
+});
+
 /** App-layer subnet block (BLOCK_SUBNETS). */
 const abuseBlockedSubnetTotal = new client.Counter({
   name: 'abuse_blocked_subnet_total',
@@ -1057,6 +1063,7 @@ function startPgPoolMetrics(pool) {
     wsReplayFailOpenTotal.inc({ reason: 'insert_lock_pressure' }, 0);
     wsReplayStartedTotal.inc(0);
     wsReplayConcurrentGauge.set(0);
+    wsReplaySemaphoreCapGauge.set(0);
     abuseBlockedSubnetTotal.inc(0);
     abuseAutoBanBlocksTotal.inc(0);
     abuseAutoBanIssuedTotal.inc(0);
@@ -1184,6 +1191,7 @@ module.exports = {
   wsReplayFailOpenTotal,
   wsReplayStartedTotal,
   wsReplayConcurrentGauge,
+  wsReplaySemaphoreCapGauge,
   abuseBlockedSubnetTotal,
   abuseAutoBanBlocksTotal,
   abuseAutoBanIssuedTotal,

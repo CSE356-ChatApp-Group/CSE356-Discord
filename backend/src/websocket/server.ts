@@ -115,6 +115,7 @@ const {
   wsBootstrapDbTotal,
   wsReplayFailOpenTotal,
   wsReplayConcurrentGauge,
+  wsReplaySemaphoreCapGauge,
 } = require("../utils/metrics");
 
 const wss = new WebSocketServer({ noServer: true });
@@ -224,6 +225,7 @@ const WS_APP_KEEPALIVE_INTERVAL_MS =
     : 0;
 const WS_APP_KEEPALIVE_FRAME = JSON.stringify({ event: "keepalive" });
 const replayAdmissionConfig = parseReplayAdmissionConfig(process.env);
+wsReplaySemaphoreCapGauge.set(replayAdmissionConfig.replaySemaphoreMax);
 let wsReplayInFlightCount = 0;
 
 /** Concurrent reconnect-replay DB loads per public client IP (hard cap 1). RFC1918/loopback exempt. */
@@ -1854,7 +1856,7 @@ wss.on("connection", async (ws, req) => {
               } catch (err) {
                 logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
               } finally {
-                wsReplayInFlightCount -= 1;
+                wsReplayInFlightCount = Math.max(0, wsReplayInFlightCount - 1);
                 wsReplayConcurrentGauge.set(wsReplayInFlightCount);
                 endReplayForIp(ws._clientIp);
               }

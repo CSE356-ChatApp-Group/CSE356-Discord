@@ -225,15 +225,16 @@ groups:
             `pg_pool_circuit_breaker_rejects_total`, `chatapp_ws_replay_inflight`, and nginx 429.
 
       - alert: ChatAppWsReplayInflightAboveCap
-        expr: max(chatapp_ws_replay_inflight{job="chatapp-api"}) > 2
+        expr: max by (instance) (chatapp_ws_replay_inflight{job="chatapp-api"}) > on(instance) clamp_min(max by (instance) (chatapp_ws_replay_semaphore_cap{job="chatapp-api"}), 1)
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: WS replay concurrency exceeds configured hard cap
           description: >
-            `chatapp_ws_replay_inflight` should never exceed 2 per process. If this fires,
-            replay accounting may be broken or env overrides are inconsistent.
+            `chatapp_ws_replay_inflight` should never exceed
+            `chatapp_ws_replay_semaphore_cap` on any process. If this fires, replay
+            accounting may be broken or env/runtime cap values are inconsistent.
 
       - alert: ChatAppPgPoolPressure
         expr: max(pg_pool_waiting{job="chatapp-api"}) > 15
