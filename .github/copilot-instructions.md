@@ -166,7 +166,7 @@ tail -f artifacts/rollout-monitoring/grader-watch-events.jsonl
 | `CHATAPP_INSTANCES` | 4 | Number of workers |
 | `FANOUT_QUEUE_CONCURRENCY` | 5 | Parallel fanout workers |
 | `DISABLE_RATE_LIMITS` | true | Grader environment — no rate limiting |
-| `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | false | Return 201 after channel publish; defer the rest of logical user fanout |
+| `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | true | Await all logical user-feed publishes before 201 (avoids deferred fanout missing the ~15s delivery window) |
 | `WS_AUTO_SUBSCRIBE_MODE` | messages | Auto-sub channel+conversation+user on connect |
 | `WS_APP_KEEPALIVE_INTERVAL_MS` | 10000 | App-level WS keepalive (grader path churn) |
 | `USER_FEED_SHARD_COUNT` | 4 | Redis pubsub shards for user feed on grader hosts |
