@@ -177,7 +177,16 @@ function shouldSuppressChannelRetry(channelId: string) {
   return nowMs - lastTimeoutAt <= MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS;
 }
 
-function buildInsertLockTimeoutError(channelId: string, waitMs: number) {
+/** Mirrored on POST /messages 503 JSON `code` for operators / graders (snake_case). */
+type MessagePostInsertLockRetryKind =
+  | 'message_insert_lock_wait_timeout'
+  | 'message_insert_lock_recent_shed';
+
+function buildInsertLockTimeoutError(
+  channelId: string,
+  waitMs: number,
+  retryKind: MessagePostInsertLockRetryKind = 'message_insert_lock_wait_timeout',
+) {
   const err: any = new Error(
     'Messaging is briefly busy saving your message; please retry.',
   );
@@ -185,6 +194,7 @@ function buildInsertLockTimeoutError(channelId: string, waitMs: number) {
   err.statusCode = 503;
   err.channelId = channelId;
   err.messageInsertLockWaitMs = waitMs;
+  err.messagePostRetryCode = retryKind;
   return err;
 }
 
@@ -196,6 +206,7 @@ function buildInsertLockQueueRejectError(channelId: string, waiters: number) {
   err.statusCode = 503;
   err.channelId = channelId;
   err.messageInsertLockWaiters = waiters;
+  err.messagePostRetryCode = 'message_insert_lock_waiter_cap';
   return err;
 }
 
@@ -291,7 +302,11 @@ async function enterChannelInsertWaitQueue(
       },
       'POST /messages channel insert lock suppressed due to recent timeout',
     );
-    throw buildInsertLockTimeoutError(channelId, backoffMs);
+    throw buildInsertLockTimeoutError(
+      channelId,
+      backoffMs,
+      'message_insert_lock_recent_shed',
+    );
   }
 
   const queue = getOrCreateChannelQueue(channelId);
@@ -421,7 +436,11 @@ async function acquireChannelInsertLease(
     'POST /messages channel insert lock timed out',
   );
   leaveChannelInsertWaitQueue(waitQueueLease);
-  throw buildInsertLockTimeoutError(channelId, waitMs);
+  throw buildInsertLockTimeoutError(
+    channelId,
+    waitMs,
+    'message_insert_lock_wait_timeout',
+  );
 }
 
 async function releaseChannelInsertLease(

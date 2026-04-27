@@ -234,6 +234,7 @@ describe('runChannelMessageInsertSerialized', () => {
     ).rejects.toMatchObject({
       code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
       statusCode: 503,
+      messagePostRetryCode: 'message_insert_lock_wait_timeout',
     });
     await p1;
   });
@@ -291,6 +292,7 @@ describe('runChannelMessageInsertSerialized', () => {
     ).rejects.toMatchObject({
       code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
       statusCode: 503,
+      messagePostRetryCode: 'message_insert_lock_wait_timeout',
     });
     releaseA();
     await p1;
@@ -331,6 +333,7 @@ describe('runChannelMessageInsertSerialized', () => {
     ).rejects.toMatchObject({
       code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
       statusCode: 503,
+      messagePostRetryCode: 'message_insert_lock_wait_timeout',
     });
 
     const retryStartedAt = Date.now();
@@ -339,6 +342,7 @@ describe('runChannelMessageInsertSerialized', () => {
     ).rejects.toMatchObject({
       code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
       statusCode: 503,
+      messagePostRetryCode: 'message_insert_lock_recent_shed',
     });
     expect(Date.now() - retryStartedAt).toBeLessThan(150);
 
@@ -403,6 +407,7 @@ describe('runChannelMessageInsertSerialized', () => {
     ).rejects.toMatchObject({
       code: 'MESSAGE_INSERT_LOCK_QUEUE_REJECT',
       statusCode: 503,
+      messagePostRetryCode: 'message_insert_lock_waiter_cap',
     });
 
     releaseA();

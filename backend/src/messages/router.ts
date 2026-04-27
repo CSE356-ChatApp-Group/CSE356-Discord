@@ -295,6 +295,27 @@ function isMessagePostInsertDbTimeout(err) {
   return false;
 }
 
+const MESSAGE_POST_BUSY_USER_MESSAGE =
+  "Messaging is briefly busy saving your message; please retry.";
+
+/** Stable `code` values on POST /messages 503 JSON for operators and clients (human `error` unchanged). */
+function messagePostBusy503Body(
+  req: { id?: string },
+  apiCode:
+    | "message_post_insert_timeout"
+    | "message_insert_lock_wait_timeout"
+    | "message_insert_lock_recent_shed"
+    | "message_insert_lock_waiter_cap",
+  extras: Record<string, unknown> = {},
+) {
+  return {
+    error: MESSAGE_POST_BUSY_USER_MESSAGE,
+    code: apiCode,
+    requestId: req.id,
+    ...extras,
+  };
+}
+
 function buildMessagePostTimeoutPhaseLog({
   err,
   req,
@@ -2296,25 +2317,36 @@ router.post(
           }),
           "POST /messages: insert hit statement/query timeout (likely lock contention on hot channel)",
         );
-        return res.status(503).set("Retry-After", "1").json({
-          error: "Messaging is briefly busy saving your message; please retry.",
-          requestId: req.id,
-        });
+        return res
+          .status(503)
+          .set("Retry-After", "1")
+          .json(messagePostBusy503Body(req, "message_post_insert_timeout"));
       }
       if (isChannelInsertLockTimeoutError(err)) {
+        const lockApiCode =
+          err?.messagePostRetryCode === "message_insert_lock_recent_shed"
+            ? "message_insert_lock_recent_shed"
+            : "message_insert_lock_wait_timeout";
         logger.warn(
           {
             requestId: req.id,
             channelId,
             conversationId,
             waitMs: err.messageInsertLockWaitMs || null,
+            apiCode: lockApiCode,
           },
           "POST /messages: channel insert lock timed out before DB transaction",
         );
-        return res.status(503).set("Retry-After", "1").json({
-          error: "Messaging is briefly busy saving your message; please retry.",
-          requestId: req.id,
-        });
+        return res
+          .status(503)
+          .set("Retry-After", "1")
+          .json(
+            messagePostBusy503Body(req, lockApiCode, {
+              ...(typeof err.messageInsertLockWaitMs === "number" && {
+                waitedMs: err.messageInsertLockWaitMs,
+              }),
+            }),
+          );
       }
       if (isChannelInsertLockQueueRejectError(err)) {
         logger.warn(
@@ -2326,10 +2358,16 @@ router.post(
           },
           "POST /messages: channel insert lock waiter cap exceeded before DB transaction",
         );
-        return res.status(503).set("Retry-After", "1").json({
-          error: "Messaging is briefly busy saving your message; please retry.",
-          requestId: req.id,
-        });
+        return res
+          .status(503)
+          .set("Retry-After", "1")
+          .json(
+            messagePostBusy503Body(req, "message_insert_lock_waiter_cap", {
+              ...(typeof err.messageInsertLockWaiters === "number" && {
+                lockWaiters: err.messageInsertLockWaiters,
+              }),
+            }),
+          );
       }
       next(err);
     }
