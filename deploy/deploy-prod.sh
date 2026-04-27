@@ -731,7 +731,13 @@ do_fast_rollback() {
 gate_same_release() {
   echo "Gate: same-release parity across target workers..."
   local expected="${RELEASE_DIR}/${RELEASE_SHA}/backend"
-  if ! ssh_prod "
+  # After `systemctl restart`, MainPID and /proc/$pid/cwd can lag briefly; retry
+  # instead of failing an otherwise-successful rolling deploy.
+  local attempt max_attempts
+  max_attempts="${SAME_RELEASE_GATE_MAX_ATTEMPTS:-8}"
+  attempt=1
+  while [ "${attempt}" -le "${max_attempts}" ]; do
+    if ssh_prod "
     set -euo pipefail
     expected='${expected}'
     for p in ${TARGET_PORTS_CSV//,/ }; do
@@ -748,10 +754,15 @@ gate_same_release() {
       fi
     done
   "; then
-    echo "ERROR: same-release parity gate failed."
-    return 1
-  fi
-  echo "✓ Same-release parity gate passed"
+      echo "✓ Same-release parity gate passed"
+      return 0
+    fi
+    echo "WARN: same-release parity attempt ${attempt}/${max_attempts} failed; sleeping 2s (MainPID/cwd settle)..."
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  echo "ERROR: same-release parity gate failed after ${max_attempts} attempts."
+  return 1
 }
 
 gate_current_symlink_ok() {
