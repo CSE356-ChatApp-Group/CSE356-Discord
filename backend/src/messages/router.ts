@@ -2042,8 +2042,10 @@ router.post(
         // legacy inline await (no wall-clock cap — success = DB + enqueue or full publish).
         try {
           if (messagePostAsyncFanoutEnabled()) {
+            // Fixed job name for metrics: do not include message id — each id was a new
+            // Prometheus histogram label set (~2M+ series) and crushed the monitoring VM.
             const enqueued = sideEffects.enqueueFanoutJob(
-              `fanout.message_post.channel:${baseMessage.id}`,
+              "fanout.message_post.channel",
               async () => {
                 await messagePostFanoutAsync.runPostMessageFanoutJob(
                   "channel",
@@ -2154,7 +2156,7 @@ router.post(
         try {
           if (messagePostAsyncFanoutEnabled()) {
             const enqueued = sideEffects.enqueueFanoutJob(
-              `fanout.message_post.conversation:${baseMessage.id}`,
+              "fanout.message_post.conversation",
               async () => {
                 await messagePostFanoutAsync.runPostMessageFanoutJob(
                   "conversation",

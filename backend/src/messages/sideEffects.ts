@@ -206,7 +206,11 @@ function getQueueStats() {
   };
 }
 
-/** Expose enqueue for channel user-topic fanout when HTTP returns before fanout completes. */
+/**
+ * Expose enqueue for channel user-topic fanout when HTTP returns before fanout completes.
+ * `name` is the Prometheus label `name` on side_effect_* histograms — keep it a small fixed set
+ * of strings, never message/channel/user ids.
+ */
 function enqueueFanoutJob(name, fn) {
   return enqueue(name, fn);
 }
