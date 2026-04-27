@@ -2398,7 +2398,7 @@ PY
     exit 1
   }
   deploy_log_phase "multi-worker cutover (9c) + parity gates OK"
-  echo "✓ Multi-worker nginx upstream restored"
+  echo "OK: Multi-worker nginx upstream restored"
   fi  # end else (spare-port)
 fi
 
