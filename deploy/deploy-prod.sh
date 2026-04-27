@@ -1438,51 +1438,8 @@ ssh_prod "
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
     || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Realtime-related keys below are overwritten again by apply-env-profile.py using
-  # deploy/env/prod.required.env (throughput-first: non-blocking user fanout, recent_connect, etc.).
-  # These sed lines exist so a half-written remote script still has sane defaults if the profile step fails.
-  sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT=.*/CHANNEL_MESSAGE_USER_FANOUT=true/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_MESSAGE_USER_FANOUT=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MODE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MODE=.*/CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MAX=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MAX=.*/CHANNEL_MESSAGE_USER_FANOUT_MAX=10000/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_MESSAGE_USER_FANOUT_MAX=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=.*/CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=.*/CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180/' /opt/chatapp/shared/.env \
-    || echo 'CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^MESSAGE_USER_FANOUT_HTTP_BLOCKING=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=false/' /opt/chatapp/shared/.env \
-    || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^WS_AUTO_SUBSCRIBE_MODE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_AUTO_SUBSCRIBE_MODE=.*/WS_AUTO_SUBSCRIBE_MODE=messages/' /opt/chatapp/shared/.env \
-    || echo 'WS_AUTO_SUBSCRIBE_MODE=messages' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^USER_FEED_SHARD_COUNT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=4/' /opt/chatapp/shared/.env \
-    || echo 'USER_FEED_SHARD_COUNT=4' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^WS_RECENT_CONNECT_TTL_SECONDS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_RECENT_CONNECT_TTL_SECONDS=.*/WS_RECENT_CONNECT_TTL_SECONDS=300/' /opt/chatapp/shared/.env \
-    || echo 'WS_RECENT_CONNECT_TTL_SECONDS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
-    || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=.*/COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}/' /opt/chatapp/shared/.env \
-    || echo 'COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CHANNELS_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNELS_LIST_CACHE_TTL_SECS=.*/CHANNELS_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
-    || echo 'CHANNELS_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^WS_BOOTSTRAP_BATCH_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_BOOTSTRAP_BATCH_SIZE=.*/WS_BOOTSTRAP_BATCH_SIZE=64/' /opt/chatapp/shared/.env \
-    || echo 'WS_BOOTSTRAP_BATCH_SIZE=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^WS_BOOTSTRAP_CACHE_TTL_SECONDS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_BOOTSTRAP_CACHE_TTL_SECONDS=.*/WS_BOOTSTRAP_CACHE_TTL_SECONDS=180/' /opt/chatapp/shared/.env \
-    || echo 'WS_BOOTSTRAP_CACHE_TTL_SECONDS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Realtime and delivery-safety keys are profile-owned only. Keep them in
+  # deploy/env/prod.required.env so deploy logic cannot accidentally diverge.
   sudo grep -q '^DISABLE_RATE_LIMITS=' /opt/chatapp/shared/.env \
     || echo 'DISABLE_RATE_LIMITS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   sudo grep -q '^AUTH_GLOBAL_PER_IP_RATE_LIMIT=' /opt/chatapp/shared/.env \
@@ -1499,6 +1456,8 @@ ssh_prod "
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \
     --required /tmp/prod.required.env
+  echo 'profile-owned keys (post-merge):'
+  sudo grep -E '^(CHANNEL_MESSAGE_USER_FANOUT|CHANNEL_MESSAGE_USER_FANOUT_MODE|MESSAGE_USER_FANOUT_HTTP_BLOCKING|WS_AUTO_SUBSCRIBE_MODE|WS_BOOTSTRAP_BATCH_SIZE|WS_BOOTSTRAP_CACHE_TTL_SECONDS|READ_RECEIPT_DEFER_POOL_WAITING|OVERLOAD_HTTP_SHED_ENABLED|OVERLOAD_LAG_SHED_MS)=' /opt/chatapp/shared/.env
   rm -f /tmp/apply-env-profile.py /tmp/prod.required.env
   sudo systemctl daemon-reload
   echo 'systemd unit installed'"

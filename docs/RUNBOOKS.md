@@ -67,6 +67,7 @@ Fires when **completed** 5xx responses stay above ~0.25/s (5m rate) for 4 minute
 
 1. Check hot routes; inspect DB slow queries and Redis latency.
 2. Compare with k6 `slo` summary from the same week.
+3. If **errors or latency spike while RPS is flat** (tail-latency regime), run [`scripts/prod-pg-stat-activity.sh`](../scripts/prod-pg-stat-activity.sh) on the DB host during the spike — longest `pg_stat_activity` rows surface unbounded worst-case queries and wait events without guessing.
 
 ## Discord did not notify but the app looked unhealthy
 

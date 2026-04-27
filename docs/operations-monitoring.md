@@ -58,13 +58,24 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 
    ```bash
    DATABASE_URL='postgresql://...' ./scripts/pg-stat-statements-snapshot.sh
-   DB_SSH='root@db-host' DB_NAME='chatapp_prod' ./scripts/pg-stat-statements-snapshot.sh
+   DB_SSH='ubuntu@130.245.136.21' DB_NAME='chatapp_prod' ./scripts/pg-stat-statements-snapshot.sh
+   PROD_DB_SSH='ubuntu@130.245.136.21' ./scripts/pg-stat-statements-snapshot.sh   # alias for DB_SSH (same as prod-pg-stat-activity.sh)
+
+   During an incident window: `DELTA_SECONDS=120 PROD_DB_SSH=ubuntu@130.245.136.21 ./scripts/pg-stat-statements-snapshot.sh` prints **total_exec_time deltas** between two samples.
    ```
 
    This prints three ranked views:
    - highest total execution time
    - slowest mean execution time among frequently called statements
    - most IO-heavy statements
+
+6. **Live slow backends (`pg_stat_activity`)** — when **5xx or p99 move without RPS moving** (per-route blocking, not pool saturation), capture what is running *right now*:
+
+   ```bash
+   PROD_DB_SSH=ubuntu@130.245.136.21 DB_NAME=chatapp_prod bash scripts/prod-pg-stat-activity.sh
+   ```
+
+   The script prints non-idle sessions ordered by **wait_event**, then the **longest `now() - query_start`** (top 15). For lock chains, see also [`scripts/sql/pg-blocking-wait-chain.sql`](../scripts/sql/pg-blocking-wait-chain.sql). `MODE=wait` or `MODE=longest` limits output to one section.
 
 ## Core metric families (labels often include `job="chatapp-api"`)
 

@@ -74,6 +74,8 @@ export class GeneratedClient {
   private presenceHandlers: ((evt: { userId: string; presence: string }) => void)[] = [];
   private inviteHandlers: ((evt: { type: 'community' | 'dm'; id: string }) => void)[] = [];
   private readReceiptHandlers: ((evt: { conversationId: string; userId: string; messageId: string }) => void)[] = [];
+  private realtimeReady = false;
+  private realtimeReadyWaiters: Array<() => void> = [];
 
   private static keycloakCookieCache: Map<string, Map<string, string>> = new Map();
 
@@ -197,6 +199,25 @@ export class GeneratedClient {
         if (name && val) jar.set(name, val);
       }
     }
+  }
+
+  private markRealtimeReady(): void {
+    this.realtimeReady = true;
+    const waiters = this.realtimeReadyWaiters.splice(0);
+    for (const resolve of waiters) {
+      try {
+        resolve();
+      } catch {
+        // ignore waiter failures
+      }
+    }
+  }
+
+  private waitForRealtimeReady(): Promise<void> {
+    if (this.realtimeReady) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.realtimeReadyWaiters.push(resolve);
+    });
   }
 
   // ─── Authentication ───
@@ -784,6 +805,10 @@ export class GeneratedClient {
     const data = msg.data || msg;
 
     switch (event) {
+      case 'ready':
+        this.markRealtimeReady();
+        break;
+
       case 'message:created':
       case 'new_message':
         this.messageHandlers.forEach(h => h(this.mapMessage(data)));
@@ -880,7 +905,9 @@ export class GeneratedClient {
 
   async enableRealtime(): Promise<void> {
     try {
+      this.realtimeReady = false;
       await this.rt.enable();
+      await this.waitForRealtimeReady();
     } catch {
       // WS connection failed or was destroyed — not critical
     }

@@ -378,6 +378,9 @@ else
   gh release download "release-${RELEASE_SHA}" -R "${GITHUB_REPO}" -p "${ARTIFACT}" -O "${DOWNLOADED_ARTIFACT}"
 fi
 
+STAGING_ARTIFACT_SHA256=$(openssl dgst -sha256 "${SOURCE_ARTIFACT}" | awk '{print $2}')
+echo "Artifact SHA256 (local): ${STAGING_ARTIFACT_SHA256}"
+
 echo "2) Copying artifact and verification scripts to staging host..."
 scp "${SOURCE_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
 scp deploy/health-check.sh deploy/smoke-test.sh deploy/candidate-ws-smoke.cjs deploy/pgbouncer-setup.py deploy/redis-wait.sh "${STAGING_USER}@${STAGING_HOST}:/tmp/"
@@ -449,51 +452,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
     || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # COMPAS-style throughput: keep logical per-user message delivery enabled
-  # (implemented internally via sharded user feeds in the app); pin here so
-  # shared .env on long-lived staging VMs stays aligned after manual edits.
-  sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT=.*/CHANNEL_MESSAGE_USER_FANOUT=true/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_MESSAGE_USER_FANOUT=true' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MODE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MODE=.*/CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CHANNEL_MESSAGE_USER_FANOUT_MAX=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_MESSAGE_USER_FANOUT_MAX=.*/CHANNEL_MESSAGE_USER_FANOUT_MAX=10000/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_MESSAGE_USER_FANOUT_MAX=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=.*/CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180/' /opt/chatapp/shared/.env \
-    || echo 'CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=.*/CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180/' /opt/chatapp/shared/.env \
-    || echo 'CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^MESSAGE_USER_FANOUT_HTTP_BLOCKING=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^MESSAGE_USER_FANOUT_HTTP_BLOCKING=.*/MESSAGE_USER_FANOUT_HTTP_BLOCKING=false/' /opt/chatapp/shared/.env \
-    || echo 'MESSAGE_USER_FANOUT_HTTP_BLOCKING=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^WS_AUTO_SUBSCRIBE_MODE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_AUTO_SUBSCRIBE_MODE=.*/WS_AUTO_SUBSCRIBE_MODE=messages/' /opt/chatapp/shared/.env \
-    || echo 'WS_AUTO_SUBSCRIBE_MODE=messages' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^USER_FEED_SHARD_COUNT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^USER_FEED_SHARD_COUNT=.*/USER_FEED_SHARD_COUNT=4/' /opt/chatapp/shared/.env \
-    || echo 'USER_FEED_SHARD_COUNT=4' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^WS_RECENT_CONNECT_TTL_SECONDS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_RECENT_CONNECT_TTL_SECONDS=.*/WS_RECENT_CONNECT_TTL_SECONDS=300/' /opt/chatapp/shared/.env \
-    || echo 'WS_RECENT_CONNECT_TTL_SECONDS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^COMMUNITIES_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^COMMUNITIES_LIST_CACHE_TTL_SECS=.*/COMMUNITIES_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
-    || echo 'COMMUNITIES_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=.*/COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}/' /opt/chatapp/shared/.env \
-    || echo 'COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT=${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^CHANNELS_LIST_CACHE_TTL_SECS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHANNELS_LIST_CACHE_TTL_SECS=.*/CHANNELS_LIST_CACHE_TTL_SECS=300/' /opt/chatapp/shared/.env \
-    || echo 'CHANNELS_LIST_CACHE_TTL_SECS=300' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^WS_BOOTSTRAP_BATCH_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_BOOTSTRAP_BATCH_SIZE=.*/WS_BOOTSTRAP_BATCH_SIZE=64/' /opt/chatapp/shared/.env \
-    || echo 'WS_BOOTSTRAP_BATCH_SIZE=64' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^WS_BOOTSTRAP_CACHE_TTL_SECONDS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^WS_BOOTSTRAP_CACHE_TTL_SECONDS=.*/WS_BOOTSTRAP_CACHE_TTL_SECONDS=180/' /opt/chatapp/shared/.env \
-    || echo 'WS_BOOTSTRAP_CACHE_TTL_SECONDS=180' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+  # Realtime and delivery-safety keys are profile-owned only. Keep them in
+  # deploy/env/staging.required.env so deploy logic cannot accidentally diverge.
   # Keep HTTP shedding off on staging: grader bursts hit ~200ms lag easily and shed 503s
   # look like flaky delivery (same knob as prod; overload stages still throttle side work).
   sudo grep -q '^OVERLOAD_HTTP_SHED_ENABLED=' /opt/chatapp/shared/.env \
@@ -521,6 +481,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \
     --required /tmp/staging.required.env
+  echo 'profile-owned keys (post-merge):'
+  sudo grep -E '^(CHANNEL_MESSAGE_USER_FANOUT|CHANNEL_MESSAGE_USER_FANOUT_MODE|MESSAGE_USER_FANOUT_HTTP_BLOCKING|WS_AUTO_SUBSCRIBE_MODE|WS_BOOTSTRAP_BATCH_SIZE|WS_BOOTSTRAP_CACHE_TTL_SECONDS|READ_RECEIPT_DEFER_POOL_WAITING|OVERLOAD_HTTP_SHED_ENABLED|OVERLOAD_LAG_SHED_MS)=' /opt/chatapp/shared/.env
   rm -f /tmp/apply-env-profile.py /tmp/staging.required.env
   sudo systemctl daemon-reload
   echo 'systemd unit installed'
@@ -529,10 +491,19 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 echo "4) Unpacking artifact into immutable release directory..."
 ssh "${STAGING_USER}@${STAGING_HOST}" "
   set -euo pipefail
+  REMOTE_TGZ='/tmp/${ARTIFACT}'
+  GOT=\$(openssl dgst -sha256 \"\$REMOTE_TGZ\" | awk '{print \$2}')
+  if [ \"\$GOT\" != \"${STAGING_ARTIFACT_SHA256}\" ]; then
+    echo \"ERROR: artifact SHA256 mismatch after copy (truncated or corrupted transfer)\"
+    echo \"  expected: ${STAGING_ARTIFACT_SHA256}\"
+    echo \"  actual:   \$GOT\"
+    exit 1
+  fi
+  echo \"✓ Artifact SHA256 verified on host\"
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
   mkdir -p '${RELEASE_DIR}'
   mkdir -p \"\${RELEASE_PATH}\"
-  tar xzf '/tmp/${ARTIFACT}' -C \"\${RELEASE_PATH}\"
+  tar xzf \"\$REMOTE_TGZ\" -C \"\${RELEASE_PATH}\"
 
   # Install backend runtime deps only if node_modules are not bundled.
   if [ ! -d \"\${RELEASE_PATH}/backend/node_modules\" ]; then
