@@ -54,7 +54,7 @@ describe('search() – FTS zero → scoped literal', () => {
     const { search } = require('../src/search/client');
 
     const out = await search('That makes more', {
-      channelId: '00000000-0000-4000-8000-000000000003',
+      communityId: '00000000-0000-4000-8000-000000000004',
       userId: '00000000-0000-4000-8000-000000000002',
       limit: 10,
       offset: 0,
@@ -70,7 +70,7 @@ describe('search() – FTS zero → scoped literal', () => {
     expect(traceCall![0]).toMatchObject({
       search_trace: true,
       query: 'That makes more',
-      resolved_scope: 'channel',
+      resolved_scope: 'community',
       fallback_used: true,
       fts_hit_count: 0,
       fallback_hit_count: 1,
@@ -124,7 +124,7 @@ describe('search() – FTS zero → scoped literal', () => {
     const { search } = require('../src/search/client');
 
     await search('unicorn', {
-      channelId: '00000000-0000-4000-8000-000000000013',
+      communityId: '00000000-0000-4000-8000-000000000014',
       userId: '00000000-0000-4000-8000-000000000012',
       limit: 5,
       offset: 0,
@@ -183,7 +183,7 @@ describe('search() – FTS zero → scoped literal', () => {
     const { search } = require('../src/search/client');
 
     const out = await search('more just about', {
-      channelId: '00000000-0000-4000-8000-000000000023',
+      communityId: '00000000-0000-4000-8000-000000000024',
       userId: '00000000-0000-4000-8000-000000000022',
       limit: 20,
       offset: 0,

@@ -2,7 +2,7 @@
  * Search integration tests.
  *
  * Covers:
- *  - FTS query returns matching messages (channel, community, conversation, unscoped)
+ *  - FTS query returns matching messages (community, conversation, unscoped)
  *  - community-scoped search only returns messages from that community's channels
  *  - access control: non-member cannot search a private channel / community
  *  - single-character queries are allowed
@@ -75,10 +75,29 @@ async function inviteToChannel(token: string, channelId: string, userIds: string
   expect(res.status).toBe(200);
 }
 
+async function createConversation(token: string, participants: string[]) {
+  const res = await request(app)
+    .post('/api/v1/conversations')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ participantIds: participants });
+  expect(res.status).toBe(201);
+  return res.body.conversation as { id: string };
+}
+
+async function sendConversationMessage(token: string, conversationId: string, content: string) {
+  const res = await request(app)
+    .post('/api/v1/messages')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ conversationId, content });
+  expect(res.status).toBe(201);
+  return res.body.message as { id: string };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('Search – basic FTS', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
   const marker = `ftstestmarker${uniqueSuffix()}`;
 
@@ -86,7 +105,8 @@ describe('Search – basic FTS', () => {
     const owner = await createAuthenticatedUser('srchowner');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken, uniqueSuffix());
-    const channel = await createChannel(ownerToken, community.id);
+    communityId = community.id;
+    const channel = await createChannel(ownerToken, communityId);
     channelId = channel.id;
 
     await sendMessage(ownerToken, channelId, `First message about ${marker}`);
@@ -94,9 +114,9 @@ describe('Search – basic FTS', () => {
     await sendMessage(ownerToken, channelId, 'Unrelated message about cats');
   });
 
-  it('returns matching messages for a channel-scoped query', async () => {
+  it('returns matching messages for a community-scoped query', async () => {
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -106,7 +126,7 @@ describe('Search – basic FTS', () => {
 
   it('returns zero hits for a non-matching query', async () => {
     const res = await request(app)
-      .get(`/api/v1/search?q=zzznomatch${uniqueSuffix()}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=zzznomatch${uniqueSuffix()}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -115,7 +135,7 @@ describe('Search – basic FTS', () => {
 
   it('allows single-character queries', async () => {
     const res = await request(app)
-      .get(`/api/v1/search?q=a&channelId=${channelId}`)
+      .get(`/api/v1/search?q=a&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -123,7 +143,7 @@ describe('Search – basic FTS', () => {
 
   it('includes communityId and channelName in each hit', async () => {
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -136,7 +156,7 @@ describe('Search – basic FTS', () => {
 
   it('returns newest-first within matched results', async () => {
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}&limit=10`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}&limit=10`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -214,6 +234,7 @@ describe('Search – community scope', () => {
 
 describe('Search – access control', () => {
   let ownerToken: string;
+  let communityId: string;
   let privateChannelId: string;
   let publicChannelId: string;
   const markerChannel = `accctrl${uniqueSuffix()}`;
@@ -223,19 +244,20 @@ describe('Search – access control', () => {
     const owner = await createAuthenticatedUser('srchac');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken, uniqueSuffix());
-    const publicChannel = await createChannel(ownerToken, community.id, { isPrivate: false });
+    communityId = community.id;
+    const publicChannel = await createChannel(ownerToken, communityId, { isPrivate: false });
     publicChannelId = publicChannel.id;
     await sendMessage(ownerToken, publicChannelId, `Public message: ${markerPublic}`);
     // Use a PRIVATE channel so non-members are denied
-    const channel = await createChannel(ownerToken, community.id, { isPrivate: true });
+    const channel = await createChannel(ownerToken, communityId, { isPrivate: true });
     privateChannelId = channel.id;
     await sendMessage(ownerToken, privateChannelId, `Secret message: ${markerChannel}`);
   });
 
-  it('returns 403 when searching a private channel the user is not a member of', async () => {
+  it('returns 403 when searching a community the user is not a member of', async () => {
     const outsider = await createAuthenticatedUser('srchout2');
     const res = await request(app)
-      .get(`/api/v1/search?q=${markerChannel}&channelId=${privateChannelId}`)
+      .get(`/api/v1/search?q=${markerChannel}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${outsider.accessToken}`);
 
     expect(res.status).toBe(403);
@@ -243,15 +265,15 @@ describe('Search – access control', () => {
 
   it('returns 401 when unauthenticated', async () => {
     const res = await request(app)
-      .get(`/api/v1/search?q=${markerChannel}&channelId=${privateChannelId}`);
+      .get(`/api/v1/search?q=${markerChannel}&communityId=${communityId}`);
 
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 when searching a public channel without community membership', async () => {
+  it('returns 403 when searching community content without membership', async () => {
     const outsider = await createAuthenticatedUser('srchoutpublic');
     const res = await request(app)
-      .get(`/api/v1/search?q=${markerPublic}&channelId=${publicChannelId}`)
+      .get(`/api/v1/search?q=${markerPublic}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${outsider.accessToken}`);
 
     expect(res.status).toBe(403);
@@ -280,6 +302,7 @@ describe('Search – access control', () => {
 
 describe('Search – XSS sanitization', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
   const xssMarker = `xsstest${uniqueSuffix()}`;
 
@@ -287,7 +310,8 @@ describe('Search – XSS sanitization', () => {
     const owner = await createAuthenticatedUser('srchxss');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken, uniqueSuffix());
-    const channel = await createChannel(ownerToken, community.id);
+    communityId = community.id;
+    const channel = await createChannel(ownerToken, communityId);
     channelId = channel.id;
     // Message containing raw HTML / script injection attempt
     await sendMessage(
@@ -299,7 +323,7 @@ describe('Search – XSS sanitization', () => {
 
   it('_formatted.content does not contain unescaped <script> tags', async () => {
     const res = await request(app)
-      .get(`/api/v1/search?q=${xssMarker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${xssMarker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -321,7 +345,7 @@ describe('Search – XSS sanitization', () => {
     // partial token to force trigram path. Use raw partial of the xssMarker.
     const partial = xssMarker.slice(0, 4); // short enough to be infix
     const res = await request(app)
-      .get(`/api/v1/search?q=${partial}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${partial}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -336,6 +360,7 @@ describe('Search – XSS sanitization', () => {
 // Trigram/partial-match fallback removed; FTS-only per spec.
 describe.skip('Search – trigram fallback', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
   const base = `trigfallback${uniqueSuffix()}`;
 
@@ -343,7 +368,8 @@ describe.skip('Search – trigram fallback', () => {
     const owner = await createAuthenticatedUser('srchtrig');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken, uniqueSuffix());
-    const channel = await createChannel(ownerToken, community.id);
+    communityId = community.id;
+    const channel = await createChannel(ownerToken, communityId);
     channelId = channel.id;
     await sendMessage(ownerToken, channelId, `Partial match test: ${base}suffix`);
   });
@@ -352,7 +378,7 @@ describe.skip('Search – trigram fallback', () => {
     // FTS won't match a mid-word prefix; trigram ILIKE will
     const partial = base.slice(0, 6);
     const res = await request(app)
-      .get(`/api/v1/search?q=${partial}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${partial}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -363,6 +389,7 @@ describe.skip('Search – trigram fallback', () => {
 
 describe('Search – common phrases and all-term matching', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
   const exactPhrase = `games that have ${uniqueSuffix()}`;
   const commonPhrase = 'more just about';
@@ -373,7 +400,8 @@ describe('Search – common phrases and all-term matching', () => {
     const owner = await createAuthenticatedUser('srchallterms');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken, uniqueSuffix());
-    const channel = await createChannel(ownerToken, community.id);
+    communityId = community.id;
+    const channel = await createChannel(ownerToken, communityId);
     channelId = channel.id;
 
     await sendMessage(ownerToken, channelId, `${exactPhrase} with every searched word present`);
@@ -390,7 +418,7 @@ describe('Search – common phrases and all-term matching', () => {
     // so only the one message containing both "games" and that number is returned.
     const uniqueTerm = exactPhrase.split(' ').pop()!;
     const res = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent(`games ${uniqueTerm}`)}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${encodeURIComponent(`games ${uniqueTerm}`)}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -407,7 +435,7 @@ describe('Search – common phrases and all-term matching', () => {
     // ''::tsquery. Scoped searches fall back to an exact literal match inside
     // the requested scope only.
     const res = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent(commonPhrase)}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${encodeURIComponent(commonPhrase)}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -418,7 +446,7 @@ describe('Search – common phrases and all-term matching', () => {
     // "be" is an English stop word; the scoped literal fallback can still find
     // messages containing that literal token/string.
     const res = await request(app)
-      .get(`/api/v1/search?q=be&channelId=${channelId}`)
+      .get(`/api/v1/search?q=be&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -431,7 +459,7 @@ describe('Search – common phrases and all-term matching', () => {
     // FTS produces 'lazy'::tsquery which matches any message containing "lazy",
     // so both "a lazy fox" and "the lazy dog" are returned.
     const res = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent(boundaryPhrase)}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${encodeURIComponent(boundaryPhrase)}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -456,7 +484,7 @@ describe('Search – common phrases and all-term matching', () => {
 
     it('emits search_trace with fallback_used true for stopword-only query', async () => {
       await request(app)
-        .get(`/api/v1/search?q=${encodeURIComponent(commonPhrase)}&channelId=${channelId}`)
+        .get(`/api/v1/search?q=${encodeURIComponent(commonPhrase)}&communityId=${communityId}`)
         .set('Authorization', `Bearer ${ownerToken}`);
 
       const traceCall = infoSpy.mock.calls.find(
@@ -469,7 +497,7 @@ describe('Search – common phrases and all-term matching', () => {
       expect(trace.fts_hit_count).toBe(0);
       expect(trace.fallback_hit_count).toBeGreaterThan(0);
       expect(trace.tsquery_node_count).toBe(0);
-      expect(trace.resolved_scope).toBe('channel');
+      expect(trace.resolved_scope).toBe('community');
       expect(typeof trace.requestId).toBe('string');
       expect(typeof trace.total_ms).toBe('number');
       expect(typeof trace.query_ms).toBe('number');
@@ -479,7 +507,7 @@ describe('Search – common phrases and all-term matching', () => {
       const uniqueTerm = exactPhrase.split(' ').pop()!;
       await request(app)
         .get(
-          `/api/v1/search?q=${encodeURIComponent(`games ${uniqueTerm}`)}&channelId=${channelId}`,
+          `/api/v1/search?q=${encodeURIComponent(`games ${uniqueTerm}`)}&communityId=${communityId}`,
         )
         .set('Authorization', `Bearer ${ownerToken}`);
 
@@ -518,7 +546,7 @@ describe('Search – channel scope is unsupported', () => {
       )
       .set('Authorization', `Bearer ${a.accessToken}`);
     expect(res.status).toBe(400);
-    expect(String(res.body.error || '')).toContain('channelId scope is no longer supported');
+    expect(String(res.body.error || '')).toContain('Unsupported search parameter');
   });
 });
 
@@ -564,6 +592,100 @@ describe('Search – mutually exclusive community and conversation scopes', () =
       .set('Authorization', `Bearer ${owner.accessToken}`);
     expect(res.status).toBe(400);
     expect(String(res.body.error || '')).toContain('either communityId or conversationId');
+  });
+});
+
+describe('Search – conversation scope (1:1 and group DM)', () => {
+  it('1:1 DM search returns hits for participants and rejects non-participants', async () => {
+    const a = await createAuthenticatedUser('srchdmonea');
+    const b = await createAuthenticatedUser('srchdmoneb');
+    const outsider = await createAuthenticatedUser('srchdmoneout');
+    const marker = `dmone${uniqueSuffix()}`;
+
+    const conversation = await createConversation(a.accessToken, [b.username]);
+    const msg = await sendConversationMessage(a.accessToken, conversation.id, `hello ${marker}`);
+
+    const byA = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&conversationId=${conversation.id}`)
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(byA.status).toBe(200);
+    expect((byA.body.hits || []).some((hit: any) => String(hit.id) === msg.id)).toBe(true);
+
+    const byB = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&conversationId=${conversation.id}`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(byB.status).toBe(200);
+    expect((byB.body.hits || []).some((hit: any) => String(hit.id) === msg.id)).toBe(true);
+
+    const byOutsider = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&conversationId=${conversation.id}`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+    expect(byOutsider.status).toBe(403);
+  });
+
+  it('group DM search is scoped to one conversation and includes participant-visible messages', async () => {
+    const owner = await createAuthenticatedUser('srchgroupown');
+    const u2 = await createAuthenticatedUser('srchgroupu2');
+    const u3 = await createAuthenticatedUser('srchgroupu3');
+    const marker = `dmgroup${uniqueSuffix()}`;
+
+    const group = await createConversation(owner.accessToken, [u2.username, u3.username]);
+    const m1 = await sendConversationMessage(owner.accessToken, group.id, `owner says ${marker}`);
+    const m2 = await sendConversationMessage(u2.accessToken, group.id, `u2 says ${marker}`);
+
+    const otherConversation = await createConversation(owner.accessToken, [u2.username]);
+    await sendConversationMessage(owner.accessToken, otherConversation.id, `other dm ${marker}`);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&conversationId=${group.id}`)
+      .set('Authorization', `Bearer ${u3.accessToken}`);
+    expect(res.status).toBe(200);
+
+    const ids = (res.body.hits || []).map((hit: any) => String(hit.id));
+    expect(ids).toContain(m1.id);
+    expect(ids).toContain(m2.id);
+    for (const hit of (res.body.hits || [])) {
+      expect(String(hit.conversationId || hit.conversation_id || '')).toBe(group.id);
+    }
+  });
+
+  it('conversation-scoped search reflects edits and deletions shortly after updates', async () => {
+    const a = await createAuthenticatedUser('srchdmfresha');
+    const b = await createAuthenticatedUser('srchdmfreshb');
+    const oldMarker = `dmold${uniqueSuffix()}`;
+    const newMarker = `dmnew${uniqueSuffix()}`;
+
+    const conversation = await createConversation(a.accessToken, [b.username]);
+    const message = await sendConversationMessage(a.accessToken, conversation.id, `before ${oldMarker}`);
+
+    const editRes = await request(app)
+      .patch(`/api/v1/messages/${message.id}`)
+      .set('Authorization', `Bearer ${a.accessToken}`)
+      .send({ content: `after ${newMarker}` });
+    expect(editRes.status).toBe(200);
+
+    const searchNew = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(newMarker)}&conversationId=${conversation.id}`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(searchNew.status).toBe(200);
+    expect((searchNew.body.hits || []).some((hit: any) => String(hit.id) === message.id)).toBe(true);
+
+    const searchOld = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(oldMarker)}&conversationId=${conversation.id}`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(searchOld.status).toBe(200);
+    expect((searchOld.body.hits || []).some((hit: any) => String(hit.id) === message.id)).toBe(false);
+
+    const deleteRes = await request(app)
+      .delete(`/api/v1/messages/${message.id}`)
+      .set('Authorization', `Bearer ${a.accessToken}`);
+    expect(deleteRes.status).toBe(200);
+
+    const searchAfterDelete = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(newMarker)}&conversationId=${conversation.id}`)
+      .set('Authorization', `Bearer ${b.accessToken}`);
+    expect(searchAfterDelete.status).toBe(200);
+    expect((searchAfterDelete.body.hits || []).some((hit: any) => String(hit.id) === message.id)).toBe(false);
   });
 });
 

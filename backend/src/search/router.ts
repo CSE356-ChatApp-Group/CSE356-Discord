@@ -42,6 +42,22 @@ router.get('/', async (req, res, next) => {
       });
     }
     let { q, communityId, conversationId, authorId, after, before, limit, offset } = req.query;
+    const allowedQueryParams = new Set([
+      'q',
+      'communityId',
+      'conversationId',
+      'authorId',
+      'after',
+      'before',
+      'limit',
+      'offset',
+    ]);
+    const unsupportedParam = Object.keys(req.query || {}).find((key) => !allowedQueryParams.has(key));
+    if (unsupportedParam) {
+      return res.status(400).json({
+        error: 'Unsupported search parameter; allowed params are q, communityId, conversationId, authorId, after, before, limit, offset'
+      });
+    }
     if (overload.shouldRejectSearchRequests()) {
       return res.status(503).json({ error: 'Search temporarily unavailable under high load' });
     }
