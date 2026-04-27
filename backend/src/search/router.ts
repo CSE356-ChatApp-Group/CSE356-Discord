@@ -1,13 +1,13 @@
 /**
  * Search routes
  *
- * GET /api/v1/search?q=&communityId=&channelId=&conversationId=&authorId=&after=&before=&limit=&offset=
+ * GET /api/v1/search?q=&communityId=&conversationId=&authorId=&after=&before=&limit=&offset=
  *
- * Scope: channelId and/or exactly one of communityId/conversationId.
+ * Scope (spec §7): exactly one of communityId or conversationId (community vs DM).
  * communityId and conversationId are mutually exclusive for strict clients.
  * When both are sent (grader/harness), a compatibility shim picks one scope
  * after checking conversation participation.
- * Omitting all scope fields is rejected; this route is intentionally scoped-only.
+ * Omitting both scope ids is rejected. channelId is not a search scope.
  */
 
 'use strict';
@@ -42,12 +42,11 @@ function clampSearchPaging(limitRaw, offsetRaw) {
 router.get('/', async (req, res, next) => {
   const startMs = Date.now();
   try {
-    let { q, communityId, channelId, conversationId, authorId, after, before, limit, offset } = req.query;
+    let { q, communityId, conversationId, authorId, after, before, limit, offset } = req.query;
 
     const allowedQueryParams = new Set([
       'q',
       'communityId',
-      'channelId',
       'conversationId',
       'authorId',
       'after',
@@ -59,13 +58,8 @@ router.get('/', async (req, res, next) => {
     if (unsupportedParam) {
       return res.status(400).json({
         error:
-          'Unsupported search parameter; allowed params are q, communityId, channelId, conversationId, authorId, after, before, limit, offset',
+          'Unsupported search parameter; allowed params are q, communityId, conversationId, authorId, after, before, limit, offset',
       });
-    }
-
-    // Some clients send duplicate channel/conversation ids for DM scopes.
-    if (channelId && conversationId && String(channelId) === String(conversationId)) {
-      channelId = undefined;
     }
 
     if (overload.shouldRejectSearchRequests()) {
@@ -109,9 +103,9 @@ router.get('/', async (req, res, next) => {
       }
     }
 
-    if (!communityId && !channelId && !conversationId) {
+    if (!communityId && !conversationId) {
       return res.status(400).json({
-        error: 'Search must be scoped: provide communityId, channelId, or conversationId',
+        error: 'Search must be scoped: provide either communityId or conversationId',
       });
     }
 
@@ -131,7 +125,6 @@ router.get('/', async (req, res, next) => {
     const adjustedLimit = overload.searchLimit(clampedLimit);
     const results = await searchClient.search(normalizedQuery, {
       communityId,
-      channelId,
       conversationId,
       authorId,
       after,
@@ -150,7 +143,7 @@ router.get('/', async (req, res, next) => {
           responseBody: { hits: [] },
           requestId: req.id,
           query: normalizedQuery,
-          scope: communityId ? 'community' : (channelId ? 'channel' : (conversationId ? 'conversation' : 'unknown')),
+          scope: communityId ? 'community' : (conversationId ? 'conversation' : 'unknown'),
           ...searchInstanceMeta(),
         },
         'search classifier: true empty result',
@@ -161,7 +154,7 @@ router.get('/', async (req, res, next) => {
     const queryMeta = {
       queryLength: normalizedQuery.length,
       hasQueryText: Boolean(normalizedQuery),
-      scope: communityId ? 'community' : (channelId ? 'channel' : (conversationId ? 'conversation' : 'unknown')),
+      scope: communityId ? 'community' : (conversationId ? 'conversation' : 'unknown'),
       hasFilters: Boolean(authorId || after || before),
       hitCount: results?.hits?.length || 0,
       durationMs,

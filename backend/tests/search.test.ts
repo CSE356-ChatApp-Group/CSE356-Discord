@@ -2,7 +2,7 @@
  * Search integration tests.
  *
  * Covers:
- *  - FTS query returns matching messages (community, conversation, unscoped)
+ *  - FTS query returns matching messages (community or conversation scope)
  *  - community-scoped search only returns messages from that community's channels
  *  - access control: non-member cannot search a private channel / community
  *  - single-character queries are allowed
@@ -292,7 +292,7 @@ describe('Search – community FTS candidates stay in-community before LIMIT', (
     expect(res.status).toBe(403);
   });
 
-  it('channel-scoped FTS still finds an older in-channel match when many newer matches exist in another channel (non-community SQL path unchanged)', async () => {
+  it('community-scoped FTS still finds an older in-channel match when many newer matches exist in another channel', async () => {
     const owner = await createAuthenticatedUser('srchcommftschan');
     const token = owner.accessToken;
     const community = await createCommunity(token, uniqueSuffix());
@@ -306,12 +306,15 @@ describe('Search – community FTS candidates stay in-community before LIMIT', (
     }
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&channelId=${channelA.id}`)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}`)
       .set('Authorization', `Bearer ${token}`);
 
     expect(res.status).toBe(200);
     expect(res.body.hits.length).toBeGreaterThanOrEqual(1);
-    expect(res.body.hits.every((h: any) => h.channelId === channelA.id)).toBe(true);
+    expect(res.body.hits.some((h: any) => h.channelId === channelA.id)).toBe(true);
+    for (const hit of res.body.hits) {
+      expect(hit.communityId).toBe(community.id);
+    }
   });
 });
 
@@ -705,8 +708,8 @@ describe('Search – common phrases and all-term matching', () => {
   });
 });
 
-describe('Search – grader duplicate channelId/conversationId', () => {
-  it('strips duplicate channelId=conversationId and searches the conversation', async () => {
+describe('Search – channelId is not a supported query parameter', () => {
+  it('rejects search URLs that include channelId (spec §7: community or conversation only)', async () => {
     const a = await createAuthenticatedUser('srchcompasa');
     const b = await createAuthenticatedUser('srchcompasb');
     const convRes = await request(app)
@@ -727,8 +730,8 @@ describe('Search – grader duplicate channelId/conversationId', () => {
         `/api/v1/search?q=${encodeURIComponent(marker)}&channelId=${convId}&conversationId=${convId}`,
       )
       .set('Authorization', `Bearer ${a.accessToken}`);
-    expect(res.status).toBe(200);
-    expect((res.body.hits || []).some((hit: any) => String(hit.content || '').includes(marker))).toBe(true);
+    expect(res.status).toBe(400);
+    expect(String(res.body.error || '')).toContain('Unsupported search parameter');
   });
 });
 
@@ -1069,7 +1072,7 @@ describe('Search – scoped literal fallback (hardened)', () => {
     expect(res.body.hits.some((h: any) => String(h.content || '').includes('old'))).toBe(false);
   });
 
-  it('literal fallback excludes soft-deleted messages (channel)', async () => {
+  it('literal fallback excludes soft-deleted messages (community scope)', async () => {
     const owner = await createAuthenticatedUser('srchlitdel');
     const token = owner.accessToken;
     const community = await createCommunity(token, uniqueSuffix());
@@ -1082,14 +1085,14 @@ describe('Search – scoped literal fallback (hardened)', () => {
     expect(del.status).toBe(200);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent('yet nor')}&channelId=${channel.id}`)
+      .get(`/api/v1/search?q=${encodeURIComponent('yet nor')}&communityId=${community.id}`)
       .set('Authorization', `Bearer ${token}`);
 
     expect(res.status).toBe(200);
     expect(res.body.hits.some((h: any) => h.id === msg.id)).toBe(false);
   });
 
-  it('literal fallback reflects edited message content (channel)', async () => {
+  it('literal fallback reflects edited message content (community scope)', async () => {
     const owner = await createAuthenticatedUser('srchlatedit');
     const token = owner.accessToken;
     const community = await createCommunity(token, uniqueSuffix());
@@ -1103,13 +1106,13 @@ describe('Search – scoped literal fallback (hardened)', () => {
     expect(patch.status).toBe(200);
 
     const resOld = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent(`pre ${tail}`)}&channelId=${channel.id}`)
+      .get(`/api/v1/search?q=${encodeURIComponent(`pre ${tail}`)}&communityId=${community.id}`)
       .set('Authorization', `Bearer ${token}`);
     expect(resOld.status).toBe(200);
     expect(resOld.body.hits.some((h: any) => h.id === msg.id)).toBe(false);
 
     const resNew = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent(`postedit ${tail}`)}&channelId=${channel.id}`)
+      .get(`/api/v1/search?q=${encodeURIComponent(`postedit ${tail}`)}&communityId=${community.id}`)
       .set('Authorization', `Bearer ${token}`);
     expect(resNew.status).toBe(200);
     expect(resNew.body.hits.some((h: any) => h.id === msg.id)).toBe(true);
@@ -1272,7 +1275,6 @@ describe('Search – scoped literal EXPLAIN (index-friendly)', () => {
     const owner = await createAuthenticatedUser('srchlitplan');
     const token = owner.accessToken;
     const community = await createCommunity(token, uniqueSuffix());
-    const channel = await createChannel(token, community.id);
     const b = await createAuthenticatedUser('srchlitplanB');
     const convRes = await request(app)
       .post('/api/v1/conversations')
@@ -1316,14 +1318,6 @@ describe('Search – scoped literal EXPLAIN (index-friendly)', () => {
       build('so nor test', {
         userId: owner.user.id,
         conversationId: convId,
-        limit: 5,
-        offset: 0,
-      }),
-    );
-    await runExplain(
-      build('so nor test', {
-        userId: owner.user.id,
-        channelId: channel.id,
         limit: 5,
         offset: 0,
       }),

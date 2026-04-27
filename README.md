@@ -324,7 +324,7 @@ Connect: `ws://host/ws?token=<accessToken>`
 ### Search
 
 ```
-GET /search?q=hello&channelId=<uuid>&authorId=<uuid>&after=2024-01-01&limit=20
+GET /search?q=hello&communityId=<uuid>&authorId=<uuid>&after=2024-01-01&limit=20
 ```
 
 ---

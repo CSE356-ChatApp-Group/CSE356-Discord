@@ -4,9 +4,10 @@
  * Primary path:  websearch_to_tsquery + tsvector GIN index
  *                (ranked via ts_rank, highlighted via ts_headline)
  *
- * Scoped searches only (community, channel, or conversation). If FTS returns no
- * rows, a bounded literal substring pass runs inside the same scope (no trigram,
- * no cross-scope scan). There is no global / membership-only search path.
+ * Scoped searches only (community or DM conversation), per spec §7: community
+ * search spans accessible public and private channels; conversation search is
+ * limited to that thread. If FTS returns no rows, a bounded literal substring
+ * pass runs inside the same scope (no trigram, no cross-scope scan).
  *
  * Access control is built into the query:
  *   - `scope_access` CTE preserves 403 without a second DB trip.
@@ -89,13 +90,12 @@ function logSearchDbTiming(
 
 function resolvedSearchScope(opts: Record<string, any>): string {
   if (opts.communityId) return 'community';
-  if (opts.channelId) return 'channel';
   if (opts.conversationId) return 'conversation';
   return 'none';
 }
 
 function isScopedSearch(opts: Record<string, any>): boolean {
-  return Boolean(opts.communityId || opts.channelId || opts.conversationId);
+  return Boolean(opts.communityId || opts.conversationId);
 }
 
 function logSearchTrace(payload: Record<string, unknown>) {
@@ -244,33 +244,6 @@ const FTS_FROM_CLAUSE = `
   LEFT JOIN channels ch ON ch.id = m.channel_id`;
 
 function buildScopedAccessParts(params: any[], opts: Record<string, any>) {
-  if (opts.channelId) {
-    const channelId = p(params, opts.channelId);
-    const userId = p(params, opts.userId);
-    return {
-      scopeType: 'channel',
-      targetIdPh: channelId,
-      userIdPh: userId,
-      cte: `
-        scope_access AS (
-          SELECT EXISTS (
-            SELECT 1
-            FROM channels ch
-            JOIN community_members community_member
-              ON community_member.community_id = ch.community_id
-             AND community_member.user_id = ${userId}
-            LEFT JOIN channel_members cm
-              ON cm.channel_id = ch.id
-             AND cm.user_id = ${userId}
-            WHERE ch.id = ${channelId}
-              AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
-          ) AS has_access
-        )`,
-      fromClause: 'FROM scope_access',
-      onClause: 'ON scope_access.has_access = TRUE',
-    };
-  }
-
   if (opts.conversationId) {
     const conversationId = p(params, opts.conversationId);
     const userId = p(params, opts.userId);
@@ -337,9 +310,7 @@ function buildAuthorTimeFilters(
 function buildFilters(params: any[], opts: Record<string, any>): string {
   const parts: string[] = [];
 
-  if (opts.channelId) {
-    parts.push(`AND m.channel_id = ${p(params, opts.channelId)}`);
-  } else if (opts.conversationId) {
+  if (opts.conversationId) {
     parts.push(`AND m.conversation_id = ${p(params, opts.conversationId)}`);
   } else if (opts.communityId) {
     const cid = p(params, opts.communityId);
@@ -442,7 +413,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   let orderBy = 'fc.created_at DESC, m.id DESC';
 
   if (!scope) {
-    throw new Error('FTS search requires communityId, channelId, or conversationId');
+    throw new Error('FTS search requires communityId or conversationId');
   }
 
   if (isCommunityScoped && scope?.targetIdPh && scope?.userIdPh) {
@@ -505,33 +476,6 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       CROSS JOIN search_query sq
       JOIN users u ON u.id = m.author_id`;
     orderBy = 'sc.created_at DESC, m.id DESC';
-  } else if (scope.scopeType === 'channel' && scope.targetIdPh && scope.userIdPh) {
-    ctes.push(`scoped_recent_candidates AS MATERIALIZED (
-      SELECT m0.id,
-             m0.created_at
-      FROM messages m0
-      INNER JOIN channels ch_gate ON ch_gate.id = m0.channel_id
-        AND ch_gate.id = ${scope.targetIdPh}
-      LEFT JOIN channel_members cm_gate
-        ON cm_gate.channel_id = ch_gate.id
-       AND cm_gate.user_id = ${scope.userIdPh}
-      WHERE m0.deleted_at IS NULL
-        AND m0.channel_id = ${scope.targetIdPh}
-        AND (ch_gate.is_private = FALSE OR cm_gate.user_id IS NOT NULL)
-        ${candidateFilters.join('\n        ')}
-      ORDER BY m0.created_at DESC, m0.id DESC
-      LIMIT ${recentCandidatesLimit}
-    )`);
-    ctes.push(`fts_candidates AS MATERIALIZED (
-      SELECT src.id,
-             src.created_at
-      FROM scoped_recent_candidates src
-      CROSS JOIN search_query sq0
-      JOIN messages m0 ON m0.id = src.id
-      WHERE m0.content_tsv @@ sq0.q
-      ORDER BY src.created_at DESC, src.id DESC
-    )`);
-    filters = '';
   } else if (scope.scopeType === 'conversation' && scope.targetIdPh && scope.userIdPh) {
     ctes.push(`scoped_recent_candidates AS MATERIALIZED (
       SELECT m0.id,
@@ -732,50 +676,6 @@ function buildScopedLiteralParts(
     };
   }
 
-  if (scope.scopeType === 'channel' && scope.targetIdPh && scope.userIdPh) {
-    return {
-      sql: `
-        WITH ${scope.cte.trim()}
-        SELECT scope_access.has_access AS "__scopeAccess",
-          search_rows.*
-        FROM scope_access
-        LEFT JOIN LATERAL (
-          SELECT ${SELECT_COLS}
-          FROM (
-            SELECT m0.id,
-                   m0.content,
-                   m0.author_id,
-                   m0.channel_id,
-                   m0.conversation_id,
-                   m0.created_at
-            FROM messages m0
-            INNER JOIN channels ch_gate
-              ON ch_gate.id = m0.channel_id
-             AND ch_gate.id = ${scope.targetIdPh}
-            LEFT JOIN channel_members cm_gate
-              ON cm_gate.channel_id = ch_gate.id
-             AND cm_gate.user_id = ${scope.userIdPh}
-            WHERE m0.deleted_at IS NULL
-              AND m0.channel_id = ${scope.targetIdPh}
-              AND (ch_gate.is_private = FALSE OR cm_gate.user_id IS NOT NULL)
-              ${authorTimeFilters}
-            ORDER BY m0.created_at DESC, m0.id DESC
-            LIMIT ${recentCapPh}
-          ) m
-          JOIN users u ON u.id = m.author_id
-          LEFT JOIN channels ch ON ch.id = m.channel_id
-          WHERE lower(coalesce(m.content, '')) LIKE ('%' || lower(${rawQueryPh}) || '%')
-             OR position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
-          ORDER BY m.created_at DESC, m.id DESC
-          LIMIT ${limitPh} OFFSET ${offsetPh}
-        ) search_rows ON scope_access.has_access = TRUE`,
-      params,
-      limit,
-      offset,
-      q,
-    };
-  }
-
   return {
     sql: `SELECT NULL WHERE FALSE`,
     params,
@@ -864,7 +764,7 @@ function shouldRetrySearchOnPrimary(
  *
  * Scoped searches run FTS first. When FTS returns no hits, a bounded literal
  * substring match runs inside the same scope (no trigram, no cross-scope scan).
- * Queries without communityId, channelId, or conversationId return no hits.
+ * Queries without communityId or conversationId return no hits.
  *
  * @param q     Raw query string (validated by caller: non-empty when present)
  * @param opts  { conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset?, requestId? }
