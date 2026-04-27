@@ -6,6 +6,8 @@ Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool s
 
 **Prometheus scrape host (runner env, optional):** When rendering `infrastructure/monitoring/prometheus-host.yml` for the DB/monitoring VM, **`deploy-prod.sh`** sets the app VM address via **`PROM_APP_HOST`** if set; otherwise it uses the first address from **`hostname -I`** on the prod app SSH host, then falls back to **`10.0.0.237`**. Staging uses **`STAGING_PROM_APP_HOST`** with the same pattern, default **`10.128.0.2`**. Override when VPC addressing differs.
 
+**Three-VM prod orchestrator (`deploy-prod-multi.sh`, runner env):** **`PROM_REDIS_HOST`** is the **private** address Prometheus uses for the `redis` scrape target (default **VM1 internal**, `10.0.0.237` in the current inventory). **`REDIS_EXPORTER_SSH_HOST`** is the **SSH-reachable** host where `redis_exporter` is started in Docker (default **VM1 public**, `130.245.136.44`). Do not point SSH at a VPC-only IP from a machine outside the VLAN — the old default did that and caused deploy-time SSH timeouts while metrics checks still passed.
+
 ## Grading / autograder hosts
 
 If the VM is **only** hit by course autograders (no general public) and you do not care about auth brute-force or spam, you can still opt into a grading profile by setting **`DISABLE_RATE_LIMITS=true`** (and optionally **`AUTH_REGISTER_GLOBAL_PER_IP_MAX`**) in `/opt/chatapp/shared/.env` **after** deploy — note that **`deploy/env/*.required.env`** now pins **`DISABLE_RATE_LIMITS=false`** on each deploy so public-facing hosts keep Redis-backed auth limits unless you override deliberately.

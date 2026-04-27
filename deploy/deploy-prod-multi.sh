@@ -59,9 +59,11 @@ PGBOUNCER_RESERVE_SIZE="${PGBOUNCER_RESERVE_SIZE:-5}"
 PROD_USER="${PROD_USER:-ubuntu}"
 MONITORING_VM_HOST="${MONITORING_VM_HOST:-130.245.136.120}"
 MONITORING_VM_USER="${MONITORING_VM_USER:-${PROD_USER}}"
-APP_HOST="${APP_HOST:-${VM1_INTERNAL}}"
-REDIS_HOST="${REDIS_HOST:-${APP_HOST}}"
-PROM_REDIS_HOST="${PROM_REDIS_HOST:-${REDIS_HOST}}"
+# Managed Redis is off-host (see docs/infrastructure-inventory.md). redis_exporter runs in Docker
+# on an app VM with --network host; Prometheus on the monitoring VM scrapes :9121 on a *VPC*
+# address. Do not SSH to a private IP from a laptop — use the public app host for SSH.
+PROM_REDIS_HOST="${PROM_REDIS_HOST:-${VM1_INTERNAL}}"
+REDIS_EXPORTER_SSH_HOST="${REDIS_EXPORTER_SSH_HOST:-$VM1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # VM1 runs fewer workers than VM2/VM3; deploy-prod.sh reads CHATAPP_INSTANCES from the target
 # host's /opt/chatapp/shared/.env so systemd/nginx match (Phase 6 health checks use these lists).
@@ -126,6 +128,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "  PG_POOL_MAX per worker: VM1=${VM1_PG_POOL_MAX_PER_INSTANCE} VM2=${VM2_PG_POOL_MAX_PER_INSTANCE} VM3=${VM3_PG_POOL_MAX_PER_INSTANCE}"
   echo "  PostgreSQL needed: max_connections >= ${DB_TARGET_MAX_CONNECTIONS}"
   echo "  nginx upstream: 16 workers (4 VM1 + 6 VM2 + 6 VM3)"
+  echo "  PROM_REDIS_HOST (Prometheus redis job): ${PROM_REDIS_HOST}"
+  echo "  REDIS_EXPORTER_SSH_HOST (docker run target): ${REDIS_EXPORTER_SSH_HOST}"
   echo ""
   exit 0
 fi
@@ -180,7 +184,6 @@ fi
 # SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo "=== Phase 0: Deploy to VM3 (workers only; brief client errors possible while rolling) ==="
 PROD_HOST=$VM3 \
-  REDIS_HOST="${REDIS_HOST}" \
   PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
   PGBOUNCER_POOL_SIZE="${VM3_PGBOUNCER_POOL_SIZE}" \
   PGBOUNCER_MAX_DB_CONNECTIONS="${VM3_PGBOUNCER_MAX_DB_CONNECTIONS}" \
@@ -233,7 +236,6 @@ fi
 echo ""
 echo "=== Phase 1: Deploy to VM2 (workers only; brief client errors possible while rolling) ==="
 PROD_HOST=$VM2 \
-  REDIS_HOST="${REDIS_HOST}" \
   PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
   PGBOUNCER_POOL_SIZE="${VM2_PGBOUNCER_POOL_SIZE}" \
   PGBOUNCER_MAX_DB_CONNECTIONS="${VM2_PGBOUNCER_MAX_DB_CONNECTIONS}" \
@@ -276,7 +278,6 @@ echo "✓ All VM2 workers healthy"
 echo ""
 echo "=== Phase 3: Deploy to VM1 (PgBouncer/MinIO/nginx) ==="
 PROD_HOST=$VM1 \
-  REDIS_HOST="${REDIS_HOST}" \
   PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
   EXTRA_UPSTREAM_SERVERS_CSV="$EXTRA_UPSTREAM_CSV" \
   PGBOUNCER_POOL_SIZE="${VM1_PGBOUNCER_POOL_SIZE}" \
@@ -435,20 +436,20 @@ ssh -o StrictHostKeyChecking=accept-new "${MONITORING_VM_USER}@${MONITORING_VM_H
 echo "✓ Monitoring stack updated on monitoring VM (${MONITORING_VM_HOST})"
 echo ""
 
-if [ "${REDIS_HOST}" != "${VM1_INTERNAL}" ]; then
+if [ "${PROM_REDIS_HOST}" != "${VM1_INTERNAL}" ]; then
   ssh_vm "$VM1" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
 fi
-if [ "${REDIS_HOST}" != "${VM2_INTERNAL}" ]; then
+if [ "${PROM_REDIS_HOST}" != "${VM2_INTERNAL}" ]; then
   ssh_vm "$VM2" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
 fi
-if [ "${REDIS_HOST}" != "${VM3_INTERNAL}" ]; then
+if [ "${PROM_REDIS_HOST}" != "${VM3_INTERNAL}" ]; then
   ssh_vm "$VM3" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
 fi
 
-echo "Starting redis_exporter on Redis VM (${REDIS_HOST})..."
+echo "Starting redis_exporter via SSH ${REDIS_EXPORTER_SSH_HOST} (metrics at ${PROM_REDIS_HOST}:9121 for Prometheus)..."
 # shellcheck disable=SC2086
 ssh -o StrictHostKeyChecking=accept-new \
-    "${PROD_USER}@${REDIS_HOST}" "
+    "${PROD_USER}@${REDIS_EXPORTER_SSH_HOST}" "
   set -euo pipefail
   RURL=\$(python3 - <<'PY'
 from pathlib import Path
@@ -472,7 +473,7 @@ PY
   sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
     oliver006/redis_exporter:latest --redis.addr=\"\$RURL\" >/dev/null
   echo 'redis_exporter started on Redis VM (:9121)'
-" || echo "⚠ Failed to start redis_exporter on Redis VM (${REDIS_HOST})"
+" || echo "⚠ Failed to start redis_exporter on ${REDIS_EXPORTER_SSH_HOST}"
 
 echo "Checking monitoring VM -> Redis exporter connectivity (${PROM_REDIS_HOST}:9121)..."
 ssh -o StrictHostKeyChecking=accept-new "${MONITORING_VM_USER}@${MONITORING_VM_HOST}" "
