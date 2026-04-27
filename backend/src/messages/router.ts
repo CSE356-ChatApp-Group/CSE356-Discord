@@ -44,6 +44,9 @@ const {
   fanoutPublishTargetsHistogram,
   readReceiptShedTotal,
   readReceiptRequestsTotal,
+  readReceiptCursorCasTotal,
+  readReceiptScopeTotal,
+  readReceiptOptimizationTotal,
 } = require("../utils/metrics");
 const {
   getShouldDeferReadReceiptForInsertLockPressure,
@@ -418,6 +421,12 @@ const READ_DB_LOCK_TTL_MS = parseInt(
   process.env.READ_DB_LOCK_TTL_MS || "500",
   10,
 );
+const READ_RECEIPT_CAS1_DEBOUNCE_MS = Math.min(
+  1000,
+  Math.max(500, parseInt(process.env.READ_RECEIPT_CAS1_DEBOUNCE_MS || "750", 10) || 750),
+);
+const readReceiptCas1DebounceByTarget = new Map();
+const READ_RECEIPT_CAS1_DEBOUNCE_MAX_KEYS = 20000;
 // Four-key Lua script:
 //   KEYS[1] = cursor key (read_cursor_ts:...)
 //   KEYS[2] = db_lock key (read_db_lock:...)
@@ -483,6 +492,42 @@ function readDbLockKey(userId, channelId, conversationId) {
   if (channelId) return `read_db_lock:${userId}:ch:${channelId}`;
   if (conversationId) return `read_db_lock:${userId}:cv:${conversationId}`;
   throw new Error("read db lock scope required");
+}
+
+function shouldRunCas1SideEffects(userId, channelId, conversationId) {
+  const targetKey = channelId
+    ? `${userId}:ch:${channelId}`
+    : `${userId}:cv:${conversationId}`;
+  const now = Date.now();
+  const prev = Number(readReceiptCas1DebounceByTarget.get(targetKey) || 0);
+  if (now - prev < READ_RECEIPT_CAS1_DEBOUNCE_MS) {
+    return false;
+  }
+  readReceiptCas1DebounceByTarget.set(targetKey, now);
+  if (readReceiptCas1DebounceByTarget.size > READ_RECEIPT_CAS1_DEBOUNCE_MAX_KEYS) {
+    let pruned = 0;
+    for (const [k, ts] of readReceiptCas1DebounceByTarget) {
+      if (now - Number(ts || 0) > READ_RECEIPT_CAS1_DEBOUNCE_MS * 8) {
+        readReceiptCas1DebounceByTarget.delete(k);
+        pruned += 1;
+      }
+      if (pruned >= 500) break;
+    }
+  }
+  return true;
+}
+
+async function loadActiveConversationParticipantUserIds(conversationId) {
+  const { rows } = await query(
+    `SELECT user_id::text AS user_id
+     FROM conversation_participants
+     WHERE conversation_id = $1
+       AND left_at IS NULL`,
+    [conversationId],
+  );
+  return rows
+    .map((row) => String(row?.user_id || "").trim())
+    .filter(Boolean);
 }
 
 /**
@@ -838,7 +883,7 @@ async function advanceReadStateCursor({
 
   if (casResult === 0) {
     // Cursor already at or ahead of this message — no DB write needed
-    return { applied: null, didAdvanceCursor: false };
+    return { applied: null, didAdvanceCursor: false, casResult: 0 };
   }
 
   if (casResult === 1) {
@@ -849,6 +894,7 @@ async function advanceReadStateCursor({
         last_read_at: new Date().toISOString(),
       },
       didAdvanceCursor: true,
+      casResult: 1,
     };
   }
 
@@ -861,6 +907,7 @@ async function advanceReadStateCursor({
       last_read_at: new Date().toISOString(),
     },
     didAdvanceCursor: true,
+    casResult: 2,
   };
 }
 
@@ -2392,15 +2439,28 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     const messageId = req.params.id;
     const messageCreatedAt = target.created_at;
 
-    const { applied, didAdvanceCursor } = await advanceReadStateCursor({
+    const { applied, didAdvanceCursor, casResult } = await advanceReadStateCursor({
       userId: uid,
       channelId: channel_id,
       conversationId: conversation_id,
       messageId,
       messageCreatedAt,
     });
+    const readScope = conversation_id ? "conversation" : "channel";
+    readReceiptScopeTotal.inc({ scope: readScope });
+    readReceiptCursorCasTotal.inc({
+      scope: readScope,
+      cas_result: String(Number(casResult) || 0),
+    });
 
     if (!didAdvanceCursor) {
+      return res.json({ success: true });
+    }
+
+    const shouldRunDebouncedSideEffects =
+      casResult !== 1 || shouldRunCas1SideEffects(uid, channel_id, conversation_id);
+    if (!shouldRunDebouncedSideEffects) {
+      readReceiptOptimizationTotal.inc({ reason: "cas1_side_effects_debounced" });
       return res.json({ success: true });
     }
 
@@ -2443,11 +2503,13 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
 
     const publishReadUpdated = async () => {
       if (conversation_id) {
-        await publishConversationEventNow(
-          conversation_id,
-          "read:updated",
-          payload,
-        );
+        readReceiptOptimizationTotal.inc({ reason: "conversation_read_direct_user_fanout" });
+        const participantIds =
+          await loadActiveConversationParticipantUserIds(conversation_id);
+        await publishUserFeedTargets(participantIds, {
+          event: "read:updated",
+          data: payload,
+        });
       } else {
         // Channel read cursors are private: fan out only to the reader's user topic
         // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,

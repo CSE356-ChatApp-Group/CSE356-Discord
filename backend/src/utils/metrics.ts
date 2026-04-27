@@ -249,6 +249,27 @@ const readReceiptRequestsTotal = new client.Counter({
   labelNames: ['result'],
 });
 
+/** Distribution of Redis CAS outcomes for read cursor advance, by scope. */
+const readReceiptCursorCasTotal = new client.Counter({
+  name: 'read_receipt_cursor_cas_total',
+  help: 'Redis CAS result distribution for PUT /messages/:id/read by scope',
+  labelNames: ['scope', 'cas_result'],
+});
+
+/** Split of read requests by target scope. */
+const readReceiptScopeTotal = new client.Counter({
+  name: 'read_receipt_scope_total',
+  help: 'PUT /messages/:id/read requests by scope',
+  labelNames: ['scope'],
+});
+
+/** Read-path optimizations applied on the hot path. */
+const readReceiptOptimizationTotal = new client.Counter({
+  name: 'read_receipt_optimization_total',
+  help: 'PUT /messages/:id/read optimization events by reason',
+  labelNames: ['reason'],
+});
+
 /** Rolling-window p95 insert-lock wait (ms) on this worker; updated when evaluating read shed. */
 const messageChannelInsertLockPressureWaitP95MsGauge = new client.Gauge({
   name: 'message_channel_insert_lock_pressure_wait_p95_ms',
@@ -931,6 +952,16 @@ function startPgPoolMetrics(pool) {
       0,
     );
     readReceiptRequestsTotal.inc({ result: 'deferred_overload_stage_high' }, 0);
+    readReceiptCursorCasTotal.inc({ scope: 'channel', cas_result: '0' }, 0);
+    readReceiptCursorCasTotal.inc({ scope: 'channel', cas_result: '1' }, 0);
+    readReceiptCursorCasTotal.inc({ scope: 'channel', cas_result: '2' }, 0);
+    readReceiptCursorCasTotal.inc({ scope: 'conversation', cas_result: '0' }, 0);
+    readReceiptCursorCasTotal.inc({ scope: 'conversation', cas_result: '1' }, 0);
+    readReceiptCursorCasTotal.inc({ scope: 'conversation', cas_result: '2' }, 0);
+    readReceiptScopeTotal.inc({ scope: 'channel' }, 0);
+    readReceiptScopeTotal.inc({ scope: 'conversation' }, 0);
+    readReceiptOptimizationTotal.inc({ reason: 'cas1_side_effects_debounced' }, 0);
+    readReceiptOptimizationTotal.inc({ reason: 'conversation_read_direct_user_fanout' }, 0);
     messageChannelInsertLockPressureWaitP95MsGauge.set(0);
     messageChannelInsertLockPressureRecentTimeoutsGauge.set(0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
@@ -1085,6 +1116,9 @@ module.exports = {
   messageInsertLockHolderDurationMs,
   readReceiptShedTotal,
   readReceiptRequestsTotal,
+  readReceiptCursorCasTotal,
+  readReceiptScopeTotal,
+  readReceiptOptimizationTotal,
   messageChannelInsertLockPressureWaitP95MsGauge,
   messageChannelInsertLockPressureRecentTimeoutsGauge,
   wsConnectionResultTotal,
