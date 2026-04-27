@@ -1062,8 +1062,8 @@ function startPgPoolMetrics(pool) {
     wsReplayFailOpenTotal.inc({ reason: 'global_concurrency' }, 0);
     wsReplayFailOpenTotal.inc({ reason: 'insert_lock_pressure' }, 0);
     wsReplayStartedTotal.inc(0);
-    wsReplayConcurrentGauge.set(0);
-    wsReplaySemaphoreCapGauge.set(0);
+    // Do not zero chatapp_ws_replay_* gauges here: server.ts sets semaphore cap/inflight
+    // on load; forcing cap=0 made alerts using clamp_min(cap,1) false-positive (inflight>1).
     abuseBlockedSubnetTotal.inc(0);
     abuseAutoBanBlocksTotal.inc(0);
     abuseAutoBanIssuedTotal.inc(0);

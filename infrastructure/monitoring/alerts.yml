@@ -225,16 +225,26 @@ groups:
             `pg_pool_circuit_breaker_rejects_total`, `chatapp_ws_replay_inflight`, and nginx 429.
 
       - alert: ChatAppWsReplayInflightAboveCap
-        expr: max by (instance) (chatapp_ws_replay_inflight{job="chatapp-api"}) > on(instance) clamp_min(max by (instance) (chatapp_ws_replay_semaphore_cap{job="chatapp-api"}), 1)
+        # Require cap > 0: `clamp_min(cap,1)` turns a scraped cap of 0 into 1, which makes
+        # any inflight >= 2 look "above cap" (false positive) during bootstrap or if the
+        # cap series is missing/stale. Real invariant is inflight > cap with a positive cap.
+        expr: |
+          (
+            max by (instance) (chatapp_ws_replay_inflight{job="chatapp-api"})
+            > on(instance) max by (instance) (chatapp_ws_replay_semaphore_cap{job="chatapp-api"})
+          )
+          and on(instance) (max by (instance) (chatapp_ws_replay_semaphore_cap{job="chatapp-api"}) > 0)
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: WS replay concurrency exceeds configured hard cap
           description: >
-            `chatapp_ws_replay_inflight` should never exceed
-            `chatapp_ws_replay_semaphore_cap` on any process. If this fires, replay
-            accounting may be broken or env/runtime cap values are inconsistent.
+            `chatapp_ws_replay_inflight` should never be strictly greater than
+            `chatapp_ws_replay_semaphore_cap` on any process (same `instance` label).
+            If this fires after the PromQL guard above, replay slot accounting is broken,
+            or scrape labels for inflight vs cap diverged. If cap is missing/zero on scrape,
+            this alert is suppressed to avoid `clamp_min(0,1)` false positives.
 
       - alert: ChatAppPgPoolPressure
         expr: max(pg_pool_waiting{job="chatapp-api"}) > 15

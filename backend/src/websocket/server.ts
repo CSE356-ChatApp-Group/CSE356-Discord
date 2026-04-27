@@ -232,6 +232,7 @@ const WS_REPLAY_USER_COOLDOWN_MS =
 const replayAdmissionConfig = parseReplayAdmissionConfig(process.env);
 wsReplaySemaphoreCapGauge.set(replayAdmissionConfig.replaySemaphoreMax);
 let wsReplayInFlightCount = 0;
+wsReplayConcurrentGauge.set(0);
 const recentReplayByUser = new Map();
 
 function tryAcquireReplaySlot() {
