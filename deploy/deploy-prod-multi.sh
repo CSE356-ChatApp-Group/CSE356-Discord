@@ -450,12 +450,27 @@ echo "Starting redis_exporter on Redis VM (${REDIS_HOST})..."
 ssh -o StrictHostKeyChecking=accept-new \
     "${PROD_USER}@${REDIS_HOST}" "
   set -euo pipefail
+  RURL=\$(python3 - <<'PY'
+from pathlib import Path
+env = Path('/opt/chatapp/shared/.env')
+val = ''
+if env.exists():
+    for line in env.read_text().splitlines():
+        if line.startswith('REDIS_URL='):
+            val = line.split('=', 1)[1].strip()
+print(val)
+PY
+)
+  if [ -z \"\$RURL\" ]; then
+    echo 'WARN: REDIS_URL not found in /opt/chatapp/shared/.env; using localhost without auth'
+    RURL='redis://127.0.0.1:6379'
+  fi
   if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
     sudo docker rm -f redis_exporter >/dev/null 2>&1 || true
   fi
   sudo docker pull oliver006/redis_exporter:latest >/dev/null
   sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
-    oliver006/redis_exporter:latest --redis.addr='redis://127.0.0.1:6379' >/dev/null
+    oliver006/redis_exporter:latest --redis.addr=\"\$RURL\" >/dev/null
   echo 'redis_exporter started on Redis VM (:9121)'
 " || echo "⚠ Failed to start redis_exporter on Redis VM (${REDIS_HOST})"
 

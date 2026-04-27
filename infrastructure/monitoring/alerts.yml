@@ -696,19 +696,47 @@ groups:
             Prometheus cannot reach :9121. Fix the `redis` scrape target or the exporter container.
             (No alert if the `redis` job is not configured — add it when you run redis_exporter.)
 
-      - alert: ChatAppRedisMemoryNearMax
+      - alert: ChatAppRedisMemoryHigh80
         expr: |
           redis_memory_max_bytes{job="redis"} > 0
           and
-          (redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"}) > 0.88
-        for: 15m
+          (redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"}) > 0.80
+        for: 10m
         labels:
           severity: warning
         annotations:
-          summary: Redis is close to maxmemory eviction threshold
+          summary: Redis memory usage above 80% of maxmemory
           description: >
-            Used memory is >88% of configured maxmemory. Eviction or OOM risk — raise maxmemory,
-            add RAM, or reduce cache TTL / key volume.
+            Redis used memory is >80% of maxmemory for 10m. Track growth and
+            trim nonessential caches before eviction pressure rises.
+
+      - alert: ChatAppRedisMemoryHigh90
+        expr: |
+          redis_memory_max_bytes{job="redis"} > 0
+          and
+          (redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"}) > 0.90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Redis memory usage above 90% of maxmemory
+          description: >
+            Redis used memory is >90% of maxmemory for 5m. OOM/eviction risk is high;
+            raise maxmemory or reduce key volume immediately.
+
+      - alert: ChatAppRedisMemoryHigh95
+        expr: |
+          redis_memory_max_bytes{job="redis"} > 0
+          and
+          (redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"}) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Redis memory usage above 95% of maxmemory
+          description: >
+            Redis used memory is >95% of maxmemory for 2m. Immediate OOM risk;
+            apply emergency mitigation now.
 
       # Absolute threshold — tune for your `maxclients` / workload (exporter label sets vary by version).
       - alert: ChatAppRedisClientsElevated

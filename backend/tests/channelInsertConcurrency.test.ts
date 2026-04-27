@@ -219,26 +219,23 @@ describe('runChannelMessageInsertSerialized', () => {
     expect(order).toEqual(['a-start', 'a-end', 'b-start', 'b-end']);
   });
 
-  it('uses the default wait timeout longer than 1500ms', async () => {
+  it('uses the default wait timeout around 2000ms', async () => {
     const redisClient = new FakeRedisLockClient();
     const workerA = loadWorker(redisClient);
     const workerB = loadWorker(redisClient);
     const ch = 'abababab-aaaa-bbbb-cccc-dddddddddddd';
-    const order: string[] = [];
 
     const p1 = workerA.runChannelMessageInsertSerialized(ch, async () => {
-      order.push('a-start');
       await sleep(2200);
-      order.push('a-end');
     });
     await sleep(10);
-    const p2 = workerB.runChannelMessageInsertSerialized(ch, async () => {
-      order.push('b-start');
-      order.push('b-end');
+    await expect(
+      workerB.runChannelMessageInsertSerialized(ch, async () => undefined),
+    ).rejects.toMatchObject({
+      code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
+      statusCode: 503,
     });
-
-    await Promise.all([p1, p2]);
-    expect(order).toEqual(['a-start', 'a-end', 'b-start', 'b-end']);
+    await p1;
   });
 
   it('does not serialize different channels across workers', async () => {
@@ -303,6 +300,53 @@ describe('runChannelMessageInsertSerialized', () => {
         Object.assign(new Error('busy'), { code: 'MESSAGE_INSERT_LOCK_TIMEOUT' }),
       ),
     ).toBe(true);
+  });
+
+  it('suppresses immediate retries after a recent channel timeout', async () => {
+    const redisClient = new FakeRedisLockClient();
+    const env = {
+      MESSAGE_INSERT_LOCK_TTL_MS: '6000',
+      MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS: '500',
+      MESSAGE_INSERT_LOCK_POLL_MIN_MS: '10',
+      MESSAGE_INSERT_LOCK_POLL_MAX_MS: '10',
+      MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS: '5000',
+      MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS: '0',
+      MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MAX_MS: '0',
+    };
+    const workerA = loadWorker(redisClient, env);
+    const workerB = loadWorker(redisClient, env);
+    const ch = 'abababab-abcd-abcd-abcd-abababababab';
+
+    let releaseA!: () => void;
+    const holdUntilReleased = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const p1 = workerA.runChannelMessageInsertSerialized(ch, async () => {
+      await holdUntilReleased;
+    });
+    await sleep(5);
+
+    await expect(
+      workerB.runChannelMessageInsertSerialized(ch, async () => 'never'),
+    ).rejects.toMatchObject({
+      code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
+      statusCode: 503,
+    });
+
+    const retryStartedAt = Date.now();
+    await expect(
+      workerB.runChannelMessageInsertSerialized(ch, async () => 'retry-never'),
+    ).rejects.toMatchObject({
+      code: 'MESSAGE_INSERT_LOCK_TIMEOUT',
+      statusCode: 503,
+    });
+    expect(Date.now() - retryStartedAt).toBeLessThan(150);
+
+    releaseA();
+    await p1;
+    expect(workerB.metrics.messageChannelInsertLockTotal.inc).toHaveBeenCalledWith({
+      result: 'recent_timeout_shed',
+    });
   });
 
   it('fails safe when Redis is unavailable and still runs the insert locally', async () => {

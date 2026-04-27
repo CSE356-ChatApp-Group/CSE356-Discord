@@ -33,7 +33,7 @@ const MESSAGE_INSERT_LOCK_TTL_MS = parseIntEnv(
 );
 const MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS = parseIntEnv(
   'MESSAGE_INSERT_LOCK_WAIT_TIMEOUT_MS',
-  4000,
+  2000,
   500,
   4000,
 );
@@ -73,6 +73,24 @@ const MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS = parseIntEnv(
   25,
   2000,
 );
+const MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS = parseIntEnv(
+  'MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS',
+  2000,
+  250,
+  10000,
+);
+const MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS = parseIntEnv(
+  'MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS',
+  200,
+  0,
+  2000,
+);
+const MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MAX_MS = parseIntEnv(
+  'MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MAX_MS',
+  500,
+  MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS,
+  5000,
+);
 const MESSAGE_INSERT_LOCK_RELEASE_LUA = `
 if redis.call("get", KEYS[1]) == ARGV[1] then
   return redis.call("del", KEYS[1])
@@ -82,6 +100,7 @@ end`;
 const MESSAGE_INSERT_LOCK_TIMEOUT_CODE = 'MESSAGE_INSERT_LOCK_TIMEOUT';
 const MESSAGE_INSERT_LOCK_QUEUE_REJECT_CODE = 'MESSAGE_INSERT_LOCK_QUEUE_REJECT';
 const channelQueues = new Map<string, ChannelQueue>();
+const recentChannelTimeoutAtMs = new Map<string, number>();
 let waitersTotal = 0;
 
 function parseIntEnv(
@@ -135,6 +154,27 @@ function jitteredSleepMs(attempt: number) {
   );
   const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(base / 2)));
   return Math.min(MESSAGE_INSERT_LOCK_POLL_MAX_MS, base + jitter);
+}
+
+function pruneRecentTimeoutMap(nowMs: number) {
+  if (recentChannelTimeoutAtMs.size <= 50000) return;
+  const floor = nowMs - MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS * 4;
+  for (const [channelId, ts] of recentChannelTimeoutAtMs) {
+    if (ts < floor) recentChannelTimeoutAtMs.delete(channelId);
+  }
+}
+
+function markRecentChannelTimeout(channelId: string) {
+  const nowMs = Date.now();
+  recentChannelTimeoutAtMs.set(channelId, nowMs);
+  pruneRecentTimeoutMap(nowMs);
+}
+
+function shouldSuppressChannelRetry(channelId: string) {
+  const nowMs = Date.now();
+  const lastTimeoutAt = Number(recentChannelTimeoutAtMs.get(channelId) || 0);
+  if (!lastTimeoutAt) return false;
+  return nowMs - lastTimeoutAt <= MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS;
 }
 
 function buildInsertLockTimeoutError(channelId: string, waitMs: number) {
@@ -227,6 +267,33 @@ async function enterChannelInsertWaitQueue(
   channelId: string,
   opts: { requestId?: string } = {},
 ): Promise<QueueWaitLease> {
+  if (shouldSuppressChannelRetry(channelId)) {
+    const backoffSpan = Math.max(
+      0,
+      MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MAX_MS -
+        MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS,
+    );
+    const backoffMs =
+      MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS +
+      (backoffSpan > 0 ? Math.floor(Math.random() * (backoffSpan + 1)) : 0);
+    if (backoffMs > 0) {
+      await sleep(backoffMs);
+    }
+    messageChannelInsertLockTotal.inc({ result: 'recent_timeout_shed' });
+    messageChannelInsertLockWaitMs.observe({ result: 'recent_timeout_shed' }, backoffMs);
+    messageInsertLockQueueRejectTotal.inc({ reason: 'recent_timeout_shed' });
+    logger.warn(
+      {
+        channelId,
+        requestId: opts.requestId,
+        backoffMs,
+        timeoutWindowMs: MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS,
+      },
+      'POST /messages channel insert lock suppressed due to recent timeout',
+    );
+    throw buildInsertLockTimeoutError(channelId, backoffMs);
+  }
+
   const queue = getOrCreateChannelQueue(channelId);
   if (queue.entries.length >= MESSAGE_INSERT_LOCK_MAX_WAITERS_PER_CHANNEL) {
     messageChannelInsertLockTotal.inc({ result: 'queue_reject' });
@@ -348,6 +415,7 @@ async function acquireChannelInsertLease(
   messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, waitMs);
   messageInsertLockWaitTimeoutTotal.inc();
   recordMessageChannelInsertLockTimeoutEvent();
+  markRecentChannelTimeout(channelId);
   logger.warn(
     { channelId, requestId: opts.requestId, waitMs },
     'POST /messages channel insert lock timed out',
