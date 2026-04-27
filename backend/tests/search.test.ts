@@ -348,27 +348,83 @@ describe('Search – scoped literal rescue for deep history and weak tsquery', (
     expect(res.body.hits.some((h: any) => String(h.content || '').includes(marker))).toBe(true);
   });
 
-  it('weak tsquery query "still will have" includes exact literal and not only "still" matches', async () => {
+  it('"Sleep gang again" does not return hits that miss "again"', async () => {
     const owner = await createAuthenticatedUser('srchweakowner');
     const token = owner.accessToken;
     const community = await createCommunity(token, uniqueSuffix());
     const channel = await createChannel(token, community.id);
 
-    await sendMessage(token, channel.id, 'still waters run deep');
-    await sendMessage(token, channel.id, 'still here, still waiting');
-    await sendMessage(token, channel.id, 'this still exists but not all terms');
-    await sendMessage(token, channel.id, 'still will have all three words present');
+    await sendMessage(token, channel.id, 'sleep gang tonight only');
+    await sendMessage(token, channel.id, 'sleep in this gang chat now');
+    await sendMessage(token, channel.id, 'again and again but no sleep gang phrase');
+    await sendMessage(token, channel.id, 'Sleep gang again we queue now');
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${encodeURIComponent('still will have')}&communityId=${community.id}&limit=10`)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('Sleep gang again')}&communityId=${community.id}&limit=10`,
+      )
       .set('Authorization', `Bearer ${token}`);
 
     expect(res.status).toBe(200);
-    expect(
-      res.body.hits.some((h: any) =>
-        String(h.content || '').toLowerCase().includes('still will have'),
-      ),
-    ).toBe(true);
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    for (const hit of res.body.hits) {
+      const lower = String(hit.content || '').toLowerCase();
+      expect(lower).toContain('sleep');
+      expect(lower).toContain('gang');
+      expect(lower).toContain('again');
+    }
+  });
+
+  it('"will never spawn" must not return a result missing any word', async () => {
+    const owner = await createAuthenticatedUser('srchspawnowner');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+
+    await sendMessage(token, channel.id, 'this will happen, never maybe');
+    await sendMessage(token, channel.id, 'spawn wave incoming soon');
+    await sendMessage(token, channel.id, 'it will never spawn in this biome');
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('will never spawn')}&communityId=${community.id}&limit=10`,
+      )
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    for (const hit of res.body.hits) {
+      const lower = String(hit.content || '').toLowerCase();
+      expect(lower).toContain('will');
+      expect(lower).toContain('never');
+      expect(lower).toContain('spawn');
+    }
+  });
+
+  it('"literally been waiting" must not collapse to only "wait"', async () => {
+    const owner = await createAuthenticatedUser('srchwaitowner');
+    const token = owner.accessToken;
+    const community = await createCommunity(token, uniqueSuffix());
+    const channel = await createChannel(token, community.id);
+
+    await sendMessage(token, channel.id, 'waiting room open now');
+    await sendMessage(token, channel.id, 'we wait here');
+    await sendMessage(token, channel.id, 'I have literally been waiting here for hours');
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('literally been waiting')}&communityId=${community.id}&limit=10`,
+      )
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    for (const hit of res.body.hits) {
+      const lower = String(hit.content || '').toLowerCase();
+      expect(lower).toContain('literally');
+      expect(lower).toContain('been');
+      expect(lower).toContain('waiting');
+    }
   });
 
   it('community literal fallback still excludes inaccessible private channels', async () => {

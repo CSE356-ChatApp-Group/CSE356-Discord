@@ -547,6 +547,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
 function buildScopedLiteralParts(
   q: string,
   opts: Record<string, any>,
+  strictTerms: string[] = [],
   recentCapOverride?: number,
 ) {
   const params: any[] = [];
@@ -567,7 +568,16 @@ function buildScopedLiteralParts(
   // Parameter order must match SQL text: scope ids (in CTE), author/time, query string,
   // scoped candidate cap, page limit, offset.
   const authorTimeFilters = buildAuthorTimeFilters(params, opts, 'm0');
-  const rawQueryPh = p(params, q);
+  const normalizedStrictTerms = Array.from(
+    new Set(
+      (strictTerms || [])
+        .map((t) => String(t || '').trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+  const strictMultiWord = normalizedStrictTerms.length > 1;
+  const rawQueryPh = !strictMultiWord ? p(params, q) : '';
+  const strictTermLikePhs = strictMultiWord ? normalizedStrictTerms.map((t) => p(params, t)) : [];
   const scopedRecentCap = Number.isFinite(recentCapOverride as number) && (recentCapOverride as number) > 0
     ? Number(recentCapOverride)
     : literalRecentCandidateCap();
@@ -622,8 +632,14 @@ function buildScopedLiteralParts(
           JOIN community_channels cc
             ON cc.id = mc.channel_id
           JOIN users u ON u.id = mc.author_id
-          WHERE lower(coalesce(mc.content, '')) LIKE ('%' || lower(${rawQueryPh}) || '%')
-             OR position(lower(${rawQueryPh}) in lower(coalesce(mc.content, ''))) > 0
+          WHERE ${
+            strictMultiWord
+              ? strictTermLikePhs
+                  .map((ph) => `lower(coalesce(mc.content, '')) LIKE ('%' || ${ph}::text || '%')`)
+                  .join('\n             AND ')
+              : `lower(coalesce(mc.content, '')) LIKE ('%' || lower(${rawQueryPh}::text) || '%')
+             OR position(lower(${rawQueryPh}::text) in lower(coalesce(mc.content, ''))) > 0`
+          }
           ORDER BY mc.created_at DESC, mc.id DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
         ) search_rows ON scope_access.has_access = TRUE`,
@@ -664,8 +680,14 @@ function buildScopedLiteralParts(
           ) m
           JOIN users u ON u.id = m.author_id
           LEFT JOIN channels ch ON ch.id = m.channel_id
-          WHERE lower(coalesce(m.content, '')) LIKE ('%' || lower(${rawQueryPh}) || '%')
-             OR position(lower(${rawQueryPh}) in lower(coalesce(m.content, ''))) > 0
+          WHERE ${
+            strictMultiWord
+              ? strictTermLikePhs
+                  .map((ph) => `lower(coalesce(m.content, '')) LIKE ('%' || ${ph}::text || '%')`)
+                  .join('\n             AND ')
+              : `lower(coalesce(m.content, '')) LIKE ('%' || lower(${rawQueryPh}::text) || '%')
+             OR position(lower(${rawQueryPh}::text) in lower(coalesce(m.content, ''))) > 0`
+          }
           ORDER BY m.created_at DESC, m.id DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
         ) search_rows ON scope_access.has_access = TRUE`,
@@ -801,7 +823,8 @@ async function searchOnce(
     const tsqueryText = String(tsqueryMetaRes.rows[0]?.tsquery_text ?? '');
     const tsqueryNodes = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0);
     const strictTerms = tokenizeStrictSearchTerms(trimmed);
-    const weakTsquery = strictTerms.length > 1 && tsqueryNodes <= 1;
+    const strictMultiWord = strictTerms.length > 1;
+    const weakTsquery = strictMultiWord && tsqueryNodes <= 1;
 
     const ftsMeta = buildFtsParts(trimmed, opts);
     const tFts = Date.now();
@@ -814,13 +837,17 @@ async function searchOnce(
     }
 
     const ftsHits = ftsRes.rows.filter((row: any) => row && row.id);
+    const strictFtsHits = strictMultiWord
+      ? ftsHits.filter((row: any) => messageMatchesAllStrictTerms(row?.content, strictTerms))
+      : ftsHits;
     const ftsHitCount = ftsHits.length;
+    const strictFtsHitCount = strictFtsHits.length;
     const communityFtsCandidateCount =
       scopeLabel === 'community'
         ? ftsRes.rows.find((r: any) => r && r.fts_candidate_count != null)?.fts_candidate_count
         : undefined;
 
-    if (ftsHitCount > 0 && !weakTsquery) {
+    if (strictFtsHitCount > 0 && !weakTsquery) {
       const totalMs = Date.now() - tSearchStart;
       logSearchTrace({
         requestId,
@@ -829,6 +856,8 @@ async function searchOnce(
         tsquery_text: tsqueryText,
         tsquery_node_count: tsqueryNodes,
         fts_hit_count: ftsHitCount,
+        strict_term_count: strictTerms.length,
+        strict_fts_hit_count: strictFtsHitCount,
         fallback_used: false,
         fallback_hit_count: 0,
         total_ms: totalMs,
@@ -836,14 +865,19 @@ async function searchOnce(
         ...(scopeLabel === 'community'
           ? {
               fts_candidate_count: communityFtsCandidateCount,
-              result_count: ftsHitCount,
+              result_count: strictFtsHitCount,
             }
           : {}),
       });
-      return buildResult(ftsRes.rows, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
+      return buildResult(strictFtsHits, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
     }
 
-    const literalMeta = buildScopedLiteralParts(trimmed, opts, literalRecentCandidateCapDeep());
+    const literalMeta = buildScopedLiteralParts(
+      trimmed,
+      opts,
+      strictTerms,
+      literalRecentCandidateCapDeep(),
+    );
     const tLit = Date.now();
     const literalRes = await client.query(literalMeta.sql, literalMeta.params);
     queryMsAccum += Date.now() - tLit;
@@ -853,8 +887,8 @@ async function searchOnce(
       throw err;
     }
     const fallbackHits = literalRes.rows.filter((row: any) => row && row.id);
-    const combinedHits = weakTsquery
-      ? mergeSearchRowsPreferLiteral(fallbackHits, ftsHits, limit, offset)
+    const combinedHits = weakTsquery || strictMultiWord
+      ? mergeSearchRowsPreferLiteral(fallbackHits, strictFtsHits, limit, offset)
       : fallbackHits;
     const totalMs = Date.now() - tSearchStart;
     logSearchTrace({
@@ -864,6 +898,8 @@ async function searchOnce(
       tsquery_text: tsqueryText,
       tsquery_node_count: tsqueryNodes,
       fts_hit_count: ftsHitCount,
+      strict_term_count: strictTerms.length,
+      strict_fts_hit_count: strictFtsHitCount,
       fallback_used: true,
       fallback_hit_count: fallbackHits.length,
       weak_tsquery: weakTsquery,
@@ -882,7 +918,7 @@ async function searchOnce(
 
 // ── Meili-backed search path ──────────────────────────────────────────────────
 
-const MEILI_STRICT_TERM_MIN_LEN = 2;
+const STRICT_TERM_MIN_LEN = 1;
 
 /**
  * Split a user query into lowercase terms for strict substring AND matching
@@ -895,7 +931,7 @@ function tokenizeStrictSearchTerms(raw: string): string[] {
     .toLowerCase()
     .split(/\s+/)
     .map((t) => t.replace(/^[^\p{L}\p{N}]+/gu, '').replace(/[^\p{L}\p{N}]+$/gu, ''))
-    .filter((t) => t.length >= MEILI_STRICT_TERM_MIN_LEN);
+    .filter((t) => t.length >= STRICT_TERM_MIN_LEN);
 }
 
 function messageMatchesAllStrictTerms(content: unknown, terms: string[]): boolean {

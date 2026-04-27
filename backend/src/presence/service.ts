@@ -130,19 +130,24 @@ async function getPresenceFanoutRecipientUserIds(userId, targets) {
   )];
 
   const { rows } = await query(
-    `SELECT DISTINCT recipient_id::text AS user_id
+    `SELECT recipient_id::text AS user_id
        FROM (
-         SELECT $1::uuid AS recipient_id
-         UNION
-         SELECT cm.user_id AS recipient_id
-           FROM community_members cm
-          WHERE cm.community_id = ANY($2::uuid[])
-         UNION
-         SELECT cp.user_id AS recipient_id
-           FROM conversation_participants cp
-          WHERE cp.conversation_id = ANY($3::uuid[])
-            AND cp.left_at IS NULL
-       ) recipients`,
+         SELECT DISTINCT recipient_id
+           FROM (
+             SELECT $1::uuid AS recipient_id
+             UNION ALL
+             SELECT cm.user_id AS recipient_id
+               FROM community_members cm
+              WHERE cm.community_id = ANY($2::uuid[])
+             UNION ALL
+             SELECT cp.user_id AS recipient_id
+               FROM conversation_participants cp
+              WHERE cp.conversation_id = ANY($3::uuid[])
+                AND cp.left_at IS NULL
+           ) recipients_union
+       ) recipients
+      WHERE recipient_id IS NOT NULL
+        AND recipient_id <> $1::uuid`,
     [userId, communityIds, conversationIds],
   );
 
