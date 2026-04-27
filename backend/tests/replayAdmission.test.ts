@@ -56,7 +56,7 @@ describe('websocket replay admission', () => {
     });
 
     expect(cfg).toEqual({
-      replaySemaphoreMax: 2,
+      replaySemaphoreMax: 32,
       replayDeferMaxAttempts: 8,
       replayDeferBaseDelayMs: 250,
       replayDeferMaxDelayMs: 4000,

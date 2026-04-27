@@ -14,7 +14,7 @@ function parseReplayAdmissionConfig(env: NodeJS.ProcessEnv = process.env): Repla
   const rawWsReplaySemaphoreMax = Number(env.WS_REPLAY_SEMAPHORE_MAX || '2');
   const replaySemaphoreMax =
     Number.isFinite(rawWsReplaySemaphoreMax) && rawWsReplaySemaphoreMax > 0
-      ? Math.min(2, Math.floor(rawWsReplaySemaphoreMax))
+      ? Math.min(32, Math.floor(rawWsReplaySemaphoreMax))
       : 2;
 
   const rawWsReplayDeferredMaxAttempts = Number(env.WS_REPLAY_DEFER_MAX_ATTEMPTS || '8');

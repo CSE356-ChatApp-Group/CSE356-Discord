@@ -71,7 +71,7 @@ const WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED = Math.min(
 const rawReplayDbMaxGlobal = Number(process.env.WS_REPLAY_DB_MAX_IN_FLIGHT || '2');
 const WS_REPLAY_DB_MAX_GLOBAL =
   Number.isFinite(rawReplayDbMaxGlobal) && rawReplayDbMaxGlobal >= 1
-    ? Math.min(2, Math.floor(rawReplayDbMaxGlobal))
+    ? Math.min(32, Math.floor(rawReplayDbMaxGlobal))
     : 2;
 
 const rawReplayDedupTtlSec = Number(process.env.WS_REPLAY_DEDUP_TTL_SEC || '3');

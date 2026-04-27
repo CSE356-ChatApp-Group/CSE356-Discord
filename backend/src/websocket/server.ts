@@ -80,7 +80,11 @@ const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { loadReplayableMessagesForUser } = require("../messages/reconnectReplay");
 const { markWsRecentConnect, markChannelRecentConnect } = require("./recentConnect");
-const { parseReplayAdmissionConfig, evaluateReplayGate } = require("./replayAdmission");
+const {
+  parseReplayAdmissionConfig,
+  evaluateReplayGate,
+  computeReplayDeferredDelayMs,
+} = require("./replayAdmission");
 const { isWsReplayDisabled } = require("../utils/abuseKillSwitch");
 const { clientIpFromReq } = require("../middleware/wsUpgradeLimiter");
 const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
@@ -257,6 +261,37 @@ function replayGateSnapshot() {
     replayAdmissionConfig,
   );
   return { ...gate, pool };
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForReplayGateOpen(ws, userId) {
+  let attempts = 0;
+  let totalWaitMs = 0;
+  let lastGate = replayGateSnapshot();
+  while (!lastGate.ok && attempts < replayAdmissionConfig.replayDeferMaxAttempts) {
+    attempts += 1;
+    if (ws.readyState !== WebSocket.OPEN) {
+      return { ok: false, gate: lastGate, attempts, totalWaitMs, cancelled: true };
+    }
+    const delayMs = computeReplayDeferredDelayMs(attempts, replayAdmissionConfig);
+    totalWaitMs += delayMs;
+    await sleepMs(delayMs);
+    lastGate = replayGateSnapshot();
+  }
+  if (attempts > 0 && lastGate.ok) {
+    logger.info(
+      {
+        userId,
+        attempts,
+        totalWaitMs,
+      },
+      "WS reconnect replay admission deferred before success",
+    );
+  }
+  return { ok: lastGate.ok, gate: lastGate, attempts, totalWaitMs, cancelled: false };
 }
 
 function aclCacheKey(userId: string, channel: string) {
@@ -1753,18 +1788,23 @@ wss.on("connection", async (ws, req) => {
             "WS reconnect replay skipped: per-IP concurrent replay cap",
           );
         } else {
-          const gate = replayGateSnapshot();
-          if (!gate.ok) {
-            wsReplayFailOpenTotal.inc({ reason: gate.reason || "gate" });
+          const admission = await waitForReplayGateOpen(ws, user.id);
+          if (!admission.ok) {
+            if (!admission.cancelled) {
+              wsReplayFailOpenTotal.inc({ reason: admission.gate.reason || "gate" });
+            }
             logger.warn(
               {
                 userId: user.id,
-                reason: gate.reason,
-                waiting: gate.pool.waiting,
+                reason: admission.gate.reason,
+                waiting: admission.gate.pool.waiting,
                 inFlight: wsReplayInFlightCount,
                 maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+                attempts: admission.attempts,
+                deferredWaitMs: admission.totalWaitMs,
+                cancelled: admission.cancelled,
               },
-              "WS reconnect replay skipped: pressure (fail-open empty)",
+              "WS reconnect replay skipped after bounded admission waits",
             );
             endReplayForIp(ws._clientIp);
           } else {
@@ -1860,7 +1900,17 @@ wss.on("connection", async (ws, req) => {
         return;
       }
       ws._lastDataFrameAt = Date.now();
-      ws.send(JSON.stringify({ event: 'ready' }));
+      ws.send(
+        JSON.stringify({
+          event: "ready",
+          data: {
+            bootstrapComplete: true,
+            subscriptionsHydrated: true,
+            connectedAt: ws._connectedAt,
+            readyAt: ws._lastDataFrameAt,
+          },
+        }),
+      );
     })
     .catch(() => {
     });
