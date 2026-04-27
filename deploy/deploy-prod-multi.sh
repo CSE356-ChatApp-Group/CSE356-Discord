@@ -483,10 +483,23 @@ for vm in "$VM1" "$VM2" "$VM3"; do
   ports_list="${ports[*]}"
   echo "--- ${label} (${vm}) ---"
   # shellcheck disable=SC2029
-  ssh_vm "$vm" "for p in ${ports_list}; do
+  ssh_vm "$vm" "any_dead=0
+  for p in ${ports_list}; do
     echo -n \"  Worker \$p: \"
-    curl -sf --max-time 8 http://127.0.0.1:\$p/health 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); c=d.get("capacity",{}); print(d["status"], "lag="+str(c.get("event_loop_lag_p99_ms","?"))+"ms stage="+str(c.get("overload_stage","?")))' 2>/dev/null || echo \"DEAD\"
-  done" || overall_ok=0
+    body=\$(curl -fsS --max-time 8 \"http://127.0.0.1:\$p/health\" 2>/dev/null || true)
+    if [ -z \"\$body\" ]; then
+      echo \"DEAD\"
+      any_dead=1
+      continue
+    fi
+    parsed=\$(printf '%s' \"\$body\" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get(\"capacity\",{}); print(d.get(\"status\",\"UNKNOWN\"), \"lag=\"+str(c.get(\"event_loop_lag_p99_ms\",\"?\"))+\"ms stage=\"+str(c.get(\"overload_stage\",\"?\")))' 2>/dev/null || true)
+    if [ -z \"\$parsed\" ]; then
+      echo \"OK\"
+    else
+      echo \"\$parsed\"
+    fi
+  done
+  [ \"\$any_dead\" -eq 0 ]" || overall_ok=0
 done
 
 echo ""
