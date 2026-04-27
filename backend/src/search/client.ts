@@ -867,7 +867,7 @@ function shouldRetrySearchOnPrimary(
  * Queries without communityId, channelId, or conversationId return no hits.
  *
  * @param q     Raw query string (validated by caller: non-empty when present)
- * @param opts  { channelId?, conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset?, requestId? }
+ * @param opts  { conversationId?, communityId?, userId, authorId?, after?, before?, limit?, offset?, requestId? }
  */
 async function searchOnce(
   q: string,
@@ -1204,7 +1204,6 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       {
         query: trimmed,
         communityId: opts.communityId,
-        channelId: opts.channelId,
         conversationId: opts.conversationId,
       },
       'search: replica returned empty result set, retrying on primary',
@@ -1218,7 +1217,6 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       {
         query: trimmed,
         communityId: opts.communityId,
-        channelId: opts.channelId,
         conversationId: opts.conversationId,
       },
       'search: replica access check may be stale, retrying on primary',
