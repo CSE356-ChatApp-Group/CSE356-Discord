@@ -36,7 +36,8 @@ type SingleflightParams<T> = {
 const DEFAULT_LOCK_TTL_MS = 2_500;
 const DEFAULT_WAIT_FOR_FRESH_MS = 800;
 const DEFAULT_POLL_MS = 40;
-const DEFAULT_STALE_MULTIPLIER = 3;
+/** Stale companion TTL = ceil(ttl * multiplier); lowered default to cut Redis duplication. */
+const DEFAULT_STALE_MULTIPLIER = 2;
 const DEFAULT_TTL_JITTER_RATIO = 0.20;
 
 function sleep(ms: number) {
@@ -76,24 +77,44 @@ async function getJsonCache<T>(redis: JsonRedisLike, key: string): Promise<T | n
   }
 }
 
+type StaleCacheOpts = {
+  staleTtlSeconds?: number;
+  jitterRatio?: number;
+  /** When false, skip `stale:<key>` (saves ~1× JSON for large list caches). */
+  writeStale?: boolean;
+  /** Overrides DEFAULT_STALE_MULTIPLIER when staleTtlSeconds is not set. */
+  staleMultiplier?: number;
+  /** Upper bound for stale TTL (seconds). */
+  maxStaleTtlSeconds?: number;
+};
+
 async function setJsonCacheWithStale(
   redis: JsonRedisLike,
   key: string,
   value: unknown,
   ttlSeconds: number,
-  opts: { staleTtlSeconds?: number; jitterRatio?: number } = {},
+  opts: StaleCacheOpts = {},
 ) {
   const payload = JSON.stringify(value);
   const ttl = jitteredTtlSeconds(ttlSeconds, opts.jitterRatio);
+  const mult = Number.isFinite(opts.staleMultiplier as number)
+    ? Number(opts.staleMultiplier)
+    : DEFAULT_STALE_MULTIPLIER;
+  const maxStale = Number.isFinite(opts.maxStaleTtlSeconds as number)
+    ? clampInt(Number(opts.maxStaleTtlSeconds), Math.max(ttl + 1, 2), 7 * 24 * 60 * 60)
+    : 7 * 24 * 60 * 60;
   const staleTtl = clampInt(
-    opts.staleTtlSeconds || ttlSeconds * DEFAULT_STALE_MULTIPLIER,
+    opts.staleTtlSeconds ?? Math.round(ttlSeconds * mult),
     Math.max(ttl + 1, 2),
-    7 * 24 * 60 * 60,
+    maxStale,
   );
   try {
     await redis.set(key, payload, 'EX', ttl);
   } catch {
     // non-fatal
+  }
+  if (opts.writeStale === false) {
+    return;
   }
   try {
     await redis.set(staleCacheKey(key), payload, 'EX', staleTtl);

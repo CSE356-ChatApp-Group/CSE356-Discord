@@ -25,6 +25,32 @@ function conversationFanoutTargetsVersionKey(conversationId: string) {
   return `conversation:${conversationId}:fanout_targets_v`;
 }
 
+function parseConversationFanoutTargetsCached(
+  conversationId: string,
+  cached: string,
+): string[] | null {
+  try {
+    const parsed = JSON.parse(cached);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((value: unknown) => typeof value === 'string');
+    }
+    if (
+      parsed
+      && typeof parsed === 'object'
+      && (parsed as { v?: unknown; u?: unknown }).v === 2
+      && Array.isArray((parsed as { u?: unknown }).u)
+    ) {
+      const users = (parsed as { u: string[] }).u.filter(
+        (id: unknown) => typeof id === 'string' && id.length > 0,
+      );
+      return [`conversation:${conversationId}`, ...users.map((id: string) => `user:${id}`)];
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 async function readConversationFanoutCacheState(cacheKey: string, versionKey: string) {
   const mget = typeof redis.mget === 'function' ? redis.mget.bind(redis) : null;
   if (!mget) {
@@ -80,14 +106,10 @@ async function getConversationFanoutTargets(conversationId: string): Promise<str
   const versionKey = conversationFanoutTargetsVersionKey(conversationId);
   const { cached, version: cachedVersion } = await readConversationFanoutCacheState(cacheKey, versionKey);
   if (cached) {
-    try {
-      const parsed = JSON.parse(cached);
-      if (Array.isArray(parsed)) {
-        fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'hit' });
-        return parsed.filter((value) => typeof value === 'string');
-      }
-    } catch {
-      // Ignore parse failures and repopulate from Postgres below.
+    const fromCache = parseConversationFanoutTargetsCached(conversationId, cached);
+    if (fromCache !== null) {
+      fanoutTargetCacheTotal.inc({ path: 'conversation_event', result: 'hit' });
+      return fromCache;
     }
     redis.del(cacheKey).catch(() => {});
   }
@@ -110,10 +132,14 @@ async function getConversationFanoutTargets(conversationId: string): Promise<str
         conversationFanoutTargetsCacheVersionRetryTotal.inc({ outcome: 'retry' });
         continue;
       }
+      const userIds = uniqueTargets
+        .filter((t) => typeof t === 'string' && t.startsWith('user:'))
+        .map((t) => t.slice('user:'.length));
+      const compact = { v: 2 as const, u: userIds };
       redis
         .set(
           cacheKey,
-          JSON.stringify(uniqueTargets),
+          JSON.stringify(compact),
           'EX',
           CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS,
         )

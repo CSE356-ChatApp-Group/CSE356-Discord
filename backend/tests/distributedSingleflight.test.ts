@@ -100,4 +100,11 @@ describe('distributedSingleflight util', () => {
     expect(await getJsonCache(redis, 'k3')).toEqual({ value: 1 });
     expect(await getJsonCache(redis, staleCacheKey('k3'))).toEqual({ value: 1 });
   });
+
+  it('writeStale:false skips stale companion key', async () => {
+    const redis = makeRedisMock();
+    await setJsonCacheWithStale(redis, 'k4', { value: 2 }, 10, { writeStale: false, jitterRatio: 0 });
+    expect(await getJsonCache(redis, 'k4')).toEqual({ value: 2 });
+    expect(await getJsonCache(redis, staleCacheKey('k4'))).toBeNull();
+  });
 });

@@ -92,6 +92,28 @@ function channelUserFanoutTargetsVersionKey(channelId: string) {
   return `channel:${channelId}:user_fanout_targets_v`;
 }
 
+function parseChannelUserFanoutTargetsCached(cached: string): string[] | null {
+  try {
+    const parsed = JSON.parse(cached);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((value: unknown) => typeof value === 'string');
+    }
+    if (
+      parsed
+      && typeof parsed === 'object'
+      && (parsed as { v?: unknown; u?: unknown }).v === 2
+      && Array.isArray((parsed as { u?: unknown }).u)
+    ) {
+      return (parsed as { u: string[] }).u
+        .filter((id: unknown) => typeof id === 'string' && id.length > 0)
+        .map((id: string) => `user:${id}`);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 async function readChannelUserFanoutCacheState(cacheKey: string, versionKey: string) {
   try {
     const [cached, version] = await redis.mget(cacheKey, versionKey);
@@ -161,17 +183,13 @@ async function getChannelUserFanoutTargetKeysWithMeta(channelId: string): Promis
   const versionKey = channelUserFanoutTargetsVersionKey(channelId);
   const { cached, version: cachedVersion } = await readChannelUserFanoutCacheState(cacheKey, versionKey);
   if (cached) {
-    try {
-      const parsed = JSON.parse(cached);
-      if (Array.isArray(parsed)) {
-        fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'hit' });
-        return {
-          targets: parsed.filter((value) => typeof value === 'string'),
-          cacheResult: 'hit',
-        };
-      }
-    } catch {
-      // Ignore parse failures and repopulate from Postgres below.
+    const fromCache = parseChannelUserFanoutTargetsCached(cached);
+    if (fromCache !== null) {
+      fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'hit' });
+      return {
+        targets: fromCache,
+        cacheResult: 'hit',
+      };
     }
     redis.del(cacheKey).catch(() => {});
   }
@@ -212,8 +230,12 @@ async function getChannelUserFanoutTargetKeysWithMeta(channelId: string): Promis
 
       const keys: string[] = rows.map((r: { user_id: string }) => `user:${r.user_id}`);
       const uniqueKeys = Array.from(new Set(keys));
+      const compact = {
+        v: 2 as const,
+        u: uniqueKeys.map((k) => (k.startsWith('user:') ? k.slice('user:'.length) : k)),
+      };
       redis
-        .set(cacheKey, JSON.stringify(uniqueKeys), 'EX', CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS)
+        .set(cacheKey, JSON.stringify(compact), 'EX', CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS)
         .catch(() => {});
       return uniqueKeys;
     }

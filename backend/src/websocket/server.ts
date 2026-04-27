@@ -1611,7 +1611,10 @@ async function listAutoSubscriptionChannels(userId, mode = 'full') {
         ...communityRes.rows.map((row) => `community:${row.id}`),
       ];
       wsBootstrapChannelsHistogram.observe(channels.length);
-      await setJsonCacheWithStale(redis, cacheKey, channels, WS_BOOTSTRAP_CACHE_TTL_SECONDS);
+      await setJsonCacheWithStale(redis, cacheKey, channels, WS_BOOTSTRAP_CACHE_TTL_SECONDS, {
+        staleMultiplier: 1.5,
+        maxStaleTtlSeconds: 600,
+      });
       return channels;
     },
   });

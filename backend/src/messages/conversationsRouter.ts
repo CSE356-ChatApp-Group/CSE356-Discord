@@ -458,7 +458,10 @@ router.get('/', async (req, res, next) => {
       applyConversationLastMessageMetadata(rows, latestByConversation);
       sortConversationRowsByLatest(rows);
       const payload = { conversations: rows };
-      await setJsonCacheWithStale(redis, cacheKey, payload, CONVERSATIONS_CACHE_TTL_SECS);
+      await setJsonCacheWithStale(redis, cacheKey, payload, CONVERSATIONS_CACHE_TTL_SECS, {
+        staleMultiplier: 1.25,
+        maxStaleTtlSeconds: 180,
+      });
       return payload;
     },
   });

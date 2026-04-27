@@ -385,22 +385,65 @@ const COMMUNITY_MEMBERS_ROSTER_SQL = `
   WHERE cm.community_id = $1
   ORDER BY cm.role DESC, u.username`;
 
+/** Hydrate `{ id, role, joined_at }[]` with user profile fields (smaller Redis payload than full rows). */
+async function hydrateCommunityMembersFromIds(minimal) {
+  const ids = (Array.isArray(minimal) ? minimal : [])
+    .map((m) => (m && typeof m.id === 'string' ? m.id : null))
+    .filter(Boolean);
+  if (!ids.length) return [];
+  const { rows: userRows } = await query(
+    `SELECT id, username, display_name, avatar_url
+       FROM users
+      WHERE id = ANY($1::uuid[])`,
+    [ids],
+  );
+  const userById = new Map(userRows.map((u: any) => [String(u.id), u]));
+  return minimal.map((m: any) => {
+    const u = userById.get(String(m.id)) as any || {};
+    return {
+      id: m.id,
+      username: u.username,
+      display_name: u.display_name,
+      avatar_url: u.avatar_url,
+      role: m.role,
+      joined_at: m.joined_at,
+    };
+  });
+}
+
+async function readMembersCacheValue(cacheKey) {
+  const raw = await getJsonCache(redis, cacheKey);
+  if (!raw) return null;
+  if (typeof raw === 'object' && !Array.isArray(raw) && raw.v === 2 && Array.isArray(raw.members)) {
+    return await hydrateCommunityMembersFromIds(raw.members);
+  }
+  if (Array.isArray(raw) && raw.length) return raw;
+  return null;
+}
+
 async function loadCommunityMembersRoster(communityId) {
   const cacheKey = membersCacheKey(communityId);
-  const cached = await getJsonCache(redis, cacheKey);
-  if (Array.isArray(cached)) return cached;
+  const cached = await readMembersCacheValue(cacheKey);
+  if (cached) return cached;
 
   return withDistributedSingleflight({
     redis,
     cacheKey,
     inflight: communityMembersInflight,
     readFresh: async () => {
-      const fresh = await getJsonCache(redis, cacheKey);
-      return Array.isArray(fresh) ? fresh : null;
+      const fresh = await readMembersCacheValue(cacheKey);
+      return fresh;
     },
     load: async () => {
       const { rows } = await query(COMMUNITY_MEMBERS_ROSTER_SQL, [communityId]);
-      redis.setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify(rows)).catch(() => {});
+      const minimal = rows.map((r) => ({
+        id: r.id,
+        role: r.role,
+        joined_at: r.joined_at,
+      }));
+      redis
+        .setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify({ v: 2, members: minimal }))
+        .catch(() => {});
       return rows;
     },
   });
@@ -733,7 +776,10 @@ router.get('/', async (req, res, next) => {
           const slice = hasMore ? rows.slice(0, page.limit) : rows;
           const body: any = await buildCommunitiesListPayload(req.user.id, slice);
           if (hasMore) body.nextAfter = slice[slice.length - 1].id;
-          await setJsonCacheWithStale(redis, cacheKey, body, COMMUNITIES_PAGED_CACHE_TTL_SECS);
+          await setJsonCacheWithStale(redis, cacheKey, body, COMMUNITIES_PAGED_CACHE_TTL_SECS, {
+            staleMultiplier: 1.25,
+            maxStaleTtlSeconds: 240,
+          });
           if (!page.after) {
             writeLastGoodCommunitiesPayload(req.user.id, body);
           }

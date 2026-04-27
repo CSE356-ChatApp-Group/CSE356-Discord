@@ -127,7 +127,7 @@ describe('channelRealtimeFanout', () => {
   it('getChannelUserFanoutTargetKeys reuses cached user fanout targets', async () => {
     redis.mget
       .mockResolvedValueOnce([null, '0'])
-      .mockResolvedValueOnce([JSON.stringify(['user:cached-a', 'user:cached-b']), '0']);
+      .mockResolvedValueOnce([JSON.stringify({ v: 2, u: ['cached-a', 'cached-b'] }), '0']);
     redis.get
       .mockResolvedValueOnce('0');
     query.mockResolvedValueOnce({
@@ -142,7 +142,7 @@ describe('channelRealtimeFanout', () => {
     expect(query).toHaveBeenCalledTimes(1);
     expect(redis.set).toHaveBeenCalledWith(
       'channel:chan-2:user_fanout_targets',
-      JSON.stringify(['user:cached-a', 'user:cached-b']),
+      JSON.stringify({ v: 2, u: ['cached-a', 'cached-b'] }),
       'EX',
       180,
     );

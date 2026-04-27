@@ -432,7 +432,10 @@ router.get('/',
           }
 
           const response = { channels: rows.filter((row) => row.id) };
-          await setJsonCacheWithStale(redis, cacheKey, response, CHANNELS_LIST_CACHE_TTL_SECS);
+          await setJsonCacheWithStale(redis, cacheKey, response, CHANNELS_LIST_CACHE_TTL_SECS, {
+            staleMultiplier: 1.25,
+            maxStaleTtlSeconds: 180,
+          });
           return { ok: true, body: response };
         },
       });

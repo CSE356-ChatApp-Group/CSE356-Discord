@@ -85,7 +85,7 @@ describe('conversationFanoutTargets', () => {
   it('reuses cached conversation fanout targets', async () => {
     redis.mget
       .mockResolvedValueOnce([null, null])
-      .mockResolvedValueOnce([JSON.stringify(['conversation:conv-2', 'user:a', 'user:b']), '0']);
+      .mockResolvedValueOnce([JSON.stringify({ v: 2, u: ['a', 'b'] }), '0']);
     redis.get
       .mockResolvedValueOnce('0');
     query.mockResolvedValueOnce({
@@ -100,7 +100,7 @@ describe('conversationFanoutTargets', () => {
     expect(query).toHaveBeenCalledTimes(1);
     expect(redis.set).toHaveBeenCalledWith(
       'conversation:conv-2:fanout_targets',
-      JSON.stringify(['conversation:conv-2', 'user:a', 'user:b']),
+      JSON.stringify({ v: 2, u: ['a', 'b'] }),
       'EX',
       180,
     );

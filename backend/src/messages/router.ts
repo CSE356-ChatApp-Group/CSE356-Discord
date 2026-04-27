@@ -1237,6 +1237,7 @@ router.get(
                   cacheKey,
                   body,
                   MESSAGES_CACHE_TTL_SECS,
+                  { writeStale: false },
                 );
               }
               return body;
@@ -1338,6 +1339,7 @@ router.get(
                   cacheKey,
                   body,
                   MESSAGES_CACHE_TTL_SECS,
+                  { writeStale: false },
                 );
               }
               return body;
