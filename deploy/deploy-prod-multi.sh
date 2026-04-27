@@ -447,32 +447,27 @@ if [ "${PROM_REDIS_HOST}" != "${VM3_INTERNAL}" ]; then
 fi
 
 echo "Starting redis_exporter via SSH ${REDIS_EXPORTER_SSH_HOST} (metrics at ${PROM_REDIS_HOST}:9121 for Prometheus)..."
+scp -q ${DEPLOY_SSH_EXTRA_OPTS} \
+  "${SCRIPT_DIR}/redis_exporter_redis_url.py" \
+  "${PROD_USER}@${REDIS_EXPORTER_SSH_HOST}:/tmp/redis_exporter_redis_url.py.deploy"
 # shellcheck disable=SC2086
 ssh -o StrictHostKeyChecking=accept-new \
     "${PROD_USER}@${REDIS_EXPORTER_SSH_HOST}" "
   set -euo pipefail
-  RURL=\$(python3 - <<'PY'
-from pathlib import Path
-env = Path('/opt/chatapp/shared/.env')
-val = ''
-if env.exists():
-    for line in env.read_text().splitlines():
-        if line.startswith('REDIS_URL='):
-            val = line.split('=', 1)[1].strip()
-print(val)
-PY
-)
-  if [ -z \"\$RURL\" ]; then
-    echo 'WARN: REDIS_URL not found in /opt/chatapp/shared/.env; using localhost without auth'
-    RURL='redis://127.0.0.1:6379'
-  fi
-  if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
-    sudo docker rm -f redis_exporter >/dev/null 2>&1 || true
-  fi
+  sudo mkdir -p /opt/chatapp-monitoring
+  sudo install -m 755 /tmp/redis_exporter_redis_url.py.deploy /opt/chatapp-monitoring/redis_exporter_redis_url.py
+  rm -f /tmp/redis_exporter_redis_url.py.deploy
+  RURL=\$(python3 /opt/chatapp-monitoring/redis_exporter_redis_url.py)
+  ENVF=/opt/chatapp-monitoring/redis_exporter_runtime.env
+  printf 'REDIS_ADDR=%s\\n' \"\$RURL\" | sudo tee \"\$ENVF\" >/dev/null
+  sudo chmod 600 \"\$ENVF\"
+  sudo docker rm -f redis_exporter >/dev/null 2>&1 || true
   sudo docker pull oliver006/redis_exporter:latest >/dev/null
-  sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
-    oliver006/redis_exporter:latest --redis.addr=\"\$RURL\" >/dev/null
-  echo 'redis_exporter started on Redis VM (:9121)'
+  sudo docker run -d --name redis_exporter --restart unless-stopped --network host \\
+    --env-file \"\$ENVF\" \\
+    oliver006/redis_exporter:latest >/dev/null
+  sudo rm -f \"\$ENVF\"
+  echo 'redis_exporter (re)started (REDIS_ADDR from merged .env)'
 " || echo "⚠ Failed to start redis_exporter on ${REDIS_EXPORTER_SSH_HOST}"
 
 echo "Checking monitoring VM -> Redis exporter connectivity (${PROM_REDIS_HOST}:9121)..."

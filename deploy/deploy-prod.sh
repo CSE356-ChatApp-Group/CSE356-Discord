@@ -2660,6 +2660,10 @@ scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o Co
 scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS} \
     "${REPO_ROOT}/deploy/pgbouncer-exporter.py" "$PROD_USER@$PROD_HOST:/tmp/pgbouncer-exporter.py.deploy" || true
+scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    ${DEPLOY_SSH_EXTRA_OPTS} \
+    "${REPO_ROOT}/deploy/redis_exporter_redis_url.py" "$PROD_USER@$PROD_HOST:/tmp/redis_exporter_redis_url.py.deploy" \
+    || echo "WARN: could not copy redis_exporter_redis_url.py (redis_exporter may use fallback)" >&2
 ssh_prod "
   set -euo pipefail
   if [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/promtail-host-config.yml.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ] || [ -f /tmp/pgbouncer-exporter.py.deploy ]; then
@@ -2688,22 +2692,29 @@ ssh_prod "
   if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
     sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml up -d --remove-orphans node-exporter promtail >/dev/null
   fi
-  set -a
-  # shellcheck disable=SC1091
-  source /opt/chatapp/shared/.env 2>/dev/null || true
-  set +a
-  RURL=\"\${REDIS_URL:-redis://127.0.0.1:6379}\"
-  if ! sudo docker ps --format '{{.Names}}' | grep -qx redis_exporter; then
-    if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
-      sudo docker rm -f redis_exporter 2>/dev/null || true
-    fi
-    sudo docker pull oliver006/redis_exporter:latest >/dev/null
-    sudo docker run -d --name redis_exporter --restart unless-stopped --network host \
-      oliver006/redis_exporter:latest --redis.addr=\"\$RURL\"
-    echo 'redis_exporter started (uses REDIS_URL from /opt/chatapp/shared/.env)'
-  else
-    echo 'redis_exporter already running — skipping pull'
+  if [ -f /tmp/redis_exporter_redis_url.py.deploy ]; then
+    sudo install -m 755 /tmp/redis_exporter_redis_url.py.deploy /opt/chatapp-monitoring/redis_exporter_redis_url.py
+    rm -f /tmp/redis_exporter_redis_url.py.deploy
   fi
+  if [ -x /opt/chatapp-monitoring/redis_exporter_redis_url.py ]; then
+    RURL=\$(python3 /opt/chatapp-monitoring/redis_exporter_redis_url.py)
+  else
+    set -a
+    # shellcheck disable=SC1091
+    source /opt/chatapp/shared/.env 2>/dev/null || true
+    set +a
+    RURL=\"\${REDIS_URL:-redis://127.0.0.1:6379}\"
+  fi
+  ENVF=/opt/chatapp-monitoring/redis_exporter_runtime.env
+  printf 'REDIS_ADDR=%s\\n' \"\$RURL\" | sudo tee \"\$ENVF\" >/dev/null
+  sudo chmod 600 \"\$ENVF\"
+  sudo docker rm -f redis_exporter 2>/dev/null || true
+  sudo docker pull oliver006/redis_exporter:latest >/dev/null
+  sudo docker run -d --name redis_exporter --restart unless-stopped --network host \\
+    --env-file \"\$ENVF\" \\
+    oliver006/redis_exporter:latest >/dev/null
+  sudo rm -f \"\$ENVF\"
+  echo 'redis_exporter (re)started (REDIS_ADDR from merged .env via redis_exporter_redis_url.py)'
 
   if [ -f /tmp/pgbouncer-exporter.py.deploy ]; then
     sudo install -m 755 /tmp/pgbouncer-exporter.py.deploy /opt/chatapp-monitoring/pgbouncer-exporter.py
