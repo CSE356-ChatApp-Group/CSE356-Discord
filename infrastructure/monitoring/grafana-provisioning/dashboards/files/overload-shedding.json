@@ -136,7 +136,7 @@
           "refId": "A"
         }
       ],
-      "title": "503 Shed Rate",
+      "title": "Global 429 Shed Rate",
       "type": "stat"
     },
     {
@@ -309,11 +309,11 @@
       "targets": [
         {
           "expr": "sum by (stage) (rate(http_overload_shed_total{job=\"chatapp-api\"}[5m]))",
-          "legendFormat": "Requests Shed (503)",
+          "legendFormat": "Global overload shed (429)",
           "refId": "A"
         }
       ],
-      "title": "Request Shedding Rate (Higher = Higher Load)",
+      "title": "Global Overload Shedding Rate",
       "type": "timeseries"
     },
     {
@@ -397,9 +397,14 @@
           "expr": "sum by (stage, reason) (rate(search_throttled_total{job=\"chatapp-api\"}[5m]))",
           "legendFormat": "{{stage}} - {{reason}}",
           "refId": "A"
+        },
+        {
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route=\"/api/v1/search/\",status_class=\"4xx\"}[5m]))",
+          "legendFormat": "search route 4xx (all reasons)",
+          "refId": "B"
         }
       ],
-      "title": "Search Throttling (Result Limiting Under Load)",
+      "title": "Search Throttling (Route-Local Reasons)",
       "type": "timeseries"
     },
     {
@@ -491,6 +496,107 @@
         }
       ],
       "title": "Database Pool Status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Rate / value",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(read_receipt_requests_total{job=\"chatapp-api\",result=\"deferred_message_channel_insert_lock_pressure\"}[5m]))",
+          "legendFormat": "read deferred (insert-lock pressure)",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route=\"/api/v1/messages/\",method=\"POST\",status_class=\"5xx\"}[5m]))",
+          "legendFormat": "POST /messages 5xx",
+          "refId": "B"
+        },
+        {
+          "expr": "max(message_channel_insert_lock_pressure_wait_p95_ms{job=\"chatapp-api\"})",
+          "legendFormat": "insert-lock wait p95 ms",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=\"/api/v1/search/\"}[5m])))",
+          "legendFormat": "search p99 ms",
+          "refId": "D"
+        }
+      ],
+      "title": "Route Isolation Signals (Read vs Search vs Messages)",
       "type": "timeseries"
     }
   ],

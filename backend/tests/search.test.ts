@@ -14,6 +14,10 @@ import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
 
 const logger = require('../src/utils/logger');
+const {
+  recordMessageChannelInsertLockAcquireWait,
+  resetMessageChannelInsertLockPressureForTests,
+} = require('../src/messages/messageInsertLockPressure');
 
 afterAll(async () => {
   await wsServer.shutdown();
@@ -632,7 +636,7 @@ describe('Search – communityId + conversationId (DM vs mislabeled channel)', (
     expect(res.body.hits[0].content).toContain(marker);
   });
 
-  it('promotes conversationId to channelId when that UUID is a channel in the community', async () => {
+  it('falls back to community scope when conversationId is not an accessible conversation', async () => {
     const owner = await createAuthenticatedUser('srchmislabel');
     const community = await createCommunity(owner.accessToken, uniqueSuffix());
     const ch = await createChannel(owner.accessToken, community.id);
@@ -895,6 +899,79 @@ describe('Search – scoped literal fallback (hardened)', () => {
 
     expect(res.status).toBe(400);
     expect(String(res.body.error || '')).toContain('Search must be scoped');
+  });
+});
+
+describe('Search – overload isolation and classifier reasons', () => {
+  let warnSpy: jest.SpyInstance;
+  let infoSpy: jest.SpyInstance;
+  const prevForcedStage = process.env.FORCE_OVERLOAD_STAGE;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
+    resetMessageChannelInsertLockPressureForTests();
+    delete process.env.FORCE_OVERLOAD_STAGE;
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+    resetMessageChannelInsertLockPressureForTests();
+    if (prevForcedStage === undefined) delete process.env.FORCE_OVERLOAD_STAGE;
+    else process.env.FORCE_OVERLOAD_STAGE = prevForcedStage;
+  });
+
+  it('insert-lock pressure does not shed /search', async () => {
+    const owner = await createAuthenticatedUser('srchisolock');
+    const community = await createCommunity(owner.accessToken, uniqueSuffix());
+    const channel = await createChannel(owner.accessToken, community.id);
+    const marker = `isolationmarker${uniqueSuffix()}`;
+    await sendMessage(owner.accessToken, channel.id, marker);
+    for (let i = 0; i < 8; i += 1) recordMessageChannelInsertLockAcquireWait(450);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(marker)}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect((res.body.hits || []).some((h: any) => String(h.content || '').includes(marker))).toBe(true);
+    const throttled = warnSpy.mock.calls.find(
+      (c: unknown[]) => (c[0] as Record<string, unknown>)?.reason === 'insert_lock_read_pressure',
+    );
+    expect(throttled).toBeUndefined();
+  });
+
+  it('search overload sheds /search with overload_stage reason label', async () => {
+    process.env.FORCE_OVERLOAD_STAGE = '3';
+    const owner = await createAuthenticatedUser('srchisoload');
+    const community = await createCommunity(owner.accessToken, uniqueSuffix());
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=anything&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(res.status).toBe(429);
+    const throttled = warnSpy.mock.calls.find(
+      (c: unknown[]) => (c[0] as Record<string, unknown>)?.reason === 'overload_stage',
+    );
+    expect(throttled).toBeDefined();
+  });
+
+  it('logs classifier empty-result for true 200 empty search', async () => {
+    const owner = await createAuthenticatedUser('srchemptyclass');
+    const community = await createCommunity(owner.accessToken, uniqueSuffix());
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${encodeURIComponent(`none${uniqueSuffix()}`)}&communityId=${community.id}`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect((res.body.hits || []).length).toBe(0);
+    const emptyLog = infoSpy.mock.calls.find(
+      (c: unknown[]) => (c[0] as Record<string, unknown>)?.classification === 'search_empty_result',
+    );
+    expect(emptyLog).toBeDefined();
   });
 });
 
