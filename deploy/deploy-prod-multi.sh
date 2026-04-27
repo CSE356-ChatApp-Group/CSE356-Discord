@@ -132,38 +132,46 @@ fi
 echo ""
 
 # ── Phase -1: Pre-flight checks before any deploy ──────────────────────────────
-echo "=== Phase -1: Pre-flight PostgreSQL check ==="
-echo "Verifying PostgreSQL max_connections is set for per-VM PgBouncer architecture..."
-PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
-set +e
-# shellcheck disable=SC2086
-CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ${DEPLOY_SSH_EXTRA_OPTS} "${PROD_USER}@${PROD_DB_HOST}" \
-  "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null")
-SSH_EXIT=$?
-set -e
-if [ "${SSH_EXIT}" -ne 0 ]; then
-  echo "ERROR: SSH connection to DB host ${PROD_DB_HOST} failed (exit code ${SSH_EXIT})."
-  echo "This usually means host key verification failed or SSH is not properly configured."
-  echo "Check that ${PROD_DB_HOST} is in known_hosts and the SSH key can access the host."
-  exit 1
-fi
-if [ -z "${CURRENT_MAX}" ]; then
-  echo "ERROR: PostgreSQL max_connections check returned empty output from ${PROD_DB_HOST}."
-  exit 1
-fi
-echo "  Current PostgreSQL max_connections: ${CURRENT_MAX}"
-if [ "${CURRENT_MAX}" -lt "${DB_TARGET_MAX_CONNECTIONS}" ]; then
-  echo "ERROR: PostgreSQL max_connections must be >= ${DB_TARGET_MAX_CONNECTIONS} for the staged pool-reduction rollout."
-  echo "  Current: ${CURRENT_MAX}"
-  echo "  Required: ${DB_TARGET_MAX_CONNECTIONS} (VM1 ${VM1_PGBOUNCER_MAX_DB_CONNECTIONS} + VM2 ${VM2_PGBOUNCER_MAX_DB_CONNECTIONS} + VM3 ${VM3_PGBOUNCER_MAX_DB_CONNECTIONS} + admin headroom)"
+# Set SKIP_DB_SSH_PREFLIGHT=1 only when the deploy host cannot SSH to the DB VM
+# (e.g. missing known_hosts in CI); default is always verify max_connections.
+if [ "${SKIP_DB_SSH_PREFLIGHT:-}" = "1" ]; then
+  echo "=== Phase -1: Pre-flight PostgreSQL check (skipped: SKIP_DB_SSH_PREFLIGHT=1) ==="
+  echo "WARNING: not verifying PostgreSQL max_connections on DB host — use only when necessary."
   echo ""
-  echo "  Run on DB VM to upgrade:"
-  echo "    DB_SSH=${PROD_USER}@${PROD_DB_HOST} REMOTE_PG_MAX_CONNECTIONS=${DB_TARGET_MAX_CONNECTIONS} ALLOW_DB_RESTART=true ./deploy/tune-remote-db-postgres.sh"
+else
+  echo "=== Phase -1: Pre-flight PostgreSQL check ==="
+  echo "Verifying PostgreSQL max_connections is set for per-VM PgBouncer architecture..."
+  PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
+  set +e
+  # shellcheck disable=SC2086
+  CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ${DEPLOY_SSH_EXTRA_OPTS} "${PROD_USER}@${PROD_DB_HOST}" \
+    "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null")
+  SSH_EXIT=$?
+  set -e
+  if [ "${SSH_EXIT}" -ne 0 ]; then
+    echo "ERROR: SSH connection to DB host ${PROD_DB_HOST} failed (exit code ${SSH_EXIT})."
+    echo "This usually means host key verification failed or SSH is not properly configured."
+    echo "Check that ${PROD_DB_HOST} is in known_hosts and the SSH key can access the host."
+    exit 1
+  fi
+  if [ -z "${CURRENT_MAX}" ]; then
+    echo "ERROR: PostgreSQL max_connections check returned empty output from ${PROD_DB_HOST}."
+    exit 1
+  fi
+  echo "  Current PostgreSQL max_connections: ${CURRENT_MAX}"
+  if [ "${CURRENT_MAX}" -lt "${DB_TARGET_MAX_CONNECTIONS}" ]; then
+    echo "ERROR: PostgreSQL max_connections must be >= ${DB_TARGET_MAX_CONNECTIONS} for the staged pool-reduction rollout."
+    echo "  Current: ${CURRENT_MAX}"
+    echo "  Required: ${DB_TARGET_MAX_CONNECTIONS} (VM1 ${VM1_PGBOUNCER_MAX_DB_CONNECTIONS} + VM2 ${VM2_PGBOUNCER_MAX_DB_CONNECTIONS} + VM3 ${VM3_PGBOUNCER_MAX_DB_CONNECTIONS} + admin headroom)"
+    echo ""
+    echo "  Run on DB VM to upgrade:"
+    echo "    DB_SSH=${PROD_USER}@${PROD_DB_HOST} REMOTE_PG_MAX_CONNECTIONS=${DB_TARGET_MAX_CONNECTIONS} ALLOW_DB_RESTART=true ./deploy/tune-remote-db-postgres.sh"
+    echo ""
+    exit 1
+  fi
+  echo "✓ PostgreSQL max_connections is adequate (${CURRENT_MAX})"
   echo ""
-  exit 1
 fi
-echo "✓ PostgreSQL max_connections is adequate (${CURRENT_MAX})"
-echo ""
 
 # ── Phase 0: Deploy to VM3 first (after pre-flight PostgreSQL check) ─────────
 # VM3 has no shared services: a *failed* deploy does not take down Redis/PgBouncer on VM1.
