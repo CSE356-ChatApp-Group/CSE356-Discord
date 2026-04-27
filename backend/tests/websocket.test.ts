@@ -1558,6 +1558,77 @@ describe('Multi-socket fanout', () => {
     }
   });
 
+  it('delivers participant update to existing users and invite notifications to newly added users', async () => {
+    const owner = await createAuthenticatedUser('wsgroupinviteowner');
+    const existing = await createAuthenticatedUser('wsgroupinviteexisting');
+    const base = await createAuthenticatedUser('wsgroupinvitebase');
+    const invitee = await createAuthenticatedUser('wsgroupinviteinvitee');
+
+    const existingSocket = await connectWebSocket(port, existing.accessToken);
+    const inviteeSocket = await connectWebSocket(port, invitee.accessToken);
+
+    try {
+      const createRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [existing.user.id, base.user.id] });
+
+      expect(createRes.status).toBe(201);
+      const groupConversationId = createRes.body.conversation.id;
+
+      const existingParticipantAddedPromise = waitForWsEvent(
+        existingSocket,
+        (event) =>
+          event.event === 'conversation:participant_added'
+          && event.data?.conversationId === groupConversationId
+          && Array.isArray(event.data?.participantIds)
+          && event.data.participantIds.includes(invitee.user.id),
+      );
+
+      const inviteeParticipantAddedPromise = waitForWsEvent(
+        inviteeSocket,
+        (event) =>
+          event.event === 'conversation:participant_added'
+          && event.data?.conversationId === groupConversationId
+          && Array.isArray(event.data?.participantIds)
+          && event.data.participantIds.includes(invitee.user.id),
+      );
+
+      const inviteeInvitePromise = waitForWsEvent(
+        inviteeSocket,
+        (event) =>
+          ['conversation:invited', 'conversation:invite', 'conversation:created'].includes(event.event)
+          && event.data?.conversationId === groupConversationId,
+      );
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/conversations/${groupConversationId}/invite`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [invitee.user.id] });
+
+      expect(inviteRes.status).toBe(200);
+
+      const [existingParticipantAddedEvent, inviteeParticipantAddedEvent, inviteeInviteEvent] = await Promise.all([
+        existingParticipantAddedPromise,
+        inviteeParticipantAddedPromise,
+        inviteeInvitePromise,
+      ]);
+
+      expect(existingParticipantAddedEvent.data.conversationId).toBe(groupConversationId);
+      expect(existingParticipantAddedEvent.data.participantIds).toContain(invitee.user.id);
+
+      expect(inviteeParticipantAddedEvent.data.conversationId).toBe(groupConversationId);
+      expect(inviteeParticipantAddedEvent.data.participantIds).toContain(invitee.user.id);
+
+      expect(inviteeInviteEvent.data.conversationId).toBe(groupConversationId);
+      expect(inviteeInviteEvent.data.participantIds).toContain(invitee.user.id);
+      expect(inviteeInviteEvent.data.invitedBy).toBe(owner.user.id);
+    } finally {
+      await closeWebSocket(existingSocket);
+      await closeWebSocket(inviteeSocket);
+    }
+  });
+
   it('delivers user-channel events after the user reconnects', async () => {
     const owner = await createAuthenticatedUser('wsreconnectowner');
     const existing = await createAuthenticatedUser('wsreconnectexisting');
