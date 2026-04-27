@@ -90,11 +90,12 @@ async function publishUserFeedTargets(userTargets, payload) {
     shardGroups.get(shardChannel).push(userId);
   }
 
-  await Promise.all(
-    Array.from(shardGroups.entries()).map(([shardChannel, shardUserIds]) =>
-      fanout.publish(shardChannel, userFeedEnvelope(shardUserIds, payload)),
-    ),
-  );
+  // Sequential publishes: each payload can be large (message + many UUIDs). Redis
+  // executes pubsub on one thread; parallel Promise.all only stacks commands and
+  // worsens tail latency under multi-worker bursts (see Redis SLOWLOG PUBLISH).
+  for (const [shardChannel, shardUserIds] of shardGroups.entries()) {
+    await fanout.publish(shardChannel, userFeedEnvelope(shardUserIds, payload));
+  }
 }
 
 function isUserFeedEnvelope(value) {
