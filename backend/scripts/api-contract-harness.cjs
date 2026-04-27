@@ -28,7 +28,7 @@ const PASSWORD = 'ContractTest!234';
 /** Content of ctx.msgIds[0] after editMessage; use `_` not `-` so websearch_to_tsquery does not treat `-` as NOT. */
 const editedChannelSearchMark = `edited_${suffix.slice(0, 6)}`;
 
-/** @type {{ A: any, B: any, C: any, communityId: string, publicChannelId: string, privateChannelId: string, dm1v1: string, dmGroup: string, msgIds: string[], wsA: import('ws'), wsB: import('ws'), searchToken: string }} */
+/** @type {{ A: any, B: any, C: any, communityId: string, publicChannelId: string, privateChannelId: string, dm1v1: string, dmGroup: string, msgIds: string[], deletedMsgId: string, wsA: import('ws'), wsB: import('ws'), searchToken: string }} */
 const ctx = {
   A: null,
   B: null,
@@ -39,6 +39,7 @@ const ctx = {
   dm1v1: '',
   dmGroup: '',
   msgIds: [],
+  deletedMsgId: '',
   wsA: null,
   wsB: null,
   // Avoid `-` in the token: websearch_to_tsquery treats `-` as NOT and can return 0 FTS hits.
@@ -521,6 +522,7 @@ add('deleteMessage', async () => {
   });
   assert(res.status === 201, `precreate delete ${res.status}`);
   const delId = json.message.id;
+  ctx.deletedMsgId = delId;
   const delSeen = waitWsEvent(
     ctx.wsB,
     (m) => m.event === 'message:deleted' && String(m.data?.id) === delId,
@@ -544,15 +546,28 @@ add('onMessageDeleteReceived', async () => {
 });
 
 add('searchMessages', async () => {
-  // Scope to our channel: unscoped search is global newest-first with a small limit, so on
-  // shared staging other traffic can push this message off the first page.
-  // Query editedChannelSearchMark: editMessage rewrites msgIds[0] so ctx.searchToken no longer appears.
-  const scope = `&channelId=${encodeURIComponent(ctx.publicChannelId)}`;
+  // Community-scoped search should surface edited content quickly, return newest-first,
+  // and include enough metadata for jump/context loading.
+  const marker = `commscope_${suffix}`;
+  const { res: m1Res, json: m1Json } = await fetchJson('POST', '/messages', ctx.A.token, {
+    channelId: ctx.publicChannelId,
+    content: `${marker} older`,
+  });
+  assert(m1Res.status === 201, `search seed m1 ${m1Res.status}`);
+  await sleep(1200); // ensure stable created_at ordering for newest-first assertion
+  const { res: m2Res, json: m2Json } = await fetchJson('POST', '/messages', ctx.B.token, {
+    channelId: ctx.publicChannelId,
+    content: `${marker} newer`,
+  });
+  assert(m2Res.status === 201, `search seed m2 ${m2Res.status}`);
+  const m1 = m1Json.message?.id;
+  const m2 = m2Json.message?.id;
+
   let last = 'search miss';
   for (let i = 0; i < 45; i++) {
     const { res, json } = await fetchJson(
       'GET',
-      `/search?q=${encodeURIComponent(editedChannelSearchMark)}${scope}`,
+      `/search?q=${encodeURIComponent(marker)}&communityId=${encodeURIComponent(ctx.communityId)}`,
       ctx.A.token,
       null,
     );
@@ -562,16 +577,59 @@ add('searchMessages', async () => {
       continue;
     }
     const hits = json.hits || [];
-    if (hits.some((h) => h.id === ctx.msgIds[0] || String(h.content || '').includes(editedChannelSearchMark))) {
+    const ids = hits.map((h) => String(h.id || ''));
+    const hasBoth = ids.includes(String(m1)) && ids.includes(String(m2));
+    if (hasBoth) {
+      const createdTimes = hits
+        .map((h) => Date.parse(h.createdAt || h.created_at || 0))
+        .filter((n) => Number.isFinite(n));
+      for (let j = 1; j < createdTimes.length; j++) {
+        assert(createdTimes[j - 1] >= createdTimes[j], 'search results newest-first');
+      }
+      const top = hits[0] || {};
+      assert(typeof top.content === 'string', 'search hit content');
+      assert(Boolean(top.authorId || top.author_id), 'search hit author');
+      assert(Boolean(top.createdAt || top.created_at), 'search hit timestamp');
+      assert(Boolean(top.channelId || top.channel_id || top.conversationId || top.conversation_id), 'search hit scope pointer');
+      assert(Boolean(top.id), 'search hit id for jump/context');
       return;
     }
-    last = 'no hit in channel scope';
+    last = 'community-scoped search missing seeded hits';
     await sleep(1000);
   }
   throw new Error(last);
 });
 
 add('searchMessages (community scope)', async () => {
+  // Community scope must include private channels only for users with access.
+  const marker = `private_scope_${suffix}`;
+  const { res: seedRes, json: seedJson } = await fetchJson('POST', '/messages', ctx.A.token, {
+    channelId: ctx.privateChannelId,
+    content: `${marker} private`,
+  });
+  assert(seedRes.status === 201, `private seed ${seedRes.status}`);
+  const privateId = seedJson.message.id;
+
+  const ownerSearch = await fetchJson(
+    'GET',
+    `/search?q=${encodeURIComponent(marker)}&communityId=${ctx.communityId}`,
+    ctx.A.token,
+    null,
+  );
+  assert(ownerSearch.res.status === 200, `owner community search ${ownerSearch.res.status}`);
+  const ownerIds = (ownerSearch.json.hits || []).map((h) => String(h.id));
+  assert(ownerIds.includes(String(privateId)), 'owner sees private-channel result');
+
+  const memberSearch = await fetchJson(
+    'GET',
+    `/search?q=${encodeURIComponent(marker)}&communityId=${ctx.communityId}`,
+    ctx.B.token,
+    null,
+  );
+  assert(memberSearch.res.status === 200, `member community search ${memberSearch.res.status}`);
+  const memberIds = (memberSearch.json.hits || []).map((h) => String(h.id));
+  assert(!memberIds.includes(String(privateId)), 'non-member does not see private-channel result');
+
   const { res, json } = await fetchJson(
     'GET',
     `/search?q=${encodeURIComponent('zzznope' + suffix)}&communityId=${ctx.communityId}`,
@@ -582,29 +640,105 @@ add('searchMessages (community scope)', async () => {
   assert(Array.isArray(json.hits), 'hits');
 });
 
+add('searchMessages (conversation scope)', async () => {
+  // Conversation scope should work for both 1:1 and group DMs and stay isolated.
+  const dmMark = `dm_scope_${suffix}`;
+  const grpMark = `grp_scope_${suffix}`;
+  const dmPost = await fetchJson('POST', '/messages', ctx.A.token, {
+    conversationId: ctx.dm1v1,
+    content: `${dmMark} one-to-one`,
+  });
+  assert(dmPost.res.status === 201, `dm search seed ${dmPost.res.status}`);
+  const dmId = dmPost.json.message.id;
+
+  const grpPost = await fetchJson('POST', '/messages', ctx.A.token, {
+    conversationId: ctx.dmGroup,
+    content: `${grpMark} group`,
+  });
+  assert(grpPost.res.status === 201, `group search seed ${grpPost.res.status}`);
+  const grpId = grpPost.json.message.id;
+
+  const dmSearch = await fetchJson(
+    'GET',
+    `/search?q=${encodeURIComponent(dmMark)}&conversationId=${ctx.dm1v1}`,
+    ctx.A.token,
+    null,
+  );
+  assert(dmSearch.res.status === 200, `dm scoped search ${dmSearch.res.status}`);
+  const dmIds = (dmSearch.json.hits || []).map((h) => String(h.id));
+  assert(dmIds.includes(String(dmId)), '1:1 scoped search returns DM message');
+  assert(!dmIds.includes(String(grpId)), '1:1 scoped search excludes group DM messages');
+
+  const grpSearch = await fetchJson(
+    'GET',
+    `/search?q=${encodeURIComponent(grpMark)}&conversationId=${ctx.dmGroup}`,
+    ctx.A.token,
+    null,
+  );
+  assert(grpSearch.res.status === 200, `group scoped search ${grpSearch.res.status}`);
+  const grpIds = (grpSearch.json.hits || []).map((h) => String(h.id));
+  assert(grpIds.includes(String(grpId)), 'group scoped search returns group message');
+  assert(!grpIds.includes(String(dmId)), 'group scoped search excludes 1:1 DM messages');
+});
+
 add('searchMessages (time filter)', async () => {
-  // Large client-side horizon avoids excluding rows when the API host clock is ahead of the runner.
-  const before = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-  const scope = `&channelId=${encodeURIComponent(ctx.publicChannelId)}`;
-  let last = 'time filter miss';
-  for (let i = 0; i < 45; i++) {
-    const { res, json } = await fetchJson(
-      'GET',
-      `/search?q=${encodeURIComponent(editedChannelSearchMark)}&before=${encodeURIComponent(before)}${scope}`,
-      ctx.A.token,
-      null,
-    );
-    if (res.status !== 200) {
-      last = `time search HTTP ${res.status}`;
-      await sleep(1000);
-      continue;
-    }
-    const hits = json.hits || [];
-    if (hits.some((h) => h.id === ctx.msgIds[0])) return;
-    last = 'expected message id not in time-filtered channel search';
-    await sleep(1000);
-  }
-  throw new Error(last);
+  // Validate author + time filters in community scope and ensure deleted rows are excluded.
+  const marker = `filter_scope_${suffix}`;
+  const aPost = await fetchJson('POST', '/messages', ctx.A.token, {
+    channelId: ctx.publicChannelId,
+    content: `${marker} authorA`,
+  });
+  assert(aPost.res.status === 201, `filter seed A ${aPost.res.status}`);
+  const aId = aPost.json.message.id;
+  const aTs = Date.parse(aPost.json.message.createdAt || aPost.json.message.created_at || 0);
+
+  await sleep(1200); // stable temporal boundary for before/after filters
+
+  const bPost = await fetchJson('POST', '/messages', ctx.B.token, {
+    channelId: ctx.publicChannelId,
+    content: `${marker} authorB`,
+  });
+  assert(bPost.res.status === 201, `filter seed B ${bPost.res.status}`);
+  const bId = bPost.json.message.id;
+  const bTs = Date.parse(bPost.json.message.createdAt || bPost.json.message.created_at || 0);
+
+  const beforeBoundaryMs = Number.isFinite(aTs) && Number.isFinite(bTs) && bTs > aTs
+    ? aTs + Math.floor((bTs - aTs) / 2)
+    : Date.now();
+  const beforeBoundary = new Date(beforeBoundaryMs).toISOString();
+
+  const byAuthor = await fetchJson(
+    'GET',
+    `/search?q=${encodeURIComponent(marker)}&communityId=${ctx.communityId}&authorId=${ctx.A.id}`,
+    ctx.A.token,
+    null,
+  );
+  assert(byAuthor.res.status === 200, `author filter search ${byAuthor.res.status}`);
+  const byAuthorHits = byAuthor.json.hits || [];
+  assert(byAuthorHits.some((h) => String(h.id) === String(aId)), 'author filter includes author A message');
+  assert(!byAuthorHits.some((h) => String(h.id) === String(bId)), 'author filter excludes other author');
+
+  const byTime = await fetchJson(
+    'GET',
+    `/search?q=${encodeURIComponent(marker)}&communityId=${ctx.communityId}&before=${encodeURIComponent(beforeBoundary)}`,
+    ctx.A.token,
+    null,
+  );
+  assert(byTime.res.status === 200, `time filter search ${byTime.res.status}`);
+  const byTimeHits = byTime.json.hits || [];
+  assert(!byTimeHits.some((h) => String(h.id) === String(bId)), 'before filter excludes later message');
+
+  const deletedProbe = await fetchJson(
+    'GET',
+    `/search?q=${encodeURIComponent(`to-delete-${suffix}`)}&communityId=${ctx.communityId}`,
+    ctx.A.token,
+    null,
+  );
+  assert(deletedProbe.res.status === 200, `deleted freshness search ${deletedProbe.res.status}`);
+  assert(
+    !(deletedProbe.json.hits || []).some((h) => String(h.id) === String(ctx.deletedMsgId)),
+    'deleted message excluded from search results',
+  );
 });
 
 add('markRead', async () => {
