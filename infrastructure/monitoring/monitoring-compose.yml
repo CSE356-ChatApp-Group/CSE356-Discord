@@ -9,20 +9,19 @@ services:
     restart: unless-stopped
     depends_on: [alertmanager]
     network_mode: host
-    # 4 GB host: a ~3.4 GiB Prometheus cgroup still exhausts RAM because Loki/Grafana/kernel
-    # need hundreds of MiB — sum of limits must stay below ~3.5 GiB physical. Cap sibling
-    # services below; raise PROMETHEUS_MEM_LIMIT only after upgrading this VM (e.g. 8 GiB).
-    mem_limit: ${PROMETHEUS_MEM_LIMIT:-2520m}
-    cpus: ${PROMETHEUS_CPU_LIMIT:-1.75}
+    # Defaults assume prod monitoring VM ≥8 GiB / 4 vCPU (see docs/infrastructure-inventory.md).
+    # On smaller hosts set PROMETHEUS_* / LOKI_* / GRAFANA_* in /opt/chatapp-monitoring/.env.
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-4g}
+    cpus: ${PROMETHEUS_CPU_LIMIT:-3}
     environment:
       ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-prod}
-      GOMEMLIMIT: ${PROMETHEUS_GOMEMLIMIT:-2400MiB}
+      GOMEMLIMIT: ${PROMETHEUS_GOMEMLIMIT:-3800MiB}
     entrypoint: ["sh", "-ec"]
     command:
       - |
         sed "s/__ALERT_ENVIRONMENT__/$${ALERT_ENVIRONMENT:-prod}/g" /etc/prometheus/prometheus.yml.template >/tmp/prometheus.yml
         exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --web.listen-address=127.0.0.1:9090 \
-          --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-5d}
+          --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
     volumes:
       - ./prometheus-host.yml:/etc/prometheus/prometheus.yml.template:ro
       - ./alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -65,8 +64,8 @@ services:
   grafana:
     image: grafana/grafana:11.1.0
     restart: unless-stopped
-    mem_limit: ${GRAFANA_MEM_LIMIT:-320m}
-    cpus: ${GRAFANA_CPU_LIMIT:-0.75}
+    mem_limit: ${GRAFANA_MEM_LIMIT:-512m}
+    cpus: ${GRAFANA_CPU_LIMIT:-1}
     network_mode: host
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
@@ -82,8 +81,8 @@ services:
   loki:
     image: grafana/loki:3.1.0
     restart: unless-stopped
-    mem_limit: ${LOKI_MEM_LIMIT:-448m}
-    cpus: ${LOKI_CPU_LIMIT:-1.0}
+    mem_limit: ${LOKI_MEM_LIMIT:-1536m}
+    cpus: ${LOKI_CPU_LIMIT:-2}
     volumes:
       - ./loki-config.yml:/etc/loki/local-config.yaml:ro
       - loki_data:/loki
@@ -93,8 +92,8 @@ services:
   tempo:
     image: grafana/tempo:2.5.0
     restart: unless-stopped
-    mem_limit: ${TEMPO_MEM_LIMIT:-192m}
-    cpus: ${TEMPO_CPU_LIMIT:-0.5}
+    mem_limit: ${TEMPO_MEM_LIMIT:-384m}
+    cpus: ${TEMPO_CPU_LIMIT:-0.75}
     command: ["-config.file=/etc/tempo/config.yml"]
     volumes:
       - ./tempo-config.yml:/etc/tempo/config.yml:ro
