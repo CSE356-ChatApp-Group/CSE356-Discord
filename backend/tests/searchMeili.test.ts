@@ -109,7 +109,7 @@ describe('Search – SEARCH_BACKEND=postgres (default)', () => {
     await sendMessage(owner.accessToken, channel.id, `${marker} test`);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channel.id}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${community.id}`)
       .set('Authorization', `Bearer ${owner.accessToken}`);
 
     expect(res.status).toBe(200);
@@ -119,6 +119,7 @@ describe('Search – SEARCH_BACKEND=postgres (default)', () => {
 
 describe('Search – SEARCH_BACKEND=meili basic path', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
   let messageId: string;
   const marker = `meilibasic${uniqueSuffix()}`;
@@ -127,6 +128,7 @@ describe('Search – SEARCH_BACKEND=meili basic path', () => {
     const owner = await createAuthenticatedUser('meili-basic-owner');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken);
+    communityId = community.id;
     const channel = await createChannel(ownerToken, community.id);
     channelId = channel.id;
     const msg = await sendMessage(ownerToken, channelId, `${marker} hello`);
@@ -137,7 +139,7 @@ describe('Search – SEARCH_BACKEND=meili basic path', () => {
     setMeiliMode([messageId]);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -149,7 +151,7 @@ describe('Search – SEARCH_BACKEND=meili basic path', () => {
     setMeiliMode([]);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -161,24 +163,26 @@ describe('Search – SEARCH_BACKEND=meili basic path', () => {
     setMeiliMode([messageId]);
 
     await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(mockSearchCandidates).toHaveBeenCalledWith(
       marker,
-      expect.objectContaining({ channelId }),
+      expect.objectContaining({ communityId }),
     );
   });
 });
 
 describe('Search – Meili path: Postgres recheck filters deleted messages', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
 
   beforeAll(async () => {
     const owner = await createAuthenticatedUser('meili-del-owner');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken);
+    communityId = community.id;
     const channel = await createChannel(ownerToken, community.id);
     channelId = channel.id;
   });
@@ -197,7 +201,7 @@ describe('Search – Meili path: Postgres recheck filters deleted messages', () 
     setMeiliMode([msg.id]);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -208,6 +212,7 @@ describe('Search – Meili path: Postgres recheck filters deleted messages', () 
 describe('Search – Meili path: private channel access control', () => {
   let ownerToken: string;
   let outsiderToken: string;
+  let communityId: string;
   let privateChannelId: string;
   let msgId: string;
   const marker = `meiliprivate${uniqueSuffix()}`;
@@ -219,7 +224,8 @@ describe('Search – Meili path: private channel access control', () => {
     outsiderToken = outsider.accessToken;
 
     const community = await createCommunity(ownerToken);
-    const channel   = await createChannel(ownerToken, community.id, true); // private
+    communityId = community.id;
+    const channel   = await createChannel(ownerToken, communityId, true); // private
     privateChannelId = channel.id;
     const msg = await sendMessage(ownerToken, privateChannelId, `${marker} secret`);
     msgId = msg.id;
@@ -229,7 +235,7 @@ describe('Search – Meili path: private channel access control', () => {
     setMeiliMode([msgId]);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${privateChannelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${outsiderToken}`);
 
     expect(res.status).toBe(403);
@@ -239,7 +245,7 @@ describe('Search – Meili path: private channel access control', () => {
     setMeiliMode([msgId]);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${privateChannelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -357,6 +363,7 @@ describe('Search – Meili path: DM conversation access', () => {
 describe('Search – Meili path: author + time filters enforced in Postgres', () => {
   let ownerToken: string;
   let otherToken: string;
+  let communityId: string;
   let channelId: string;
   let ownerMsgId: string;
   let otherMsgId: string;
@@ -371,8 +378,9 @@ describe('Search – Meili path: author + time filters enforced in Postgres', ()
     ownerUserId = owner.user.id;
 
     const community = await createCommunity(ownerToken);
-    await joinCommunity(otherToken, community.id);
-    const channel = await createChannel(ownerToken, community.id);
+    communityId = community.id;
+    await joinCommunity(otherToken, communityId);
+    const channel = await createChannel(ownerToken, communityId);
     channelId = channel.id;
 
     const m1 = await sendMessage(ownerToken, channelId, `${marker} from owner`);
@@ -385,7 +393,7 @@ describe('Search – Meili path: author + time filters enforced in Postgres', ()
     setMeiliMode([ownerMsgId, otherMsgId]);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}&authorId=${ownerUserId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}&authorId=${ownerUserId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -397,6 +405,7 @@ describe('Search – Meili path: author + time filters enforced in Postgres', ()
 
 describe('Search – Meili path: results are newest-first', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
   const marker = `meilisort${uniqueSuffix()}`;
 
@@ -404,6 +413,7 @@ describe('Search – Meili path: results are newest-first', () => {
     const owner = await createAuthenticatedUser('meili-sort-owner');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken);
+    communityId = community.id;
     const channel   = await createChannel(ownerToken, community.id);
     channelId = channel.id;
     await sendMessage(ownerToken, channelId, `${marker} first`);
@@ -424,7 +434,7 @@ describe('Search – Meili path: results are newest-first', () => {
     setMeiliMode(ids);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -435,12 +445,14 @@ describe('Search – Meili path: results are newest-first', () => {
 
 describe('Search – Meili path: edited message uses fresh Postgres content', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
 
   beforeAll(async () => {
     const owner = await createAuthenticatedUser('meili-edit-owner');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken);
+    communityId = community.id;
     const channel   = await createChannel(ownerToken, community.id);
     channelId = channel.id;
   });
@@ -461,7 +473,7 @@ describe('Search – Meili path: edited message uses fresh Postgres content', ()
     setMeiliMode([msg.id]);
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -473,6 +485,7 @@ describe('Search – Meili path: edited message uses fresh Postgres content', ()
 
 describe('Search – Meili path: Meili error falls back to Postgres', () => {
   let ownerToken: string;
+  let communityId: string;
   let channelId: string;
   const marker = `meilifallback${uniqueSuffix()}`;
 
@@ -480,6 +493,7 @@ describe('Search – Meili path: Meili error falls back to Postgres', () => {
     const owner = await createAuthenticatedUser('meili-fallback-owner');
     ownerToken = owner.accessToken;
     const community = await createCommunity(ownerToken);
+    communityId = community.id;
     const channel   = await createChannel(ownerToken, community.id);
     channelId = channel.id;
     await sendMessage(ownerToken, channelId, `${marker} content`);
@@ -490,7 +504,7 @@ describe('Search – Meili path: Meili error falls back to Postgres', () => {
     mockSearchCandidates.mockRejectedValue(new Error('Meili timeout'));
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
@@ -505,7 +519,7 @@ describe('Search – Meili path: Meili error falls back to Postgres', () => {
     mockSearchCandidates.mockRejectedValue(new Error('ECONNREFUSED'));
 
     const res = await request(app)
-      .get(`/api/v1/search?q=${marker}&channelId=${channelId}`)
+      .get(`/api/v1/search?q=${marker}&communityId=${communityId}`)
       .set('Authorization', `Bearer ${ownerToken}`);
 
     expect(res.status).toBeLessThan(500);
@@ -533,7 +547,7 @@ describe('Search – Meili path: strict token AND + Postgres fallback', () => {
 
     const res = await request(app)
       .get(
-        `/api/v1/search?q=${encodeURIComponent('strictalpha strictbeta strictgamma')}&channelId=${channel.id}`,
+        `/api/v1/search?q=${encodeURIComponent('strictalpha strictbeta strictgamma')}&communityId=${community.id}`,
       )
       .set('Authorization', `Bearer ${owner.accessToken}`);
 
@@ -556,7 +570,7 @@ describe('Search – Meili path: strict token AND + Postgres fallback', () => {
 
     const res = await request(app)
       .get(
-        `/api/v1/search?q=${encodeURIComponent('strictpass one three')}&channelId=${channel.id}`,
+        `/api/v1/search?q=${encodeURIComponent('strictpass one three')}&communityId=${community.id}`,
       )
       .set('Authorization', `Bearer ${owner.accessToken}`);
 
@@ -578,7 +592,7 @@ describe('Search – Meili path: strict token AND + Postgres fallback', () => {
 
     const res = await request(app)
       .get(
-        `/api/v1/search?q=${encodeURIComponent('strictdel alpha beta gamma')}&channelId=${channel.id}`,
+        `/api/v1/search?q=${encodeURIComponent('strictdel alpha beta gamma')}&communityId=${community.id}`,
       )
       .set('Authorization', `Bearer ${owner.accessToken}`);
 

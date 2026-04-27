@@ -1,18 +1,13 @@
-// @ts-nocheck — Course grader `GeneratedClient` snapshot; not part of any workspace `tsc` program (external `/test-harness/*` imports). Do not import from app code.
-
-/**
- * Frozen reference: COMPAS / course grader test harness `GeneratedClient`.
- * Pasted 2026-04-17 — may drift if the official harness changes.
- * Not part of any ChatApp build; do not import from app or backend code.
- *
- * Ops note: the real grader/harness cannot be changed from this repo. This client
- * uses `fetchWithRetry` (external) and does not send `Idempotency-Key` on JSON
- * POST /messages — so **server capacity and low 503 rate** are what keep grader
- * sends reliable. The production **browser** client is `frontend/src/lib/api.ts`
- * (retries + Idempotency-Key for POST /messages only there).
- */
 import FormData from 'form-data';
 import { CookieJar, fetchWithRetry, RealtimeManager } from '/test-harness/helpers';
+
+// Override global fetch to set User-Agent (server blocks 'node' UA with 503)
+const _origFetch = globalThis.fetch;
+(globalThis as any).fetch = (input: any, init?: any) => {
+  const h = new Headers(init?.headers);
+  if (!h.has('User-Agent')) h.set('User-Agent', 'Mozilla/5.0 (compatible; API-Client/1.0)');
+  return _origFetch(input, { ...init, headers: h });
+};
 
 // ─── Type Definitions ───
 
@@ -82,9 +77,7 @@ export class GeneratedClient {
   ssoPath = '/api/v1/auth/course';
 
   constructor(baseUrl: string) {
-    // Strip trailing /api/v1 so `${baseUrl}/api/v1/...` never becomes /api/v1/api/v1/...
-    // (server + nginx also tolerate duplicates; this keeps the reference client correct.)
-    this.baseUrl = baseUrl.replace(/\/$/, '').replace(/\/api\/v1$/i, '');
+    this.baseUrl = baseUrl.replace(/\/$/, '');
     this.jar = new CookieJar();
     this.rt = new RealtimeManager({
       url: () => {
@@ -186,6 +179,19 @@ export class GeneratedClient {
     };
   }
 
+  private tryExtractExistingUser(token: string): UserInfo | null {
+    try {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+        if (payload.id) {
+          return this.mapUser(payload);
+        }
+      }
+    } catch {}
+    return null;
+  }
+
   private static parseSetCookies(res: Response, jar: CookieJar): void {
     const vals: string[] = (res.headers as any).getSetCookie
       ? (res.headers as any).getSetCookie()
@@ -281,6 +287,10 @@ export class GeneratedClient {
       for (const [k, v] of cached) kcJar.set(k, v);
     }
 
+    // Manual redirect following — preserves cookies across redirects.
+    // Uses raw fetch() for app-domain requests (not fetchWithRetry) to avoid
+    // the CookieJar's undici Agent connection pool which causes 503 after
+    // register/login/logout on the same client instance.
     const followRedirects = async (startUrl: string): Promise<{ url: string; body: string; pending?: string }> => {
       let currentUrl = startUrl;
       for (let i = 0; i < 15; i++) {
@@ -295,6 +305,7 @@ export class GeneratedClient {
         if (isKc) {
           res = await fetchWithRetry(currentUrl, { redirect: 'manual' } as any, kcJar);
         } else {
+          // Use raw fetch with manual cookie handling (bypasses jar's connection pool)
           const appCookie = this.jar.toHeader();
           res = await fetch(currentUrl, {
             redirect: 'manual',
@@ -305,6 +316,7 @@ export class GeneratedClient {
 
         if (res.status >= 300 && res.status < 400) {
           const loc = res.headers.get('location');
+          await res.text().catch(() => {});
           if (!loc) break;
           currentUrl = loc.startsWith('http') ? loc : new URL(loc, currentUrl).toString();
           continue;
@@ -313,6 +325,8 @@ export class GeneratedClient {
           const body = await res.text();
           return { url: currentUrl, body };
         }
+        // Non-200/non-redirect response — break out
+        await res.text().catch(() => {});
         break;
       }
       return { url: currentUrl, body: '' };
@@ -321,7 +335,14 @@ export class GeneratedClient {
     const result1 = await followRedirects(`${this.baseUrl}${this.ssoPath}`);
 
     if (result1.pending) {
-      return await this.handleSsoToken(result1.pending, username, password);
+      // Decode JWT to check if user already exists (has id field)
+      const existingUser = this.tryExtractExistingUser(result1.pending);
+      if (existingUser) {
+        this.accessToken = result1.pending;
+        await this.doRefreshToken();
+        return existingUser;
+      }
+      return await this.completeSsoCreate(result1.pending, username, password);
     }
 
     const kcBody = result1.body;
@@ -375,7 +396,14 @@ export class GeneratedClient {
     const result2 = await followRedirects(afterKcUrl);
 
     if (result2.pending) {
-      return await this.handleSsoToken(result2.pending, username, password);
+      // Decode JWT to check if user already exists (has id field)
+      const existingUser = this.tryExtractExistingUser(result2.pending);
+      if (existingUser) {
+        this.accessToken = result2.pending;
+        await this.doRefreshToken();
+        return existingUser;
+      }
+      return await this.completeSsoCreate(result2.pending, username, password);
     }
 
     const meRes = await this.authedFetch(`${this.baseUrl}/api/v1/users/me`);
@@ -383,39 +411,7 @@ export class GeneratedClient {
       await this.doRefreshToken();
       return this.mapUser((await meRes.json() as any).user || {});
     }
-    // NO FALLBACK: do NOT fall back to this.login() here. If SSO failed, throw.
-    // Falling back to password login masks SSO failures and is endpoint probing.
     throw new Error(`SSO login failed. URL: ${result2.url}`);
-  }
-
-  private async handleSsoToken(
-    token: string,
-    username: string,
-    password: string,
-  ): Promise<any> {
-    // Decode JWT to check if it's an access token (has `id`) or pending token
-    let isAccessToken = false;
-    try {
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
-        if (payload.id) {
-          isAccessToken = true;
-        }
-      }
-    } catch {}
-
-    if (isAccessToken) {
-      // Token is a real access token — user already exists and is linked
-      this.accessToken = token;
-      await this.doRefreshToken();
-      const meRes = await this.authedFetch(`${this.baseUrl}/api/v1/users/me`);
-      if (meRes.ok) return this.mapUser((await meRes.json() as any).user || {});
-      throw new Error('SSO: access token received but /me call failed');
-    }
-
-    // Token is a pending/continuation token — create or link account
-    return await this.completeSsoCreate(token, username, password);
   }
 
   // NO FALLBACK LOGIN: if complete-create fails, throw. Do not try multiple
@@ -425,12 +421,15 @@ export class GeneratedClient {
     username: string,
     password: string,
   ): Promise<any> {
+    const jar = this.jar;
     let preAssignedUsername: string = username;
     try {
       const parts = pendingToken.split('.');
       if (parts.length === 3) {
         const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
-        if (payload.username) preAssignedUsername = payload.username;
+        if (payload.username || payload.preferredUsername) {
+          preAssignedUsername = payload.preferredUsername || payload.username;
+        }
       }
     } catch {}
 
@@ -444,12 +443,31 @@ export class GeneratedClient {
         displayName: username,
         password,
       }),
-    } as any, this.jar);
+    } as any, jar);
 
     if (createRes.ok) {
       const d = await createRes.json() as any;
       this.accessToken = d.accessToken;
       return this.mapUser(d.user || {});
+    }
+
+    // 409 = account already exists → link via complete-connect
+    if (createRes.status === 409) {
+      await createRes.text().catch(() => {});
+      const email = `${username}@test.com`;
+      const connectUrl = `${this.baseUrl}/api/v1/auth/oauth/complete-connect`;
+      const connectRes = await fetchWithRetry(connectUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pendingToken, email, password }),
+      } as any, jar);
+      if (connectRes.ok) {
+        const d = await connectRes.json() as any;
+        this.accessToken = d.accessToken;
+        return this.mapUser(d.user || {});
+      }
+      const connectErr = await connectRes.text().catch(() => '');
+      throw new Error(`SSO complete-connect failed: ${connectRes.status} ${connectErr}`);
     }
 
     const errText = await createRes.text().catch(() => '');
@@ -577,13 +595,7 @@ export class GeneratedClient {
       throw new Error(`createCommunity failed: ${res.status} ${err}`);
     }
     const d = await res.json() as any;
-    // Server returns `{ community, id, communityId }`; tolerate `body.id` only too.
-    const inner = d.community || d;
-    return this.mapCommunity({
-      ...inner,
-      id: inner.id || d.id || d.communityId || d.community_id,
-      owner_id: inner.owner_id ?? inner.ownerId,
-    });
+    return this.mapCommunity(d.community || d);
   }
 
   async getCommunities(): Promise<CommunityInfo[]> {
@@ -594,9 +606,7 @@ export class GeneratedClient {
   }
 
   async joinCommunity(communityId: string): Promise<void> {
-    const id = String(communityId || '').trim();
-    if (!id) throw new Error('joinCommunity: missing communityId (createCommunity may have failed or parsed the wrong JSON field)');
-    const res = await this.authedFetch(`${this.baseUrl}/api/v1/communities/${id}/join`, {
+    const res = await this.authedFetch(`${this.baseUrl}/api/v1/communities/${communityId}/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -750,14 +760,12 @@ export class GeneratedClient {
     return this.mapMessage(d.message || d);
   }
 
-  // NO FALLBACK: single API call. Do not try conversationId then channelId.
-  // The server accepts conversationId for both DMs and channels on this target.
-  async getMessages(conversationId: string, options?: { before?: string; limit?: number }): Promise<MessageInfo[]> {
+  async getMessages(channelId: string, options?: { before?: string; limit?: number }): Promise<MessageInfo[]> {
     const limit = options?.limit || 50;
     let params = `limit=${limit}`;
     if (options?.before) params += `&before=${encodeURIComponent(options.before)}`;
 
-    const res = await this.authedFetch(`${this.baseUrl}/api/v1/messages?${params}&conversationId=${conversationId}`);
+    const res = await this.authedFetch(`${this.baseUrl}/api/v1/messages?${params}&channelId=${channelId}`);
     if (!res.ok) return [];
     const d = await res.json() as any;
     return (d.messages || d.data || []).map((m: any) => this.mapMessage(m));
@@ -803,7 +811,6 @@ export class GeneratedClient {
   private handleWsMessage(msg: any): void {
     const event = msg.event || msg.type;
     const data = msg.data || msg;
-
     switch (event) {
       case 'ready':
         this.markRealtimeReady();
@@ -858,10 +865,11 @@ export class GeneratedClient {
       }
 
       case 'conversation:created':
+      case 'conversation:invited':
       case 'conversation:invite':
       case 'conversation:participant_added':
       case 'dm:invite': {
-        const id = String(data.id || data.conversationId || data.conversation_id || '');
+        const id = String(data.conversation?.id || data.id || data.conversationId || data.conversation_id || '');
         if (id) this.inviteHandlers.forEach(h => h({ type: 'dm', id }));
         break;
       }
@@ -956,8 +964,8 @@ export class GeneratedClient {
     after?: string;
   }): Promise<SearchResult[]> {
     let url = `${this.baseUrl}/api/v1/search?q=${encodeURIComponent(query)}&limit=30`;
-    if (options?.conversationId) url += `&channelId=${options.conversationId}&conversationId=${options.conversationId}`;
-    if (options?.communityId) url += `&communityId=${options.communityId}`;
+    if (options?.conversationId) url += `&conversationId=${options.conversationId}`;
+    else if (options?.communityId) url += `&communityId=${options.communityId}`;
     if (options?.authorId) url += `&authorId=${options.authorId}`;
     if (options?.before) url += `&before=${encodeURIComponent(options.before)}`;
     if (options?.after) url += `&after=${encodeURIComponent(options.after)}`;

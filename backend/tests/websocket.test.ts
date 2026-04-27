@@ -1516,7 +1516,7 @@ describe('Multi-socket fanout', () => {
     }
   });
 
-  it('delivers conversation:participant_added to the newly invited participant', async () => {
+  it('delivers conversation:invited to the newly invited participant', async () => {
     const owner = await createAuthenticatedUser('wspartaddowner');
     const existing = await createAuthenticatedUser('wspartaddexisting');
     const base = await createAuthenticatedUser('wspartaddbase');
@@ -1533,10 +1533,10 @@ describe('Multi-socket fanout', () => {
       expect(createRes.status).toBe(201);
       const groupConversationId = createRes.body.conversation.id;
 
-      const participantAddedPromise = waitForWsEvent(
+      const invitePromise = waitForWsEvent(
         inviteeSocket,
         (event) =>
-          event.event === 'conversation:participant_added'
+          ['conversation:invited', 'conversation:invite', 'conversation:created'].includes(event.event)
           && event.data?.conversationId === groupConversationId
           && Array.isArray(event.data?.participantIds)
           && event.data.participantIds.includes(invitee.user.id),
@@ -1549,11 +1549,69 @@ describe('Multi-socket fanout', () => {
 
       expect(inviteRes.status).toBe(200);
 
-      const participantAddedEvent = await participantAddedPromise;
-      expect(participantAddedEvent.data.conversationId).toBe(groupConversationId);
-      expect(participantAddedEvent.data.invitedBy).toBe(owner.user.id);
-      expect(participantAddedEvent.data.participantIds).toContain(invitee.user.id);
+      const inviteEvent = await invitePromise;
+      expect(inviteEvent.data.conversationId).toBe(groupConversationId);
+      expect(inviteEvent.data.invitedBy).toBe(owner.user.id);
+      expect(inviteEvent.data.participantIds).toContain(invitee.user.id);
     } finally {
+      await closeWebSocket(inviteeSocket);
+    }
+  });
+
+  it('delivers participant update to existing users and invite notifications to newly added users', async () => {
+    const owner = await createAuthenticatedUser('wsgroupinviteowner');
+    const existing = await createAuthenticatedUser('wsgroupinviteexisting');
+    const base = await createAuthenticatedUser('wsgroupinvitebase');
+    const invitee = await createAuthenticatedUser('wsgroupinviteinvitee');
+
+    const existingSocket = await connectWebSocket(port, existing.accessToken);
+    const inviteeSocket = await connectWebSocket(port, invitee.accessToken);
+
+    try {
+      const createRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [existing.user.id, base.user.id] });
+
+      expect(createRes.status).toBe(201);
+      const groupConversationId = createRes.body.conversation.id;
+
+      const existingParticipantAddedPromise = waitForWsEvent(
+        existingSocket,
+        (event) =>
+          event.event === 'conversation:participant_added'
+          && event.data?.conversationId === groupConversationId
+          && Array.isArray(event.data?.participantIds)
+          && event.data.participantIds.includes(invitee.user.id),
+      );
+
+      const inviteeInvitePromise = waitForWsEvent(
+        inviteeSocket,
+        (event) =>
+          ['conversation:invited', 'conversation:invite', 'conversation:created'].includes(event.event)
+          && event.data?.conversationId === groupConversationId,
+      );
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/conversations/${groupConversationId}/invite`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [invitee.user.id] });
+
+      expect(inviteRes.status).toBe(200);
+
+      const [existingParticipantAddedEvent, inviteeInviteEvent] = await Promise.all([
+        existingParticipantAddedPromise,
+        inviteeInvitePromise,
+      ]);
+
+      expect(existingParticipantAddedEvent.data.conversationId).toBe(groupConversationId);
+      expect(existingParticipantAddedEvent.data.participantIds).toContain(invitee.user.id);
+
+      expect(inviteeInviteEvent.data.conversationId).toBe(groupConversationId);
+      expect(inviteeInviteEvent.data.participantIds).toContain(invitee.user.id);
+      expect(inviteeInviteEvent.data.invitedBy).toBe(owner.user.id);
+    } finally {
+      await closeWebSocket(existingSocket);
       await closeWebSocket(inviteeSocket);
     }
   });

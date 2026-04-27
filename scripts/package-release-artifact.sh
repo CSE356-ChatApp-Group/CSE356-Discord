@@ -32,7 +32,10 @@ tar --exclude=node_modules --exclude=.git --exclude=.env \
   frontend/package*.json \
   migrations/ \
   package*.json \
-  .env.example
+  .env.example \
+  deploy/env/prod.required.env \
+  deploy/env/staging.required.env \
+  deploy/apply-env-profile.py
 
 echo "Wrote ${OUT}"
 ls -lh "$OUT"

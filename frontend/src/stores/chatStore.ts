@@ -1517,7 +1517,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const normalizedQuery = String(q || '').trim();
     const after = normalizeSearchDateTime(nextFilters.after);
     const before = normalizeSearchDateTime(nextFilters.before);
-    const { activeCommunity, activeChannel, activeConv, members } = get();
+    const { activeCommunity, activeConv, members } = get();
     const authorId = resolveSearchAuthorId(nextFilters.author, members, activeConv);
     const hasAnyFilter = Boolean(nextFilters.author.trim() || after || before);
     const canSearchText = normalizedQuery.length > 0;
@@ -1538,11 +1538,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
     const qs = new URLSearchParams({ limit: '30' });
     if (activeConv) qs.set('conversationId', activeConv.id);
-    else if (activeChannel) qs.set('channelId', activeChannel.id);
     else if (activeCommunity) qs.set('communityId', activeCommunity.id);
     else {
       if (requestSeq === latestSearchRequestSeq) {
-        set({ searchResults: [], searchError: 'Open a channel, conversation, or community before searching.' });
+        set({ searchResults: [], searchError: 'Open a conversation or community before searching.' });
       }
       return;
     }
