@@ -937,8 +937,8 @@ export class GeneratedClient {
     after?: string;
   }): Promise<SearchResult[]> {
     let url = `${this.baseUrl}/api/v1/search?q=${encodeURIComponent(query)}&limit=30`;
-    if (options?.conversationId) url += `&channelId=${options.conversationId}&conversationId=${options.conversationId}`;
-    if (options?.communityId) url += `&communityId=${options.communityId}`;
+    if (options?.conversationId) url += `&conversationId=${options.conversationId}`;
+    else if (options?.communityId) url += `&communityId=${options.communityId}`;
     if (options?.authorId) url += `&authorId=${options.authorId}`;
     if (options?.before) url += `&before=${encodeURIComponent(options.before)}`;
     if (options?.after) url += `&after=${encodeURIComponent(options.after)}`;
