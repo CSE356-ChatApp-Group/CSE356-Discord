@@ -1516,7 +1516,7 @@ describe('Multi-socket fanout', () => {
     }
   });
 
-  it('delivers conversation:participant_added to the newly invited participant', async () => {
+  it('delivers conversation:invited to the newly invited participant', async () => {
     const owner = await createAuthenticatedUser('wspartaddowner');
     const existing = await createAuthenticatedUser('wspartaddexisting');
     const base = await createAuthenticatedUser('wspartaddbase');
@@ -1533,10 +1533,10 @@ describe('Multi-socket fanout', () => {
       expect(createRes.status).toBe(201);
       const groupConversationId = createRes.body.conversation.id;
 
-      const participantAddedPromise = waitForWsEvent(
+      const invitePromise = waitForWsEvent(
         inviteeSocket,
         (event) =>
-          event.event === 'conversation:participant_added'
+          ['conversation:invited', 'conversation:invite', 'conversation:created'].includes(event.event)
           && event.data?.conversationId === groupConversationId
           && Array.isArray(event.data?.participantIds)
           && event.data.participantIds.includes(invitee.user.id),
@@ -1549,10 +1549,10 @@ describe('Multi-socket fanout', () => {
 
       expect(inviteRes.status).toBe(200);
 
-      const participantAddedEvent = await participantAddedPromise;
-      expect(participantAddedEvent.data.conversationId).toBe(groupConversationId);
-      expect(participantAddedEvent.data.invitedBy).toBe(owner.user.id);
-      expect(participantAddedEvent.data.participantIds).toContain(invitee.user.id);
+      const inviteEvent = await invitePromise;
+      expect(inviteEvent.data.conversationId).toBe(groupConversationId);
+      expect(inviteEvent.data.invitedBy).toBe(owner.user.id);
+      expect(inviteEvent.data.participantIds).toContain(invitee.user.id);
     } finally {
       await closeWebSocket(inviteeSocket);
     }
@@ -1585,15 +1585,6 @@ describe('Multi-socket fanout', () => {
           && event.data.participantIds.includes(invitee.user.id),
       );
 
-      const inviteeParticipantAddedPromise = waitForWsEvent(
-        inviteeSocket,
-        (event) =>
-          event.event === 'conversation:participant_added'
-          && event.data?.conversationId === groupConversationId
-          && Array.isArray(event.data?.participantIds)
-          && event.data.participantIds.includes(invitee.user.id),
-      );
-
       const inviteeInvitePromise = waitForWsEvent(
         inviteeSocket,
         (event) =>
@@ -1608,17 +1599,13 @@ describe('Multi-socket fanout', () => {
 
       expect(inviteRes.status).toBe(200);
 
-      const [existingParticipantAddedEvent, inviteeParticipantAddedEvent, inviteeInviteEvent] = await Promise.all([
+      const [existingParticipantAddedEvent, inviteeInviteEvent] = await Promise.all([
         existingParticipantAddedPromise,
-        inviteeParticipantAddedPromise,
         inviteeInvitePromise,
       ]);
 
       expect(existingParticipantAddedEvent.data.conversationId).toBe(groupConversationId);
       expect(existingParticipantAddedEvent.data.participantIds).toContain(invitee.user.id);
-
-      expect(inviteeParticipantAddedEvent.data.conversationId).toBe(groupConversationId);
-      expect(inviteeParticipantAddedEvent.data.participantIds).toContain(invitee.user.id);
 
       expect(inviteeInviteEvent.data.conversationId).toBe(groupConversationId);
       expect(inviteeInviteEvent.data.participantIds).toContain(invitee.user.id);

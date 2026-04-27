@@ -799,7 +799,6 @@ async function addParticipantsHandler(req, res, next) {
       const participantUpdateTargets = [
         `conversation:${req.params.id}`,
         ...currentParticipantIds.map((participantId) => `user:${participantId}`),
-        ...invitedUserTargets,
       ];
       // Push subscribe_channels to newly added participants so active WS sessions
       // subscribe to the conversation channel without waiting for a reconnect.
@@ -816,12 +815,6 @@ async function addParticipantsHandler(req, res, next) {
           'subscribe_channels push failed (group DM invite)',
         );
       }
-      // Notify newly added users on their user:<id> feed that they were added.
-      await publishConversationEventsStrict(
-        invitedUserTargets,
-        'conversation:participant_added',
-        sharedEventData
-      );
       await publishConversationInviteNotifications(
         invitedUserTargets,
         sharedEventData,
