@@ -9,6 +9,29 @@ const _origFetch = globalThis.fetch;
   return _origFetch(input, { ...init, headers: h });
 };
 
+/** Pulls `code` / `requestId` from JSON error bodies (e.g. POST /messages 503) for clearer grader logs. */
+function formatFailedResponse(status: number, bodyText: string): string {
+  const raw = (bodyText || '').trim();
+  if (!raw) return String(status);
+  try {
+    const j = JSON.parse(raw) as {
+      code?: string;
+      requestId?: string;
+      waitedMs?: number;
+      lockWaiters?: number;
+    };
+    const tags: string[] = [];
+    if (j.code) tags.push(`code=${j.code}`);
+    if (j.requestId) tags.push(`requestId=${j.requestId}`);
+    if (typeof j.waitedMs === 'number') tags.push(`waitedMs=${j.waitedMs}`);
+    if (typeof j.lockWaiters === 'number') tags.push(`lockWaiters=${j.lockWaiters}`);
+    if (tags.length === 0) return `${status} ${raw}`;
+    return `${status} [${tags.join(' ')}] ${raw}`;
+  } catch {
+    return `${status} ${raw}`;
+  }
+}
+
 // ─── Type Definitions ───
 
 export interface UserInfo {
@@ -725,7 +748,7 @@ export class GeneratedClient {
     }
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      throw new Error(`sendMessage failed: ${res.status} ${err}`);
+      throw new Error(`sendMessage failed: ${formatFailedResponse(res.status, err)}`);
     }
     const d = await res.json() as any;
     return this.mapMessage(d.message || d);
@@ -754,7 +777,7 @@ export class GeneratedClient {
     }
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      throw new Error(`sendDM failed: ${res.status} ${err}`);
+      throw new Error(`sendDM failed: ${formatFailedResponse(res.status, err)}`);
     }
     const d = await res.json() as any;
     return this.mapMessage(d.message || d);

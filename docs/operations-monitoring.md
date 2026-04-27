@@ -77,6 +77,19 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 
    The script prints non-idle sessions ordered by **wait_event**, then the **longest `now() - query_start`** (top 15). For lock chains, see also [`scripts/sql/pg-blocking-wait-chain.sql`](../scripts/sql/pg-blocking-wait-chain.sql). `MODE=wait` or `MODE=longest` limits output to one section.
 
+## POST /messages “briefly busy” **503** JSON (`code`)
+
+The human `error` string is unchanged for clients. **`code`** distinguishes causes without reading server logs:
+
+| `code` | Typical cause |
+|--------|----------------|
+| `message_post_insert_timeout` | Postgres **statement / query timeout** on insert |
+| `message_insert_lock_wait_timeout` | **Redis insert lock** not acquired within wait budget (per-channel contention) |
+| `message_insert_lock_recent_shed` | **Shed** after a recent lock timeout on that channel (parallel retries) |
+| `message_insert_lock_waiter_cap` | **Per-channel waiter cap** exceeded |
+
+Optional fields: **`waitedMs`**, **`lockWaiters`**. Correlate with **`requestId`** in Loki and with **`message_insert_lock_wait_timeout_total`**, **`message_channel_insert_lock_total`**, and holder/wait histograms in [`backend/src/utils/metrics.ts`](../backend/src/utils/metrics.ts).
+
 ## Core metric families (labels often include `job="chatapp-api"`)
 
 | Area | Metrics | Interpretation |
