@@ -432,16 +432,40 @@ async function releaseChannelInsertLease(
   if (!lease) return 'no_lease';
   let result: 'released' | 'release_mismatch' | 'release_error' = 'released';
   try {
-    const released = await withRedisOpTimeout(
-      redis.eval(
-        MESSAGE_INSERT_LOCK_RELEASE_LUA,
-        1,
-        lease.lockKey,
-        lease.token,
-      ),
-      MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS,
-      'eval',
-    );
+    const maxAttempts = 3;
+    let released: unknown = 0;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        released = await withRedisOpTimeout(
+          redis.eval(
+            MESSAGE_INSERT_LOCK_RELEASE_LUA,
+            1,
+            lease.lockKey,
+            lease.token,
+          ),
+          MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS,
+          'eval',
+        );
+        break;
+      } catch (err: any) {
+        const isTimeout = err?.code === 'REDIS_OP_TIMEOUT';
+        if (isTimeout && attempt < maxAttempts - 1) {
+          logger.warn(
+            {
+              channelId,
+              requestId: opts.requestId,
+              waitMs: lease.waitMs,
+              attempt: attempt + 1,
+              maxAttempts,
+            },
+            'POST /messages channel insert lock release Redis op timed out; retrying',
+          );
+          await sleep(50);
+          continue;
+        }
+        throw err;
+      }
+    }
     if (Number(released) === 0) {
       messageChannelInsertLockTotal.inc({ result: 'release_mismatch' });
       logger.warn(
