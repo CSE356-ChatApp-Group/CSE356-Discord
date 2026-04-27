@@ -47,6 +47,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - realtime fanout cache hit/miss/coalesced rates
    - realtime fanout stage/target p95 plus candidate-audience p95 before recent-connect filtering
    - deferred POST fanout: `fanout_job_latency_ms` p99, `fanout_queue_depth`, `fanout_retry_total`, `delivery_timeout_total`
+   - Redis: `redis_up`, used/max memory, evictions, commands/sec (`redis_commands_processed_total` rate); SLOWLOG via `REDIS_SLOWLOG_SSH=ubuntu@<vm1> ./scripts/redis-slowlog-snapshot.sh` or embed in `PROMETHEUS_URL=... REDIS_SLOWLOG_SSH=... ./scripts/metrics-snapshot.sh`
    - websocket bootstrap wall-time, breadth, and cache-hit rate
 
 2. **Grafana / Prometheus UI** — export panel data or run the same PromQL as in the snapshot script and paste results.

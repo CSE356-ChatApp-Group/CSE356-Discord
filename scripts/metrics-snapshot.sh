@@ -64,6 +64,13 @@ queries=(
   'histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))'
   'max by (vm, instance) (message_channel_insert_lock_pressure_recent_timeout_count{job="chatapp-api"})'
   'max by (vm, instance) (message_channel_insert_lock_pressure_wait_p95_ms{job="chatapp-api"})'
+  # Redis (redis_exporter job=redis on PROM_REDIS_HOST:9121)
+  'redis_up{job="redis"}'
+  'max(redis_memory_used_bytes{job="redis"})'
+  'max(redis_memory_max_bytes{job="redis"})'
+  'sum(rate(redis_evicted_keys_total{job="redis"}[5m]))'
+  'sum(rate(redis_commands_processed_total{job="redis"}[5m]))'
+  'sum(rate(redis_acl_access_denied_cmd_total{job="redis"}[5m])) + sum(rate(redis_acl_access_denied_key_total{job="redis"}[5m])) + sum(rate(redis_acl_access_denied_channel_total{job="redis"}[5m]))'
 )
 
 run() {
@@ -80,6 +87,15 @@ run() {
     fi
     echo ""
   done
+
+  if [[ -n "${REDIS_SLOWLOG_SSH:-}" ]]; then
+    echo "--- redis SLOWLOG (REDIS_SLOWLOG_SSH=${REDIS_SLOWLOG_SSH}) ---"
+    ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    if ! REDIS_SLOWLOG_SSH="${REDIS_SLOWLOG_SSH}" bash "${ROOT}/scripts/redis-slowlog-snapshot.sh"; then
+      echo '{"status":"error","error":"redis SLOWLOG snapshot failed"}'
+    fi
+    echo ""
+  fi
 }
 
 if [[ -n "$OUT" ]]; then

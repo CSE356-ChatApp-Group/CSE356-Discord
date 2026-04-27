@@ -724,6 +724,29 @@ groups:
             Rapid degradation in delivery path: message-route 5xx burn, fanout critical job failures,
             or dropped critical side-effect jobs in a short window. This should page immediately.
 
+      - alert: ChatAppMessagePostFanoutQueueFull
+        expr: sum(rate(message_post_fanout_async_enqueue_total{job="chatapp-api",result="queue_full"}[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: POST /messages fanout:critical queue is full (background fallback)
+          description: >
+            Deferred message fanout is hitting `FANOUT_CRITICAL_MAX_DEPTH` — some publishes fall back to
+            `publishBackgroundEvent`. Increase `FANOUT_QUEUE_CONCURRENCY` / max depth or scale workers;
+            correlate with `fanout_queue_depth` and `fanout_job_latency_ms`.
+
+      - alert: ChatAppFanoutCriticalQueueSustainedBacklog
+        expr: sum(fanout_queue_depth{job="chatapp-api",queue="fanout:all"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Fanout aggregate queue depth sustained above zero
+          description: >
+            `sum(fanout_queue_depth{queue="fanout:all"})` stayed >0 for 15m — side-effect workers are not draining
+            the backlog. Check Redis publish latency, `FANOUT_QUEUE_CONCURRENCY`, and `fanout_job_latency_ms`.
+
   # Redis (requires redis_exporter job on :9121 — deploy-staging installs it).
   - name: chatapp-redis
     rules:
@@ -791,3 +814,86 @@ groups:
           description: >
             >300 connected clients for 15m. If approaching `maxclients`, new connections may fail;
             check for pool leaks or raise limits.
+
+      - alert: ChatAppRedisExporterNotReady
+        expr: redis_up{job="redis"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: redis_exporter cannot authenticate or ping Redis (redis_up=0)
+          description: >
+            Fix `REDIS_ADDR` / ACL credentials on the redis_exporter host (`redis_exporter_redis_url.py`
+            URL-encoding), confirm managed Redis allows the app VPC, and check exporter logs:
+            `sudo docker logs redis_exporter`.
+
+      - alert: ChatAppRedisEvictionsNonZero
+        expr: sum(rate(redis_evicted_keys_total{job="redis"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis is evicting keys (memory pressure)
+          description: >
+            `redis_evicted_keys_total` rate is >0 for 10m. volatile-lru is shedding data; raise `maxmemory`,
+            reduce cache TTLs, or investigate large hot keys. Correlate with `redis_memory_used_bytes`.
+
+      - alert: ChatAppRedisRejectedConnections
+        expr: |
+          sum by (job) (rate(redis_rejected_connections_total{job="redis"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis is rejecting connections
+          description: >
+            `redis_rejected_connections_total` is increasing — often `maxclients` or ACL limits.
+            Check app pool sizing and Redis `INFO clients`.
+
+      # Protocol-level denials (managed Redis has no host OOM log series here); correlate with memory/eviction alerts.
+      - alert: ChatAppRedisAclDeniedOperations
+        expr: |
+          (
+            sum(rate(redis_acl_access_denied_cmd_total{job="redis"}[5m]))
+            + sum(rate(redis_acl_access_denied_key_total{job="redis"}[5m]))
+            + sum(rate(redis_acl_access_denied_channel_total{job="redis"}[5m]))
+          ) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis ACL is denying commands, keys, or channels
+          description: >
+            ACL deny counters are increasing — wrong credentials on a client, overly tight ACL rules, or a
+            security probe. Correlate with `redis_acl_access_denied_auth_total` and application Redis errors.
+
+      - alert: ChatAppRedisRdbOrAofLoadingStall
+        expr: redis_loading_dump_file{job="redis"} == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis reports loading a persistence file for an extended time
+          description: >
+            `redis_loading_dump_file` stayed 1 for 30m — investigate persistence layer health, disk I/O,
+            or managed-provider incidents (this is a coarse proxy for “Redis stuck loading”, not kernel OOM).
+
+      # Kernel OOM / Redis process death is not a single Prometheus series on managed Redis; use logs on
+      # the app VM (`journalctl -u chatapp@*`) plus this proxy: redis_up flapping with evictions.
+      - alert: ChatAppRedisOOMRiskComposite
+        expr: |
+          (redis_up{job="redis"} == 1)
+          and
+          (sum(rate(redis_evicted_keys_total{job="redis"}[5m])) > 5)
+          and
+          (redis_memory_max_bytes{job="redis"} > 0)
+          and
+          ((redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"}) > 0.92)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Redis severe eviction under near-maxmemory (OOM-class risk)
+          description: >
+            Eviction rate is high while used/maxmemory >92%. Treat as emergency memory pressure;
+            confirm host RSS, Redis `INFO memory`, and managed Redis alerts; scale or trim immediately.
