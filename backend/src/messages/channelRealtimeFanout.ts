@@ -282,6 +282,18 @@ function writeRecentConnectTargetsCache(channelId: string, targets: string[]) {
   });
 }
 
+/** Sequential MGET batches — avoids firing dozens of MGETs at once (Redis single-thread + ioredis). */
+async function mgetKeyBatches(keys: string[], batchSize: number): Promise<(string | null)[]> {
+  if (!keys.length) return [];
+  const out: (string | null)[] = [];
+  for (let i = 0; i < keys.length; i += batchSize) {
+    const slice = keys.slice(i, i + batchSize);
+    const part = await redis.mget(...slice);
+    out.push(...part);
+  }
+  return out;
+}
+
 async function recentConnectTargets(channelId: string, targets: string[]) {
   if (!targets.length) return [];
   const cachedTargets = readRecentConnectTargetsCache(channelId);
@@ -312,14 +324,8 @@ async function recentConnectTargets(channelId: string, targets: string[]) {
       let bootstrapWindowTargets: string[] = [];
       if (notInZset.length > 0) {
         const keys = notInZset.map((target) => wsRecentConnectKey(target.slice('user:'.length)));
-        // Batch into ≤100 keys per MGET to avoid blocking Redis event loop for >1ms per call.
         const MGET_BATCH = 100;
-        const batchResults = await Promise.all(
-          Array.from({ length: Math.ceil(keys.length / MGET_BATCH) }, (_, i) =>
-            redis.mget(...keys.slice(i * MGET_BATCH, (i + 1) * MGET_BATCH)),
-          ),
-        );
-        const markers = batchResults.flat();
+        const markers = await mgetKeyBatches(keys, MGET_BATCH);
         bootstrapWindowTargets = notInZset.filter((_t, idx) => !!markers[idx]);
       }
 
@@ -331,12 +337,7 @@ async function recentConnectTargets(channelId: string, targets: string[]) {
     }
     const keys = targets.map((target) => wsRecentConnectKey(target.slice(5)));
     const MGET_BATCH = 100;
-    const batchResults = await Promise.all(
-      Array.from({ length: Math.ceil(keys.length / MGET_BATCH) }, (_, i) =>
-        redis.mget(...keys.slice(i * MGET_BATCH, (i + 1) * MGET_BATCH)),
-      ),
-    );
-    const markers = batchResults.flat();
+    const markers = await mgetKeyBatches(keys, MGET_BATCH);
     const filteredTargets = targets.filter((_target, idx) => !!markers[idx]);
     writeRecentConnectTargetsCache(channelId, filteredTargets);
     return filteredTargets;
