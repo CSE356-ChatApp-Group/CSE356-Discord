@@ -19,7 +19,48 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
-  "links": [],
+  "links": [
+    {
+      "title": "Redis & cache signals",
+      "type": "link",
+      "icon": "database",
+      "url": "/d/redis-cache-store",
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Failure modes",
+      "type": "link",
+      "icon": "bolt",
+      "url": "/d/chatapp-failure-modes",
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Latency RCA",
+      "type": "link",
+      "icon": "line-chart",
+      "url": "/d/latency-root-cause",
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Overload & shedding",
+      "type": "link",
+      "icon": "shield",
+      "url": "/d/overload-shedding",
+      "keepTime": true,
+      "targetBlank": false
+    },
+    {
+      "title": "API routes",
+      "type": "link",
+      "icon": "list-ul",
+      "url": "/d/api-routes-overview",
+      "keepTime": true,
+      "targetBlank": false
+    }
+  ],
   "panels": [
     {
       "datasource": {
@@ -1173,7 +1214,7 @@
           "refId": "A"
         }
       ],
-      "title": "Redis list cache (rate by endpoint + result)",
+      "title": "Endpoint list cache (HTTP list pages, rate by endpoint + result)",
       "type": "timeseries"
     },
     {
@@ -2638,6 +2679,7 @@
         "y": 163
       },
       "id": 58,
+      "description": "Requires Prometheus job `redis` (redis_exporter). Local: docker-compose `redis-exporter` + scrape in prometheus.yml. See **Redis & app cache signals** dashboard (top links) for full Redis + app-side cache metrics.",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2735,6 +2777,6 @@
   "timezone": "America/New_York",
   "title": "ChatApp Overview",
   "uid": "chatapp-overview",
-  "version": 11,
+  "version": 12,
   "weekStart": ""
 }

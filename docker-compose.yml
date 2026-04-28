@@ -70,6 +70,16 @@ services:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_dev}", "ping"]
       interval: 10s
 
+  # Prometheus scrape target for redis_exporter (see infrastructure/monitoring/prometheus.yml job `redis`).
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379
+    depends_on:
+      redis: { condition: service_healthy }
+    networks: [chatapp]
+
   # ── Node 2 · API (primary) ────────────────────────────────────────────────────
   api:
     image: node:20-alpine
@@ -252,7 +262,9 @@ services:
   prometheus:
     image: prom/prometheus:v2.53.1
     restart: unless-stopped
-    depends_on: [alertmanager]
+    depends_on:
+      alertmanager: { condition: service_started }
+      redis-exporter: { condition: service_started }
     environment:
       ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-local}
     ports:

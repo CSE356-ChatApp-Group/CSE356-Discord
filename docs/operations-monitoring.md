@@ -10,7 +10,7 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Alert rules (PromQL) | [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) |
 | Incident steps | [`RUNBOOKS.md`](RUNBOOKS.md) |
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
-| Grafana dashboard (repo copy) | [`infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) |
+| Grafana dashboards (repo JSON) | **Overview:** [`chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) — **Redis / cache:** [`redis-cache-store.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/redis-cache-store.json) (`job=redis` + app-side Redis-adjacent counters). Overview top links jump to Failure modes, Latency RCA, Redis, Overload, API routes. |
 | Instant Prometheus triage | [`scripts/metrics-snapshot.sh`](../scripts/metrics-snapshot.sh) |
 | Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) |
 

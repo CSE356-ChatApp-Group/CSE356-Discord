@@ -46,10 +46,10 @@ scrape_configs:
   #   static_configs:
   #     - targets: ['postgres-exporter:9187']
 
-  # ── Redis exporter ─────────────────────────────────────────────────────────
-  # - job_name: 'redis'
-  #   static_configs:
-  #     - targets: ['redis-exporter:9121']
+  # ── Redis exporter (docker-compose service `redis-exporter`; prod: VM per deploy scripts)
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
 
   # ── Nginx stub_status ──────────────────────────────────────────────────────
   # - job_name: 'nginx'
