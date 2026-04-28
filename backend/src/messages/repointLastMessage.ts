@@ -32,6 +32,12 @@ const CH_LAST_MSG_DIRTY_SET  = 'ch:last_msg:dirty';
 const CONV_LAST_MSG_KEY_PREFIX = 'conv:last_msg:';
 const CONV_LAST_MSG_DIRTY_SET  = 'conv:last_msg:dirty';
 
+const LAST_MESSAGE_REDIS_TTL_SECS = (() => {
+  const raw = parseInt(process.env.LAST_MESSAGE_REDIS_TTL_SECS || '43200', 10);
+  if (!Number.isFinite(raw) || raw < 300) return 43_200;
+  return Math.min(86_400 * 30, raw);
+})();
+
 const CHANNEL_FLUSH_INTERVAL_MS = parseInt(
   process.env.CHANNEL_LAST_MSG_FLUSH_INTERVAL_MS || '10000', 10
 );
@@ -165,12 +171,14 @@ async function flushLastMessageToRedis(
     ? pending.createdAt
     : (pending.createdAt as Date).toISOString();
   try {
+    const key = `${keyPrefix}${id}`;
     await redis.hset(
-      `${keyPrefix}${id}`,
+      key,
       'msg_id',    pending.messageId,
       'author_id', pending.authorId ?? '',
       'at',        atStr,
     );
+    await redis.expire(key, LAST_MESSAGE_REDIS_TTL_SECS);
     await redis.sadd(dirtySet, id);
     lastMessageRedisUpdateTotal.inc({ target: logLabel, result: 'ok' });
     return true;

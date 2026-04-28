@@ -4,6 +4,11 @@ const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const { loadHydratedMessageById } = require('./messageHydrate');
 const { wrapFanoutPayload } = require('./realtimePayload');
+const {
+  wsPendingReplayUserTrimmedTotal,
+  wsPendingReplayUserZsetSize,
+  wsPendingReplayGuardTotal,
+} = require('../utils/metrics');
 
 const rawPendingTtlSeconds = Number(process.env.WS_REPLAY_PENDING_TTL_SECONDS || '180');
 const WS_REPLAY_PENDING_TTL_SECONDS =
@@ -17,7 +22,26 @@ const WS_REPLAY_PENDING_DRAIN_LIMIT =
     ? Math.min(2000, Math.max(10, Math.floor(rawPendingDrainLimit)))
     : 300;
 
+const rawPendingUserCap = Number(process.env.WS_REPLAY_PENDING_USER_MAX_ZSET || '400');
+const WS_REPLAY_PENDING_USER_MAX_ZSET =
+  Number.isFinite(rawPendingUserCap) && rawPendingUserCap > 0
+    ? Math.min(5000, Math.max(50, Math.floor(rawPendingUserCap)))
+    : 400;
+
+const rawPendingMemoryGuardPct = Number(process.env.WS_REPLAY_PENDING_MEMORY_GUARD_PCT || '85');
+const WS_REPLAY_PENDING_MEMORY_GUARD_PCT =
+  Number.isFinite(rawPendingMemoryGuardPct) && rawPendingMemoryGuardPct >= 50
+    ? Math.min(98, Math.max(50, rawPendingMemoryGuardPct))
+    : 85;
+
+const WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED =
+  String(process.env.WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED || 'true').toLowerCase() !== 'false';
+const WS_REPLAY_PENDING_MEMORY_GUARD_CACHE_MS = 2000;
+
 const PENDING_MIN_MARKER = '__pendingMin';
+let pendingGuardCachedUntilMs = 0;
+let pendingGuardCachedShouldSkip = false;
+let pendingGuardLastWarnAtMs = 0;
 
 function pendingUserKey(userId: string) {
   return `ws:pending:user:${userId}`;
@@ -77,6 +101,22 @@ async function enqueuePendingMessageForUsers(targets: string[], payload: Record<
   if (!messageId) return;
   const userIds = normalizeUserIds(targets);
   if (!userIds.length) return;
+  if (await shouldSkipPendingReplayWrite()) {
+    wsPendingReplayGuardTotal.inc({ reason: 'redis_memory_high' });
+    const now = Date.now();
+    if (now - pendingGuardLastWarnAtMs >= 30000) {
+      pendingGuardLastWarnAtMs = now;
+      logger.warn(
+        {
+          guardPct: WS_REPLAY_PENDING_MEMORY_GUARD_PCT,
+          users: userIds.length,
+          messageId,
+        },
+        'WS pending replay enqueue skipped: Redis memory guard active',
+      );
+    }
+    return;
+  }
 
   const score = Date.now();
   const minimal = buildPendingRedisPayload(payload, messageId);
@@ -89,10 +129,44 @@ async function enqueuePendingMessageForUsers(targets: string[], payload: Record<
     WS_REPLAY_PENDING_TTL_SECONDS,
   );
   for (const userId of userIds) {
-    pipeline.zadd(pendingUserKey(userId), score, messageId);
-    pipeline.expire(pendingUserKey(userId), WS_REPLAY_PENDING_TTL_SECONDS);
+    const userKey = pendingUserKey(userId);
+    pipeline.zadd(userKey, score, messageId);
+    pipeline.expire(userKey, WS_REPLAY_PENDING_TTL_SECONDS);
+    pipeline.zremrangebyrank(userKey, 0, -(WS_REPLAY_PENDING_USER_MAX_ZSET + 1));
+    pipeline.zcard(userKey);
   }
-  await pipeline.exec();
+  const results = await pipeline.exec();
+  for (let i = 0; i < userIds.length; i += 1) {
+    const base = 1 + (i * 4);
+    const [, trimmedRaw] = results[base + 2] || [];
+    const [, zcardRaw] = results[base + 3] || [];
+    const trimmed = Number(trimmedRaw) || 0;
+    const zcard = Number(zcardRaw) || 0;
+    if (trimmed > 0) wsPendingReplayUserTrimmedTotal.inc(trimmed);
+    wsPendingReplayUserZsetSize.observe(zcard);
+  }
+}
+
+async function shouldSkipPendingReplayWrite(): Promise<boolean> {
+  if (!WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED) return false;
+  const now = Date.now();
+  if (now < pendingGuardCachedUntilMs) return pendingGuardCachedShouldSkip;
+  pendingGuardCachedUntilMs = now + WS_REPLAY_PENDING_MEMORY_GUARD_CACHE_MS;
+  pendingGuardCachedShouldSkip = false;
+  try {
+    const info = await redis.info('memory');
+    const usedMatch = /(?:^|\n)used_memory:(\d+)(?:\n|$)/.exec(info);
+    const maxMatch = /(?:^|\n)maxmemory:(\d+)(?:\n|$)/.exec(info);
+    const used = usedMatch ? Number(usedMatch[1]) : 0;
+    const max = maxMatch ? Number(maxMatch[1]) : 0;
+    if (used > 0 && max > 0) {
+      const pct = (used * 100) / max;
+      pendingGuardCachedShouldSkip = pct >= WS_REPLAY_PENDING_MEMORY_GUARD_PCT;
+    }
+  } catch {
+    pendingGuardCachedShouldSkip = false;
+  }
+  return pendingGuardCachedShouldSkip;
 }
 
 async function drainPendingMessagesForUser(userId: string) {
@@ -144,4 +218,5 @@ module.exports = {
   drainPendingMessagesForUser,
   WS_REPLAY_PENDING_TTL_SECONDS,
   WS_REPLAY_PENDING_DRAIN_LIMIT,
+  WS_REPLAY_PENDING_USER_MAX_ZSET,
 };

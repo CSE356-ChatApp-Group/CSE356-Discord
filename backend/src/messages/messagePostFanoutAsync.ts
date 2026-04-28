@@ -25,8 +25,8 @@ function lockTtlSec() {
 }
 
 function doneTtlSec() {
-  const raw = parseInt(process.env.MESSAGE_FANOUT_JOB_DONE_TTL_SEC || "86400", 10);
-  return Number.isFinite(raw) ? Math.min(604800, Math.max(3600, raw)) : 86400;
+  const raw = parseInt(process.env.MESSAGE_FANOUT_JOB_DONE_TTL_SEC || "7200", 10);
+  return Number.isFinite(raw) ? Math.min(604800, Math.max(3600, raw)) : 7200;
 }
 
 function maxAttempts() {

@@ -78,6 +78,12 @@ describe("messagePostFanoutAsync", () => {
     );
     const redis = require("../src/db/redis");
     expect(await redis.get("fanout:v1:done:msg-1")).toBe("1");
+    expect(redis.set).toHaveBeenCalledWith(
+      "fanout:v1:done:msg-1",
+      "1",
+      "EX",
+      7200,
+    );
   });
 
   it("skips publish when done marker already set (dedup)", async () => {

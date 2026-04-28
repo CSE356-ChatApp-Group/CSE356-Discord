@@ -253,6 +253,25 @@ const messageChannelInsertLockTotal = new client.Counter({
   labelNames: ['result'],
 });
 
+/**
+ * Per-request insert path for channel POST /messages (orthogonal to message_channel_insert_lock_total).
+ * path: optimistic_bypass | acquired_immediate | acquired_after_wait | redis_fallback_null_lease
+ * reason_detail: env_optimistic | env_mode_off | env_lock_disabled | none | redis_set_error
+ */
+const messageChannelInsertPathTotal = new client.Counter({
+  name: 'message_channel_insert_path_total',
+  help: 'POST /messages channel insert path decision (bypass vs serialized acquire vs Redis fallback)',
+  labelNames: ['path', 'reason_detail'],
+});
+
+/** Milliseconds from POST insert-path entry to DB txn start (queue + Redis spin; 0 for optimistic bypass). */
+const messageChannelInsertPathPrecallMs = new client.Histogram({
+  name: 'message_channel_insert_path_precall_ms',
+  help: 'Time spent before channel insert DB work, by insert path',
+  labelNames: ['path'],
+  buckets: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
 const messageChannelInsertLockWaitMs = new client.Histogram({
   name: 'message_channel_insert_lock_wait_ms',
   help: 'Milliseconds spent waiting on the channel-scoped POST /messages insert lock',
@@ -508,6 +527,26 @@ const wsReplayQueryDurationMs = new client.Histogram({
   help: 'Milliseconds spent loading reconnect replay messages from Postgres',
   labelNames: ['result'],
   buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 1500, 2500, 5000, 10000],
+});
+
+/** Pending replay user ZSET trims when cardinality cap is enforced. */
+const wsPendingReplayUserTrimmedTotal = new client.Counter({
+  name: 'ws_pending_replay_user_trimmed_total',
+  help: 'Pending replay ZSET members trimmed due to per-user cardinality cap',
+});
+
+/** Distribution of ws:pending:user:* zset cardinality after enqueue+trim. */
+const wsPendingReplayUserZsetSize = new client.Histogram({
+  name: 'ws_pending_replay_user_zset_size',
+  help: 'Cardinality of ws:pending:user:* after enqueue path processing',
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Nonessential pending replay write skipped by emergency memory guard. */
+const wsPendingReplayGuardTotal = new client.Counter({
+  name: 'ws_pending_replay_guard_total',
+  help: 'Pending replay writes skipped due to Redis memory guard activation',
+  labelNames: ['reason'],
 });
 
 /**
@@ -945,6 +984,9 @@ function startPgPoolMetrics(pool) {
     wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
     wsReplayQueryDurationMs.observe({ result: 'timeout' }, 0);
     wsReplayQueryDurationMs.observe({ result: 'pool_busy' }, 0);
+    wsPendingReplayUserTrimmedTotal.inc(0);
+    wsPendingReplayUserZsetSize.observe(0);
+    wsPendingReplayGuardTotal.inc({ reason: 'redis_memory_high' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'channel' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'conversation' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'user' }, 0);
@@ -1009,6 +1051,7 @@ function startPgPoolMetrics(pool) {
     messagePostIdempotencyPollWaitMs.observe({ outcome: 'exhausted_409' }, 0);
     messageChannelInsertLockTotal.inc({ result: 'acquired_immediate' }, 0);
     messageChannelInsertLockTotal.inc({ result: 'acquired_after_wait' }, 0);
+    messageChannelInsertLockTotal.inc({ result: 'optimistic_bypass' }, 0);
     messageChannelInsertLockTotal.inc({ result: 'timeout' }, 0);
     messageChannelInsertLockTotal.inc({ result: 'redis_error' }, 0);
     messageChannelInsertLockTotal.inc({ result: 'release_mismatch' }, 0);
@@ -1017,6 +1060,23 @@ function startPgPoolMetrics(pool) {
     messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, 0);
     messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, 0);
     messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, 0);
+    for (const path of [
+      'optimistic_bypass',
+      'acquired_immediate',
+      'acquired_after_wait',
+      'redis_fallback_null_lease',
+    ]) {
+      for (const reason_detail of [
+        'env_optimistic',
+        'env_mode_off',
+        'env_lock_disabled',
+        'none',
+        'redis_set_error',
+      ]) {
+        messageChannelInsertPathTotal.inc({ path, reason_detail }, 0);
+      }
+      messageChannelInsertPathPrecallMs.observe({ path }, 0);
+    }
     messageInsertLockWaitersCurrentGauge.set(0);
     messageInsertLockQueueRejectTotal.inc({ reason: 'per_channel_waiter_cap' }, 0);
     messageInsertLockWaitTimeoutTotal.inc(0);
@@ -1197,6 +1257,8 @@ module.exports = {
   messagePostIdempotencyPollWaitMs,
   messagePostRateLimitHitsTotal,
   messageChannelInsertLockTotal,
+  messageChannelInsertPathTotal,
+  messageChannelInsertPathPrecallMs,
   messageChannelInsertLockWaitMs,
   messageInsertLockWaitersCurrentGauge,
   messageInsertLockQueueRejectTotal,
@@ -1228,6 +1290,9 @@ module.exports = {
   wsReplayQueryTotal,
   wsReplayErrorClassTotal,
   wsReplayQueryDurationMs,
+  wsPendingReplayUserTrimmedTotal,
+  wsPendingReplayUserZsetSize,
+  wsPendingReplayGuardTotal,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,
   channelLastMessageUpdateDeferredTotal,

@@ -299,6 +299,9 @@ async function bustChannelListCacheForUser(communityId, userId) {
 const _channelsListTtl = parseInt(process.env.CHANNELS_LIST_CACHE_TTL_SECS || '60', 10);
 const CHANNELS_LIST_CACHE_TTL_SECS =
   Number.isFinite(_channelsListTtl) && _channelsListTtl > 0 ? _channelsListTtl : 60;
+const _channelMsgCountTtl = parseInt(process.env.CHANNEL_MSG_COUNT_REDIS_TTL_SECS || '2592000', 10);
+const CHANNEL_MSG_COUNT_REDIS_TTL_SECS =
+  Number.isFinite(_channelMsgCountTtl) && _channelMsgCountTtl > 0 ? _channelMsgCountTtl : 2_592_000;
 const channelsListInflight = new Map();
 
 // ── List ───────────────────────────────────────────────────────────────────────
@@ -422,6 +425,18 @@ router.get('/',
                     ch.last_message_author_id !== userId;
                   ch.unread_message_count = hasUnread ? 1 : 0;
                 }
+              }
+              // Opportunistic TTL repair for legacy channel:msg_count keys created without EX.
+              // Best-effort only; never block the response path.
+              const ttlRepair = redis.pipeline();
+              let ttlRepairOps = 0;
+              for (let i = 0; i < accessibleRows.length; i += 1) {
+                if (rawCounts[i] === null) continue;
+                ttlRepair.expire(countKeys[i], CHANNEL_MSG_COUNT_REDIS_TTL_SECS);
+                ttlRepairOps += 1;
+              }
+              if (ttlRepairOps > 0) {
+                ttlRepair.exec().catch(() => {});
               }
             } catch (err) {
               logger.warn({ err }, 'Failed to fetch unread counts from Redis; defaulting to 0');

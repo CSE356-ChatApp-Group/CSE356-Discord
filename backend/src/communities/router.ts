@@ -287,6 +287,9 @@ const COMMUNITIES_LAST_GOOD_CACHE_TTL_SECS = Math.max(
   COMMUNITIES_CACHE_TTL_SECS,
   900,
 );
+const _communitiesVersionTtl = parseInt(process.env.COMMUNITIES_VERSION_CACHE_TTL_SECS || '2592000', 10);
+const COMMUNITIES_VERSION_CACHE_TTL_SECS =
+  Number.isFinite(_communitiesVersionTtl) && _communitiesVersionTtl > 0 ? _communitiesVersionTtl : 2_592_000;
 
 const COMMUNITY_RETURNING_FIELDS = `
   id,
@@ -360,20 +363,34 @@ async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
     await redis.del(...new Set(keys));
   }
   await Promise.allSettled(
-    normalizedUserIds.map((userId) => redis.incr(communitiesUserVersionKey(userId))),
+    normalizedUserIds.map(async (userId) => {
+      const key = communitiesUserVersionKey(userId);
+      await redis.incr(key);
+      await redis.expire(key, COMMUNITIES_VERSION_CACHE_TTL_SECS);
+    }),
   );
 }
 
 async function getPublicCommunitiesVersion() {
-  return (await redis.get(PUBLIC_COMMUNITIES_VERSION_KEY).catch(() => null)) || '0';
+  const v = (await redis.get(PUBLIC_COMMUNITIES_VERSION_KEY).catch(() => null)) || '0';
+  redis.expire(PUBLIC_COMMUNITIES_VERSION_KEY, COMMUNITIES_VERSION_CACHE_TTL_SECS).catch(() => {});
+  return v;
 }
 
 async function bumpPublicCommunitiesVersion() {
-  await redis.incr(PUBLIC_COMMUNITIES_VERSION_KEY).catch(() => {});
+  try {
+    await redis.incr(PUBLIC_COMMUNITIES_VERSION_KEY);
+    await redis.expire(PUBLIC_COMMUNITIES_VERSION_KEY, COMMUNITIES_VERSION_CACHE_TTL_SECS);
+  } catch {
+    // Best-effort only.
+  }
 }
 
 async function getCommunitiesUserVersion(userId) {
-  return (await redis.get(communitiesUserVersionKey(userId)).catch(() => null)) || '0';
+  const key = communitiesUserVersionKey(userId);
+  const v = (await redis.get(key).catch(() => null)) || '0';
+  redis.expire(key, COMMUNITIES_VERSION_CACHE_TTL_SECS).catch(() => {});
+  return v;
 }
 
 const MEMBERS_CACHE_TTL_SECS = 30;
