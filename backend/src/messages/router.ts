@@ -314,6 +314,12 @@ const MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS = (() => {
   if (!Number.isFinite(raw) || raw < 25) return 125;
   return Math.min(1000, raw);
 })();
+const MESSAGE_POST_IMMEDIATE_RECENT_BRIDGE_ENABLED = (() => {
+  const raw = String(
+    process.env.MESSAGE_POST_IMMEDIATE_RECENT_BRIDGE_ENABLED || "false",
+  ).toLowerCase();
+  return raw === "1" || raw === "true";
+})();
 
 /** PgBouncer `query_timeout` or PG `statement_timeout` during insert (often row lock behind channels FK). */
 function isMessagePostInsertDbTimeout(err) {
@@ -2437,25 +2443,27 @@ router.post(
               message,
             );
             realtimePublishedAtForHttp = createdEnvelope.publishedAt;
-            const recentBridgeRun = await withBoundedPostInsertTimeout(
-              "recent_bridge",
-              publishChannelMessageRecentUserBridge(
-                channelId,
-                createdEnvelope,
-              ),
-              MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
-            );
-            if (!recentBridgeRun.ok && recentBridgeRun.timedOut) {
-              deliveryTimeoutTotal.inc({ phase: "recent_bridge" });
-              logger.warn(
-                {
-                  requestId: req.id,
+            if (MESSAGE_POST_IMMEDIATE_RECENT_BRIDGE_ENABLED) {
+              const recentBridgeRun = await withBoundedPostInsertTimeout(
+                "recent_bridge",
+                publishChannelMessageRecentUserBridge(
                   channelId,
-                  timeoutMs: MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
-                  gradingNote: "post_insert_delivery_timeout_not_http_failure",
-                },
-                "POST /messages: immediate recent-connect bridge exceeded wall budget",
+                  createdEnvelope,
+                ),
+                MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
               );
+              if (!recentBridgeRun.ok && recentBridgeRun.timedOut) {
+                deliveryTimeoutTotal.inc({ phase: "recent_bridge" });
+                logger.warn(
+                  {
+                    requestId: req.id,
+                    channelId,
+                    timeoutMs: MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
+                    gradingNote: "post_insert_delivery_timeout_not_http_failure",
+                  },
+                  "POST /messages: immediate recent-connect bridge exceeded wall budget",
+                );
+              }
             }
             // Fixed job name for metrics: do not include message id — each id was a new
             // Prometheus histogram label set (~2M+ series) and crushed the monitoring VM.
