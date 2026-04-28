@@ -545,7 +545,11 @@ async function releaseChannelInsertLease(
 export function runChannelMessageInsertSerialized<T>(
   channelId: string | null,
   fn: () => Promise<T>,
-  opts: { requestId?: string } = {},
+  opts: {
+    requestId?: string;
+    /** Fired after the Redis insert lock is acquired (or skipped with null lease). `waitMs` is queue+Redis spin time. */
+    onInsertLock?: (info: { waitMs: number; leaseHeld: boolean }) => void;
+  } = {},
 ): Promise<T> {
   if (!channelId) return fn();
   if (shouldBypassChannelInsertLock()) {
@@ -554,6 +558,12 @@ export function runChannelMessageInsertSerialized<T>(
   }
   return (async () => {
     const lease = await acquireChannelInsertLease(channelId, opts);
+    if (opts.onInsertLock) {
+      opts.onInsertLock({
+        waitMs: lease?.waitMs ?? 0,
+        leaseHeld: lease != null,
+      });
+    }
     const holderStartedAt = lease ? Date.now() : null;
     const dbTxStartedAt = Date.now();
     let releaseResult: 'released' | 'release_mismatch' | 'release_error' | 'no_lease' =

@@ -81,6 +81,23 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 
    The script prints non-idle sessions ordered by **wait_event**, then the **longest `now() - query_start`** (top 15). For lock chains, see also [`scripts/sql/pg-blocking-wait-chain.sql`](../scripts/sql/pg-blocking-wait-chain.sql). `MODE=wait` or `MODE=longest` limits output to one section.
 
+## POST `/messages` end-to-end trace (`post_messages_e2e_trace`)
+
+Successful **`POST /api/v1/messages`** requests can emit a structured log line **`event=post_messages_e2e_trace`** when:
+
+- **`MESSAGE_POST_E2E_TRACE_MIN_MS`** is set and wall time ≥ that value (align with Grafana p99), and/or
+- **`MESSAGE_POST_E2E_TRACE_SAMPLE_RATE`** is set (e.g. **`0.01`** for ~1% sampling).
+
+Each line includes **`requestId`**, **`worker_id`** (`hostname:PORT` from the systemd **`chatapp@`** instance), **`total_wall_ms`**, **`tx_total_ms`**, **`fanout_mode`**, **`breakdown_ms`** (idem Redis, channel insert-lock wait, per-transaction phases, hydrate, cache bust only, fanout wall, community enqueue fire-and-forget, idem success `SET`, JSON serialization, unaccounted gap), **`dominant_component`** (which single breakdown field was largest), **`dominant_bucket`** (**`db`** \| **`redis`** \| **`serialization`** \| **`hydrate_db`** \| **`other`**) for cheap rollups, and **`response_body_bytes`**.
+
+**Correlate slow spikes**
+
+1. **Redis** — same wall clock on the app host (or VM1 if Redis is managed): `REDIS_SLOWLOG_SSH=ubuntu@<host> ./scripts/redis-slowlog-snapshot.sh` or embed in `metrics-snapshot.sh` (see Quick links table). Compare **`channel_insert_lock_wait_ms`** and **`cache_bust_ms`** with **`SLOWLOG`** timestamps.
+2. **Postgres** — `DB_SSH=ubuntu@<db-host> ./scripts/pg-stat-statements-snapshot.sh` (or **`DELTA_SECONDS`** during an incident). Match **`tx_insert_ms`** / **`tx_commit_ms`** spikes to normalized statements (insert lock, `messages` insert, attachments).
+3. **Cross-worker** — filter logs by **`worker_id`** to see if one **`chatapp@`** port dominates (pool partition, hot channel serialization).
+
+**Aggregating “% of spikes by component”** — in Loki (or any log SQL), count lines where **`dominant_bucket="db"`** vs **`redis`** vs **`serialization`** etc., divided by total **`post_messages_e2e_trace`** lines in the window. **`max()` of each numeric field in `breakdown_ms`** over the window gives worst-case per component; **`dominant_component`** answers “single biggest slice” per request (no global single cause unless one bucket dominates the rollup counts).
+
 ## POST /messages “briefly busy” **503** JSON (`code`)
 
 The human `error` string is unchanged for clients. **`code`** distinguishes causes without reading server logs:

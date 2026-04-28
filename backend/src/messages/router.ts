@@ -495,6 +495,162 @@ function buildMessagePostSlowHolderLog({
   };
 }
 
+function parseNonNegIntOr(name, fallback) {
+  const v = Number.parseInt(process.env[name] || "", 10);
+  return Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+function parseUnitIntervalOr(name, fallback) {
+  const v = Number.parseFloat(process.env[name] || "");
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : fallback;
+}
+/** Emit `post_messages_e2e_trace` when wall time >= this ms (0 = disabled). */
+const MESSAGE_POST_E2E_TRACE_MIN_MS = parseNonNegIntOr(
+  "MESSAGE_POST_E2E_TRACE_MIN_MS",
+  0,
+);
+/** Random sample of successful POSTs (e.g. 0.01 ~= 1%). Independent of min ms. */
+const MESSAGE_POST_E2E_TRACE_SAMPLE_RATE = parseUnitIntervalOr(
+  "MESSAGE_POST_E2E_TRACE_SAMPLE_RATE",
+  0,
+);
+
+function shouldEmitPostMessagesE2eTrace(totalWallMs) {
+  if (MESSAGE_POST_E2E_TRACE_MIN_MS > 0 && totalWallMs >= MESSAGE_POST_E2E_TRACE_MIN_MS) {
+    return true;
+  }
+  if (
+    MESSAGE_POST_E2E_TRACE_SAMPLE_RATE > 0 &&
+    Math.random() < MESSAGE_POST_E2E_TRACE_SAMPLE_RATE
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function buildPostMessagesE2eTracePayload(args) {
+  const {
+    req,
+    channelId,
+    conversationId,
+    postWallStart,
+    txPhases,
+    total_wall_ms,
+    idem_redis_ms,
+    channel_insert_lock_wait_ms,
+    successLog,
+    hydrate_ms,
+    cache_bust_ms,
+    fanout_wall_ms,
+    fanout_mode,
+    community_enqueue_ms,
+    idem_success_redis_ms,
+    serialization_ms,
+    response_body_bytes,
+  } = args;
+  const txAccess = Math.max(0, Number(successLog.tx_access_check_ms || 0));
+  const txInsert = Math.max(0, Number(successLog.tx_insert_ms || 0));
+  const txLater = Math.max(0, Number(successLog.tx_later_step_ms || 0));
+  const txCommit = Math.max(0, Number(successLog.tx_commit_ms || 0));
+  const txTotal = Math.max(0, Number(successLog.tx_total_ms || 0));
+  const preDbHeadMs =
+    txPhases.t0 > 0 && postWallStart > 0
+      ? Math.max(0, txPhases.t0 - postWallStart)
+      : 0;
+  const preDbOtherMs = Math.max(
+    0,
+    preDbHeadMs - idem_redis_ms - channel_insert_lock_wait_ms,
+  );
+  const breakdown = {
+    idem_redis_ms,
+    channel_insert_lock_wait_ms,
+    pre_db_other_ms: preDbOtherMs,
+    tx_access_check_ms: txAccess,
+    tx_insert_ms: txInsert,
+    tx_later_step_ms: txLater,
+    tx_commit_ms: txCommit,
+    hydrate_ms,
+    cache_bust_ms,
+    fanout_wall_ms,
+    community_enqueue_ms,
+    idem_success_redis_ms,
+    serialization_ms,
+  };
+  const accounted =
+    idem_redis_ms +
+    channel_insert_lock_wait_ms +
+    preDbOtherMs +
+    txAccess +
+    txInsert +
+    txLater +
+    txCommit +
+    hydrate_ms +
+    cache_bust_ms +
+    fanout_wall_ms +
+    community_enqueue_ms +
+    idem_success_redis_ms +
+    serialization_ms;
+  const other_unaccounted_ms = Math.max(0, total_wall_ms - accounted);
+  const candidates = {
+    ...breakdown,
+    other_unaccounted_ms,
+  };
+  let dominant_component = "other_unaccounted_ms";
+  let dominant_ms = other_unaccounted_ms;
+  for (const [k, v] of Object.entries(candidates)) {
+    const ms = typeof v === "number" ? v : 0;
+    if (ms > dominant_ms) {
+      dominant_ms = ms;
+      dominant_component = k;
+    }
+  }
+  /** Map breakdown field to coarse bucket for rollups (DB vs Redis vs serialization vs other). */
+  const dominant_bucket = (() => {
+    const d = dominant_component;
+    if (
+      d === "tx_access_check_ms" ||
+      d === "tx_insert_ms" ||
+      d === "tx_later_step_ms" ||
+      d === "tx_commit_ms"
+    ) {
+      return "db";
+    }
+    if (
+      d === "idem_redis_ms" ||
+      d === "channel_insert_lock_wait_ms" ||
+      d === "cache_bust_ms" ||
+      d === "fanout_wall_ms" ||
+      d === "idem_success_redis_ms" ||
+      d === "community_enqueue_ms"
+    ) {
+      return "redis";
+    }
+    if (d === "serialization_ms") return "serialization";
+    if (d === "hydrate_ms") return "hydrate_db";
+    return "other";
+  })();
+  return {
+    event: "post_messages_e2e_trace",
+    gradingNote: "rollup_dominant_component_and_dominant_bucket_in_log_pipeline",
+    requestId: req.id,
+    worker_id: `${os.hostname()}:${process.env.PORT || "?"}`,
+    target_type: channelId ? "channel" : "conversation",
+    channelId: channelId ?? undefined,
+    conversationId: conversationId ?? undefined,
+    total_wall_ms,
+    tx_total_ms: txTotal,
+    fanout_mode,
+    breakdown_ms: { ...breakdown, other_unaccounted_ms },
+    dominant_component,
+    dominant_ms,
+    dominant_bucket,
+    response_body_bytes,
+    correlate_redis_slowlog:
+      "REDIS_SLOWLOG_SSH=user@vm1 ./scripts/redis-slowlog-snapshot.sh (see docs/operations-monitoring.md)",
+    correlate_pg_stat_statements:
+      "DB_SSH=user@db-host ./scripts/pg-stat-statements-snapshot.sh",
+  };
+}
+
 // When unset, keep historical default (defer only under heavy pool wait).
 // `0` disables the pool-wait defer branch entirely (see PUT /messages/:id/read).
 const _readReceiptDeferWaiting = parseInt(
@@ -1707,7 +1863,12 @@ router.post(
     let threadId: string | null = null;
     let attachments: any[] = [];
     const txPhases = { t0: 0, t_access: 0, t_insert: 0, t_later: 0 };
+    let postWallStart = 0;
+    let idemWallMs = 0;
+    let channelInsertLockWaitMs = 0;
+    let postMessagesTxPhaseLog = null;
     try {
+      postWallStart = Date.now();
       const { content } = req.body;
       channelId = req.body.channelId ?? null;
       conversationId = req.body.conversationId ?? null;
@@ -1755,45 +1916,50 @@ router.post(
       if (rawIdem && typeof rawIdem === "string") {
         const trimmed = rawIdem.trim();
         if (trimmed.length > 0 && trimmed.length <= 200) {
-          idemRedisKey = `msg:idem:${req.user.id}:${crypto.createHash("sha256").update(trimmed, "utf8").digest("hex")}`;
+          const idemPhaseStart = Date.now();
           try {
-            const existing = await redis.get(idemRedisKey);
-            if (existing) {
-              let parsed: any;
-              try {
-                parsed = JSON.parse(existing);
-              } catch {
-                parsed = null;
+            idemRedisKey = `msg:idem:${req.user.id}:${crypto.createHash("sha256").update(trimmed, "utf8").digest("hex")}`;
+            try {
+              const existing = await redis.get(idemRedisKey);
+              if (existing) {
+                let parsed: any;
+                try {
+                  parsed = JSON.parse(existing);
+                } catch {
+                  parsed = null;
+                }
+                const replay = await hydrateIdemReplayBody(parsed);
+                if (replay) {
+                  return res.status(201).json(replay);
+                }
               }
-              const replay = await hydrateIdemReplayBody(parsed);
-              if (replay) {
-                return res.status(201).json(replay);
+              const gotLease = await redis.set(
+                idemRedisKey,
+                JSON.stringify({ pending: true }),
+                "EX",
+                MSG_IDEM_PENDING_TTL_SECS,
+                "NX",
+              );
+              if (gotLease !== "OK") {
+                const waited =
+                  await awaitIdempotentPostAfterLeaseContention(idemRedisKey);
+                if (waited.ok) {
+                  return res.status(201).json(waited.body);
+                }
+                res.set("Retry-After", "1");
+                return res.status(409).json({
+                  error: "Duplicate request in flight",
+                  requestId: req.id,
+                });
               }
+              idemLease = true;
+            } catch {
+              // Redis unavailable: proceed without deduplication (fail open) so messaging stays up.
+              idemRedisKey = null;
+              idemLease = false;
             }
-            const gotLease = await redis.set(
-              idemRedisKey,
-              JSON.stringify({ pending: true }),
-              "EX",
-              MSG_IDEM_PENDING_TTL_SECS,
-              "NX",
-            );
-            if (gotLease !== "OK") {
-              const waited =
-                await awaitIdempotentPostAfterLeaseContention(idemRedisKey);
-              if (waited.ok) {
-                return res.status(201).json(waited.body);
-              }
-              res.set("Retry-After", "1");
-              return res.status(409).json({
-                error: "Duplicate request in flight",
-                requestId: req.id,
-              });
-            }
-            idemLease = true;
-          } catch {
-            // Redis unavailable: proceed without deduplication (fail open) so messaging stays up.
-            idemRedisKey = null;
-            idemLease = false;
+          } finally {
+            idemWallMs = Date.now() - idemPhaseStart;
           }
         }
       }
@@ -1934,7 +2100,12 @@ router.post(
         baseMessage = await runChannelMessageInsertSerialized(
           channelId,
           runChannelMessageRowUnderInsertLock,
-          { requestId: req.id },
+          {
+            requestId: req.id,
+            onInsertLock: ({ waitMs }) => {
+              channelInsertLockWaitMs = waitMs;
+            },
+          },
         );
         if (attachments.length > 0) {
           try {
@@ -1963,18 +2134,16 @@ router.post(
       let t_after_side_effects = t_tx_done;
       let t_after_idem_cache = t_tx_done;
       let fanoutMeta: any = null;
-      {
-        const successLog = buildMessagePostSuccessPhaseLog({
-          req,
-          channelId,
-          conversationId,
-          attachments,
-          txPhases,
-          txDoneAt: t_tx_done,
-        });
-        if (successLog.tx_total_ms > 500) {
-          logger.info(successLog, "POST /messages tx phase timing");
-        }
+      postMessagesTxPhaseLog = buildMessagePostSuccessPhaseLog({
+        req,
+        channelId,
+        conversationId,
+        attachments,
+        txPhases,
+        txDoneAt: t_tx_done,
+      });
+      if (postMessagesTxPhaseLog.tx_total_ms > 500) {
+        logger.info(postMessagesTxPhaseLog, "POST /messages tx phase timing");
       }
 
       // Fire-and-forget: update channel/conversation last_message pointers outside
@@ -2003,6 +2172,7 @@ router.post(
       // released (locked tx uses merged insert RETURNING without author JSON). DM posts:
       // re-hydrate only when attachments were inserted.
       let message: any;
+      const tHydrateStart = Date.now();
       if (channelId) {
         const hydrated = await loadHydratedMessageById(baseMessage.id);
         if (!hydrated) {
@@ -2017,6 +2187,8 @@ router.post(
             ? ((await loadHydratedMessageById(baseMessage.id)) ?? baseMessage)
             : baseMessage;
       }
+      const tAfterHydrateMark = Date.now();
+      const hydrateWallMs = Math.max(0, tAfterHydrateMark - tHydrateStart);
 
       // Bust the shared Redis cache for the latest page so a follow-up GET /messages
       // (e.g. opening a DM) returns rows that include this write. Bounded wait only —
@@ -2330,30 +2502,66 @@ router.post(
         httpBody.realtimeConversationFanoutComplete =
           realtimeConversationFanoutComplete;
       }
-      res.status(201).json(httpBody);
+      const tBeforeSerialize = Date.now();
+      const jsonBody = JSON.stringify(httpBody);
+      const serializationWallMs = Math.max(0, Date.now() - tBeforeSerialize);
+      res.status(201).type("application/json; charset=utf-8").send(jsonBody);
       const t_response_sent = Date.now();
 
+      const fanoutModeForE2e = channelId
+        ? messagePostAsyncFanoutEnabled()
+          ? "channel:async_enqueue"
+          : "channel:sync_await"
+        : messagePostAsyncFanoutEnabled()
+          ? "conversation:async_enqueue"
+          : "conversation:sync_await";
+      const cacheBustOnlyMs = Math.max(0, t_after_cache_bust - tAfterHydrateMark);
+      const fanoutWallMs = Math.max(0, t_after_fanout - t_after_cache_bust);
+      const communityEnqueueMs = Math.max(
+        0,
+        t_after_side_effects - t_after_fanout,
+      );
+      const idemSuccessRedisMs = Math.max(
+        0,
+        t_after_idem_cache - t_after_side_effects,
+      );
+      const totalWallMs = t_response_sent - postWallStart;
+      if (
+        postMessagesTxPhaseLog &&
+        shouldEmitPostMessagesE2eTrace(totalWallMs)
+      ) {
+        logger.info(
+          buildPostMessagesE2eTracePayload({
+            req,
+            channelId,
+            conversationId,
+            postWallStart,
+            txPhases,
+            total_wall_ms: totalWallMs,
+            idem_redis_ms: idemWallMs,
+            channel_insert_lock_wait_ms: channelInsertLockWaitMs,
+            successLog: postMessagesTxPhaseLog,
+            hydrate_ms: hydrateWallMs,
+            cache_bust_ms: cacheBustOnlyMs,
+            fanout_wall_ms: fanoutWallMs,
+            fanout_mode: fanoutModeForE2e,
+            community_enqueue_ms: communityEnqueueMs,
+            idem_success_redis_ms: idemSuccessRedisMs,
+            serialization_ms: serializationWallMs,
+            response_body_bytes: Buffer.byteLength(jsonBody, "utf8"),
+          }),
+          "POST /messages e2e trace",
+        );
+      }
+
       if (channelId) {
-        const successLog = buildMessagePostSuccessPhaseLog({
-          req,
-          channelId,
-          conversationId,
-          attachments,
-          txPhases,
-          txDoneAt: t_tx_done,
-        });
-        if (successLog.tx_total_ms > 1000) {
+        if (postMessagesTxPhaseLog && postMessagesTxPhaseLog.tx_total_ms > 1000) {
           const postInsertBreakdown = {
-            cache_bust_ms: Math.max(0, t_after_cache_bust - t_tx_done),
-            fanout_publish_ms: Math.max(0, t_after_fanout - t_after_cache_bust),
-            side_effects_enqueue_ms: Math.max(
-              0,
-              t_after_side_effects - t_after_fanout,
-            ),
-            idempotency_cache_ms: Math.max(
-              0,
-              t_after_idem_cache - t_after_side_effects,
-            ),
+            hydrate_ms: hydrateWallMs,
+            cache_bust_ms: cacheBustOnlyMs,
+            fanout_publish_ms: fanoutWallMs,
+            side_effects_enqueue_ms: communityEnqueueMs,
+            idempotency_cache_ms: idemSuccessRedisMs,
             response_build_ms: Math.max(
               0,
               t_response_sent - t_after_idem_cache,
@@ -2364,7 +2572,7 @@ router.post(
               req,
               channelId,
               message,
-              txLog: successLog,
+              txLog: postMessagesTxPhaseLog,
               postInsertMs: Math.max(0, t_response_sent - t_tx_done),
               postInsertBreakdown,
               fanoutMeta,
