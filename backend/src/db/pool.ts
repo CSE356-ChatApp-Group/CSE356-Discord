@@ -107,6 +107,20 @@ function classifyPgQueryError(err) {
   return 'other';
 }
 
+/** True when the read pool failed in a way that should transparently use the primary. */
+function shouldFallbackReadReplicaToPrimary(err) {
+  const reason = classifyPgQueryError(err);
+  if (reason === 'connection' || reason === 'acquire_timeout' || reason === 'shutdown') {
+    return true;
+  }
+  const c = err && err.code;
+  if (c === '08006' || c === '08001' || c === '08003' || c === '53300') return true;
+  const msg = String((err && err.message) || '');
+  return /connection refused|connection reset|connection timed out|connection terminated|no pg_hba|ECONNREFUSED|socket hang up/i.test(
+    msg,
+  );
+}
+
 // ── Configuration ──────────────────────────────────────────────────────────────
 
 /**
@@ -313,9 +327,14 @@ function releaseQueryGate(): void {
 /**
  * Route read-only SELECTs to PG_READ_REPLICA_URL when set; else primary.
  * Callers must tolerate replication lag (missed very recent writes).
+ *
+ * On replica **transport** failures (refused, timeout, shutdown), falls back to
+ * `query()` on the primary so hot paths do not 500 when the standby is down.
+ * Set `PG_READ_FALLBACK_TO_PRIMARY=false` to disable fallback (fail fast).
  */
 async function queryRead(sql, params) {
   if (!readPool) return query(sql, params);
+  const readFallbackEnabled = process.env.PG_READ_FALLBACK_TO_PRIMARY !== 'false';
   const start = Date.now();
   try {
     const result = await readPool.query(sql, params);
@@ -331,6 +350,13 @@ async function queryRead(sql, params) {
     const durationMs = Date.now() - start;
     const reason = classifyPgQueryError(err);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason });
+    if (readFallbackEnabled && shouldFallbackReadReplicaToPrimary(err)) {
+      logger.warn(
+        { err, durationMs, sql: truncateSql(sql), pool: 'read', pgErrorReason: reason },
+        'pg: read replica unavailable; falling back to primary for this SELECT',
+      );
+      return query(sql, params);
+    }
     logger.error(
       { err, durationMs, sql: truncateSql(sql), pool: 'read', pgErrorReason: reason },
       'pg: read replica query error',
