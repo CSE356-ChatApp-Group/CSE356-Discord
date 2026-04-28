@@ -50,8 +50,6 @@ const {
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
-  readReceiptNoopSkipTotal,
-  readReceiptCoalescedTotal,
   readReceiptDbUpsertTotal,
   readReceiptCursorCacheHitTotal,
   messagesListAccessCacheHitTotal,
@@ -721,8 +719,19 @@ const READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS = Math.min(
     parseInt(process.env.READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS || "500", 10) || 500,
   ),
 );
+const READ_RECEIPT_SCOPE_DEBOUNCE_MS = Math.min(
+  2000,
+  Math.max(
+    250,
+    parseInt(process.env.READ_RECEIPT_SCOPE_DEBOUNCE_MS || "900", 10) || 900,
+  ),
+);
+const READ_RECEIPT_FANOUT_ENABLED =
+  String(process.env.READ_RECEIPT_FANOUT_ENABLED || "false").toLowerCase() === "true";
 const readReceiptScopeCursorByTarget = new Map();
 const READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS = 75000;
+const readReceiptScopeDebounceByTarget = new Map();
+const READ_RECEIPT_SCOPE_DEBOUNCE_MAX_KEYS = 75000;
 // Four-key Lua script:
 //   KEYS[1] = cursor key (read_cursor_ts:...)
 //   KEYS[2] = db_lock key (read_db_lock:...)
@@ -899,6 +908,51 @@ function rememberReadReceiptScopeCursor({
       if (pruned >= 1500) break;
     }
   }
+}
+
+function shouldCoalesceScopeBurstRead({
+  userId,
+  channelId,
+  conversationId,
+  messageCreatedAt,
+}) {
+  const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
+  const now = Date.now();
+  const msgTsMs = new Date(messageCreatedAt).getTime();
+  if (!Number.isFinite(msgTsMs)) return false;
+  const row = readReceiptScopeDebounceByTarget.get(key);
+  if (
+    row
+    && Number.isFinite(row.untilMs)
+    && Number.isFinite(row.maxTsMs)
+    && now < row.untilMs
+    && msgTsMs <= row.maxTsMs
+  ) {
+    return true;
+  }
+  const nextMax = row && Number.isFinite(row.maxTsMs)
+    ? Math.max(row.maxTsMs, msgTsMs)
+    : msgTsMs;
+  readReceiptScopeDebounceByTarget.set(key, {
+    maxTsMs: nextMax,
+    untilMs: now + READ_RECEIPT_SCOPE_DEBOUNCE_MS,
+    seenAtMs: now,
+  });
+  if (readReceiptScopeDebounceByTarget.size > READ_RECEIPT_SCOPE_DEBOUNCE_MAX_KEYS) {
+    let pruned = 0;
+    for (const [k, v] of readReceiptScopeDebounceByTarget) {
+      if (
+        !v
+        || !Number.isFinite(v.seenAtMs)
+        || now - v.seenAtMs > READ_RECEIPT_SCOPE_DEBOUNCE_MS * 8
+      ) {
+        readReceiptScopeDebounceByTarget.delete(k);
+        pruned += 1;
+      }
+      if (pruned >= 1500) break;
+    }
+  }
+  return false;
 }
 
 async function loadActiveConversationParticipantUserIds(conversationId) {
@@ -1245,10 +1299,10 @@ async function publishConversationEventNow(conversationId, event, data) {
 }
 
 function messagePostAsyncFanoutEnabled() {
-  const v = String(process.env.MESSAGE_POST_SYNC_FANOUT || "")
-    .trim()
-    .toLowerCase();
-  return v !== "true" && v !== "1";
+  // Burst resilience: always keep POST /messages fanout off the request thread.
+  // Legacy MESSAGE_POST_SYNC_FANOUT is intentionally ignored to prevent accidental
+  // reintroduction of synchronous fanout loops during high-traffic windows.
+  return true;
 }
 
 async function advanceReadStateCursor({
@@ -3155,12 +3209,19 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     const uid = req.user.id;
     const messageId = req.params.id;
     if (shouldCoalesceSameMessageRead(uid, messageId)) {
-      readReceiptCoalescedTotal.inc({ reason: "same_message" });
-      readReceiptOptimizationTotal.inc({ reason: "same_message_coalesced" });
-      readReceiptNoopSkipTotal.inc({ reason: "same_message_coalesced" });
       return res.json({ success: true });
     }
     const messageCreatedAt = target.created_at;
+    if (
+      shouldCoalesceScopeBurstRead({
+        userId: uid,
+        channelId: channel_id,
+        conversationId: conversation_id,
+        messageCreatedAt,
+      })
+    ) {
+      return res.json({ success: true });
+    }
     if (
       readReceiptScopeCursorCacheSaysNoAdvance({
         userId: uid,
@@ -3169,8 +3230,7 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
         messageCreatedAt,
       })
     ) {
-      readReceiptCoalescedTotal.inc({ reason: "scope_cursor" });
-      readReceiptNoopSkipTotal.inc({ reason: "scope_cursor_cache" });
+      // Strict fast path for burst duplicates: skip Redis/DB/metrics/fanout work.
       return res.json({ success: true });
     }
 
@@ -3189,8 +3249,6 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     });
 
     if (!didAdvanceCursor) {
-      readReceiptDbUpsertTotal.inc({ result: "noop" });
-      readReceiptNoopSkipTotal.inc({ reason: "cursor_not_advanced" });
       rememberReadReceiptScopeCursor({
         userId: uid,
         channelId: channel_id,
@@ -3226,7 +3284,7 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
         const countKey = `channel:msg_count:${channel_id}`;
         const readKey = `user:last_read_count:${channel_id}:${uid}`;
         const pipeline = redis.pipeline();
-        if (!dropReadReceiptFanout && communityIdForCache) {
+        if (READ_RECEIPT_FANOUT_ENABLED && !dropReadReceiptFanout && communityIdForCache) {
           pipeline.del(`channels:list:${communityIdForCache}:${uid}`);
         }
         pipeline.eval(
@@ -3243,12 +3301,16 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
           "Failed to update read watermark/cache in Redis",
         );
       }
-    } else if (!dropReadReceiptFanout && communityIdForCache) {
+    } else if (READ_RECEIPT_FANOUT_ENABLED && !dropReadReceiptFanout && communityIdForCache) {
       redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
     }
 
-    if (dropReadReceiptFanout) {
-      return res.json({ success: true, deferred: true, reason: "overload" });
+    if (dropReadReceiptFanout || !READ_RECEIPT_FANOUT_ENABLED) {
+      return res.json({
+        success: true,
+        deferred: true,
+        reason: dropReadReceiptFanout ? "overload" : "fanout_disabled",
+      });
     }
 
     const payload = {
