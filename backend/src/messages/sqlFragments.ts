@@ -90,7 +90,6 @@ SELECT
   CAST($4 AS uuid)
 FROM channels c
 WHERE c.id = $1::uuid
-  AND EXISTS (SELECT 1 FROM users u WHERE u.id = $2)
   AND (
     c.is_private = FALSE
     OR EXISTS (

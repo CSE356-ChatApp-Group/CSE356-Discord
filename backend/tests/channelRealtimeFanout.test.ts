@@ -52,11 +52,13 @@ const { userFeedRedisChannelForUserId } = require('../src/websocket/userFeed') a
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   publishChannelMessageCreated,
+  publishChannelMessageRecentUserBridge,
   getChannelUserFanoutTargetKeys,
   invalidateChannelUserFanoutTargetsCache,
   invalidateCommunityChannelUserFanoutTargetsCache,
 } = require('../src/messages/channelRealtimeFanout') as {
   publishChannelMessageCreated: (channelId: string, envelope: Record<string, unknown>) => Promise<void>;
+  publishChannelMessageRecentUserBridge: (channelId: string, envelope: Record<string, unknown>) => Promise<{ targetCount: number }>;
   getChannelUserFanoutTargetKeys: (channelId: string) => Promise<string[]>;
   invalidateChannelUserFanoutTargetsCache: (channelId: string) => Promise<void>;
   invalidateCommunityChannelUserFanoutTargetsCache: (communityId: string) => Promise<void>;
@@ -305,5 +307,23 @@ describe('channelRealtimeFanout', () => {
       if (prev === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT;
       else process.env.CHANNEL_MESSAGE_USER_FANOUT = prev;
     }
+  });
+
+  it('publishChannelMessageRecentUserBridge immediately publishes only recent channel users', async () => {
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    redis.zrangebyscore.mockResolvedValueOnce(['a', 'b', 'a']);
+
+    const result = await publishChannelMessageRecentUserBridge('bridge-1', {
+      event: 'message:created',
+      data: { id: 'm-bridge-1' },
+    });
+
+    const expectedChannels = [
+      userFeedRedisChannelForUserId('a'),
+      userFeedRedisChannelForUserId('b'),
+    ].sort();
+    expect(result.targetCount).toBe(2);
+    expect(redis.zrangebyscore).toHaveBeenCalledTimes(1);
+    expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
   });
 });

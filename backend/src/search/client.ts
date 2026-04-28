@@ -2,7 +2,7 @@
  * Search client – Postgres native full-text search (FTS primary).
  *
  * Primary path:  websearch_to_tsquery + tsvector GIN index
- *                (ranked via ts_rank, highlighted via ts_headline)
+ *                with application-side highlighting/snippet formatting
  *
  * Scoped searches only (community or DM conversation), per spec §7: community
  * search spans accessible public and private channels; conversation search is
@@ -59,7 +59,7 @@ function literalRecentCandidateCapDeep(): number {
 
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
-  const configuredMs = Math.min(2000, Math.max(1500, parseInt(rawMs || '1750', 10) || 1750));
+  const configuredMs = Math.min(2000, Math.max(1500, parseInt(rawMs || '2000', 10) || 2000));
   const stage = overload.getStage();
   if (stage >= 2) return Math.min(configuredMs, 2000);
   if (stage >= 1) return Math.min(configuredMs, 2000);
@@ -352,6 +352,92 @@ function sanitizeHeadline(raw: string): string {
     .replace(/%%EM_END%%/g, '</em>');
 }
 
+function buildHighlightRanges(content: string, terms: string[]) {
+  const normalizedTerms = Array.from(
+    new Set(
+      (terms || [])
+        .map((term) => String(term || '').trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ).sort((a, b) => b.length - a.length);
+
+  if (!normalizedTerms.length || !content) return [];
+
+  const lowerContent = content.toLowerCase();
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const term of normalizedTerms) {
+    let fromIndex = 0;
+    while (fromIndex < lowerContent.length) {
+      const foundAt = lowerContent.indexOf(term, fromIndex);
+      if (foundAt < 0) break;
+      ranges.push({ start: foundAt, end: foundAt + term.length });
+      fromIndex = foundAt + Math.max(1, term.length);
+    }
+  }
+
+  if (!ranges.length) return [];
+  ranges.sort((a, b) => a.start - b.start || a.end - b.end);
+
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of ranges) {
+    const previous = merged[merged.length - 1];
+    if (!previous || range.start > previous.end) {
+      merged.push({ ...range });
+      continue;
+    }
+    previous.end = Math.max(previous.end, range.end);
+  }
+  return merged;
+}
+
+function buildEscapedHighlightedSnippet(content: string, q: string) {
+  const raw = String(content || '');
+  if (!raw) return '';
+
+  const terms = tokenizeStrictSearchTerms(q);
+  const ranges = buildHighlightRanges(raw, terms);
+  const snippetMaxChars = 280;
+
+  let start = 0;
+  let end = raw.length;
+  if (raw.length > snippetMaxChars) {
+    if (ranges.length > 0) {
+      const focusStart = ranges[0].start;
+      start = Math.max(0, focusStart - 90);
+      end = Math.min(raw.length, start + snippetMaxChars);
+      if (end - start < snippetMaxChars) {
+        start = Math.max(0, end - snippetMaxChars);
+      }
+    } else {
+      end = Math.min(raw.length, snippetMaxChars);
+    }
+  }
+
+  const visibleRanges = ranges
+    .map((range) => ({
+      start: Math.max(range.start, start),
+      end: Math.min(range.end, end),
+    }))
+    .filter((range) => range.start < range.end);
+
+  let formatted = start > 0 ? '…' : '';
+  let cursor = start;
+  for (const range of visibleRanges) {
+    if (range.start > cursor) {
+      formatted += escapeHtml(raw.slice(cursor, range.start));
+    }
+    formatted += `<em>${escapeHtml(raw.slice(range.start, range.end))}</em>`;
+    cursor = range.end;
+  }
+  if (cursor < end) {
+    formatted += escapeHtml(raw.slice(cursor, end));
+  }
+  if (end < raw.length) {
+    formatted += '…';
+  }
+  return formatted;
+}
+
 function buildResult(rows: any[], q: string, offset: number, limit: number) {
   const materializedRows = rows.filter((row) => row && row.id);
   return {
@@ -368,7 +454,7 @@ function buildResult(rows: any[], q: string, offset: number, limit: number) {
       _formatted: {
         content: row.highlight
           ? sanitizeHeadline(row.highlight)
-          : escapeHtml(row.content || ''),
+          : buildEscapedHighlightedSnippet(row.content || '', q),
       },
     })),
     offset,
@@ -398,7 +484,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   const ctes = [`search_query AS (SELECT websearch_to_tsquery('english', $1) AS q)`];
   if (scope) ctes.push(scope.cte.trim());
 
-  // Bound the scoped working set before FTS ranking/highlight work.
+  // Bound the scoped working set before FTS candidate evaluation work.
   const recentCandidatesLimit = ftsRecentCandidateCap(limit, offset);
 
   const candidateFilters: string[] = [];
@@ -525,14 +611,7 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
       search_rows.*
     ${scopeFromSql}
     ${scope ? 'LEFT JOIN LATERAL (' : '('}
-      SELECT ${selectCols},
-        ts_headline(
-          'english',
-          coalesce(m.content, ''),
-          sq.q,
-          'MaxWords=30, MinWords=15, StartSel=%%EM_START%%, StopSel=%%EM_END%%, HighlightAll=FALSE'
-        ) AS highlight,
-        ts_rank(m.content_tsv, sq.q) AS _rank
+      SELECT ${selectCols}
       ${finalFromClause}
       WHERE m.deleted_at IS NULL
         AND m.content_tsv @@ sq.q

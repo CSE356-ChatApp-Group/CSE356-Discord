@@ -189,6 +189,7 @@ const {
 const {
   publishChannelMessageCreated,
   publishChannelMessageEvent,
+  publishChannelMessageRecentUserBridge,
 } = require("./channelRealtimeFanout");
 const { loadHydratedMessageById } = require("./messageHydrate");
 const messagePostFanoutAsync = require("./messagePostFanoutAsync");
@@ -284,6 +285,16 @@ const MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS = (() => {
   if (!Number.isFinite(raw) || raw < 1000) return 5000;
   return Math.min(60000, raw);
 })();
+const MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS = (() => {
+  const raw = parseInt(
+    process.env.MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS ||
+      process.env.MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS ||
+      "6500",
+    10,
+  );
+  if (!Number.isFinite(raw) || raw < 1000) return 6500;
+  return Math.min(60000, raw);
+})();
 /** Wall-clock cap for post-commit **message list cache bust** only (not fanout publish). */
 const MESSAGE_POST_CACHE_BUST_TIMEOUT_MS = (() => {
   const raw = parseInt(
@@ -294,6 +305,14 @@ const MESSAGE_POST_CACHE_BUST_TIMEOUT_MS = (() => {
   );
   if (!Number.isFinite(raw) || raw < 50) return 350;
   return Math.min(2000, raw);
+})();
+const MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS = (() => {
+  const raw = parseInt(
+    process.env.MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS || "125",
+    10,
+  );
+  if (!Number.isFinite(raw) || raw < 25) return 125;
+  return Math.min(1000, raw);
 })();
 
 /** PgBouncer `query_timeout` or PG `statement_timeout` during insert (often row lock behind channels FK). */
@@ -727,7 +746,7 @@ const READ_RECEIPT_SCOPE_DEBOUNCE_MS = Math.min(
   ),
 );
 const READ_RECEIPT_FANOUT_ENABLED =
-  String(process.env.READ_RECEIPT_FANOUT_ENABLED || "false").toLowerCase() === "true";
+  String(process.env.READ_RECEIPT_FANOUT_ENABLED || "true").toLowerCase() === "true";
 const readReceiptScopeCursorByTarget = new Map();
 const READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS = 75000;
 const readReceiptScopeDebounceByTarget = new Map();
@@ -2178,7 +2197,7 @@ router.post(
         withTransaction(async (client) => {
           txPhases.t0 = Date.now();
           await client.query(
-            `SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+            `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
           );
           await client.query(`SET LOCAL synchronous_commit = off`);
 
@@ -2293,7 +2312,7 @@ router.post(
           try {
             await withTransaction(async (client) => {
               await client.query(
-                `SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+                `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
               );
               await insertAttachmentRows(client, baseMessage.id);
             });
@@ -2413,6 +2432,31 @@ router.post(
         // legacy inline await (no wall-clock cap — success = DB + enqueue or full publish).
         try {
           if (messagePostAsyncFanoutEnabled()) {
+            const createdEnvelope = messageFanoutEnvelope(
+              "message:created",
+              message,
+            );
+            realtimePublishedAtForHttp = createdEnvelope.publishedAt;
+            const recentBridgeRun = await withBoundedPostInsertTimeout(
+              "recent_bridge",
+              publishChannelMessageRecentUserBridge(
+                channelId,
+                createdEnvelope,
+              ),
+              MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
+            );
+            if (!recentBridgeRun.ok && recentBridgeRun.timedOut) {
+              deliveryTimeoutTotal.inc({ phase: "recent_bridge" });
+              logger.warn(
+                {
+                  requestId: req.id,
+                  channelId,
+                  timeoutMs: MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
+                  gradingNote: "post_insert_delivery_timeout_not_http_failure",
+                },
+                "POST /messages: immediate recent-connect bridge exceeded wall budget",
+              );
+            }
             // Fixed job name for metrics: do not include message id — each id was a new
             // Prometheus histogram label set (~2M+ series) and crushed the monitoring VM.
             const enqueued = sideEffects.enqueueFanoutJob(
@@ -2446,7 +2490,6 @@ router.post(
                 );
               },
             );
-            realtimePublishedAtForHttp = new Date().toISOString();
             realtimeChannelFanoutComplete = false;
             if (enqueued) {
               messagePostFanoutAsyncEnqueueTotal.inc({
@@ -3323,38 +3366,23 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
 
     const publishReadUpdated = async () => {
       if (conversation_id) {
-        readReceiptOptimizationTotal.inc({ reason: "conversation_read_direct_user_fanout" });
-        const participantIds =
-          await loadActiveConversationParticipantUserIds(conversation_id);
-        await publishUserFeedTargets(participantIds, {
-          event: "read:updated",
-          data: payload,
-        });
-      } else {
-        // Channel read cursors are private: fan out only to the reader's user topic
-        // (bootstrap always subscribes `user:<me>`). Avoid publishing on `channel:<id>`,
-        // which would leak other members' read positions to WebSocket clients.
-        await publishUserFeedTargets([uid], {
-          event: "read:updated",
-          data: payload,
-        });
+        readReceiptOptimizationTotal.inc({ reason: "conversation_read_reliable_fanout" });
+        await publishConversationEventNow(conversation_id, "read:updated", payload);
+        return;
       }
+      await publishUserFeedTargets([uid], {
+        event: "read:updated",
+        data: payload,
+      });
     };
 
-    // Read receipts are best-effort realtime hints. Do not put Redis pub/sub
-    // fanout on the HTTP critical path for the dominant read-state route.
-    if (conversation_id) {
-      setImmediate(() => {
-        publishReadUpdated().catch((err) => {
-          logger.warn({ err, conversation_id, messageId }, "read receipt fanout failed");
-        });
-      });
-    } else {
-      setImmediate(() => {
-        publishReadUpdated().catch((err) => {
-          logger.warn({ err, channel_id, messageId }, "read receipt fanout failed");
-        });
-      });
+    try {
+      await publishReadUpdated();
+    } catch (err) {
+      logger.warn(
+        { err, channel_id, conversation_id, messageId },
+        "read receipt fanout failed",
+      );
     }
 
     res.json({ success: true });

@@ -41,6 +41,13 @@ const RECENT_CONNECT_TARGET_CACHE_MS =
   Number.isFinite(_recentConnectTargetCacheMs) && _recentConnectTargetCacheMs >= 0
     ? _recentConnectTargetCacheMs
     : 1500;
+const rawImmediateRecentBridgeMax = Number(
+  process.env.CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX || '256',
+);
+const CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX =
+  Number.isFinite(rawImmediateRecentBridgeMax) && rawImmediateRecentBridgeMax > 0
+    ? Math.min(1000, Math.max(50, Math.floor(rawImmediateRecentBridgeMax)))
+    : 256;
 const recentConnectTargetsCache: Map<string, { targets: string[]; cachedAt: number }> = new Map();
 
 function channelMessageUserFanoutEnabled() {
@@ -459,6 +466,49 @@ async function publishDeferredUserTopics(
   await publishUserTopicTargets(targets, envelope, 'channel_message_user_topics');
 }
 
+async function publishChannelMessageRecentUserBridge(
+  channelId: string,
+  envelope: Record<string, unknown>,
+) {
+  if (envelope?.event !== 'message:created') {
+    return { targetCount: 0 };
+  }
+  if (!channelMessageUserFanoutEnabled() || !channelRecentZsetEnabled()) {
+    return { targetCount: 0 };
+  }
+
+  const since = Date.now() - WS_RECENT_CONNECT_TTL_SECONDS * 1000;
+  const recentUserIds = await redis.zrangebyscore(
+    channelRecentConnectKey(channelId),
+    since,
+    '+inf',
+  );
+  const targets = Array.from(
+    new Set(
+      (Array.isArray(recentUserIds) ? recentUserIds : [])
+        .filter((userId) => typeof userId === 'string' && userId.length > 0)
+        .slice(0, CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX)
+        .map((userId) => `user:${userId}`),
+    ),
+  );
+  if (!targets.length) {
+    return { targetCount: 0 };
+  }
+
+  enqueuePendingMessageForUsers(targets, envelope).catch((err) => {
+    logger.warn(
+      { err, channelId, targetCount: targets.length },
+      'Failed to enqueue immediate recent-connect bridge pending replay pointers',
+    );
+  });
+  await publishUserTopicTargets(
+    targets,
+    envelope,
+    'channel_message_immediate_recent_bridge_user_topics',
+  );
+  return { targetCount: targets.length };
+}
+
 /**
  * Publishes message:created for a channel. Order: optional `channel:<id>` first,
  * then user topics (blocking or via side-effect queue).
@@ -578,6 +628,7 @@ async function publishChannelMessageCreated(channelId: string, envelope: Record<
 module.exports = {
   publishChannelMessageEvent,
   publishChannelMessageCreated,
+  publishChannelMessageRecentUserBridge,
   getChannelUserFanoutTargetKeys,
   invalidateChannelUserFanoutTargetsCache,
   invalidateCommunityChannelUserFanoutTargetsCache,

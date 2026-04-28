@@ -139,6 +139,59 @@ describe('search() – FTS zero → scoped literal', () => {
     });
   });
 
+  it('formats safe inline highlights when FTS rows omit ts_headline output', async () => {
+    jest.resetModules();
+
+    const pool = require('../src/db/pool');
+    const mockQuery = jest.fn();
+    mockQuery
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [{ tsquery_text: "'script' & 'marker'", tsquery_nodes: 2 }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            __scopeAccess: true,
+            id: '00000000-0000-4000-8000-000000000031',
+            content: 'script marker <script>alert(1)</script>',
+            authorId: '00000000-0000-4000-8000-000000000032',
+            authorDisplayName: 'D',
+            channelId: '00000000-0000-4000-8000-000000000033',
+            conversationId: null,
+            communityId: '00000000-0000-4000-8000-000000000034',
+            channelName: 'general',
+            createdAt: '2026-04-23T12:00:00.000Z',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+
+    jest.spyOn(pool, 'getClientTimed').mockResolvedValue({
+      client: { query: mockQuery, release: jest.fn() },
+      acquireMs: 0,
+    });
+
+    const { search } = require('../src/search/client');
+
+    const out = await search('script marker', {
+      communityId: '00000000-0000-4000-8000-000000000034',
+      userId: '00000000-0000-4000-8000-000000000032',
+      limit: 5,
+      offset: 0,
+    });
+
+    expect(out.hits).toHaveLength(1);
+    expect(out.hits[0]._formatted.content).toContain('<em>script</em>');
+    expect(out.hits[0]._formatted.content).toContain('<em>marker</em>');
+    expect(out.hits[0]._formatted.content).not.toContain('<script>');
+    expect(out.hits[0]._formatted.content).toContain('&lt;');
+    expect(out.hits[0]._formatted.content).toContain('&gt;');
+  });
+
   it('stopword-only query runs FTS then literal (scoped)', async () => {
     jest.resetModules();
     const logger = require('../src/utils/logger');
