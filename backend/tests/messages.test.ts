@@ -2223,3 +2223,272 @@ describe('Channel community-membership enforcement', () => {
     expect(outsiderPostRes.status).toBe(403);
   });
 });
+
+describe('POST /messages channel access (merged insert)', () => {
+  it('allows a member to post in a public channel', async () => {
+    const owner = await createAuthenticatedUser('mergeacc1');
+    const slug = `macc-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'merged access' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        communityId,
+        name: `mch-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: false,
+      });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: `merge-ok-${uniqueSuffix()}` });
+    expect(postRes.status).toBe(201);
+    expect(postRes.body.message.channel_id).toBe(channelId);
+    expect(postRes.body.message.author?.id).toBe(owner.user.id);
+  });
+
+  it('rejects posting to a private channel when the user is not a member', async () => {
+    const owner = await createAuthenticatedUser('mergeaccown');
+    const member = await createAuthenticatedUser('mergeaccmem');
+    const slug = `macc-priv-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'merged access private' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(joinRes.status).toBe(200);
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        communityId,
+        name: `mpriv-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: true,
+      });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .send({ channelId, content: 'should not post to private without invite' });
+    expect(postRes.status).toBe(403);
+    expect(postRes.body.error).toMatch(/access denied/i);
+  });
+
+  it('rejects posting to a nonexistent channel id', async () => {
+    const owner = await createAuthenticatedUser('mergeaccghost');
+    const slug = `macc-ghost-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'merged access ghost' });
+    expect(communityRes.status).toBe(201);
+
+    const fakeChannelId = '00000000-0000-4000-8000-000000000001';
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId: fakeChannelId, content: 'ghost channel' });
+    expect(postRes.status).toBe(403);
+    expect(postRes.body.error).toMatch(/access denied/i);
+  });
+
+  it('rejects posting to another community channel (cross-community id)', async () => {
+    const ownerA = await createAuthenticatedUser('mergeacca');
+    const ownerB = await createAuthenticatedUser('mergeaccb');
+    const slugA = `macc-xa-${uniqueSuffix()}`;
+    const slugB = `macc-xb-${uniqueSuffix()}`;
+
+    const commA = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${ownerA.accessToken}`)
+      .send({ slug: slugA, name: slugA, description: 'a' });
+    expect(commA.status).toBe(201);
+    const commB = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${ownerB.accessToken}`)
+      .send({ slug: slugB, name: slugB, description: 'b' });
+    expect(commB.status).toBe(201);
+
+    const chanB = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${ownerB.accessToken}`)
+      .send({
+        communityId: commB.body.community.id,
+        name: `xb-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: false,
+      });
+    expect(chanB.status).toBe(201);
+    const channelBId = chanB.body.channel.id;
+
+    const joinA = await request(app)
+      .post(`/api/v1/communities/${commA.body.community.id}/join`)
+      .set('Authorization', `Bearer ${ownerA.accessToken}`);
+    expect(joinA.status).toBe(200);
+
+    const postRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${ownerA.accessToken}`)
+      .send({ channelId: channelBId, content: 'cross-community post' });
+    expect(postRes.status).toBe(403);
+    expect(postRes.body.error).toMatch(/access denied/i);
+  });
+});
+
+describe('POST /messages concurrent same-channel (default insert lock)', () => {
+  it('returns hydrated messages with unique ids and stable DB ordering', async () => {
+    const owner = await createAuthenticatedUser('concchanlock');
+    const slug = `cchan-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'concurrent channel posts' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        communityId,
+        name: `cch-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: false,
+      });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const n = 15;
+    const suffix = uniqueSuffix();
+    const posts = await Promise.all(
+      Array.from({ length: n }, (_, i) =>
+        request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .set('Idempotency-Key', `cchan-${suffix}-${i}`)
+          .send({ channelId, content: `cchan-body-${suffix}-${i}` }),
+      ),
+    );
+    for (const r of posts) {
+      expect(r.status).toBe(201);
+      expect(r.body.message.author).toBeDefined();
+      expect(r.body.message.author?.id).toBe(owner.user.id);
+    }
+    const ids = posts.map((r) => r.body.message.id);
+    expect(new Set(ids).size).toBe(n);
+
+    const { rows: ordered } = await pool.query(
+      `SELECT id FROM messages WHERE channel_id = $1 AND content LIKE $2 ORDER BY created_at ASC, id ASC`,
+      [channelId, `cchan-body-${suffix}-%`],
+    );
+    expect(ordered.length).toBe(n);
+  });
+});
+
+describe('MESSAGE_INSERT_LOCK_MODE=optimistic (POST /messages invariants)', () => {
+  const prevMode = process.env.MESSAGE_INSERT_LOCK_MODE;
+  const prevEnabled = process.env.MESSAGE_INSERT_LOCK_ENABLED;
+
+  beforeAll(() => {
+    delete process.env.MESSAGE_INSERT_LOCK_ENABLED;
+    process.env.MESSAGE_INSERT_LOCK_MODE = 'optimistic';
+  });
+
+  afterAll(() => {
+    if (prevMode === undefined) delete process.env.MESSAGE_INSERT_LOCK_MODE;
+    else process.env.MESSAGE_INSERT_LOCK_MODE = prevMode;
+    if (prevEnabled === undefined) delete process.env.MESSAGE_INSERT_LOCK_ENABLED;
+    else process.env.MESSAGE_INSERT_LOCK_ENABLED = prevEnabled;
+  });
+
+  it('concurrent distinct posts create one row each, stable DB order, idempotency preserved', async () => {
+    const owner = await createAuthenticatedUser('optlockidem');
+    const slug = `optlock-${uniqueSuffix()}`;
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'optimistic lock' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const chanRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        communityId,
+        name: `opt-ch-${uniqueSuffix()}`.slice(0, 32),
+        isPrivate: false,
+      });
+    expect(chanRes.status).toBe(201);
+    const channelId = chanRes.body.channel.id;
+
+    const n = 20;
+    const suffix = uniqueSuffix();
+    const posts = await Promise.all(
+      Array.from({ length: n }, (_, i) =>
+        request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .set('Idempotency-Key', `opt-${suffix}-${i}`)
+          .send({ channelId, content: `opt-body-${suffix}-${i}` }),
+      ),
+    );
+    for (const r of posts) {
+      expect(r.status).toBe(201);
+    }
+    const ids = posts.map((r) => r.body.message.id);
+    expect(new Set(ids).size).toBe(n);
+
+    const idemKey = `opt-shared-${suffix}`;
+    const sharedBody = { channelId, content: `opt-shared-body-${suffix}` };
+    const [idemA, idemB] = await Promise.all([
+      request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .set('Idempotency-Key', idemKey)
+        .send(sharedBody),
+      request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .set('Idempotency-Key', idemKey)
+        .send(sharedBody),
+    ]);
+    expect([idemA.status, idemB.status]).toEqual([201, 201]);
+    expect(idemA.body.message.id).toBe(idemB.body.message.id);
+
+    const { rows: ordered } = await pool.query(
+      `SELECT id, content FROM messages
+       WHERE channel_id = $1 AND (content LIKE $2 OR content = $3)
+       ORDER BY created_at ASC, id ASC`,
+      [channelId, `opt-body-${suffix}-%`, sharedBody.content],
+    );
+    expect(ordered.length).toBe(n + 1);
+
+    await drainAllQueuesForTests();
+    await flushDirtyLastMessagePointers();
+
+    const { rows: latest } = await pool.query(
+      `SELECT id FROM messages WHERE channel_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [channelId],
+    );
+    const { rows: chRow } = await pool.query(
+      `SELECT last_message_id FROM channels WHERE id = $1`,
+      [channelId],
+    );
+    expect(chRow[0]?.last_message_id).toBe(latest[0]?.id);
+  });
+});

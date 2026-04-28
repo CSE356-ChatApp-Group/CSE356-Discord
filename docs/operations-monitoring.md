@@ -36,6 +36,8 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 
    PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics-snapshot.sh
    PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics-snapshot.sh --write var/metrics-snapshot.txt
+   # 10-minute windows for stability audits (replaces embedded `[5m]` in each query):
+   METRICS_SNAPSHOT_RANGE=10m PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics-snapshot.sh
    ```
 
    Paste the **stdout** or the contents of `var/metrics-snapshot.txt` into the chat. The `var/` directory is gitignored.

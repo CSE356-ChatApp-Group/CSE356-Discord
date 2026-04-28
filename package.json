@@ -16,6 +16,7 @@
     "monitoring:down": "docker compose stop prometheus grafana alertmanager loki promtail tempo node-exporter",
     "monitoring:validate": "node scripts/validate-grafana-dashboards.mjs",
     "metrics:snapshot": "bash scripts/metrics-snapshot.sh",
+    "burst:hot-channel:local": "bash scripts/run-local-hot-channel-convoy-e2e.sh",
     "db:query:snapshot": "bash scripts/pg-stat-statements-snapshot.sh",
     "load:staging": "./scripts/run-staging-capacity.sh break",
     "load:staging:smoke": "./scripts/run-staging-capacity.sh smoke",

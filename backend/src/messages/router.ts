@@ -32,6 +32,7 @@ const {
   readPool,
   withTransaction,
   poolStats,
+  pool,
 } = require("../db/pool");
 const {
   messagePostAccessDeniedTotal,
@@ -220,6 +221,8 @@ import {
   MESSAGE_SELECT_FIELDS,
   MESSAGE_AUTHOR_JSON,
   MESSAGE_INSERT_RETURNING_AUTHOR,
+  MESSAGE_POST_CHANNEL_ACCESS_DIAGNOSTIC_SQL,
+  MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL,
 } from "./sqlFragments";
 
 const router = express.Router();
@@ -1598,6 +1601,35 @@ function buildIdempotentSuccessPayload(payload: any) {
   return out;
 }
 
+/** Replay body for Redis idempotency value (legacy full `message` blob or slim `messageId` + flags). */
+async function hydrateIdemReplayBody(parsed: any): Promise<Record<string, unknown> | null> {
+  const legacy = buildIdempotentSuccessPayload(parsed);
+  if (legacy) return legacy;
+  const mid = parsed?.messageId;
+  if (!mid || typeof mid !== "string") return null;
+  const msg = await loadHydratedMessageById(mid);
+  if (!msg) return null;
+  const publishedAt =
+    typeof parsed?.realtimePublishedAt === "string"
+      ? parsed.realtimePublishedAt
+      : messageCreatedAtIso(msg);
+  if (msg.channel_id) {
+    return {
+      message: msg,
+      realtimePublishedAt: publishedAt,
+      realtimeChannelFanoutComplete:
+        parsed.realtimeChannelFanoutComplete !== false,
+      realtimeUserFanoutDeferred: parsed.realtimeUserFanoutDeferred === true,
+    };
+  }
+  return {
+    message: msg,
+    realtimePublishedAt: publishedAt,
+    realtimeConversationFanoutComplete:
+      parsed.realtimeConversationFanoutComplete !== false,
+  };
+}
+
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1630,7 +1662,7 @@ async function awaitIdempotentPostAfterLeaseContention(idemRedisKey) {
     } catch {
       break;
     }
-    const replay = buildIdempotentSuccessPayload(p2);
+    const replay = await hydrateIdemReplayBody(p2);
     if (replay) {
       messagePostIdempotencyPollTotal.inc({ outcome: "replay_201" });
       messagePostIdempotencyPollWaitMs.observe(
@@ -1638,29 +1670,6 @@ async function awaitIdempotentPostAfterLeaseContention(idemRedisKey) {
         Date.now() - pollStart,
       );
       return { ok: true as const, body: replay };
-    }
-    if (p2?.messageId) {
-      const msg2 = await loadHydratedMessageById(p2.messageId);
-      if (msg2) {
-        messagePostIdempotencyPollTotal.inc({ outcome: "replay_201" });
-        messagePostIdempotencyPollWaitMs.observe(
-          { outcome: "replay_201" },
-          Date.now() - pollStart,
-        );
-        return {
-          ok: true as const,
-          body: {
-            message: msg2,
-            ...(msg2.channel_id
-              ? {
-                  realtimeChannelFanoutComplete: true,
-                  realtimeUserFanoutDeferred: false,
-                }
-              : { realtimeConversationFanoutComplete: true }),
-            realtimePublishedAt: messageCreatedAtIso(msg2),
-          },
-        };
-      }
     }
     if (!p2?.pending) break;
   }
@@ -1756,26 +1765,9 @@ router.post(
               } catch {
                 parsed = null;
               }
-              const replay = buildIdempotentSuccessPayload(parsed);
+              const replay = await hydrateIdemReplayBody(parsed);
               if (replay) {
                 return res.status(201).json(replay);
-              }
-              if (parsed?.messageId) {
-                const cachedMsg = await loadHydratedMessageById(
-                  parsed.messageId,
-                );
-                if (cachedMsg) {
-                  return res.status(201).json({
-                    message: cachedMsg,
-                    ...(cachedMsg.channel_id
-                      ? {
-                          realtimeChannelFanoutComplete: true,
-                          realtimeUserFanoutDeferred: false,
-                        }
-                      : { realtimeConversationFanoutComplete: true }),
-                    realtimePublishedAt: messageCreatedAtIso(cachedMsg),
-                  });
-                }
               }
             }
             const gotLease = await redis.set(
@@ -1807,7 +1799,83 @@ router.post(
       }
 
       let communityId: string | null = null;
-      const runMessageInsertTransaction = () =>
+      let baseMessage: any;
+
+      const insertAttachmentRows = async (client: any, messageId: string) => {
+        if (attachments.length === 0) return;
+        const values: string[] = [];
+        const params: any[] = [];
+        let index = 1;
+
+        for (const attachment of attachments) {
+          values.push(
+            `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`,
+          );
+          params.push(
+            messageId,
+            req.user.id,
+            attachment.filename,
+            attachment.contentType,
+            attachment.sizeBytes,
+            attachment.storageKey,
+            attachment.width || null,
+            attachment.height || null,
+          );
+        }
+
+        await client.query(
+          `INSERT INTO attachments
+               (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
+             VALUES ${values.join(", ")}`,
+          params,
+        );
+      };
+
+      /** Channel-only: merged access check + insert (diagnostic SELECT only when INSERT returns 0 rows). */
+      const runChannelMessageRowUnderInsertLock = () =>
+        withTransaction(async (client) => {
+          txPhases.t0 = Date.now();
+          await client.query(
+            `SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+          );
+          await client.query(`SET LOCAL synchronous_commit = off`);
+
+          txPhases.t_access = Date.now();
+          const insertRes = await client.query(MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL, [
+            channelId,
+            req.user.id,
+            content?.trim() || null,
+            threadId || null,
+          ]);
+          txPhases.t_insert = Date.now();
+
+          if (!insertRes.rows.length) {
+            const accessRes = await client.query(
+              MESSAGE_POST_CHANNEL_ACCESS_DIAGNOSTIC_SQL,
+              [channelId, req.user.id],
+            );
+            txPhases.t_later = Date.now();
+            const accessRow = accessRes.rows[0];
+            if (accessRow && accessRow.author_exists === false) {
+              const err: any = new Error("Session no longer valid");
+              err.statusCode = 401;
+              err.messagePostDenyReason = "author_missing";
+              throw err;
+            }
+            const err: any = new Error("Access denied");
+            err.statusCode = 403;
+            err.messagePostDenyReason = "channel_access";
+            throw err;
+          }
+
+          const row = insertRes.rows[0];
+          communityId = row.post_insert_community_id ?? null;
+          delete row.post_insert_community_id;
+          txPhases.t_later = Date.now();
+          return row;
+        });
+
+      const runDmMessageInsertTransaction = () =>
         withTransaction(async (client) => {
           txPhases.t0 = Date.now();
           await client.query(
@@ -1816,141 +1884,79 @@ router.post(
           await client.query(`SET LOCAL synchronous_commit = off`);
           let row: any;
 
-          if (channelId) {
-            const accessRes = await client.query(
-              `SELECT
-               EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
-               EXISTS (
-                 SELECT 1
-                 FROM channels c
-                 WHERE c.id = $1
-                   AND (c.is_private = FALSE
-                        OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
-                   AND EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2)
-               ) AS has_access,
-               (
-                 SELECT c.community_id
-                 FROM channels c
-                 WHERE c.id = $1
-                   AND (c.is_private = FALSE
-                        OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
-                   AND EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2)
-                 LIMIT 1
-               ) AS community_id`,
-              [channelId, req.user.id],
-            );
-            txPhases.t_access = Date.now();
-            const accessRow = accessRes.rows[0];
-            if (accessRow && accessRow.author_exists === false) {
-              const err: any = new Error("Session no longer valid");
-              err.statusCode = 401;
-              err.messagePostDenyReason = "author_missing";
-              throw err;
-            }
-            if (!accessRow?.has_access) {
-              const err: any = new Error("Access denied");
-              err.statusCode = 403;
-              err.messagePostDenyReason = "channel_access";
-              throw err;
-            }
-
-            communityId = accessRow.community_id ?? null;
-
-            const insertRes = await client.query(
-              `INSERT INTO messages AS m (channel_id, author_id, content, thread_id)
-             VALUES ($1, $2, $3, $4)
-             RETURNING ${MESSAGE_INSERT_RETURNING_AUTHOR},
-               '[]'::json AS attachments`,
-              [
-                channelId,
-                req.user.id,
-                content?.trim() || null,
-                threadId || null,
-              ],
-            );
-            txPhases.t_insert = Date.now();
-            row = insertRes.rows[0];
-          } else {
-            const accessRes = await client.query(
-              `SELECT
+          const accessRes = await client.query(
+            `SELECT
                EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
                COUNT(*)::int                             AS has_access
              FROM conversation_participants
              WHERE conversation_id = $1
                AND user_id = $2
                AND left_at IS NULL`,
-              [conversationId, req.user.id],
-            );
-            txPhases.t_access = Date.now();
-            const accessRow = accessRes.rows[0];
-            if (accessRow && accessRow.author_exists === false) {
-              const err: any = new Error("Session no longer valid");
-              err.statusCode = 401;
-              err.messagePostDenyReason = "author_missing";
-              throw err;
-            }
-            if (!accessRow?.has_access) {
-              const err: any = new Error("Not a participant");
-              err.statusCode = 403;
-              err.messagePostDenyReason = "conversation_participant";
-              throw err;
-            }
+            [conversationId, req.user.id],
+          );
+          txPhases.t_access = Date.now();
+          const accessRow = accessRes.rows[0];
+          if (accessRow && accessRow.author_exists === false) {
+            const err: any = new Error("Session no longer valid");
+            err.statusCode = 401;
+            err.messagePostDenyReason = "author_missing";
+            throw err;
+          }
+          if (!accessRow?.has_access) {
+            const err: any = new Error("Not a participant");
+            err.statusCode = 403;
+            err.messagePostDenyReason = "conversation_participant";
+            throw err;
+          }
 
-            const insertRes = await client.query(
-              `INSERT INTO messages AS m (conversation_id, author_id, content, thread_id)
+          const insertRes = await client.query(
+            `INSERT INTO messages AS m (conversation_id, author_id, content, thread_id)
              VALUES ($1, $2, $3, $4)
              RETURNING ${MESSAGE_INSERT_RETURNING_AUTHOR},
                '[]'::json AS attachments`,
-              [
-                conversationId,
-                req.user.id,
-                content?.trim() || null,
-                threadId || null,
-              ],
-            );
-            txPhases.t_insert = Date.now();
-            row = insertRes.rows[0];
-          }
+            [
+              conversationId,
+              req.user.id,
+              content?.trim() || null,
+              threadId || null,
+            ],
+          );
+          txPhases.t_insert = Date.now();
+          row = insertRes.rows[0];
 
-          if (attachments.length > 0) {
-            const values: string[] = [];
-            const params: any[] = [];
-            let index = 1;
-
-            for (const attachment of attachments) {
-              values.push(
-                `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`,
-              );
-              params.push(
-                row.id,
-                req.user.id,
-                attachment.filename,
-                attachment.contentType,
-                attachment.sizeBytes,
-                attachment.storageKey,
-                attachment.width || null,
-                attachment.height || null,
-              );
-            }
-
-            await client.query(
-              `INSERT INTO attachments
-               (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
-             VALUES ${values.join(", ")}`,
-              params,
-            );
-          }
+          await insertAttachmentRows(client, row.id);
 
           txPhases.t_later = Date.now();
           return row;
         });
-      const baseMessage = await (channelId
-        ? runChannelMessageInsertSerialized(
-            channelId,
-            runMessageInsertTransaction,
-            { requestId: req.id },
-          )
-        : runMessageInsertTransaction());
+
+      if (channelId) {
+        baseMessage = await runChannelMessageInsertSerialized(
+          channelId,
+          runChannelMessageRowUnderInsertLock,
+          { requestId: req.id },
+        );
+        if (attachments.length > 0) {
+          try {
+            await withTransaction(async (client) => {
+              await client.query(
+                `SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+              );
+              await insertAttachmentRows(client, baseMessage.id);
+            });
+          } catch (attachErr) {
+            await pool
+              .query(
+                `DELETE FROM messages WHERE id = $1 AND channel_id = $2 AND author_id = $3`,
+                [baseMessage.id, channelId, req.user.id],
+              )
+              .catch(() => {});
+            throw attachErr;
+          }
+        }
+      } else {
+        baseMessage = await runDmMessageInsertTransaction();
+      }
       const t_tx_done = Date.now();
       let t_after_cache_bust = t_tx_done;
       let t_after_fanout = t_tx_done;
@@ -1993,13 +1999,24 @@ router.post(
         }
       }
 
-      // Re-hydrate only when attachments were inserted so the response includes
-      // them. For the common no-attachment path the CTE result is already fully
-      // hydrated (author joined, attachments = []).
-      const message =
-        attachments.length > 0
-          ? ((await loadHydratedMessageById(baseMessage.id)) ?? baseMessage)
-          : baseMessage;
+      // Channel posts: author + attachments always load after the insert lock is
+      // released (locked tx uses merged insert RETURNING without author JSON). DM posts:
+      // re-hydrate only when attachments were inserted.
+      let message: any;
+      if (channelId) {
+        const hydrated = await loadHydratedMessageById(baseMessage.id);
+        if (!hydrated) {
+          const err: any = new Error("Message not found after insert");
+          err.statusCode = 500;
+          throw err;
+        }
+        message = hydrated;
+      } else {
+        message =
+          attachments.length > 0
+            ? ((await loadHydratedMessageById(baseMessage.id)) ?? baseMessage)
+            : baseMessage;
+      }
 
       // Bust the shared Redis cache for the latest page so a follow-up GET /messages
       // (e.g. opening a DM) returns rows that include this write. Bounded wait only —
@@ -2277,9 +2294,10 @@ router.post(
           process.env.MESSAGE_USER_FANOUT_HTTP_BLOCKING === "0");
 
       if (idemRedisKey && idemLease) {
+        // Slim idem payload: omit full `message` JSON (often multi‑KB) — replay uses
+        // `messageId` + `loadHydratedMessageById` within MSG_IDEM_SUCCESS_TTL_SECS.
         const idemBlob: Record<string, unknown> = {
           messageId: message.id,
-          message,
           realtimePublishedAt: realtimePublishedAtForHttp,
         };
         if (channelId) {

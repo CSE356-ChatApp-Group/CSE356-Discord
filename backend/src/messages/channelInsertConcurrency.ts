@@ -177,6 +177,34 @@ function shouldSuppressChannelRetry(channelId: string) {
   return nowMs - lastTimeoutAt <= MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS;
 }
 
+/**
+ * Skip Redis + per-process queue for channel `POST /messages` inserts. Inserts run
+ * fully concurrently (same as `channelId === null` / DM path for locking purposes).
+ *
+ * Read on each call so integration tests can toggle without restarting the process.
+ *
+ * Enable bypass with either:
+ * - `MESSAGE_INSERT_LOCK_MODE=optimistic` (also `off`, `false`, `none`), or
+ * - `MESSAGE_INSERT_LOCK_ENABLED=false` (also `0`, `off`, `no`).
+ */
+export function shouldBypassChannelInsertLock(): boolean {
+  const mode = (process.env.MESSAGE_INSERT_LOCK_MODE || '').trim().toLowerCase();
+  if (
+    mode === 'optimistic' ||
+    mode === 'off' ||
+    mode === 'false' ||
+    mode === 'none'
+  ) {
+    return true;
+  }
+  const enabledRaw = process.env.MESSAGE_INSERT_LOCK_ENABLED;
+  const enabled = (enabledRaw === undefined ? 'true' : enabledRaw).trim().toLowerCase();
+  if (enabled === '0' || enabled === 'false' || enabled === 'off' || enabled === 'no') {
+    return true;
+  }
+  return false;
+}
+
 /** Mirrored on POST /messages 503 JSON `code` for operators / graders (snake_case). */
 type MessagePostInsertLockRetryKind =
   | 'message_insert_lock_wait_timeout'
@@ -520,6 +548,10 @@ export function runChannelMessageInsertSerialized<T>(
   opts: { requestId?: string } = {},
 ): Promise<T> {
   if (!channelId) return fn();
+  if (shouldBypassChannelInsertLock()) {
+    messageChannelInsertLockTotal.inc({ result: 'optimistic_bypass' });
+    return fn();
+  }
   return (async () => {
     const lease = await acquireChannelInsertLease(channelId, opts);
     const holderStartedAt = lease ? Date.now() : null;

@@ -5,10 +5,14 @@
 # Usage:
 #   PROMETHEUS_URL=http://127.0.0.1:9090 ./scripts/metrics-snapshot.sh
 #   ./scripts/metrics-snapshot.sh --write var/metrics-snapshot.txt
+#
+# Range window for rate()/histogram_quantile (default 5m; use 10m for stability audits):
+#   METRICS_SNAPSHOT_RANGE=10m PROMETHEUS_URL=... ./scripts/metrics-snapshot.sh
 set -euo pipefail
 
 BASE="${PROMETHEUS_URL:-http://127.0.0.1:9090}"
 BASE="${BASE%/}"
+RANGE="${METRICS_SNAPSHOT_RANGE:-5m}"
 OUT=""
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +47,7 @@ queries=(
   'histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job="chatapp-api"}[5m])))'
   'histogram_quantile(0.95, sum by (le, path) (rate(fanout_publish_targets_bucket{job="chatapp-api"}[5m])))'
   'histogram_quantile(0.95, sum by (le, path) (rate(fanout_target_candidates_bucket{job="chatapp-api"}[5m])))'
+  'histogram_quantile(0.95, sum by (le, path) (rate(fanout_job_latency_ms_bucket{job="chatapp-api",result="success"}[5m])))'
   'histogram_quantile(0.99, sum by (le, path) (rate(fanout_job_latency_ms_bucket{job="chatapp-api",result="success"}[5m])))'
   'max by (queue) (fanout_queue_depth{job="chatapp-api"})'
   'sum by (path) (rate(fanout_retry_total{job="chatapp-api"}[5m]))'
@@ -62,6 +67,11 @@ queries=(
   'histogram_quantile(0.99, sum by (le, vm) (rate(message_channel_insert_lock_wait_ms_bucket{job="chatapp-api",result="acquired"}[5m])))'
   'histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))'
   'histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))'
+  'histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",route!="/metrics"}[5m])))'
+  'histogram_quantile(0.95, sum by (le, vm) (rate(message_insert_lock_holder_duration_ms_bucket{job="chatapp-api"}[5m])))'
+  'histogram_quantile(0.99, sum by (le, vm) (rate(message_insert_lock_holder_duration_ms_bucket{job="chatapp-api"}[5m])))'
+  '100 * sum(rate(node_cpu_seconds_total{job="db-node",mode="iowait"}[5m])) / clamp_min(sum(rate(node_cpu_seconds_total{job="db-node"}[5m])), 1e-9)'
+  '100 * (1 - sum(rate(node_cpu_seconds_total{job="db-node",mode="idle"}[5m])) / clamp_min(sum(rate(node_cpu_seconds_total{job="db-node"}[5m])), 1e-9))'
   'max by (vm, instance) (message_channel_insert_lock_pressure_recent_timeout_count{job="chatapp-api"})'
   'max by (vm, instance) (message_channel_insert_lock_pressure_wait_p95_ms{job="chatapp-api"})'
   # Redis (redis_exporter job=redis on PROM_REDIS_HOST:9121)
@@ -76,10 +86,12 @@ queries=(
 run() {
   echo "=== ChatApp metrics snapshot ==="
   echo "PROMETHEUS_URL=${BASE}"
+  echo "METRICS_SNAPSHOT_RANGE=${RANGE}"
   echo "time_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo ""
 
   for q in "${queries[@]}"; do
+    q="${q//\[5m\]/[${RANGE}]}"
     echo "--- query: ${q}"
     enc=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$q")
     if ! curl -fsS "${BASE}/api/v1/query?query=${enc}"; then

@@ -18,5 +18,11 @@ if ! sanity 2>/dev/null; then
   echo "[docker-api-boot] still failing; pinning esbuild + iconv-lite"
   npm install esbuild@^0.27.5 iconv-lite@0.4.24 --no-audit --no-fund
 fi
+# `require('iconv-lite')` can succeed while `body-parser` still hits dynamic `../encodings`
+# loads (missing subdir on some npm/volume trees). Ensure the full package is present.
+if ! [ -d node_modules/iconv-lite/encodings ]; then
+  echo "[docker-api-boot] iconv-lite encodings missing; installing full iconv-lite"
+  npm install iconv-lite@0.6.3 --no-audit --no-fund
+fi
 sanity
 exec npm run dev

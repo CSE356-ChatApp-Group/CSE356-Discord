@@ -185,6 +185,65 @@ describe('runChannelMessageInsertSerialized', () => {
     jest.resetModules();
   });
 
+  it('optimistic mode overlaps concurrent work on the same channel (no Redis acquire)', async () => {
+    const prevMode = process.env.MESSAGE_INSERT_LOCK_MODE;
+    process.env.MESSAGE_INSERT_LOCK_MODE = 'optimistic';
+    try {
+      const redis = new FakeRedisLockClient();
+      const setSpy = jest.spyOn(redis, 'set');
+      const worker = loadWorker(redis, {});
+      let depth = 0;
+      let maxDepth = 0;
+      let releaseBarrier!: () => void;
+      const barrier = new Promise<void>((r) => {
+        releaseBarrier = r;
+      });
+      const work = async () => {
+        depth += 1;
+        maxDepth = Math.max(maxDepth, depth);
+        await barrier;
+        depth -= 1;
+      };
+      const ch = 'opt-overlap-ch';
+      const p1 = worker.runChannelMessageInsertSerialized(ch, work);
+      const p2 = worker.runChannelMessageInsertSerialized(ch, work);
+      await sleep(30);
+      expect(maxDepth).toBe(2);
+      releaseBarrier();
+      await Promise.all([p1, p2]);
+      expect(setSpy).not.toHaveBeenCalled();
+      expect(worker.metrics.messageChannelInsertLockTotal.inc).toHaveBeenCalledWith({
+        result: 'optimistic_bypass',
+      });
+      expect(worker.metrics.messageChannelInsertLockTotal.inc.mock.calls.length).toBe(2);
+    } finally {
+      if (prevMode === undefined) delete process.env.MESSAGE_INSERT_LOCK_MODE;
+      else process.env.MESSAGE_INSERT_LOCK_MODE = prevMode;
+    }
+  });
+
+  it('MESSAGE_INSERT_LOCK_ENABLED=false bypasses like optimistic mode', async () => {
+    const prevEn = process.env.MESSAGE_INSERT_LOCK_ENABLED;
+    const prevMode = process.env.MESSAGE_INSERT_LOCK_MODE;
+    delete process.env.MESSAGE_INSERT_LOCK_MODE;
+    process.env.MESSAGE_INSERT_LOCK_ENABLED = 'false';
+    try {
+      const redis = new FakeRedisLockClient();
+      const setSpy = jest.spyOn(redis, 'set');
+      const worker = loadWorker(redis, {});
+      await worker.runChannelMessageInsertSerialized('ch-enabled', async () => 7);
+      expect(setSpy).not.toHaveBeenCalled();
+      expect(worker.metrics.messageChannelInsertLockTotal.inc).toHaveBeenCalledWith({
+        result: 'optimistic_bypass',
+      });
+    } finally {
+      if (prevEn === undefined) delete process.env.MESSAGE_INSERT_LOCK_ENABLED;
+      else process.env.MESSAGE_INSERT_LOCK_ENABLED = prevEn;
+      if (prevMode === undefined) delete process.env.MESSAGE_INSERT_LOCK_MODE;
+      else process.env.MESSAGE_INSERT_LOCK_MODE = prevMode;
+    }
+  });
+
   it('runs immediately when channelId is null', async () => {
     const worker = loadWorker(new FakeRedisLockClient());
     let ran = false;
