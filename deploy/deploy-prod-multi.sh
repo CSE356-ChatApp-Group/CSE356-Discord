@@ -59,6 +59,7 @@ PGBOUNCER_RESERVE_SIZE="${PGBOUNCER_RESERVE_SIZE:-5}"
 PROD_USER="${PROD_USER:-ubuntu}"
 MONITORING_VM_HOST="${MONITORING_VM_HOST:-130.245.136.120}"
 MONITORING_VM_USER="${MONITORING_VM_USER:-${PROD_USER}}"
+MONITORING_VM_SCRAPE_SOURCE="${MONITORING_VM_SCRAPE_SOURCE:-10.0.1.102}"
 # Managed Redis is off-host (see docs/infrastructure-inventory.md). redis_exporter runs in Docker
 # on an app VM with --network host; Prometheus on the monitoring VM scrapes :9121 on a *VPC*
 # address. Do not SSH to a private IP from a laptop — use the public app host for SSH.
@@ -437,6 +438,34 @@ ssh -o StrictHostKeyChecking=accept-new "${MONITORING_VM_USER}@${MONITORING_VM_H
 " || echo "⚠ Monitoring VM sync had errors (non-fatal — app deploy succeeded)"
 echo "✓ Monitoring stack updated on monitoring VM (${MONITORING_VM_HOST})"
 echo ""
+
+# Ensure app VM firewalls always allow Prometheus scrapes from monitoring VM.
+# This keeps chatapp-api/node/pgbouncer/redis targets stable across reprovisioning
+# and manual firewall drift.
+echo "Ensuring UFW scrape rules on app VMs (source ${MONITORING_VM_SCRAPE_SOURCE})..."
+for vm in "$VM1" "$VM2" "$VM3"; do
+  ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
+  if [ "$vm" = "$VM1" ]; then
+    ports=("${VM1_WORKER_PORTS[@]}" 9100 9126)
+  fi
+  if [ "${PROM_REDIS_HOST}" = "${VM1_INTERNAL}" ] && [ "$vm" = "$VM1" ]; then
+    ports+=(9121)
+  fi
+  if [ "${PROM_REDIS_HOST}" = "${VM2_INTERNAL}" ] && [ "$vm" = "$VM2" ]; then
+    ports+=(9121)
+  fi
+  if [ "${PROM_REDIS_HOST}" = "${VM3_INTERNAL}" ] && [ "$vm" = "$VM3" ]; then
+    ports+=(9121)
+  fi
+  ports_csv=$(IFS=,; echo "${ports[*]}")
+  ssh_vm "$vm" "
+    set -euo pipefail
+    IFS=',' read -r -a _ports <<< \"${ports_csv}\"
+    for p in \"\${_ports[@]}\"; do
+      sudo ufw allow proto tcp from ${MONITORING_VM_SCRAPE_SOURCE} to any port \"\$p\" comment 'monitoring scrape' >/dev/null || true
+    done
+  " || echo "WARN: failed to apply UFW scrape rules on ${vm}"
+done
 
 if [ "${PROM_REDIS_HOST}" != "${VM1_INTERNAL}" ]; then
   ssh_vm "$VM1" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
