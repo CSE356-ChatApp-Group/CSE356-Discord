@@ -9,3 +9,5 @@ alwaysApply: true
 - Treat that file as the canonical environment shape unless the user gives newer information.
 - When the user provides infra changes (VM size, host, provider, runners), update `docs/infrastructure-inventory.md` in the same task.
 - If guidance depends on unknown details, ask only for the missing fields and then write them into `docs/infrastructure-inventory.md`.
+- **Production SSH:** interactive shells and deploy scripts default to **`ubuntu@`** on each **Production hosts** address in `docs/infrastructure-inventory.md` (app VM1–VM3, DB, monitoring). **Staging** uses **`ssperrottet@`** on the staging IPs in that doc — do not use `ubuntu@` on staging unless you know the host was changed.
+- **Prometheus from a dev machine:** production Prometheus usually listens on the **monitoring VM** (see inventory). Tunnel then query locally, for example: `ssh -L 9090:127.0.0.1:9090 ubuntu@<monitoring-public-ip-from-inventory> -N`, then `PROMETHEUS_URL=http://127.0.0.1:9090 ./scripts/metrics-snapshot.sh` (see `docs/operations-monitoring.md`).

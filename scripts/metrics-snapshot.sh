@@ -81,6 +81,11 @@ queries=(
   'sum(rate(redis_evicted_keys_total{job="redis"}[5m]))'
   'sum(rate(redis_commands_processed_total{job="redis"}[5m]))'
   'sum(rate(redis_acl_access_denied_cmd_total{job="redis"}[5m])) + sum(rate(redis_acl_access_denied_key_total{job="redis"}[5m])) + sum(rate(redis_acl_access_denied_channel_total{job="redis"}[5m]))'
+  # WS reliable delivery: realtime vs replay + tail latency by path
+  '100 * sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="replay"}[5m])) / clamp_min(sum(rate(ws_reliable_delivery_total{job="chatapp-api"}[5m])), 1e-9)'
+  'sum by (path, source) (rate(ws_reliable_delivery_total{job="chatapp-api"}[5m]))'
+  'histogram_quantile(0.95, sum by (le, path) (rate(ws_reliable_delivery_latency_ms_bucket{job="chatapp-api"}[5m])))'
+  'sum(rate(ws_reconnects_total{job="chatapp-api"}[5m]))'
 )
 
 run() {

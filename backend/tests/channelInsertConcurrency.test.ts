@@ -136,6 +136,8 @@ function loadWorker(
 ) {
   const metrics = {
     messageChannelInsertLockTotal: { inc: jest.fn() },
+    messageChannelInsertPathTotal: { inc: jest.fn() },
+    messageChannelInsertPathPrecallMs: { observe: jest.fn() },
     messageChannelInsertLockWaitMs: { observe: jest.fn() },
     messageInsertLockWaitersCurrentGauge: { set: jest.fn() },
     messageInsertLockQueueRejectTotal: { inc: jest.fn() },
@@ -216,6 +218,14 @@ describe('runChannelMessageInsertSerialized', () => {
         result: 'optimistic_bypass',
       });
       expect(worker.metrics.messageChannelInsertLockTotal.inc.mock.calls.length).toBe(2);
+      expect(worker.metrics.messageChannelInsertPathTotal.inc).toHaveBeenCalledWith({
+        path: 'optimistic_bypass',
+        reason_detail: 'env_optimistic',
+      });
+      expect(worker.metrics.messageChannelInsertPathPrecallMs.observe).toHaveBeenCalledWith(
+        { path: 'optimistic_bypass' },
+        0,
+      );
     } finally {
       if (prevMode === undefined) delete process.env.MESSAGE_INSERT_LOCK_MODE;
       else process.env.MESSAGE_INSERT_LOCK_MODE = prevMode;
@@ -235,6 +245,10 @@ describe('runChannelMessageInsertSerialized', () => {
       expect(setSpy).not.toHaveBeenCalled();
       expect(worker.metrics.messageChannelInsertLockTotal.inc).toHaveBeenCalledWith({
         result: 'optimistic_bypass',
+      });
+      expect(worker.metrics.messageChannelInsertPathTotal.inc).toHaveBeenCalledWith({
+        path: 'optimistic_bypass',
+        reason_detail: 'env_lock_disabled',
       });
     } finally {
       if (prevEn === undefined) delete process.env.MESSAGE_INSERT_LOCK_ENABLED;
@@ -432,6 +446,10 @@ describe('runChannelMessageInsertSerialized', () => {
       }),
       'POST /messages channel insert lock Redis error; falling back to local serialization',
     );
+    expect(worker.metrics.messageChannelInsertPathTotal.inc).toHaveBeenCalledWith({
+      path: 'redis_fallback_null_lease',
+      reason_detail: 'redis_set_error',
+    });
   });
 
   it('rejects when per-channel waiter cap is exceeded', async () => {

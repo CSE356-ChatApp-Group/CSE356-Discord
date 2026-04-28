@@ -9,10 +9,13 @@
 'use strict';
 
 const crypto = require('crypto');
+const os = require('os');
 const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const {
   messageChannelInsertLockTotal,
+  messageChannelInsertPathTotal,
+  messageChannelInsertPathPrecallMs,
   messageChannelInsertLockWaitMs,
   messageInsertLockWaitersCurrentGauge,
   messageInsertLockQueueRejectTotal,
@@ -66,6 +69,17 @@ const MESSAGE_INSERT_LOCK_HOLDER_LOG_MIN_MS = parseIntEnv(
   250,
   1,
   60000,
+);
+/** When 1/true, log every sampled insert path at rate 1.0. */
+const MESSAGE_INSERT_LOCK_PATH_LOG =
+  String(process.env.MESSAGE_INSERT_LOCK_PATH_LOG || '').toLowerCase() === '1' ||
+  process.env.MESSAGE_INSERT_LOCK_PATH_LOG === 'true' ||
+  process.env.MESSAGE_INSERT_LOCK_PATH_LOG === 'yes';
+const MESSAGE_INSERT_LOCK_PATH_LOG_SAMPLE_RATE = parseFloatEnv(
+  'MESSAGE_INSERT_LOCK_PATH_LOG_SAMPLE_RATE',
+  0,
+  0,
+  1,
 );
 const MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS = parseIntEnv(
   'MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS',
@@ -203,6 +217,57 @@ export function shouldBypassChannelInsertLock(): boolean {
     return true;
   }
   return false;
+}
+
+type ChannelInsertBypassReasonDetail =
+  | 'env_optimistic'
+  | 'env_mode_off'
+  | 'env_lock_disabled';
+
+function classifyChannelInsertBypassReasonDetail(): ChannelInsertBypassReasonDetail {
+  const mode = (process.env.MESSAGE_INSERT_LOCK_MODE || '').trim().toLowerCase();
+  if (mode === 'optimistic') return 'env_optimistic';
+  if (mode === 'off' || mode === 'false' || mode === 'none') return 'env_mode_off';
+  const enabledRaw = process.env.MESSAGE_INSERT_LOCK_ENABLED;
+  const enabled = (enabledRaw === undefined ? 'true' : enabledRaw).trim().toLowerCase();
+  if (enabled === '0' || enabled === 'false' || enabled === 'off' || enabled === 'no') {
+    return 'env_lock_disabled';
+  }
+  return 'env_mode_off';
+}
+
+function effectiveInsertPathLogSampleRate(): number {
+  if (MESSAGE_INSERT_LOCK_PATH_LOG) return 1;
+  return MESSAGE_INSERT_LOCK_PATH_LOG_SAMPLE_RATE;
+}
+
+function emitInsertPathMetricAndMaybeLog(args: {
+  path: string;
+  reason_detail: string;
+  requestId?: string;
+  channelId?: string | null;
+  precallMs: number;
+  fallback_note?: string;
+}) {
+  const { path, reason_detail, requestId, channelId, precallMs, fallback_note } = args;
+  messageChannelInsertPathTotal.inc({ path, reason_detail });
+  messageChannelInsertPathPrecallMs.observe({ path }, precallMs);
+  const rate = effectiveInsertPathLogSampleRate();
+  if (rate > 0 && Math.random() < rate) {
+    logger.info(
+      {
+        event: 'message_channel_insert_path',
+        requestId,
+        worker_id: `${os.hostname()}:${process.env.PORT || '?'}`,
+        channelId: channelId ?? undefined,
+        path,
+        reason_detail,
+        precall_ms: precallMs,
+        fallback_note,
+      },
+      'message_channel_insert_path',
+    );
+  }
 }
 
 /** Mirrored on POST /messages 503 JSON `code` for operators / graders (snake_case). */
@@ -398,7 +463,7 @@ function leaveChannelInsertWaitQueue(lease: QueueWaitLease | null) {
 async function acquireChannelInsertLease(
   channelId: string,
   opts: { requestId?: string } = {},
-): Promise<MessageInsertLease | null> {
+): Promise<{ lease: MessageInsertLease | null; precallMs: number }> {
   const startedAt = Date.now();
   const waitQueueLease = await enterChannelInsertWaitQueue(channelId, opts);
   const lockKey = `message_insert_lock:${channelId}`;
@@ -434,7 +499,10 @@ async function acquireChannelInsertLease(
             'POST /messages channel insert lock acquired after wait',
           );
         }
-        return { lockKey, token, waitMs, queueLease: waitQueueLease };
+        return {
+          lease: { lockKey, token, waitMs, queueLease: waitQueueLease },
+          precallMs: waitMs,
+        };
       }
     } catch (err) {
       const waitMs = Math.max(0, Date.now() - startedAt);
@@ -445,7 +513,7 @@ async function acquireChannelInsertLease(
         'POST /messages channel insert lock Redis error; falling back to local serialization',
       );
       leaveChannelInsertWaitQueue(waitQueueLease);
-      return null;
+      return { lease: null, precallMs: waitMs };
     }
 
     const remainingMs = deadline - Date.now();
@@ -547,21 +615,73 @@ export function runChannelMessageInsertSerialized<T>(
   fn: () => Promise<T>,
   opts: {
     requestId?: string;
-    /** Fired after the Redis insert lock is acquired (or skipped with null lease). `waitMs` is queue+Redis spin time. */
-    onInsertLock?: (info: { waitMs: number; leaseHeld: boolean }) => void;
+    /**
+     * Fired before DB channel insert work: optimistic bypass, after Redis lease acquired,
+     * or after Redis error with null lease (cross-worker lock not held).
+     * `waitMs` is queue + Redis spin time (precall).
+     */
+    onInsertLock?: (info: {
+      waitMs: number;
+      leaseHeld: boolean;
+      lockPath:
+        | 'optimistic_bypass'
+        | 'acquired_immediate'
+        | 'acquired_after_wait'
+        | 'redis_fallback_null_lease';
+      bypassReasonDetail:
+        | ChannelInsertBypassReasonDetail
+        | 'none'
+        | 'redis_set_error';
+    }) => void;
   } = {},
 ): Promise<T> {
   if (!channelId) return fn();
   if (shouldBypassChannelInsertLock()) {
     messageChannelInsertLockTotal.inc({ result: 'optimistic_bypass' });
+    const bypassReasonDetail = classifyChannelInsertBypassReasonDetail();
+    emitInsertPathMetricAndMaybeLog({
+      path: 'optimistic_bypass',
+      reason_detail: bypassReasonDetail,
+      requestId: opts.requestId,
+      channelId,
+      precallMs: 0,
+    });
+    if (opts.onInsertLock) {
+      opts.onInsertLock({
+        waitMs: 0,
+        leaseHeld: false,
+        lockPath: 'optimistic_bypass',
+        bypassReasonDetail,
+      });
+    }
     return fn();
   }
   return (async () => {
-    const lease = await acquireChannelInsertLease(channelId, opts);
+    const { lease, precallMs } = await acquireChannelInsertLease(channelId, opts);
+    const lockPath = lease
+      ? lease.waitMs === 0
+        ? 'acquired_immediate'
+        : 'acquired_after_wait'
+      : 'redis_fallback_null_lease';
+    const reason_detail =
+      lockPath === 'redis_fallback_null_lease' ? 'redis_set_error' : 'none';
+    emitInsertPathMetricAndMaybeLog({
+      path: lockPath,
+      reason_detail,
+      requestId: opts.requestId,
+      channelId,
+      precallMs,
+      fallback_note:
+        lockPath === 'redis_fallback_null_lease'
+          ? 'redis_error_during_acquire_cross_worker_lock_not_held'
+          : undefined,
+    });
     if (opts.onInsertLock) {
       opts.onInsertLock({
-        waitMs: lease?.waitMs ?? 0,
+        waitMs: precallMs,
         leaseHeld: lease != null,
+        lockPath,
+        bypassReasonDetail: reason_detail === 'redis_set_error' ? 'redis_set_error' : 'none',
       });
     }
     const holderStartedAt = lease ? Date.now() : null;

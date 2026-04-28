@@ -550,6 +550,25 @@ const wsPendingReplayGuardTotal = new client.Counter({
 });
 
 /**
+ * Reliable WS payloads actually written to a socket (after dedupe / backpressure gates).
+ * path=realtime: Redis pub/sub → local fanout. path=replay: reconnect backfill (missed DB rows
+ * or pending-queue drain). Latency uses message created_at / publishedAt when parseable.
+ */
+const wsReliableDeliveryTotal = new client.Counter({
+  name: 'ws_reliable_delivery_total',
+  help: 'Reliable websocket events delivered to a client (post-dedupe, pre-ws.send)',
+  labelNames: ['path', 'source'],
+});
+
+/** Wall-clock ms from payload reference time (created_at / publishedAt) to socket send. */
+const wsReliableDeliveryLatencyMs = new client.Histogram({
+  name: 'ws_reliable_delivery_latency_ms',
+  help: 'Milliseconds from message/event reference time to ws.send for reliable deliveries',
+  labelNames: ['path'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000, 3600000],
+});
+
+/**
  * Redis PUBLISH failures from realtime fanout (correlate with DM/channel delivery
  * gaps when HTTP 201 still returned before hardening, or with infra issues).
  */
@@ -1196,6 +1215,11 @@ function startPgPoolMetrics(pool) {
     wsReplayFailOpenTotal.inc({ reason: 'global_concurrency' }, 0);
     wsReplayFailOpenTotal.inc({ reason: 'insert_lock_pressure' }, 0);
     wsReplayStartedTotal.inc(0);
+    wsReliableDeliveryTotal.inc({ path: 'realtime', source: 'live_pubsub' }, 0);
+    wsReliableDeliveryTotal.inc({ path: 'replay', source: 'missed_db' }, 0);
+    wsReliableDeliveryTotal.inc({ path: 'replay', source: 'pending_queue' }, 0);
+    wsReliableDeliveryLatencyMs.observe({ path: 'realtime' }, 0);
+    wsReliableDeliveryLatencyMs.observe({ path: 'replay' }, 0);
     // Do not zero chatapp_ws_replay_* gauges here: server.ts sets semaphore cap/inflight
     // on load; forcing cap=0 made alerts using clamp_min(cap,1) false-positive (inflight>1).
     abuseBlockedSubnetTotal.inc(0);
@@ -1293,6 +1317,8 @@ module.exports = {
   wsPendingReplayUserTrimmedTotal,
   wsPendingReplayUserZsetSize,
   wsPendingReplayGuardTotal,
+  wsReliableDeliveryTotal,
+  wsReliableDeliveryLatencyMs,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,
   channelLastMessageUpdateDeferredTotal,

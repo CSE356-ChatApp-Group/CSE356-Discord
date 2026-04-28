@@ -116,6 +116,8 @@ const {
   wsReplayFailOpenTotal,
   wsReplayConcurrentGauge,
   wsReplaySemaphoreCapGauge,
+  wsReliableDeliveryTotal,
+  wsReliableDeliveryLatencyMs,
 } = require("../utils/metrics");
 
 const wss = new WebSocketServer({ noServer: true });
@@ -592,7 +594,11 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
       `user:${userId}`,
       payload,
       null,
-      { bypassLogicalDuplicateSuppression: true },
+      {
+        bypassLogicalDuplicateSuppression: true,
+        deliveryPath: "replay",
+        deliverySource: "missed_db",
+      },
     );
   }
 }
@@ -607,7 +613,11 @@ async function replayPendingMessagesToSocket(ws, userId) {
       `user:${userId}`,
       payload,
       null,
-      { bypassLogicalDuplicateSuppression: true },
+      {
+        bypassLogicalDuplicateSuppression: true,
+        deliveryPath: "replay",
+        deliverySource: "pending_queue",
+      },
     );
   }
   return pendingPayloads.length;
@@ -918,6 +928,27 @@ function isReliableRealtimeEvent(eventName) {
   );
 }
 
+/** Epoch ms for latency (message row time or fanout publishedAt); null if unknown. */
+function parsePayloadReferenceTimeMs(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const data = (parsed as { data?: unknown }).data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const row = data as Record<string, unknown>;
+    const ca = row.created_at ?? row.createdAt;
+    if (typeof ca === "string") {
+      const t = Date.parse(ca);
+      if (Number.isFinite(t)) return t;
+    }
+    if (typeof ca === "number" && Number.isFinite(ca)) return Math.floor(ca);
+  }
+  const pub = (parsed as { publishedAt?: unknown }).publishedAt;
+  if (typeof pub === "string") {
+    const t = Date.parse(pub);
+    if (Number.isFinite(t)) return t;
+  }
+  return null;
+}
+
 function prepareSocketPayload(logicalChannel, parsed, rawMessage) {
   const dedupeKey = socketMessageDedupeKey(parsed);
   let payloadEventName;
@@ -982,6 +1013,8 @@ function flushOutboundJob(ws, job) {
     rawMessage,
     bypassLogicalDuplicateSuppression,
     preparedPayload,
+    deliveryPath = "realtime",
+    deliverySource = "live_pubsub",
   } = job;
   if (ws.readyState !== WebSocket.OPEN) return;
   if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
@@ -1038,6 +1071,21 @@ function flushOutboundJob(ws, job) {
   }
 
   markSocketMessageDelivered(ws, dedupeKey);
+  if (payloadEventName && isReliableRealtimeEvent(payloadEventName)) {
+    const pathKind = deliveryPath === "replay" ? "replay" : "realtime";
+    const sourceKind =
+      pathKind === "replay"
+        ? (deliverySource === "pending_queue" ? "pending_queue" : "missed_db")
+        : "live_pubsub";
+    wsReliableDeliveryTotal.inc({ path: pathKind, source: sourceKind });
+    const refMs = parsePayloadReferenceTimeMs(parsed);
+    if (refMs != null) {
+      const deltaMs = Date.now() - refMs;
+      if (deltaMs >= 0 && Number.isFinite(deltaMs)) {
+        wsReliableDeliveryLatencyMs.observe({ path: pathKind }, deltaMs);
+      }
+    }
+  }
   ws._lastDataFrameAt = Date.now();
   ws.send(outbound, (err) => {
     if (!err) return;
@@ -1132,7 +1180,12 @@ function sendPayloadToSocket(
   logicalChannel,
   parsed,
   rawMessage,
-  { bypassLogicalDuplicateSuppression = false, preparedPayload = null } = {},
+  {
+    bypassLogicalDuplicateSuppression = false,
+    preparedPayload = null,
+    deliveryPath = "realtime",
+    deliverySource = "live_pubsub",
+  } = {},
 ) {
   if (ws.readyState !== WebSocket.OPEN) return false;
   if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
@@ -1200,6 +1253,8 @@ function sendPayloadToSocket(
     rawMessage,
     bypassLogicalDuplicateSuppression,
     preparedPayload: preparedPayload || prepared,
+    deliveryPath,
+    deliverySource,
   });
   adjustWsOutboundGauge(1);
   const priority = skipDropForBackpressure ? "message" : "best_effort";

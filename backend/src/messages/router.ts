@@ -537,6 +537,8 @@ function buildPostMessagesE2eTracePayload(args) {
     total_wall_ms,
     idem_redis_ms,
     channel_insert_lock_wait_ms,
+    channel_insert_lock_path,
+    channel_insert_lock_reason_detail,
     successLog,
     hydrate_ms,
     cache_bust_ms,
@@ -648,6 +650,12 @@ function buildPostMessagesE2eTracePayload(args) {
       "REDIS_SLOWLOG_SSH=user@vm1 ./scripts/redis-slowlog-snapshot.sh (see docs/operations-monitoring.md)",
     correlate_pg_stat_statements:
       "DB_SSH=user@db-host ./scripts/pg-stat-statements-snapshot.sh",
+    ...(channel_insert_lock_path != null
+      ? { channel_insert_lock_path: channel_insert_lock_path }
+      : {}),
+    ...(channel_insert_lock_reason_detail != null
+      ? { channel_insert_lock_reason_detail: channel_insert_lock_reason_detail }
+      : {}),
   };
 }
 
@@ -816,7 +824,8 @@ async function checkChannelAccessForUser(
   userId: string,
 ): Promise<boolean> {
   try {
-    const { rows } = await queryRead(
+    // Use primary: replica lag caused false "no access" right after create/join (GET /messages 403).
+    const { rows } = await query(
       `SELECT EXISTS (
          SELECT 1 FROM channels c
          JOIN community_members cm ON cm.community_id = c.community_id AND cm.user_id = $2
@@ -1358,7 +1367,8 @@ router.get(
                 /* fail open */
               }
 
-              const { rows } = await queryRead(
+              const { rows } = await messagesListQuery(
+                req,
                 `
               WITH access AS (
                 SELECT ${accessWhere} AS has_access
@@ -1866,6 +1876,8 @@ router.post(
     let postWallStart = 0;
     let idemWallMs = 0;
     let channelInsertLockWaitMs = 0;
+    let channelInsertLockPath = null;
+    let channelInsertLockReasonDetail = null;
     let postMessagesTxPhaseLog = null;
     try {
       postWallStart = Date.now();
@@ -2102,8 +2114,14 @@ router.post(
           runChannelMessageRowUnderInsertLock,
           {
             requestId: req.id,
-            onInsertLock: ({ waitMs }) => {
+            onInsertLock: ({
+              waitMs,
+              lockPath,
+              bypassReasonDetail,
+            }) => {
               channelInsertLockWaitMs = waitMs;
+              channelInsertLockPath = lockPath;
+              channelInsertLockReasonDetail = bypassReasonDetail;
             },
           },
         );
@@ -2540,6 +2558,8 @@ router.post(
             total_wall_ms: totalWallMs,
             idem_redis_ms: idemWallMs,
             channel_insert_lock_wait_ms: channelInsertLockWaitMs,
+            channel_insert_lock_path: channelInsertLockPath,
+            channel_insert_lock_reason_detail: channelInsertLockReasonDetail,
             successLog: postMessagesTxPhaseLog,
             hydrate_ms: hydrateWallMs,
             cache_bust_ms: cacheBustOnlyMs,

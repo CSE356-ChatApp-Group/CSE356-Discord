@@ -51,6 +51,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - deferred POST fanout: `fanout_job_latency_ms` p99, `fanout_queue_depth`, `fanout_retry_total`, `delivery_timeout_total`
    - Redis: `redis_up`, used/max memory, evictions, commands/sec (`redis_commands_processed_total` rate); SLOWLOG via `REDIS_SLOWLOG_SSH=ubuntu@<vm1> ./scripts/redis-slowlog-snapshot.sh` or embed in `PROMETHEUS_URL=... REDIS_SLOWLOG_SSH=... ./scripts/metrics-snapshot.sh`
    - websocket bootstrap wall-time, breadth, and cache-hit rate
+   - websocket reliable delivery mix (`ws_reliable_delivery_total` replay %, `ws_reliable_delivery_latency_ms` p95 by path) plus reconnect rate for correlation
 
 2. **Grafana / Prometheus UI** — export panel data or run the same PromQL as in the snapshot script and paste results.
 
@@ -129,6 +130,8 @@ The human `error` string is unchanged for clients. **`code`** distinguishes caus
 
 Optional fields: **`waitedMs`**, **`lockWaiters`**. Correlate with **`requestId`** in Loki and with **`message_insert_lock_wait_timeout_total`**, **`message_channel_insert_lock_total`**, and holder/wait histograms in [`backend/src/utils/metrics.ts`](../backend/src/utils/metrics.ts).
 
+**Insert path (channel posts):** `message_channel_insert_path_total{path,reason_detail}` counts each decision (`optimistic_bypass`, `acquired_immediate`, `acquired_after_wait`, `redis_fallback_null_lease`) with **`reason_detail`** explaining bypass (`env_optimistic`, `env_mode_off`, `env_lock_disabled`) or serialized fallback (`none`, `redis_set_error`). `message_channel_insert_path_precall_ms_bucket` is precall queue+Redis spin by **`path`** (0 for bypass). Structured logs: **`message_channel_insert_path`** when `MESSAGE_INSERT_LOCK_PATH_LOG` or `MESSAGE_INSERT_LOCK_PATH_LOG_SAMPLE_RATE` is set (`docs/env.md`). Sampled **`post_messages_e2e_trace`** includes **`channel_insert_lock_path`** and **`channel_insert_lock_reason_detail`** when present.
+
 ## Core metric families (labels often include `job="chatapp-api"`)
 
 | Area | Metrics | Interpretation |
@@ -139,8 +142,8 @@ Optional fields: **`waitedMs`**, **`lockWaiters`**. Correlate with **`requestId`
 | Cache | `endpoint_list_cache_total` | Redis list cache `hit` / `miss` / `coalesced` by `endpoint`. |
 | Overload | `chatapp_overload_stage`, `http_overload_shed_total` | Stage 0–3; early 503s when shedding enabled. |
 | Abuse (auto-ban) | `abuse_auto_ban_blocks_total`, `abuse_auto_ban_issued_total` | **403** from temporary Redis IP ban (`AUTO_IP_BAN_ENABLED`); bans issued after sustained rate-limit **429** strikes (external IPs only). |
-| Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_candidates`, `fanout_target_cache_total`, `conversation_fanout_targets_cache_version_retry_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total` | Fanout health, Redis publish multiplier, candidate audience size before recent-connect filtering, target-cache effectiveness, conversation fanout cache invalidation races, WS bootstrap breadth, and slow clients. |
-| Messages | `message_post_response_total`, `message_post_idempotency_poll_total`, `message_post_idempotency_poll_wait_ms`, `message_cache_bust_failures_total` | POST outcomes; idempotency duplicate-lease polls (`outcome=replay_201|exhausted_409`) and wait histogram; cache bust issues. |
+| Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_candidates`, `fanout_target_cache_total`, `conversation_fanout_targets_cache_version_retry_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total`, `ws_reliable_delivery_total`, `ws_reliable_delivery_latency_ms` | Fanout health, Redis publish multiplier, candidate audience size before recent-connect filtering, target-cache effectiveness, conversation fanout cache invalidation races, WS bootstrap breadth, and slow clients. **`ws_reliable_delivery_total{path,source}`** counts each reliable event actually **`ws.send`** after dedupe: **`path=realtime`** (`source=live_pubsub`) vs **`path=replay`** (`source=missed_db` reconnect SQL backfill vs `pending_queue` Redis pending drain). **`ws_reliable_delivery_latency_ms`** is ms from **`created_at` / `publishedAt`** to send (same path label). |
+| Messages | `message_post_response_total`, `message_post_idempotency_poll_total`, `message_post_idempotency_poll_wait_ms`, `message_cache_bust_failures_total`, `message_channel_insert_path_total`, `message_channel_insert_path_precall_ms` | POST outcomes; idempotency duplicate-lease polls (`outcome=replay_201|exhausted_409`) and wait histogram; cache bust issues; per-request channel insert path vs precall time. |
 | Read receipts (insert lock) | `read_receipt_shed_total{reason="message_channel_insert_lock_pressure"}`, `read_receipt_requests_total{result="deferred_message_channel_insert_lock_pressure"}`, `message_channel_insert_lock_total`, `message_channel_insert_lock_wait_ms`, `message_channel_insert_lock_pressure_wait_p95_ms`, `message_channel_insert_lock_pressure_recent_timeout_count` | Soft-defer `PUT /messages/:id/read` under per-process lock pressure; see [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md). |
 | Optional RUM | `client_web_vital_*`, `client_rum_batches_total` | Browser-side; requires `ENABLE_CLIENT_RUM` + built frontend flags. |
 | Memory | `process_resident_memory_bytes{job="chatapp-api"}` | **Per Node process** (each `chatapp@` port is a target). **`ChatAppHighMemoryUsage`** in [`alerts.yml`](../infrastructure/monitoring/alerts.yml) fires when RSS **> ~650 MiB for 10m** per target — tune if VM RAM or worker count changes. Grafana overview panel overlays the same threshold. |
@@ -174,6 +177,28 @@ histogram_quantile(0.95, sum by (le, path) (rate(fanout_target_candidates_bucket
 
 # WS bootstrap breadth p95
 histogram_quantile(0.95, sum by (le) (rate(ws_bootstrap_channels_bucket{job="chatapp-api"}[5m])))
+
+# Channel POST /messages insert path mix (each request increments once; sum over reason_detail per path)
+sum by (path) (rate(message_channel_insert_path_total{job="chatapp-api"}[5m]))
+  / sum(rate(message_channel_insert_path_total{job="chatapp-api"}[5m]))
+
+# p99 precall (queue + Redis spin) by insert path
+histogram_quantile(0.99, sum by (le, path) (rate(message_channel_insert_path_precall_ms_bucket{job="chatapp-api"}[5m])))
+
+# WS: % of reliable deliveries that were replay (reconnect / pending), not live pub/sub
+100 * sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="replay"}[5m]))
+  / clamp_min(sum(rate(ws_reliable_delivery_total{job="chatapp-api"}[5m])), 1e-9)
+
+# Replay breakdown: missed DB vs pending-queue drain
+sum by (source) (rate(ws_reliable_delivery_total{job="chatapp-api",path="replay"}[5m]))
+
+# p95 delivery lag from message/event reference time → socket (by path)
+histogram_quantile(0.95, sum by (le, path) (rate(ws_reliable_delivery_latency_ms_bucket{job="chatapp-api"}[5m])))
+
+# Correlate replay spikes: same instant() as Redis memory + fanout p95 + reconnect rate
+max(redis_memory_used_bytes{job="redis"}) / max(redis_memory_max_bytes{job="redis"})
+sum(rate(ws_reconnects_total{job="chatapp-api"}[5m]))
+histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job="chatapp-api"}[5m])))
 ```
 
 ## Auth login/register stampede
