@@ -14,11 +14,13 @@
 #   LIMIT            default 15
 #   MIN_CALLS_MEAN   default 20  (filter noisy one-off statements from mean-latency view)
 #   MIN_CALLS_IO     default 5   (filter one-off statements from IO-heavy view)
+#   MIN_CALLS_STDDEV default 10  (stddev_exec_time view; requires PG 13+ pg_stat_statements)
 set -euo pipefail
 
 LIMIT="${LIMIT:-15}"
 MIN_CALLS_MEAN="${MIN_CALLS_MEAN:-20}"
 MIN_CALLS_IO="${MIN_CALLS_IO:-5}"
+MIN_CALLS_STDDEV="${MIN_CALLS_STDDEV:-10}"
 DB_NAME="${DB_NAME:-chatapp_prod}"
 DB_SSH="${DB_SSH:-${PROD_DB_SSH:-}}"
 DELTA_SECONDS="${DELTA_SECONDS:-}"
@@ -71,6 +73,7 @@ WITH stats AS (
     total_exec_time,
     mean_exec_time,
     max_exec_time,
+    stddev_exec_time,
     rows,
     shared_blks_hit,
     shared_blks_read,
@@ -166,6 +169,23 @@ SELECT
   left(query, 180) AS query
 FROM stats
 ORDER BY max_exec_time DESC NULLS LAST
+LIMIT ${LIMIT};
+"
+
+echo
+echo "=== pg_stat_statements: top stddev_exec_time (calls >= ${MIN_CALLS_STDDEV}; volatile latency / tail) ==="
+run_psql "${shared_cte}
+SELECT
+  queryid,
+  calls,
+  round(stddev_exec_time::numeric, 2) AS stddev_exec_ms,
+  round(mean_exec_time::numeric, 2) AS mean_exec_ms,
+  round(max_exec_time::numeric, 2) AS max_exec_ms,
+  round(total_exec_time::numeric, 1) AS total_exec_ms,
+  left(query, 180) AS query
+FROM stats
+WHERE calls >= ${MIN_CALLS_STDDEV}
+ORDER BY stddev_exec_time DESC NULLS LAST
 LIMIT ${LIMIT};
 "
 

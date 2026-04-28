@@ -12,7 +12,7 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
 | Grafana dashboard (repo copy) | [`infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) |
 | Instant Prometheus triage | [`scripts/metrics-snapshot.sh`](../scripts/metrics-snapshot.sh) |
-| Top normalized SQL (`pg_stat_statements`) | [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) |
+| Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) |
 
 ## Where latency comes from (split app + DB VMs)
 
@@ -97,6 +97,24 @@ Each line includes **`requestId`**, **`worker_id`** (`hostname:PORT` from the sy
 3. **Cross-worker** — filter logs by **`worker_id`** to see if one **`chatapp@`** port dominates (pool partition, hot channel serialization).
 
 **Aggregating “% of spikes by component”** — in Loki (or any log SQL), count lines where **`dominant_bucket="db"`** vs **`redis`** vs **`serialization`** etc., divided by total **`post_messages_e2e_trace`** lines in the window. **`max()` of each numeric field in `breakdown_ms`** over the window gives worst-case per component; **`dominant_component`** answers “single biggest slice” per request (no global single cause unless one bucket dominates the rollup counts).
+
+## Slow non-`POST /messages` HTTP trace (`slow_http_request_trace`)
+
+When **`SLOW_HTTP_TRACE_MIN_MS`** is set (for example **`2000`**), successful and errored requests that exceed that wall time emit **`event=slow_http_request_trace`** unless the route matches **`SLOW_HTTP_TRACE_EXCLUDE_PREFIXES`** (default excludes **`/api/v1/messages`**, **`/health`**, **`/metrics`**). Each line includes **`route`**, **`requestId`**, **`worker_id`**, **`total_wall_ms`**, **`db_query_count`**, **`db_business_sql_count`**, **`db_sum_ms`** (sum of round-trip times for every `query()` / wrapped `client.query()`), **`db_max_single_ms`**, **`db_query_samples`** (up to 30 truncated statements with **`pool`** `primary` or `read`), and **`app_wall_ms_estimated`** when DB work was roughly sequential (**`db_wall_parallel_overlap_hint`** when summed DB time exceeds total wall — overlapping `await` / `Promise.all`).
+
+**Rank slow routes by impact** — in logs or Grafana: **`sum by (route) (count)`** or request volume × p95 from Prometheus **`http_server_request_duration_ms`** for the same window; join with **`slow_http_request_trace`** counts on **`route`**.
+
+## Slow route EXPLAIN workflow {#slow-route-explain-workflow}
+
+1. Capture **`slow_http_request_trace`** (or **`pg: slow query`** lines from **`PG_SLOW_QUERY_MS`**) for the window; note **`db_query_samples`** and **`queryid`** from [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) (`DB_SSH` / **`DATABASE_URL`**). The snapshot includes **top `total_exec_time`**, **top `max_exec_time`**, **top `stddev_exec_time`** (calls ≥ **`MIN_CALLS_STDDEV`**, default 10), slowest **mean** among frequent callers, and **IO-heavy** statements.
+2. On the DB, ensure **`pg_stat_statements`** is available (`shared_preload_libraries` + **`CREATE EXTENSION`** as appropriate for your host).
+3. Take the normalized SQL (from **`pg_stat_statements.query`** or app sample), bind realistic parameters, then run:
+   ```sql
+   SET track_io_timing = ON;
+   EXPLAIN (ANALYZE, BUFFERS, VERBOSE) <statement>;
+   ```
+4. Interpret: **sequential scans** on large tables → index / rewrite; **estimated rows « actual** → **`ANALYZE`** / stats; **buffers: shared read** high → cache/IO; **Lock** rows → contention; **`db_query_count`** on one HTTP request ≫ 1 with similar SQL shapes → **N+1** in handler code.
+5. **Expected latency after fix** — index or plan fix often improves the dominated step by **10×–100×** until the next bottleneck; confirm with **`EXPLAIN ANALYZE`** and a canary before assuming global p99 movement.
 
 ## POST /messages “briefly busy” **503** JSON (`code`)
 

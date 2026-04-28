@@ -65,7 +65,11 @@ app.use((req, res, next) => {
   })();
 });
 const { register, httpRequestsTotal, httpRequestDurationMs, httpRequestsAbortedTotal, httpOverloadShedTotal, messagePostResponseTotal, pgQueriesPerRequestHistogram, pgBusinessSqlQueriesPerRequestHistogram } = require('./utils/metrics');
-const { run: runDbContext } = require('./utils/requestDbContext');
+const {
+  run: runDbContext,
+  createRequestDbStore,
+} = require('./utils/requestDbContext');
+const { maybeLogSlowHttpRequestTrace } = require('./utils/slowHttpRequestTrace');
 
 function parseBooleanEnv(value, fallback) {
   if (typeof value !== 'string') return fallback;
@@ -144,7 +148,8 @@ function getRouteLabel(req) {
 app.use((req, res, next) => {
   const pathOnly = (req.path || '').split('?')[0];
   if (isQuietPath(pathOnly)) return next();
-  const store = { count: 0, sqlCount: 0 };
+  const store = createRequestDbStore();
+  const wallStart = process.hrtime.bigint();
   runDbContext(store, () => {
     let observed = false;
     const observePgQueries = () => {
@@ -154,8 +159,22 @@ app.use((req, res, next) => {
       pgQueriesPerRequestHistogram.observe({ route }, store.count);
       pgBusinessSqlQueriesPerRequestHistogram.observe({ route }, store.sqlCount);
     };
-    res.on('finish', observePgQueries);
-    res.on('close', observePgQueries);
+    let terminalDone = false;
+    const onDone = () => {
+      if (terminalDone) return;
+      terminalDone = true;
+      observePgQueries();
+      const durationMs = Number(process.hrtime.bigint() - wallStart) / 1e6;
+      maybeLogSlowHttpRequestTrace({
+        req,
+        res,
+        store,
+        durationMs,
+        route: getRouteLabel(req),
+      });
+    };
+    res.on('finish', onDone);
+    res.on('close', onDone);
     next();
   });
 });

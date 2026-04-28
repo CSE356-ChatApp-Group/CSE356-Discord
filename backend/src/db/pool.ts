@@ -41,7 +41,7 @@
 
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
-const { incrementDbQuery } = require('../utils/requestDbContext');
+const { incrementDbQuery, recordDbQueryWall } = require('../utils/requestDbContext');
 const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal, pgQueriesTotal, pgQueryGateActive, pgQueryGateWaiting, pgQueryGateRejectsTotal } = require('../utils/metrics');
 
 function extractSqlText(queryArg) {
@@ -67,18 +67,23 @@ function wrapPoolClientForRequestMetrics(client) {
   client._reqMetricsWrapped = true;
   const origQuery = client.query.bind(client);
   client.query = function queryWrapped(...args) {
+    const t0 = Date.now();
     const last = args[args.length - 1];
     if (typeof last === 'function') {
       const cb = last;
       const rest = args.slice(0, -1);
       return origQuery(...rest, (err, result) => {
-        if (!err) incrementDbQuery(isTransactionControlSql(rest[0]) ? 'all' : 'business_sql');
+        if (!err) {
+          recordDbQueryWall(Date.now() - t0, extractSqlText(rest[0]), 'primary');
+          incrementDbQuery(isTransactionControlSql(rest[0]) ? 'all' : 'business_sql');
+        }
         cb(err, result);
       });
     }
     const p = origQuery(...args);
     if (p && typeof p.then === 'function') {
       return p.then((result) => {
+        recordDbQueryWall(Date.now() - t0, extractSqlText(args[0]), 'primary');
         incrementDbQuery(isTransactionControlSql(args[0]) ? 'all' : 'business_sql');
         return result;
       });
@@ -314,9 +319,10 @@ async function queryRead(sql, params) {
   const start = Date.now();
   try {
     const result = await readPool.query(sql, params);
+    const durationMs = Date.now() - start;
+    recordDbQueryWall(durationMs, extractSqlText(sql), 'read');
     pgQueriesTotal.inc({ pool: 'read' });
     incrementDbQuery(isTransactionControlSql(sql) ? 'all' : 'business_sql');
-    const durationMs = Date.now() - start;
     if (durationMs >= SLOW_QUERY_MS) {
       logger.warn({ durationMs, sql: truncateSql(sql), pool: 'read' }, 'pg read replica: slow query');
     }
@@ -339,9 +345,10 @@ async function query(sql, params) {
   const start = Date.now();
   try {
     const result = await pool.query(sql, params);
+    const durationMs = Date.now() - start;
+    recordDbQueryWall(durationMs, extractSqlText(sql), 'primary');
     pgQueriesTotal.inc({ pool: 'primary' });
     incrementDbQuery(isTransactionControlSql(sql) ? 'all' : 'business_sql');
-    const durationMs = Date.now() - start;
     if (durationMs >= SLOW_QUERY_MS) {
       logger.warn({ durationMs, sql: truncateSql(sql), pool: poolStats() }, 'pg: slow query');
     }
