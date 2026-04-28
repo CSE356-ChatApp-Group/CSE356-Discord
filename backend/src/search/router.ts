@@ -43,6 +43,9 @@ router.get('/', async (req, res, next) => {
   const startMs = Date.now();
   try {
     let { q, communityId, conversationId, authorId, after, before, limit, offset } = req.query;
+    const requestedCommunityId = communityId ? String(communityId) : undefined;
+    const requestedConversationId = conversationId ? String(conversationId) : undefined;
+    let scopeResolution = 'as_requested';
 
     const allowedQueryParams = new Set([
       'q',
@@ -98,8 +101,10 @@ router.get('/', async (req, res, next) => {
       );
       if (rows.length > 0) {
         communityId = undefined;
+        scopeResolution = 'both_requested_keep_conversation_participant';
       } else {
         conversationId = undefined;
+        scopeResolution = 'both_requested_fallback_to_community_not_participant';
       }
     }
 
@@ -123,6 +128,7 @@ router.get('/', async (req, res, next) => {
 
     const { limit: clampedLimit, offset: clampedOffset } = clampSearchPaging(limit, offset);
     const adjustedLimit = overload.searchLimit(clampedLimit);
+    const effectiveScope = communityId ? 'community' : (conversationId ? 'conversation' : 'unknown');
     const results = await searchClient.search(normalizedQuery, {
       communityId,
       conversationId,
@@ -143,7 +149,16 @@ router.get('/', async (req, res, next) => {
           responseBody: { hits: [] },
           requestId: req.id,
           query: normalizedQuery,
-          scope: communityId ? 'community' : (conversationId ? 'conversation' : 'unknown'),
+          scope: effectiveScope,
+          requestedScope: {
+            communityId: requestedCommunityId,
+            conversationId: requestedConversationId,
+          },
+          effectiveScopeIds: {
+            communityId: communityId ? String(communityId) : undefined,
+            conversationId: conversationId ? String(conversationId) : undefined,
+          },
+          scopeResolution,
           ...searchInstanceMeta(),
         },
         'search classifier: true empty result',
@@ -154,7 +169,16 @@ router.get('/', async (req, res, next) => {
     const queryMeta = {
       queryLength: normalizedQuery.length,
       hasQueryText: Boolean(normalizedQuery),
-      scope: communityId ? 'community' : (conversationId ? 'conversation' : 'unknown'),
+      scope: effectiveScope,
+      requestedScope: {
+        communityId: requestedCommunityId,
+        conversationId: requestedConversationId,
+      },
+      effectiveScopeIds: {
+        communityId: communityId ? String(communityId) : undefined,
+        conversationId: conversationId ? String(conversationId) : undefined,
+      },
+      scopeResolution,
       hasFilters: Boolean(authorId || after || before),
       hitCount: results?.hits?.length || 0,
       durationMs,

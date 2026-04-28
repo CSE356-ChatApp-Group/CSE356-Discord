@@ -50,6 +50,11 @@ const {
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
+  readReceiptNoopSkipTotal,
+  readReceiptCoalescedTotal,
+  readReceiptDbUpsertTotal,
+  readReceiptCursorCacheHitTotal,
+  messagesListAccessCacheHitTotal,
 } = require("../utils/metrics");
 const {
   getShouldDeferReadReceiptForInsertLockPressure,
@@ -709,6 +714,15 @@ const READ_RECEIPT_SAME_MESSAGE_COALESCE_MS = Math.min(
 );
 const readReceiptRecentByMessage = new Map();
 const READ_RECEIPT_RECENT_MAX_KEYS = 50000;
+const READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS = Math.min(
+  5000,
+  Math.max(
+    250,
+    parseInt(process.env.READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS || "500", 10) || 500,
+  ),
+);
+const readReceiptScopeCursorByTarget = new Map();
+const READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS = 75000;
 // Four-key Lua script:
 //   KEYS[1] = cursor key (read_cursor_ts:...)
 //   KEYS[2] = db_lock key (read_db_lock:...)
@@ -818,6 +832,73 @@ function shouldCoalesceSameMessageRead(userId, messageId) {
     }
   }
   return false;
+}
+
+function readReceiptScopeCursorKey(userId, channelId, conversationId) {
+  return channelId
+    ? `${userId}:ch:${channelId}`
+    : `${userId}:cv:${conversationId}`;
+}
+
+function readReceiptScopeCursorCacheSaysNoAdvance({
+  userId,
+  channelId,
+  conversationId,
+  messageCreatedAt,
+}) {
+  const now = Date.now();
+  const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
+  const row = readReceiptScopeCursorByTarget.get(key);
+  if (!row) {
+    readReceiptCursorCacheHitTotal.inc({ result: "miss" });
+    return false;
+  }
+  const { tsMs, seenAtMs } = row || {};
+  if (
+    !Number.isFinite(tsMs) ||
+    !Number.isFinite(seenAtMs) ||
+    now - seenAtMs > READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS
+  ) {
+    readReceiptScopeCursorByTarget.delete(key);
+    readReceiptCursorCacheHitTotal.inc({ result: "miss" });
+    return false;
+  }
+  const msgTsMs = new Date(messageCreatedAt).getTime();
+  const noAdvance = Number.isFinite(msgTsMs) && tsMs >= msgTsMs;
+  readReceiptCursorCacheHitTotal.inc({ result: noAdvance ? "hit" : "miss" });
+  return noAdvance;
+}
+
+function rememberReadReceiptScopeCursor({
+  userId,
+  channelId,
+  conversationId,
+  messageCreatedAt,
+}) {
+  const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
+  const msgTsMs = new Date(messageCreatedAt).getTime();
+  if (!Number.isFinite(msgTsMs)) return;
+  const prev = readReceiptScopeCursorByTarget.get(key);
+  const prevTsMs = Number(prev?.tsMs || 0);
+  readReceiptScopeCursorByTarget.set(key, {
+    tsMs: Math.max(prevTsMs, msgTsMs),
+    seenAtMs: Date.now(),
+  });
+  if (readReceiptScopeCursorByTarget.size > READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS) {
+    let pruned = 0;
+    const now = Date.now();
+    for (const [k, row] of readReceiptScopeCursorByTarget) {
+      if (
+        !row ||
+        !Number.isFinite(row.seenAtMs) ||
+        now - row.seenAtMs > READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS * 8
+      ) {
+        readReceiptScopeCursorByTarget.delete(k);
+        pruned += 1;
+      }
+      if (pruned >= 1500) break;
+    }
+  }
 }
 
 async function loadActiveConversationParticipantUserIds(conversationId) {
@@ -1388,6 +1469,7 @@ router.get(
               )`;
               try {
                 if (await checkChannelAccessCache(redis, channelId, req.user.id)) {
+                  messagesListAccessCacheHitTotal.inc({ path: "channel_latest" });
                   accessWhere = "$2::uuid IS NOT NULL";
                 }
               } catch {
@@ -1568,6 +1650,7 @@ router.get(
 
         try {
           if (await checkChannelAccessCache(redis, channelId, req.user.id)) {
+            messagesListAccessCacheHitTotal.inc({ path: "channel_paginated" });
             accessWhere = "$2::uuid IS NOT NULL";
           }
         } catch {
@@ -3072,10 +3155,24 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     const uid = req.user.id;
     const messageId = req.params.id;
     if (shouldCoalesceSameMessageRead(uid, messageId)) {
+      readReceiptCoalescedTotal.inc({ reason: "same_message" });
       readReceiptOptimizationTotal.inc({ reason: "same_message_coalesced" });
+      readReceiptNoopSkipTotal.inc({ reason: "same_message_coalesced" });
       return res.json({ success: true });
     }
     const messageCreatedAt = target.created_at;
+    if (
+      readReceiptScopeCursorCacheSaysNoAdvance({
+        userId: uid,
+        channelId: channel_id,
+        conversationId: conversation_id,
+        messageCreatedAt,
+      })
+    ) {
+      readReceiptCoalescedTotal.inc({ reason: "scope_cursor" });
+      readReceiptNoopSkipTotal.inc({ reason: "scope_cursor_cache" });
+      return res.json({ success: true });
+    }
 
     const { applied, didAdvanceCursor, casResult } = await advanceReadStateCursor({
       userId: uid,
@@ -3092,8 +3189,27 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     });
 
     if (!didAdvanceCursor) {
+      readReceiptDbUpsertTotal.inc({ result: "noop" });
+      readReceiptNoopSkipTotal.inc({ reason: "cursor_not_advanced" });
+      rememberReadReceiptScopeCursor({
+        userId: uid,
+        channelId: channel_id,
+        conversationId: conversation_id,
+        messageCreatedAt,
+      });
       return res.json({ success: true });
     }
+    if (casResult === 2) {
+      readReceiptDbUpsertTotal.inc({ result: "enqueued" });
+    } else if (casResult === 1) {
+      readReceiptDbUpsertTotal.inc({ result: "rate_limited" });
+    }
+    rememberReadReceiptScopeCursor({
+      userId: uid,
+      channelId: channel_id,
+      conversationId: conversation_id,
+      messageCreatedAt,
+    });
 
     const shouldRunDebouncedSideEffects =
       casResult !== 1 || shouldRunCas1SideEffects(uid, channel_id, conversation_id);

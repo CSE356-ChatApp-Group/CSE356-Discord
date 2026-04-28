@@ -347,6 +347,34 @@ const readReceiptOptimizationTotal = new client.Counter({
   labelNames: ['reason'],
 });
 
+/** PUT /messages/:id/read skipped because cursor already at/ahead of target message. */
+const readReceiptNoopSkipTotal = new client.Counter({
+  name: 'read_receipt_noop_skip_total',
+  help: 'PUT /messages/:id/read requests that performed no state change and skipped side effects',
+  labelNames: ['reason'],
+});
+
+/** PUT /messages/:id/read coalesced bursts (same message or same cursor scope cooldown). */
+const readReceiptCoalescedTotal = new client.Counter({
+  name: 'read_receipt_coalesced_total',
+  help: 'PUT /messages/:id/read requests coalesced to avoid duplicate work',
+  labelNames: ['reason'],
+});
+
+/** PUT /messages/:id/read DB upsert path outcome after Redis cursor CAS. */
+const readReceiptDbUpsertTotal = new client.Counter({
+  name: 'read_receipt_db_upsert_total',
+  help: 'PUT /messages/:id/read DB upsert enqueue/skip outcomes after Redis CAS',
+  labelNames: ['result'],
+});
+
+/** PUT /messages/:id/read in-process cursor cache outcomes (short TTL). */
+const readReceiptCursorCacheHitTotal = new client.Counter({
+  name: 'read_receipt_cursor_cache_hit_total',
+  help: 'PUT /messages/:id/read in-process cursor cache outcomes by result',
+  labelNames: ['result'],
+});
+
 /** Rolling-window p95 insert-lock wait (ms) on this worker; updated when evaluating read shed. */
 const messageChannelInsertLockPressureWaitP95MsGauge = new client.Gauge({
   name: 'message_channel_insert_lock_pressure_wait_p95_ms',
@@ -911,6 +939,13 @@ const endpointListCacheInvalidationsTotal = new client.Counter({
   labelNames: ['endpoint', 'reason'],
 });
 
+/** GET /messages access check shortcuts from scoped channel access cache. */
+const messagesListAccessCacheHitTotal = new client.Counter({
+  name: 'messages_list_access_cache_hit_total',
+  help: 'GET /messages requests that reused a cached channel access decision',
+  labelNames: ['path'],
+});
+
 /** API route rate limiters that intentionally shed abusive traffic before hot paths. */
 const apiRateLimitHitsTotal = new client.Counter({
   name: 'api_rate_limit_hits_total',
@@ -1162,6 +1197,16 @@ function startPgPoolMetrics(pool) {
     readReceiptScopeTotal.inc({ scope: 'conversation' }, 0);
     readReceiptOptimizationTotal.inc({ reason: 'cas1_side_effects_debounced' }, 0);
     readReceiptOptimizationTotal.inc({ reason: 'conversation_read_direct_user_fanout' }, 0);
+    readReceiptNoopSkipTotal.inc({ reason: 'cursor_not_advanced' }, 0);
+    readReceiptNoopSkipTotal.inc({ reason: 'same_message_coalesced' }, 0);
+    readReceiptNoopSkipTotal.inc({ reason: 'scope_cursor_cache' }, 0);
+    readReceiptCoalescedTotal.inc({ reason: 'same_message' }, 0);
+    readReceiptCoalescedTotal.inc({ reason: 'scope_cursor' }, 0);
+    readReceiptDbUpsertTotal.inc({ result: 'enqueued' }, 0);
+    readReceiptDbUpsertTotal.inc({ result: 'rate_limited' }, 0);
+    readReceiptDbUpsertTotal.inc({ result: 'noop' }, 0);
+    readReceiptCursorCacheHitTotal.inc({ result: 'hit' }, 0);
+    readReceiptCursorCacheHitTotal.inc({ result: 'miss' }, 0);
     messageChannelInsertLockPressureWaitP95MsGauge.set(0);
     messageChannelInsertLockPressureRecentTimeoutsGauge.set(0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
@@ -1194,6 +1239,8 @@ function startPgPoolMetrics(pool) {
     endpointListCacheBypassTotal.inc({ endpoint: 'messages_conversation', reason: 'pagination' }, 0);
     endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_channel', reason: 'write' }, 0);
     endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_conversation', reason: 'write' }, 0);
+    messagesListAccessCacheHitTotal.inc({ path: 'channel_latest' }, 0);
+    messagesListAccessCacheHitTotal.inc({ path: 'channel_paginated' }, 0);
     channelAccessCacheTotal.inc({ result: 'hit' }, 0);
     channelAccessCacheTotal.inc({ result: 'miss' }, 0);
     fanoutTargetCacheTotal.inc({ path: 'channel_message_user_topics', result: 'hit' }, 0);
@@ -1347,6 +1394,10 @@ module.exports = {
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
+  readReceiptNoopSkipTotal,
+  readReceiptCoalescedTotal,
+  readReceiptDbUpsertTotal,
+  readReceiptCursorCacheHitTotal,
   messageChannelInsertLockPressureWaitP95MsGauge,
   messageChannelInsertLockPressureRecentTimeoutsGauge,
   wsConnectionResultTotal,
@@ -1416,6 +1467,7 @@ module.exports = {
   endpointListCacheTotal,
   endpointListCacheBypassTotal,
   endpointListCacheInvalidationsTotal,
+  messagesListAccessCacheHitTotal,
   apiRateLimitHitsTotal,
   wsUpgradeSeenTotal,
   wsUpgradeRateLimitedTotal,
