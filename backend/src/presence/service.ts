@@ -24,6 +24,12 @@ const {
 
 const TTL_SECONDS = 90;
 const PRESENCE_DB_CURSOR_TTL_SECS = parseInt(process.env.PRESENCE_DB_CURSOR_TTL_SECS || '300', 10);
+/** Away-message text in Redis must expire so volatile-lru can reclaim abandoned keys. */
+const AWAY_MESSAGE_REDIS_TTL_SECS = (() => {
+  const raw = parseInt(process.env.AWAY_MESSAGE_REDIS_TTL_SECS || '2592000', 10);
+  if (!Number.isFinite(raw) || raw < 3600) return 2_592_000;
+  return Math.min(86_400 * 90, raw);
+})();
 
 // Lua CAS: set key to ARGV[1] only if key is missing or value differs. Returns 1=written, 0=skipped.
 const PRESENCE_DB_CAS_LUA = `
@@ -169,7 +175,7 @@ async function setAwayMessage(userId, message) {
     await redis.del(awayMessageKey(userId));
     return null;
   }
-  await redis.set(awayMessageKey(userId), normalized);
+  await redis.set(awayMessageKey(userId), normalized, 'EX', AWAY_MESSAGE_REDIS_TTL_SECS);
   return normalized;
 }
 

@@ -8,6 +8,7 @@ jest.mock('../src/db/redis', () => ({
   decr: jest.fn(),
   set: jest.fn(),
   eval: jest.fn(),
+  expire: jest.fn(),
 }));
 
 jest.mock('../src/messages/sideEffects', () => ({
@@ -27,6 +28,7 @@ const redis = require('../src/db/redis') as {
   decr: jest.Mock;
   set: jest.Mock;
   eval: jest.Mock;
+  expire: jest.Mock;
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { query, poolStats } = require('../src/db/pool') as {
@@ -49,6 +51,7 @@ describe('channelMessageCounter', () => {
     jest.clearAllMocks();
     poolStats.mockReturnValue({ waiting: 0 });
     redis.eval.mockResolvedValue(1);
+    redis.expire.mockResolvedValue(1);
     sideEffects.enqueueFanoutJob.mockImplementation((_name, fn) => {
       Promise.resolve().then(fn);
       return true;
@@ -61,6 +64,7 @@ describe('channelMessageCounter', () => {
     await incrementChannelMessageCount('chan-hot');
 
     expect(redis.incr).toHaveBeenCalledWith('channel:msg_count:chan-hot');
+    expect(redis.expire).toHaveBeenCalledWith('channel:msg_count:chan-hot', 2_592_000);
     expect(sideEffects.enqueueFanoutJob).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
   });
@@ -83,7 +87,7 @@ describe('channelMessageCounter', () => {
       'SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL',
       ['chan-cold'],
     );
-    expect(redis.set).toHaveBeenCalledWith('channel:msg_count:chan-cold', '37');
+    expect(redis.set).toHaveBeenCalledWith('channel:msg_count:chan-cold', '37', 'EX', 2_592_000);
   });
 
   it('clamps missing-key decrement and schedules reconciliation', async () => {
@@ -99,7 +103,7 @@ describe('channelMessageCounter', () => {
     await decrementChannelMessageCount('chan-del');
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(redis.set).toHaveBeenCalledWith('channel:msg_count:chan-del', '0');
+    expect(redis.set).toHaveBeenCalledWith('channel:msg_count:chan-del', '0', 'EX', 2_592_000);
     expect(query).toHaveBeenCalledWith(
       'SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL',
       ['chan-del'],

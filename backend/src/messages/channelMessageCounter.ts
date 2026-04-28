@@ -24,6 +24,13 @@ const MSG_COUNT_RECONCILE_POOL_WAITING_GUARD = (() => {
   return Math.min(1000, raw);
 })();
 
+/** Redis STRING `channel:msg_count:*` must stay volatile so `maxmemory` + volatile-lru can reclaim idle channels. */
+const MSG_COUNT_REDIS_TTL_SECS = (() => {
+  const raw = parseInt(process.env.CHANNEL_MSG_COUNT_REDIS_TTL_SECS || '2592000', 10);
+  if (!Number.isFinite(raw) || raw < 3600) return 2_592_000;
+  return Math.min(86_400 * 90, raw);
+})();
+
 const MSG_COUNT_RECONCILE_LOCK_RELEASE_LUA = `
 if redis.call("get", KEYS[1]) == ARGV[1] then
   return redis.call("del", KEYS[1])
@@ -69,7 +76,7 @@ async function reconcileChannelMessageCount(channelId: string) {
     [channelId],
   );
   const count = rows[0]?.cnt ?? 0;
-  await redis.set(countKeyForChannel(channelId), String(count));
+  await redis.set(countKeyForChannel(channelId), String(count), 'EX', MSG_COUNT_REDIS_TTL_SECS);
   return true;
 }
 
@@ -101,16 +108,20 @@ async function scheduleCountReconcile(channelId: string) {
 }
 
 async function incrementChannelMessageCount(channelId: string) {
-  const count = await redis.incr(countKeyForChannel(channelId));
+  const key = countKeyForChannel(channelId);
+  const count = await redis.incr(key);
+  await redis.expire(key, MSG_COUNT_REDIS_TTL_SECS).catch(() => {});
   if (count <= 1) {
     scheduleCountReconcile(channelId).catch(() => {});
   }
 }
 
 async function decrementChannelMessageCount(channelId: string) {
-  const count = await redis.decr(countKeyForChannel(channelId));
+  const key = countKeyForChannel(channelId);
+  const count = await redis.decr(key);
+  await redis.expire(key, MSG_COUNT_REDIS_TTL_SECS).catch(() => {});
   if (count < 0) {
-    await redis.set(countKeyForChannel(channelId), '0');
+    await redis.set(key, '0', 'EX', MSG_COUNT_REDIS_TTL_SECS);
     scheduleCountReconcile(channelId).catch(() => {});
   }
 }
