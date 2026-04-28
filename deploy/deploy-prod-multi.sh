@@ -84,6 +84,19 @@ ssh_vm() {
       "${PROD_USER}@${host}" "$@"
 }
 
+scp_with_opts() {
+  # shellcheck disable=SC2086
+  scp -q ${DEPLOY_SSH_EXTRA_OPTS} "$@"
+}
+
+push_monitoring_artifact() {
+  local local_path="$1"
+  local remote_path="$2"
+  # shellcheck disable=SC2086
+  scp -q -o StrictHostKeyChecking=accept-new \
+      "${local_path}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:${remote_path}" || true
+}
+
 # Extra upstream servers to inject on every rewrite_nginx_upstream call during VM1 deploy.
 # INCREASED from 5 to 6 workers per VM2/VM3 to utilize idle CPU capacity on those VMs.
 # Validated: VM3 CPU idle ~76%, VM2 CPU idle ~48%. Adding 1 worker should use ~15% additional CPU.
@@ -225,7 +238,7 @@ if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
   echo "=== CANARY: DEPLOY_STOP_AFTER_VM3=1 — rollout paused here.        ==="
   echo "=== VM3 (${VM3}) runs the new build; VM1/VM2 unchanged.            ==="
   echo "=== Soak 10–15m; compare Prometheus vm=vm3 vs vm=~\"vm1|vm2\".      ==="
-  echo "=== Resume: unset DEPLOY_STOP_AFTER_VM3 && ./deploy/deploy-prod-multi.sh ${SHA}"
+  echo "=== Resume: unset DEPLOY_STOP_AFTER_VM3 && ./deploy/deploy-prod-multi.sh ${SHA} ==="
   echo "======================================================================"
   exit 0
 fi
@@ -368,8 +381,7 @@ python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
   --vm3-host "${VM3_INTERNAL}" \
   --vm3-workers 6
 # shellcheck disable=SC2086
-scp -q -o StrictHostKeyChecking=accept-new \
-    "${PROM_BUILD}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/prometheus-host.yml.deploy" || true
+push_monitoring_artifact "${PROM_BUILD}" "/tmp/prometheus-host.yml.deploy"
 rm -f "${PROM_BUILD}"
 # Sync all monitoring config files to the monitoring VM
 for _src in \
@@ -383,11 +395,8 @@ for _src in \
   "${SCRIPT_DIR}/../deploy/prometheus-db-file-sd.py:/tmp/prometheus-db-file-sd.py.deploy"; do
   _local="${_src%%:*}"
   _remote="${_src##*:}"
-  # shellcheck disable=SC2086
-  scp -q -o StrictHostKeyChecking=accept-new \
-      "${_local}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:${_remote}" || true
+  push_monitoring_artifact "${_local}" "${_remote}"
 done
-# shellcheck disable=SC2086
 scp -qr -o StrictHostKeyChecking=accept-new \
     "${SCRIPT_DIR}/../infrastructure/monitoring/grafana-provisioning-remote" \
     "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/grafana-provisioning-remote.deploy" || true
@@ -462,7 +471,9 @@ for vm in "$VM1" "$VM2" "$VM3"; do
     set -euo pipefail
     IFS=',' read -r -a _ports <<< \"${ports_csv}\"
     for p in \"\${_ports[@]}\"; do
-      sudo ufw allow proto tcp from ${MONITORING_VM_SCRAPE_SOURCE} to any port \"\$p\" comment 'monitoring scrape' >/dev/null || true
+      if ! sudo ufw status | grep -qE \"^[[:space:]]*[0-9]+\\\\][[:space:]]+\${p}/tcp[[:space:]]+ALLOW IN[[:space:]]+${MONITORING_VM_SCRAPE_SOURCE}\"; then
+        sudo ufw allow proto tcp from ${MONITORING_VM_SCRAPE_SOURCE} to any port \"\$p\" comment 'monitoring scrape' >/dev/null || true
+      fi
     done
   " || echo "WARN: failed to apply UFW scrape rules on ${vm}"
 done
@@ -478,7 +489,7 @@ if [ "${PROM_REDIS_HOST}" != "${VM3_INTERNAL}" ]; then
 fi
 
 echo "Starting redis_exporter via SSH ${REDIS_EXPORTER_SSH_HOST} (metrics at ${PROM_REDIS_HOST}:9121 for Prometheus)..."
-scp -q ${DEPLOY_SSH_EXTRA_OPTS} \
+scp_with_opts \
   "${SCRIPT_DIR}/redis_exporter_redis_url.py" \
   "${PROD_USER}@${REDIS_EXPORTER_SSH_HOST}:/tmp/redis_exporter_redis_url.py.deploy"
 # shellcheck disable=SC2086

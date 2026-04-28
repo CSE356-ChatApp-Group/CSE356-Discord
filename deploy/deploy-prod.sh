@@ -884,6 +884,54 @@ gate_ingress_canary() {
   echo "✓ Ingress canary gate passed"
 }
 
+restart_worker_on_release() {
+  # Shared worker restart primitive used by both rolling and companion paths.
+  # Keeps deploy behavior consistent and easier for operators/agents to edit in one place.
+  local port="$1"
+  ssh_prod "
+    set -euo pipefail
+    RELEASE_PATH=${RELEASE_DIR}/${RELEASE_SHA}
+    DROPIN_DIR=/etc/systemd/system/chatapp@${port}.service.d
+    sudo mkdir -p \"\$DROPIN_DIR\"
+    printf '[Service]\\nWorkingDirectory=%s/backend\\n' \"\$RELEASE_PATH\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl reset-failed chatapp@${port} 2>/dev/null || true
+    ok=0
+    for attempt in 1 2 3; do
+      sudo systemctl stop chatapp@${port} 2>/dev/null || true
+      released=0
+      for _ in \$(seq 1 24); do
+        if ! sudo ss -H -ltn \"sport = :${port}\" | grep -q .; then
+          released=1
+          break
+        fi
+        sleep 0.5
+      done
+      if [ \"\$released\" -ne 1 ]; then
+        for pid in \$(sudo ss -H -ltnp \"sport = :${port}\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u); do
+          sudo kill -9 \"\$pid\" 2>/dev/null || true
+        done
+        sleep 1
+      fi
+      sudo systemctl reset-failed chatapp@${port} 2>/dev/null || true
+      sudo systemctl start chatapp@${port}
+      sleep 2
+      if systemctl is-active --quiet chatapp@${port}; then
+        ok=1
+        break
+      fi
+      echo \"chatapp@${port} restart attempt \$attempt failed; retrying in 3s\"
+      sleep 3
+    done
+    if [ \"\$ok\" -ne 1 ]; then
+      echo 'ERROR: chatapp@${port} failed to become active after retries'
+      sudo journalctl -u chatapp@${port} --no-pager -n 60 || true
+      exit 1
+    fi
+    echo 'chatapp@${port} restarted on ${RELEASE_SHA}'
+  "
+}
+
 ssh_prod "sudo logger -t chatapp-deploy \"event=start sha=${RELEASE_SHA} old_port=${OLD_PORT} new_port=${NEW_PORT} instances=${CHATAPP_INSTANCES}\"" || true
 
 rollback_cutover() {
@@ -2086,32 +2134,12 @@ if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
       # before SIGTERM is sent.
       sleep 2
 
-      # 3. Stop, update systemd dropin, start on new release.
-      ssh_prod "
-        set -euo pipefail
-        RELEASE_PATH=${RELEASE_DIR}/${RELEASE_SHA}
-        DROPIN_DIR=/etc/systemd/system/chatapp@${roll_port}.service.d
-        sudo mkdir -p \"\$DROPIN_DIR\"
-        printf '[Service]\\nWorkingDirectory=%s/backend\\n' \"\$RELEASE_PATH\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
-        sudo systemctl daemon-reload
-        sudo systemctl reset-failed chatapp@${roll_port} 2>/dev/null || true
-        ok=0
-        for attempt in 1 2 3; do
-          sudo systemctl restart chatapp@${roll_port}
-          sleep 2
-          if systemctl is-active --quiet chatapp@${roll_port}; then
-            ok=1; break
-          fi
-          echo \"chatapp@${roll_port} restart attempt \$attempt failed; retrying in 3s\"
-          sleep 3
-        done
-        if [ \"\$ok\" -ne 1 ]; then
-          echo 'ERROR: chatapp@${roll_port} failed to become active after retries'
-          sudo journalctl -u chatapp@${roll_port} --no-pager -n 60 || true
-          exit 1
-        fi
-        echo 'chatapp@${roll_port} restarted on ${RELEASE_SHA}'
-      " || { echo "ERROR: roll failed on :${roll_port}"; rollback_cutover; exit 1; }
+      # 3. Restart worker on new release (shared safe restart helper).
+      if ! restart_worker_on_release "${roll_port}"; then
+        echo "ERROR: roll failed on :${roll_port}"
+        rollback_cutover
+        exit 1
+      fi
 
       # 4. Health check isolated worker (not yet in nginx upstream).
       if ! ssh_prod "/tmp/health-check.sh ${roll_port} http://127.0.0.1:${roll_port}"; then
@@ -2217,36 +2245,12 @@ PY
   fi
 
   echo "9b. Rolling companion on port ${OLD_PORT} to ${RELEASE_SHA}..."
-  ssh_prod "
-    set -euo pipefail
-    RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
-    DROPIN_DIR=/etc/systemd/system/chatapp@${OLD_PORT}.service.d
-    sudo mkdir -p \"\$DROPIN_DIR\"
-    printf '[Service]\\nWorkingDirectory=%s/backend\\n' \"\$RELEASE_PATH\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
-    sudo systemctl daemon-reload
-    sudo systemctl reset-failed chatapp@${OLD_PORT} 2>/dev/null || true
-    ok=0
-    for attempt in 1 2 3; do
-      sudo systemctl restart chatapp@${OLD_PORT}
-      sleep 2
-      if systemctl is-active --quiet chatapp@${OLD_PORT}; then
-        ok=1
-        break
-      fi
-      echo 'chatapp@${OLD_PORT} restart attempt' \"\$attempt\" 'failed; retrying in 3s'
-      sleep 3
-    done
-    if [ \"\$ok\" -ne 1 ]; then
-      echo 'ERROR: chatapp@${OLD_PORT} failed to become active after retries'
-      sudo journalctl -u chatapp@${OLD_PORT} --no-pager -n 60 || true
-      exit 1
-    fi
-    echo 'Companion chatapp@${OLD_PORT} restarted on new release'
-  " || {
+  if ! restart_worker_on_release "${OLD_PORT}"; then
     echo "ERROR: Companion roll to ${RELEASE_SHA} failed."
     rollback_cutover
     exit 1
-  }
+  fi
+  echo "Companion chatapp@${OLD_PORT} restarted on new release"
   if ! ssh_prod "/tmp/health-check.sh ${OLD_PORT} http://127.0.0.1:${OLD_PORT}"; then
     echo "ERROR: Health check failed on companion port ${OLD_PORT}."
     rollback_cutover
@@ -2271,36 +2275,11 @@ PY
     echo "  Settling ${WORKER_SETTLE_SECS}s after OLD_PORT restart before rolling additional workers..."
     sleep "${WORKER_SETTLE_SECS}"
     for extra_port in "${ADDITIONAL_PORTS[@]}"; do
-      ssh_prod "
-        set -euo pipefail
-        RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
-        PORT='${extra_port}'
-        DROPIN_DIR=/etc/systemd/system/chatapp@\${PORT}.service.d
-        sudo mkdir -p \"\$DROPIN_DIR\"
-        printf '[Service]\\nWorkingDirectory=%s/backend\\n' \"\$RELEASE_PATH\" | sudo tee \"\${DROPIN_DIR}/release.conf\" > /dev/null
-        sudo systemctl daemon-reload
-        sudo systemctl reset-failed chatapp@\${PORT} 2>/dev/null || true
-        ok=0
-        for attempt in 1 2 3; do
-          sudo systemctl restart chatapp@\${PORT}
-          sleep 2
-          if systemctl is-active --quiet chatapp@\${PORT}; then
-            ok=1
-            break
-          fi
-          echo 'chatapp@'\"\${PORT}\"' restart attempt' \"\$attempt\" 'failed; retrying in 3s'
-          sleep 3
-        done
-        if [ \"\$ok\" -ne 1 ]; then
-          echo 'ERROR: chatapp@'\"\${PORT}\"' failed to become active after retries'
-          sudo journalctl -u chatapp@\${PORT} --no-pager -n 60 || true
-          exit 1
-        fi
-      " || {
+      if ! restart_worker_on_release "${extra_port}"; then
         echo "ERROR: Rolling additional worker port ${extra_port} failed."
         rollback_cutover
         exit 1
-      }
+      fi
       hc_ok=0
       for attempt in 1 2 3 4 5; do
         if ssh_prod "/tmp/health-check.sh ${extra_port} http://127.0.0.1:${extra_port}"; then
@@ -2325,6 +2304,7 @@ PY
     rollback_cutover
     exit 1
   }
+  CHATAPP_INSTANCES_HIGH_START=$((4000 + CHATAPP_INSTANCES))
   ssh_prod "
     set -euo pipefail
     export TARGET_PORTS_CSV='${TARGET_PORTS_CSV}'
@@ -2365,7 +2345,7 @@ PY
     done
     # Belt-and-suspenders: stop/disable any higher-numbered workers (e.g. @4004 when CHATAPP_INSTANCES=4)
     # so a previous deploy or manual start cannot leave them enabled after nginx only lists TARGET_PORTS.
-    for p in \$(seq $((4000 + CHATAPP_INSTANCES)) 4007); do
+    for p in \$(seq ${CHATAPP_INSTANCES_HIGH_START} 4007); do
       sudo systemctl stop chatapp@\${p} 2>/dev/null || true
       sudo systemctl disable chatapp@\${p} 2>/dev/null || true
     done
