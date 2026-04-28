@@ -112,6 +112,16 @@ function classifyRoute(req) {
     return `/api/v1/auth/${routePath.slice(1)}`.replace(/\/+/g, '/');
   }
 
+  // Same `req.baseUrl` loss as auth: mounted routers still set `req.route.path`
+  // (`/:id/read`, `/:id/join`) so metrics would otherwise split one URL into two labels.
+  if (routePath && typeof routePath === 'string' && rawPath.startsWith('/api/v1/messages/')) {
+    if (routePath === '/:id/read') return '/api/v1/messages/:id/read';
+  }
+  if (routePath && typeof routePath === 'string' && rawPath.startsWith('/api/v1/communities/')) {
+    if (routePath === '/:id/join') return '/api/v1/communities/:id/join';
+    if (routePath === '/join') return '/api/v1/communities/join';
+  }
+
   if (routePath) {
     return `${req.baseUrl || ''}${routePath}`.replace(/\/+/g, '/');
   }
