@@ -291,6 +291,16 @@ const _communitiesVersionTtl = parseInt(process.env.COMMUNITIES_VERSION_CACHE_TT
 const COMMUNITIES_VERSION_CACHE_TTL_SECS =
   Number.isFinite(_communitiesVersionTtl) && _communitiesVersionTtl > 0 ? _communitiesVersionTtl : 2_592_000;
 
+/** Unit tests stub `redis` with partial mocks; production ioredis has `expire`. */
+async function redisExpireBestEffort(key, ttlSec) {
+  if (typeof redis.expire !== 'function') return;
+  try {
+    await redis.expire(key, ttlSec);
+  } catch {
+    /* ignore */
+  }
+}
+
 const COMMUNITY_RETURNING_FIELDS = `
   id,
   slug,
@@ -366,21 +376,21 @@ async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
     normalizedUserIds.map(async (userId) => {
       const key = communitiesUserVersionKey(userId);
       await redis.incr(key);
-      await redis.expire(key, COMMUNITIES_VERSION_CACHE_TTL_SECS);
+      await redisExpireBestEffort(key, COMMUNITIES_VERSION_CACHE_TTL_SECS);
     }),
   );
 }
 
 async function getPublicCommunitiesVersion() {
   const v = (await redis.get(PUBLIC_COMMUNITIES_VERSION_KEY).catch(() => null)) || '0';
-  redis.expire(PUBLIC_COMMUNITIES_VERSION_KEY, COMMUNITIES_VERSION_CACHE_TTL_SECS).catch(() => {});
+  void redisExpireBestEffort(PUBLIC_COMMUNITIES_VERSION_KEY, COMMUNITIES_VERSION_CACHE_TTL_SECS);
   return v;
 }
 
 async function bumpPublicCommunitiesVersion() {
   try {
     await redis.incr(PUBLIC_COMMUNITIES_VERSION_KEY);
-    await redis.expire(PUBLIC_COMMUNITIES_VERSION_KEY, COMMUNITIES_VERSION_CACHE_TTL_SECS);
+    await redisExpireBestEffort(PUBLIC_COMMUNITIES_VERSION_KEY, COMMUNITIES_VERSION_CACHE_TTL_SECS);
   } catch {
     // Best-effort only.
   }
@@ -389,7 +399,7 @@ async function bumpPublicCommunitiesVersion() {
 async function getCommunitiesUserVersion(userId) {
   const key = communitiesUserVersionKey(userId);
   const v = (await redis.get(key).catch(() => null)) || '0';
-  redis.expire(key, COMMUNITIES_VERSION_CACHE_TTL_SECS).catch(() => {});
+  void redisExpireBestEffort(key, COMMUNITIES_VERSION_CACHE_TTL_SECS);
   return v;
 }
 

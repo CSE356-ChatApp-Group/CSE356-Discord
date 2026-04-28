@@ -2408,6 +2408,10 @@ describe('MESSAGE_INSERT_LOCK_MODE=optimistic (POST /messages invariants)', () =
     process.env.MESSAGE_INSERT_LOCK_MODE = 'optimistic';
   });
 
+  afterEach(() => {
+    resetMessageChannelInsertLockPressureForTests();
+  });
+
   afterAll(() => {
     if (prevMode === undefined) delete process.env.MESSAGE_INSERT_LOCK_MODE;
     else process.env.MESSAGE_INSERT_LOCK_MODE = prevMode;
@@ -2485,10 +2489,9 @@ describe('MESSAGE_INSERT_LOCK_MODE=optimistic (POST /messages invariants)', () =
       `SELECT id FROM messages WHERE channel_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
       [channelId],
     );
-    const { rows: chRow } = await pool.query(
-      `SELECT last_message_id FROM channels WHERE id = $1`,
-      [channelId],
-    );
-    expect(chRow[0]?.last_message_id).toBe(latest[0]?.id);
+    // Default test env keeps channel PG last_message reconcile off; coalesced pointer
+    // lives in Redis until a background flush (or explicit repoint with reconcile on).
+    const redisMeta = await redis.hgetall(`ch:last_msg:${channelId}`);
+    expect(redisMeta.msg_id).toBe(latest[0]?.id);
   });
 });

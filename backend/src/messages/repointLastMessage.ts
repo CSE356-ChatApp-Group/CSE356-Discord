@@ -178,7 +178,13 @@ async function flushLastMessageToRedis(
       'author_id', pending.authorId ?? '',
       'at',        atStr,
     );
-    await redis.expire(key, LAST_MESSAGE_REDIS_TTL_SECS);
+    if (typeof redis.expire === 'function') {
+      try {
+        await redis.expire(key, LAST_MESSAGE_REDIS_TTL_SECS);
+      } catch (expireErr: any) {
+        logger.warn({ err: expireErr, id }, `${logLabel} last_message Redis expire failed`);
+      }
+    }
     await redis.sadd(dirtySet, id);
     lastMessageRedisUpdateTotal.inc({ target: logLabel, result: 'ok' });
     return true;
