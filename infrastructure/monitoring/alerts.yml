@@ -370,7 +370,8 @@ groups:
       # Validate attachments with curl on the app host or application-level checks.
 
       - alert: ChatAppHostCpuHigh
-        expr: 100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m]))) > 85
+        # Preserve `job` in labels so Alertmanager / Discord do not fall back to default "chatapp-api".
+        expr: 100 * (1 - avg by (instance, job) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m]))) > 85
         for: 15m
         labels:
           severity: warning
@@ -390,7 +391,7 @@ groups:
             CPU demand is consistently above scheduling capacity; burst latency will degrade.
 
       - alert: ChatAppHostIoWaitHigh
-        expr: 100 * avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="iowait"}[5m])) > 20
+        expr: 100 * avg by (instance, job) (rate(node_cpu_seconds_total{job="node",mode="iowait"}[5m])) > 20
         for: 10m
         labels:
           severity: warning
@@ -401,7 +402,7 @@ groups:
             which often amplifies tail latency under burst traffic.
 
       - alert: ChatAppDbHostIoWaitHigh
-        expr: 100 * avg by (instance) (rate(node_cpu_seconds_total{job="db-node",mode="iowait"}[5m])) > 12
+        expr: 100 * avg by (instance, job) (rate(node_cpu_seconds_total{job="db-node",mode="iowait"}[5m])) > 12
         for: 10m
         labels:
           severity: warning

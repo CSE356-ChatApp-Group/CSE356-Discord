@@ -125,6 +125,15 @@ def main() -> None:
                 '100 * max(redis_memory_used_bytes{job="redis"}) / clamp_min(max(redis_memory_max_bytes{job="redis"}),1)',
             )
             ev_r = prom_scalar(prom, 'sum(rate(redis_expired_keys_total{job="redis"}[2m]))')
+            evict_r = prom_scalar(prom, 'sum(rate(redis_evicted_keys_total{job="redis"}[2m]))')
+            delivery_r = prom_scalar(
+                prom,
+                'sum(rate(delivery_timeout_total{job="chatapp-api"}[2m]))',
+            )
+            reliable_r = prom_scalar(
+                prom,
+                'sum(rate(ws_reliable_delivery_total{job="chatapp-api"}[2m]))',
+            )
             z95 = prom_scalar(
                 prom,
                 'histogram_quantile(0.95, sum by (le) (rate(ws_pending_user_zset_size_bucket{job="chatapp-api"}[2m])))',
@@ -149,10 +158,15 @@ def main() -> None:
                 "ts": now,
                 "redis_mem_pct": mem_pct,
                 "redis_expired_keys_per_s": ev_r,
+                "redis_evicted_keys_per_s": evict_r,
+                "delivery_timeout_per_s": delivery_r,
+                "ws_reliable_delivery_per_s": reliable_r,
                 "ws_pending_zset_p95": z95,
                 "ws_pending_zset_p99": z99,
                 "ws_trim_delta_1m": trim_d,
                 "ws_guard_delta_1m": guard_d,
+                "ws_trim_cum": trim_c,
+                "ws_guard_cum": guard_c,
                 "fanout_done_capped_count": fd,
             }
             log.write(json.dumps(row) + "\n")
@@ -202,6 +216,12 @@ def main() -> None:
     gstr = f"{growth_per_min:.4f}" if growth_per_min is not None else "n/a"
     print(f"growth_approx_per_{interval}s_interval_pct_pts≈{gstr}", flush=True)
     print(f"mean_expired_keys_rate_per_s={decay_mean}", flush=True)
+    evs2 = [float(r["redis_evicted_keys_per_s"]) for r in lines if r.get("redis_evicted_keys_per_s") is not None]
+    if evs2:
+        print(f"max_evicted_keys_rate_per_s={max(evs2)}", flush=True)
+    fds = [r.get("fanout_done_capped_count") for r in lines if r.get("fanout_done_capped_count")]
+    if len(fds) >= 2:
+        print(f"fanout_done_first={fds[0]!r} fanout_done_last={fds[-1]!r}", flush=True)
     sp = f"{span5:.3f}" if span5 is not None else "n/a"
     print(f"plateau_last5_span<=0.5pct: {'YES' if plateau else 'NO'} (span5={sp})", flush=True)
 

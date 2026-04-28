@@ -26,6 +26,8 @@ const {
   fanoutTargetCandidatesHistogram,
   fanoutRecentConnectCacheTotal,
   fanoutRecentConnectZsetSize,
+  channelMessageFanoutRecipientTotal,
+  realtimeMissAttributionTotal,
 } = require('../utils/metrics');
 
 const rawUserFanoutTargetsCacheTtl = Number(process.env.CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS || '180');
@@ -517,6 +519,18 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
     mode === 'all' && !blocking
       ? allTargets.filter((target) => !recentTargetSet.has(target))
       : [];
+
+  if (channelMessageUserFanoutEnabled() && envelope?.event === 'message:created') {
+    channelMessageFanoutRecipientTotal.inc({ segment: 'candidate' }, candidateCount);
+    channelMessageFanoutRecipientTotal.inc({ segment: 'inline_user_topic' }, inlineTargets.length);
+    channelMessageFanoutRecipientTotal.inc({ segment: 'deferred_user_topic' }, deferredTargets.length);
+    if (mode === 'all' && !blocking && deferredTargets.length > 0) {
+      realtimeMissAttributionTotal.inc(
+        { reason: 'channel_user_topic_deferred_not_recent' },
+        deferredTargets.length,
+      );
+    }
+  }
 
   if (inlineTargets.length > 0) {
     await publishUserTopicTargets(

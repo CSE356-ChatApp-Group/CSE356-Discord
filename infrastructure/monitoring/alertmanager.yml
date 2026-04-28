@@ -28,7 +28,7 @@ receivers:
           **Environment:** {{ with .CommonLabels.environment }}{{ . }}{{ else }}unknown{{ end }}
           **Status:** {{ .Status | toUpper }}
           **Severity:** {{ with .CommonLabels.severity }}{{ . }}{{ else }}unknown{{ end }}
-          **Job:** {{ with .CommonLabels.job }}{{ . }}{{ else }}chatapp-api{{ end }}
+          **Job:** {{ with .CommonLabels.job }}{{ . }}{{ else }}(none — check alert labels){{ end }}
           {{ range .Alerts }}
           • {{ if .Annotations.description }}{{ .Annotations.description }}{{ else }}{{ .Annotations.summary }}{{ end }}
           {{ end }}
@@ -44,7 +44,7 @@ receivers:
           **Environment:** {{ with .CommonLabels.environment }}{{ . }}{{ else }}unknown{{ end }}
           **Status:** {{ .Status | toUpper }}
           **Severity:** {{ with .CommonLabels.severity }}{{ . }}{{ else }}critical{{ end }}
-          **Job:** {{ with .CommonLabels.job }}{{ . }}{{ else }}chatapp-api{{ end }}
+          **Job:** {{ with .CommonLabels.job }}{{ . }}{{ else }}(none — check alert labels){{ end }}
           {{ range .Alerts }}
           • {{ if .Annotations.description }}{{ .Annotations.description }}{{ else }}{{ .Annotations.summary }}{{ end }}
           {{ end }}

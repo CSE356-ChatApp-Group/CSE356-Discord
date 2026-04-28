@@ -125,13 +125,13 @@ def main() -> None:
         z95 = scalar(
             prom_instant(
                 prom,
-                'histogram_quantile(0.95, sum by (le) (rate(ws_pending_replay_user_zset_size_bucket{job="chatapp-api"}[2m])))',
+                'histogram_quantile(0.95, sum by (le) (rate(ws_pending_user_zset_size_bucket{job="chatapp-api"}[2m])))',
             ),
         )
         z99 = scalar(
             prom_instant(
                 prom,
-                'histogram_quantile(0.99, sum by (le) (rate(ws_pending_replay_user_zset_size_bucket{job="chatapp-api"}[2m])))',
+                'histogram_quantile(0.99, sum by (le) (rate(ws_pending_user_zset_size_bucket{job="chatapp-api"}[2m])))',
             ),
         )
         fd = fanout_done_sample(ssh_host, lua)

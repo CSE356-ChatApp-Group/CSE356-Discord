@@ -118,6 +118,7 @@ const {
   wsReplaySemaphoreCapGauge,
   wsReliableDeliveryTotal,
   wsReliableDeliveryLatencyMs,
+  realtimeMissAttributionTotal,
 } = require("../utils/metrics");
 
 const wss = new WebSocketServer({ noServer: true });
@@ -1456,6 +1457,22 @@ function deliverPubsubMessage(channel, message) {
   for (const ws of clients) {
     if (sendPayloadToSocket(ws, channel, parsed, message, { preparedPayload })) {
       deliveredCount += 1;
+    }
+  }
+
+  const parsedEvent =
+    parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as { event?: unknown }).event
+      : null;
+  const isReliableChannelMsg =
+    typeof parsedEvent === "string"
+    && parsedEvent.startsWith("message:")
+    && (channelType === "channel" || channelType === "conversation");
+  if (isReliableChannelMsg) {
+    if (deliveredCount === 0) {
+      realtimeMissAttributionTotal.inc({ reason: "topic_message_send_blocked" });
+    } else if (deliveredCount < recipientCount) {
+      realtimeMissAttributionTotal.inc({ reason: "topic_message_partial_delivery" });
     }
   }
 }

@@ -52,6 +52,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - Redis: `redis_up`, used/max memory, evictions, commands/sec (`redis_commands_processed_total` rate); SLOWLOG via `REDIS_SLOWLOG_SSH=ubuntu@<vm1> ./scripts/redis-slowlog-snapshot.sh` or embed in `PROMETHEUS_URL=... REDIS_SLOWLOG_SSH=... ./scripts/metrics-snapshot.sh`
    - websocket bootstrap wall-time, breadth, and cache-hit rate
    - websocket reliable delivery mix (`ws_reliable_delivery_total` replay %, `ws_reliable_delivery_latency_ms` p95 by path) plus reconnect rate for correlation
+   - channel message user-topic fanout split (`channel_message_fanout_recipient_total`) and miss hints (`realtime_miss_attribution_total`)
 
 2. **Grafana / Prometheus UI** — export panel data or run the same PromQL as in the snapshot script and paste results.
 
@@ -142,7 +143,7 @@ Optional fields: **`waitedMs`**, **`lockWaiters`**. Correlate with **`requestId`
 | Cache | `endpoint_list_cache_total` | Redis list cache `hit` / `miss` / `coalesced` by `endpoint`. |
 | Overload | `chatapp_overload_stage`, `http_overload_shed_total` | Stage 0–3; early 503s when shedding enabled. |
 | Abuse (auto-ban) | `abuse_auto_ban_blocks_total`, `abuse_auto_ban_issued_total` | **403** from temporary Redis IP ban (`AUTO_IP_BAN_ENABLED`); bans issued after sustained rate-limit **429** strikes (external IPs only). |
-| Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_candidates`, `fanout_target_cache_total`, `conversation_fanout_targets_cache_version_retry_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total`, `ws_reliable_delivery_total`, `ws_reliable_delivery_latency_ms` | Fanout health, Redis publish multiplier, candidate audience size before recent-connect filtering, target-cache effectiveness, conversation fanout cache invalidation races, WS bootstrap breadth, and slow clients. **`ws_reliable_delivery_total{path,source}`** counts each reliable event actually **`ws.send`** after dedupe: **`path=realtime`** (`source=live_pubsub`) vs **`path=replay`** (`source=missed_db` reconnect SQL backfill vs `pending_queue` Redis pending drain). **`ws_reliable_delivery_latency_ms`** is ms from **`created_at` / `publishedAt`** to send (same path label). |
+| Realtime | `redis_fanout_publish_failures_total`, `fanout_publish_duration_ms`, `fanout_publish_targets`, `fanout_target_candidates`, `fanout_target_cache_total`, `conversation_fanout_targets_cache_version_retry_total`, `ws_bootstrap_wall_duration_ms`, `ws_bootstrap_channels`, `ws_bootstrap_list_cache_total`, `ws_backpressure_events_total`, `ws_reliable_delivery_total`, `ws_reliable_delivery_latency_ms`, `channel_message_fanout_recipient_total`, `realtime_miss_attribution_total`, `pending_replay_recipient_total`, `pending_replay_entries_per_message`, `offline_pending_skipped_total`, `ws_pending_user_zset_size` | Fanout health, Redis publish multiplier, candidate audience size before recent-connect filtering, target-cache effectiveness, conversation fanout cache invalidation races, WS bootstrap breadth, and slow clients. **`ws_reliable_delivery_total{path,source}`** counts each reliable event actually **`ws.send`** after dedupe: **`path=realtime`** (`source=live_pubsub`) vs **`path=replay`** (`source=missed_db` reconnect SQL backfill vs `pending_queue` Redis pending drain). **`ws_reliable_delivery_latency_ms`** is ms from **`created_at` / `publishedAt`** to send (same path label). **`channel_message_fanout_recipient_total{segment}`** splits channel **`message:created`** user-topic work: **`candidate`**, **`inline_user_topic`**, **`deferred_user_topic`** (deferred = not in recent-connect inline set when HTTP blocking is off). **`realtime_miss_attribution_total{reason}`** flags correlated gaps — see [Realtime delivery miss triage](#realtime-delivery-miss-triage-grader-mean-vs-p95). |
 | Messages | `message_post_response_total`, `message_post_idempotency_poll_total`, `message_post_idempotency_poll_wait_ms`, `message_cache_bust_failures_total`, `message_channel_insert_path_total`, `message_channel_insert_path_precall_ms` | POST outcomes; idempotency duplicate-lease polls (`outcome=replay_201|exhausted_409`) and wait histogram; cache bust issues; per-request channel insert path vs precall time. |
 | Read receipts (insert lock) | `read_receipt_shed_total{reason="message_channel_insert_lock_pressure"}`, `read_receipt_requests_total{result="deferred_message_channel_insert_lock_pressure"}`, `message_channel_insert_lock_total`, `message_channel_insert_lock_wait_ms`, `message_channel_insert_lock_pressure_wait_p95_ms`, `message_channel_insert_lock_pressure_recent_timeout_count` | Soft-defer `PUT /messages/:id/read` under per-process lock pressure; see [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md). |
 | Optional RUM | `client_web_vital_*`, `client_rum_batches_total` | Browser-side; requires `ENABLE_CLIENT_RUM` + built frontend flags. |
@@ -185,7 +186,9 @@ sum by (path) (rate(message_channel_insert_path_total{job="chatapp-api"}[5m]))
 # p99 precall (queue + Redis spin) by insert path
 histogram_quantile(0.99, sum by (le, path) (rate(message_channel_insert_path_precall_ms_bucket{job="chatapp-api"}[5m])))
 
-# WS: % of reliable deliveries that were replay (reconnect / pending), not live pub/sub
+# WS: realtime_success_rate and replay_fallback_rate (reliable deliveries post-dedupe)
+100 * sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="realtime"}[5m]))
+  / clamp_min(sum(rate(ws_reliable_delivery_total{job="chatapp-api"}[5m])), 1e-9)
 100 * sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="replay"}[5m]))
   / clamp_min(sum(rate(ws_reliable_delivery_total{job="chatapp-api"}[5m])), 1e-9)
 
@@ -200,6 +203,84 @@ max(redis_memory_used_bytes{job="redis"}) / max(redis_memory_max_bytes{job="redi
 sum(rate(ws_reconnects_total{job="chatapp-api"}[5m]))
 histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job="chatapp-api"}[5m])))
 ```
+
+## Realtime delivery miss triage (grader: mean vs p95) {#realtime-delivery-miss-triage-grader-mean-vs-p95}
+
+When **average** end-to-end delivery (or grader-reported delivery) **spikes** while **p95** HTTP or fanout stays **flat**, the usual story is: **most** messages are fast on the live path, but a **fraction** arrive only after **deferred user-topic publish**, **async fanout job** delay, **reconnect replay**, or **pending-queue drain**. Use the metrics below over the **same** time range.
+
+### 1) Path split and replay fallback
+
+| Quantity | PromQL / series |
+|----------|-----------------|
+| Realtime delivered (count / s) | `sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="realtime"}[5m]))` |
+| Replay delivered (count / s) | `sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="replay"}[5m]))` |
+| **Replay fallback rate** | `100 * sum(rate(ws_reliable_delivery_total{path="replay"}[5m])) / clamp_min(sum(rate(ws_reliable_delivery_total[5m])), 1e-9)` |
+| **Realtime success rate** | `100 * sum(rate(ws_reliable_delivery_total{path="realtime"}[5m])) / clamp_min(sum(rate(ws_reliable_delivery_total[5m])), 1e-9)` |
+| Delivery timeout (post-insert) | `sum by (phase) (rate(delivery_timeout_total{job="chatapp-api"}[5m]))` — today mainly **`phase=cache_bust`** (bounded wait after commit; see POST /messages path) |
+| Miss / stress signals | `sum by (reason) (rate(realtime_miss_attribution_total{job="chatapp-api"}[5m]))` |
+| Channel user-topic **deferred** volume | `sum(rate(channel_message_fanout_recipient_total{segment="deferred_user_topic"}[5m]))` vs **`inline_user_topic`** |
+
+### 2) Classifying “misses” (instrumented vs inferred)
+
+Exact per-recipient “why” is not always observable on one worker (userfeed shards, multi-`chatapp@`). Use this mapping:
+
+| Cause | How you see it |
+|-------|----------------|
+| **Recipient disconnected** | Loki: `ws.disconnect` / close codes; **`ws_disconnects_total`**; **`ws_reconnect_gap_ms`**; replay **`source=missed_db`** rising after disconnect logs |
+| **Recipient reconnecting** | **`ws_reconnects_total`** with replay **`path=replay`**; **`ws_bootstrap_wall_duration_ms`** high in same window |
+| **Recipient subscribed late / not recent-connect inline** | **`realtime_miss_attribution_total{reason="channel_user_topic_deferred_not_recent"}`** (recipient count not published inline to `user:<id>`; deferred to **`fanout.channel_message.user_topics`**). Requires **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`**, **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=false`** |
+| **Fanout target missing / stale audience** | **`fanout_target_cache_total{path="channel_message_user_topics",result="miss"}`** spikes; **`conversation_fanout_targets_cache_version_retry_total`**; DM target lookup **`fanout_publish_duration_ms`** `conversation_event` / `conversation_dm` **`target_lookup`** |
+| **Redis pub/sub delay** | **`fanout_publish_duration_ms`** by **`path`** and **`stage`**; **`redis_fanout_publish_failures_total`**; Redis **SLOWLOG** / **`redis_commands_processed_total`** / memory (see snapshot script) |
+| **Worker: local socket not found** | Not a single counter (normal cross-worker). Infer from **replay** + **deferred** + **zero local subscribers** on the **channel** topic only in **single-worker** or canary setups |
+| **Backpressure / drop** | **`ws_backpressure_events_total`**, **`topic_message_send_blocked`** / **`topic_message_partial_delivery`** on **`realtime_miss_attribution_total`** (local **`channel:`** / **`conversation:`** path: had subscribers but **all** or **some** `sendPayloadToSocket` enqueue failed) |
+| **Replay recovered** | **`ws_reliable_delivery_total{path="replay"}`** by **`source`** (`missed_db` vs `pending_queue`) |
+
+### 3) Correlations (same instant or Grafana row)
+
+- **Disconnect / reconnect:** `rate(ws_reconnects_total[5m])`, **`ws_replay_query_duration_ms`**, **`ws_reliable_delivery_total{path="replay"}`**
+- **Bootstrap:** **`histogram_quantile(0.95, rate(ws_bootstrap_wall_duration_ms_bucket[5m]))`**, **`ws_bootstrap_list_cache_total`**
+- **Deferred POST fanout:** **`fanout_job_latency_ms`**, **`message_post_fanout_job_total`**, **`fanout_queue_depth`**, **`fanout_retry_total`**
+- **Redis:** memory ratio, evictions, SLOWLOG (see top of this doc)
+- **List cache:** **`sum by (endpoint,result) (rate(endpoint_list_cache_total[5m]))`** — correlate with **`delivery_timeout_total`** / slow GETs after writes
+
+### 4) Top miss cause (operator recipe)
+
+1. If **`channel_user_topic_deferred_not_recent`** dominates → **recent-connect / subscribe ordering** vs **deferred user-topic** path (see fixes below).
+2. If **`topic_message_send_blocked`** or **`ws_backpressure_events_total`** rises → **slow consumers** or outbound queue caps.
+3. If **`fanout_target_cache_total` miss** + retries → **stale or incomplete fanout audience** until cache/coalesce settles.
+4. If **`message_post_fanout_job_total{result="dead_letter"}`** or **`redis_fanout_publish_failures_total`** → **async fanout / Redis**; replay and pending queue absorb gaps.
+5. If **`ws_reliable_delivery_total{path="replay",source="pending_queue"}`** with **`ws_pending_replay_guard_total`** → **Redis memory guard** skipping pending enqueue.
+
+### 5) Lowest-risk fixes (ordered)
+
+| Fix | Risk | When it helps | Expected impact on grader spikes |
+|-----|------|----------------|----------------------------------|
+| **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`** (or keep default blocking in prod) so **all** user-topic publishes run **before** HTTP 201 returns | Low–medium (more POST tail latency) | **`channel_user_topic_deferred_not_recent`** and deferred **`fanout_recipient`** ratio high | **High** on mean delivery: removes deferred-queue tail for channel members |
+| Keep **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`** (default) for grading; avoid **`recent_connect`** unless infra proves safe | Low | Deferred / missed user-topic under connect bursts | **High** vs experimental mode |
+| **Tighter bootstrap** (already marks **`markChannelRecentConnect`** before batched **`subscribeClient`**) — only change if logs show gap; optional **`WS_BOOTSTRAP_*`**, **`RECENT_CONNECT_TARGET_CACHE_MS`** tuning | Low | Rare race before ZSET populated | **Small** |
+| Shorter **`CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS`** or rely on existing membership invalidation | Low | **`fanout_target_cache` miss** spikes with wrong audience | **Medium** when cache staleness is proven |
+| **Do not** add blind “retry publish for online recipients not found locally” without cross-worker idempotency — **high** duplicate risk | High | — | — |
+| **Immediate replay after reconnect** — already **`replayPendingMessagesToSocket`** + **`replayMissedMessagesToSocket`**; tune **`WS_MESSAGE_REPLAY_*`** only with load testing | Medium | Replay latency tail, not mean | **Medium** on tail only |
+
+**Expected reduction:** If spikes are driven by **deferred user-topic** (common when **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=false`** with **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`**), setting blocking **on** (staging/prod required env already does) usually **collapses the slow tail**. If blocking is already **on**, check **`MESSAGE_POST_SYNC_FANOUT`** / **`fanout_job_latency_ms`** p99 and **`message_post_fanout_job_total{result="dead_letter"}`**. If spikes are **replay**, fix **disconnect/bootstrap** or **Redis/fanout** first.
+
+### Pending replay Redis footprint (`ws:pending:user:*`)
+
+**Channel `message:created`:** after **`channel:<id>`** publish, **`enqueuePendingMessageForUsers(allTargets, …)`** receives every visible member’s **`user:<uuid>`** from **`publishChannelMessageEvent`** (same list as logical user-feed duplicates when fanout is on). **DM `message:created`:** **`enqueuePendingMessageForUsers(userIds, …)`** receives conversation participant user ids from **`publishConversationEventNow`**.
+
+**Recipient classes (filtering mode, default on):**
+
+| Class | Redis / meaning | Gets `ws:pending:user:*` ZADD? |
+|-------|-------------------|--------------------------------|
+| **connected** | `SCARD user:<id>:connections > 0` (WS on any worker) | Yes |
+| **recent** | No active socket, but `EXISTS ws:recent_connect:<id>` or `ws:replay_pending_eligible:<id>` (set on connect; TTL = **`WS_RECENT_CONNECT_TTL_SECONDS`** / **`WS_REPLAY_RECENT_USER_WINDOW_SECONDS`**) — *recently disconnected / reconnect bridge* | Yes |
+| **offline** | Neither marker nor connections | **No** (skipped) |
+
+**Metrics:** **`pending_replay_recipient_total{class}`** (`connected`, `recent`, `offline_skipped`, `legacy_enqueue`), **`pending_replay_entries_per_message`**, **`offline_pending_skipped_total`**, **`ws_pending_user_zset_size`** (ZSET cardinality after enqueue). **Rates:** **`realtime_success_rate`** and **`replay_fallback_rate`** from **`ws_reliable_delivery_total`** (see snapshot script / Example PromQL).
+
+**Spec:** Pending replay is **not** the source of durable history or unread counts — Postgres and normal app paths are. Skipping pending for offline users does **not** change read receipts, unread aggregates, or REST history.
+
+**Rollback:** **`WS_REPLAY_PENDING_LEGACY_ALL=true`** restores enqueue-for-all fanout targets (old Redis mailbox behavior).
 
 ## Auth login/register stampede
 

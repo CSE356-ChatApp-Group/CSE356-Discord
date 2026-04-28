@@ -9,6 +9,8 @@ const redisMock = {
   status: "ready",
   info: jest.fn(),
   pipeline: jest.fn(() => ({
+    exists: jest.fn().mockReturnThis(),
+    scard: jest.fn().mockReturnThis(),
     set: pipelineSet.mockReturnThis(),
     zadd: pipelineZadd.mockReturnThis(),
     expire: pipelineExpire.mockReturnThis(),
@@ -19,6 +21,11 @@ const redisMock = {
 };
 
 jest.mock("../src/db/redis", () => redisMock);
+jest.mock("../src/websocket/recentConnect", () => ({
+  wsRecentConnectKey: (id: string) => `ws:recent_connect:${id}`,
+  wsReplayPendingEligibilityKey: (id: string) => `ws:replay_pending_eligible:${id}`,
+  WS_REPLAY_RECENT_USER_WINDOW_SECONDS: 30,
+}));
 jest.mock("../src/messages/messageHydrate", () => ({
   loadHydratedMessageById: jest.fn(async () => null),
 }));
@@ -28,10 +35,16 @@ jest.mock("../src/messages/realtimePayload", () => ({
 const trimMetric = { inc: jest.fn() };
 const zsetSizeMetric = { observe: jest.fn() };
 const guardMetric = { inc: jest.fn() };
+const pendingClassMetric = { inc: jest.fn() };
+const pendingEntriesHist = { observe: jest.fn() };
+const offlineSkipMetric = { inc: jest.fn() };
 jest.mock("../src/utils/metrics", () => ({
   wsPendingReplayUserTrimmedTotal: trimMetric,
-  wsPendingReplayUserZsetSize: zsetSizeMetric,
+  wsPendingUserZsetSize: zsetSizeMetric,
   wsPendingReplayGuardTotal: guardMetric,
+  pendingReplayRecipientTotal: pendingClassMetric,
+  pendingReplayEntriesPerMessage: pendingEntriesHist,
+  offlinePendingSkippedTotal: offlineSkipMetric,
 }));
 const loggerWarn = jest.fn();
 jest.mock("../src/utils/logger", () => ({
@@ -58,6 +71,8 @@ describe("realtimePending enqueue safeguards", () => {
     process.env.WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED = "true";
     process.env.WS_REPLAY_PENDING_MEMORY_GUARD_PCT = "85";
     process.env.WS_REPLAY_PENDING_USER_MAX_ZSET = "100";
+    process.env.WS_REPLAY_PENDING_ONLY_ACTIVE = "false";
+    process.env.WS_REPLAY_PENDING_LEGACY_ALL = "false";
   });
 
   it("trims per-user pending zset and records metrics", async () => {

@@ -536,8 +536,8 @@ const wsPendingReplayUserTrimmedTotal = new client.Counter({
 });
 
 /** Distribution of ws:pending:user:* zset cardinality after enqueue+trim. */
-const wsPendingReplayUserZsetSize = new client.Histogram({
-  name: 'ws_pending_replay_user_zset_size',
+const wsPendingUserZsetSize = new client.Histogram({
+  name: 'ws_pending_user_zset_size',
   help: 'Cardinality of ws:pending:user:* after enqueue path processing',
   buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 });
@@ -566,6 +566,47 @@ const wsReliableDeliveryLatencyMs = new client.Histogram({
   help: 'Milliseconds from message/event reference time to ws.send for reliable deliveries',
   labelNames: ['path'],
   buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000, 3600000],
+});
+
+/**
+ * Channel message:created user-topic fanout volume by segment (candidate list vs inline Redis
+ * publish vs deferred side-effect queue). Use deferred / candidate ratio with replay rate.
+ */
+const channelMessageFanoutRecipientTotal = new client.Counter({
+  name: 'channel_message_fanout_recipient_total',
+  help: 'Recipient slots for channel message user-topic fanout by segment',
+  labelNames: ['segment'],
+});
+
+/**
+ * Actionable signals for realtime gaps (grader: mean delivery up, p95 flat). Not exhaustive
+ * classification — combine with ws_reliable_delivery_total, ws_reconnects_total, fanout_job_*, logs.
+ */
+const realtimeMissAttributionTotal = new client.Counter({
+  name: 'realtime_miss_attribution_total',
+  help: 'Correlates with delayed or non-immediate realtime delivery before replay recovery',
+  labelNames: ['reason'],
+});
+
+/** Per-user classification when enqueueing ws:pending:user:* pointers (filtering mode). */
+const pendingReplayRecipientTotal = new client.Counter({
+  name: 'pending_replay_recipient_total',
+  help:
+    'Users per message:connected=active WS (user:<id>:connections); recent=no socket but ws:recent_connect or ws:replay_pending_eligible; offline_skipped=fully offline; legacy_enqueue=all targets',
+  labelNames: ['class'],
+});
+
+/** Count of eligible users written to ws:pending:user:* per message:created pending enqueue. */
+const pendingReplayEntriesPerMessage = new client.Histogram({
+  name: 'pending_replay_entries_per_message',
+  help: 'Number of ws:pending:user zset entries added for one pending-replay enqueue',
+  buckets: [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233],
+});
+
+/** Users skipped for pending replay (fully offline / no recent session marker). */
+const offlinePendingSkippedTotal = new client.Counter({
+  name: 'offline_pending_skipped_total',
+  help: 'Fanout targets skipped for ws:pending:user enqueue because not connected or recently connected',
 });
 
 /**
@@ -1004,7 +1045,7 @@ function startPgPoolMetrics(pool) {
     wsReplayQueryDurationMs.observe({ result: 'timeout' }, 0);
     wsReplayQueryDurationMs.observe({ result: 'pool_busy' }, 0);
     wsPendingReplayUserTrimmedTotal.inc(0);
-    wsPendingReplayUserZsetSize.observe(0);
+    wsPendingUserZsetSize.observe(0);
     wsPendingReplayGuardTotal.inc({ reason: 'redis_memory_high' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'channel' }, 0);
     redisFanoutPublishFailuresTotal.inc({ channel_prefix: 'conversation' }, 0);
@@ -1220,6 +1261,18 @@ function startPgPoolMetrics(pool) {
     wsReliableDeliveryTotal.inc({ path: 'replay', source: 'pending_queue' }, 0);
     wsReliableDeliveryLatencyMs.observe({ path: 'realtime' }, 0);
     wsReliableDeliveryLatencyMs.observe({ path: 'replay' }, 0);
+    channelMessageFanoutRecipientTotal.inc({ segment: 'candidate' }, 0);
+    channelMessageFanoutRecipientTotal.inc({ segment: 'inline_user_topic' }, 0);
+    channelMessageFanoutRecipientTotal.inc({ segment: 'deferred_user_topic' }, 0);
+    realtimeMissAttributionTotal.inc({ reason: 'channel_user_topic_deferred_not_recent' }, 0);
+    realtimeMissAttributionTotal.inc({ reason: 'topic_message_send_blocked' }, 0);
+    realtimeMissAttributionTotal.inc({ reason: 'topic_message_partial_delivery' }, 0);
+    pendingReplayRecipientTotal.inc({ class: 'connected' }, 0);
+    pendingReplayRecipientTotal.inc({ class: 'recent' }, 0);
+    pendingReplayRecipientTotal.inc({ class: 'offline_skipped' }, 0);
+    pendingReplayRecipientTotal.inc({ class: 'legacy_enqueue' }, 0);
+    pendingReplayEntriesPerMessage.observe(0);
+    offlinePendingSkippedTotal.inc(0);
     // Do not zero chatapp_ws_replay_* gauges here: server.ts sets semaphore cap/inflight
     // on load; forcing cap=0 made alerts using clamp_min(cap,1) false-positive (inflight>1).
     abuseBlockedSubnetTotal.inc(0);
@@ -1315,10 +1368,15 @@ module.exports = {
   wsReplayErrorClassTotal,
   wsReplayQueryDurationMs,
   wsPendingReplayUserTrimmedTotal,
-  wsPendingReplayUserZsetSize,
+  wsPendingUserZsetSize,
   wsPendingReplayGuardTotal,
   wsReliableDeliveryTotal,
   wsReliableDeliveryLatencyMs,
+  channelMessageFanoutRecipientTotal,
+  realtimeMissAttributionTotal,
+  pendingReplayRecipientTotal,
+  pendingReplayEntriesPerMessage,
+  offlinePendingSkippedTotal,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,
   channelLastMessageUpdateDeferredTotal,
