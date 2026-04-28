@@ -9,6 +9,17 @@
 const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const { redisFanoutPublishFailuresTotal } = require('../utils/metrics');
+const _fanoutRetryInfoSampleRate = Number(process.env.REDIS_FANOUT_RETRY_INFO_SAMPLE_RATE ?? '0');
+const REDIS_FANOUT_RETRY_INFO_SAMPLE_RATE =
+  Number.isFinite(_fanoutRetryInfoSampleRate) && _fanoutRetryInfoSampleRate >= 0
+    ? Math.min(1, Math.max(0, _fanoutRetryInfoSampleRate))
+    : 0;
+
+function shouldSample(rate = REDIS_FANOUT_RETRY_INFO_SAMPLE_RATE) {
+  if (rate >= 1) return true;
+  if (rate <= 0) return false;
+  return Math.random() < rate;
+}
 
 function channelPrefix(channel) {
   if (typeof channel !== 'string') return 'unknown';
@@ -38,7 +49,7 @@ async function publish(channel, payload) {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       await redis.publish(channel, serializedPayload);
-      if (attempt > 1) {
+      if (attempt > 1 && shouldSample()) {
         logger.info(
           { channel, event: eventName, attempt, maxAttempts },
           'Redis fanout publish succeeded after retry',

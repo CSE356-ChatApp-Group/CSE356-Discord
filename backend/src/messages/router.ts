@@ -703,6 +703,12 @@ const READ_RECEIPT_CAS1_DEBOUNCE_MS = Math.min(
 );
 const readReceiptCas1DebounceByTarget = new Map();
 const READ_RECEIPT_CAS1_DEBOUNCE_MAX_KEYS = 20000;
+const READ_RECEIPT_SAME_MESSAGE_COALESCE_MS = Math.min(
+  2000,
+  Math.max(100, parseInt(process.env.READ_RECEIPT_SAME_MESSAGE_COALESCE_MS || "400", 10) || 400),
+);
+const readReceiptRecentByMessage = new Map();
+const READ_RECEIPT_RECENT_MAX_KEYS = 50000;
 // Four-key Lua script:
 //   KEYS[1] = cursor key (read_cursor_ts:...)
 //   KEYS[2] = db_lock key (read_db_lock:...)
@@ -791,6 +797,27 @@ function shouldRunCas1SideEffects(userId, channelId, conversationId) {
     }
   }
   return true;
+}
+
+function shouldCoalesceSameMessageRead(userId, messageId) {
+  const now = Date.now();
+  const key = `${userId}:${messageId}`;
+  const prev = Number(readReceiptRecentByMessage.get(key) || 0);
+  if (prev > 0 && now - prev < READ_RECEIPT_SAME_MESSAGE_COALESCE_MS) {
+    return true;
+  }
+  readReceiptRecentByMessage.set(key, now);
+  if (readReceiptRecentByMessage.size > READ_RECEIPT_RECENT_MAX_KEYS) {
+    let pruned = 0;
+    for (const [k, ts] of readReceiptRecentByMessage) {
+      if (now - Number(ts || 0) > READ_RECEIPT_SAME_MESSAGE_COALESCE_MS * 10) {
+        readReceiptRecentByMessage.delete(k);
+        pruned += 1;
+      }
+      if (pruned >= 1000) break;
+    }
+  }
+  return false;
 }
 
 async function loadActiveConversationParticipantUserIds(conversationId) {
@@ -3044,6 +3071,10 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     const { channel_id, conversation_id } = target;
     const uid = req.user.id;
     const messageId = req.params.id;
+    if (shouldCoalesceSameMessageRead(uid, messageId)) {
+      readReceiptOptimizationTotal.inc({ reason: "same_message_coalesced" });
+      return res.json({ success: true });
+    }
     const messageCreatedAt = target.created_at;
 
     const { applied, didAdvanceCursor, casResult } = await advanceReadStateCursor({
@@ -3072,28 +3103,32 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     }
 
     const communityIdForCache = target.community_id;
-    if (!dropReadReceiptFanout && channel_id && communityIdForCache) {
-      redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
-    }
-
-    // Reset the user's unread watermark in Redis to the current channel message count.
+    // Batch non-critical Redis updates into one pipeline to cut round trips
+    // for the hottest route.
     if (channel_id) {
       try {
         const countKey = `channel:msg_count:${channel_id}`;
         const readKey = `user:last_read_count:${channel_id}:${uid}`;
-        await redis.eval(
+        const pipeline = redis.pipeline();
+        if (!dropReadReceiptFanout && communityIdForCache) {
+          pipeline.del(`channels:list:${communityIdForCache}:${uid}`);
+        }
+        pipeline.eval(
           RESET_UNREAD_WATERMARK_LUA,
           2,
           countKey,
           readKey,
           String(USER_LAST_READ_COUNT_REDIS_TTL_SEC),
         );
+        await pipeline.exec();
       } catch (err) {
         logger.warn(
           { err, channel_id },
-          "Failed to reset user:last_read_count in Redis",
+          "Failed to update read watermark/cache in Redis",
         );
       }
+    } else if (!dropReadReceiptFanout && communityIdForCache) {
+      redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
     }
 
     if (dropReadReceiptFanout) {

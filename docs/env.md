@@ -147,7 +147,9 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `MESSAGE_FANOUT_JOB_DONE_TTL_SEC` | Redis “fanout completed” marker TTL (default **7200** s, clamped **3600–604800**) so duplicate jobs skip **`PUBLISH`** while limiting marker growth under sustained traffic. |
 | `MESSAGE_FANOUT_JOB_MAX_ATTEMPTS` | Publish attempts per job before dead-letter (default **5**, clamped **1–10**). |
 | `MESSAGE_FANOUT_JOB_BACKOFF_MS_BASE` | Exponential backoff base (ms) between attempts (default **100**, clamped **25–2000**). |
+| `REDIS_FANOUT_RETRY_INFO_SAMPLE_RATE` | Samples "fanout publish succeeded after retry" info logs in `websocket/fanout` (`0..1`, default `0`). Retry/failure warnings remain unsampled. |
 | `MESSAGE_INGEST_STREAM_ENABLED`, `MESSAGE_INGEST_STREAM_CONSUMER` | `1`/`true` to append channel message metadata to Redis Stream `MESSAGE_INGEST_STREAM_KEY` and run an ACK consumer (pipeline hook before Kafka/NATS) |
+| `READ_RECEIPT_SAME_MESSAGE_COALESCE_MS` | In-memory coalescing window for repeated `PUT /messages/:id/read` calls for the same `(user,message)` (default **400ms**, clamp **100–2000**). Skips duplicate hot-path work when clients spam identical reads. |
 | `MESSAGE_INGEST_STREAM_KEY`, `MESSAGE_INGEST_STREAM_GROUP`, `MESSAGE_INGEST_STREAM_MAXLEN` | Stream name, consumer group, approximate max stream length |
 | `LAST_MESSAGE_PG_RECONCILE_ENABLED` | `true` to enable background DB reconcile of `channels.last_message_*` from Redis metadata **and** delete-time `repointChannelLastMessage` DB updates; default `false` keeps channel latest-message metadata Redis-first with DB as stale fallback |
 | `CHANNEL_LAST_MESSAGE_PG_RECONCILE_ENABLED` | Legacy alias for `LAST_MESSAGE_PG_RECONCILE_ENABLED` (either may be set; **`LAST_MESSAGE_*` wins** when both are present) |
@@ -159,6 +161,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
 | `WS_OUTBOUND_QUEUE_MAX_MESSAGE`, `WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT`, `WS_OUTBOUND_DRAIN_BATCH` | Per-socket outbound queue caps and max `ws.send` calls per `setImmediate` drain tick |
 | `WS_OUTBOUND_MESSAGE_WAITERS_MAX` | When the primary queue is full, `message:*` frames wait in a FIFO (default **4096**); exceeding this closes the socket (`outbound_waiters_overflow`) |
+| `WS_HOT_LOG_SAMPLE_RATE` | Samples high-frequency websocket info logs (`connected`, `disconnected`, replay progress). `0` disables these info logs, `1` logs all (default `0`). Warnings/errors are unaffected. |
 | `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning (code default recent-connect bridge window `20`; staging/prod deploy profiles pin bootstrap TTL `180`, batch size `64`, and recent-connect bridge window `300`) |
 | `WS_AUTO_SUBSCRIBE_MODE` | `messages` (default) subscribes **`channel:`** + **`conversation:`** + **`user:<self>`** during connect; `user_only` keeps just **`user:<self>`**; `full` also eager-subscribes accessible **`community:`** topics. |
 | `WS_APP_KEEPALIVE_INTERVAL_MS` | When `>=5000`, sends a tiny `{"event":"keepalive"}` data frame to otherwise-idle sockets on that cadence. Leave `0` to disable. Useful when intermediaries churn idle WebSocket upgrades despite normal control ping/pong. |

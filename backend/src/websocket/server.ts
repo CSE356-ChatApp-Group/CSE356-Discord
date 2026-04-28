@@ -234,6 +234,22 @@ const WS_REPLAY_USER_COOLDOWN_MS =
     : 3000;
 const replayAdmissionConfig = parseReplayAdmissionConfig(process.env);
 wsReplaySemaphoreCapGauge.set(replayAdmissionConfig.replaySemaphoreMax);
+const _wsHotLogSampleRate = Number(process.env.WS_HOT_LOG_SAMPLE_RATE ?? "0");
+const WS_HOT_LOG_SAMPLE_RATE =
+  Number.isFinite(_wsHotLogSampleRate) && _wsHotLogSampleRate >= 0
+    ? Math.min(1, Math.max(0, _wsHotLogSampleRate))
+    : 0;
+
+function shouldSampleWsHotLog(rate = WS_HOT_LOG_SAMPLE_RATE) {
+  if (rate >= 1) return true;
+  if (rate <= 0) return false;
+  return Math.random() < rate;
+}
+
+function logWsHotInfo(payload, message, rate = WS_HOT_LOG_SAMPLE_RATE) {
+  if (!shouldSampleWsHotLog(rate)) return;
+  logger.info(payload, message);
+}
 let wsReplayInFlightCount = 0;
 wsReplayConcurrentGauge.set(0);
 const recentReplayByUser = new Map();
@@ -317,7 +333,7 @@ async function waitForReplayGateOpen(ws, userId) {
     lastGate = replayGateSnapshot();
   }
   if (attempts > 0 && lastGate.ok) {
-    logger.info(
+    logWsHotInfo(
       {
         userId,
         attempts,
@@ -533,7 +549,7 @@ function observeRecentReconnect(userId, connectionId, previous) {
 
   wsReconnectsTotal.inc({ window: reconnectWindowLabel(gapMs) });
   wsReconnectGapMs.observe(gapMs);
-  logger.info(
+  logWsHotInfo(
     {
       event: "ws.reconnected_after_gap",
       userId,
@@ -565,8 +581,10 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
     closeCode,
   );
   if (!messages.length) return;
+  const userChannel = `user:${userId}`;
+  const publishedAt = new Date().toISOString();
 
-  logger.info(
+  logWsHotInfo(
     {
       event: "ws.replay.missed_messages",
       userId,
@@ -588,11 +606,11 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
     const payload = {
       event: "message:created",
       data: message,
-      publishedAt: new Date().toISOString(),
+      publishedAt,
     };
     sendPayloadToSocket(
       ws,
-      `user:${userId}`,
+      userChannel,
       payload,
       null,
       {
@@ -1816,7 +1834,7 @@ function ready() {
   if (!wsStartupPromise) {
     wsStartupPromise = ensureUserFeedShardSubscriptions()
       .then(() => {
-        logger.info(
+        logWsHotInfo(
           { shardCount: USER_FEED_SHARD_CHANNELS.length },
           'WS userfeed shard subscriptions ready',
         );
@@ -1849,7 +1867,7 @@ wss.on("connection", async (ws, req) => {
   }
 
   wsConnectionResultTotal.inc({ result: "accepted" });
-  logger.info({ userId: user.id }, "WS connected");
+  logWsHotInfo({ userId: user.id }, "WS connected");
   ws._clientIp = clientIpFromReq(req);
   ws._replayConsumed = false;
   ws._subscriptions = new Set();
@@ -1901,7 +1919,7 @@ wss.on("connection", async (ws, req) => {
       if (recentDisconnect) {
         if (isWsReplayDisabled()) {
           wsReplayFailOpenTotal.inc({ reason: "disabled" });
-          logger.info({ userId: user.id }, "WS reconnect replay skipped: DISABLE_WS_REPLAY");
+          logWsHotInfo({ userId: user.id }, "WS reconnect replay skipped: DISABLE_WS_REPLAY");
         } else if (ws._replayConsumed === true) {
           wsReplayFailOpenTotal.inc({ reason: "per_socket" });
         } else if (!tryBeginReplayForIp(ws._clientIp)) {
@@ -1959,7 +1977,7 @@ wss.on("connection", async (ws, req) => {
                       replayUpperBoundMs,
                     );
                   } else {
-                    logger.info(
+                    logWsHotInfo(
                       {
                         userId: user.id,
                         connectionId: ws._connectionId,
@@ -1969,7 +1987,7 @@ wss.on("connection", async (ws, req) => {
                     );
                   }
                   const pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
-                  logger.info(
+                  logWsHotInfo(
                     {
                       event: "ws.replay.pending_drain",
                       userId: user.id,
@@ -2404,12 +2422,12 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
     || closeCode === 4001;
 
   if (shuttingDown) {
-    logger.info({ ...logPayload, shuttingDown: true }, "WS disconnected");
+    logWsHotInfo({ ...logPayload, shuttingDown: true }, "WS disconnected");
     return;
   }
 
   if (!isRedisOperational(redis)) {
-    logger.info({ ...logPayload, redisOperational: false }, "WS disconnected");
+    logWsHotInfo({ ...logPayload, redisOperational: false }, "WS disconnected");
     return;
   }
 
@@ -2430,7 +2448,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
     })
     .catch((err) => {
       if (/Connection is closed/i.test(String(err?.message || err))) {
-        logger.info(logPayload, "WS disconnected");
+        logWsHotInfo(logPayload, "WS disconnected");
         return;
       }
       logger.warn({ err, userId }, "WS cleanup presence update failed");
@@ -2438,7 +2456,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
   if (abnormalClose) {
     logger.warn(logPayload, "WS disconnected abnormally");
   } else {
-    logger.info(logPayload, "WS disconnected");
+    logWsHotInfo(logPayload, "WS disconnected");
   }
 }
 
