@@ -149,8 +149,14 @@ async function getCommunityChannelIds(communityId: string): Promise<string[]> {
   return rows.map((row: { id: string }) => row.id);
 }
 
-async function invalidateCommunityChannelUserFanoutTargetsCache(communityId: string) {
-  const ids = await getCommunityChannelIds(communityId);
+async function invalidateCommunityChannelUserFanoutTargetsCache(
+  communityId: string,
+  preloadedChannelIds?: string[] | null,
+) {
+  const ids =
+    Array.isArray(preloadedChannelIds) && preloadedChannelIds.length
+      ? preloadedChannelIds
+      : await getCommunityChannelIds(communityId);
 
   if (!ids.length) return;
 

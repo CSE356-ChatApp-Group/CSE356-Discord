@@ -131,13 +131,14 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
 
     incrCommunityMemberCount(communityId).catch(() => {});
 
-    getCommunityChannelIds(communityId)
-      .then((ids) => warmChannelAccessCacheForUser(redis, ids, req.user.id))
-      .catch(() => {});
+    const [realtimeTargets, channelIds] = await Promise.all([
+      listCommunityRealtimeTargets(communityId, req.user.id),
+      getCommunityChannelIds(communityId),
+    ]);
+    warmChannelAccessCacheForUser(redis, channelIds, req.user.id).catch(() => {});
 
-    const realtimeTargets = await listCommunityRealtimeTargets(communityId, req.user.id);
     await Promise.allSettled([
-      invalidateCommunityChannelUserFanoutTargetsCache(communityId),
+      invalidateCommunityChannelUserFanoutTargetsCache(communityId, channelIds),
       presenceService.invalidatePresenceFanoutTargets(req.user.id),
       invalidateWsBootstrapCache(req.user.id),
       publishUserFeedTargets([req.user.id], {
@@ -1098,12 +1099,11 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
 
     const publicVersion = await getPublicCommunitiesVersion();
 
-    getCommunityChannelIds(req.params.id)
-      .then((ids) => evictChannelAccessCacheForUser(redis, ids, req.user.id))
-      .catch(() => {});
+    const leaveChannelIds = await getCommunityChannelIds(req.params.id);
+    evictChannelAccessCacheForUser(redis, leaveChannelIds, req.user.id).catch(() => {});
 
     await Promise.allSettled([
-      invalidateCommunityChannelUserFanoutTargetsCache(req.params.id),
+      invalidateCommunityChannelUserFanoutTargetsCache(req.params.id, leaveChannelIds),
       invalidateCommunitiesCaches(
         [req.user.id, ...remainingMembers.map((member) => member.user_id)],
         publicVersion,
