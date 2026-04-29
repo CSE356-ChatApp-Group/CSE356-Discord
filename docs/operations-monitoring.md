@@ -13,6 +13,7 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Grafana dashboards (repo JSON) | **Overview:** [`chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) — **Redis / cache:** [`redis-cache-store.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/redis-cache-store.json) (`job=redis` + app-side Redis-adjacent counters). Overview top links jump to Failure modes, Latency RCA, Redis, Overload, API routes. |
 | Instant Prometheus triage | [`scripts/metrics-snapshot.sh`](../scripts/metrics-snapshot.sh) |
 | Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) |
+| **Primary DB + read replica (Prometheus)** | Alert group **`chatapp-database`** in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml): `ChatAppDbPostgresExporterDown`, replication slot **`replica_155_nvme`** inactive / WAL retain size, **`ChatAppDbReplicaNodeExporterDown`**, replica **`/mnt/replica-data`** disk. Scrape targets: [`deploy/prometheus-db-file-sd.py`](../deploy/prometheus-db-file-sd.py) writes **`file_sd/db-node.json`** (primary `:9100` + replica `:9100` when **`PG_READ_REPLICA_URL`** host differs) and **`db-postgres.json`** (primary `:9187` only). Replica **`postgres_exporter`** is optional (needs its own DSN on that host). |
 
 ## Where latency comes from (split app + DB VMs)
 
@@ -266,7 +267,7 @@ Exact per-recipient “why” is not always observable on one worker (userfeed s
 
 ### Pending replay Redis footprint (`ws:pending:user:*`)
 
-**Channel `message:created`:** after **`channel:<id>`** publish, **`enqueuePendingMessageForUsers(allTargets, …)`** receives every visible member’s **`user:<uuid>`** from **`publishChannelMessageEvent`** (same list as logical user-feed duplicates when fanout is on). **DM `message:created`:** **`enqueuePendingMessageForUsers(userIds, …)`** receives conversation participant user ids from **`publishConversationEventNow`**.
+**Channel `message:created`:** after **`channel:<id>`** publish, **`enqueuePendingMessageForUsers(pendingEnqueueTargets, …)`** receives the **capped visible-member** list (same as fanout candidate list). **`filterUsersEligibleForPendingReplay`** then keeps only **connected** or **recent-marker** users, so offline members are not written. Inline **`user:`** Redis publishes may be smaller when **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`**, but pending enqueue still uses the full capped list so **`user_only`** clients do not lose the pending safety net. **DM `message:created`:** **`enqueuePendingMessageForUsers(userIds, …)`** receives conversation participant user ids from **`publishConversationEventNow`**.
 
 **Recipient classes (filtering mode, default on):**
 

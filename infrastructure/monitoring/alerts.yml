@@ -492,6 +492,97 @@ groups:
             Emergency: ssh ubuntu@<db-host> 'sudo -u postgres psql chatapp_prod -c
             "\di+" && df -h /'
 
+  # Primary postgres_exporter (:9187) + optional read-replica node_exporter (:9100) via file_sd
+  # (see deploy/prometheus-db-file-sd.py). Replication series exist only on the primary scrape.
+  - name: chatapp-database
+    rules:
+      - alert: ChatAppDbPostgresExporterDown
+        expr: up{job="db-postgres"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Postgres exporter scrape is down
+          description: >
+            Prometheus cannot scrape postgres_exporter (job db-postgres) on {{ $labels.instance }}.
+            Fix the exporter unit, DATA_SOURCE_NAME, or firewall from the monitoring VM to :9187.
+            Runbook: docs/operations-monitoring.md (DB metrics).
+
+      - alert: ChatAppDbReplicationPhysicalSlotInactive
+        expr: pg_replication_slots_active{job="db-postgres", slot_name="replica_155_nvme"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Physical replication slot replica_155_nvme is inactive
+          description: >
+            The standby is not attached to slot replica_155_nvme (or the slot was dropped).
+            Check `pg_stat_replication` and the read-replica host; app reads may be falling back to the primary.
+
+      - alert: ChatAppDbReplicationSlotWalRetainHigh
+        expr: pg_replication_slots_pg_wal_lsn_diff{job="db-postgres", slot_name="replica_155_nvme"} > 1073741824
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: WAL retained for replica slot exceeds 1 GiB
+          description: >
+            `pg_replication_slots_pg_wal_lsn_diff` for replica_155_nvme is high — the replica may be stalled
+            or far behind, risking disk pressure on the primary. Check replica `pg_stat_wal_receiver` and disk.
+
+      - alert: ChatAppDbReplicationSlotWalRetainCritical
+        expr: pg_replication_slots_pg_wal_lsn_diff{job="db-postgres", slot_name="replica_155_nvme"} > 5368709120
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: WAL retained for replica slot exceeds 5 GiB (critical)
+          description: >
+            Primary WAL retention for the physical replica slot is very large. Risk of filling the primary disk
+            if the replica does not catch up. Investigate replica connectivity, replay pause, and `max_slot_wal_keep_size`.
+
+      - alert: ChatAppDbReplicaNodeExporterDown
+        expr: up{job="db-node", role="replica-database-host"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Read-replica node_exporter scrape is down
+          description: >
+            Prometheus cannot scrape node_exporter on the read-replica host ({{ $labels.instance }}).
+            Install/enable prometheus-node-exporter and allow TCP 9100 from the monitoring VM.
+
+      - alert: ChatAppDbReplicaDataDiskSpaceLow
+        expr: |
+          (
+            node_filesystem_avail_bytes{job="db-node", role="replica-database-host", mountpoint="/mnt/replica-data", fstype!~"tmpfs|overlay"}
+              /
+            node_filesystem_size_bytes{job="db-node", role="replica-database-host", mountpoint="/mnt/replica-data", fstype!~"tmpfs|overlay"}
+          ) < 0.20
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: Read-replica data volume disk space is low
+          description: >
+            Less than 20% free on /mnt/replica-data on the replica for 20m. Postgres replay and local WAL need headroom;
+            expand the volume or prune old local WAL only after confirming replication health.
+
+      - alert: ChatAppDbReplicaDataDiskSpaceCritical
+        expr: |
+          (
+            node_filesystem_avail_bytes{job="db-node", role="replica-database-host", mountpoint="/mnt/replica-data", fstype!~"tmpfs|overlay"}
+              /
+            node_filesystem_size_bytes{job="db-node", role="replica-database-host", mountpoint="/mnt/replica-data", fstype!~"tmpfs|overlay"}
+          ) < 0.10
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Read-replica data volume disk critically low
+          description: >
+            Less than 10% free on /mnt/replica-data. Replica may fail recovery or replay; expand disk immediately.
+
   # HTTP behaviour under stress — complements raw 5xx% (timeouts often abort before 5xx).
   - name: chatapp-capacity-edge
     rules:

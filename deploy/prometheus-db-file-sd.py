@@ -4,6 +4,10 @@
 Prefers PGDUMP_DATABASE_URL (direct Postgres :5432) over DATABASE_URL (often PgBouncer :6432).
 When the resolved host is missing or localhost, writes empty target lists so Prometheus
 does not scrape bogus addresses (e.g. staging all-in-one).
+
+When PG_READ_REPLICA_URL points at a different host, adds that host :9100 to db-node.json
+(node_exporter must be installed there; see deploy/install-db-metrics-exporters.sh header).
+postgres_exporter on the replica is optional and not added here (no shared creds file on replica).
 """
 from __future__ import annotations
 
@@ -83,6 +87,21 @@ def main() -> int:
                 "labels": {"instance": "db-vm", "role": "postgresql"},
             }
         ]
+
+    replica_url = (env.get("PG_READ_REPLICA_URL") or "").strip()
+    replica_host = host_from_db_url(replica_url) if replica_url else None
+    if (
+        replica_host
+        and replica_host not in ("localhost", "127.0.0.1", "::1")
+        and replica_host != host
+    ):
+        groups_node = list(groups_node) if groups_node else []
+        groups_node.append(
+            {
+                "targets": [f"{replica_host}:9100"],
+                "labels": {"instance": "db-replica", "role": "replica-database-host"},
+            }
+        )
 
     (out_dir / "db-node.json").write_text(
         json.dumps(groups_node, indent=2) + "\n", encoding="utf-8"

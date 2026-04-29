@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # Install prometheus-node-exporter + postgres_exporter on the dedicated PostgreSQL VM
-# so the app VM's Prometheus (Grafana stack) can scrape DB host + Postgres metrics.
+# so the monitoring VM Prometheus can scrape DB host + Postgres metrics (file_sd).
 #
 # Prerequisites: PostgreSQL listening on 127.0.0.1:5432, credentials file from DB setup.
 #
 # Usage:
 #   DB_SSH=root@130.245.136.21 ./deploy/install-db-metrics-exporters.sh
 #
-# Firewall: allow TCP 9100 and 9187 only from the app VM's private IP (Linode / VPC).
+# Read replica (prod): install **node_exporter** on the replica so Prometheus can scrape
+# disk/iowait (`job=db-node`, `role=replica-database-host`). `apt-get install -y prometheus-node-exporter`
+# on the replica and allow **9100** from the monitoring VM private IP. `deploy/prometheus-db-file-sd.py`
+# adds `PG_READ_REPLICA_URL` host to `db-node.json` when it differs from the primary. Optional
+# postgres_exporter on the replica needs a local DATA_SOURCE_NAME (not automated here).
+#
+# Firewall: allow TCP 9100 and 9187 from the **monitoring** VM private IP (see docs/infrastructure-inventory.md).
 #
 set -euo pipefail
 
