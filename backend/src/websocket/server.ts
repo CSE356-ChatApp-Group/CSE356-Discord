@@ -92,6 +92,7 @@ const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
 const {
   allUserFeedRedisChannels,
   isUserFeedEnvelope,
+  publishUserFeedTargets,
   userIdFromTarget,
 } = require("./userFeed");
 const {
@@ -1424,6 +1425,56 @@ function normalizeCommunityTopic(value) {
   return parsed.id;
 }
 
+/**
+ * Remove closed sockets from a local subscription set so Redis→WS fanout does not
+ * treat CLOSING/CLOSED tabs as delivery targets (avoids ws.realtime_delivery_blocked
+ * when the harness still expects userfeed delivery on another worker or after dup).
+ */
+function pruneNonOpenSocketsFromLocalTopicSubscribers(topicChannel, clients) {
+  if (!clients || clients.size === 0) return [];
+  const recoveredUserIds = [];
+  for (const ws of [...clients]) {
+    if (ws.readyState === WebSocket.OPEN) continue;
+    const uid = ws._userId;
+    if (typeof uid === "string" && uid.trim()) recoveredUserIds.push(uid.trim());
+    unsubscribeClient(ws, topicChannel).catch((err) => {
+      logger.warn({ err, topicChannel, userId: uid }, "WS prune: unsubscribeClient failed");
+    });
+  }
+  return [...new Set(recoveredUserIds)];
+}
+
+function pruneNonOpenFromCommunitySubscribers(communityId, clients) {
+  if (!clients || clients.size === 0) return;
+  for (const ws of [...clients]) {
+    if (ws.readyState === WebSocket.OPEN) continue;
+    unsubscribeCommunityClient(ws, communityId);
+  }
+}
+
+async function userfeedRecoveryAfterStaleTopicMap(channel, parsed, userIds) {
+  if (!userIds.length || parsed === null || typeof parsed !== "object") return false;
+  const ev = parsed.event;
+  if (typeof ev !== "string" || !ev.startsWith("message:")) return false;
+  try {
+    await publishUserFeedTargets(
+      userIds.map((id) => `user:${id}`),
+      parsed,
+    );
+    realtimeMissAttributionTotal.inc(
+      { reason: "channel_topic_stale_map_userfeed_recovery" },
+      userIds.length,
+    );
+    return true;
+  } catch (err) {
+    logger.warn(
+      { err, channel, userIds },
+      "WS userfeed recovery after stale topic subscribers failed",
+    );
+    return false;
+  }
+}
+
 function deliverUserFeedMessage(channel, routed) {
   const payload = routed.payload;
   const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
@@ -1476,6 +1527,8 @@ function deliverUserFeedMessage(channel, routed) {
     const clients = localUserClients.get(userId);
     if (!clients || clients.size === 0) continue;
     const logicalChannel = `user:${userId}`;
+    pruneNonOpenSocketsFromLocalTopicSubscribers(logicalChannel, clients);
+    if (!clients.size) continue;
     const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
     for (const ws of clients) {
       if (internalSubscribeChannels) {
@@ -1510,6 +1563,9 @@ function deliverCommunityFeedMessage(channel, routed) {
   fanoutRecipientsHistogram.observe({ channel_type: "communityfeed" }, recipientCount);
   if (!clients || recipientCount === 0) return;
 
+  pruneNonOpenFromCommunitySubscribers(communityId, clients);
+  if (!clients.size) return;
+
   const payload = routed.payload;
   const logicalChannel = `community:${communityId}`;
   const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
@@ -1518,7 +1574,7 @@ function deliverCommunityFeedMessage(channel, routed) {
   }
 }
 
-function deliverPubsubMessage(channel, message) {
+async function deliverPubsubMessage(channel, message) {
   if (USER_FEED_SHARD_CHANNEL_SET.has(channel)) {
     let routed: unknown = null;
     try {
@@ -1579,15 +1635,32 @@ function deliverPubsubMessage(channel, message) {
 
   if (!clients || recipientCount === 0) return;
 
-  if (channelType === "user" && recipientCount > 0 && parsed !== null && logger.isLevelEnabled("debug")) {
+  let staleTopicRecoveryUserIds: string[] = [];
+  if (channelType === "channel" || channelType === "conversation" || channelType === "user") {
+    staleTopicRecoveryUserIds = pruneNonOpenSocketsFromLocalTopicSubscribers(channel, clients);
+  }
+
+  if (!clients.size) {
+    if (
+      (channelType === "channel" || channelType === "conversation")
+      && staleTopicRecoveryUserIds.length > 0
+      && parsed !== null
+    ) {
+      await userfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
+    }
+    return;
+  }
+
+  if (channelType === "user" && clients.size > 0 && parsed !== null && logger.isLevelEnabled("debug")) {
     logger.debug({
       event: "presence.fanout.delivered",
       channel,
-      recipientCount,
+      recipientCount: clients.size,
       payload: parsed,
     });
   }
 
+  const openRecipientSlots = clients.size;
   const preparedPayload = prepareSocketPayload(channel, parsed, message);
   let deliveredCount = 0;
   const reasonCounts: Record<string, number> = {};
@@ -1606,7 +1679,11 @@ function deliverPubsubMessage(channel, message) {
     && parsedEvent.startsWith("message:")
     && (channelType === "channel" || channelType === "conversation");
   if (isReliableChannelMsg) {
-    if (deliveredCount === 0) {
+    let recovered = false;
+    if (deliveredCount === 0 && staleTopicRecoveryUserIds.length > 0 && parsed !== null) {
+      recovered = await userfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
+    }
+    if (deliveredCount === 0 && !recovered) {
       realtimeMissAttributionTotal.inc({ reason: "topic_message_send_blocked" });
       const messageId =
         parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
@@ -1622,22 +1699,21 @@ function deliverPubsubMessage(channel, message) {
           messageId: typeof resolvedMessageId === "string" ? resolvedMessageId : null,
           recipientCount,
           reasonCounts,
+          staleTopicRecoveryUserIds,
           gradingNote: "correlate_with_delivery_timeout_missing_recipient",
         },
         "Reliable realtime message had recipients but zero successful socket sends",
       );
-    } else if (deliveredCount < recipientCount) {
+    } else if (deliveredCount < openRecipientSlots) {
       realtimeMissAttributionTotal.inc({ reason: "topic_message_partial_delivery" });
     }
   }
 }
 
 redisSub.on("message", (channel, message) => {
-  try {
-    deliverPubsubMessage(channel, message);
-  } catch (err) {
+  void deliverPubsubMessage(channel, message).catch((err) => {
     logger.error({ err, channel }, "deliverPubsubMessage failed");
-  }
+  });
 });
 
 const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(

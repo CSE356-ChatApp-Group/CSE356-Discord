@@ -358,8 +358,8 @@ describe('communities router — join fires Redis incr, leave fires Redis decr',
   it('POST /:id/join returns 200 and fires incrCommunityMemberCount', async () => {
     poolMock.query
       .mockResolvedValueOnce({ rows: [{ id: COMMUNITY_ID, is_public: true }] }) // resolve community
-      .mockResolvedValueOnce({ rowCount: 1 }); // INSERT community_members
-    poolMock.queryRead.mockResolvedValue({ rows: [] }); // listCommunityRealtimeTargets
+      .mockResolvedValueOnce({ rowCount: 1 }) // INSERT community_members
+      .mockResolvedValueOnce({ rows: [] }); // listCommunityRealtimeTargets (primary query)
 
     const app = buildApp();
     const res = await request(app)

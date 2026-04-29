@@ -1334,6 +1334,7 @@ function startPgPoolMetrics(pool) {
     realtimeMissAttributionTotal.inc({ reason: 'channel_user_topic_deferred_not_recent' }, 0);
     realtimeMissAttributionTotal.inc({ reason: 'topic_message_send_blocked' }, 0);
     realtimeMissAttributionTotal.inc({ reason: 'topic_message_partial_delivery' }, 0);
+    realtimeMissAttributionTotal.inc({ reason: 'channel_topic_stale_map_userfeed_recovery' }, 0);
     pendingReplayRecipientTotal.inc({ class: 'connected' }, 0);
     pendingReplayRecipientTotal.inc({ class: 'recent' }, 0);
     pendingReplayRecipientTotal.inc({ class: 'offline_skipped' }, 0);

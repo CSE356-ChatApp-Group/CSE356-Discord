@@ -103,7 +103,7 @@ jobs:
 
       - name: Backend tests
         env:
-          WS_AUTO_SUBSCRIBE_MODE: user_only
+          WS_AUTO_SUBSCRIBE_MODE: messages
         run: |
           set -o pipefail
           npm run test --workspace=backend -- --runInBand --verbose 2>&1 | tee backend-test.log

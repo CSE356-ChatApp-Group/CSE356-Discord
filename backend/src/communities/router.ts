@@ -592,7 +592,10 @@ async function loadCommunityMembersRoster(communityId) {
 }
 
 async function listCommunityRealtimeTargets(communityId, userId) {
-  const { rows } = await queryRead(
+  // Primary (not replica): right after INSERT community_members, replica lag can
+  // return an empty or partial channel list so WS subscribe_channels misses
+  // channel:<id> topics until reconnect — correlates with grader delivery timeouts.
+  const { rows } = await query(
     `SELECT c.id::text AS id
      FROM channels c
      LEFT JOIN channel_members chm
