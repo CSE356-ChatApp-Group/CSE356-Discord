@@ -34,8 +34,8 @@ RestartSec=5
 # The app's own 10 s forced-exit timer fires before this deadline, so
 # systemd will never need to send SIGKILL under normal conditions.
 TimeoutStopSec=15
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/chatapp-%i.log
+StandardError=append:/var/log/chatapp-%i.log
 SyslogIdentifier=chatapp-%i
 # Raise file-descriptor limit: Node opens one FD per connection + pool client.
 # OS default (1024) is hit at ~500 concurrent users; raise to match nginx.
