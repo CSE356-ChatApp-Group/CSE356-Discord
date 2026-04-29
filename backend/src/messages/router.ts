@@ -1042,6 +1042,25 @@ async function messagesListQuery(req, sql, params) {
   return queryRead(sql, params);
 }
 
+/**
+ * Replica-first channel list reads can transiently return has_access=false right
+ * after create/join due to replica lag on community_members/channel_members.
+ * Retry once on primary before returning 403 so we preserve correctness while
+ * keeping the steady-state read load on replicas.
+ */
+async function channelMessagesListQueryWithPrimaryRetry(req, sql, params) {
+  if (wantsMessagesListPrimary(req)) {
+    return query(sql, params);
+  }
+
+  const replicaResult = await queryRead(sql, params);
+  if (replicaResult?.rows?.[0]?.has_access) {
+    return replicaResult;
+  }
+
+  return query(sql, params);
+}
+
 async function bustMessagesCacheSafe(opts: {
   channelId?: string;
   conversationId?: string;
@@ -1560,7 +1579,7 @@ router.get(
                 /* fail open */
               }
 
-              const { rows } = await messagesListQuery(
+              const { rows } = await channelMessagesListQueryWithPrimaryRetry(
                 req,
                 `
               WITH access AS (
@@ -1796,7 +1815,9 @@ router.get(
         ) AS msg ON access.has_access = TRUE
       `;
 
-      const { rows } = await messagesListQuery(req, sql, params);
+      const { rows } = channelId
+        ? await channelMessagesListQueryWithPrimaryRetry(req, sql, params)
+        : await messagesListQuery(req, sql, params);
 
       if (!rows[0]?.has_access) {
         return res
