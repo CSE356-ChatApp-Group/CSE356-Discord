@@ -43,7 +43,9 @@ echo "✓ Connection limits tuned"
 # 3. Configure Nginx for candidate-port cutover
 echo "3. Configuring Nginx..."
 sudo install -d -m 0755 /etc/nginx/conf.d
-sudo install -m 0644 "$(dirname "$0")/nginx/admission-control.conf" /etc/nginx/conf.d/admission-control.conf
+# Production chatapp site uses external_* zones — must match admission-control-production.conf
+# (staging uses deploy/nginx/admission-control.conf + different zone names).
+sudo install -m 0644 "$(dirname "$0")/nginx/admission-control-production.conf" /etc/nginx/conf.d/admission-control.conf
 sudo tee /etc/nginx/sites-available/chatapp > /dev/null <<'EOF'
 upstream app {
   # max_fails=0: never drain the upstream on 502/503 bursts (avoids no live upstreams).
