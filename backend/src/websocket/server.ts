@@ -95,6 +95,10 @@ const {
   userIdFromTarget,
 } = require("./userFeed");
 const {
+  allCommunityFeedRedisChannels,
+  isCommunityFeedEnvelope,
+} = require("./communityFeed");
+const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
@@ -841,6 +845,8 @@ async function reconcileAllConnectedUsers() {
  */
 const channelClients = new Map(); // key → Set<WebSocket>
 const localUserClients = new Map(); // userId → Set<WebSocket>
+// Sharded community feed membership. Keyed by communityId (without prefix).
+const communityClients = new Map(); // communityId → Set<WebSocket>
 const WS_SOCKET_MESSAGE_DEDUPE_MAX = 512;
 
 /**
@@ -852,12 +858,14 @@ const redisSubscribed = new Set();
 const redisSubscribeInFlight = new Map();
 const USER_FEED_SHARD_CHANNELS = allUserFeedRedisChannels();
 const USER_FEED_SHARD_CHANNEL_SET = new Set(USER_FEED_SHARD_CHANNELS);
+const COMMUNITY_FEED_SHARD_CHANNELS = allCommunityFeedRedisChannels();
+const COMMUNITY_FEED_SHARD_CHANNEL_SET = new Set(COMMUNITY_FEED_SHARD_CHANNELS);
 let wsStartupPromise: Promise<void> | null = null;
 
 // ── Redis subscriber listener ──────────────────────────────────────────────────
 function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
   if (
-    !logicalChannel.startsWith("user:")
+    !(logicalChannel.startsWith("user:") || logicalChannel.startsWith("community:"))
     || !parsed
     || typeof parsed !== "object"
     || Array.isArray(parsed)
@@ -951,7 +959,7 @@ function extractInternalUserFeedCommand(payload) {
     return null;
   }
 
-  return internal as { kind: string; channels?: unknown };
+  return internal as { kind: string; channels?: unknown; communityIds?: unknown };
 }
 
 function isReliableRealtimeEvent(eventName) {
@@ -1409,6 +1417,13 @@ function recipientClientsForChannel(channel) {
   return channelClients.get(channel) || null;
 }
 
+function normalizeCommunityTopic(value) {
+  if (typeof value !== "string") return null;
+  const parsed = parseChannelKey(value.startsWith("community:") ? value : `community:${value}`);
+  if (!parsed || parsed.type !== "community") return null;
+  return parsed.id;
+}
+
 function deliverUserFeedMessage(channel, routed) {
   const payload = routed.payload;
   const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
@@ -1428,6 +1443,13 @@ function deliverUserFeedMessage(channel, routed) {
       (Array.isArray(internalCommand.channels) ? internalCommand.channels : [])
         .filter((value) => typeof value === "string")
         .filter((value) => parseChannelKey(value)),
+    )]
+    : null;
+  const internalSubscribeCommunities = internalCommand?.kind === "subscribe_communities"
+    ? [...new Set(
+      (Array.isArray(internalCommand.communityIds) ? internalCommand.communityIds : [])
+        .map((value) => normalizeCommunityTopic(value))
+        .filter((value) => typeof value === "string"),
     )]
     : null;
 
@@ -1468,9 +1490,31 @@ function deliverUserFeedMessage(channel, routed) {
         });
         continue;
       }
+      if (internalSubscribeCommunities) {
+        for (const communityId of internalSubscribeCommunities) {
+          subscribeCommunityClient(ws, communityId);
+        }
+        continue;
+      }
 
       sendPayloadToSocket(ws, logicalChannel, payload, null, { preparedPayload });
     }
+  }
+}
+
+function deliverCommunityFeedMessage(channel, routed) {
+  const communityId = routed.__wsRoute.communityId;
+  if (typeof communityId !== "string" || !communityId) return;
+  const clients = communityClients.get(communityId);
+  const recipientCount = clients ? clients.size : 0;
+  fanoutRecipientsHistogram.observe({ channel_type: "communityfeed" }, recipientCount);
+  if (!clients || recipientCount === 0) return;
+
+  const payload = routed.payload;
+  const logicalChannel = `community:${communityId}`;
+  const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
+  for (const ws of clients) {
+    sendPayloadToSocket(ws, logicalChannel, payload, null, { preparedPayload });
   }
 }
 
@@ -1484,6 +1528,19 @@ function deliverPubsubMessage(channel, message) {
     }
     if (isUserFeedEnvelope(routed)) {
       deliverUserFeedMessage(channel, routed);
+    }
+    return;
+  }
+
+  if (COMMUNITY_FEED_SHARD_CHANNEL_SET.has(channel)) {
+    let routed: unknown = null;
+    try {
+      routed = JSON.parse(message);
+    } catch {
+      return;
+    }
+    if (isCommunityFeedEnvelope(routed)) {
+      deliverCommunityFeedMessage(channel, routed);
     }
     return;
   }
@@ -1607,18 +1664,18 @@ const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
 const wsBootstrapIngressInFlight: Map<string, Promise<string[]>> = new Map();
 let wsBootstrapDbInFlight = 0;
 
-function wsBootstrapIngressKey(userId) {
-  return `ws:bootstrap:${userId}`;
+function wsBootstrapIngressKey(userId, scope = 'default') {
+  return `ws:bootstrap:${userId}:ingress:${scope}`;
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function readWsBootstrapIngressCache(userId) {
+async function readWsBootstrapIngressCache(userId, scope = 'default') {
   if (!isRedisOperational(redis)) return null;
   try {
-    const raw = await redis.get(wsBootstrapIngressKey(userId));
+    const raw = await redis.get(wsBootstrapIngressKey(userId, scope));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return null;
@@ -1628,11 +1685,11 @@ async function readWsBootstrapIngressCache(userId) {
   }
 }
 
-async function writeWsBootstrapIngressCache(userId, channels) {
+async function writeWsBootstrapIngressCache(userId, channels, scope = 'default') {
   if (!isRedisOperational(redis)) return;
   try {
     await redis.set(
-      wsBootstrapIngressKey(userId),
+      wsBootstrapIngressKey(userId, scope),
       JSON.stringify(channels),
       "EX",
       WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
@@ -1677,11 +1734,18 @@ async function invalidateWsBootstrapCaches(userIds) {
     seen.add(userId);
     const messagesKey = wsBootstrapCacheKey(userId, 'messages');
     const fullKey = wsBootstrapCacheKey(userId, 'full');
+    const userOnlyKey = wsBootstrapCacheKey(userId, 'user_only');
     keys.push(
+      `ws:bootstrap:${userId}`,
+      wsBootstrapIngressKey(userId, 'messages'),
+      wsBootstrapIngressKey(userId, 'full'),
+      wsBootstrapIngressKey(userId, 'user_only'),
       messagesKey,
       staleCacheKey(messagesKey),
       fullKey,
       staleCacheKey(fullKey),
+      userOnlyKey,
+      staleCacheKey(userOnlyKey),
     );
   }
   if (!keys.length) return;
@@ -1713,7 +1777,7 @@ function wsAutoSubscribeMode() {
  * server-side filtering (phase-2).
  */
 async function listAutoSubscriptionChannels(userId, mode = 'full') {
-  const scope = mode === 'full' ? 'full' : 'messages';
+  const scope = mode === 'full' ? 'full' : (mode === 'user_only' ? 'user_only' : 'messages');
   const cacheKey = wsBootstrapCacheKey(userId, scope);
   const cached = await getJsonCache(redis, cacheKey);
   if (Array.isArray(cached)) {
@@ -1745,36 +1809,40 @@ async function listAutoSubscriptionChannels(userId, mode = 'full') {
     load: async () => {
       wsBootstrapDbTotal.inc();
       const [conversationRes, communityRes, channelRes] = await Promise.all([
-        query(
-          `SELECT conversation_id::text AS id
-           FROM conversation_participants
-           WHERE user_id = $1 AND left_at IS NULL`,
-          [userId],
-        ),
-        scope === 'full'
-          ? query(
-            `SELECT community_id::text AS id
-             FROM community_members
-             WHERE user_id = $1`,
+        scope === 'user_only'
+          ? Promise.resolve({ rows: [] })
+          : query(
+            `SELECT conversation_id::text AS id
+             FROM conversation_participants
+             WHERE user_id = $1 AND left_at IS NULL`,
             [userId],
-          )
-          : Promise.resolve({ rows: [] }),
+          ),
         query(
-          `SELECT c.id::text AS id
-           FROM channels c
-           JOIN community_members cm
-             ON cm.community_id = c.community_id
-            AND cm.user_id = $1
-           LEFT JOIN channel_members chm
-             ON chm.channel_id = c.id
-            AND chm.user_id = $1
-           WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
+          `SELECT community_id::text AS id
+           FROM community_members
+           WHERE user_id = $1`,
           [userId],
         ),
+        scope === 'user_only'
+          ? Promise.resolve({ rows: [] })
+          : query(
+            `SELECT c.id::text AS id
+             FROM channels c
+             JOIN community_members cm
+               ON cm.community_id = c.community_id
+              AND cm.user_id = $1
+             LEFT JOIN channel_members chm
+               ON chm.channel_id = c.id
+              AND chm.user_id = $1
+             WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
+            [userId],
+          ),
       ]);
 
-      // Subscribe channel topics first so message fanout can arrive before the tail
-      // of community/conversation Redis topics finishes (grading: many listeners).
+      // `community:` entries are delivered through sharded communityfeed topics,
+      // not one Redis SUBSCRIBE per community.  This gives every connected
+      // community member public-channel notifications without per-message
+      // audience cache staleness.
       const channels = [
         ...channelRes.rows.map((row) => `channel:${row.id}`),
         ...conversationRes.rows.map((row) => `conversation:${row.id}`),
@@ -1791,16 +1859,25 @@ async function listAutoSubscriptionChannels(userId, mode = 'full') {
   return load;
 }
 
+async function subscribeBootstrapChannel(ws, channel) {
+  if (typeof channel === "string" && channel.startsWith("community:")) {
+    const parsed = parseChannelKey(channel);
+    if (parsed?.type === "community") subscribeCommunityClient(ws, parsed.id);
+    return;
+  }
+  await subscribeClient(ws, channel);
+}
+
 async function bootstrapUserSubscriptions(ws, userId) {
   const mode = wsAutoSubscribeMode();
-  if (mode === 'user_only') return;
-  const ingressCached = await readWsBootstrapIngressCache(userId);
+  const ingressScope = mode === 'full' ? 'full' : (mode === 'user_only' ? 'user_only' : 'messages');
+  const ingressCached = await readWsBootstrapIngressCache(userId, ingressScope);
   if (Array.isArray(ingressCached)) {
     wsBootstrapCachedTotal.inc({ source: 'ttl' });
     warmWsAclCacheFromChannelList(userId, ingressCached);
     for (let i = 0; i < ingressCached.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
       const batch = ingressCached.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-      await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
+      await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
       if (ws.readyState !== WebSocket.OPEN) return;
     }
     return;
@@ -1812,7 +1889,7 @@ async function bootstrapUserSubscriptions(ws, userId) {
     warmWsAclCacheFromChannelList(userId, channels);
     for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
       const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-      await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
+      await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
       if (ws.readyState !== WebSocket.OPEN) return;
     }
     return;
@@ -1827,7 +1904,7 @@ async function bootstrapUserSubscriptions(ws, userId) {
   wsBootstrapIngressInFlight.set(userId, loadPromise);
 
   const channels = await loadPromise;
-  await writeWsBootstrapIngressCache(userId, channels);
+  await writeWsBootstrapIngressCache(userId, channels, ingressScope);
   warmWsAclCacheFromChannelList(userId, channels);
   
   // Populate channel:recent_connect ZSETs immediately for all channel: topics
@@ -1844,7 +1921,7 @@ async function bootstrapUserSubscriptions(ws, userId) {
   
   for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
     const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-    await Promise.allSettled(batch.map((channel) => subscribeClient(ws, channel)));
+    await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
     if (ws.readyState !== WebSocket.OPEN) return;
   }
 }
@@ -1905,16 +1982,23 @@ async function ensureRedisChannelSubscribed(redisChannel) {
 }
 
 async function ensureUserFeedShardSubscriptions() {
-  await Promise.all(
-    USER_FEED_SHARD_CHANNELS.map((redisChannel) => ensureRedisChannelSubscribed(redisChannel)),
-  );
+  await Promise.all([
+    ...USER_FEED_SHARD_CHANNELS.map((redisChannel) => ensureRedisChannelSubscribed(redisChannel)),
+    ...COMMUNITY_FEED_SHARD_CHANNELS.map((redisChannel) => ensureRedisChannelSubscribed(redisChannel)),
+  ]);
 }
 
 function ready() {
   if (!wsStartupPromise) {
     wsStartupPromise = ensureUserFeedShardSubscriptions()
       .then(() => {
-        logWsHotInfo(() => ({ shardCount: USER_FEED_SHARD_CHANNELS.length }), 'WS userfeed shard subscriptions ready');
+        logWsHotInfo(
+          () => ({
+            userfeedShards: USER_FEED_SHARD_CHANNELS.length,
+            communityfeedShards: COMMUNITY_FEED_SHARD_CHANNELS.length,
+          }),
+          'WS userfeed + communityfeed shard subscriptions ready',
+        );
       })
       .catch((err) => {
         wsStartupPromise = null;
@@ -1948,6 +2032,7 @@ wss.on("connection", async (ws, req) => {
   ws._clientIp = clientIpFromReq(req);
   ws._replayConsumed = false;
   ws._subscriptions = new Set();
+  ws._communityIds = new Set();
   /** `channel:<uuid>` topics the client explicitly { type: "unsubscribe" }'d — skip duplicate `user:<me>` message:* for those. */
   ws._explicitChannelUnsub = new Set();
   ws._userId = user.id;
@@ -2191,7 +2276,7 @@ async function handleClientMessage(ws, user, msg) {
       }
       if (allowed) {
         try {
-          await subscribeClient(ws, msg.channel);
+          await subscribeBootstrapChannel(ws, msg.channel);
           ws.send(
             JSON.stringify({
               event: "subscribed",
@@ -2210,7 +2295,12 @@ async function handleClientMessage(ws, user, msg) {
     }
 
     case "unsubscribe":
-      await unsubscribeClient(ws, msg.channel);
+      if (typeof msg.channel === "string" && msg.channel.startsWith("community:")) {
+        const parsed = parseChannelKey(msg.channel);
+        if (parsed?.type === "community") unsubscribeCommunityClient(ws, parsed.id);
+      } else {
+        await unsubscribeClient(ws, msg.channel);
+      }
       break;
 
     case "ping":
@@ -2378,6 +2468,28 @@ async function _isAllowedChannelDb(user, channel) {
   return rows.length > 0;
 }
 
+// ── Community-feed subscribe helpers ──────────────────────────────────────────
+function subscribeCommunityClient(ws, communityId) {
+  if (typeof communityId !== "string" || !communityId) return;
+  if (!ws._communityIds) ws._communityIds = new Set();
+  if (ws._communityIds.has(communityId)) return;
+  ws._communityIds.add(communityId);
+  if (!communityClients.has(communityId)) {
+    communityClients.set(communityId, new Set());
+  }
+  communityClients.get(communityId).add(ws);
+}
+
+function unsubscribeCommunityClient(ws, communityId) {
+  if (typeof communityId !== "string" || !communityId) return;
+  ws._communityIds?.delete(communityId);
+  const clients = communityClients.get(communityId);
+  clients?.delete(ws);
+  if ((clients?.size || 0) === 0) {
+    communityClients.delete(communityId);
+  }
+}
+
 // ── Subscribe helpers ──────────────────────────────────────────────────────────
 async function subscribeClient(ws, redisChannel) {
   if (ws._subscriptions.has(redisChannel)) return;
@@ -2473,6 +2585,9 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
   Promise.allSettled(
     subscriptions.map((ch) => unsubscribeClient(ws, ch)),
   ).catch(() => {});
+  for (const communityId of Array.from(ws._communityIds || [])) {
+    unsubscribeCommunityClient(ws, communityId);
+  }
 
   noteRecentDisconnectForSocket(ws, closeCode, closeReason);
 

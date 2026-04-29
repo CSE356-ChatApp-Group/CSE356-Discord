@@ -2538,7 +2538,9 @@ router.post(
                       "message:created",
                       msg,
                     );
-                    await publishChannelMessageCreated(channelId, envelope);
+                    await publishChannelMessageCreated(channelId, envelope, {
+                      communityId,
+                    });
                   },
                 );
               },
@@ -2554,11 +2556,14 @@ router.post(
                 path: "channel",
                 result: "queue_full",
               });
-              sideEffects.publishBackgroundEvent(
-                `channel:${channelId}`,
-                "message:created",
-                message,
-              );
+              publishChannelMessageCreated(channelId, createdEnvelope, {
+                communityId,
+              }).catch((err) => {
+                logger.warn(
+                  { err, requestId: req.id, channelId, messageId: message.id },
+                  "POST /messages queue-full channel fanout fallback failed",
+                );
+              });
             }
           } else {
             messagePostFanoutAsyncEnqueueTotal.inc({
@@ -2574,6 +2579,7 @@ router.post(
               fanoutMeta = await publishChannelMessageCreated(
                 channelId,
                 createdEnvelope,
+                { communityId },
               );
               realtimeChannelFanoutComplete = true;
             } catch (syncFanoutErr) {

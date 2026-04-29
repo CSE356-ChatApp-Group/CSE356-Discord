@@ -792,6 +792,7 @@ describe('Channel realtime delivery', () => {
         expect([
           `user:${member.user.id}`,
           `channel:${channelId}`,
+          `community:${communityId}`,
         ]).toContain(event.channel);
       } finally {
         await closeWebSocket(memberSocket);

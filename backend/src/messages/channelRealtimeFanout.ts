@@ -9,6 +9,7 @@ const { query } = require('../db/pool');
 const redis = require('../db/redis');
 const fanout = require('../websocket/fanout');
 const { publishUserFeedTargets } = require('../websocket/userFeed');
+const { publishCommunityFeedMessage } = require('../websocket/communityFeed');
 const sideEffects = require('./sideEffects');
 const { enqueuePendingMessageForUsers } = require('./realtimePending');
 const {
@@ -50,6 +51,16 @@ const CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX =
     ? Math.min(1000, Math.max(50, Math.floor(rawImmediateRecentBridgeMax)))
     : 256;
 const recentConnectTargetsCache: Map<string, { targets: string[]; cachedAt: number }> = new Map();
+const channelRealtimeMetaCache: Map<string, {
+  communityId: string | null;
+  isPrivate: boolean;
+  cachedAt: number;
+}> = new Map();
+const channelRealtimeMetaInflight: Map<string, Promise<{
+  communityId: string | null;
+  isPrivate: boolean;
+}>> = new Map();
+const CHANNEL_REALTIME_META_CACHE_MS = 5 * 60 * 1000;
 
 function channelMessageUserFanoutEnabled() {
   const v = process.env.CHANNEL_MESSAGE_USER_FANOUT;
@@ -138,6 +149,7 @@ async function readChannelUserFanoutCacheState(cacheKey: string, versionKey: str
 }
 
 async function invalidateChannelUserFanoutTargetsCache(channelId: string) {
+  invalidateChannelRealtimeMeta(channelId);
   const cacheKey = channelUserFanoutTargetsCacheKey(channelId);
   const versionKey = channelUserFanoutTargetsVersionKey(channelId);
   try {
@@ -157,6 +169,45 @@ async function getCommunityChannelIds(communityId: string): Promise<string[]> {
     [communityId],
   );
   return rows.map((row: { id: string }) => row.id);
+}
+
+async function getChannelRealtimeMeta(channelId: string): Promise<{
+  communityId: string | null;
+  isPrivate: boolean;
+}> {
+  const cached = channelRealtimeMetaCache.get(channelId);
+  if (cached && Date.now() - cached.cachedAt <= CHANNEL_REALTIME_META_CACHE_MS) {
+    return { communityId: cached.communityId, isPrivate: cached.isPrivate };
+  }
+
+  const inFlight = channelRealtimeMetaInflight.get(channelId);
+  if (inFlight) return inFlight;
+
+  const load = (async () => {
+    const { rows } = await query(
+      `SELECT community_id::text AS community_id, is_private
+       FROM channels
+       WHERE id = $1`,
+      [channelId],
+    );
+    const row = rows[0] || {};
+    const meta = {
+      communityId: typeof row.community_id === 'string' ? row.community_id : null,
+      isPrivate: row.is_private === true,
+    };
+    channelRealtimeMetaCache.set(channelId, { ...meta, cachedAt: Date.now() });
+    return meta;
+  })().finally(() => {
+    channelRealtimeMetaInflight.delete(channelId);
+  });
+
+  channelRealtimeMetaInflight.set(channelId, load);
+  return load;
+}
+
+function invalidateChannelRealtimeMeta(channelId: string) {
+  channelRealtimeMetaCache.delete(channelId);
+  channelRealtimeMetaInflight.delete(channelId);
 }
 
 async function invalidateCommunityChannelUserFanoutTargetsCache(
@@ -572,7 +623,11 @@ async function publishChannelMessageRecentUserBridge(
  * Publishes message:created for a channel. Order: optional `channel:<id>` first,
  * then user topics (blocking or via side-effect queue).
  */
-async function publishChannelMessageEvent(channelId: string, envelope: Record<string, unknown>) {
+async function publishChannelMessageEvent(
+  channelId: string,
+  envelope: Record<string, unknown>,
+  opts: { communityId?: string | null; isPrivate?: boolean | null } = {},
+) {
   const chKey = `channel:${channelId}`;
   const firstChannel = channelPublishFirst();
   const startedAt = process.hrtime.bigint();
@@ -588,13 +643,30 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
   let candidateCount = 0;
   let cacheResult: 'hit' | 'miss' | 'coalesced' = 'miss';
 
-  if (firstChannel) {
+  async function publishChannelTopicOnly() {
     const channelPublishStartedAt = process.hrtime.bigint();
     await fanout.publish(chKey, envelope);
     fanoutPublishDurationMs.observe(
       { path: 'channel_message', stage: 'channel_topic' },
       Number(process.hrtime.bigint() - channelPublishStartedAt) / 1e6,
     );
+  }
+
+  async function publishCommunityFeedIfPublic() {
+    const meta =
+      opts.communityId && opts.isPrivate !== undefined && opts.isPrivate !== null
+        ? { communityId: opts.communityId, isPrivate: opts.isPrivate === true }
+        : await getChannelRealtimeMeta(channelId).catch((err) => {
+          logger.warn({ err, channelId }, 'Failed to load channel realtime metadata');
+          return { communityId: null, isPrivate: true };
+        });
+    if (!meta.isPrivate && meta.communityId) {
+      await publishCommunityFeedMessage(meta.communityId, envelope);
+    }
+  }
+
+  if (firstChannel) {
+    await publishChannelTopicOnly();
   }
 
   ({
@@ -604,6 +676,8 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
     candidateCount,
     cacheResult,
   } = await userTargetsPromise);
+
+  await publishCommunityFeedIfPublic();
 
   if (envelope?.event === 'message:created' && pendingEnqueueTargets.length > 0) {
     // Reconnect bridge: keep a short-lived per-user pending pointer so reconnect
@@ -662,12 +736,7 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
   }
 
   if (!firstChannel) {
-    const channelPublishStartedAt = process.hrtime.bigint();
-    await fanout.publish(chKey, envelope);
-    fanoutPublishDurationMs.observe(
-      { path: 'channel_message', stage: 'channel_topic' },
-      Number(process.hrtime.bigint() - channelPublishStartedAt) / 1e6,
-    );
+    await publishChannelTopicOnly();
   }
 
   fanoutPublishDurationMs.observe(
@@ -684,8 +753,12 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
   };
 }
 
-async function publishChannelMessageCreated(channelId: string, envelope: Record<string, unknown>) {
-  return publishChannelMessageEvent(channelId, envelope);
+async function publishChannelMessageCreated(
+  channelId: string,
+  envelope: Record<string, unknown>,
+  opts: { communityId?: string | null; isPrivate?: boolean | null } = {},
+) {
+  return publishChannelMessageEvent(channelId, envelope, opts);
 }
 
 module.exports = {

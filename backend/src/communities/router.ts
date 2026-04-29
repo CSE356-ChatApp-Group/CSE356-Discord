@@ -175,6 +175,12 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
           channels: realtimeTargets,
         },
       }),
+      publishUserFeedTargets([req.user.id], {
+        __wsInternal: {
+          kind: "subscribe_communities",
+          communityIds: [communityId],
+        },
+      }),
     ]);
     invalidateWsAclCache(req.user.id, `community:${communityId}`);
     {
