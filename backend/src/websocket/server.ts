@@ -234,6 +234,13 @@ const WS_APP_KEEPALIVE_INTERVAL_MS =
     ? Math.floor(rawAppKeepaliveIntervalMs)
     : 0;
 const WS_APP_KEEPALIVE_FRAME = JSON.stringify({ event: "keepalive" });
+const rawShutdownCloseGraceMs = Number(process.env.WS_SHUTDOWN_CLOSE_GRACE_MS || 2_000);
+const WS_SHUTDOWN_CLOSE_GRACE_MS =
+  Number.isFinite(rawShutdownCloseGraceMs) && rawShutdownCloseGraceMs >= 250
+    ? Math.min(10_000, Math.floor(rawShutdownCloseGraceMs))
+    : 2_000;
+const WS_SERVICE_RESTART_CLOSE_CODE = 1012;
+const WS_SERVICE_RESTART_CLOSE_REASON = "service_restart";
 const rawReplayUserCooldownMs = Number(process.env.WS_REPLAY_USER_COOLDOWN_MS || '3000');
 const WS_REPLAY_USER_COOLDOWN_MS =
   Number.isFinite(rawReplayUserCooldownMs) && rawReplayUserCooldownMs >= 500
@@ -2569,36 +2576,92 @@ function getLocalWebSocketClientCount() {
   }
 }
 
+function waitForSocketClose(ws, timeoutMs) {
+  if (ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      ws.off("close", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    ws.once("close", finish);
+  });
+}
+
 async function shutdown() {
   shuttingDown = true;
   clearInterval(heartbeatInterval);
   clearInterval(presenceSweepInterval);
 
-  // Collect all Redis disconnect-record writes before closing connections.
+  // Collect all Redis disconnect-record writes and connection cleanup before
+  // closing the shared clients in index.ts.  During deploys, terminating
+  // sockets without cleanup leaves short-lived stale connection-set entries;
+  // pending replay then sees SCARD > 0 and can skip offline users.
   // noteRecentDisconnectForSocket is fire-and-forget; if we call wss.close()
   // immediately the Redis writes may race against redis.closeRedisConnections()
   // in index.ts, silently dropping the reconnect-replay keys and causing
   // delivery misses when clients reconnect to a new worker.
   const disconnectWrites: Promise<unknown>[] = [];
+  const cleanupWrites: Promise<unknown>[] = [];
+  const usersToRecompute = new Set();
+  const closeWaits: Promise<unknown>[] = [];
+
   wss.clients.forEach((ws) => {
     try {
       const userId = typeof ws?._userId === "string" ? ws._userId : null;
+      const connectionId = typeof ws?._connectionId === "string" ? ws._connectionId : null;
       if (userId && !ws._recentDisconnectRecorded) {
         ws._recentDisconnectRecorded = true;
         disconnectWrites.push(
           recordRecentDisconnect(
             userId,
-            recentDisconnectPayloadForSocket(ws, 1001, "shutdown"),
+            recentDisconnectPayloadForSocket(
+              ws,
+              WS_SERVICE_RESTART_CLOSE_CODE,
+              WS_SERVICE_RESTART_CLOSE_REASON,
+            ),
           ).catch(() => {}),
         );
       }
-      ws.terminate();
+      if (userId && connectionId) {
+        usersToRecompute.add(userId);
+        cleanupWrites.push(removeConnection(userId, connectionId).catch(() => {}));
+      }
+
+      if (ws.readyState === WebSocket.OPEN) {
+        closeWaits.push(waitForSocketClose(ws, WS_SHUTDOWN_CLOSE_GRACE_MS));
+        ws.close(WS_SERVICE_RESTART_CLOSE_CODE, WS_SERVICE_RESTART_CLOSE_REASON);
+      } else if (ws.readyState === WebSocket.CLOSING) {
+        closeWaits.push(waitForSocketClose(ws, WS_SHUTDOWN_CLOSE_GRACE_MS));
+      } else if (ws.readyState !== WebSocket.CLOSED) {
+        ws.terminate();
+      }
     } catch {
-      // Ignore termination errors during shutdown.
+      // Ignore socket errors during shutdown.
     }
   });
 
-  await Promise.allSettled(disconnectWrites);
+  await Promise.allSettled([...disconnectWrites, ...cleanupWrites]);
+  await Promise.allSettled(
+    Array.from(usersToRecompute).map((userId) => recomputeUserPresence(userId).catch(() => {})),
+  );
+
+  await Promise.allSettled(closeWaits);
+  wss.clients.forEach((ws) => {
+    if (ws.readyState !== WebSocket.CLOSED) {
+      try {
+        ws.terminate();
+      } catch {
+        // Ignore termination errors during shutdown.
+      }
+    }
+  });
 
   await new Promise<void>((resolve) => {
     wss.close(() => resolve());
