@@ -2186,6 +2186,48 @@ describe('channel/conversation last_message async metadata update', () => {
 });
 
 describe('Channel community-membership enforcement', () => {
+  it('allows the community owner/channel creator to read and post in a public channel even if membership cache rows drift', async () => {
+    const owner = await createAuthenticatedUser('publicchannelownerfallback');
+    const outsider = await createAuthenticatedUser('publicchanneloutsiderfallback');
+    const slug = `public-owner-fallback-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug, description: 'owner public channel access fallback' });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `owner-fallback-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    await pool.query(
+      'DELETE FROM community_members WHERE community_id = $1 AND user_id = $2',
+      [communityId, owner.user.id],
+    );
+
+    const postOwnerRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'owner fallback message' });
+    expect(postOwnerRes.status).toBe(201);
+
+    const ownerGetRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(ownerGetRes.status).toBe(200);
+    expect(ownerGetRes.body.messages.some((m: any) => m.id === postOwnerRes.body.message.id)).toBe(true);
+
+    const outsiderGetRes = await request(app)
+      .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
+      .set('Authorization', `Bearer ${outsider.accessToken}`);
+    expect(outsiderGetRes.status).toBe(403);
+  });
+
   it('rejects reading or posting in a public channel when the user is not in the community', async () => {
     const owner = await createAuthenticatedUser('publicchannelowner');
     const outsider = await createAuthenticatedUser('publicchanneloutsider');
@@ -2221,6 +2263,64 @@ describe('Channel community-membership enforcement', () => {
       .set('Authorization', `Bearer ${outsider.accessToken}`)
       .send({ channelId, content: 'outsider should not post' });
     expect(outsiderPostRes.status).toBe(403);
+  });
+});
+
+describe('GET /unread-counts', () => {
+  it('returns aggregate unread counts for readable channels and active DM conversations', async () => {
+    const owner = await createAuthenticatedUser('unreadowner');
+    const member = await createAuthenticatedUser('unreadmember');
+    const slug = `unread-${uniqueSuffix()}`;
+
+    const communityRes = await request(app)
+      .post('/api/v1/communities')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ slug, name: slug });
+    expect(communityRes.status).toBe(201);
+    const communityId = communityRes.body.community.id;
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .send({});
+    expect(joinRes.status).toBe(200);
+
+    const channelRes = await request(app)
+      .post('/api/v1/channels')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ communityId, name: `unread-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
+    expect(channelRes.status).toBe(201);
+    const channelId = channelRes.body.channel.id;
+
+    const channelMsgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'channel unread for member' });
+    expect(channelMsgRes.status).toBe(201);
+
+    const dmRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [member.user.id] });
+    expect(dmRes.status).toBe(201);
+    const conversationId = dmRes.body.conversation.id;
+
+    const dmMsgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ conversationId, content: 'dm unread for member' });
+    expect(dmMsgRes.status).toBe(201);
+
+    const unreadRes = await request(app)
+      .get('/api/v1/unread-counts')
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(unreadRes.status).toBe(200);
+
+    const counts = unreadRes.body.unreadCounts || unreadRes.body.counts || [];
+    const channelCount = counts.find((row: any) => row.conversationId === channelId);
+    const dmCount = counts.find((row: any) => row.conversationId === conversationId);
+    expect(channelCount?.count).toBeGreaterThanOrEqual(1);
+    expect(dmCount?.count).toBeGreaterThanOrEqual(1);
   });
 });
 

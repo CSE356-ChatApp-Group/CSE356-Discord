@@ -1022,10 +1022,13 @@ async function checkChannelAccessForUser(
     const { rows } = await query(
       `SELECT EXISTS (
          SELECT 1 FROM channels c
-         JOIN community_members cm ON cm.community_id = c.community_id AND cm.user_id = $2
+         JOIN communities co ON co.id = c.community_id
          WHERE c.id = $1
            AND (c.is_private = FALSE
+                OR co.owner_id = $2
                 OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
+           AND (co.owner_id = $2
+                OR EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2))
        ) AS has_access`,
       [channelId, userId],
     );
@@ -1154,10 +1157,13 @@ async function ensureChannelAccess(channelId, userId) {
   const { rows } = await query(
     `SELECT 1
      FROM channels c
+     JOIN communities co ON co.id = c.community_id
      WHERE c.id = $1
        AND (c.is_private = FALSE
+            OR co.owner_id = $2
             OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
-       AND EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2)`,
+       AND (co.owner_id = $2
+            OR EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2))`,
     [channelId, userId],
   );
   return rows.length > 0;
@@ -1556,17 +1562,25 @@ router.get(
               let accessWhere = `EXISTS (
                 SELECT 1
                 FROM channels c
-                JOIN community_members community_member
-                  ON community_member.community_id = c.community_id
-                 AND community_member.user_id = $2
+                JOIN communities co ON co.id = c.community_id
                 WHERE c.id = $3
                   AND (
                     c.is_private = FALSE
+                    OR co.owner_id = $2
                     OR EXISTS (
                       SELECT 1
                       FROM channel_members cm
                       WHERE cm.channel_id = c.id
                         AND cm.user_id = $2
+                    )
+                  )
+                  AND (
+                    co.owner_id = $2
+                    OR EXISTS (
+                      SELECT 1
+                      FROM community_members community_member
+                      WHERE community_member.community_id = c.community_id
+                        AND community_member.user_id = $2
                     )
                   )
               )`;
@@ -1763,12 +1777,17 @@ router.get(
         if (!accessWhere) {
           accessWhere = `EXISTS (
             SELECT 1 FROM channels c
-            JOIN community_members community_member
-              ON community_member.community_id = c.community_id
-             AND community_member.user_id = $2
+            JOIN communities co ON co.id = c.community_id
             WHERE c.id = $${ci}
               AND (c.is_private = FALSE
+                   OR co.owner_id = $2
                    OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
+              AND (co.owner_id = $2
+                   OR EXISTS (
+                     SELECT 1 FROM community_members community_member
+                     WHERE community_member.community_id = c.community_id
+                       AND community_member.user_id = $2
+                   ))
           )`;
         }
         targetWhere = `m.channel_id = $${ci}`;
@@ -3000,14 +3019,19 @@ router.patch(
              CASE
                WHEN m.channel_id IS NOT NULL THEN EXISTS (
                  SELECT 1 FROM channels c
-                 JOIN community_members community_member
-                   ON community_member.community_id = c.community_id
-                  AND community_member.user_id = $3
+                 JOIN communities co ON co.id = c.community_id
                  WHERE c.id = m.channel_id
                    AND (c.is_private = FALSE
+                        OR co.owner_id = $3
                         OR EXISTS (
                           SELECT 1 FROM channel_members
                           WHERE channel_id = c.id AND user_id = $3
+                        ))
+                   AND (co.owner_id = $3
+                        OR EXISTS (
+                          SELECT 1 FROM community_members community_member
+                          WHERE community_member.community_id = c.community_id
+                            AND community_member.user_id = $3
                         ))
                )
                WHEN m.conversation_id IS NOT NULL THEN EXISTS (
@@ -3126,14 +3150,19 @@ router.delete("/:id", param("id").isUUID(), async (req, res, next) => {
              CASE
                WHEN m.channel_id IS NOT NULL THEN EXISTS (
                  SELECT 1 FROM channels c
-                 JOIN community_members community_member
-                   ON community_member.community_id = c.community_id
-                  AND community_member.user_id = $2
+                 JOIN communities co ON co.id = c.community_id
                  WHERE c.id = m.channel_id
                    AND (c.is_private = FALSE
+                        OR co.owner_id = $2
                         OR EXISTS (
                           SELECT 1 FROM channel_members
                           WHERE channel_id = c.id AND user_id = $2
+                        ))
+                   AND (co.owner_id = $2
+                        OR EXISTS (
+                          SELECT 1 FROM community_members community_member
+                          WHERE community_member.community_id = c.community_id
+                            AND community_member.user_id = $2
                         ))
                )
                WHEN m.conversation_id IS NOT NULL THEN EXISTS (

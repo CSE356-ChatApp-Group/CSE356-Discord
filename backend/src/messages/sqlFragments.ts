@@ -61,18 +61,24 @@ SELECT
   EXISTS (
     SELECT 1
     FROM channels c
+    JOIN communities co ON co.id = c.community_id
     WHERE c.id = $1
       AND (c.is_private = FALSE
+           OR co.owner_id = $2
            OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
-      AND EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2)
+      AND (co.owner_id = $2
+           OR EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2))
   ) AS has_access,
   (
     SELECT c.community_id
     FROM channels c
+    JOIN communities co ON co.id = c.community_id
     WHERE c.id = $1
       AND (c.is_private = FALSE
+           OR co.owner_id = $2
            OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
-      AND EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2)
+      AND (co.owner_id = $2
+           OR EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2))
     LIMIT 1
   ) AS community_id`;
 
@@ -89,18 +95,20 @@ SELECT
   $3::text,
   CAST($4 AS uuid)
 FROM channels c
+JOIN communities co ON co.id = c.community_id
 WHERE c.id = $1::uuid
   AND (
     c.is_private = FALSE
+    OR co.owner_id = $2
     OR EXISTS (
       SELECT 1 FROM channel_members chm
       WHERE chm.channel_id = c.id AND chm.user_id = $2
     )
   )
-  AND EXISTS (
+  AND (co.owner_id = $2 OR EXISTS (
     SELECT 1 FROM community_members cm
     WHERE cm.community_id = c.community_id AND cm.user_id = $2
-  )
+  ))
 RETURNING
   ${MESSAGE_INSERT_RETURNING_CORE.trim()},
   (SELECT ch.community_id FROM channels ch WHERE ch.id = m.channel_id LIMIT 1) AS post_insert_community_id`;

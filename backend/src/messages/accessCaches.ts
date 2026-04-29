@@ -59,15 +59,22 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
   const { rows } = await query(
     `SELECT c.id::text AS id
      FROM channels c
-     JOIN community_members community_member
-       ON community_member.community_id = c.community_id
-      AND community_member.user_id = $2::uuid
+     JOIN communities co ON co.id = c.community_id
      WHERE c.id = $1::uuid
        AND (
          c.is_private = FALSE
+         OR co.owner_id = $2::uuid
          OR EXISTS (
            SELECT 1 FROM channel_members cm
            WHERE cm.channel_id = c.id AND cm.user_id = $2::uuid
+         )
+       )
+       AND (
+         co.owner_id = $2::uuid
+         OR EXISTS (
+           SELECT 1 FROM community_members community_member
+           WHERE community_member.community_id = c.community_id
+             AND community_member.user_id = $2::uuid
          )
        )
      LIMIT 1`,
@@ -105,14 +112,21 @@ const MESSAGE_TARGET_SQL = `SELECT m.id,
           WHEN m.channel_id IS NOT NULL THEN EXISTS (
             SELECT 1
             FROM channels c
-            JOIN community_members community_member
-              ON community_member.community_id = c.community_id
-             AND community_member.user_id = $2
+            JOIN communities co ON co.id = c.community_id
             LEFT JOIN channel_members cm
               ON cm.channel_id = c.id
              AND cm.user_id = $2
             WHERE c.id = m.channel_id
-              AND (c.is_private = FALSE OR cm.user_id IS NOT NULL)
+              AND (c.is_private = FALSE OR co.owner_id = $2 OR cm.user_id IS NOT NULL)
+              AND (
+                co.owner_id = $2
+                OR EXISTS (
+                  SELECT 1
+                  FROM community_members community_member
+                  WHERE community_member.community_id = c.community_id
+                    AND community_member.user_id = $2
+                )
+              )
           )
           ELSE FALSE
         END AS has_access
