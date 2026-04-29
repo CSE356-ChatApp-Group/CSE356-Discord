@@ -51,6 +51,7 @@ jest.mock('../src/messages/realtimePayload', () => ({
 const pendingClassMetric = { inc: jest.fn() };
 const pendingEntriesHist = { observe: jest.fn() };
 const offlineSkipMetric = { inc: jest.fn() };
+const secondProbeRecentMetric = { inc: jest.fn() };
 const trimMetric = { inc: jest.fn() };
 const zsetSizeMetric = { observe: jest.fn() };
 const guardMetric = { inc: jest.fn() };
@@ -61,6 +62,7 @@ jest.mock('../src/utils/metrics', () => ({
   wsPendingReplayGuardTotal: guardMetric,
   pendingReplayRecipientTotal: pendingClassMetric,
   pendingReplayEntriesPerMessage: pendingEntriesHist,
+  pendingReplaySecondProbeRecentUserTotal: secondProbeRecentMetric,
   offlinePendingSkippedTotal: offlineSkipMetric,
 }));
 
@@ -81,16 +83,20 @@ describe('realtimePending recipient filter', () => {
     pendingClassMetric.inc.mockReset();
     pendingEntriesHist.observe.mockReset();
     offlineSkipMetric.inc.mockReset();
+    secondProbeRecentMetric.inc.mockReset();
     trimMetric.inc.mockReset();
     zsetSizeMetric.observe.mockReset();
     process.env.WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED = 'false';
     process.env.WS_REPLAY_PENDING_ONLY_ACTIVE = 'true';
     process.env.WS_REPLAY_PENDING_LEGACY_ALL = 'false';
     process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK = 'false';
+    delete process.env.WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK;
   });
 
   it('skips Redis pending writes when no user is connected or recent', async () => {
-    classifyExec.mockResolvedValue([[null, 0], [null, 0]]);
+    classifyExec
+      .mockResolvedValueOnce([[null, 0], [null, 0]])
+      .mockResolvedValueOnce([[null, 0], [null, 0]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
     await enqueuePendingMessageForUsers(['user:ghost'], {
       event: 'message:created',
@@ -100,7 +106,7 @@ describe('realtimePending recipient filter', () => {
     expect(offlineSkipMetric.inc).toHaveBeenCalledWith(1);
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'offline_skipped' }, 1);
     expect(enqueueExec).not.toHaveBeenCalled();
-    expect(pipelineCallCount).toBe(1);
+    expect(pipelineCallCount).toBe(2);
   });
 
   it('enqueues when user has active connections (scard>0)', async () => {
@@ -121,6 +127,54 @@ describe('realtimePending recipient filter', () => {
     expect(pendingEntriesHist.observe).toHaveBeenCalledWith(1);
     expect(enqueueExec).toHaveBeenCalled();
     expect(pipelineCallCount).toBe(2);
+  });
+
+  it('skips second EXISTS probe when recentTargets is present but empty (channel-style)', async () => {
+    classifyExec.mockResolvedValue([[null, 0], [null, 0]]);
+    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    await enqueuePendingMessageForUsers(
+      ['user:ghost'],
+      { event: 'message:created', data: { id: 'm-empty-hint', channel_id: 'c1' } },
+      { recentTargets: [] },
+    );
+    expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'offline_skipped' }, 1);
+    expect(enqueueExec).not.toHaveBeenCalled();
+    expect(classifyExec).toHaveBeenCalledTimes(1);
+  });
+
+  it('conversation path skips second probe when WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK=false', async () => {
+    process.env.WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK = 'false';
+    classifyExec.mockResolvedValue([[null, 0], [null, 0]]);
+    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    await enqueuePendingMessageForUsers(['user:strict'], {
+      event: 'message:created',
+      data: { id: 'm-strict', channel_id: 'c1' },
+    });
+    expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'offline_skipped' }, 1);
+    expect(enqueueExec).not.toHaveBeenCalled();
+    expect(classifyExec).toHaveBeenCalledTimes(1);
+  });
+
+  it('conversation path (no recentTargets opt) second-probes ws:recent_connect when unified misses', async () => {
+    classifyExec
+      .mockResolvedValueOnce([[null, 0], [null, 0]])
+      .mockResolvedValueOnce([[null, 1], [null, 0]]);
+    enqueueExec.mockResolvedValue([
+      [null, 'OK'],
+      [null, 1],
+      [null, 1],
+      [null, 0],
+      [null, 1],
+    ]);
+    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    await enqueuePendingMessageForUsers(['user:conv'], {
+      event: 'message:created',
+      data: { id: 'm-conv-rc', channel_id: 'c1' },
+    });
+    expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'recent' }, 1);
+    expect(secondProbeRecentMetric.inc).toHaveBeenCalledWith({ mode: 'conversation_marker' }, 1);
+    expect(enqueueExec).toHaveBeenCalled();
+    expect(classifyExec).toHaveBeenCalledTimes(2);
   });
 
   it('enqueues recent class when recentTargets hints user and scard=0 (no EXISTS)', async () => {
@@ -162,6 +216,7 @@ describe('realtimePending recipient filter', () => {
       data: { id: 'm-leg-rc', channel_id: 'c1' },
     });
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'recent' }, 1);
+    expect(secondProbeRecentMetric.inc).toHaveBeenCalledWith({ mode: 'legacy_global' }, 1);
     expect(enqueueExec).toHaveBeenCalled();
     expect(classifyExec).toHaveBeenCalledTimes(2);
   });

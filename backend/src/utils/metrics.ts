@@ -638,6 +638,14 @@ const pendingReplayEntriesPerMessage = new client.Histogram({
   buckets: [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233],
 });
 
+/** Users classified `recent` via phase-2 EXISTS(ws:recent_connect/replay_pending) after unified key miss. */
+const pendingReplaySecondProbeRecentUserTotal = new client.Counter({
+  name: 'pending_replay_second_probe_recent_user_total',
+  help:
+    'Users added to pending replay after phase-2 marker EXISTS: conversation_marker = legacy off + no recentTargets opt; legacy_global = WS_PENDING_ELIGIBLE_LEGACY_FALLBACK=true',
+  labelNames: ['mode'],
+});
+
 /** Users skipped for pending replay (fully offline / no recent session marker). */
 const offlinePendingSkippedTotal = new client.Counter({
   name: 'offline_pending_skipped_total',
@@ -1332,6 +1340,8 @@ function startPgPoolMetrics(pool) {
     pendingReplayRecipientTotal.inc({ class: 'legacy_enqueue' }, 0);
     pendingReplayEntriesPerMessage.observe(0);
     offlinePendingSkippedTotal.inc(0);
+    pendingReplaySecondProbeRecentUserTotal.inc({ mode: 'conversation_marker' }, 0);
+    pendingReplaySecondProbeRecentUserTotal.inc({ mode: 'legacy_global' }, 0);
     // Do not zero chatapp_ws_replay_* gauges here: server.ts sets semaphore cap/inflight
     // on load; forcing cap=0 made alerts using clamp_min(cap,1) false-positive (inflight>1).
     abuseBlockedSubnetTotal.inc(0);
@@ -1440,6 +1450,7 @@ module.exports = {
   realtimeMissAttributionTotal,
   pendingReplayRecipientTotal,
   pendingReplayEntriesPerMessage,
+  pendingReplaySecondProbeRecentUserTotal,
   offlinePendingSkippedTotal,
   redisFanoutPublishFailuresTotal,
   messageLastMessageRepointFkRetryTotal,

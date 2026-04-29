@@ -16,6 +16,7 @@ const {
   wsPendingReplayGuardTotal,
   pendingReplayRecipientTotal,
   pendingReplayEntriesPerMessage,
+  pendingReplaySecondProbeRecentUserTotal,
   offlinePendingSkippedTotal,
 } = require('../utils/metrics');
 
@@ -62,6 +63,15 @@ const WS_REPLAY_PENDING_LEGACY_ALL =
  */
 const WS_PENDING_ELIGIBLE_LEGACY_FALLBACK =
   String(process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK ?? 'true').toLowerCase() !== 'false';
+
+/**
+ * When global legacy fallback is off, still run the second EXISTS probe for enqueue paths that
+ * do not pass `recentTargets` (conversation fanout). Channel fanout always passes explicit
+ * `recentTargets` and keeps the strict single-phase path to preserve Redis savings at scale.
+ */
+const WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK =
+  String(process.env.WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK ?? 'true').toLowerCase() !==
+  'false';
 
 const PENDING_MIN_MARKER = '__pendingMin';
 let pendingGuardCachedUntilMs = 0;
@@ -123,10 +133,13 @@ function pendingReplayFilterEnabled() {
  *
  * @param recentUserIdsKnown - user ids already known recent from the same fanout pass
  *   (e.g. `recentConnectTargets`); skips EXISTS on `ws:pending_eligible:*` for them.
+ * @param recentTargetsHintProvided - `true` when the caller passed `recentTargets` on `opts`
+ *   (even if empty). Channel fanout uses this to avoid a second Redis EXISTS pass at large N.
  */
 async function filterUsersEligibleForPendingReplay(
   userIds: string[],
   recentUserIdsKnown?: Set<string>,
+  recentTargetsHintProvided?: boolean,
 ): Promise<{
   eligible: string[];
   perClass: { connected: number; recent: number; offlineSkipped: number };
@@ -140,6 +153,10 @@ async function filterUsersEligibleForPendingReplay(
   const knownRecent = recentUserIdsKnown instanceof Set ? recentUserIdsKnown : new Set<string>();
   const useReplayKey = WS_REPLAY_RECENT_USER_WINDOW_SECONDS > 0;
   const legacyFallback = WS_PENDING_ELIGIBLE_LEGACY_FALLBACK;
+  const hintProvided = recentTargetsHintProvided === true;
+  const conversationMarkerFallback =
+    !legacyFallback && !hintProvided && WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK;
+  const useSecondMarkerProbe = legacyFallback || conversationMarkerFallback;
 
   for (let offset = 0; offset < userIds.length; offset += REDIS_PENDING_CLASSIFY_BATCH) {
     const slice = userIds.slice(offset, offset + REDIS_PENDING_CLASSIFY_BATCH);
@@ -184,7 +201,7 @@ async function filterUsersEligibleForPendingReplay(
       } else if (row.pendingExists) {
         eligible.push(row.uid);
         perClass.recent += 1;
-      } else if (legacyFallback) {
+      } else if (useSecondMarkerProbe) {
         needLegacyProbe.push(row.uid);
       } else {
         perClass.offlineSkipped += 1;
@@ -210,6 +227,11 @@ async function filterUsersEligibleForPendingReplay(
       if (exRecent || exReplay) {
         eligible.push(uid);
         perClass.recent += 1;
+        if (conversationMarkerFallback) {
+          pendingReplaySecondProbeRecentUserTotal.inc({ mode: 'conversation_marker' }, 1);
+        } else if (legacyFallback) {
+          pendingReplaySecondProbeRecentUserTotal.inc({ mode: 'legacy_global' }, 1);
+        }
       } else {
         perClass.offlineSkipped += 1;
       }
@@ -266,6 +288,8 @@ async function enqueuePendingMessageForUsers(
   const userIds = normalizeUserIds(targets);
   if (!userIds.length) return;
   const recentKnown = recentTargetsUserIdSet(opts?.recentTargets);
+  const recentTargetsHintProvided =
+    opts != null && Object.prototype.hasOwnProperty.call(opts, 'recentTargets');
   if (await shouldSkipPendingReplayWrite()) {
     wsPendingReplayGuardTotal.inc({ reason: 'redis_memory_high' });
     const now = Date.now();
@@ -285,7 +309,11 @@ async function enqueuePendingMessageForUsers(
 
   let enqueueUserIds = userIds;
   if (pendingReplayFilterEnabled()) {
-    const { eligible, perClass } = await filterUsersEligibleForPendingReplay(userIds, recentKnown);
+    const { eligible, perClass } = await filterUsersEligibleForPendingReplay(
+      userIds,
+      recentKnown,
+      recentTargetsHintProvided,
+    );
     enqueueUserIds = eligible;
     if (perClass.connected > 0) {
       pendingReplayRecipientTotal.inc({ class: 'connected' }, perClass.connected);

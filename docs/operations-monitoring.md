@@ -217,6 +217,8 @@ When **average** end-to-end delivery (or grader-reported delivery) **spikes** wh
 | **Realtime by Redis topic prefix** (channel-first migration) | `sum by (topic_prefix) (rate(ws_reliable_delivery_topic_total{job="chatapp-api",path="realtime"}[5m]))` — `topic_prefix` is `channel`, `user`, `conversation`, `community`, `userfeed`, or `other` |
 | Replay delivered (count / s) | `sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="replay"}[5m]))` |
 | **Replay fallback rate** | `100 * sum(rate(ws_reliable_delivery_total{path="replay"}[5m])) / clamp_min(sum(rate(ws_reliable_delivery_total[5m])), 1e-9)` |
+| **Replay by topic prefix** (channel vs DM vs user feed) | `sum by (topic_prefix) (rate(ws_reliable_delivery_topic_total{job="chatapp-api",path="replay"}[5m]))` |
+| **Pending classify: second-probe rescues** | `sum by (mode) (rate(pending_replay_second_probe_recent_user_total{job="chatapp-api"}[5m]))` — `conversation_marker` vs `legacy_global` |
 | **Realtime success rate** | `100 * sum(rate(ws_reliable_delivery_total{path="realtime"}[5m])) / clamp_min(sum(rate(ws_reliable_delivery_total[5m])), 1e-9)` |
 | Delivery timeout (post-insert) | `sum by (phase) (rate(delivery_timeout_total{job="chatapp-api"}[5m]))` — today mainly **`phase=cache_bust`** (bounded wait after commit; see POST /messages path) |
 | Miss / stress signals | `sum by (reason) (rate(realtime_miss_attribution_total{job="chatapp-api"}[5m]))` |
@@ -268,7 +270,7 @@ Exact per-recipient “why” is not always observable on one worker (userfeed s
 
 ### Pending replay Redis footprint (`ws:pending:user:*`)
 
-**Channel `message:created`:** after **`channel:<id>`** publish, **`enqueuePendingMessageForUsers(pendingEnqueueTargets, …)`** receives the **capped visible-member** list (same as fanout candidate list). **`filterUsersEligibleForPendingReplay`** then keeps only **connected** or **recent-marker** users, so offline members are not written. Inline **`user:`** Redis publishes may be smaller when **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`**, but pending enqueue still uses the full capped list so **`user_only`** clients do not lose the pending safety net. **DM `message:created`:** **`enqueuePendingMessageForUsers(userIds, …)`** receives conversation participant user ids from **`publishConversationEventNow`**.
+**Channel `message:created`:** after **`channel:<id>`** publish, **`enqueuePendingMessageForUsers(pendingEnqueueTargets, …)`** receives the **capped visible-member** list (same as fanout candidate list). **`filterUsersEligibleForPendingReplay`** then keeps only **connected** or **recent-marker** users, so offline members are not written. Inline **`user:`** Redis publishes may be smaller when **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`**, but pending enqueue still uses the full capped list so **`user_only`** clients do not lose the pending safety net. **DM `message:created`:** **`enqueuePendingMessageForUsers(userIds, …)`** receives conversation participant user ids from **`publishConversationEventNow`** (no `recentTargets` hint). With **`WS_PENDING_ELIGIBLE_LEGACY_FALLBACK=false`**, the server still runs the **conversation marker fallback** by default: a second **`EXISTS ws:recent_connect:*` / `ws:replay_pending_eligible:*`** pass for phase‑1 misses (channel fanout passes explicit `recentTargets` and stays single‑phase). Disable with **`WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK=false`**.
 
 **Recipient classes (filtering mode, default on):**
 
@@ -278,7 +280,7 @@ Exact per-recipient “why” is not always observable on one worker (userfeed s
 | **recent** | No active socket, but `EXISTS ws:recent_connect:<id>` or `ws:replay_pending_eligible:<id>` (set on connect; TTL = **`WS_RECENT_CONNECT_TTL_SECONDS`** / **`WS_REPLAY_RECENT_USER_WINDOW_SECONDS`**) — *recently disconnected / reconnect bridge* | Yes |
 | **offline** | Neither marker nor connections | **No** (skipped) |
 
-**Metrics:** **`pending_replay_recipient_total{class}`** (`connected`, `recent`, `offline_skipped`, `legacy_enqueue`), **`pending_replay_entries_per_message`**, **`offline_pending_skipped_total`**, **`ws_pending_user_zset_size`** (ZSET cardinality after enqueue). **Rates:** **`realtime_success_rate`** and **`replay_fallback_rate`** from **`ws_reliable_delivery_total`** (see snapshot script / Example PromQL).
+**Metrics:** **`pending_replay_recipient_total{class}`** (`connected`, `recent`, `offline_skipped`, `legacy_enqueue`), **`pending_replay_second_probe_recent_user_total{mode}`** (`conversation_marker` = targeted DM path when global legacy is off; `legacy_global` = second probe under **`WS_PENDING_ELIGIBLE_LEGACY_FALLBACK=true`**), **`pending_replay_entries_per_message`**, **`offline_pending_skipped_total`**, **`ws_pending_user_zset_size`** (ZSET cardinality after enqueue). **Replay mix by logical topic:** **`ws_reliable_delivery_topic_total{path="replay"}`** by **`topic_prefix`** (`channel`, `conversation`, `user`, …). **Rates:** **`realtime_success_rate`** and **`replay_fallback_rate`** from **`ws_reliable_delivery_total`** (see snapshot script / Example PromQL).
 
 **Spec:** Pending replay is **not** the source of durable history or unread counts — Postgres and normal app paths are. Skipping pending for offline users does **not** change read receipts, unread aggregates, or REST history.
 
