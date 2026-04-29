@@ -13,53 +13,74 @@
  * PATCH  /api/v1/communities/:id/members/:userId – owner-only role update
  */
 
-'use strict';
+"use strict";
 
-const express = require('express');
-const { rateLimit } = require('express-rate-limit');
-const { RedisStore } = require('rate-limit-redis');
-const { validate: uuidValidate } = require('uuid');
-const { body, param, validationResult } = require('express-validator');
+const express = require("express");
+const { rateLimit } = require("express-rate-limit");
+const { RedisStore } = require("rate-limit-redis");
+const { validate: uuidValidate } = require("uuid");
+const { body, param, validationResult } = require("express-validator");
 
-const { query, queryRead, getClient } = require('../db/pool');
-const redis            = require('../db/redis');
-const logger           = require('../utils/logger');
-const { authenticate } = require('../middleware/authenticate');
-const presenceService  = require('../presence/service');
-const fanout           = require('../websocket/fanout');
-const { publishUserFeedTargets } = require('../websocket/userFeed');
-const { invalidateWsBootstrapCache, invalidateWsAclCache } = require('../websocket/server');
-const { invalidateCommunityChannelUserFanoutTargetsCache, getCommunityChannelIds } = require('../messages/channelRealtimeFanout');
-const { warmChannelAccessCacheForUser, evictChannelAccessCacheForUser } = require('../messages/channelAccessCache');
-const { recordEndpointListCache, recordEndpointListCacheBypass } = require('../utils/endpointCacheMetrics');
-const { apiRateLimitHitsTotal } = require('../utils/metrics');
-const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
+const { query, queryRead, getClient } = require("../db/pool");
+const redis = require("../db/redis");
+const logger = require("../utils/logger");
+const { authenticate } = require("../middleware/authenticate");
+const presenceService = require("../presence/service");
+const fanout = require("../websocket/fanout");
+const { publishUserFeedTargets } = require("../websocket/userFeed");
+const {
+  invalidateWsBootstrapCache,
+  invalidateWsAclCache,
+} = require("../websocket/server");
+const {
+  invalidateCommunityChannelUserFanoutTargetsCache,
+  getCommunityChannelIds,
+} = require("../messages/channelRealtimeFanout");
+const {
+  warmChannelAccessCacheForUser,
+  evictChannelAccessCacheForUser,
+} = require("../messages/channelAccessCache");
+const {
+  recordEndpointListCache,
+  recordEndpointListCacheBypass,
+} = require("../utils/endpointCacheMetrics");
+const { apiRateLimitHitsTotal } = require("../utils/metrics");
+const { recordAbuseStrikeFromRequest } = require("../utils/autoIpBan");
 const {
   staleCacheKey,
   getJsonCache,
   setJsonCacheWithStale,
   withDistributedSingleflight,
-} = require('../utils/distributedSingleflight');
-const { getChannelLastMessageMetaMapFromRedis } = require('../messages/repointLastMessage');
+} = require("../utils/distributedSingleflight");
+const {
+  getChannelLastMessageMetaMapFromRedis,
+} = require("../messages/repointLastMessage");
 const {
   incrCommunityMemberCount,
   decrCommunityMemberCount,
   getCommunityMemberCountsFromRedis,
-} = require('./communityMemberCount');
+} = require("./communityMemberCount");
 
 const router = express.Router();
 
 // POST /join with no id in body: 400 before auth (clearer than 401 for malformed harnesses + tests).
 router.use((req, res, next) => {
-  if (req.method !== 'POST') return next();
-  const path = String(req.path || '').replace(/\/$/, '') || '/';
-  if (path !== '/join') return next();
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (req.method !== "POST") return next();
+  const path = String(req.path || "").replace(/\/$/, "") || "/";
+  if (path !== "/join") return next();
+  const body = req.body && typeof req.body === "object" ? req.body : {};
   const raw = String(
-    body.communityId ?? body.community_id ?? body.id ?? body.slug ?? body.name ?? ''
+    body.communityId ??
+      body.community_id ??
+      body.id ??
+      body.slug ??
+      body.name ??
+      "",
   ).trim();
   if (!raw) {
-    return res.status(400).json({ error: 'Missing community id', requestId: req.id });
+    return res
+      .status(400)
+      .json({ error: "Missing community id", requestId: req.id });
   }
   next();
 });
@@ -68,7 +89,10 @@ router.use(authenticate);
 
 function validate(req, res) {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) { res.status(400).json({ errors: errors.array() }); return false; }
+  if (!errors.isEmpty()) {
+    res.status(400).json({ errors: errors.array() });
+    return false;
+  }
   return true;
 }
 
@@ -77,17 +101,17 @@ function validate(req, res) {
  * non-UUID matches a public community by exact slug or exact name (LIMIT 2 → ambiguous).
  */
 async function resolveCommunityIdForPublicJoin(rawId) {
-  const token = String(rawId ?? '').trim();
-  if (!token) return { ok: false, reason: 'missing' };
-  if (token.length > 512) return { ok: false, reason: 'invalid' };
+  const token = String(rawId ?? "").trim();
+  if (!token) return { ok: false, reason: "missing" };
+  if (token.length > 512) return { ok: false, reason: "invalid" };
 
   if (uuidValidate(token)) {
     const { rows } = await query(
-      'SELECT id, is_public FROM communities WHERE id = $1',
-      [token]
+      "SELECT id, is_public FROM communities WHERE id = $1",
+      [token],
     );
     const row = rows[0];
-    if (!row) return { ok: false, reason: 'notfound' };
+    if (!row) return { ok: false, reason: "notfound" };
     return { ok: true, id: row.id, isPublic: row.is_public };
   }
 
@@ -95,27 +119,29 @@ async function resolveCommunityIdForPublicJoin(rawId) {
     `SELECT id FROM communities
      WHERE is_public = true AND (slug = $1 OR name = $1)
      LIMIT 2`,
-    [token]
+    [token],
   );
-  if (rows.length === 0) return { ok: false, reason: 'notfound' };
-  if (rows.length > 1) return { ok: false, reason: 'ambiguous' };
+  if (rows.length === 0) return { ok: false, reason: "notfound" };
+  if (rows.length > 1) return { ok: false, reason: "ambiguous" };
   return { ok: true, id: rows[0].id, isPublic: true };
 }
 
 /** Shared join implementation after resolveCommunityIdForPublicJoin. */
 async function executeResolvedPublicJoin(req, res, next, resolved) {
   if (!resolved.ok) {
-    if (resolved.reason === 'missing' || resolved.reason === 'invalid') {
-      return res.status(400).json({ error: 'Invalid community id' });
+    if (resolved.reason === "missing" || resolved.reason === "invalid") {
+      return res.status(400).json({ error: "Invalid community id" });
     }
-    if (resolved.reason === 'ambiguous') {
-      return res.status(409).json({ error: 'Multiple communities match; use id or slug' });
+    if (resolved.reason === "ambiguous") {
+      return res
+        .status(409)
+        .json({ error: "Multiple communities match; use id or slug" });
     }
-    return res.status(404).json({ error: 'Community not found' });
+    return res.status(404).json({ error: "Community not found" });
   }
 
   if (!resolved.isPublic) {
-    return res.status(403).json({ error: 'Community is private' });
+    return res.status(403).json({ error: "Community is private" });
   }
 
   const communityId = resolved.id;
@@ -123,7 +149,7 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
   try {
     const { rowCount } = await query(
       `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-      [communityId, req.user.id]
+      [communityId, req.user.id],
     );
     if (!rowCount) {
       return res.json({ success: true });
@@ -135,7 +161,9 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
       listCommunityRealtimeTargets(communityId, req.user.id),
       getCommunityChannelIds(communityId),
     ]);
-    warmChannelAccessCacheForUser(redis, channelIds, req.user.id).catch(() => {});
+    warmChannelAccessCacheForUser(redis, channelIds, req.user.id).catch(
+      () => {},
+    );
 
     await Promise.allSettled([
       invalidateCommunityChannelUserFanoutTargetsCache(communityId, channelIds),
@@ -143,7 +171,7 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
       invalidateWsBootstrapCache(req.user.id),
       publishUserFeedTargets([req.user.id], {
         __wsInternal: {
-          kind: 'subscribe_channels',
+          kind: "subscribe_channels",
           channels: realtimeTargets,
         },
       }),
@@ -156,7 +184,7 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
     redis.del(membersCacheKey(communityId)).catch(() => {});
 
     await fanout.publish(`community:${communityId}`, {
-      event: 'community:member_joined',
+      event: "community:member_joined",
       data: { userId: req.user.id, communityId },
     });
 
@@ -167,33 +195,44 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
 }
 
 function parsePositiveIntEnv(name, fallback) {
-  const parsed = Number.parseInt(process.env[name] || '', 10);
+  const parsed = Number.parseInt(process.env[name] || "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function clientIp(req) {
-  const realIp = req.headers['x-real-ip'];
+  const realIp = req.headers["x-real-ip"];
   const firstRealIp = Array.isArray(realIp) ? realIp[0] : realIp;
   if (firstRealIp) return firstRealIp.trim();
 
   if (req.ip) return req.ip.trim();
 
-  const forwardedFor = req.headers['x-forwarded-for'];
-  const firstForwarded = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-  return (firstForwarded ? firstForwarded.split(',')[0] : req.socket?.remoteAddress || 'unknown').trim();
+  const forwardedFor = req.headers["x-forwarded-for"];
+  const firstForwarded = Array.isArray(forwardedFor)
+    ? forwardedFor[0]
+    : forwardedFor;
+  return (
+    firstForwarded
+      ? firstForwarded.split(",")[0]
+      : req.socket?.remoteAddress || "unknown"
+  ).trim();
 }
 
 function isInternalIp(ip) {
-  const normalized = String(ip || '').replace(/^::ffff:/, '');
-  const parts = normalized.split('.');
-  const secondOctet = Number.parseInt(parts[1] || '', 10);
-  return normalized === 'localhost'
-    || normalized === '127.0.0.1'
-    || normalized.startsWith('127.')
-    || ip === '::1'
-    || normalized.startsWith('10.')
-    || (parts[0] === '172' && Number.isFinite(secondOctet) && secondOctet >= 16 && secondOctet <= 31)
-    || normalized.startsWith('192.168.');
+  const normalized = String(ip || "").replace(/^::ffff:/, "");
+  const parts = normalized.split(".");
+  const secondOctet = Number.parseInt(parts[1] || "", 10);
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized.startsWith("127.") ||
+    ip === "::1" ||
+    normalized.startsWith("10.") ||
+    (parts[0] === "172" &&
+      Number.isFinite(secondOctet) &&
+      secondOctet >= 16 &&
+      secondOctet <= 31) ||
+    normalized.startsWith("192.168.")
+  );
 }
 
 function communityJoinRateLimitNoop(_req, _res, next) {
@@ -201,25 +240,34 @@ function communityJoinRateLimitNoop(_req, _res, next) {
 }
 
 function buildCommunityJoinIpRateLimiter() {
-  if (process.env.DISABLE_RATE_LIMITS === 'true' || process.env.NODE_ENV === 'test') {
+  if (
+    process.env.DISABLE_RATE_LIMITS === "true" ||
+    process.env.NODE_ENV === "test"
+  ) {
     return communityJoinRateLimitNoop;
   }
-  const windowMs = parsePositiveIntEnv('COMMUNITY_JOIN_PER_IP_WINDOW_MS', 60_000);
-  const limit = parsePositiveIntEnv('COMMUNITY_JOIN_PER_IP_MAX', 300);
+  const windowMs = parsePositiveIntEnv(
+    "COMMUNITY_JOIN_PER_IP_WINDOW_MS",
+    60_000,
+  );
+  const limit = parsePositiveIntEnv("COMMUNITY_JOIN_PER_IP_MAX", 300);
   return rateLimit({
     windowMs,
     limit,
-    standardHeaders: 'draft-7',
+    standardHeaders: "draft-7",
     legacyHeaders: false,
     skip: (req) => isInternalIp(clientIp(req)),
     keyGenerator: (req) => `cji:${clientIp(req)}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
-      prefix: 'rl:community_join:ip:',
+      prefix: "rl:community_join:ip:",
     }),
-    message: { error: 'Too many community join requests from this network. Slow down and try again shortly.' },
+    message: {
+      error:
+        "Too many community join requests from this network. Slow down and try again shortly.",
+    },
     handler: (req, res, _next, options) => {
-      apiRateLimitHitsTotal.inc({ scope: 'community_join_ip' });
+      apiRateLimitHitsTotal.inc({ scope: "community_join_ip" });
       recordAbuseStrikeFromRequest(req);
       res.status(options.statusCode).json(options.message);
     },
@@ -227,25 +275,34 @@ function buildCommunityJoinIpRateLimiter() {
 }
 
 function buildCommunityJoinUserRateLimiter() {
-  if (process.env.DISABLE_RATE_LIMITS === 'true' || process.env.NODE_ENV === 'test') {
+  if (
+    process.env.DISABLE_RATE_LIMITS === "true" ||
+    process.env.NODE_ENV === "test"
+  ) {
     return communityJoinRateLimitNoop;
   }
-  const windowMs = parsePositiveIntEnv('COMMUNITY_JOIN_PER_USER_WINDOW_MS', 60_000);
-  const limit = parsePositiveIntEnv('COMMUNITY_JOIN_PER_USER_MAX', 120);
+  const windowMs = parsePositiveIntEnv(
+    "COMMUNITY_JOIN_PER_USER_WINDOW_MS",
+    60_000,
+  );
+  const limit = parsePositiveIntEnv("COMMUNITY_JOIN_PER_USER_MAX", 120);
   return rateLimit({
     windowMs,
     limit,
-    standardHeaders: 'draft-7',
+    standardHeaders: "draft-7",
     legacyHeaders: false,
     skip: (req) => isInternalIp(clientIp(req)),
-    keyGenerator: (req) => `cju:${req.user?.id || 'anon'}`,
+    keyGenerator: (req) => `cju:${req.user?.id || "anon"}`,
     store: new RedisStore({
       sendCommand: (...args) => redis.call(...args),
-      prefix: 'rl:community_join:user:',
+      prefix: "rl:community_join:user:",
     }),
-    message: { error: 'Too many community join requests from this account. Slow down and try again shortly.' },
+    message: {
+      error:
+        "Too many community join requests from this account. Slow down and try again shortly.",
+    },
     handler: (_req, res, _next, options) => {
-      apiRateLimitHitsTotal.inc({ scope: 'community_join_user' });
+      apiRateLimitHitsTotal.inc({ scope: "community_join_user" });
       res.status(options.statusCode).json(options.message);
     },
   });
@@ -257,43 +314,64 @@ const communityJoinUserRateLimiter = buildCommunityJoinUserRateLimiter();
 /** Middleware: load caller's community membership into req.membership */
 async function loadMembership(req, res, next) {
   const { rows } = await query(
-    'SELECT role FROM community_members WHERE community_id=$1 AND user_id=$2',
-    [req.params.id, req.user.id]
+    "SELECT role FROM community_members WHERE community_id=$1 AND user_id=$2",
+    [req.params.id, req.user.id],
   );
   req.membership = rows[0] || null;
   next();
 }
 
-const _communitiesTtl = parseInt(process.env.COMMUNITIES_LIST_CACHE_TTL_SECS || '300', 10);
+const _communitiesTtl = parseInt(
+  process.env.COMMUNITIES_LIST_CACHE_TTL_SECS || "300",
+  10,
+);
 const COMMUNITIES_CACHE_TTL_SECS =
-  Number.isFinite(_communitiesTtl) && _communitiesTtl > 0 ? _communitiesTtl : 300;
-const _communitiesPagedTtl = parseInt(process.env.COMMUNITIES_PAGED_CACHE_TTL_SECS || '60', 10);
+  Number.isFinite(_communitiesTtl) && _communitiesTtl > 0
+    ? _communitiesTtl
+    : 300;
+const _communitiesPagedTtl = parseInt(
+  process.env.COMMUNITIES_PAGED_CACHE_TTL_SECS || "60",
+  10,
+);
 const COMMUNITIES_PAGED_CACHE_TTL_SECS =
-  Number.isFinite(_communitiesPagedTtl) && _communitiesPagedTtl > 0 ? _communitiesPagedTtl : 60;
-const _communitiesHeavyTimeout = parseInt(process.env.COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS || '2500', 10);
+  Number.isFinite(_communitiesPagedTtl) && _communitiesPagedTtl > 0
+    ? _communitiesPagedTtl
+    : 60;
+const _communitiesHeavyTimeout = parseInt(
+  process.env.COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS || "2500",
+  10,
+);
 const COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS =
   Number.isFinite(_communitiesHeavyTimeout) && _communitiesHeavyTimeout > 100
     ? _communitiesHeavyTimeout
     : 2500;
-const _communitiesHeavyInflight = parseInt(process.env.COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT || '4', 10);
+const _communitiesHeavyInflight = parseInt(
+  process.env.COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT || "4",
+  10,
+);
 const COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT =
   Number.isFinite(_communitiesHeavyInflight) && _communitiesHeavyInflight > 0
     ? _communitiesHeavyInflight
     : 4;
-const PUBLIC_COMMUNITIES_VERSION_KEY = 'communities:list:public_version';
-const COMMUNITIES_USER_VERSION_KEY_PREFIX = 'communities:list:user_version:';
+const PUBLIC_COMMUNITIES_VERSION_KEY = "communities:list:public_version";
+const COMMUNITIES_USER_VERSION_KEY_PREFIX = "communities:list:user_version:";
 let communitiesUnreadQueriesInFlight = 0;
 const COMMUNITIES_LAST_GOOD_CACHE_TTL_SECS = Math.max(
   COMMUNITIES_CACHE_TTL_SECS,
   900,
 );
-const _communitiesVersionTtl = parseInt(process.env.COMMUNITIES_VERSION_CACHE_TTL_SECS || '2592000', 10);
+const _communitiesVersionTtl = parseInt(
+  process.env.COMMUNITIES_VERSION_CACHE_TTL_SECS || "2592000",
+  10,
+);
 const COMMUNITIES_VERSION_CACHE_TTL_SECS =
-  Number.isFinite(_communitiesVersionTtl) && _communitiesVersionTtl > 0 ? _communitiesVersionTtl : 2_592_000;
+  Number.isFinite(_communitiesVersionTtl) && _communitiesVersionTtl > 0
+    ? _communitiesVersionTtl
+    : 2_592_000;
 
 /** Unit tests stub `redis` with partial mocks; production ioredis has `expire`. */
 async function redisExpireBestEffort(key, ttlSec) {
-  if (typeof redis.expire !== 'function') return;
+  if (typeof redis.expire !== "function") return;
   try {
     await redis.expire(key, ttlSec);
   } catch {
@@ -343,12 +421,18 @@ const COMMUNITY_DETAIL_CHANNEL_JSON = `
   )
   ORDER BY ch.position`;
 
-function communitiesCacheKey(userId, publicVersion = '0') {
+function communitiesCacheKey(userId, publicVersion = "0") {
   return `communities:list:${userId}:v${publicVersion}`;
 }
 
-function communitiesPagedCacheKey(userId, publicVersion, userVersion, limit, after) {
-  return `communities:list:${userId}:v${publicVersion}:uv${userVersion}:paged:l${limit}:a${after || '_'}`;
+function communitiesPagedCacheKey(
+  userId,
+  publicVersion,
+  userVersion,
+  limit,
+  after,
+) {
+  return `communities:list:${userId}:v${publicVersion}:uv${userVersion}:paged:l${limit}:a${after || "_"}`;
 }
 
 function communitiesUserVersionKey(userId) {
@@ -359,16 +443,22 @@ function communitiesLastGoodCacheKey(userId) {
   return `communities:list:last_good:${userId}`;
 }
 
-async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
-  const normalizedUserIds = [...new Set(
-    (Array.isArray(userIds) ? userIds : []).filter((userId) => typeof userId === 'string' && userId),
-  )];
-  const keys = [...new Set(
-    normalizedUserIds.flatMap((userId) => {
-      const key = communitiesCacheKey(userId, publicVersion);
-      return [key, staleCacheKey(key)];
-    })
-  )];
+async function invalidateCommunitiesCaches(userIds, publicVersion = "0") {
+  const normalizedUserIds = [
+    ...new Set(
+      (Array.isArray(userIds) ? userIds : []).filter(
+        (userId) => typeof userId === "string" && userId,
+      ),
+    ),
+  ];
+  const keys = [
+    ...new Set(
+      normalizedUserIds.flatMap((userId) => {
+        const key = communitiesCacheKey(userId, publicVersion);
+        return [key, staleCacheKey(key)];
+      }),
+    ),
+  ];
   if (keys.length > 0) {
     await redis.del(...new Set(keys));
   }
@@ -382,15 +472,22 @@ async function invalidateCommunitiesCaches(userIds, publicVersion = '0') {
 }
 
 async function getPublicCommunitiesVersion() {
-  const v = (await redis.get(PUBLIC_COMMUNITIES_VERSION_KEY).catch(() => null)) || '0';
-  void redisExpireBestEffort(PUBLIC_COMMUNITIES_VERSION_KEY, COMMUNITIES_VERSION_CACHE_TTL_SECS);
+  const v =
+    (await redis.get(PUBLIC_COMMUNITIES_VERSION_KEY).catch(() => null)) || "0";
+  void redisExpireBestEffort(
+    PUBLIC_COMMUNITIES_VERSION_KEY,
+    COMMUNITIES_VERSION_CACHE_TTL_SECS,
+  );
   return v;
 }
 
 async function bumpPublicCommunitiesVersion() {
   try {
     await redis.incr(PUBLIC_COMMUNITIES_VERSION_KEY);
-    await redisExpireBestEffort(PUBLIC_COMMUNITIES_VERSION_KEY, COMMUNITIES_VERSION_CACHE_TTL_SECS);
+    await redisExpireBestEffort(
+      PUBLIC_COMMUNITIES_VERSION_KEY,
+      COMMUNITIES_VERSION_CACHE_TTL_SECS,
+    );
   } catch {
     // Best-effort only.
   }
@@ -398,13 +495,15 @@ async function bumpPublicCommunitiesVersion() {
 
 async function getCommunitiesUserVersion(userId) {
   const key = communitiesUserVersionKey(userId);
-  const v = (await redis.get(key).catch(() => null)) || '0';
+  const v = (await redis.get(key).catch(() => null)) || "0";
   void redisExpireBestEffort(key, COMMUNITIES_VERSION_CACHE_TTL_SECS);
   return v;
 }
 
 const MEMBERS_CACHE_TTL_SECS = 30;
-function membersCacheKey(communityId) { return `community:${communityId}:members`; }
+function membersCacheKey(communityId) {
+  return `community:${communityId}:members`;
+}
 const communityMembersInflight: Map<string, Promise<any[]>> = new Map();
 const COMMUNITY_MEMBERS_ROSTER_SQL = `
   SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
@@ -416,7 +515,7 @@ const COMMUNITY_MEMBERS_ROSTER_SQL = `
 /** Hydrate `{ id, role, joined_at }[]` with user profile fields (smaller Redis payload than full rows). */
 async function hydrateCommunityMembersFromIds(minimal) {
   const ids = (Array.isArray(minimal) ? minimal : [])
-    .map((m) => (m && typeof m.id === 'string' ? m.id : null))
+    .map((m) => (m && typeof m.id === "string" ? m.id : null))
     .filter(Boolean);
   if (!ids.length) return [];
   const { rows: userRows } = await query(
@@ -427,7 +526,7 @@ async function hydrateCommunityMembersFromIds(minimal) {
   );
   const userById = new Map(userRows.map((u: any) => [String(u.id), u]));
   return minimal.map((m: any) => {
-    const u = userById.get(String(m.id)) as any || {};
+    const u = (userById.get(String(m.id)) as any) || {};
     return {
       id: m.id,
       username: u.username,
@@ -442,7 +541,12 @@ async function hydrateCommunityMembersFromIds(minimal) {
 async function readMembersCacheValue(cacheKey) {
   const raw = await getJsonCache(redis, cacheKey);
   if (!raw) return null;
-  if (typeof raw === 'object' && !Array.isArray(raw) && raw.v === 2 && Array.isArray(raw.members)) {
+  if (
+    typeof raw === "object" &&
+    !Array.isArray(raw) &&
+    raw.v === 2 &&
+    Array.isArray(raw.members)
+  ) {
     return await hydrateCommunityMembersFromIds(raw.members);
   }
   if (Array.isArray(raw) && raw.length) return raw;
@@ -470,7 +574,11 @@ async function loadCommunityMembersRoster(communityId) {
         joined_at: r.joined_at,
       }));
       redis
-        .setex(cacheKey, MEMBERS_CACHE_TTL_SECS, JSON.stringify({ v: 2, members: minimal }))
+        .setex(
+          cacheKey,
+          MEMBERS_CACHE_TTL_SECS,
+          JSON.stringify({ v: 2, members: minimal }),
+        )
         .catch(() => {});
       return rows;
     },
@@ -497,12 +605,18 @@ async function listCommunityRealtimeTargets(communityId, userId) {
 }
 
 // In-process singleflight: prevents thundering-herd when cache expires.
-const communitiesInflight: Map<string, Promise<{ communities: any[] }>> = new Map();
+const communitiesInflight: Map<
+  string,
+  Promise<{ communities: any[] }>
+> = new Map();
 const communitiesPagedInflight: Map<string, Promise<any>> = new Map();
 
 async function cleanupCommunityUnreadCounterKeys(communityId) {
   try {
-    const { rows } = await queryRead('SELECT id::text FROM channels WHERE community_id = $1', [communityId]);
+    const { rows } = await queryRead(
+      "SELECT id::text FROM channels WHERE community_id = $1",
+      [communityId],
+    );
     if (!rows.length) return;
     const channelKeys = rows.map((row) => `channel:msg_count:${row.id}`);
     await redis.del(...channelKeys);
@@ -560,26 +674,27 @@ ORDER BY c.name, c.id
 LIMIT $4`;
 
 function isCommunitiesTimeout(err) {
-  const msg = String(err?.message || '').toLowerCase();
+  const msg = String(err?.message || "").toLowerCase();
   return (
-    err?.code === '57014'
-    || msg.includes('statement timeout')
-    || msg.includes('query read timeout')
-    || msg.includes('query timed out')
+    err?.code === "57014" ||
+    msg.includes("statement timeout") ||
+    msg.includes("query read timeout") ||
+    msg.includes("query timed out")
   );
 }
 
 function isCommunitiesTransientFailure(err) {
   if (isCommunitiesTimeout(err)) return true;
-  const msg = String(err?.message || '').toLowerCase();
+  const msg = String(err?.message || "").toLowerCase();
   return (
-    err?.code === 'POOL_CIRCUIT_OPEN'
-    || err?.name === 'PoolTimeoutError'
-    || err?.code === '57014'
-    || (/timeout exceeded/i.test(msg) && /(connect|client|connection|waiting)/i.test(msg))
-    || msg.includes('waiting for a client')
-    || msg.includes('remaining connection slots')
-    || msg.includes('too many clients')
+    err?.code === "POOL_CIRCUIT_OPEN" ||
+    err?.name === "PoolTimeoutError" ||
+    err?.code === "57014" ||
+    (/timeout exceeded/i.test(msg) &&
+      /(connect|client|connection|waiting)/i.test(msg)) ||
+    msg.includes("waiting for a client") ||
+    msg.includes("remaining connection slots") ||
+    msg.includes("too many clients")
   );
 }
 
@@ -588,7 +703,11 @@ async function readLastGoodCommunitiesPayload(userId) {
     const raw = await redis.get(communitiesLastGoodCacheKey(userId));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && Array.isArray(parsed.communities) ? parsed : null;
+    return parsed &&
+      typeof parsed === "object" &&
+      Array.isArray(parsed.communities)
+      ? parsed
+      : null;
   } catch {
     return null;
   }
@@ -612,7 +731,12 @@ async function queryCommunitiesListFull(userId) {
   });
 }
 
-async function queryCommunitiesListPage(userId, cursorName, cursorId, fetchLimit) {
+async function queryCommunitiesListPage(
+  userId,
+  cursorName,
+  cursorId,
+  fetchLimit,
+) {
   return query({
     text: COMMUNITIES_LIST_PAGE_SQL,
     values: [userId, cursorName, cursorId, fetchLimit],
@@ -622,8 +746,10 @@ async function queryCommunitiesListPage(userId, cursorName, cursorId, fetchLimit
 
 async function fetchUnreadCountsForCommunities(userId, communityIds) {
   if (!communityIds.length) return new Map();
-  if (communitiesUnreadQueriesInFlight >= COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT) {
-    recordEndpointListCacheBypass('communities', 'pressure');
+  if (
+    communitiesUnreadQueriesInFlight >= COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT
+  ) {
+    recordEndpointListCacheBypass("communities", "pressure");
     return new Map();
   }
 
@@ -649,16 +775,27 @@ async function fetchUnreadCountsForCommunities(userId, communityIds) {
       // Keep unread calculation bounded; route remains available with zero unread fallback.
       query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
     });
-    return new Map(rows.map((row) => [row.community_id, Number(row.unread_channel_count || 0)]));
+    return new Map(
+      rows.map((row) => [
+        row.community_id,
+        Number(row.unread_channel_count || 0),
+      ]),
+    );
   } catch (err) {
     if (isCommunitiesTimeout(err)) {
-      logger.warn({ err }, 'Communities unread-count query timed out; using unread=0 fallback');
-      recordEndpointListCacheBypass('communities', 'timeout');
+      logger.warn(
+        { err },
+        "Communities unread-count query timed out; using unread=0 fallback",
+      );
+      recordEndpointListCacheBypass("communities", "timeout");
       return new Map();
     }
     throw err;
   } finally {
-    communitiesUnreadQueriesInFlight = Math.max(0, communitiesUnreadQueriesInFlight - 1);
+    communitiesUnreadQueriesInFlight = Math.max(
+      0,
+      communitiesUnreadQueriesInFlight - 1,
+    );
   }
 }
 
@@ -683,7 +820,8 @@ async function buildCommunitiesListPayload(userId, rows) {
 }
 
 function applyCommunityChannelLastMessageMetadata(channels, latestByChannel) {
-  if (!Array.isArray(channels) || !channels.length || !latestByChannel?.size) return;
+  if (!Array.isArray(channels) || !channels.length || !latestByChannel?.size)
+    return;
   for (const ch of channels) {
     const latest = latestByChannel.get(ch.id);
     if (!latest) continue;
@@ -700,22 +838,22 @@ function parseCommunitiesPageQuery(req) {
   if (rawL !== undefined && String(rawL).length) {
     const n = parseInt(String(rawL), 10);
     if (!Number.isFinite(n) || n < 1 || n > 100) {
-      return { error: 'limit must be an integer from 1 to 100' };
+      return { error: "limit must be an integer from 1 to 100" };
     }
     limit = n;
   }
   let after = null;
   if (rawA !== undefined && String(rawA).length) {
     const s = String(rawA).trim();
-    if (!uuidValidate(s)) return { error: 'after must be a UUID' };
+    if (!uuidValidate(s)) return { error: "after must be a UUID" };
     after = s;
   }
-  if (after && !limit) return { error: 'after requires limit' };
+  if (after && !limit) return { error: "after requires limit" };
   return { limit, after };
 }
 
 // ── List ───────────────────────────────────────────────────────────────────────
-router.get('/', async (req, res, next) => {
+router.get("/", async (req, res, next) => {
   const page = parseCommunitiesPageQuery(req);
   if (page.error) return res.status(400).json({ error: page.error });
 
@@ -728,42 +866,45 @@ router.get('/', async (req, res, next) => {
         publicVersion,
         userVersion,
         page.limit,
-        page.after || '',
+        page.after || "",
       );
       const cached = await getJsonCache(redis, cacheKey);
       if (cached) {
-        recordEndpointListCache('communities', 'hit');
+        recordEndpointListCache("communities", "hit");
         return res.json(cached);
       }
 
       if (communitiesPagedInflight.has(cacheKey)) {
-        recordEndpointListCache('communities', 'coalesced');
+        recordEndpointListCache("communities", "coalesced");
         try {
           return res.json(await communitiesPagedInflight.get(cacheKey));
         } catch (err) {
           if (isCommunitiesTransientFailure(err) && !page.after) {
             const stale = await readLastGoodCommunitiesPayload(req.user.id);
             if (stale) {
-              recordEndpointListCacheBypass('communities', 'timeout');
+              recordEndpointListCacheBypass("communities", "timeout");
               logger.warn(
                 { err, userId: req.user.id },
-                'GET /communities transient failure during coalesced fetch; serving stale cache',
+                "GET /communities transient failure during coalesced fetch; serving stale cache",
               );
               return res.json(stale);
             }
           }
           if (isCommunitiesTransientFailure(err)) {
-            logger.warn({ err, userId: req.user.id }, 'GET /communities transient failure during coalesced fetch');
-            return res
-              .status(503)
-              .set('Retry-After', '1')
-              .json({ error: 'Communities are briefly unavailable; please retry.', requestId: req.id });
+            logger.warn(
+              { err, userId: req.user.id },
+              "GET /communities transient failure during coalesced fetch",
+            );
+            return res.status(503).set("Retry-After", "1").json({
+              error: "Communities are briefly unavailable; please retry.",
+              requestId: req.id,
+            });
           }
           return next(err);
         }
       }
 
-      recordEndpointListCache('communities', 'miss');
+      recordEndpointListCache("communities", "miss");
       const promise = withDistributedSingleflight({
         redis,
         cacheKey,
@@ -784,7 +925,7 @@ router.get('/', async (req, res, next) => {
               [req.user.id, page.after],
             );
             if (!curRows.length) {
-              const error: any = new Error('Invalid after cursor');
+              const error: any = new Error("Invalid after cursor");
               error.statusCode = 400;
               throw error;
             }
@@ -802,12 +943,21 @@ router.get('/', async (req, res, next) => {
 
           const hasMore = rows.length > page.limit;
           const slice = hasMore ? rows.slice(0, page.limit) : rows;
-          const body: any = await buildCommunitiesListPayload(req.user.id, slice);
+          const body: any = await buildCommunitiesListPayload(
+            req.user.id,
+            slice,
+          );
           if (hasMore) body.nextAfter = slice[slice.length - 1].id;
-          await setJsonCacheWithStale(redis, cacheKey, body, COMMUNITIES_PAGED_CACHE_TTL_SECS, {
-            staleMultiplier: 1.25,
-            maxStaleTtlSeconds: 240,
-          });
+          await setJsonCacheWithStale(
+            redis,
+            cacheKey,
+            body,
+            COMMUNITIES_PAGED_CACHE_TTL_SECS,
+            {
+              staleMultiplier: 1.25,
+              maxStaleTtlSeconds: 240,
+            },
+          );
           if (!page.after) {
             writeLastGoodCommunitiesPayload(req.user.id, body);
           }
@@ -818,14 +968,17 @@ router.get('/', async (req, res, next) => {
       return res.json(await promise);
     } catch (err) {
       if (err?.statusCode === 400) {
-        return res.status(400).json({ error: 'Invalid after cursor' });
+        return res.status(400).json({ error: "Invalid after cursor" });
       }
       if (isCommunitiesTransientFailure(err)) {
-        logger.warn({ err, userId: req.user.id }, 'GET /communities (paged) transient failure');
-        return res
-          .status(503)
-          .set('Retry-After', '1')
-          .json({ error: 'Communities are briefly unavailable; please retry.', requestId: req.id });
+        logger.warn(
+          { err, userId: req.user.id },
+          "GET /communities (paged) transient failure",
+        );
+        return res.status(503).set("Retry-After", "1").json({
+          error: "Communities are briefly unavailable; please retry.",
+          requestId: req.id,
+        });
       }
       return next(err);
     }
@@ -836,7 +989,7 @@ router.get('/', async (req, res, next) => {
   try {
     const cached = await redis.get(cacheKey);
     if (cached) {
-      recordEndpointListCache('communities', 'hit');
+      recordEndpointListCache("communities", "hit");
       return res.json(JSON.parse(cached));
     }
   } catch {
@@ -844,35 +997,40 @@ router.get('/', async (req, res, next) => {
   }
 
   if (communitiesInflight.has(cacheKey)) {
-    recordEndpointListCache('communities', 'coalesced');
+    recordEndpointListCache("communities", "coalesced");
     try {
       return res.json(await communitiesInflight.get(cacheKey));
     } catch (err) {
       if (isCommunitiesTransientFailure(err)) {
         const stale = await readLastGoodCommunitiesPayload(req.user.id);
         if (stale) {
-          recordEndpointListCacheBypass('communities', 'timeout');
+          recordEndpointListCacheBypass("communities", "timeout");
           logger.warn(
             { err, userId: req.user.id },
-            'GET /communities transient failure during coalesced fetch; serving stale cache',
+            "GET /communities transient failure during coalesced fetch; serving stale cache",
           );
           return res.json(stale);
         }
-        logger.warn({ err, userId: req.user.id }, 'GET /communities transient failure during coalesced fetch');
-        return res
-          .status(503)
-          .set('Retry-After', '1')
-          .json({ error: 'Communities are briefly unavailable; please retry.', requestId: req.id });
+        logger.warn(
+          { err, userId: req.user.id },
+          "GET /communities transient failure during coalesced fetch",
+        );
+        return res.status(503).set("Retry-After", "1").json({
+          error: "Communities are briefly unavailable; please retry.",
+          requestId: req.id,
+        });
       }
       return next(err);
     }
   }
 
-  recordEndpointListCache('communities', 'miss');
+  recordEndpointListCache("communities", "miss");
   const promise: Promise<{ communities: any[] }> = (async () => {
     const { rows } = await queryCommunitiesListFull(req.user.id);
     const payload = await buildCommunitiesListPayload(req.user.id, rows);
-    redis.setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload)).catch(() => {});
+    redis
+      .setex(cacheKey, COMMUNITIES_CACHE_TTL_SECS, JSON.stringify(payload))
+      .catch(() => {});
     writeLastGoodCommunitiesPayload(req.user.id, payload);
     return payload;
   })();
@@ -886,67 +1044,87 @@ router.get('/', async (req, res, next) => {
     if (isCommunitiesTransientFailure(err)) {
       const stale = await readLastGoodCommunitiesPayload(req.user.id);
       if (stale) {
-        recordEndpointListCacheBypass('communities', 'timeout');
+        recordEndpointListCacheBypass("communities", "timeout");
         logger.warn(
           { err, userId: req.user.id },
-          'GET /communities transient failure; serving stale cache',
+          "GET /communities transient failure; serving stale cache",
         );
         return res.json(stale);
       }
-      logger.warn({ err, userId: req.user.id }, 'GET /communities transient failure');
-      return res
-        .status(503)
-        .set('Retry-After', '1')
-        .json({ error: 'Communities are briefly unavailable; please retry.', requestId: req.id });
+      logger.warn(
+        { err, userId: req.user.id },
+        "GET /communities transient failure",
+      );
+      return res.status(503).set("Retry-After", "1").json({
+        error: "Communities are briefly unavailable; please retry.",
+        requestId: req.id,
+      });
     }
     next(err);
   }
 });
 
 // ── Create ─────────────────────────────────────────────────────────────────────
-router.post('/',
-  body('slug').isString().custom((value) => value.trim().length > 0),
-  body('name').isString().custom((value) => value.trim().length > 0),
-  body('description').optional().isString(),
-  body('isPublic').optional().isBoolean(),
+router.post(
+  "/",
+  body("slug")
+    .isString()
+    .custom((value) => value.trim().length > 0),
+  body("name")
+    .isString()
+    .custom((value) => value.trim().length > 0),
+  body("description").optional().isString(),
+  body("isPublic").optional().isBoolean(),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     let client;
     try {
       client = await getClient();
-      await client.query('BEGIN');
+      await client.query("BEGIN");
       const slug = String(req.body.slug).trim();
       const name = String(req.body.name).trim();
-      const description = typeof req.body.description === 'string' ? req.body.description : null;
+      const description =
+        typeof req.body.description === "string" ? req.body.description : null;
       const { isPublic = true } = req.body;
       const { rowCount } = await client.query(
-        'SELECT 1 FROM communities WHERE owner_id = $1',
-        [req.user.id]
+        "SELECT 1 FROM communities WHERE owner_id = $1",
+        [req.user.id],
       );
       if (rowCount >= 100) {
-        await client.query('ROLLBACK');
-        return res.status(403).json({ error: 'Maximum 100 communities reached' });
+        await client.query("ROLLBACK");
+        return res
+          .status(403)
+          .json({ error: "Maximum 100 communities reached" });
       }
       const { rows } = await client.query(
         `INSERT INTO communities (slug, name, description, is_public, owner_id)
          VALUES ($1,$2,$3,$4,$5) RETURNING ${COMMUNITY_RETURNING_FIELDS}`,
-        [slug, name, description || null, isPublic, req.user.id]
+        [slug, name, description || null, isPublic, req.user.id],
       );
       const community = rows[0];
 
       await client.query(
         `INSERT INTO community_members (community_id, user_id, role) VALUES ($1,$2,'owner')`,
-        [community.id, req.user.id]
+        [community.id, req.user.id],
       );
       community.member_count = 1;
 
-      // Create a default #general channel
-      await client.query(
-        `INSERT INTO channels (community_id, name, created_by) VALUES ($1,'general',$2)`,
-        [community.id, req.user.id]
+      // Create a default #general channel and return its ID
+      const { rows: channelRows } = await client.query(
+        `INSERT INTO channels (community_id, name, created_by) VALUES ($1,'general',$2) RETURNING id`,
+        [community.id, req.user.id],
       );
+      const defaultChannelId = channelRows[0].id;
 
-      await client.query('COMMIT');
+      await client.query("COMMIT");
+
+      // Warm access cache for the owner on the newly created channel
+      warmChannelAccessCacheForUser(
+        redis,
+        [defaultChannelId],
+        req.user.id,
+      ).catch(() => {});
+
       await Promise.allSettled([
         presenceService.invalidatePresenceFanoutTargets(req.user.id),
         invalidateWsBootstrapCache(req.user.id),
@@ -964,15 +1142,18 @@ router.post('/',
         communityId: community.id,
       });
     } catch (err) {
-      await client?.query('ROLLBACK');
-      if (err.code === '23505') return res.status(409).json({ error: 'Slug already taken' });
+      await client?.query("ROLLBACK");
+      if (err.code === "23505")
+        return res.status(409).json({ error: "Slug already taken" });
       next(err);
-    } finally { client?.release(); }
-  }
+    } finally {
+      client?.release();
+    }
+  },
 );
 
 // ── Get ────────────────────────────────────────────────────────────────────────
-router.get('/:id', param('id').isUUID(), async (req, res, next) => {
+router.get("/:id", param("id").isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
     const { rows } = await queryRead(
@@ -997,9 +1178,9 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
                WHERE cm2.community_id = c.id AND cm2.user_id = $2
              ))
        GROUP BY c.id`,
-      [req.params.id, req.user.id]
+      [req.params.id, req.user.id],
     );
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
     const community = rows[0];
     const redisCounts = await getCommunityMemberCountsFromRedis([community.id]);
     const redisCount = redisCounts.get(community.id);
@@ -1007,74 +1188,102 @@ router.get('/:id', param('id').isUUID(), async (req, res, next) => {
     if (Array.isArray(community.channels) && community.channels.length > 0) {
       const latestByChannel = await getChannelLastMessageMetaMapFromRedis(
         community.channels.map((ch) => ch.id),
-        'community_channel',
+        "community_channel",
       );
-      applyCommunityChannelLastMessageMetadata(community.channels, latestByChannel);
+      applyCommunityChannelLastMessageMetadata(
+        community.channels,
+        latestByChannel,
+      );
     }
     res.json({ community });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ── Delete ─────────────────────────────────────────────────────────────────────
-router.delete('/:id', param('id').isUUID(), loadMembership, async (req, res, next) => {
-  if (!validate(req, res)) return;
-  try {
-    const { rows: [community] } = await query(
-      'SELECT id, owner_id, is_public FROM communities WHERE id=$1',
-      [req.params.id]
-    );
-    if (!community) return res.status(404).json({ error: 'Community not found' });
-    if (community.owner_id !== req.user.id || req.membership?.role !== 'owner') {
-      return res.status(403).json({ error: 'Insufficient permissions' });
+router.delete(
+  "/:id",
+  param("id").isUUID(),
+  loadMembership,
+  async (req, res, next) => {
+    if (!validate(req, res)) return;
+    try {
+      const {
+        rows: [community],
+      } = await query(
+        "SELECT id, owner_id, is_public FROM communities WHERE id=$1",
+        [req.params.id],
+      );
+      if (!community)
+        return res.status(404).json({ error: "Community not found" });
+      if (
+        community.owner_id !== req.user.id ||
+        req.membership?.role !== "owner"
+      ) {
+        return res.status(403).json({ error: "Insufficient permissions" });
+      }
+
+      const { rows: memberRows } = await query(
+        "SELECT user_id FROM community_members WHERE community_id=$1",
+        [req.params.id],
+      );
+      await cleanupCommunityUnreadCounterKeys(req.params.id);
+
+      // FK cascade from messages.channel_id -> channels.id was dropped (migration 023).
+      // Delete all channel messages in this community before the community (and its
+      // channels via channels.community_id CASCADE) are removed.
+      await query(
+        "DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE community_id = $1)",
+        [req.params.id],
+      );
+      await query("DELETE FROM communities WHERE id=$1", [req.params.id]);
+
+      if (community.is_public) {
+        await bumpPublicCommunitiesVersion();
+      }
+
+      const publicVersion = await getPublicCommunitiesVersion();
+
+      await Promise.allSettled([
+        invalidateCommunitiesCaches(
+          memberRows.map((r) => r.user_id),
+          publicVersion,
+        ),
+        redis.del(membersCacheKey(req.params.id)),
+        fanout.publish(`community:${req.params.id}`, {
+          event: "community:deleted",
+          data: { communityId: req.params.id },
+        }),
+      ]);
+
+      res.json({ success: true });
+    } catch (err) {
+      next(err);
     }
-
-    const { rows: memberRows } = await query(
-      'SELECT user_id FROM community_members WHERE community_id=$1',
-      [req.params.id]
-    );
-    await cleanupCommunityUnreadCounterKeys(req.params.id);
-
-    // FK cascade from messages.channel_id -> channels.id was dropped (migration 023).
-    // Delete all channel messages in this community before the community (and its
-    // channels via channels.community_id CASCADE) are removed.
-    await query(
-      'DELETE FROM messages WHERE channel_id IN (SELECT id FROM channels WHERE community_id = $1)',
-      [req.params.id],
-    );
-    await query('DELETE FROM communities WHERE id=$1', [req.params.id]);
-
-    if (community.is_public) {
-      await bumpPublicCommunitiesVersion();
-    }
-
-    const publicVersion = await getPublicCommunitiesVersion();
-
-    await Promise.allSettled([
-      invalidateCommunitiesCaches(memberRows.map((r) => r.user_id), publicVersion),
-      redis.del(membersCacheKey(req.params.id)),
-      fanout.publish(`community:${req.params.id}`, {
-        event: 'community:deleted',
-        data: { communityId: req.params.id },
-      }),
-    ]);
-
-    res.json({ success: true });
-  } catch (err) { next(err); }
-});
+  },
+);
 
 // ── Join ───────────────────────────────────────────────────────────────────────
 // Body-based join for harnesses that POST /communities/join with id in JSON (no :id path).
 router.post(
-  '/join',
+  "/join",
   communityJoinIpRateLimiter,
   communityJoinUserRateLimiter,
   async (req, res, next) => {
-    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const body = req.body && typeof req.body === "object" ? req.body : {};
     const raw = String(
-      body.communityId ?? body.community_id ?? body.id ?? body.slug ?? body.name ?? ''
+      body.communityId ??
+        body.community_id ??
+        body.id ??
+        body.slug ??
+        body.name ??
+        "",
     ).trim();
     if (!raw) {
-      return res.status(400).json({ error: 'Missing community id', requestId: req.id });
+      return res
+        .status(400)
+        .json({ error: "Missing community id", requestId: req.id });
     }
     try {
       const resolved = await resolveCommunityIdForPublicJoin(raw);
@@ -1082,32 +1291,34 @@ router.post(
     } catch (err) {
       next(err);
     }
-  }
+  },
 );
 
 router.post(
-  '/:id/join',
+  "/:id/join",
   communityJoinIpRateLimiter,
   communityJoinUserRateLimiter,
-  param('id').trim().isLength({ min: 1, max: 512 }),
+  param("id").trim().isLength({ min: 1, max: 512 }),
   async (req, res, next) => {
     if (!validate(req, res)) return;
     try {
       const resolved = await resolveCommunityIdForPublicJoin(req.params.id);
       return executeResolvedPublicJoin(req, res, next, resolved);
-    } catch (err) { next(err); }
-  }
+    } catch (err) {
+      next(err);
+    }
+  },
 );
 
 // ── Leave ──────────────────────────────────────────────────────────────────────
-router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
+router.delete("/:id/leave", param("id").isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
     const { rowCount } = await query(
       `DELETE FROM community_members
        WHERE community_id=$1 AND user_id=$2 AND role != 'owner'
        RETURNING user_id`,
-      [req.params.id, req.user.id]
+      [req.params.id, req.user.id],
     );
     if (!rowCount) {
       return res.json({ success: true });
@@ -1116,8 +1327,8 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     decrCommunityMemberCount(req.params.id).catch(() => {});
 
     const { rows: remainingMembers } = await query(
-      'SELECT user_id FROM community_members WHERE community_id=$1',
-      [req.params.id]
+      "SELECT user_id FROM community_members WHERE community_id=$1",
+      [req.params.id],
     );
 
     await presenceService.invalidatePresenceFanoutTargets(req.user.id);
@@ -1127,27 +1338,38 @@ router.delete('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     const publicVersion = await getPublicCommunitiesVersion();
 
     const leaveChannelIds = await getCommunityChannelIds(req.params.id);
-    evictChannelAccessCacheForUser(redis, leaveChannelIds, req.user.id).catch(() => {});
+    evictChannelAccessCacheForUser(redis, leaveChannelIds, req.user.id).catch(
+      () => {},
+    );
 
     await Promise.allSettled([
-      invalidateCommunityChannelUserFanoutTargetsCache(req.params.id, leaveChannelIds),
+      invalidateCommunityChannelUserFanoutTargetsCache(
+        req.params.id,
+        leaveChannelIds,
+      ),
       invalidateCommunitiesCaches(
         [req.user.id, ...remainingMembers.map((member) => member.user_id)],
         publicVersion,
       ),
       redis.del(membersCacheKey(req.params.id)),
       fanout.publish(`community:${req.params.id}`, {
-        event: 'community:member_left',
-        data: { userId: req.user.id, leftUserId: req.user.id, communityId: req.params.id },
+        event: "community:member_left",
+        data: {
+          userId: req.user.id,
+          leftUserId: req.user.id,
+          communityId: req.params.id,
+        },
       }),
     ]);
 
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ── Members + presence ─────────────────────────────────────────────────────────
-router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
+router.get("/:id/members", param("id").isUUID(), async (req, res, next) => {
   if (!validate(req, res)) return;
   try {
     const { rows: accessRows } = await query(
@@ -1156,52 +1378,59 @@ router.get('/:id/members', param('id').isUUID(), async (req, res, next) => {
        LEFT JOIN community_members cm
          ON cm.community_id = c.id AND cm.user_id = $2
        WHERE c.id = $1`,
-      [req.params.id, req.user.id]
+      [req.params.id, req.user.id],
     );
-    if (!accessRows.length) return res.status(404).json({ error: 'Community not found' });
+    if (!accessRows.length)
+      return res.status(404).json({ error: "Community not found" });
     if (!accessRows[0].my_role) {
-      return res.status(403).json({ error: 'Not a community member' });
+      return res.status(403).json({ error: "Not a community member" });
     }
 
     const rows = await loadCommunityMembersRoster(req.params.id);
-    const presenceMap = await presenceService.getBulkPresenceDetails(rows.map(r => r.id));
-    const members = rows.map(r => ({
+    const presenceMap = await presenceService.getBulkPresenceDetails(
+      rows.map((r) => r.id),
+    );
+    const members = rows.map((r) => ({
       ...r,
-      status: presenceMap[r.id]?.status || 'offline',
+      status: presenceMap[r.id]?.status || "offline",
       away_message: presenceMap[r.id]?.awayMessage || null,
     }));
     res.json({ members });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.patch(
-  '/:id/members/:userId',
-  param('id').isUUID(),
-  param('userId').isUUID(),
-  body('role').isIn(['member', 'admin']),
+  "/:id/members/:userId",
+  param("id").isUUID(),
+  param("userId").isUUID(),
+  body("role").isIn(["member", "admin"]),
   loadMembership,
   async (req, res, next) => {
     if (!validate(req, res)) return;
     let client;
     try {
-      if (req.membership?.role !== 'owner') {
-        return res.status(403).json({ error: 'Insufficient permissions' });
+      if (req.membership?.role !== "owner") {
+        return res.status(403).json({ error: "Insufficient permissions" });
       }
 
       client = await getClient();
-      await client.query('BEGIN');
+      await client.query("BEGIN");
 
-      const { rows: [community] } = await client.query(
-        'SELECT id, owner_id FROM communities WHERE id = $1',
-        [req.params.id]
+      const {
+        rows: [community],
+      } = await client.query(
+        "SELECT id, owner_id FROM communities WHERE id = $1",
+        [req.params.id],
       );
       if (!community) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Community not found' });
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "Community not found" });
       }
       if (community.owner_id === req.params.userId) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Cannot change owner role' });
+        await client.query("ROLLBACK");
+        return res.status(400).json({ error: "Cannot change owner role" });
       }
 
       const { rows } = await client.query(
@@ -1209,14 +1438,14 @@ router.patch(
          SET role = $1
          WHERE community_id = $2 AND user_id = $3
          RETURNING community_id, user_id, role`,
-        [req.body.role, req.params.id, req.params.userId]
+        [req.body.role, req.params.id, req.params.userId],
       );
       if (!rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Member not found' });
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "Member not found" });
       }
 
-      await client.query('COMMIT');
+      await client.query("COMMIT");
 
       const publicVersion = await getPublicCommunitiesVersion();
 
@@ -1224,7 +1453,7 @@ router.patch(
         invalidateCommunitiesCaches([req.params.userId], publicVersion),
         redis.del(membersCacheKey(req.params.id)),
         fanout.publish(`community:${req.params.id}`, {
-          event: 'community:role_updated',
+          event: "community:role_updated",
           data: {
             communityId: req.params.id,
             userId: req.params.userId,
@@ -1241,12 +1470,12 @@ router.patch(
         },
       });
     } catch (err) {
-      await client?.query('ROLLBACK');
+      await client?.query("ROLLBACK");
       next(err);
     } finally {
       client?.release();
     }
-  }
+  },
 );
 
 module.exports = router;
