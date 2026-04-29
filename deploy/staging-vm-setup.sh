@@ -54,6 +54,8 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 86400;
     proxy_send_timeout 86400;
+    proxy_next_upstream error timeout http_502 http_503 http_504;
+    proxy_next_upstream_tries 0;
   }
 
   location ~ ^/api/v1(/api/v1)+(.*)$ {
@@ -86,7 +88,7 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -102,7 +104,7 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -118,7 +120,7 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -134,7 +136,7 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -150,7 +152,7 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -167,7 +169,7 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -185,7 +187,7 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 30s;
     client_max_body_size 10m;
   }
@@ -201,7 +203,7 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 30s;
     client_max_body_size 10m;
   }
@@ -215,8 +217,8 @@ server {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_next_upstream error timeout http_502 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 30s;
     client_max_body_size 10m;
   }

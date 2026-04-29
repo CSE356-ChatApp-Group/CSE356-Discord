@@ -1817,7 +1817,7 @@ if sudo awk '
     next
   }
   in_api && /proxy_next_upstream[[:space:]]+error[[:space:]]+timeout[[:space:]]+http_502[[:space:]]+http_503[[:space:]]+http_504[[:space:]]+non_idempotent;/ {retry=1}
-  in_api && /proxy_next_upstream_tries[[:space:]]+2;/ {tries=1}
+  in_api && /proxy_next_upstream_tries[[:space:]]+0;/ {tries=1}
   END {
     if (in_api && !(retry && tries)) {
       all_ok=0
@@ -1856,7 +1856,7 @@ def normalize_api_block(match):
     # Normalize all retry directives in /api/ to one canonical pair to keep patching idempotent.
     body = re.sub(r"\n\s*proxy_next_upstream[^\n]*;", "", body)
     body = re.sub(r"\n\s*proxy_next_upstream_tries\s+\d+;", "", body)
-    body += f"\n    {retry_full}\n    proxy_next_upstream_tries 2;"
+    body += f"\n    {retry_full}\n    proxy_next_upstream_tries 0;"
     if body != orig:
         changed = True
     return match.group(1) + body + match.group(3)
@@ -1925,7 +1925,7 @@ block = """  location ^~ /api/v1/auth/ {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -1983,7 +1983,7 @@ block = """  location ^~ /api/v1/auth/course/callback {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -1999,7 +1999,7 @@ block = """  location ^~ /api/v1/auth/course/callback {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -2015,7 +2015,7 @@ block = """  location ^~ /api/v1/auth/course/callback {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -2031,7 +2031,7 @@ block = """  location ^~ /api/v1/auth/course/callback {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;
@@ -2047,7 +2047,7 @@ block = """  location ^~ /api/v1/auth/course/callback {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 2;
+    proxy_next_upstream_tries 0;
     proxy_read_timeout 75s;
     proxy_send_timeout 75s;
     client_max_body_size 10m;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Production nginx + chatapp upstream audit (run from laptop with SSH).
 # Checks:
-#   - exact 14-worker 3-VM upstream topology (VM1=4, VM2=5, VM3=5)
+#   - exact 16-worker 3-VM upstream topology (VM1=4, VM2=6, VM3=6)
 #   - required proxy retry policy includes http_503 + non_idempotent
 #   - nginx -t succeeds
 #
@@ -139,9 +139,12 @@ else
   echo "OK: worker-host local upstream matches active local chatapp units"
 fi
 
-# Required retry policy now includes http_503 + non_idempotent and tries=2.
+# Required retry policy includes http_503 + non_idempotent on /api/.
+# proxy_next_upstream_tries must be 0 (unlimited within upstream group) for multi-VM:
+# with tries=2 and 16 workers, rolling deploys often hit two dead peers in a row →
+# connect() failed (111: Connection refused) and client-visible failures despite healthy peers.
 RETRY_LINE='proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;'
-TRIES_LINE='proxy_next_upstream_tries 2;'
+TRIES_LINE='proxy_next_upstream_tries 0;'
 if sudo grep -Fq "${RETRY_LINE}" "${SITE}"; then
   echo "OK: proxy_next_upstream includes http_503 + non_idempotent"
 else
@@ -149,7 +152,7 @@ else
   exit 1
 fi
 if sudo grep -Fq "${TRIES_LINE}" "${SITE}"; then
-  echo "OK: proxy_next_upstream_tries 2 is present"
+  echo "OK: proxy_next_upstream_tries 0 is present (multi-upstream safe)"
 else
   echo "FAIL: missing '${TRIES_LINE}' in ${SITE}"
   exit 1

@@ -544,8 +544,9 @@ run_preflight_db_check
 
 # ── Phase 0: Deploy to VM3 first (after pre-flight PostgreSQL check) ─────────
 # VM3 has no shared services: a *failed* deploy does not take down Redis/PgBouncer on VM1.
-# Rolling Node workers here still drops connections on VM3 ports that VM1 nginx is
-# proxying to — expect brief 502/RST bursts for requests steered to a restarting peer.
+# Rolling Node workers can briefly refuse ports VM1 nginx still lists. With
+# proxy_next_upstream_tries 0 (see deploy-common / prod-nginx-audit), nginx retries
+# across all healthy peers instead of stopping after two dead picks (tries=2 bug).
 # SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 phase_deploy_workers_vm \
   "=== Phase 0: Deploy to VM3 (workers only; brief client errors possible while rolling) ===" \
@@ -571,8 +572,7 @@ if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
 fi
 
 # ── Phase 1: Deploy to VM2 ───────────────────────────────────────────────────
-# Same traffic caveat as Phase 0: VM1 nginx upstream lists VM2 workers; rolling them
-# can surface 502 from nginx while peers restart (not the same as isolating user traffic).
+# Same rolling caveat as Phase 0 for VM2 upstreams; nginx tries=0 mitigates connect refused.
 # SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo ""
 phase_deploy_workers_vm \
