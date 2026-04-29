@@ -23,6 +23,7 @@ services:
   promtail:
     image: grafana/promtail:3.1.0
     restart: unless-stopped
+    network_mode: host
     command: ["-config.file=/etc/promtail/config.yml"]
     volumes:
       - /var/log:/var/log:ro
