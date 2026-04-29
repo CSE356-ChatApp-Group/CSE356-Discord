@@ -31,25 +31,34 @@ function wsReplayPendingEligibilityKey(userId: string) {
   return `ws:replay_pending_eligible:${userId}`;
 }
 
+/** Single key for pending-replay classification EXISTS (replaces dual read on recent + replay keys). TTL = max(recent, replay) when replay window is enabled. */
+function wsPendingEligibleKey(userId: string) {
+  return `ws:pending_eligible:${userId}`;
+}
+
+function pendingEligibleTtlSeconds() {
+  const recentTtl = WS_RECENT_CONNECT_TTL_SECONDS;
+  const replayTtl = WS_REPLAY_RECENT_USER_WINDOW_SECONDS;
+  if (replayTtl > 0) return Math.max(recentTtl, replayTtl);
+  return recentTtl;
+}
+
 function channelRecentConnectKey(channelId: string) {
   return `channel:recent_connect:${channelId}`;
 }
 
 async function markWsRecentConnect(userId: string) {
-  if (WS_REPLAY_RECENT_USER_WINDOW_SECONDS > 0) {
-    await redis
-      .multi()
-      .set(wsRecentConnectKey(userId), '1', 'EX', WS_RECENT_CONNECT_TTL_SECONDS)
-      .set(
-        wsReplayPendingEligibilityKey(userId),
-        '1',
-        'EX',
-        WS_REPLAY_RECENT_USER_WINDOW_SECONDS,
-      )
-      .exec();
-    return;
+  const recentTtl = WS_RECENT_CONNECT_TTL_SECONDS;
+  const replayTtl = WS_REPLAY_RECENT_USER_WINDOW_SECONDS;
+  const eligibleTtl = pendingEligibleTtlSeconds();
+
+  const multi = redis.multi();
+  multi.set(wsRecentConnectKey(userId), '1', 'EX', recentTtl);
+  if (replayTtl > 0) {
+    multi.set(wsReplayPendingEligibilityKey(userId), '1', 'EX', replayTtl);
   }
-  await redis.set(wsRecentConnectKey(userId), '1', 'EX', WS_RECENT_CONNECT_TTL_SECONDS);
+  multi.set(wsPendingEligibleKey(userId), '1', 'EX', eligibleTtl);
+  await multi.exec();
 }
 
 /**
@@ -74,6 +83,7 @@ module.exports = {
   WS_REPLAY_RECENT_USER_WINDOW_SECONDS,
   wsRecentConnectKey,
   wsReplayPendingEligibilityKey,
+  wsPendingEligibleKey,
   channelRecentConnectKey,
   channelRecentZsetEnabled,
   markWsRecentConnect,

@@ -499,7 +499,7 @@ async function publishChannelMessageRecentUserBridge(
     return { targetCount: 0 };
   }
 
-  enqueuePendingMessageForUsers(targets, envelope).catch((err) => {
+  enqueuePendingMessageForUsers(targets, envelope, { recentTargets: targets }).catch((err) => {
     logger.warn(
       { err, channelId, targetCount: targets.length },
       'Failed to enqueue immediate recent-connect bridge pending replay pointers',
@@ -553,7 +553,9 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
   if (envelope?.event === 'message:created' && pendingEnqueueTargets.length > 0) {
     // Reconnect bridge: keep a short-lived per-user pending pointer so reconnect
     // drain can recover missed live fanout quickly before marking socket ready.
-    enqueuePendingMessageForUsers(pendingEnqueueTargets, envelope).catch((err) => {
+    enqueuePendingMessageForUsers(pendingEnqueueTargets, envelope, {
+      recentTargets: hintedRecentTargets,
+    }).catch((err) => {
       logger.warn(
         { err, channelId, targetCount: pendingEnqueueTargets.length },
         'Failed to enqueue channel message pending replay pointers',

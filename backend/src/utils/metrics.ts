@@ -627,7 +627,7 @@ const realtimeMissAttributionTotal = new client.Counter({
 const pendingReplayRecipientTotal = new client.Counter({
   name: 'pending_replay_recipient_total',
   help:
-    'Users per message:connected=active WS (user:<id>:connections); recent=no socket but ws:recent_connect or ws:replay_pending_eligible; offline_skipped=fully offline; legacy_enqueue=all targets',
+    'Users per message:connected=active WS (user:<id>:connections); recent=no socket but ws:pending_eligible (or hinted recentTargets) or legacy markers; offline_skipped=fully offline; legacy_enqueue=all targets',
   labelNames: ['class'],
 });
 

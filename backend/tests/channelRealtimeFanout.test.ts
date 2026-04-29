@@ -205,6 +205,7 @@ describe('channelRealtimeFanout', () => {
     expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
       ['user:a', 'user:b'],
       expect.objectContaining({ event: 'message:created', data: expect.objectContaining({ id: 'm1' }) }),
+      { recentTargets: [] },
     );
     const expectedChannels = [
       'channel:c1',
@@ -227,6 +228,7 @@ describe('channelRealtimeFanout', () => {
       expect(enqueuePendingMessageForUsers).toHaveBeenCalledTimes(1);
       const pendingArg = enqueuePendingMessageForUsers.mock.calls[0][0] as string[];
       expect(pendingArg.sort()).toEqual(['user:a', 'user:b']);
+      expect(enqueuePendingMessageForUsers.mock.calls[0][2]).toEqual({ recentTargets: ['user:a'] });
       const expectedChannels = [
         'channel:c1',
         userFeedRedisChannelForUserId('a'),
@@ -357,5 +359,10 @@ describe('channelRealtimeFanout', () => {
     expect(result.targetCount).toBe(2);
     expect(redis.zrangebyscore).toHaveBeenCalledTimes(1);
     expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      expect.arrayContaining(['user:a', 'user:b']),
+      expect.objectContaining({ event: 'message:created' }),
+      { recentTargets: expect.arrayContaining(['user:a', 'user:b']) },
+    );
   });
 });

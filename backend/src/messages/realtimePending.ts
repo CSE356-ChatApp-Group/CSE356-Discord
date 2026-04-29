@@ -5,6 +5,7 @@ const logger = require('../utils/logger');
 const { loadHydratedMessagesByIds } = require('./messageHydrate');
 const { wrapFanoutPayload } = require('./realtimePayload');
 const {
+  wsPendingEligibleKey,
   wsRecentConnectKey,
   wsReplayPendingEligibilityKey,
   WS_REPLAY_RECENT_USER_WINDOW_SECONDS,
@@ -54,6 +55,14 @@ const WS_REPLAY_PENDING_ONLY_ACTIVE =
 const WS_REPLAY_PENDING_LEGACY_ALL =
   String(process.env.WS_REPLAY_PENDING_LEGACY_ALL || 'false').toLowerCase() === 'true';
 
+/**
+ * Rollout safety: when `ws:pending_eligible:*` is absent (sessions before unified marker),
+ * re-check `ws:recent_connect:*` / `ws:replay_pending_eligible:*` (second pipeline, only for
+ * phase-1 pending-miss + zero connections). Set **`false`** after fleet + reconnect window.
+ */
+const WS_PENDING_ELIGIBLE_LEGACY_FALLBACK =
+  String(process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK ?? 'true').toLowerCase() !== 'false';
+
 const PENDING_MIN_MARKER = '__pendingMin';
 let pendingGuardCachedUntilMs = 0;
 let pendingGuardCachedShouldSkip = false;
@@ -92,6 +101,18 @@ function normalizeUserIds(targets: string[]) {
   )];
 }
 
+/** User ids already classified as "recent" for fanout (skip EXISTS on unified pending-eligible key). */
+function recentTargetsUserIdSet(recentTargets?: string[]) {
+  const out = new Set<string>();
+  if (!Array.isArray(recentTargets) || !recentTargets.length) return out;
+  for (const t of recentTargets) {
+    if (typeof t !== 'string' || !t) continue;
+    const id = t.startsWith('user:') ? t.slice(5) : t;
+    if (id) out.add(id);
+  }
+  return out;
+}
+
 function pendingReplayFilterEnabled() {
   return WS_REPLAY_PENDING_ONLY_ACTIVE && !WS_REPLAY_PENDING_LEGACY_ALL;
 }
@@ -99,8 +120,14 @@ function pendingReplayFilterEnabled() {
 /**
  * Returns user ids that should receive `ws:pending:user:*` zadd for this message.
  * Offline users still get history from Postgres on reconnect; DB replay covers gaps.
+ *
+ * @param recentUserIdsKnown - user ids already known recent from the same fanout pass
+ *   (e.g. `recentConnectTargets`); skips EXISTS on `ws:pending_eligible:*` for them.
  */
-async function filterUsersEligibleForPendingReplay(userIds: string[]): Promise<{
+async function filterUsersEligibleForPendingReplay(
+  userIds: string[],
+  recentUserIdsKnown?: Set<string>,
+): Promise<{
   eligible: string[];
   perClass: { connected: number; recent: number; offlineSkipped: number };
 }> {
@@ -110,29 +137,77 @@ async function filterUsersEligibleForPendingReplay(userIds: string[]): Promise<{
   }
 
   const eligible: string[] = [];
+  const knownRecent = recentUserIdsKnown instanceof Set ? recentUserIdsKnown : new Set<string>();
   const useReplayKey = WS_REPLAY_RECENT_USER_WINDOW_SECONDS > 0;
+  const legacyFallback = WS_PENDING_ELIGIBLE_LEGACY_FALLBACK;
 
   for (let offset = 0; offset < userIds.length; offset += REDIS_PENDING_CLASSIFY_BATCH) {
     const slice = userIds.slice(offset, offset + REDIS_PENDING_CLASSIFY_BATCH);
     const pipe = redis.pipeline();
     for (const uid of slice) {
-      pipe.exists(wsRecentConnectKey(uid));
-      if (useReplayKey) pipe.exists(wsReplayPendingEligibilityKey(uid));
+      if (!knownRecent.has(uid)) {
+        pipe.exists(wsPendingEligibleKey(uid));
+      }
       pipe.scard(userConnectionSetKey(uid));
     }
     const results = await pipe.exec();
     let idx = 0;
+
+    const phase1: Array<{
+      uid: string;
+      connCount: number;
+      pendingExists: boolean;
+      fromHint: boolean;
+    }> = [];
+
     for (let i = 0; i < slice.length; i += 1) {
       const uid = slice[i];
-      const exRecent = Number(results[idx++]?.[1] || 0) === 1;
-      const exReplay = useReplayKey ? Number(results[idx++]?.[1] || 0) === 1 : false;
+      const fromHint = knownRecent.has(uid);
+      let pendingExists = false;
+      if (fromHint) {
+        pendingExists = false;
+      } else {
+        pendingExists = Number(results[idx++]?.[1] || 0) === 1;
+      }
       const connCount = Number(results[idx++]?.[1] || 0) || 0;
+      phase1.push({ uid, connCount, pendingExists, fromHint });
+    }
 
-      const hasRecentMarker = exRecent || exReplay;
-      if (connCount > 0) {
-        eligible.push(uid);
+    const needLegacyProbe: string[] = [];
+    for (const row of phase1) {
+      if (row.connCount > 0) {
+        eligible.push(row.uid);
         perClass.connected += 1;
-      } else if (hasRecentMarker) {
+      } else if (row.fromHint) {
+        eligible.push(row.uid);
+        perClass.recent += 1;
+      } else if (row.pendingExists) {
+        eligible.push(row.uid);
+        perClass.recent += 1;
+      } else if (legacyFallback) {
+        needLegacyProbe.push(row.uid);
+      } else {
+        perClass.offlineSkipped += 1;
+      }
+    }
+
+    if (!needLegacyProbe.length) {
+      continue;
+    }
+
+    const leg = redis.pipeline();
+    for (const uid of needLegacyProbe) {
+      leg.exists(wsRecentConnectKey(uid));
+      if (useReplayKey) {
+        leg.exists(wsReplayPendingEligibilityKey(uid));
+      }
+    }
+    const legRes = await leg.exec();
+    let lj = 0;
+    for (const uid of needLegacyProbe) {
+      const exRecent = Number(legRes[lj++]?.[1] || 0) === 1;
+      const exReplay = useReplayKey ? Number(legRes[lj++]?.[1] || 0) === 1 : false;
+      if (exRecent || exReplay) {
         eligible.push(uid);
         perClass.recent += 1;
       } else {
@@ -177,12 +252,20 @@ async function hydratePendingPayloads(
   return out;
 }
 
-async function enqueuePendingMessageForUsers(targets: string[], payload: Record<string, unknown>) {
+/**
+ * @param opts.recentTargets - `user:<id>` strings from the same publish pass; avoids EXISTS for those users.
+ */
+async function enqueuePendingMessageForUsers(
+  targets: string[],
+  payload: Record<string, unknown>,
+  opts?: { recentTargets?: string[] },
+) {
   if (!isRedisOperational()) return;
   const messageId = extractMessageId(payload);
   if (!messageId) return;
   const userIds = normalizeUserIds(targets);
   if (!userIds.length) return;
+  const recentKnown = recentTargetsUserIdSet(opts?.recentTargets);
   if (await shouldSkipPendingReplayWrite()) {
     wsPendingReplayGuardTotal.inc({ reason: 'redis_memory_high' });
     const now = Date.now();
@@ -202,7 +285,7 @@ async function enqueuePendingMessageForUsers(targets: string[], payload: Record<
 
   let enqueueUserIds = userIds;
   if (pendingReplayFilterEnabled()) {
-    const { eligible, perClass } = await filterUsersEligibleForPendingReplay(userIds);
+    const { eligible, perClass } = await filterUsersEligibleForPendingReplay(userIds, recentKnown);
     enqueueUserIds = eligible;
     if (perClass.connected > 0) {
       pendingReplayRecipientTotal.inc({ class: 'connected' }, perClass.connected);

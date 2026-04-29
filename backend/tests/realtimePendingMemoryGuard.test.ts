@@ -22,9 +22,7 @@ const redisMock = {
 
 jest.mock("../src/db/redis", () => redisMock);
 jest.mock("../src/websocket/recentConnect", () => ({
-  wsRecentConnectKey: (id: string) => `ws:recent_connect:${id}`,
-  wsReplayPendingEligibilityKey: (id: string) => `ws:replay_pending_eligible:${id}`,
-  WS_REPLAY_RECENT_USER_WINDOW_SECONDS: 30,
+  wsPendingEligibleKey: (id: string) => `ws:pending_eligible:${id}`,
 }));
 jest.mock("../src/messages/messageHydrate", () => ({
   loadHydratedMessageById: jest.fn(async () => null),
