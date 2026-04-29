@@ -1537,8 +1537,8 @@ ssh_prod "
     || echo 'NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Enforce git-tracked realtime profile so deploys cannot drift.
   PROFILE_REQUIRED=/tmp/prod.required.env
-  if [ -f "${RELEASE_PATH}/deploy/env/prod.required.env" ]; then
-    PROFILE_REQUIRED="${RELEASE_PATH}/deploy/env/prod.required.env"
+  if [ -f "\${RELEASE_PATH}/deploy/env/prod.required.env" ]; then
+    PROFILE_REQUIRED="\${RELEASE_PATH}/deploy/env/prod.required.env"
   fi
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \

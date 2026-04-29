@@ -97,6 +97,12 @@ function classifyPgQueryError(err) {
   const code = err && err.code;
   const msg = String((err && err.message) || '');
   if (
+    code === '57014' ||
+    /query read timeout|query timeout|statement timeout|canceling statement due to statement timeout/i.test(msg)
+  ) {
+    return 'query_timeout';
+  }
+  if (
     code === 'ETIMEDOUT' ||
     (/timeout/i.test(msg) && (/connect/i.test(msg) || /acquiring/i.test(msg)))
   ) {
@@ -110,7 +116,12 @@ function classifyPgQueryError(err) {
 /** True when the read pool failed in a way that should transparently use the primary. */
 function shouldFallbackReadReplicaToPrimary(err) {
   const reason = classifyPgQueryError(err);
-  if (reason === 'connection' || reason === 'acquire_timeout' || reason === 'shutdown') {
+  if (
+    reason === 'connection' ||
+    reason === 'acquire_timeout' ||
+    reason === 'query_timeout' ||
+    reason === 'shutdown'
+  ) {
     return true;
   }
   const c = err && err.code;
@@ -193,6 +204,7 @@ pool.on('error', (err) => {
 /** Optional read replica for SELECT-heavy paths (eventual consistency). */
 const READ_REPLICA_URL = process.env.PG_READ_REPLICA_URL || '';
 const READ_POOL_MAX = parseInt(process.env.PG_READ_POOL_MAX || '15', 10);
+const READ_QUERY_TIMEOUT_MS = parseInt(process.env.PG_READ_QUERY_TIMEOUT_MS || '0', 10);
 let readPool = null;
 if (READ_REPLICA_URL) {
   readPool = new Pool({
@@ -200,6 +212,9 @@ if (READ_REPLICA_URL) {
     max: Number.isFinite(READ_POOL_MAX) && READ_POOL_MAX > 0 ? READ_POOL_MAX : 15,
     connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
     idleTimeoutMillis: IDLE_TIMEOUT_MS,
+    ...(Number.isFinite(READ_QUERY_TIMEOUT_MS) && READ_QUERY_TIMEOUT_MS > 0
+      ? { query_timeout: READ_QUERY_TIMEOUT_MS }
+      : {}),
     keepAlive: false,
     application_name: `${APPLICATION_NAME}-read`,
   });

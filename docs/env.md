@@ -164,7 +164,8 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED` | `true` to enable background DB reconcile of `conversations.last_message_*` from Redis metadata **and** delete-time `repointConversationLastMessage` DB updates; default `false` keeps conversation latest-message metadata Redis-first with DB as stale fallback |
 | `LAST_MESSAGE_REDIS_TTL_SECS` | TTL for Redis metadata keys `ch:last_msg:*` / `conv:last_msg:*` (default **43200** s) so these recoverable caches do not remain immortal. |
 | `PG_READ_REPLICA_URL`, `PG_READ_POOL_MAX` | Optional read replica for `GET /api/v1/messages` list `SELECT`s ([`docs/db-scaling-messages.md`](db-scaling-messages.md)). Request **`X-ChatApp-Read-Consistency: primary`** on that GET to force the primary when you need read-your-writes after a POST. |
-| `PG_READ_FALLBACK_TO_PRIMARY` | When **`false`**, `queryRead()` fails fast on replica errors. Otherwise (default) **transport** failures on the read pool (refused connection, timeouts, shutdown) **retry the same SELECT on the primary** so routes like **`PUT /messages/:id/read`** do not return **500** if the standby is down. |
+| `PG_READ_FALLBACK_TO_PRIMARY` | When **`false`**, `queryRead()` fails fast on replica errors. Otherwise (default) **transport** failures and replica query timeouts retry the same SELECT on the primary so routes like **`PUT /messages/:id/read`** do not return **500** if the standby is down or wedged. |
+| `PG_READ_QUERY_TIMEOUT_MS` | Optional read-replica query timeout in milliseconds. When set above `0`, a slow replica SELECT times out and, if `PG_READ_FALLBACK_TO_PRIMARY` is enabled, retries on primary. Prod currently pins **`750`** during incident stabilization. |
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
