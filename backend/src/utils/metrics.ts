@@ -596,6 +596,13 @@ const wsReliableDeliveryLatencyMs = new client.Histogram({
   buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000, 3600000],
 });
 
+/** Reliable deliveries split by Redis logical topic prefix (channel-first migration / grader tuning). */
+const wsReliableDeliveryTopicTotal = new client.Counter({
+  name: 'ws_reliable_delivery_topic_total',
+  help: 'Reliable websocket deliveries by path and logical Redis channel prefix (message:* and related)',
+  labelNames: ['path', 'topic_prefix'],
+});
+
 /**
  * Channel message:created user-topic fanout volume by segment (candidate list vs inline Redis
  * publish vs deferred side-effect queue). Use deferred / candidate ratio with replay rate.
@@ -1308,6 +1315,11 @@ function startPgPoolMetrics(pool) {
     wsReliableDeliveryTotal.inc({ path: 'replay', source: 'pending_queue' }, 0);
     wsReliableDeliveryLatencyMs.observe({ path: 'realtime' }, 0);
     wsReliableDeliveryLatencyMs.observe({ path: 'replay' }, 0);
+    for (const path of ['realtime', 'replay'] as const) {
+      for (const topic_prefix of ['channel', 'user', 'conversation', 'community', 'userfeed', 'other'] as const) {
+        wsReliableDeliveryTopicTotal.inc({ path, topic_prefix }, 0);
+      }
+    }
     channelMessageFanoutRecipientTotal.inc({ segment: 'candidate' }, 0);
     channelMessageFanoutRecipientTotal.inc({ segment: 'inline_user_topic' }, 0);
     channelMessageFanoutRecipientTotal.inc({ segment: 'deferred_user_topic' }, 0);
@@ -1423,6 +1435,7 @@ module.exports = {
   wsPendingReplayGuardTotal,
   wsReliableDeliveryTotal,
   wsReliableDeliveryLatencyMs,
+  wsReliableDeliveryTopicTotal,
   channelMessageFanoutRecipientTotal,
   realtimeMissAttributionTotal,
   pendingReplayRecipientTotal,

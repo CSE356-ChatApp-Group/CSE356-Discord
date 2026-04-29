@@ -118,6 +118,7 @@ const {
   wsReplaySemaphoreCapGauge,
   wsReliableDeliveryTotal,
   wsReliableDeliveryLatencyMs,
+  wsReliableDeliveryTopicTotal,
   realtimeMissAttributionTotal,
 } = require("../utils/metrics");
 
@@ -943,6 +944,24 @@ function isReliableRealtimeEvent(eventName) {
   );
 }
 
+/** Buckets `ws_reliable_delivery_topic_total` — bounded label cardinality. */
+function wsDeliveryTopicPrefixForMetrics(logicalChannel) {
+  if (typeof logicalChannel !== "string") return "other";
+  const idx = logicalChannel.indexOf(":");
+  if (idx <= 0) return "other";
+  const prefix = logicalChannel.slice(0, idx);
+  if (
+    prefix === "channel"
+    || prefix === "user"
+    || prefix === "conversation"
+    || prefix === "community"
+    || prefix === "userfeed"
+  ) {
+    return prefix;
+  }
+  return "other";
+}
+
 /** Epoch ms for latency (message row time or fanout publishedAt); null if unknown. */
 function parsePayloadReferenceTimeMs(parsed) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
@@ -1093,6 +1112,10 @@ function flushOutboundJob(ws, job) {
         ? (deliverySource === "pending_queue" ? "pending_queue" : "missed_db")
         : "live_pubsub";
     wsReliableDeliveryTotal.inc({ path: pathKind, source: sourceKind });
+    wsReliableDeliveryTopicTotal.inc({
+      path: pathKind,
+      topic_prefix: wsDeliveryTopicPrefixForMetrics(logicalChannel),
+    });
     const refMs = parsePayloadReferenceTimeMs(parsed);
     if (refMs != null) {
       const deltaMs = Date.now() - refMs;
@@ -2033,6 +2056,7 @@ wss.on("connection", async (ws, req) => {
   ws.on("pong", () => {
     ws.isAlive = true;
     refreshConnectionTtls(user.id, ws._connectionId).catch(() => {});
+    markWsRecentConnect(user.id).catch(() => {});
   });
 
   ws._presenceInitPromise = upsertConnectionState(user.id, ws._connectionId, "idle")

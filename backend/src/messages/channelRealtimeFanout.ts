@@ -394,6 +394,7 @@ async function resolveUserTopicTargets(channelId: string) {
       recentTargets: [],
       candidateCount: 0,
       cacheResult: 'miss' as const,
+      pendingEnqueueTargets: [] as string[],
     };
   }
 
@@ -424,6 +425,7 @@ async function resolveUserTopicTargets(channelId: string) {
       recentTargets: [],
       candidateCount: 0,
       cacheResult: targetLookup.cacheResult,
+      pendingEnqueueTargets: [],
     };
   }
 
@@ -437,6 +439,7 @@ async function resolveUserTopicTargets(channelId: string) {
       recentTargets: [],
       candidateCount: capped.length,
       cacheResult: targetLookup.cacheResult,
+      pendingEnqueueTargets: capped,
     };
   }
 
@@ -456,6 +459,7 @@ async function resolveUserTopicTargets(channelId: string) {
     recentTargets: inlineTargets,
     candidateCount: capped.length,
     cacheResult: targetLookup.cacheResult,
+    pendingEnqueueTargets: capped,
   };
 }
 
@@ -524,6 +528,7 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
   // avoidable latency for rich clients already listening on `channel:<id>`.
   const userTargetsPromise = resolveUserTopicTargets(channelId);
   let allTargets: string[] = [];
+  let pendingEnqueueTargets: string[] = [];
   let hintedRecentTargets: string[] = [];
   let candidateCount = 0;
   let cacheResult: 'hit' | 'miss' | 'coalesced' = 'miss';
@@ -539,17 +544,18 @@ async function publishChannelMessageEvent(channelId: string, envelope: Record<st
 
   ({
     allTargets,
+    pendingEnqueueTargets,
     recentTargets: hintedRecentTargets,
     candidateCount,
     cacheResult,
   } = await userTargetsPromise);
 
-  if (envelope?.event === 'message:created' && allTargets.length > 0) {
+  if (envelope?.event === 'message:created' && pendingEnqueueTargets.length > 0) {
     // Reconnect bridge: keep a short-lived per-user pending pointer so reconnect
     // drain can recover missed live fanout quickly before marking socket ready.
-    enqueuePendingMessageForUsers(allTargets, envelope).catch((err) => {
+    enqueuePendingMessageForUsers(pendingEnqueueTargets, envelope).catch((err) => {
       logger.warn(
-        { err, channelId, targetCount: allTargets.length },
+        { err, channelId, targetCount: pendingEnqueueTargets.length },
         'Failed to enqueue channel message pending replay pointers',
       );
     });

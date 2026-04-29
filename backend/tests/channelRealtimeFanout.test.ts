@@ -14,6 +14,10 @@ jest.mock('../src/messages/sideEffects', () => ({
   enqueueFanoutJob: jest.fn((_name: string, fn: () => Promise<void>) => fn()),
 }));
 
+jest.mock('../src/messages/realtimePending', () => ({
+  enqueuePendingMessageForUsers: jest.fn(),
+}));
+
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(() => Promise.resolve(null)),
   mget: jest.fn(() => Promise.resolve([])),
@@ -48,6 +52,10 @@ const redis = require('../src/db/redis') as {
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { userFeedRedisChannelForUserId } = require('../src/websocket/userFeed') as {
   userFeedRedisChannelForUserId: (userId: string) => string;
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending') as {
+  enqueuePendingMessageForUsers: jest.Mock;
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
@@ -87,6 +95,8 @@ describe('channelRealtimeFanout', () => {
     redis.incr.mockReset();
     redis.pipeline.mockReset();
     redis.multi.mockReset();
+    enqueuePendingMessageForUsers.mockReset();
+    enqueuePendingMessageForUsers.mockResolvedValue(undefined);
     redis.get.mockResolvedValue(null);
     redis.mget.mockResolvedValue([]);
     redis.zrangebyscore.mockResolvedValue([]);
@@ -177,6 +187,10 @@ describe('channelRealtimeFanout', () => {
     redis.mget.mockResolvedValueOnce([null, null]);
     query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
     await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      ['user:a', 'user:b'],
+      expect.objectContaining({ event: 'message:created', data: expect.objectContaining({ id: 'm1' }) }),
+    );
     const expectedChannels = [
       'channel:c1',
       userFeedRedisChannelForUserId('a'),
@@ -195,6 +209,9 @@ describe('channelRealtimeFanout', () => {
         .mockResolvedValueOnce(['1', null]);
       query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
       await publishChannelMessageCreated('c1', { event: 'message:created', data: { id: 'm1' } });
+      expect(enqueuePendingMessageForUsers).toHaveBeenCalledTimes(1);
+      const pendingArg = enqueuePendingMessageForUsers.mock.calls[0][0] as string[];
+      expect(pendingArg.sort()).toEqual(['user:a', 'user:b']);
       const expectedChannels = [
         'channel:c1',
         userFeedRedisChannelForUserId('a'),

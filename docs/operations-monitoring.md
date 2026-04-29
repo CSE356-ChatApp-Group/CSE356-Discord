@@ -214,6 +214,7 @@ When **average** end-to-end delivery (or grader-reported delivery) **spikes** wh
 | Quantity | PromQL / series |
 |----------|-----------------|
 | Realtime delivered (count / s) | `sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="realtime"}[5m]))` |
+| **Realtime by Redis topic prefix** (channel-first migration) | `sum by (topic_prefix) (rate(ws_reliable_delivery_topic_total{job="chatapp-api",path="realtime"}[5m]))` — `topic_prefix` is `channel`, `user`, `conversation`, `community`, `userfeed`, or `other` |
 | Replay delivered (count / s) | `sum(rate(ws_reliable_delivery_total{job="chatapp-api",path="replay"}[5m]))` |
 | **Replay fallback rate** | `100 * sum(rate(ws_reliable_delivery_total{path="replay"}[5m])) / clamp_min(sum(rate(ws_reliable_delivery_total[5m])), 1e-9)` |
 | **Realtime success rate** | `100 * sum(rate(ws_reliable_delivery_total{path="realtime"}[5m])) / clamp_min(sum(rate(ws_reliable_delivery_total[5m])), 1e-9)` |
