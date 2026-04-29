@@ -1120,29 +1120,35 @@ function flushOutboundJob(ws, job) {
     return;
   }
 
-  markSocketMessageDelivered(ws, dedupeKey);
-  if (payloadEventName && isReliableRealtimeEvent(payloadEventName)) {
-    const pathKind = deliveryPath === "replay" ? "replay" : "realtime";
-    const sourceKind =
-      pathKind === "replay"
-        ? (deliverySource === "pending_queue" ? "pending_queue" : "missed_db")
-        : "live_pubsub";
-    wsReliableDeliveryTotal.inc({ path: pathKind, source: sourceKind });
-    wsReliableDeliveryTopicTotal.inc({
-      path: pathKind,
-      topic_prefix: wsDeliveryTopicPrefixForMetrics(logicalChannel),
-    });
-    const refMs = parsePayloadReferenceTimeMs(parsed);
-    if (refMs != null) {
-      const deltaMs = Date.now() - refMs;
-      if (deltaMs >= 0 && Number.isFinite(deltaMs)) {
-        wsReliableDeliveryLatencyMs.observe({ path: pathKind }, deltaMs);
-      }
-    }
-  }
-  ws._lastDataFrameAt = Date.now();
+  const isReliableEvent = !!(payloadEventName && isReliableRealtimeEvent(payloadEventName));
+  const pathKind = deliveryPath === "replay" ? "replay" : "realtime";
+  const sourceKind =
+    pathKind === "replay"
+      ? (deliverySource === "pending_queue" ? "pending_queue" : "missed_db")
+      : "live_pubsub";
+  const topicPrefix = wsDeliveryTopicPrefixForMetrics(logicalChannel);
+  const refMs = isReliableEvent ? parsePayloadReferenceTimeMs(parsed) : null;
   ws.send(outbound, (err) => {
-    if (!err) return;
+    if (!err) {
+      // Only mark dedupe after the frame is accepted by ws.send callback.
+      // Marking early can suppress retries/replay when the send actually fails.
+      markSocketMessageDelivered(ws, dedupeKey);
+      if (isReliableEvent) {
+        wsReliableDeliveryTotal.inc({ path: pathKind, source: sourceKind });
+        wsReliableDeliveryTopicTotal.inc({
+          path: pathKind,
+          topic_prefix: topicPrefix,
+        });
+        if (refMs != null) {
+          const deltaMs = Date.now() - refMs;
+          if (deltaMs >= 0 && Number.isFinite(deltaMs)) {
+            wsReliableDeliveryLatencyMs.observe({ path: pathKind }, deltaMs);
+          }
+        }
+      }
+      ws._lastDataFrameAt = Date.now();
+      return;
+    }
     (ws as any)._sawError = true;
     logger.warn(
       {
@@ -1239,10 +1245,20 @@ function sendPayloadToSocket(
     preparedPayload = null,
     deliveryPath = "realtime",
     deliverySource = "live_pubsub",
+    debugReasonCounts = null,
   } = {},
 ) {
-  if (ws.readyState !== WebSocket.OPEN) return false;
+  const bumpReason = (reason) => {
+    if (!debugReasonCounts) return;
+    debugReasonCounts[reason] = (debugReasonCounts[reason] || 0) + 1;
+  };
+
+  if (ws.readyState !== WebSocket.OPEN) {
+    bumpReason("not_open");
+    return false;
+  }
   if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
+    bumpReason("logical_suppressed");
     return false;
   }
 
@@ -1251,6 +1267,7 @@ function sendPayloadToSocket(
   const { dedupeKey, skipDropForBackpressure } = prepared;
 
   if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
+    bumpReason("dedupe_recent_delivery");
     return false;
   }
 
@@ -1283,6 +1300,7 @@ function sendPayloadToSocket(
         noteRecentDisconnectForSocket(ws, 1006, "outbound_waiters_overflow");
         clearOutboundQueue(ws);
         ws.terminate();
+        bumpReason("waiters_overflow_terminated");
         return false;
       }
       waiters.push({
@@ -1298,6 +1316,7 @@ function sendPayloadToSocket(
     }
   } else if (q.length >= maxDepth) {
     wsOutboundQueueDroppedBestEffortTotal.inc();
+    bumpReason("best_effort_queue_drop");
     return false;
   }
 
@@ -1507,8 +1526,9 @@ function deliverPubsubMessage(channel, message) {
 
   const preparedPayload = prepareSocketPayload(channel, parsed, message);
   let deliveredCount = 0;
+  const reasonCounts: Record<string, number> = {};
   for (const ws of clients) {
-    if (sendPayloadToSocket(ws, channel, parsed, message, { preparedPayload })) {
+    if (sendPayloadToSocket(ws, channel, parsed, message, { preparedPayload, debugReasonCounts: reasonCounts })) {
       deliveredCount += 1;
     }
   }
@@ -1524,6 +1544,24 @@ function deliverPubsubMessage(channel, message) {
   if (isReliableChannelMsg) {
     if (deliveredCount === 0) {
       realtimeMissAttributionTotal.inc({ reason: "topic_message_send_blocked" });
+      const messageId =
+        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+          ? (parsed as { data?: { id?: unknown; messageId?: unknown; message_id?: unknown } }).data
+          : null;
+      const resolvedMessageId = messageId?.id || messageId?.messageId || messageId?.message_id || null;
+      logger.warn(
+        {
+          event: "ws.realtime_delivery_blocked",
+          channel,
+          channelType,
+          parsedEvent,
+          messageId: typeof resolvedMessageId === "string" ? resolvedMessageId : null,
+          recipientCount,
+          reasonCounts,
+          gradingNote: "correlate_with_delivery_timeout_missing_recipient",
+        },
+        "Reliable realtime message had recipients but zero successful socket sends",
+      );
     } else if (deliveredCount < recipientCount) {
       realtimeMissAttributionTotal.inc({ reason: "topic_message_partial_delivery" });
     }

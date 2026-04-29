@@ -650,6 +650,21 @@ do_fast_rollback() {
   notify_discord_prod ":arrow_left: **Prod rollback starting** \`${sha:0:7}\` · ${CHATAPP_INSTANCES} workers"
   deploy_log_phase "rollback: beginning rolling worker swap"
 
+  # Reapply the release-owned env profile when present. Runtime env lives in
+  # /opt/chatapp/shared/.env, so swapping only the systemd WorkingDirectory is
+  # not a true rollback if the previous deploy changed profile-owned keys.
+  ssh_prod "
+    set -euo pipefail
+    if [ -f '${release_path}/deploy/apply-env-profile.py' ] && [ -f '${release_path}/deploy/env/prod.required.env' ]; then
+      sudo python3 '${release_path}/deploy/apply-env-profile.py' \
+        --target /opt/chatapp/shared/.env \
+        --required '${release_path}/deploy/env/prod.required.env'
+      echo 'rollback env profile applied from release artifact'
+    else
+      echo 'WARN: rollback release has no bundled env profile; shared .env left unchanged'
+    fi
+  "
+
   # Snapshot current worker state so exit trap can attempt recovery if rollback fails
   capture_previous_release_map
 
@@ -899,6 +914,10 @@ restart_worker_on_release() {
     ok=0
     for attempt in 1 2 3; do
       sudo systemctl stop chatapp@${port} 2>/dev/null || true
+      # Defensive: terminate any remaining processes in the cgroup so the next start
+      # cannot race into EADDRINUSE with a stale listener.
+      sudo systemctl kill --kill-who=all --signal=TERM chatapp@${port} 2>/dev/null || true
+      sleep 0.5
       released=0
       for _ in \$(seq 1 24); do
         if ! sudo ss -H -ltn \"sport = :${port}\" | grep -q .; then
@@ -908,6 +927,11 @@ restart_worker_on_release() {
         sleep 0.5
       done
       if [ \"\$released\" -ne 1 ]; then
+        # Escalate to SIGKILL for stale listeners still occupying the port.
+        for pid in \$(sudo ss -H -ltnp \"sport = :${port}\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u); do
+          sudo kill -TERM \"\$pid\" 2>/dev/null || true
+        done
+        sleep 0.5
         for pid in \$(sudo ss -H -ltnp \"sport = :${port}\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u); do
           sudo kill -9 \"\$pid\" 2>/dev/null || true
         done
@@ -1512,9 +1536,13 @@ ssh_prod "
     && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}/' /opt/chatapp/shared/.env \
     || echo 'NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Enforce git-tracked realtime profile so deploys cannot drift.
+  PROFILE_REQUIRED=/tmp/prod.required.env
+  if [ -f "${RELEASE_PATH}/deploy/env/prod.required.env" ]; then
+    PROFILE_REQUIRED="${RELEASE_PATH}/deploy/env/prod.required.env"
+  fi
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \
-    --required /tmp/prod.required.env
+    --required "\$PROFILE_REQUIRED"
   echo 'profile-owned keys (post-merge):'
   sudo grep -E '^(CHANNEL_MESSAGE_USER_FANOUT|CHANNEL_MESSAGE_USER_FANOUT_MODE|MESSAGE_USER_FANOUT_HTTP_BLOCKING|WS_AUTO_SUBSCRIBE_MODE|WS_BOOTSTRAP_BATCH_SIZE|WS_BOOTSTRAP_CACHE_TTL_SECONDS|READ_RECEIPT_DEFER_POOL_WAITING|OVERLOAD_HTTP_SHED_ENABLED|OVERLOAD_LAG_SHED_MS)=' /opt/chatapp/shared/.env
   rm -f /tmp/apply-env-profile.py /tmp/prod.required.env

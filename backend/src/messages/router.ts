@@ -1331,10 +1331,8 @@ async function publishConversationEventNow(conversationId, event, data) {
 }
 
 function messagePostAsyncFanoutEnabled() {
-  // Burst resilience: always keep POST /messages fanout off the request thread.
-  // Legacy MESSAGE_POST_SYNC_FANOUT is intentionally ignored to prevent accidental
-  // reintroduction of synchronous fanout loops during high-traffic windows.
-  return true;
+  const v = process.env.MESSAGE_POST_SYNC_FANOUT;
+  return !(v === "1" || v === "true" || v === "yes");
 }
 
 async function advanceReadStateCursor({
