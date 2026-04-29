@@ -203,7 +203,10 @@ jobs:
             frontend/package*.json \
             migrations/ \
             package*.json \
-            .env.example
+            .env.example \
+            deploy/env/prod.required.env \
+            deploy/env/staging.required.env \
+            deploy/apply-env-profile.py
           echo "Packaged: releases/chatapp-${{ github.sha }}.tar.gz"
           ls -lh releases/chatapp-${{ github.sha }}.tar.gz
 

@@ -131,7 +131,10 @@ jobs:
             frontend/package*.json \
             migrations/ \
             package*.json \
-            .env.example
+            .env.example \
+            deploy/env/prod.required.env \
+            deploy/env/staging.required.env \
+            deploy/apply-env-profile.py
           ls -lh "releases/chatapp-${TARGET_SHA}.tar.gz"
 
       - name: Fail production when release artifact is missing
