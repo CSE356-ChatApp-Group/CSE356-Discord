@@ -2,7 +2,7 @@
 
 const redis = require('../db/redis');
 const logger = require('../utils/logger');
-const { loadHydratedMessageById } = require('./messageHydrate');
+const { loadHydratedMessagesByIds } = require('./messageHydrate');
 const { wrapFanoutPayload } = require('./realtimePayload');
 const {
   wsRecentConnectKey,
@@ -161,13 +161,20 @@ function isLegacyFullPendingPayload(parsed: Record<string, unknown>) {
   return !parsed[PENDING_MIN_MARKER] && typeof parsed.event === 'string' && parsed.data !== undefined;
 }
 
-async function hydratePendingPayload(parsed: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-  const id = typeof parsed.id === 'string' ? parsed.id : null;
-  if (!id) return null;
-  const event = typeof parsed.event === 'string' ? parsed.event : 'message:created';
-  const row = await loadHydratedMessageById(id);
-  if (!row) return null;
-  return wrapFanoutPayload(event, row) as Record<string, unknown>;
+async function hydratePendingPayloads(
+  entries: Array<{ parsed: Record<string, unknown>; messageId: string }>,
+): Promise<Map<string, Record<string, unknown>>> {
+  const out = new Map<string, Record<string, unknown>>();
+  if (!entries.length) return out;
+  const ids = entries.map((e) => e.messageId);
+  const rows = await loadHydratedMessagesByIds(ids);
+  for (const { parsed, messageId } of entries) {
+    const row = rows.get(messageId);
+    if (!row) continue;
+    const event = typeof parsed.event === 'string' ? parsed.event : 'message:created';
+    out.set(messageId, wrapFanoutPayload(event, row) as Record<string, unknown>);
+  }
+  return out;
 }
 
 async function enqueuePendingMessageForUsers(targets: string[], payload: Record<string, unknown>) {
@@ -286,7 +293,9 @@ async function drainPendingMessagesForUser(userId: string) {
   const payloadKeys = messageIds.map((messageId) => pendingMessageKey(messageId));
   const payloadRows = await redis.mget(...payloadKeys);
   const pipeline = redis.pipeline();
-  const drained: Record<string, unknown>[] = [];
+  const toHydrate: Array<{ parsed: Record<string, unknown>; messageId: string }> = [];
+  const legacyByIndex: Array<Record<string, unknown> | null> = new Array(messageIds.length).fill(null);
+
   for (let i = 0; i < messageIds.length; i += 1) {
     const messageId = messageIds[i];
     const rawPayload = payloadRows[i];
@@ -296,18 +305,31 @@ async function drainPendingMessagesForUser(userId: string) {
       const parsed = JSON.parse(rawPayload);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
       if (isLegacyFullPendingPayload(parsed as Record<string, unknown>)) {
-        drained.push(parsed as Record<string, unknown>);
+        legacyByIndex[i] = parsed as Record<string, unknown>;
         continue;
       }
       if ((parsed as Record<string, unknown>)[PENDING_MIN_MARKER] === true) {
-        const hydrated = await hydratePendingPayload(parsed as Record<string, unknown>);
-        if (hydrated) drained.push(hydrated);
-        continue;
+        toHydrate.push({ parsed: parsed as Record<string, unknown>, messageId });
       }
     } catch {
       // Ignore invalid payloads; TTL cleanup will remove payload keys.
     }
   }
+
+  const hydratedMap = await hydratePendingPayloads(toHydrate);
+
+  const drained: Record<string, unknown>[] = [];
+  for (let i = 0; i < messageIds.length; i += 1) {
+    const legacy = legacyByIndex[i];
+    if (legacy) {
+      drained.push(legacy);
+      continue;
+    }
+    const messageId = messageIds[i];
+    const h = hydratedMap.get(messageId);
+    if (h) drained.push(h);
+  }
+
   await pipeline.exec();
   return drained;
 }

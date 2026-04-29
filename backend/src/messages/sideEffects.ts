@@ -31,6 +31,11 @@ const activeWorkers: Record<string, number> = {
   'fanout:background': 0,
 };
 
+let _fanoutYieldParsed = parseInt(String(process.env.FANOUT_QUEUE_YIELD_EVERY ?? '6'), 10);
+if (!Number.isFinite(_fanoutYieldParsed)) _fanoutYieldParsed = 6;
+const FANOUT_QUEUE_YIELD_EVERY =
+  _fanoutYieldParsed <= 0 ? 0 : Math.min(256, Math.floor(_fanoutYieldParsed));
+
 function queueNameForJob(name: string): string {
   // Background fanout jobs are explicitly tagged; everything else is critical.
   if (name.startsWith('fanout:background.')) return 'fanout:background';
@@ -101,6 +106,7 @@ function enqueue(name, fn) {
 
 async function drainWorker(queueName) {
   const queue = queues[queueName];
+  let processedInWorker = 0;
   try {
     while (queue.length) {
       const job = queue.shift();
@@ -125,6 +131,14 @@ async function drainWorker(queueName) {
           durationMs
         );
         logger.warn({ err, sideEffect: job.name, queue: queueName }, 'Async side-effect failed');
+      }
+      processedInWorker += 1;
+      if (
+        FANOUT_QUEUE_YIELD_EVERY > 0
+        && processedInWorker % FANOUT_QUEUE_YIELD_EVERY === 0
+        && queue.length > 0
+      ) {
+        await new Promise((resolve) => setImmediate(resolve));
       }
     }
   } finally {

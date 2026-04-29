@@ -28,9 +28,13 @@ jest.mock('../src/websocket/server', () => ({
   invalidateWsBootstrapCaches: jest.fn(),
 }));
 
-jest.mock('../src/websocket/fanout', () => ({
-  publish: jest.fn(),
-}));
+jest.mock('../src/websocket/fanout', () => {
+  const fanoutPublishMock = jest.fn();
+  const fanoutPublishBatchMock = jest.fn(async (entries) => {
+    for (const e of entries) await fanoutPublishMock(e.channel, e.payload);
+  });
+  return { publish: fanoutPublishMock, publishBatch: fanoutPublishBatchMock };
+});
 
 jest.mock('../src/websocket/userFeed', () => ({
   publishUserFeedTargets: jest.fn(),

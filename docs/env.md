@@ -126,6 +126,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `MSG_IDEM_POLL_DEADLINE_MS` | Max wall-clock wait when a second POST shares `Idempotency-Key` while the first holds the Redis lease (default **5000**, clamped 500–30000). Replaces legacy fixed **100ms × 50** polling. |
 | `MSG_IDEM_POLL_MAX_SLEEP_MS` | Exponential backoff cap between Redis polls in that wait loop (default **150**, clamped 5–500). |
 | `FANOUT_QUEUE_CONCURRENCY`, `FANOUT_CRITICAL_MAX_DEPTH` | Side-effect / fanout queue |
+| `FANOUT_QUEUE_YIELD_EVERY` | Fanout worker yields to the event loop after this many completed jobs when more work remains (default **6**; set **`0`** to disable). Reduces coordinated long turns under burst. |
 | **S3** | |
 | `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_INTERNAL_ENDPOINT` | Bucket and endpoints |
 | `S3_PRESIGN_SIGNING_ENDPOINT` | Presign signing host when public URL differs |
@@ -156,6 +157,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS` | Short-lived in-process `(user,channel|conversation)` cursor cache window for `PUT /messages/:id/read` (default **500ms**, clamp **250–5000**). Skips duplicate reads when message cursor is already known ahead in the same hot burst. |
 | `READ_RECEIPT_SCOPE_DEBOUNCE_MS` | Per `(user,channel|conversation)` burst debounce window for `PUT /messages/:id/read` (default **900ms**, clamp **250–2000**). Within the window, only the highest cursor message is processed; older duplicates return immediately. |
 | `READ_RECEIPT_FANOUT_ENABLED` | Enables `read:updated` fanout publishes from `PUT /messages/:id/read`. Default **`true`** so realtime read receipts work out of the box; set to `false` only if you intentionally want durable read-state updates without websocket fanout. |
+| `READ_RECEIPT_CHANNEL_FANOUT_ASYNC` | When **`true`** (default), **channel** `read:updated` fanout runs on **`fanout:critical`** (does not extend **`PUT /read`** wall time). **Conversation/DM** reads still publish inline. If the fanout queue refuses the job, publish runs on-thread as fallback. |
 | `MESSAGE_INGEST_STREAM_KEY`, `MESSAGE_INGEST_STREAM_GROUP`, `MESSAGE_INGEST_STREAM_MAXLEN` | Stream name, consumer group, approximate max stream length |
 | `LAST_MESSAGE_PG_RECONCILE_ENABLED` | `true` to enable background DB reconcile of `channels.last_message_*` from Redis metadata **and** delete-time `repointChannelLastMessage` DB updates; default `false` keeps channel latest-message metadata Redis-first with DB as stale fallback |
 | `CHANNEL_LAST_MESSAGE_PG_RECONCILE_ENABLED` | Legacy alias for `LAST_MESSAGE_PG_RECONCILE_ENABLED` (either may be set; **`LAST_MESSAGE_*` wins** when both are present) |
@@ -167,6 +169,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **WebSocket** | |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
 | `WS_OUTBOUND_QUEUE_MAX_MESSAGE`, `WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT`, `WS_OUTBOUND_DRAIN_BATCH` | Per-socket outbound queue caps and max `ws.send` calls per `setImmediate` drain tick |
+| `WS_REPLAY_OUTBOUND_YIELD_EVERY` | After enqueueing this many replay frames on one socket (pending queue + DB missed replay), **`setImmediate`** yield before continuing (default **48**, clamp **8–512**). |
 | `WS_OUTBOUND_MESSAGE_WAITERS_MAX` | When the primary queue is full, `message:*` frames wait in a FIFO (default **4096**); exceeding this closes the socket (`outbound_waiters_overflow`) |
 | `WS_HOT_LOG_SAMPLE_RATE` | Samples high-frequency websocket info logs (`connected`, `disconnected`, replay progress). `0` disables these info logs, `1` logs all (default `0`). Warnings/errors are unaffected. |
 | `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning (code default recent-connect bridge window `20`; staging/prod deploy profiles pin bootstrap TTL `180`, batch size `64`, and recent-connect bridge window `300`) |

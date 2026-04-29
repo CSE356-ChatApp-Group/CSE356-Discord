@@ -64,7 +64,13 @@ jest.mock('../src/presence/service', () => ({
   invalidatePresenceFanoutTargets: jest.fn().mockResolvedValue(undefined),
   getBulkPresenceDetails: jest.fn().mockResolvedValue({}),
 }));
-jest.mock('../src/websocket/fanout', () => ({ publish: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('../src/websocket/fanout', () => {
+  const fanoutPublishMock = jest.fn().mockResolvedValue(undefined);
+  const fanoutPublishBatchMock = jest.fn(async (entries) => {
+    for (const e of entries) await fanoutPublishMock(e.channel, e.payload);
+  });
+  return { publish: fanoutPublishMock, publishBatch: fanoutPublishBatchMock };
+});
 jest.mock('../src/websocket/userFeed', () => ({ publishUserFeedTargets: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../src/websocket/server', () => ({
   invalidateWsBootstrapCache: jest.fn().mockResolvedValue(undefined),

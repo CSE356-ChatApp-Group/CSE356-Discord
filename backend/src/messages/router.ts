@@ -753,6 +753,13 @@ const READ_RECEIPT_SCOPE_DEBOUNCE_MS = Math.min(
 );
 const READ_RECEIPT_FANOUT_ENABLED =
   String(process.env.READ_RECEIPT_FANOUT_ENABLED || "true").toLowerCase() === "true";
+/** When true (default), channel read:updated fanout runs on fanout:critical queue (not inline on PUT). */
+const READ_RECEIPT_CHANNEL_FANOUT_ASYNC = (() => {
+  const raw = process.env.READ_RECEIPT_CHANNEL_FANOUT_ASYNC;
+  if (raw === undefined || raw === "") return true;
+  const v = String(raw).toLowerCase();
+  return v !== "0" && v !== "false" && v !== "no";
+})();
 const readReceiptScopeCursorByTarget = new Map();
 const READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS = 75000;
 const readReceiptScopeDebounceByTarget = new Map();
@@ -3385,7 +3392,16 @@ router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
     };
 
     try {
-      await publishReadUpdated();
+      if (conversation_id) {
+        await publishReadUpdated();
+      } else if (READ_RECEIPT_CHANNEL_FANOUT_ASYNC) {
+        const enqueued = sideEffects.enqueueFanoutJob("fanout.read_receipt", publishReadUpdated);
+        if (!enqueued) {
+          await publishReadUpdated();
+        }
+      } else {
+        await publishReadUpdated();
+      }
     } catch (err) {
       logger.warn(
         { err, channel_id, conversation_id, messageId },

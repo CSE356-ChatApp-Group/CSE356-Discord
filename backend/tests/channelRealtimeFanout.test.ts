@@ -6,9 +6,17 @@ jest.mock('../src/db/pool', () => ({
   query: jest.fn(),
 }));
 
-jest.mock('../src/websocket/fanout', () => ({
-  publish: jest.fn(() => Promise.resolve()),
-}));
+jest.mock('../src/websocket/fanout', () => {
+  const fanoutPublishMock = jest.fn(() => Promise.resolve()) as unknown as jest.MockedFunction<
+    (channel: string, payload: unknown) => Promise<void>
+  >;
+  const fanoutPublishBatchMock = jest.fn(async (entries) => {
+    for (const e of entries) {
+      await fanoutPublishMock(e.channel, e.payload);
+    }
+  });
+  return { publish: fanoutPublishMock, publishBatch: fanoutPublishBatchMock };
+});
 
 jest.mock('../src/messages/sideEffects', () => ({
   enqueueFanoutJob: jest.fn((_name: string, fn: () => Promise<void>) => fn()),
@@ -37,7 +45,7 @@ jest.mock('../src/db/redis', () => ({
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { query } = require('../src/db/pool') as { query: jest.Mock };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const fanout = require('../src/websocket/fanout') as { publish: jest.Mock };
+const fanout = require('../src/websocket/fanout') as { publish: jest.Mock; publishBatch: jest.Mock };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const redis = require('../src/db/redis') as {
   get: jest.Mock;
@@ -87,6 +95,13 @@ describe('channelRealtimeFanout', () => {
   afterEach(() => {
     query.mockReset();
     fanout.publish.mockReset();
+    fanout.publish.mockResolvedValue(undefined);
+    fanout.publishBatch.mockReset();
+    fanout.publishBatch.mockImplementation(async (entries) => {
+      for (const e of entries) {
+        await fanout.publish(e.channel, e.payload);
+      }
+    });
     redis.get.mockReset();
     redis.mget.mockReset();
     redis.zrangebyscore.mockReset();

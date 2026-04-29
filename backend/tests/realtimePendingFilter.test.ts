@@ -38,6 +38,7 @@ const redisMock = {
 jest.mock('../src/db/redis', () => redisMock);
 jest.mock('../src/messages/messageHydrate', () => ({
   loadHydratedMessageById: jest.fn(async () => null),
+  loadHydratedMessagesByIds: jest.fn(async () => new Map()),
 }));
 jest.mock('../src/messages/realtimePayload', () => ({
   wrapFanoutPayload: jest.fn((event: string, row: unknown) => ({ event, data: row })),

@@ -10,6 +10,15 @@ import {
 const { query } = require("../db/pool");
 
 async function loadHydratedMessageById(messageId: string) {
+  const map = await loadHydratedMessagesByIds([messageId]);
+  return map.get(messageId) || null;
+}
+
+/** One query for many ids — used by pending-replay drain to cut DB round-trips. */
+async function loadHydratedMessagesByIds(messageIds: string[]) {
+  const unique = [...new Set((messageIds || []).filter((id) => typeof id === "string" && id.length))];
+  if (!unique.length) return new Map<string, Record<string, unknown>>();
+
   const { rows } = await query(
     `SELECT ${MESSAGE_SELECT_FIELDS},
             ${MESSAGE_AUTHOR_JSON},
@@ -17,11 +26,16 @@ async function loadHydratedMessageById(messageId: string) {
      FROM messages m
      LEFT JOIN users u ON u.id = m.author_id
      LEFT JOIN attachments a ON a.message_id = m.id
-     WHERE m.id = $1
+     WHERE m.id = ANY($1::uuid[])
      GROUP BY m.id, u.id`,
-    [messageId],
+    [unique],
   );
-  return rows[0] || null;
+
+  const map = new Map<string, Record<string, unknown>>();
+  for (const row of rows as Array<{ id: string } & Record<string, unknown>>) {
+    map.set(String(row.id), row as Record<string, unknown>);
+  }
+  return map;
 }
 
-module.exports = { loadHydratedMessageById };
+module.exports = { loadHydratedMessageById, loadHydratedMessagesByIds };

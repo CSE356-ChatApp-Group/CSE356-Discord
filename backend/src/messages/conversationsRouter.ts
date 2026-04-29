@@ -44,10 +44,18 @@ function publishConversationEvents(targets, event, data) {
   const uniqueTargets = [...new Set(targets.filter(Boolean))];
   const payload = wrapFanoutPayload(event, data);
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
-  return Promise.allSettled([
-    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
-    ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
-  ]);
+  const tasks: Promise<unknown>[] = [];
+  if (passthroughTargets.length) {
+    tasks.push(
+      fanout.publishBatch(
+        passthroughTargets.map((target) => ({ channel: target, payload })),
+      ),
+    );
+  }
+  if (userIds.length > 0) {
+    tasks.push(publishUserFeedTargets(userIds, payload));
+  }
+  return Promise.allSettled(tasks);
 }
 
 async function publishConversationEventsStrict(targets, event, data) {
@@ -57,10 +65,18 @@ async function publishConversationEventsStrict(targets, event, data) {
   const payload = wrapFanoutPayload(event, data);
   const { userIds, passthroughTargets } = splitUserTargets(uniqueTargets);
 
-  await Promise.all([
-    ...passthroughTargets.map((target) => fanout.publish(target, payload)),
-    ...(userIds.length > 0 ? [publishUserFeedTargets(userIds, payload)] : []),
-  ]);
+  const parallel: Promise<unknown>[] = [];
+  if (passthroughTargets.length) {
+    parallel.push(
+      fanout.publishBatch(
+        passthroughTargets.map((target) => ({ channel: target, payload })),
+      ),
+    );
+  }
+  if (userIds.length > 0) {
+    parallel.push(publishUserFeedTargets(userIds, payload));
+  }
+  await Promise.all(parallel);
 }
 
 async function publishConversationInviteNotifications(

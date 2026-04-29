@@ -8,13 +8,6 @@ const USER_FEED_SHARD_COUNT =
     ? Math.max(1, Math.min(256, Math.floor(rawUserFeedShardCount)))
     : 64;
 
-/** Max concurrent Redis `PUBLISH`es per `publishUserFeedTargets` call (1–4, default 3). */
-function userFeedPublishConcurrency() {
-  const raw = parseInt(String(process.env.USER_FEED_PUBLISH_CONCURRENCY ?? '3'), 10);
-  if (!Number.isFinite(raw)) return 3;
-  return Math.min(4, Math.max(1, Math.floor(raw)));
-}
-
 /**
  * Run async thunks with at most `limit` in flight (shared index pool).
  * Preserves one invocation per job; order of completion is undefined.
@@ -125,12 +118,11 @@ async function publishUserFeedTargets(userTargets, payload) {
     shardGroups.get(shardChannel).push(userId);
   }
 
-  const concurrency = userFeedPublishConcurrency();
-  const jobs = Array.from(shardGroups.entries()).map(
-    ([shardChannel, shardUserIds]) => async () =>
-      fanout.publish(shardChannel, userFeedEnvelope(shardUserIds, payload)),
-  );
-  await runWithConcurrencyLimit(jobs, concurrency);
+  const batch = Array.from(shardGroups.entries()).map(([shardChannel, shardUserIds]) => ({
+    channel: shardChannel,
+    payload: userFeedEnvelope(shardUserIds, payload),
+  }));
+  await fanout.publishBatch(batch);
 }
 
 function isUserFeedEnvelope(value) {
@@ -154,7 +146,6 @@ module.exports = {
   publishUserFeedTargets,
   runWithConcurrencyLimit,
   splitUserTargets,
-  userFeedPublishConcurrency,
   userFeedRedisChannelForUserId,
   userIdFromTarget,
 };

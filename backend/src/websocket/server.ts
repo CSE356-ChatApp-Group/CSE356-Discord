@@ -151,6 +151,12 @@ const WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT = parseInt(
 );
 /** Max `ws.send` calls per setImmediate drain tick per socket. */
 const WS_OUTBOUND_DRAIN_BATCH = parseInt(process.env.WS_OUTBOUND_DRAIN_BATCH || String(32), 10);
+/** After enqueueing this many replay frames on one socket, yield so the event loop serves other sockets/work. */
+const WS_REPLAY_OUTBOUND_YIELD_EVERY = (() => {
+  const raw = parseInt(process.env.WS_REPLAY_OUTBOUND_YIELD_EVERY || String(48), 10);
+  if (!Number.isFinite(raw) || raw < 1) return 48;
+  return Math.min(512, Math.max(8, Math.floor(raw)));
+})();
 /** When primary queue is full, `message:*` jobs wait here (FIFO) until drain makes room. */
 const WS_OUTBOUND_MESSAGE_WAITERS_MAX = Math.max(
   64,
@@ -598,6 +604,7 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
   // bypassLogicalDuplicateSuppression skips only the explicit-channel
   // unsub gate — wasSocketMessageRecentlyDelivered in flushOutboundJob still
   // suppresses replay when the same message id was already delivered live.
+  let replayed = 0;
   for (const message of messages) {
     if (ws.readyState !== WebSocket.OPEN) return;
     const payload = {
@@ -616,12 +623,17 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
         deliverySource: "missed_db",
       },
     );
+    replayed += 1;
+    if (replayed % WS_REPLAY_OUTBOUND_YIELD_EVERY === 0 && replayed < messages.length) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
 }
 
 async function replayPendingMessagesToSocket(ws, userId) {
   const pendingPayloads = await drainPendingMessagesForUser(userId);
   if (!pendingPayloads.length) return 0;
+  let n = 0;
   for (const payload of pendingPayloads) {
     if (ws.readyState !== WebSocket.OPEN) return 0;
     sendPayloadToSocket(
@@ -635,6 +647,10 @@ async function replayPendingMessagesToSocket(ws, userId) {
         deliverySource: "pending_queue",
       },
     );
+    n += 1;
+    if (n % WS_REPLAY_OUTBOUND_YIELD_EVERY === 0 && n < pendingPayloads.length) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
   return pendingPayloads.length;
 }
