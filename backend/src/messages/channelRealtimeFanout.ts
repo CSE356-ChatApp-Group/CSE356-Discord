@@ -41,6 +41,7 @@ const RECENT_CONNECT_TARGET_CACHE_MS =
   Number.isFinite(_recentConnectTargetCacheMs) && _recentConnectTargetCacheMs >= 0
     ? _recentConnectTargetCacheMs
     : 1500;
+const ACTIVE_CONNECTED_TARGET_BATCH = 500;
 const rawImmediateRecentBridgeMax = Number(
   process.env.CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX || '256',
 );
@@ -313,6 +314,10 @@ function readRecentConnectTargetsCache(channelId: string): string[] | null {
 
 function writeRecentConnectTargetsCache(channelId: string, targets: string[]) {
   if (RECENT_CONNECT_TARGET_CACHE_MS <= 0) return;
+  // Do not cache negative results. A grader/browser can connect or refresh its
+  // user-topic subscription immediately after this lookup; caching [] would
+  // suppress the only delivery path while WS_AUTO_SUBSCRIBE_MODE=user_only.
+  if (!targets.length) return;
   recentConnectTargetsCache.set(recentConnectTargetsCacheKey(channelId), {
     targets,
     cachedAt: Date.now(),
@@ -329,6 +334,46 @@ async function mgetKeyBatches(keys: string[], batchSize: number): Promise<(strin
     out.push(...part);
   }
   return out;
+}
+
+function connectedUsersKey() {
+  return 'presence:connected_users';
+}
+
+async function smismemberBatches(key: string, members: string[], batchSize: number): Promise<boolean[]> {
+  if (!members.length) return [];
+  const out: boolean[] = [];
+  for (let i = 0; i < members.length; i += batchSize) {
+    const slice = members.slice(i, i + batchSize);
+    try {
+      const raw = await redis.call('SMISMEMBER', key, ...slice);
+      const values = Array.isArray(raw) ? raw : [];
+      out.push(...values.map((value) => Number(value) === 1));
+    } catch (err: any) {
+      const message = String(err?.message || '');
+      if (!/unknown command|wrong number of arguments|SMISMEMBER/i.test(message)) {
+        throw err;
+      }
+      const pipe = redis.pipeline();
+      for (const member of slice) {
+        pipe.sismember(key, member);
+      }
+      const results = await pipe.exec();
+      out.push(...results.map((row) => Number(row?.[1] || 0) === 1));
+    }
+  }
+  return out;
+}
+
+async function activeConnectedTargets(targets: string[]) {
+  if (!targets.length) return [];
+  const userIds = targets.map((target) => target.slice('user:'.length));
+  const active = await smismemberBatches(
+    connectedUsersKey(),
+    userIds,
+    ACTIVE_CONNECTED_TARGET_BATCH,
+  );
+  return targets.filter((_target, idx) => active[idx]);
 }
 
 async function recentConnectTargets(channelId: string, targets: string[]) {
@@ -354,16 +399,22 @@ async function recentConnectTargets(channelId: string, targets: string[]) {
         .filter((uid) => typeof uid === 'string' && cappedSet.has(`user:${uid}`))
         .map((uid) => `user:${uid}`);
 
-      // Fall back to ws:recent_connect for users not yet in the channel ZSET.
+      // Fall back to active/recent user markers for users not yet in the channel ZSET.
       // This covers the bootstrap timing window (~5-55ms after connect) before
       // bootstrapUserSubscriptions has had a chance to run markChannelRecentConnect.
+      // It also covers WS_AUTO_SUBSCRIBE_MODE=user_only, where channel ZSET entries
+      // are never created unless clients explicitly subscribe to channel:<id>.
       const notInZset = targets.filter((t) => !zsetSet.has(t.slice('user:'.length)));
       let bootstrapWindowTargets: string[] = [];
       if (notInZset.length > 0) {
         const keys = notInZset.map((target) => wsRecentConnectKey(target.slice('user:'.length)));
         const MGET_BATCH = 100;
-        const markers = await mgetKeyBatches(keys, MGET_BATCH);
-        bootstrapWindowTargets = notInZset.filter((_t, idx) => !!markers[idx]);
+        const [markers, activeTargets] = await Promise.all([
+          mgetKeyBatches(keys, MGET_BATCH),
+          activeConnectedTargets(notInZset),
+        ]);
+        const activeSet = new Set(activeTargets);
+        bootstrapWindowTargets = notInZset.filter((t, idx) => !!markers[idx] || activeSet.has(t));
       }
 
       const filteredTargets = bootstrapWindowTargets.length > 0
@@ -374,8 +425,12 @@ async function recentConnectTargets(channelId: string, targets: string[]) {
     }
     const keys = targets.map((target) => wsRecentConnectKey(target.slice(5)));
     const MGET_BATCH = 100;
-    const markers = await mgetKeyBatches(keys, MGET_BATCH);
-    const filteredTargets = targets.filter((_target, idx) => !!markers[idx]);
+    const [markers, activeTargets] = await Promise.all([
+      mgetKeyBatches(keys, MGET_BATCH),
+      activeConnectedTargets(targets),
+    ]);
+    const activeSet = new Set(activeTargets);
+    const filteredTargets = targets.filter((target, idx) => !!markers[idx] || activeSet.has(target));
     writeRecentConnectTargetsCache(channelId, filteredTargets);
     return filteredTargets;
   } catch (err) {

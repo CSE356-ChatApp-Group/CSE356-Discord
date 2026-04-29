@@ -29,6 +29,7 @@ jest.mock('../src/messages/realtimePending', () => ({
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(() => Promise.resolve(null)),
   mget: jest.fn(() => Promise.resolve([])),
+  call: jest.fn(() => Promise.resolve([])),
   zrangebyscore: jest.fn(() => Promise.resolve([])),
   set: jest.fn(() => Promise.resolve('OK')),
   del: jest.fn(() => Promise.resolve(1)),
@@ -50,6 +51,7 @@ const fanout = require('../src/websocket/fanout') as { publish: jest.Mock; publi
 const redis = require('../src/db/redis') as {
   get: jest.Mock;
   mget: jest.Mock;
+  call: jest.Mock;
   zrangebyscore: jest.Mock;
   set: jest.Mock;
   del: jest.Mock;
@@ -104,6 +106,7 @@ describe('channelRealtimeFanout', () => {
     });
     redis.get.mockReset();
     redis.mget.mockReset();
+    redis.call.mockReset();
     redis.zrangebyscore.mockReset();
     redis.set.mockReset();
     redis.del.mockReset();
@@ -114,6 +117,7 @@ describe('channelRealtimeFanout', () => {
     enqueuePendingMessageForUsers.mockResolvedValue(undefined);
     redis.get.mockResolvedValue(null);
     redis.mget.mockResolvedValue([]);
+    redis.call.mockResolvedValue([]);
     redis.zrangebyscore.mockResolvedValue([]);
     redis.set.mockResolvedValue('OK');
     redis.del.mockResolvedValue(1);
@@ -123,6 +127,7 @@ describe('channelRealtimeFanout', () => {
     pipelineSet = jest.fn();
     pipelineZadd = jest.fn();
     pipelineExpire = jest.fn();
+    const pipelineSismember = jest.fn();
     pipelineExec = jest.fn(() => Promise.resolve([]));
     const pipelineObj: any = {
       del: (...args: any[]) => { pipelineDel(...args); return pipelineObj; },
@@ -130,6 +135,7 @@ describe('channelRealtimeFanout', () => {
       set: (...args: any[]) => { pipelineSet(...args); return pipelineObj; },
       zadd: (...args: any[]) => { pipelineZadd(...args); return pipelineObj; },
       expire: (...args: any[]) => { pipelineExpire(...args); return pipelineObj; },
+      sismember: (...args: any[]) => { pipelineSismember(...args); return pipelineObj; },
       exec: pipelineExec,
     };
     redis.pipeline.mockReturnValue(pipelineObj);
@@ -286,6 +292,34 @@ describe('channelRealtimeFanout', () => {
         userFeedRedisChannelForUserId('a'),
         userFeedRedisChannelForUserId('b'),
       ].sort();
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+    }
+  });
+
+  it('publishChannelMessageCreated recent_connect includes active connected users even after recent marker expiry', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-active-user-only';
+    try {
+      redis.mget
+        .mockResolvedValueOnce([null, null])
+        .mockResolvedValueOnce([null]);
+      redis.call.mockResolvedValueOnce([1]);
+      redis.zrangebyscore.mockResolvedValueOnce([]);
+      query.mockResolvedValueOnce({ rows: [{ user_id: 'active-user' }] });
+      await publishChannelMessageCreated(ch, { event: 'message:created', data: { id: 'm1' } });
+      expect(redis.call).toHaveBeenCalledWith('SMISMEMBER', 'presence:connected_users', 'active-user');
+      const expectedChannels = [
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('active-user'),
+      ].sort();
+      expect(enqueuePendingMessageForUsers.mock.calls[0][2]).toEqual({
+        recentTargets: ['user:active-user'],
+      });
       expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
     } finally {
       if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
