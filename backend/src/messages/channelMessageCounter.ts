@@ -7,6 +7,7 @@ const {
   registerRedisLuaScript,
   redisEvalSha,
 } = require('../db/redisLua');
+const { LOCK_RELEASE_IF_MATCH_LUA } = require('../db/redisLuaScripts');
 const logger = require('../utils/logger');
 const sideEffects = require('./sideEffects');
 
@@ -35,13 +36,7 @@ const MSG_COUNT_REDIS_TTL_SECS = (() => {
   return Math.min(86_400 * 90, raw);
 })();
 
-const MSG_COUNT_RECONCILE_LOCK_RELEASE_LUA = `
-if redis.call("get", KEYS[1]) == ARGV[1] then
-  return redis.call("del", KEYS[1])
-else
-  return 0
-end`;
-registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, MSG_COUNT_RECONCILE_LOCK_RELEASE_LUA);
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
 
 function countKeyForChannel(channelId: string) {
   return `channel:msg_count:${channelId}`;

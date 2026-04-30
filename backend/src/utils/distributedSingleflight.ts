@@ -16,6 +16,7 @@ const {
   registerRedisLuaScript,
   redisEvalSha,
 } = require('../db/redisLua');
+const { LOCK_RELEASE_IF_MATCH_LUA } = require('../db/redisLuaScripts');
 
 type JsonRedisLike = {
   get(key: string): Promise<string | null>;
@@ -129,13 +130,7 @@ async function setJsonCacheWithStale(
   }
 }
 
-const RELEASE_LOCK_LUA = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
-`;
-registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, RELEASE_LOCK_LUA);
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
 
 async function releaseLock(redis: JsonRedisLike, lockKey: string, token: string) {
   try {

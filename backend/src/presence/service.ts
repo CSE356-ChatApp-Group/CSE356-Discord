@@ -17,6 +17,7 @@ const {
   registerRedisLuaScript,
   redisEvalSha,
 } = require("../db/redisLua");
+const { PRESENCE_DB_CAS_LUA } = require("../db/redisLuaScripts");
 const { publishUserFeedTargets } = require("../websocket/userFeed");
 const { query, withTransaction } = require("../db/pool");
 const overload = require("../utils/overload");
@@ -35,15 +36,6 @@ const AWAY_MESSAGE_REDIS_TTL_SECS = (() => {
   return Math.min(86_400 * 90, raw);
 })();
 
-// Lua CAS: set key to ARGV[1] only if key is missing or value differs. Returns 1=written, 0=skipped.
-const PRESENCE_DB_CAS_LUA = `
-local current = redis.call('GET', KEYS[1])
-if not current or current ~= ARGV[1] then
-  redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
-  return 1
-end
-return 0
-`;
 registerRedisLuaScript(REDIS_LUA_IDS.PRESENCE_DB_CAS, PRESENCE_DB_CAS_LUA);
 
 function presenceDbCursorKey(userId) {

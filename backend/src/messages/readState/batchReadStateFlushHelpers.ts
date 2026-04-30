@@ -5,6 +5,7 @@ const {
   registerRedisLuaScript,
   redisEvalSha,
 } = require('../../db/redisLua');
+const { LOCK_RELEASE_IF_MATCH_LUA } = require('../../db/redisLuaScripts');
 const logger = require('../../utils/logger');
 const {
   batchReadStateConfig: {
@@ -17,13 +18,7 @@ const {
 } = require('../config/batchReadStateConfig');
 
 let readStateFlushScanCursor = '0';
-const FLUSH_LOCK_RELEASE_LUA = `
-if redis.call("get", KEYS[1]) == ARGV[1] then
-  return redis.call("del", KEYS[1])
-end
-return 0
-`;
-registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, FLUSH_LOCK_RELEASE_LUA);
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));

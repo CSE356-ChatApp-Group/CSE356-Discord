@@ -15,6 +15,7 @@ const {
   registerRedisLuaScript,
   redisEvalSha,
 } = require('../db/redisLua');
+const { LOCK_RELEASE_IF_MATCH_LUA } = require('../db/redisLuaScripts');
 const logger = require('../utils/logger');
 const {
   messageChannelInsertLockTotal,
@@ -109,13 +110,7 @@ const MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MAX_MS = parseIntEnv(
   MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS,
   5000,
 );
-const MESSAGE_INSERT_LOCK_RELEASE_LUA = `
-if redis.call("get", KEYS[1]) == ARGV[1] then
-  return redis.call("del", KEYS[1])
-else
-  return 0
-end`;
-registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, MESSAGE_INSERT_LOCK_RELEASE_LUA);
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
 const MESSAGE_INSERT_LOCK_TIMEOUT_CODE = 'MESSAGE_INSERT_LOCK_TIMEOUT';
 const MESSAGE_INSERT_LOCK_QUEUE_REJECT_CODE = 'MESSAGE_INSERT_LOCK_QUEUE_REJECT';
 const channelQueues = new Map<string, ChannelQueue>();

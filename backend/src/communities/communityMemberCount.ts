@@ -19,6 +19,7 @@ const {
   registerRedisLuaScript,
   redisEvalSha,
 } = require('../db/redisLua');
+const { LOCK_RELEASE_IF_MATCH_LUA } = require('../db/redisLuaScripts');
 const logger = require('../utils/logger');
 const {
   communityCountRedisUpdateTotal,
@@ -50,9 +51,7 @@ const COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE = parseInt(
 );
 
 let localReconcileInFlight = false;
-const COMMUNITY_RECONCILE_LOCK_RELEASE_LUA =
-  `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) end return 0`;
-registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, COMMUNITY_RECONCILE_LOCK_RELEASE_LUA);
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
 
 const RECONCILE_SQL = `
   WITH counts AS (
