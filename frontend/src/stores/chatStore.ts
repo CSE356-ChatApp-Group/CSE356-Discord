@@ -2,13 +2,25 @@ import { create } from 'zustand';
 import { api, getToken, invalidateApiCache } from '../lib/api';
 import { wsManager } from '../lib/ws';
 import { useAuthStore } from './authStore';
-import type { Entity, MessagePaginationState, UnreadCountsSnapshot } from './chatStoreTypes';
+import { PRESENCE_STATUSES } from './chatStoreTypes';
+import type {
+  ChatState,
+  Entity,
+  MessagePaginationState,
+  PresenceStatus,
+  SearchFilters,
+  SendMessageInput,
+  UnreadCountsSnapshot,
+} from './chatStoreTypes';
 export type {
+  ChatState,
   ChatStateCommunityRemovalSlice,
   Entity,
   MessagePaginationState,
+  PresenceStatus,
   UnreadCountsSnapshot,
 } from './chatStoreTypes';
+export { PRESENCE_STATUSES } from './chatStoreTypes';
 import {
   dedupeMessages,
   mergeLatestPageWithExisting,
@@ -45,79 +57,9 @@ import {
 import { normalizeSearchDateTime, resolveSearchAuthorId } from './chatStoreSearchHelpers';
 import { fetchUnreadCountsSnapshot } from './chatStoreUnreadCounts';
 import { hydrateAuthorFromSession } from './chatStoreHydrate';
-export const PRESENCE_STATUSES = ['online', 'idle', 'away', 'offline'] as const;
-export type PresenceStatus = (typeof PRESENCE_STATUSES)[number];
 const VALID_PRESENCE_STATUSES = new Set<string>(PRESENCE_STATUSES);
-type PendingUpload = {
-  file: File;
-  width?: number;
-  height?: number;
-};
-type SendMessageInput = {
-  content?: string;
-  attachments?: PendingUpload[];
-};
-type SearchFilters = {
-  author: string;
-  after: string;
-  before: string;
-};
 const MESSAGE_CONTEXT_SIDE_LIMIT = 25;
 const MESSAGE_PAGE_LIMIT = 50;
-
-type ChatState = {
-  communities: Entity[];
-  activeCommunity: Entity | null;
-  channels: Entity[];
-  activeChannel: Entity | null;
-  conversations: Entity[];
-  activeConv: Entity | null;
-  messages: Record<string, Entity[]>;
-  messagePagination: Record<string, MessagePaginationState>;
-  presence: Record<string, PresenceStatus>;
-  awayMessages: Record<string, string | null>;
-  members: Entity[];
-  searchResults: Entity[] | null;
-  searchQuery: string;
-  searchError: string | null;
-  searchFilters: SearchFilters;
-  jumpTargetMessageId: string | null;
-  fetchCommunities: () => Promise<Entity[]>;
-  createCommunity: (slug: string, name: string, description: string) => Promise<Entity>;
-  deleteCommunity: (communityId: string) => Promise<void>;
-  leaveCommunity: (communityId: string) => Promise<void>;
-  updateCommunityMemberRole: (communityId: string, userId: string, role: 'member' | 'admin') => Promise<void>;
-  selectCommunity: (community: Entity) => Promise<void>;
-  fetchChannels: (communityId: string) => Promise<Entity[]>;
-  fetchChannelMembers: (channelId: string) => Promise<Entity[]>;
-  createChannel: (communityId: string, name: string, isPrivate?: boolean, description?: string) => Promise<Entity>;
-  inviteToChannel: (channelId: string, userIds: string[]) => Promise<Entity[]>;
-  deleteChannel: (channelId: string) => Promise<void>;
-  updateChannel: (channelId: string, updates: { name?: string; description?: string; isPrivate?: boolean }) => Promise<Entity>;
-  selectChannel: (channel: Entity) => Promise<void>;
-  fetchConversations: () => Promise<void>;
-  openHome: () => void;
-  openDm: (participants: string | string[]) => Promise<Entity>;
-  selectConversation: (conv: Entity) => Promise<void>;
-  inviteToConversation: (conversationId: string, participants: string[]) => Promise<Entity | null>;
-  leaveConversation: (conversationId: string) => Promise<void>;
-  renameGroupDm: (conversationId: string, name: string) => Promise<void>;
-  fetchMessages: (args?: { channelId?: string; conversationId?: string; before?: string; after?: string }) => Promise<Entity[]>;
-  sendMessage: (content: string | SendMessageInput) => Promise<void>;
-  editMessage: (id: string, content: string) => Promise<void>;
-  deleteMessage: (id: string) => Promise<void>;
-  fetchMembers: (communityId: string) => Promise<void>;
-  hydratePresenceForUsers: (userIds: string[]) => Promise<void>;
-  setPresence: (userId: string, status: PresenceStatus, awayMessage?: string | null) => void;
-  search: (q: string, filters?: Partial<SearchFilters>) => Promise<void>;
-  jumpToSearchResult: (hit: Entity) => Promise<void>;
-  clearJumpTargetMessage: () => void;
-  setSearchFilters: (filters: Partial<SearchFilters>) => void;
-  resetSearchFilters: () => void;
-  clearSearch: () => void;
-  reset: () => void;
-  _handleWsEvent: (event: any) => void;
-};
 
 const DEFAULT_SEARCH_FILTERS: SearchFilters = {
   author: '',
