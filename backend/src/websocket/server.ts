@@ -1774,6 +1774,16 @@ wss.on("connection", async (ws, req) => {
       if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) {
         return;
       }
+      // Defensive guard: ensure the personal user feed channel is attached on
+      // every connection before advertising subscriptionsHydrated=true.
+      // This prevents a reconnect edge where user:<id> could be absent and DM
+      // invite/participant events (published via userfeed shards) would miss.
+      return subscribeClient(ws, `user:${user.id}`)
+        .catch((err) => {
+          logger.warn({ err, userId: user.id }, "WS ready guard: user-channel resubscribe failed");
+        })
+        .then(() => {
+          if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) return;
       ws._lastDataFrameAt = Date.now();
       ws.send(
         JSON.stringify({
@@ -1786,6 +1796,7 @@ wss.on("connection", async (ws, req) => {
           },
         }),
       );
+        });
     })
     .catch(() => {
     });
@@ -1840,6 +1851,11 @@ async function handleClientMessage(ws, user, msg) {
         const parsed = parseChannelKey(msg.channel);
         if (parsed?.type === "community") unsubscribeCommunityClient(ws, parsed.id);
       } else {
+        // Keep user:<self> sticky for this socket; it is the control plane for
+        // DM invites/participant updates and bootstrap subscribe commands.
+        if (msg.channel === `user:${user.id}`) {
+          break;
+        }
         await unsubscribeClient(ws, msg.channel);
       }
       break;
