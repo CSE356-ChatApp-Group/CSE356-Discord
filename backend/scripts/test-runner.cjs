@@ -22,6 +22,9 @@ function testContainerSuffix() {
 const PG_CONTAINER = `chatapp-test-postgres${testContainerSuffix()}`;
 const REDIS_CONTAINER = `chatapp-test-redis${testContainerSuffix()}`;
 
+const FORCE_PROVISION = process.env.TEST_FORCE_PROVISION === '1';
+const ALLOW_NON_TEST_DATABASE = process.env.ALLOW_NON_TEST_DATABASE === '1';
+
 function parsePositiveIntEnv(name, fallback) {
   const value = Number.parseInt(process.env[name] || '', 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -246,7 +249,53 @@ function runCiStyleTests() {
   return run('npm', testArgs, { env });
 }
 
-const shouldProvision = !process.env.DATABASE_URL;
+function databaseNameFromUrl(rawUrl) {
+  if (!rawUrl) return '';
+  try {
+    const parsed = new URL(rawUrl);
+    return decodeURIComponent((parsed.pathname || '').replace(/^\//, '')).trim();
+  } catch {
+    return '';
+  }
+}
+
+function assertSafeManualDatabaseConfig() {
+  const dbUrl = process.env.DATABASE_URL || '';
+  if (!dbUrl) return;
+
+  const dbName = databaseNameFromUrl(dbUrl);
+  const looksLikeTestDb = /\btest\b/i.test(dbName) || dbName === 'chatapp_test';
+  if (!looksLikeTestDb && !ALLOW_NON_TEST_DATABASE) {
+    console.error(
+      [
+        'Refusing to run backend tests against a non-test DATABASE_URL.',
+        `Detected database: ${dbName || '(unknown)'}`,
+        'Use one of:',
+        '  - unset DATABASE_URL (runner will provision disposable Docker Postgres/Redis)',
+        '  - set DATABASE_URL to a dedicated test DB (e.g. .../chatapp_test)',
+        '  - set ALLOW_NON_TEST_DATABASE=1 to override intentionally',
+      ].join('\n'),
+    );
+    process.exit(1);
+  }
+
+  if (!process.env.REDIS_URL) {
+    console.error(
+      [
+        'REDIS_URL is not set while DATABASE_URL is set.',
+        'Set REDIS_URL to a disposable/test Redis before running tests,',
+        'or unset DATABASE_URL to let the test runner provision Docker services.',
+      ].join('\n'),
+    );
+    process.exit(1);
+  }
+}
+
+if (!FORCE_PROVISION) {
+  assertSafeManualDatabaseConfig();
+}
+
+const shouldProvision = FORCE_PROVISION || !process.env.DATABASE_URL;
 let exitCode = 1;
 
 try {

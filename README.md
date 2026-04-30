@@ -189,6 +189,18 @@ If `DATABASE_URL` is not provided, the backend test runner starts disposable
 Postgres and Redis containers, runs migrations, executes Jest, and cleans up.
 In CI or other pre-provisioned environments, it uses existing environment values.
 
+To always run against disposable Docker services (even if you exported
+`DATABASE_URL` / `REDIS_URL` in your shell), use:
+
+```bash
+cd backend
+npm run test:docker
+```
+
+Safety rails: when `DATABASE_URL` is set manually, the backend test runner now
+refuses to run unless it looks like a test database and `REDIS_URL` is set.
+Override intentionally with `ALLOW_NON_TEST_DATABASE=1`.
+
 Run frontend tests only:
 
 ```bash
