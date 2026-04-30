@@ -1,5 +1,7 @@
 # Environment variables
 
+**Maintainers:** When you add or change a tunable, update [`.env.example`](../.env.example), this file, and (if staging/prod must pin it) [`deploy/env/`](../deploy/env/). See **[`docs/README.md`](README.md)** for the full maintenance checklist and single sources of truth.
+
 Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool sizing on staging/production VMs (`deploy/deploy-staging.sh`, `deploy/deploy-prod.sh`).
 
 **Deploy script (runner environment, not app `.env`):** `INGRESS_POST_DEPLOY_SECONDS` (default **20**) controls how long `deploy-prod.sh` hammers **`http://127.0.0.1/health`** through nginx after cutover. **`DEPLOY_NON_INTERACTIVE=true`** skips the production confirmation prompt (Ansible / CI); **`GITHUB_ACTIONS=true`** does the same.
@@ -204,11 +206,13 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PG_READ_FALLBACK_TO_PRIMARY` | When **`false`**, `queryRead()` fails fast on replica errors. Otherwise (default) **transport** failures and replica query timeouts retry the same SELECT on the primary so routes like **`PUT /messages/:id/read`** do not return **500** if the standby is down or wedged. |
 | `PG_READ_QUERY_TIMEOUT_MS` | Optional read-replica query timeout in milliseconds. When set above `0`, a slow replica SELECT times out and, if `PG_READ_FALLBACK_TO_PRIMARY` is enabled, retries on primary. Prod currently pins **`750`** during incident stabilization. |
 | `UNREAD_COUNTS_QUERY_TIMEOUT_MS` | Read-replica query timeout for `GET /api/v1/unread-counts` aggregate channel/DM unread counts. Default **750** ms; falls back through `queryRead()` if the replica times out and primary fallback is enabled. |
+| `UNREAD_COUNTS_MAX_INFLIGHT` | Per-process cap for concurrent `GET /api/v1/unread-counts` DB queries. Default **48**. When saturated, the route returns an empty unread payload (HTTP 200) to shed pressure and avoid cascading timeouts. |
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | `PRESENCE_SWEEPER_MS` | Interval for presence sweeper ticks (`websocket/server.ts`; default **15000** ms). |
 | `PRESENCE_DB_CURSOR_TTL_SECS` | TTL for presence DB cursor keys (default **300** s). |
 | `AWAY_MESSAGE_REDIS_TTL_SECS` | TTL for away-message Redis payloads (default **2592000** s). |
 | **WebSocket** | |
+| | WebSocket server tunables are centralized in [`serverConfig.ts`](../backend/src/websocket/serverConfig.ts) so `websocket/server.ts` focuses on connection/bootstrap/fanout flow logic. |
 | `REALTIME_EVENT_ALIAS_FANOUT` | When **`1`/`true`/`yes`**, `fanout.publish` / `fanout.publishBatch` (including sharded userfeed batches) also publishes **alias** event names on the same Redis channel — for example `new_message` beside `message:created`, `message:edited` / `message_edited` beside `message:updated`, and read-receipt aliases beside `read:updated`. Default **off**. **Not required** for the in-repo grader `GeneratedClient` (see [`docs/websocket-generated-client-parity.md`](websocket-generated-client-parity.md)); enable only for third-party harnesses that insist on alternate names. When on, permissive clients may invoke handlers twice. **Canonical + alias tables and WS “reliable event” classification** live in [`backend/src/realtime/realtimeEventAliases.ts`](../backend/src/realtime/realtimeEventAliases.ts) (one file to edit when adding names). |
 | `WS_PROFILE` | Optional websocket behavior profile. **`generated-client`** sets coherent defaults for this repo’s generated client assumptions (for example: `WS_AUTO_SUBSCRIBE_MODE=messages`, `CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`, and reduced recent-connect fallback probing). Explicit env vars still override profile defaults. |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
