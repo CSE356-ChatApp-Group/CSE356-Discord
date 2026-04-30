@@ -145,6 +145,30 @@ describe('chatStore quick actions', () => {
     expect(useChatStore.getState().presence['user-2']).toBe('online');
   });
 
+  it('hydrates presence in bounded batches to avoid oversized request URIs', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (!path.startsWith('/presence?userIds=')) {
+        throw new Error(`Unexpected GET ${path}`);
+      }
+      const qs = path.split('/presence?userIds=')[1] || '';
+      const ids = decodeURIComponent(qs).split(',').filter(Boolean);
+      expect(ids.length).toBeLessThanOrEqual(100);
+      return Promise.resolve({
+        presence: Object.fromEntries(ids.map((id) => [id, 'online'])),
+        awayMessages: {},
+      });
+    });
+
+    const ids = Array.from({ length: 205 }, (_, idx) => `user-${idx + 1}`);
+    await useChatStore.getState().hydratePresenceForUsers(ids);
+
+    const presence = useChatStore.getState().presence;
+    expect(apiGet).toHaveBeenCalledTimes(3);
+    expect(presence['user-1']).toBe('online');
+    expect(presence['user-100']).toBe('online');
+    expect(presence['user-205']).toBe('online');
+  });
+
   it('inviteToChannel posts invited users and refreshes active community channels', async () => {
     apiPost.mockResolvedValue({ members: [{ id: 'user-2', username: 'alex' }] });
     apiGet.mockResolvedValue({ channels: [] });
