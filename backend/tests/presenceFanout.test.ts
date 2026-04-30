@@ -54,8 +54,9 @@ const pool = require('../src/db/pool') as {
 const { publishUserFeedTargets } = require('../src/websocket/userFeed') as {
   publishUserFeedTargets: jest.Mock;
 };
-const { setPresence } = require('../src/presence/service') as {
+const { setPresence, getBulkPresenceDetails } = require('../src/presence/service') as {
   setPresence: (userId: string, status: string, awayMessage?: string | null) => Promise<void>;
+  getBulkPresenceDetails: (userIds: string[]) => Promise<Record<string, { status: string; awayMessage: string | null }>>;
 };
 
 describe('presence fanout', () => {
@@ -171,5 +172,29 @@ describe('presence fanout', () => {
 
     expect(newUnionAllShape).toEqual(oldUnionShape);
     expect(new Set(newUnionAllShape).size).toBe(newUnionAllShape.length);
+  });
+
+  it('only fetches away-message keys for users who are currently away', async () => {
+    redis.mget
+      .mockResolvedValueOnce(['online', 'away', null])
+      .mockResolvedValueOnce(['stepped away']);
+
+    const details = await getBulkPresenceDetails(['u-1', 'u-2', 'u-3']);
+
+    expect(redis.mget).toHaveBeenNthCalledWith(
+      1,
+      'presence:u-1',
+      'presence:u-2',
+      'presence:u-3',
+    );
+    expect(redis.mget).toHaveBeenNthCalledWith(
+      2,
+      'presence:u-2:away_message',
+    );
+    expect(details).toEqual({
+      'u-1': { status: 'online', awayMessage: null },
+      'u-2': { status: 'away', awayMessage: 'stepped away' },
+      'u-3': { status: 'offline', awayMessage: null },
+    });
   });
 });

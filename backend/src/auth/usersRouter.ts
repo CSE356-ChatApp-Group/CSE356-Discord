@@ -19,6 +19,7 @@ const { query } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const { hashPassword } = require('./passwords');
 const presenceService  = require('../presence/service');
+const { invalidateCommunityMemberRostersForUser } = require('../communities/membersRoster');
 const { BUCKET, s3 } = require('../attachments/storage');
 const logger = require('../utils/logger');
 
@@ -117,6 +118,7 @@ async function saveAvatarForUser(userId, file) {
   } catch (err) {
     logger.warn({ err, userId }, 'avatar upload to object storage failed; falling back to inline DB storage');
     await saveAvatarInline(userId, file);
+    await invalidateCommunityMemberRostersForUser(userId).catch(() => {});
 
     if (previousStorageKey) {
       s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: previousStorageKey })).catch(() => {});
@@ -137,6 +139,7 @@ async function saveAvatarForUser(userId, file) {
        WHERE id=$1`,
       [userId, avatarUrl, storageKey, file.mimetype]
     );
+    await invalidateCommunityMemberRostersForUser(userId).catch(() => {});
   } catch (err) {
     await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: storageKey })).catch(() => {});
     throw err;
@@ -281,6 +284,9 @@ router.patch('/me',
         `UPDATE users SET ${setClauses}, updated_at=NOW() WHERE id=$1 RETURNING ${PUBLIC_FIELDS}, email`,
         [req.user.id, ...Object.values(updates)]
       );
+      if (Object.prototype.hasOwnProperty.call(updates, 'display_name')) {
+        await invalidateCommunityMemberRostersForUser(req.user.id).catch(() => {});
+      }
       const { status, awayMessage } = await presenceService.getPresenceDetails(req.user.id);
       res.json({ user: { ...rows[0], status, away_message: awayMessage } });
     } catch (err) { next(err); }

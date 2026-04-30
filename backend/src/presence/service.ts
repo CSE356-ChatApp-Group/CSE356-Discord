@@ -330,16 +330,27 @@ async function getBulkPresence(userIds) {
 async function getBulkPresenceDetails(userIds) {
   if (!userIds.length) return {};
   const statusKeys = userIds.map((id) => presenceStatusKey(id));
-  const msgKeys = userIds.map((id) => awayMessageKey(id));
-  const [statuses, awayMessages] = await Promise.all([
-    redis.mget(...statusKeys),
-    redis.mget(...msgKeys),
-  ]);
+  const statuses = await redis.mget(...statusKeys);
+  const awayUserIds = [];
+  userIds.forEach((id, index) => {
+    if ((statuses[index] || "offline") === "away") {
+      awayUserIds.push(id);
+    }
+  });
+
+  const awayMessagesByUserId = {};
+  if (awayUserIds.length > 0) {
+    const awayMessageKeys = awayUserIds.map((id) => awayMessageKey(id));
+    const awayValues = await redis.mget(...awayMessageKeys);
+    awayUserIds.forEach((id, index) => {
+      awayMessagesByUserId[id] = awayValues[index] || null;
+    });
+  }
 
   const details = {};
   userIds.forEach((id, index) => {
     const status = statuses[index] || "offline";
-    const awayMessage = status === "away" ? awayMessages[index] || null : null;
+    const awayMessage = status === "away" ? awayMessagesByUserId[id] || null : null;
     details[id] = { status, awayMessage };
   });
   return details;

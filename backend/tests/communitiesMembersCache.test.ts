@@ -165,6 +165,63 @@ describe('community members roster caching', () => {
     });
   });
 
+  it('uses v3 cached roster payloads without a follow-up users table hydration query', async () => {
+    const communityId = '24222222-2222-4222-8222-222222222222';
+    redis.get.mockResolvedValue(
+      JSON.stringify({
+        v: 3,
+        members: [
+          {
+            id: 'u-2',
+            username: 'bob',
+            display_name: 'Bob',
+            avatar_url: null,
+            role: 'admin',
+            joined_at: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      }),
+    );
+    pool.query.mockResolvedValueOnce({ rows: [{ my_role: 'member' }] });
+    presenceService.getBulkPresenceDetails.mockResolvedValue({
+      'u-2': { status: 'idle', awayMessage: null },
+    });
+
+    const app = buildApp();
+    const res = await request(app).get(`/api/v1/communities/${communityId}/members`);
+
+    expect(res.status).toBe(200);
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.body.members[0]).toMatchObject({
+      id: 'u-2',
+      username: 'bob',
+      status: 'idle',
+    });
+  });
+
+  it('invalidates all affected community member roster caches for a user', async () => {
+    pool.query.mockResolvedValueOnce({
+      rows: [
+        { community_id: '11111111-1111-4111-8111-111111111111' },
+        { community_id: '22222222-2222-4222-8222-222222222222' },
+        { community_id: '11111111-1111-4111-8111-111111111111' },
+      ],
+    });
+
+    const {
+      invalidateCommunityMemberRostersForUser,
+    } = require('../src/communities/membersRoster') as {
+      invalidateCommunityMemberRostersForUser: (userId: string) => Promise<void>;
+    };
+
+    await invalidateCommunityMemberRostersForUser('user-42');
+
+    expect(redis.del).toHaveBeenCalledWith(
+      'community:11111111-1111-4111-8111-111111111111:members',
+      'community:22222222-2222-4222-8222-222222222222:members',
+    );
+  });
+
   it('invalidates members cache on community delete', async () => {
     const communityId = '33333333-3333-4333-8333-333333333333';
 
