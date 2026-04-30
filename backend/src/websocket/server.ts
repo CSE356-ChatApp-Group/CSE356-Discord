@@ -96,6 +96,10 @@ const { createWsAclCacheStore } = require("./aclCacheStore");
 const { createRedisSubscriptionRegistry } = require("./subscriptionRegistry");
 const { createPresenceCoordinator } = require("./presenceCoordinator");
 const { createShutdownLifecycle } = require("./shutdownLifecycle");
+const { createSubscriptionManager } = require("./subscriptionManager");
+const { createClientMessageRouter } = require("./clientMessageRouter");
+const { createDisconnectLifecycle } = require("./disconnectLifecycle");
+const { createConnectionLifecycle } = require("./connectionLifecycle");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -346,6 +350,21 @@ const {
   presenceSweeperDebounceMs: PRESENCE_SWEEPER_DEBOUNCE_MS,
   presenceDisconnectDebounceMs: PRESENCE_DISCONNECT_DEBOUNCE_MS,
 });
+const {
+  subscribeCommunityClient,
+  unsubscribeCommunityClient,
+  subscribeClient,
+  unsubscribeClient,
+} = createSubscriptionManager({
+  localUserClients,
+  channelClients,
+  communityClients,
+  userIdFromTarget,
+  ready,
+  ensureRedisChannelSubscribed,
+  releaseRedisChannelSubscription,
+  markChannelRecentConnect,
+});
 const { parseChannelKey, isAllowedChannel } = createChannelAclHelpers({
   query,
   aclCache,
@@ -513,6 +532,20 @@ const {
   WS_BOOTSTRAP_CACHE_TTL_SECONDS,
   WS_BOOTSTRAP_BATCH_SIZE,
 });
+const { handleClientMessage } = createClientMessageRouter({
+  WebSocket,
+  logger,
+  refreshConnectionTtls,
+  isAllowedChannel,
+  subscribeBootstrapChannel,
+  parseChannelKey,
+  unsubscribeCommunityClient,
+  unsubscribeClient,
+  shouldRefreshOnlinePresence,
+  upsertConnectionState,
+  recomputeUserPresence,
+  presenceService,
+});
 
 async function ensureUserFeedShardSubscriptions() {
   await Promise.all([
@@ -539,570 +572,6 @@ function ready() {
       });
   }
   return wsStartupPromise;
-}
-
-// ── Connection handling ────────────────────────────────────────────────────────
-wss.on("connection", async (ws, req) => {
-  // Authenticate
-  let user;
-  try {
-    const url = new URL(req.url, "ws://localhost");
-    const token = url.searchParams.get("token");
-    if (!token) {
-      if (!isAuthBypassEnabled()) throw new Error("No token");
-      ({ user } = await getBypassAuthContext());
-    } else {
-      user = await authenticateAccessToken(token);
-    }
-  } catch {
-    wsConnectionResultTotal.inc({ result: "unauthorized" });
-    ws.close(4001, "Unauthorized");
-    return;
-  }
-
-  wsConnectionResultTotal.inc({ result: "accepted" });
-  logWsHotInfo(() => ({ userId: user.id }), "WS connected");
-  ws._clientIp = clientIpFromReq(req);
-  ws._replayConsumed = false;
-  ws._subscriptions = new Set();
-  ws._communityIds = new Set();
-  /** `channel:<uuid>` topics the client explicitly { type: "unsubscribe" }'d — skip duplicate `user:<me>` message:* for those. */
-  ws._explicitChannelUnsub = new Set();
-  ws._userId = user.id;
-  ws._connectionId = randomUUID();
-  ws._connectedAt = Date.now();
-  ws._lastDataFrameAt = ws._connectedAt;
-  ws._bootstrapReady = false;
-  ws._presenceStatus = "idle";
-  ws._lastActivityAt = 0;
-  ws._awayMessage = null;
-  ws._sawError = false;
-  ws._recentDisconnectRecorded = false;
-  ws._recentMessageKeys = new Map();
-  ws._outboundQueue = [];
-  ws._outboundDrainScheduled = false;
-
-  // Mark freshly connected users for a short window so channel fanout can send
-  // a targeted user-topic duplicate while channel auto-subscribe warms up.
-  //
-  // Ordering: markWsRecentConnect runs immediately; full channel/conversation
-  // bootstrap (bootstrapWithRetry → bootstrapUserSubscriptions) runs in parallel
-  // and can take seconds for large accounts. During that window the socket is
-  // subscribed to user:<id> (below) but not yet to every channel:<id>. Live
-  // channel message:created delivery therefore relies on the logical user:<id>
-  // duplicate path — in particular CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect
-  // is not merely a throughput knob: with that mode, only users in the recent-connect
-  // window receive the duplicate; turning it off or mis-tuning it can drop channel
-  // messages for sockets still bootstrapping. Default mode=all avoids that coupling.
-  markWsRecentConnect(user.id).catch(() => {});
-
-  ws._bootstrapPromise = subscribeClient(ws, `user:${user.id}`)
-    .then(async () => {
-      // Capture the replay upper bound AFTER the user-topic subscribe completes.
-      // This closes the race where messages arriving during subscribe latency (~5-20ms)
-      // would be missed by both live delivery (subscribe not yet active) and replay
-      // (created_at > upper bound). Capturing now covers the full subscribe gap,
-      // at the cost of a few extra DB rows scanned — acceptable given replay limit=60.
-      const replayUpperBoundMs = Date.now();
-      // Consume the recent-disconnect key AFTER subscribe succeeds, not at
-      // connect-start. If we consumed it eagerly and this connection died before
-      // bootstrap completed (bootstrapReady:false, lifetimeMs<100ms), the key
-      // would be deleted but replay would never fire — the next reconnect attempt
-      // would then have no key and silently skip replay.
-      const recentDisconnect = await consumeRecentDisconnect(user.id).catch(() => null);
-      observeRecentReconnect(user.id, ws._connectionId, recentDisconnect);
-      if (recentDisconnect) {
-        if (isWsReplayDisabled()) {
-          wsReplayFailOpenTotal.inc({ reason: "disabled" });
-          logWsHotInfo(() => ({ userId: user.id }), "WS reconnect replay skipped: DISABLE_WS_REPLAY");
-        } else if (ws._replayConsumed === true) {
-          wsReplayFailOpenTotal.inc({ reason: "per_socket" });
-        } else if (!tryBeginReplayForIp(ws._clientIp)) {
-          wsReplayFailOpenTotal.inc({ reason: "per_ip" });
-          logger.warn(
-            { userId: user.id, clientIp: ws._clientIp },
-            "WS reconnect replay skipped: per-IP concurrent replay cap",
-          );
-        } else {
-          const admission = await waitForReplayGateOpen(ws, user.id);
-          if (!admission.ok) {
-            if (!admission.cancelled) {
-              wsReplayFailOpenTotal.inc({ reason: admission.gate.reason || "gate" });
-            }
-            logger.warn(
-              {
-                userId: user.id,
-                reason: admission.gate.reason,
-                waiting: admission.gate.pool.waiting,
-                inFlight: getReplayInFlightCount(),
-                maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
-                attempts: admission.attempts,
-                deferredWaitMs: admission.totalWaitMs,
-                cancelled: admission.cancelled,
-              },
-              "WS reconnect replay skipped after bounded admission waits",
-            );
-            endReplayForIp(ws._clientIp);
-          } else {
-            ws._replayConsumed = true;
-            await new Promise((r) => setTimeout(r, replayStartupJitterMs()));
-            if (ws.readyState !== WebSocket.OPEN) {
-              endReplayForIp(ws._clientIp);
-            } else {
-              if (!tryAcquireReplaySlot()) {
-                wsReplayFailOpenTotal.inc({ reason: "semaphore_full" });
-                logger.warn(
-                  {
-                    userId: user.id,
-                    inFlight: getReplayInFlightCount(),
-                    maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
-                  },
-                  "WS reconnect replay skipped: semaphore slot unavailable at execution",
-                );
-                endReplayForIp(ws._clientIp);
-              } else {
-                try {
-                  const replayStartedAt = Date.now();
-                  const replayAllowed = canRunReplayForUser(user.id);
-                  if (replayAllowed) {
-                    await replayMissedMessagesToSocket(
-                      ws,
-                      user.id,
-                      recentDisconnect,
-                      replayUpperBoundMs,
-                    );
-                  } else {
-                    logWsHotInfo(() => ({
-                        userId: user.id,
-                        connectionId: ws._connectionId,
-                        cooldownMs: WS_REPLAY_USER_COOLDOWN_MS,
-                      }),
-                      "WS reconnect replay DB query skipped due to short per-user cooldown");
-                  }
-                  const pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
-                  logWsHotInfo(() => ({
-                      event: "ws.replay.pending_drain",
-                      userId: user.id,
-                      connectionId: ws._connectionId,
-                      replayAndDrainMs: Date.now() - replayStartedAt,
-                      pendingReplayed,
-                    }),
-                    "WS reconnect replay + pending drain completed before ready");
-                } catch (err) {
-                  logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
-                } finally {
-                  releaseReplaySlot();
-                  endReplayForIp(ws._clientIp);
-                }
-              }
-            }
-          }
-        }
-      }
-      ws._bootstrapReady = true;
-    })
-    .catch((err) => {
-      wsConnectionResultTotal.inc({ result: "user_subscribe_failed" });
-      logger.warn({ err, userId: user.id }, "WS user-channel subscribe failed");
-      noteRecentDisconnectForSocket(ws, 1011, "user_subscribe_failed");
-      ws.close(1011, "Subscription failed");
-    });
-
-  ws.on("message", (raw) => {
-    try {
-      const msg = JSON.parse(raw);
-      handleClientMessage(ws, user, msg).catch((err) => {
-        logger.warn({ err, userId: user.id }, "WS message dispatch failed");
-      });
-    } catch {
-      ws.send(JSON.stringify({ event: "error", data: "Invalid JSON" }));
-    }
-  });
-
-  ws.on("close", (code, reasonBuffer) => {
-    const reason =
-      typeof reasonBuffer?.toString === "function" ? reasonBuffer.toString() : "";
-    cleanup(ws, user.id, code, reason);
-  });
-
-  ws.on("error", (err) => {
-    ws._sawError = true;
-    logger.warn({ err, userId: user.id }, "WS error");
-  });
-
-  // Heartbeat / pong
-  ws.isAlive = true;
-  ws.on("pong", () => {
-    ws.isAlive = true;
-    refreshConnectionTtls(user.id, ws._connectionId).catch(() => {});
-    markWsRecentConnect(user.id).catch(() => {});
-  });
-
-  ws._presenceInitPromise = upsertConnectionState(user.id, ws._connectionId, "idle")
-    .then(async () => {
-      // Cancel any debounced disconnect recompute — this connection supersedes it.
-      cancelPendingPresenceRecompute(user.id);
-      await refreshConnectionTtls(user.id, ws._connectionId, { active: false });
-      await recomputeUserPresence(user.id);
-    })
-    .catch((err) =>
-      logger.warn({ err, userId: user.id }, "WS presence setup failed"),
-    );
-
-  const bootstrapSubscriptionsPromise = (async () => {
-    if (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS > 0) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.floor(Math.random() * (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS + 1))),
-      );
-    }
-    return bootstrapWithRetry(ws, user.id);
-  })();
-  bootstrapSubscriptionsPromise
-    .catch((err) => {
-      wsConnectionResultTotal.inc({ result: "bootstrap_failed" });
-      logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed");
-    });
-
-  Promise.all([ws._bootstrapPromise, bootstrapSubscriptionsPromise])
-    .then(() => {
-      if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) {
-        return;
-      }
-      // Defensive guard: ensure the personal user feed channel is attached on
-      // every connection before advertising subscriptionsHydrated=true.
-      // This prevents a reconnect edge where user:<id> could be absent and DM
-      // invite/participant events (published via userfeed shards) would miss.
-      return subscribeClient(ws, `user:${user.id}`)
-        .catch((err) => {
-          logger.warn({ err, userId: user.id }, "WS ready guard: user-channel resubscribe failed");
-        })
-        .then(() => {
-          if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) return;
-      ws._lastDataFrameAt = Date.now();
-      ws.send(
-        JSON.stringify({
-          event: "ready",
-          data: {
-            bootstrapComplete: true,
-            subscriptionsHydrated: true,
-            connectedAt: ws._connectedAt,
-            readyAt: ws._lastDataFrameAt,
-          },
-        }),
-      );
-        });
-    })
-    .catch(() => {
-    });
-});
-
-// ── Client message dispatch ────────────────────────────────────────────────────
-async function handleClientMessage(ws, user, msg) {
-  if (ws._bootstrapPromise) {
-    await ws._bootstrapPromise;
-  }
-  if (ws._presenceInitPromise) {
-    await ws._presenceInitPromise;
-  }
-  if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) {
-    return;
-  }
-
-  refreshConnectionTtls(user.id, ws._connectionId).catch(() => {});
-
-  switch (msg.type) {
-    case "subscribe": {
-      let allowed: boolean;
-      try {
-        allowed = await isAllowedChannel(user, msg.channel);
-      } catch (err) {
-        logger.warn({ err, userId: user.id, channel: msg.channel }, "WS subscribe: channel access check failed");
-        ws.send(JSON.stringify({ event: "error", data: "Subscribe temporarily unavailable" }));
-        break;
-      }
-      if (allowed) {
-        try {
-          await subscribeBootstrapChannel(ws, msg.channel);
-          ws.send(
-            JSON.stringify({
-              event: "subscribed",
-              data: { channel: msg.channel },
-            }),
-          );
-        } catch {
-          ws.send(JSON.stringify({ event: "error", data: "Subscribe failed" }));
-        }
-      } else {
-        ws.send(
-          JSON.stringify({ event: "error", data: "Channel not allowed" }),
-        );
-      }
-      break;
-    }
-
-    case "unsubscribe":
-      if (typeof msg.channel === "string" && msg.channel.startsWith("community:")) {
-        const parsed = parseChannelKey(msg.channel);
-        if (parsed?.type === "community") unsubscribeCommunityClient(ws, parsed.id);
-      } else {
-        // Keep user:<self> sticky for this socket; it is the control plane for
-        // DM invites/participant updates and bootstrap subscribe commands.
-        if (msg.channel === `user:${user.id}`) {
-          break;
-        }
-        await unsubscribeClient(ws, msg.channel);
-      }
-      break;
-
-    case "ping":
-      ws.send(JSON.stringify({ event: "pong" }));
-      break;
-
-    case "presence": {
-      // Client reporting its own presence status
-      if (["online", "idle", "away"].includes(msg.status)) {
-        const nextStatus = msg.status;
-        const awayMessageChanged =
-          nextStatus === "away" && (msg.awayMessage || null) !== (ws._awayMessage || null);
-        const redundantOnlineRefresh =
-          nextStatus === "online" && !shouldRefreshOnlinePresence(ws);
-
-        if (!awayMessageChanged && nextStatus === ws._presenceStatus && (nextStatus !== "online" || redundantOnlineRefresh)) {
-          if (nextStatus === "online") {
-            ws._lastActivityAt = Date.now();
-            refreshConnectionTtls(user.id, ws._connectionId, { active: true }).catch(() => {});
-          }
-          break;
-        }
-
-        upsertConnectionState(user.id, ws._connectionId, nextStatus)
-          .then(async () => {
-            ws._presenceStatus = nextStatus;
-            if (nextStatus === "away") {
-              ws._awayMessage = msg.awayMessage || null;
-              await presenceService.setAwayMessage(user.id, msg.awayMessage);
-            } else {
-              ws._awayMessage = null;
-            }
-            if (nextStatus === "online") {
-              ws._lastActivityAt = Date.now();
-              await refreshConnectionTtls(user.id, ws._connectionId, { active: true });
-            }
-            await recomputeUserPresence(user.id);
-          })
-          .catch(() => {});
-      }
-      break;
-    }
-
-    case "away_message": {
-      const nextAwayMessage = msg.message || null;
-      if (nextAwayMessage === (ws._awayMessage || null)) {
-        break;
-      }
-
-      ws._awayMessage = nextAwayMessage;
-      if (ws._presenceStatus === "away") {
-        presenceService.setPresence(user.id, "away", nextAwayMessage).catch(() => {});
-      } else {
-        presenceService.setAwayMessage(user.id, nextAwayMessage).catch(() => {});
-      }
-      break;
-    }
-
-    case "activity": {
-      const now = Date.now();
-      const needsRefresh = shouldRefreshOnlinePresence(ws);
-      refreshConnectionTtls(user.id, ws._connectionId, { active: true })
-        .then(async () => {
-          ws._lastActivityAt = now;
-          if (!needsRefresh) return;
-          ws._presenceStatus = "online";
-          ws._awayMessage = null;
-          await upsertConnectionState(user.id, ws._connectionId, "online");
-          await recomputeUserPresence(user.id);
-        })
-        .catch(() => {});
-      break;
-    }
-
-    default:
-      ws.send(
-        JSON.stringify({ event: "error", data: `Unknown type: ${msg.type}` }),
-      );
-  }
-}
-
-// ── Community-feed subscribe helpers ──────────────────────────────────────────
-function subscribeCommunityClient(ws, communityId) {
-  if (typeof communityId !== "string" || !communityId) return;
-  if (!ws._communityIds) ws._communityIds = new Set();
-  if (ws._communityIds.has(communityId)) return;
-  ws._communityIds.add(communityId);
-  if (!communityClients.has(communityId)) {
-    communityClients.set(communityId, new Set());
-  }
-  communityClients.get(communityId).add(ws);
-}
-
-function unsubscribeCommunityClient(ws, communityId) {
-  if (typeof communityId !== "string" || !communityId) return;
-  ws._communityIds?.delete(communityId);
-  const clients = communityClients.get(communityId);
-  clients?.delete(ws);
-  if ((clients?.size || 0) === 0) {
-    communityClients.delete(communityId);
-  }
-}
-
-// ── Subscribe helpers ──────────────────────────────────────────────────────────
-async function subscribeClient(ws, redisChannel) {
-  if (ws._subscriptions.has(redisChannel)) return;
-
-  const userId = userIdFromTarget(redisChannel);
-  if (redisChannel.startsWith("user:") && userId) {
-    if (!localUserClients.has(userId)) {
-      localUserClients.set(userId, new Set());
-    }
-    localUserClients.get(userId).add(ws);
-    ws._subscriptions.add(redisChannel);
-    try {
-      await ready();
-    } catch (err) {
-      const clients = localUserClients.get(userId);
-      clients?.delete(ws);
-      if ((clients?.size || 0) === 0) {
-        localUserClients.delete(userId);
-      }
-      ws._subscriptions.delete(redisChannel);
-      throw err;
-    }
-    return;
-  }
-
-  await ensureRedisChannelSubscribed(redisChannel);
-
-  if (!channelClients.has(redisChannel)) {
-    channelClients.set(redisChannel, new Set());
-  }
-  channelClients.get(redisChannel).add(ws);
-  ws._subscriptions.add(redisChannel);
-  if (redisChannel.startsWith("channel:")) {
-    ws._explicitChannelUnsub?.delete(redisChannel);
-    const uid = ws._userId;
-    if (uid) {
-      markChannelRecentConnect(uid, redisChannel.slice("channel:".length)).catch(() => {});
-    }
-  }
-}
-
-async function unsubscribeClient(ws, redisChannel) {
-  const userId = userIdFromTarget(redisChannel);
-  if (redisChannel.startsWith("user:") && userId) {
-    const clients = localUserClients.get(userId);
-    clients?.delete(ws);
-    if ((clients?.size || 0) === 0) {
-      localUserClients.delete(userId);
-    }
-    ws._subscriptions.delete(redisChannel);
-    return;
-  }
-
-  channelClients.get(redisChannel)?.delete(ws);
-  ws._subscriptions.delete(redisChannel);
-  if (redisChannel.startsWith("channel:")) {
-    ws._explicitChannelUnsub?.add(redisChannel);
-  }
-
-  if ((channelClients.get(redisChannel)?.size || 0) === 0) {
-    channelClients.delete(redisChannel);
-    // No local subscribers remain — release the Redis subscription so the
-    // subscriber connection doesn't accumulate channels indefinitely.
-    releaseRedisChannelSubscription(redisChannel);
-  }
-}
-
-function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
-  clearOutboundQueue(ws);
-  const subscriptions = [...ws._subscriptions];
-  const bootstrapReady = ws._bootstrapReady === true;
-  const lifetimeMs = Math.max(0, Date.now() - Number(ws._connectedAt || Date.now()));
-  const clean = closeCode !== 1006;
-  const subscriptionCount = subscriptions.length;
-  const closeCodeLabel = String(closeCode || 1005);
-
-  wsDisconnectsTotal.inc({
-    code: closeCodeLabel,
-    clean: clean ? "true" : "false",
-    bootstrap_ready: bootstrapReady ? "true" : "false",
-  });
-  wsConnectionLifetimeMs.observe(
-    {
-      close_code: closeCodeLabel,
-      bootstrap_ready: bootstrapReady ? "true" : "false",
-    },
-    lifetimeMs,
-  );
-
-  Promise.allSettled(
-    subscriptions.map((ch) => unsubscribeClient(ws, ch)),
-  ).catch(() => {});
-  for (const communityId of Array.from(ws._communityIds || [])) {
-    unsubscribeCommunityClient(ws, communityId);
-  }
-
-  noteRecentDisconnectForSocket(ws, closeCode, closeReason);
-
-  const logPayload = {
-    event: "ws.disconnected",
-    userId,
-    connectionId: ws._connectionId,
-    closeCode,
-    closeReason: closeReason || null,
-    clean,
-    bootstrapReady,
-    lifetimeMs,
-    sawError: ws._sawError === true,
-    subscriptionCount,
-  };
-
-  const abnormalClose =
-    !clean
-    || ws._sawError === true
-    || closeCode === 1011
-    || closeCode === 4001;
-
-  if (shuttingDown) {
-    logWsHotInfo(() => ({ ...logPayload, shuttingDown: true }), "WS disconnected");
-    return;
-  }
-
-  if (!isRedisOperational(redis)) {
-    logWsHotInfo(() => ({ ...logPayload, redisOperational: false }), "WS disconnected");
-    return;
-  }
-
-  removeConnection(userId, ws._connectionId)
-    .then(() => {
-      if (abnormalClose) {
-        return recomputeUserPresence(userId);
-      }
-      // Clean disconnect — debounce presence recompute so short-gap reconnects
-      // (grader 30ms cycles) skip the offline→online churn entirely.
-      scheduleDebouncedPresenceRecompute(userId);
-    })
-    .catch((err) => {
-      if (/Connection is closed/i.test(String(err?.message || err))) {
-        logWsHotInfo(() => logPayload, "WS disconnected");
-        return;
-      }
-      logger.warn({ err, userId }, "WS cleanup presence update failed");
-    });
-  if (abnormalClose) {
-    logger.warn(logPayload, "WS disconnected abnormally");
-  } else {
-    logWsHotInfo(() => logPayload, "WS disconnected");
-  }
 }
 
 // ── Heartbeat (server → client WS ping/pong) ──────────────────────────────────
@@ -1147,6 +616,63 @@ function getLocalWebSocketClientCount() {
   }
 }
 
+const { cleanup } = createDisconnectLifecycle({
+  WebSocket,
+  clearOutboundQueue,
+  wsDisconnectsTotal,
+  wsConnectionLifetimeMs,
+  unsubscribeClient,
+  unsubscribeCommunityClient,
+  noteRecentDisconnectForSocket,
+  isRedisOperational,
+  redis,
+  removeConnection,
+  recomputeUserPresence,
+  scheduleDebouncedPresenceRecompute,
+  logWsHotInfo,
+  logger,
+  isShuttingDown: () => shuttingDown,
+});
+const { handleConnection } = createConnectionLifecycle({
+  WebSocket,
+  randomUUID,
+  URL,
+  authenticateAccessToken,
+  isAuthBypassEnabled,
+  getBypassAuthContext,
+  wsConnectionResultTotal,
+  logWsHotInfo,
+  clientIpFromReq,
+  markWsRecentConnect,
+  subscribeClient,
+  consumeRecentDisconnect,
+  observeRecentReconnect,
+  isWsReplayDisabled,
+  wsReplayFailOpenTotal,
+  tryBeginReplayForIp,
+  waitForReplayGateOpen,
+  getReplayInFlightCount,
+  replayAdmissionConfig,
+  endReplayForIp,
+  tryAcquireReplaySlot,
+  canRunReplayForUser,
+  replayMissedMessagesToSocket,
+  replayPendingMessagesToSocket,
+  WS_REPLAY_USER_COOLDOWN_MS,
+  releaseReplaySlot,
+  noteRecentDisconnectForSocket,
+  logger,
+  handleClientMessage,
+  refreshConnectionTtls,
+  upsertConnectionState,
+  cancelPendingPresenceRecompute,
+  recomputeUserPresence,
+  WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
+  bootstrapWithRetry,
+  cleanup,
+  replayStartupJitterMs,
+});
+
 const { shutdown } = createShutdownLifecycle({
   WebSocket,
   wss,
@@ -1163,6 +689,9 @@ const { shutdown } = createShutdownLifecycle({
     shuttingDown = value;
   },
 });
+
+// ── Connection handling ────────────────────────────────────────────────────────
+wss.on("connection", handleConnection);
 
 const { createRedisPubsubDelivery } = require("./redisPubsubDelivery");
 const { deliverPubsubMessage } = createRedisPubsubDelivery({
