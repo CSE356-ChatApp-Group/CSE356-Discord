@@ -771,10 +771,6 @@ function ready() {
   return wsStartupPromise;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // ── Connection handling ────────────────────────────────────────────────────────
 wss.on("connection", async (ws, req) => {
   // Authenticate
@@ -985,7 +981,9 @@ wss.on("connection", async (ws, req) => {
 
   const bootstrapSubscriptionsPromise = (async () => {
     if (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS > 0) {
-      await sleep(Math.floor(Math.random() * (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS + 1)));
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.floor(Math.random() * (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS + 1))),
+      );
     }
     return bootstrapWithRetry(ws, user.id);
   })();
