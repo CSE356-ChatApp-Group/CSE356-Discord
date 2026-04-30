@@ -305,12 +305,13 @@ sync_monitoring_stack() {
   scp -qr -o StrictHostKeyChecking=accept-new \
       "${SCRIPT_DIR}/../infrastructure/monitoring/grafana-provisioning-remote" \
       "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/grafana-provisioning-remote.deploy" || true
-  scp -q -o StrictHostKeyChecking=accept-new \
+  if scp -q -o BatchMode=yes -o ConnectTimeout=25 -o StrictHostKeyChecking=accept-new \
       "${PROD_USER}@${VM1}:/opt/chatapp/shared/.env" \
-      "/tmp/chatapp-monitoring-multi.env" 2>/dev/null && \
-    scp -q -o StrictHostKeyChecking=accept-new \
+      "/tmp/chatapp-monitoring-multi.env" 2>/dev/null; then
+    scp -q -o BatchMode=yes -o ConnectTimeout=25 -o StrictHostKeyChecking=accept-new \
         "/tmp/chatapp-monitoring-multi.env" \
         "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/chatapp-monitoring.env.deploy" || true
+  fi
   rm -f "/tmp/chatapp-monitoring-multi.env"
 
   ssh -o StrictHostKeyChecking=accept-new "${MONITORING_VM_USER}@${MONITORING_VM_HOST}" "
