@@ -316,10 +316,10 @@ After any hand-edited nginx config or if you see `no live upstreams` in `error.l
 
 This fails if active `chatapp@` workers are missing from `upstream app` (for example `4000/4001` in dual-worker mode, or `4000..4003` in 4-worker mode).
 
-**Abusive client IP (nginx `deny`)** — after confirming the address is not a grader or shared NAT, run on the VM (or copy `deploy/patch-nginx-deny-ip.sh` and execute with sudo):
+**Abusive client IP (nginx `deny`)** — after confirming the address is not a grader or shared NAT, run on the VM (or copy `deploy/nginx/patches/patch-nginx-deny-ip.sh` and execute with sudo):
 
 ```bash
-sudo CHATAPP_NGINX_SITE_PATH=/etc/nginx/sites-available/chatapp ./deploy/patch-nginx-deny-ip.sh 203.0.113.10
+sudo CHATAPP_NGINX_SITE_PATH=/etc/nginx/sites-available/chatapp ./deploy/nginx/patches/patch-nginx-deny-ip.sh 203.0.113.10
 ```
 
 Idempotent: safe to re-run. Prefer updating `deploy/nginx/staging.conf` / prod bootstrap templates in-repo too so the next full nginx rewrite keeps the rule. **Staging** installs [`deploy/nginx/admission-control.conf`](./nginx/admission-control.conf) (`http_ip_strict` / `http_slash24` zones). **Production** installs [`deploy/nginx/admission-control-production.conf`](./nginx/admission-control-production.conf) (`external_*` zones used by the prod `chatapp` site). Internal RFC1918 clients get an empty limit key, so those nginx edge limits do not apply to grader-style 10.x traffic (see comments in the production file).
@@ -493,7 +493,7 @@ Grading and load tests open many **HTTP + WebSocket** connections on a small VM.
 
 5. **Access logs**: keep **JWTs out of nginx access logs** (do not log the `Authorization` header).
 
-6. **Nginx request timing**: each `deploy-staging.sh` / `deploy-prod.sh` run executes [`deploy/patch-nginx-access-log-timing.sh`](./patch-nginx-access-log-timing.sh) so `/var/log/nginx/access.log` lines include **`rt=`** (`$request_time`) and **`urt=`** (`$upstream_response_time`) for correlating slow searches with DB or app stalls—without changing the combined-log prefix analyzers rely on.
+6. **Nginx request timing**: each `deploy-staging.sh` / `deploy-prod.sh` run executes [`deploy/nginx/patches/patch-nginx-access-log-timing.sh`](./nginx/patches/patch-nginx-access-log-timing.sh) so `/var/log/nginx/access.log` lines include **`rt=`** (`$request_time`) and **`urt=`** (`$upstream_response_time`) for correlating slow searches with DB or app stalls—without changing the combined-log prefix analyzers rely on.
 
 7. **Postgres checkpoints (dedicated DB VM)**: if logs show multi-minute `checkpoint complete: wrote …` bursts on a short cadence, run [`deploy/tune-postgres-checkpoints.sh`](./tune-postgres-checkpoints.sh) with **`DB_SSH=user@db-host`**. It widens **`checkpoint_timeout`**, raises **`max_wal_size`**, and pins **`checkpoint_completion_target=0.9`**, then **`pg_reload_conf()`** (no restart). Override defaults only when you understand the trade-offs.
 

@@ -20,13 +20,17 @@ CUTOVER_COMPLETED=0
 NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-16384}"
 # Avoid scp to /tmp (root-owned files block the deploy user). See deploy-prod.sh.
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
+DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-new}"
+# shellcheck source=deploy-common.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/deploy-common.sh"
 
 ssh_staging_db() {
   ssh -o BatchMode=yes -o ConnectTimeout=25 "${STAGING_USER}@${STAGING_DB_HOST}" "$@"
 }
 
 # Remote VM shape (used for Postgres / PgBouncer — independent of HTTP worker count).
-_REMOTE_NPROC=$(ssh "${STAGING_USER}@${STAGING_HOST}" 'nproc --all' 2>/dev/null || echo 2)
+_REMOTE_NPROC=$(chatapp_ssh_staging_app 'nproc --all' 2>/dev/null || echo 2)
 
 # HTTP workers: scale with VM vCPUs so larger staging instances automatically
 # exercise the same worker topology as prod.
@@ -111,7 +115,7 @@ print(max(2, min(4, per_inst_cpu - 1)))
 #   2 GB / 1 inst: min(1500, max(246, 192)) = 246 MB   ← leaves room for PG + pgbouncer
 #   2 GB / 2 inst: min(1500, max(123, 192)) = 192 MB   (floor kicks in)
 #   7.8 GB / 2 inst: min(1500, max(468, 192)) = 468 MB ← reasonable on staging
-_REMOTE_RAM_MB=$(ssh "${STAGING_USER}@${STAGING_HOST}" "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 7800)
+_REMOTE_RAM_MB=$(chatapp_ssh_staging_app "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 7800)
 NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
@@ -121,9 +125,9 @@ echo "  UV threadpool/instance: ${UV_THREADPOOL_PER_INSTANCE}  bcrypt_conc: ${BC
 echo "  communities_heavy_max_inflight: ${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}"
 "${SCRIPT_DIR}/preflight-check.sh" staging "$RELEASE_SHA" "$STAGING_USER" "$STAGING_HOST" "$GITHUB_REPO"
 
-ssh "${STAGING_USER}@${STAGING_HOST}" "sudo logger -t chatapp-deploy \"event=start env=staging sha=${RELEASE_SHA} instances=${CHATAPP_INSTANCES}\"" || true
+chatapp_ssh_staging_app "sudo logger -t chatapp-deploy \"event=start env=staging sha=${RELEASE_SHA} instances=${CHATAPP_INSTANCES}\"" || true
 
-CURRENT_UPSTREAM_PORT=$(ssh "${STAGING_USER}@${STAGING_HOST}" "
+CURRENT_UPSTREAM_PORT=$(chatapp_ssh_staging_app "
   python3 - <<'PY'
 import re
 try:
@@ -164,7 +168,7 @@ echo "Candidate port: ${CANDIDATE_PORT}"
 # for the duration of the deploy window (steps 0→7b.2 is ~5–10 minutes).
 _COMPANION_WAS_ACTIVE=false
 if [[ ${CHATAPP_INSTANCES} -ge 2 ]]; then
-  if ssh "${STAGING_USER}@${STAGING_HOST}" \
+  if chatapp_ssh_staging_app \
        "systemctl is-active chatapp@${CANDIDATE_PORT}" >/dev/null 2>&1; then
     _COMPANION_WAS_ACTIVE=true
     echo "  (companion on port ${CANDIDATE_PORT} is active — will restore after nginx rewrite)"
@@ -177,7 +181,7 @@ cleanup_candidate() {
   fi
 
   echo "Deployment failed before cutover; cleaning up candidate port ${CANDIDATE_PORT}..."
-  ssh "${STAGING_USER}@${STAGING_HOST}" "
+  chatapp_ssh_staging_app "
     sudo systemctl stop chatapp@${CANDIDATE_PORT} 2>/dev/null || true
   " >/dev/null 2>&1 || true
 }
@@ -187,9 +191,9 @@ echo "0) Ensuring Nginx serves frontend UI and proxies backend routes..."
 # SCP the standalone nginx config (deploy/nginx/staging.conf → /tmp/chatapp-nginx.conf),
 # then substitute __LIVE_PORT__ on the server and install it.  This keeps the
 # config reviewable and diffable in version control instead of buried in a heredoc.
-scp "${SCRIPT_DIR}/nginx/staging.conf" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp-nginx.conf"
-scp "${SCRIPT_DIR}/nginx/admission-control.conf" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp-admission-control.conf"
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_scp_to_staging_app "${SCRIPT_DIR}/nginx/staging.conf" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp-nginx.conf"
+chatapp_scp_to_staging_app "${SCRIPT_DIR}/nginx/admission-control.conf" "${STAGING_USER}@${STAGING_HOST}:/tmp/chatapp-admission-control.conf"
+chatapp_ssh_staging_app "
   set -euo pipefail
   LIVE_PORT='${LIVE_PORT}'
   sudo install -d -m 0755 /etc/nginx/conf.d
@@ -214,8 +218,8 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 
 echo "0b) Nginx access log timing fields (idempotent)..."
-scp -o BatchMode=yes -o ConnectTimeout=20 "${SCRIPT_DIR}/patch-nginx-access-log-timing.sh" "${STAGING_USER}@${STAGING_HOST}:/tmp/patch-nginx-access-log-timing.sh"
-ssh "${STAGING_USER}@${STAGING_HOST}" 'sudo bash /tmp/patch-nginx-access-log-timing.sh && sudo rm -f /tmp/patch-nginx-access-log-timing.sh'
+chatapp_scp_to_staging_app "${SCRIPT_DIR}/nginx/patches/patch-nginx-access-log-timing.sh" "${STAGING_USER}@${STAGING_HOST}:/tmp/patch-nginx-access-log-timing.sh"
+chatapp_ssh_staging_app 'sudo bash /tmp/patch-nginx-access-log-timing.sh && sudo rm -f /tmp/patch-nginx-access-log-timing.sh'
 
 # Step 0 wrote nginx with only LIVE_PORT.  If the companion was running before
 # the deploy started, restore it in the upstream immediately so capacity stays
@@ -223,7 +227,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" 'sudo bash /tmp/patch-nginx-access-log-tim
 # We use the same Python inline approach as step 7b.2.
 if [[ "${_COMPANION_WAS_ACTIVE}" == "true" ]]; then
   echo "0c) Restoring companion port ${CANDIDATE_PORT} in nginx upstream (capacity preservation)..."
-  ssh "${STAGING_USER}@${STAGING_HOST}" "
+  chatapp_ssh_staging_app "
     set -euo pipefail
     sudo python3 - <<'PYEOF'
 import re
@@ -253,10 +257,10 @@ PYEOF
 fi
 
 echo "0a) Installing and configuring PgBouncer (transaction-mode connection pooler)..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
-scp "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
-scp "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${STAGING_USER}@${STAGING_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
+chatapp_scp_to_staging_app "${SCRIPT_DIR}/pgbouncer-setup.py" "${STAGING_USER}@${STAGING_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
+chatapp_scp_to_staging_app "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${STAGING_USER}@${STAGING_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
+chatapp_ssh_staging_app "
   set -euo pipefail
   # Pass the pre-computed pool size so pgbouncer-setup.py uses exactly the
   # value derived from CHATAPP_INSTANCES, not the fallback nCPU*40 formula.
@@ -292,7 +296,7 @@ TMPFILES
 "
 
 echo "0b) Tuning PostgreSQL for available RAM and CPU..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app "
   set -euo pipefail
   if python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py\" 2>/dev/null; then
     echo 'Skipping local PostgreSQL tuning — PgBouncer backend is off-host.'
@@ -382,8 +386,8 @@ STAGING_ARTIFACT_SHA256=$(openssl dgst -sha256 "${SOURCE_ARTIFACT}" | awk '{prin
 echo "Artifact SHA256 (local): ${STAGING_ARTIFACT_SHA256}"
 
 echo "2) Copying artifact and verification scripts to staging host..."
-scp "${SOURCE_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
-scp deploy/health-check.sh deploy/smoke-test.sh deploy/candidate-ws-smoke.cjs deploy/pgbouncer-setup.py deploy/redis-wait.sh "${STAGING_USER}@${STAGING_HOST}:/tmp/"
+chatapp_scp_to_staging_app "${SOURCE_ARTIFACT}" "${STAGING_USER}@${STAGING_HOST}:/tmp/${ARTIFACT}"
+chatapp_scp_to_staging_app deploy/health-check.sh deploy/smoke-test.sh deploy/candidate-ws-smoke.cjs deploy/pgbouncer-setup.py deploy/redis-wait.sh "${STAGING_USER}@${STAGING_HOST}:/tmp/"
 if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
   rm -f "${DOWNLOADED_ARTIFACT}"
 fi
@@ -391,10 +395,10 @@ fi
 echo "3) Installing/updating systemd unit on host..."
 # Use ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
 # subsystem which misparses '@' in remote paths, causing "Permission denied".
-ssh "${STAGING_USER}@${STAGING_HOST}" 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
-scp "${SCRIPT_DIR}/apply-env-profile.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/apply-env-profile.py"
-scp "${SCRIPT_DIR}/env/staging.required.env" "${STAGING_USER}@${STAGING_HOST}:/tmp/staging.required.env"
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
+chatapp_scp_to_staging_app "${SCRIPT_DIR}/apply-env-profile.py" "${STAGING_USER}@${STAGING_HOST}:/tmp/apply-env-profile.py"
+chatapp_scp_to_staging_app "${SCRIPT_DIR}/env/staging.required.env" "${STAGING_USER}@${STAGING_HOST}:/tmp/staging.required.env"
+chatapp_ssh_staging_app "
   set -euo pipefail
   sed 's/__DEPLOY_USER__/${STAGING_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   sudo cp /tmp/redis-wait.sh /opt/chatapp/shared/redis-wait.sh
@@ -489,7 +493,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 
 echo "4) Unpacking artifact into immutable release directory..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app "
   set -euo pipefail
   REMOTE_TGZ='/tmp/${ARTIFACT}'
   GOT=\$(openssl dgst -sha256 \"\$REMOTE_TGZ\" | awk '{print \$2}')
@@ -523,7 +527,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 
 echo "5) Starting candidate app on port ${CANDIDATE_PORT} via systemd..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app "
   set -euo pipefail
   RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
 
@@ -541,7 +545,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 
 echo "6) Running health, smoke, and candidate WebSocket round-trip on candidate..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app "
   set -euo pipefail
   /tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}
   /tmp/smoke-test.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}
@@ -555,7 +559,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 
 echo "7) Switching Nginx upstream from ${LIVE_PORT} to ${CANDIDATE_PORT}..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app "
   set -euo pipefail
   # Rewrite the whole upstream block (instead of global s/LIVE/CANDIDATE/) so
   # an interrupted deploy cannot leave duplicate candidate lines (4000,4000).
@@ -592,7 +596,7 @@ CUTOVER_COMPLETED=1
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 echo "7a) Monitoring: staging DB VM stack + app VM (node-exporter, promtail, redis_exporter)..."
 PROM_BUILD_STG="$(mktemp)"
-PROM_APP_HOST="${STAGING_PROM_APP_HOST:-$(ssh -o BatchMode=yes -o ConnectTimeout=15 "${STAGING_USER}@${STAGING_HOST}" 'hostname -I 2>/dev/null' | awk '{print $1}')}"
+PROM_APP_HOST="${STAGING_PROM_APP_HOST:-$(chatapp_ssh_staging_app 'hostname -I 2>/dev/null' | awk '{print $1}')}"
 PROM_APP_HOST="${PROM_APP_HOST:-10.128.0.2}"
 python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
   --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
@@ -617,7 +621,7 @@ ssh_staging_db "
 " || true
 
 ENV_PULL_STAGING="$(mktemp)"
-scp -q "${STAGING_USER}@${STAGING_HOST}:/opt/chatapp/shared/.env" "${ENV_PULL_STAGING}" || true
+chatapp_scp_from_staging_app "/opt/chatapp/shared/.env" "${ENV_PULL_STAGING}" || true
 
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "${STAGING_USER}@${STAGING_DB_HOST}:/tmp/alerts.yml.deploy" || true
 scp -q "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "${STAGING_USER}@${STAGING_DB_HOST}:/tmp/alertmanager.yml.deploy" || true
@@ -706,9 +710,9 @@ ssh_staging_db "
   fi
 " || true
 
-scp -q "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/remote-compose.yml.deploy" || true
-scp -q "${REPO_ROOT}/infrastructure/monitoring/promtail-host-config-staging.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/promtail-host-config.yml.deploy" || true
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_scp_to_staging_app "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/remote-compose.yml.deploy" || true
+chatapp_scp_to_staging_app "${REPO_ROOT}/infrastructure/monitoring/promtail-host-config-staging.yml" "${STAGING_USER}@${STAGING_HOST}:/tmp/promtail-host-config.yml.deploy" || true
+chatapp_ssh_staging_app "
   set -euo pipefail
   if [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/promtail-host-config.yml.deploy ]; then
     sudo mkdir -p /opt/chatapp-monitoring
@@ -746,7 +750,7 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 # correct.  PG pool budget is pre-divided by CHATAPP_INSTANCES above.
 if [[ ${CHATAPP_INSTANCES} -ge 2 ]]; then
   echo "7b) Rolling companion instance on port ${LIVE_PORT} to new release (dual-worker mode)..."
-  ssh "${STAGING_USER}@${STAGING_HOST}" "
+  chatapp_ssh_staging_app "
     set -euo pipefail
     RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
 
@@ -766,11 +770,11 @@ if [[ ${CHATAPP_INSTANCES} -ge 2 ]]; then
   "
 
   echo "7b.1) Health-checking companion on port ${LIVE_PORT}..."
-  ssh "${STAGING_USER}@${STAGING_HOST}" \
+  chatapp_ssh_staging_app \
     "/tmp/health-check.sh ${LIVE_PORT} http://127.0.0.1:${LIVE_PORT}"
 
   echo "7b.2) Adding companion to nginx upstream (load-balancing both workers)..."
-  ssh "${STAGING_USER}@${STAGING_HOST}" "
+  chatapp_ssh_staging_app "
     set -euo pipefail
     # Rewrite the upstream block to include both ports. max_fails=0 disables
     # nginx's passive health check — the Node-level circuit breaker already
@@ -806,7 +810,7 @@ PYEOF
   "
 
   echo "7b.3) Enabling companion service for auto-start on reboot..."
-  ssh "${STAGING_USER}@${STAGING_HOST}" \
+  chatapp_ssh_staging_app \
     "sudo systemctl enable chatapp@${LIVE_PORT} 2>/dev/null || true"
 fi
 
@@ -822,7 +826,7 @@ fi
 if [[ ${#ADDITIONAL_PORTS[@]} -gt 0 ]]; then
   echo "7c) Starting ${#ADDITIONAL_PORTS[@]} additional worker(s): ${ADDITIONAL_PORTS[*]}..."
   for extra_port in "${ADDITIONAL_PORTS[@]}"; do
-    ssh "${STAGING_USER}@${STAGING_HOST}" "
+    chatapp_ssh_staging_app "
       set -euo pipefail
       RELEASE_PATH='${RELEASE_DIR}/${RELEASE_SHA}'
       DROPIN_DIR=/etc/systemd/system/chatapp@${extra_port}.service.d
@@ -836,7 +840,7 @@ if [[ ${#ADDITIONAL_PORTS[@]} -gt 0 ]]; then
       sudo systemctl enable chatapp@${extra_port} 2>/dev/null || true
       echo 'Worker started on port ${extra_port}'
     "
-    ssh "${STAGING_USER}@${STAGING_HOST}" \
+    chatapp_ssh_staging_app \
       "/tmp/health-check.sh ${extra_port} http://127.0.0.1:${extra_port}"
   done
 
@@ -845,7 +849,7 @@ if [[ ${#ADDITIONAL_PORTS[@]} -gt 0 ]]; then
   # Use a simple range (4000..4000+N-1) — no dependency on CANDIDATE/LIVE vars
   # and no risk of duplicates.
   _ALL_PORTS="$(seq -s ' ' 4000 $((4000 + CHATAPP_INSTANCES - 1)))"
-  ssh "${STAGING_USER}@${STAGING_HOST}" "
+  chatapp_ssh_staging_app "
     set -euo pipefail
     sudo python3 - <<'PYEOF'
 import re
@@ -883,10 +887,10 @@ PYEOF
 fi
 
 echo "8) Enabling candidate service for auto-start on reboot..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "sudo systemctl enable chatapp@${CANDIDATE_PORT} 2>/dev/null || true"
+chatapp_ssh_staging_app "sudo systemctl enable chatapp@${CANDIDATE_PORT} 2>/dev/null || true"
 
 echo "9) Updating current symlink to new release..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app "
   set -euo pipefail
   ln -sfn '${RELEASE_DIR}/${RELEASE_SHA}' '${CURRENT_LINK}'
   # Keep only the 3 most recent releases to prevent disk exhaustion (node_modules ~200MB each).
@@ -894,17 +898,17 @@ ssh "${STAGING_USER}@${STAGING_HOST}" "
 "
 
 echo "10) Post-cutover verification..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "/tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}"
+chatapp_ssh_staging_app "/tmp/health-check.sh ${CANDIDATE_PORT} http://127.0.0.1:${CANDIDATE_PORT}"
 
 echo "11) Verifying frontend root from Nginx..."
-ssh "${STAGING_USER}@${STAGING_HOST}" "
+chatapp_ssh_staging_app "
   set -euo pipefail
   curl -fsS http://127.0.0.1/ >/dev/null
 "
 
 trap - ERR
 
-ssh "${STAGING_USER}@${STAGING_HOST}" "sudo logger -t chatapp-deploy \"event=complete env=staging sha=${RELEASE_SHA} candidate_port=${CANDIDATE_PORT} live_port=${LIVE_PORT}\"" || true
+chatapp_ssh_staging_app "sudo logger -t chatapp-deploy \"event=complete env=staging sha=${RELEASE_SHA} candidate_port=${CANDIDATE_PORT} live_port=${LIVE_PORT}\"" || true
 
 echo ""
 echo "Staging deployment successful."

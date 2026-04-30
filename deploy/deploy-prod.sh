@@ -48,6 +48,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy-common.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/deploy-common.sh"
+# shellcheck source=rollback.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/rollback.sh"
 
 ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT="${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT:-true}"
 
@@ -79,6 +82,36 @@ ssh_monitor() {
       -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${MONITORING_VM_USER}@${MONITORING_VM_HOST}" "$@"
+}
+
+_chatapp_scp_deploy_script_prod_tmp() {
+  local name="$1"
+  chatapp_scp_to_prod "${SCRIPT_DIR}/nginx/patches/${name}" "${PROD_USER}@${PROD_HOST}:/tmp/${name}"
+}
+
+patch_nginx_search_location() {
+  _chatapp_scp_deploy_script_prod_tmp patch-nginx-search-location.py
+  ssh_prod "sudo python3 /tmp/patch-nginx-search-location.py --site-path '${CHATAPP_NGINX_SITE_PATH}' && sudo rm -f /tmp/patch-nginx-search-location.py"
+}
+
+patch_nginx_api_retry() {
+  _chatapp_scp_deploy_script_prod_tmp patch-nginx-api-retry.py
+  ssh_prod "sudo python3 /tmp/patch-nginx-api-retry.py --site-path '${CHATAPP_NGINX_SITE_PATH}' --retry-line '${CHATAPP_NGINX_PROXY_RETRY_LINE}' && sudo rm -f /tmp/patch-nginx-api-retry.py"
+}
+
+patch_nginx_auth_location() {
+  _chatapp_scp_deploy_script_prod_tmp patch-nginx-auth-location.py
+  ssh_prod "sudo python3 /tmp/patch-nginx-auth-location.py --site-path '${CHATAPP_NGINX_SITE_PATH}' && sudo rm -f /tmp/patch-nginx-auth-location.py"
+}
+
+patch_nginx_auth_flow_routes() {
+  _chatapp_scp_deploy_script_prod_tmp patch-nginx-auth-flow-routes.py
+  ssh_prod "sudo python3 /tmp/patch-nginx-auth-flow-routes.py --site-path '${CHATAPP_NGINX_SITE_PATH}' && sudo rm -f /tmp/patch-nginx-auth-flow-routes.py"
+}
+
+patch_nginx_auth_non_idempotent() {
+  _chatapp_scp_deploy_script_prod_tmp patch-nginx-auth-non-idempotent.py
+  ssh_prod "sudo python3 /tmp/patch-nginx-auth-non-idempotent.py --site-path '${CHATAPP_NGINX_SITE_PATH}' --retry-full '${CHATAPP_NGINX_PROXY_RETRY_LINE}' --retry-legacy '${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}' && sudo rm -f /tmp/patch-nginx-auth-non-idempotent.py"
 }
 
 # Send a Discord notification to the prod ops webhook (DISCORD_WEBHOOK_URL_PROD env var).
@@ -620,129 +653,6 @@ reclaim_spare_candidate_on_rollback() {
   " >/dev/null 2>&1 || true
 }
 
-# Fast rollback: roll all workers to an already-deployed release on the server.
-# Skips backup, artifact download, npm ci, migrations, pgbouncer setup, monitoring.
-# Completes in ~2-3 minutes. Invoked by deploy-prod.sh <sha> --rollback.
-do_fast_rollback() {
-  local sha="${RELEASE_SHA}"
-  local release_path="${RELEASE_DIR}/${sha}"
-
-  echo ""
-  echo "=== FAST ROLLBACK to ${sha} ==="
-  echo "Release path: ${release_path}"
-
-  # Verify the release exists on the server (must have been deployed previously)
-  if ! ssh_prod "[ -d '${release_path}/backend' ]"; then
-    echo "ERROR: Release ${sha} not found at ${release_path}/backend on ${PROD_HOST}"
-    echo "Available releases (most recent first):"
-    ssh_prod "ls -1t '${RELEASE_DIR}' 2>/dev/null | head -10" || true
-    exit 1
-  fi
-  echo "✓ Release found on server"
-
-  # Ensure health-check.sh is in place on the server
-  # shellcheck disable=SC2086
-  scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p \
-      ${DEPLOY_SSH_EXTRA_OPTS} \
-      "${SCRIPT_DIR}/health-check.sh" "${PROD_USER}@${PROD_HOST}:/tmp/health-check.sh"
-  ssh_prod "chmod +x /tmp/health-check.sh"
-
-  notify_discord_prod ":arrow_left: **Prod rollback starting** \`${sha:0:7}\` · ${CHATAPP_INSTANCES} workers"
-  deploy_log_phase "rollback: beginning rolling worker swap"
-
-  # Reapply the release-owned env profile when present. Runtime env lives in
-  # /opt/chatapp/shared/.env, so swapping only the systemd WorkingDirectory is
-  # not a true rollback if the previous deploy changed profile-owned keys.
-  ssh_prod "
-    set -euo pipefail
-    if [ -f '${release_path}/deploy/apply-env-profile.py' ] && [ -f '${release_path}/deploy/env/prod.required.env' ]; then
-      sudo python3 '${release_path}/deploy/apply-env-profile.py' \
-        --target /opt/chatapp/shared/.env \
-        --required '${release_path}/deploy/env/prod.required.env'
-      echo 'rollback env profile applied from release artifact'
-    else
-      echo 'WARN: rollback release has no bundled env profile; shared .env left unchanged'
-    fi
-  "
-
-  # Snapshot current worker state so exit trap can attempt recovery if rollback fails
-  capture_previous_release_map
-
-  # Rolling restart: one worker at a time → no capacity drop below (N-1)/N
-  local _rb_settle=8   # 8s: matches WS_APP_KEEPALIVE_INTERVAL_MS so clients reconnect
-  for roll_port in "${TARGET_PORTS[@]}"; do
-    echo "--- Rolling back :${roll_port} → ${sha} ---"
-
-    # Build upstream CSV without this port
-    local _excl_csv=""
-    for _p in "${TARGET_PORTS[@]}"; do
-      if [ "$_p" != "${roll_port}" ]; then
-        _excl_csv="${_excl_csv:+${_excl_csv},}${_p}"
-      fi
-    done
-
-    # Drain traffic from this port before restart
-    if [[ -n "${_excl_csv}" ]]; then
-      rewrite_nginx_upstream "${_excl_csv}" "rollback: remove :${roll_port}" || {
-        echo "ERROR: could not remove :${roll_port} from nginx during rollback"
-        exit 1
-      }
-      sleep 2  # drain: let nginx old-worker keepalive connections clear before SIGTERM
-    fi
-
-    # Point systemd dropin at rollback release and restart
-    ssh_prod "
-      set -euo pipefail
-      DROPIN_DIR=/etc/systemd/system/chatapp@${roll_port}.service.d
-      sudo mkdir -p \"\$DROPIN_DIR\"
-      printf '[Service]\nWorkingDirectory=%s/backend\n' '${release_path}' \
-        | sudo tee \"\${DROPIN_DIR}/release.conf\" >/dev/null
-      sudo systemctl daemon-reload
-      sudo systemctl reset-failed chatapp@${roll_port} 2>/dev/null || true
-      sudo systemctl restart chatapp@${roll_port}
-    " || {
-      echo "ERROR: chatapp@${roll_port} restart failed during rollback"
-      exit 1
-    }
-
-    # Wait for the worker to pass health checks before restoring it to nginx
-    if ! ssh_prod "/tmp/health-check.sh ${roll_port} http://127.0.0.1:${roll_port}"; then
-      echo "ERROR: health check failed for :${roll_port} after rollback restart"
-      exit 1
-    fi
-
-    # Restore port to nginx upstream
-    rewrite_nginx_upstream "${TARGET_PORTS_CSV}" "rollback: restore :${roll_port}" || {
-      echo "ERROR: could not restore :${roll_port} to nginx after rollback restart"
-      exit 1
-    }
-
-    echo "  Settling ${_rb_settle}s for WS clients to reconnect..."
-    sleep "${_rb_settle}"
-  done
-
-  deploy_log_phase "rollback: all workers restarted"
-
-  # Update current symlink to the rollback release
-  ssh_prod "ln -sfn '${release_path}' '${CURRENT_LINK}'" \
-    && echo "✓ /opt/chatapp/current → ${sha}" \
-    || echo "WARN: symlink update failed (non-fatal)"
-
-  # Final verification gates
-  if gate_all_worker_health && gate_upstream_parity && gate_same_release; then
-    local _rb_done
-    _rb_done=$(date +%s)
-    notify_discord_prod ":white_check_mark: **Prod rollback complete** \`${sha:0:7}\` · $((${_rb_done} - ${_DEPLOY_T0}))s"
-    echo ""
-    echo "=== Rollback Complete ==="
-    echo "Production is now running: ${sha}"
-  else
-    echo "ERROR: Final gates failed after rollback — production may be degraded."
-    echo "       Manual intervention required: check journalctl -u 'chatapp@*' on ${PROD_HOST}"
-    exit 1
-  fi
-}
-
 gate_same_release() {
   echo "Gate: same-release parity across target workers..."
   local expected="${RELEASE_DIR}/${RELEASE_SHA}/backend"
@@ -1098,14 +1008,8 @@ fi  # end SKIP_BACKUP check
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
 echo "2b) Installing and configuring PgBouncer..."
 ssh_prod "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
-# shellcheck disable=SC2086
-scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
-# shellcheck disable=SC2086
-scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
+chatapp_scp_to_prod "${SCRIPT_DIR}/pgbouncer-setup.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py"
+chatapp_scp_to_prod "${SCRIPT_DIR}/pgbouncer_ini_backend_is_remote.py" "${PROD_USER}@${PROD_HOST}:${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer_ini_backend_is_remote.py"
 ssh_prod "
   set -euo pipefail
   if ! dpkg -l pgbouncer 2>/dev/null | grep -q '^ii'; then
@@ -1320,14 +1224,8 @@ echo "Artifact SHA256 (local): ${ARTIFACT_SHA256}"
 
 # 4. Copy to production server
 echo "4. Copying to production..."
-# shellcheck disable=SC2086
-scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
-# shellcheck disable=SC2086
-scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "${SCRIPT_DIR}/candidate-ws-smoke.cjs" "$PROD_USER@$PROD_HOST:/tmp/"
+chatapp_scp_to_prod "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
+chatapp_scp_to_prod "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "${SCRIPT_DIR}/candidate-ws-smoke.cjs" "$PROD_USER@$PROD_HOST:/tmp/"
 rm "$DOWNLOAD_PATH"
 echo "✓ Copied to production"
 
@@ -1410,139 +1308,55 @@ echo "5.5. Installing/updating systemd unit..."
 # subsystem which misparses '@' in remote paths, causing "Permission denied".
 ssh_prod 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
 ssh_prod 'cat > /tmp/redis-wait.sh' < "${SCRIPT_DIR}/redis-wait.sh"
-# shellcheck disable=SC2086
-scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${SCRIPT_DIR}/apply-env-profile.py" "${PROD_USER}@${PROD_HOST}:/tmp/apply-env-profile.py"
-# shellcheck disable=SC2086
-scp -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${SCRIPT_DIR}/env/prod.required.env" "${PROD_USER}@${PROD_HOST}:/tmp/prod.required.env"
+chatapp_scp_to_prod "${SCRIPT_DIR}/apply-env-profile.py" "${PROD_USER}@${PROD_HOST}:/tmp/apply-env-profile.py"
+chatapp_scp_to_prod "${SCRIPT_DIR}/env/prod.required.env" "${PROD_USER}@${PROD_HOST}:/tmp/prod.required.env"
+_PROD_DEPLOY_OVERLAY_ENV=$(mktemp)
+{
+  echo "CHATAPP_INSTANCES=${CHATAPP_INSTANCES}"
+  echo "BCRYPT_ROUNDS=1"
+  echo "UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}"
+  echo "PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}"
+  echo "PGBOUNCER_POOL_SIZE=${_PGB_SIZE}"
+  echo "PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS}"
+  echo "PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE}"
+  echo "PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE}"
+  echo "POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}"
+  echo "BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}"
+  echo "PG_CONNECTION_TIMEOUT_MS=7000"
+  echo "BG_WRITE_POOL_GUARD=5"
+  echo "SEARCH_STATEMENT_TIMEOUT_MS=10000"
+  echo "JWT_ACCESS_TTL=24h"
+  echo "JWT_REFRESH_TTL=7d"
+  echo "NODE_ENV=production"
+  echo "AUTH_BYPASS=false"
+  echo "LOG_LEVEL=info"
+  echo "FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}"
+  echo "NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}"
+  echo "AUTH_GLOBAL_PER_IP_RATE_LIMIT=false"
+  echo "AUTH_PASSWORD_STORAGE_MODE=plain"
+} > "${_PROD_DEPLOY_OVERLAY_ENV}"
+chatapp_scp_to_prod "${_PROD_DEPLOY_OVERLAY_ENV}" "${PROD_USER}@${PROD_HOST}:/tmp/prod.deploy.overlay.env"
+rm -f "${_PROD_DEPLOY_OVERLAY_ENV}"
 ssh_prod "
   set -e
+  RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   sudo cp /tmp/redis-wait.sh /opt/chatapp/shared/redis-wait.sh
   sudo chmod +x /opt/chatapp/shared/redis-wait.sh
   # PORT must not be in shared .env — systemd provides it via Environment=PORT=%i
   sudo sed -i '/^PORT=/d' /opt/chatapp/shared/.env
-  # CHATAPP_INSTANCES: persist worker count so monitoring and health endpoints
-  # can report the expected topology without re-deriving from systemd.
-  sudo grep -q '^CHATAPP_INSTANCES=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^CHATAPP_INSTANCES=.*/CHATAPP_INSTANCES=${CHATAPP_INSTANCES}/' /opt/chatapp/shared/.env \
-    || echo 'CHATAPP_INSTANCES=${CHATAPP_INSTANCES}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Ensure performance-critical env vars are set for this deployment.
-  sudo grep -q '^BCRYPT_ROUNDS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^BCRYPT_ROUNDS=.*/BCRYPT_ROUNDS=1/' /opt/chatapp/shared/.env \
-    || echo 'BCRYPT_ROUNDS=1' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^UV_THREADPOOL_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^UV_THREADPOOL_SIZE=.*/UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}/' /opt/chatapp/shared/.env \
-    || echo 'UV_THREADPOOL_SIZE=${UV_THREADPOOL_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^PG_POOL_MAX=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PG_POOL_MAX=.*/PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}/' /opt/chatapp/shared/.env \
-    || echo 'PG_POOL_MAX=${PG_POOL_MAX_PER_INSTANCE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^PGBOUNCER_POOL_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PGBOUNCER_POOL_SIZE=.*/PGBOUNCER_POOL_SIZE=${_PGB_SIZE}/' /opt/chatapp/shared/.env \
-    || echo 'PGBOUNCER_POOL_SIZE=${_PGB_SIZE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^PGBOUNCER_MAX_DB_CONNECTIONS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PGBOUNCER_MAX_DB_CONNECTIONS=.*/PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS}/' /opt/chatapp/shared/.env \
-    || echo 'PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^PGBOUNCER_MIN_POOL_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PGBOUNCER_MIN_POOL_SIZE=.*/PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE}/' /opt/chatapp/shared/.env \
-    || echo 'PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^PGBOUNCER_RESERVE_SIZE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PGBOUNCER_RESERVE_SIZE=.*/PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE}/' /opt/chatapp/shared/.env \
-    || echo 'PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # POOL_CIRCUIT_BREAKER_QUEUE: number of requests allowed to wait for a pool
-  # connection before returning 503. Keep this moderate so overload degrades
-  # quickly instead of building multi-second queue latency.
-  # PG_CONNECTION_TIMEOUT_MS=7000 keeps tail wait bounded under pressure.
-  sudo grep -q '^POOL_CIRCUIT_BREAKER_QUEUE=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^POOL_CIRCUIT_BREAKER_QUEUE=.*/POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}/' /opt/chatapp/shared/.env \
-    || echo 'POOL_CIRCUIT_BREAKER_QUEUE=${POOL_CIRCUIT_BREAKER_QUEUE}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^BCRYPT_MAX_CONCURRENT=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^BCRYPT_MAX_CONCURRENT=.*/BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}/' /opt/chatapp/shared/.env \
-    || echo 'BCRYPT_MAX_CONCURRENT=${BCRYPT_MAX_CONCURRENT}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^PG_CONNECTION_TIMEOUT_MS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^PG_CONNECTION_TIMEOUT_MS=.*/PG_CONNECTION_TIMEOUT_MS=7000/' /opt/chatapp/shared/.env \
-    || echo 'PG_CONNECTION_TIMEOUT_MS=7000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Preserve stable rollout tuning across deploys.
-  # Only set these keys when missing; do not clobber operator-pinned values.
-  # READ_RECEIPT_DEFER_POOL_WAITING=10: when pool.waiting>=10, PUT /read returns 200
-  # immediately without any DB work. Prevents read receipts from piling onto an
-  # already-stressed pool and starving POST /messages during burst traffic.
-  sudo grep -q '^READ_RECEIPT_DEFER_POOL_WAITING=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^READ_RECEIPT_DEFER_POOL_WAITING=.*/READ_RECEIPT_DEFER_POOL_WAITING=10/' /opt/chatapp/shared/.env \
-    || echo 'READ_RECEIPT_DEFER_POOL_WAITING=10' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # BG_WRITE_POOL_GUARD=5: skip fire-and-forget background DB writes (last_message_id
-  # updates, read_states inserts) when pool.waiting>=5. Prevents async background
-  # writes from crowding out sync critical-path queries during burst load.
-  sudo grep -q '^BG_WRITE_POOL_GUARD=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^BG_WRITE_POOL_GUARD=.*/BG_WRITE_POOL_GUARD=5/' /opt/chatapp/shared/.env \
-    || echo 'BG_WRITE_POOL_GUARD=5' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Bound search query hold-time in the pool; keeps hot non-search paths from
-  # starving behind long text-search statements during traffic spikes.
-  # 10 s: unscoped TSV search (no trigram) hits ~4.7 s max on replica; 5 s left too little margin.
-  sudo grep -q '^SEARCH_STATEMENT_TIMEOUT_MS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^SEARCH_STATEMENT_TIMEOUT_MS=.*/SEARCH_STATEMENT_TIMEOUT_MS=10000/' /opt/chatapp/shared/.env \
-    || echo 'SEARCH_STATEMENT_TIMEOUT_MS=10000' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Grader clients often use bearer tokens without cookie-based refresh loops.
-  # Keep access tokens valid for long test windows to avoid 401 delivery failures.
-  sudo grep -q '^JWT_ACCESS_TTL=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^JWT_ACCESS_TTL=.*/JWT_ACCESS_TTL=24h/' /opt/chatapp/shared/.env \
-    || echo 'JWT_ACCESS_TTL=24h' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^JWT_REFRESH_TTL=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^JWT_REFRESH_TTL=.*/JWT_REFRESH_TTL=7d/' /opt/chatapp/shared/.env \
-    || echo 'JWT_REFRESH_TTL=7d' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # HTTP shedding is opt-in in code; keep prod explicit so a refactor never turns it on by default.
-  sudo grep -q '^OVERLOAD_HTTP_SHED_ENABLED=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^OVERLOAD_HTTP_SHED_ENABLED=.*/OVERLOAD_HTTP_SHED_ENABLED=false/' /opt/chatapp/shared/.env \
-    || echo 'OVERLOAD_HTTP_SHED_ENABLED=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # If shedding is ever enabled, use the code default (250 ms) — not staging's aggressive 200 ms.
-  sudo grep -q '^OVERLOAD_LAG_SHED_MS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^OVERLOAD_LAG_SHED_MS=.*/OVERLOAD_LAG_SHED_MS=250/' /opt/chatapp/shared/.env \
-    || echo 'OVERLOAD_LAG_SHED_MS=250' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Runtime mode + auth safety (never leave dev bypass on after a mistaken .env copy).
-  sudo grep -q '^NODE_ENV=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^NODE_ENV=.*/NODE_ENV=production/' /opt/chatapp/shared/.env \
-    || echo 'NODE_ENV=production' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^AUTH_BYPASS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^AUTH_BYPASS=.*/AUTH_BYPASS=false/' /opt/chatapp/shared/.env \
-    || echo 'AUTH_BYPASS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # LOG_LEVEL=info: per-message delivery logs are now debug-level (commit 6c6bc36),
-  # so info no longer causes log-storm CPU waste. info preserves WS connect/disconnect
-  # and other operational visibility. warn silenced too much after delivery_miss
-  # traces were downgraded to debug.
-  sudo grep -q '^LOG_LEVEL=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^LOG_LEVEL=.*/LOG_LEVEL=info/' /opt/chatapp/shared/.env \
-    || echo 'LOG_LEVEL=info' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # FANOUT_QUEUE_CONCURRENCY: parallel fanout:critical workers per instance.
-  # This is computed from remote CPU count above so each deploy keeps queue
-  # latency low without blindly over-parallelising the host.
-  sudo grep -q '^FANOUT_QUEUE_CONCURRENCY=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^FANOUT_QUEUE_CONCURRENCY=.*/FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}/' /opt/chatapp/shared/.env \
-    || echo 'FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Realtime and delivery-safety keys are profile-owned only. Keep them in
-  # deploy/env/prod.required.env so deploy logic cannot accidentally diverge.
-  sudo grep -q '^DISABLE_RATE_LIMITS=' /opt/chatapp/shared/.env \
-    || echo 'DISABLE_RATE_LIMITS=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  sudo grep -q '^AUTH_GLOBAL_PER_IP_RATE_LIMIT=' /opt/chatapp/shared/.env \
-    || echo 'AUTH_GLOBAL_PER_IP_RATE_LIMIT=false' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Throughput-first grading profile: skip bcrypt for newly written passwords.
-  sudo grep -q '^AUTH_PASSWORD_STORAGE_MODE=' /opt/chatapp/shared/.env \
-    || echo 'AUTH_PASSWORD_STORAGE_MODE=plain' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
-  # killer fires.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
-  sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}/' /opt/chatapp/shared/.env \
-    || echo 'NODE_OPTIONS=--max-old-space-size=${NODE_OLD_SPACE_MB}' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
-  # Enforce git-tracked realtime profile so deploys cannot drift.
-  PROFILE_REQUIRED=/tmp/prod.required.env
-  if [ -f "\${RELEASE_PATH}/deploy/env/prod.required.env" ]; then
-    PROFILE_REQUIRED="\${RELEASE_PATH}/deploy/env/prod.required.env"
+  # Merge git-tracked prod.required.env with deploy-computed overlay (overlay wins on duplicate keys).
+  MERGED=/tmp/prod.merged.required.env
+  BASE=/tmp/prod.required.env
+  if [ -f \"\${RELEASE_PATH}/deploy/env/prod.required.env\" ]; then
+    BASE=\"\${RELEASE_PATH}/deploy/env/prod.required.env\"
   fi
+  cat \"\$BASE\" > \"\$MERGED\"
+  cat /tmp/prod.deploy.overlay.env >> \"\$MERGED\"
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \
-    --required "\$PROFILE_REQUIRED"
+    --required \"\$MERGED\"
+  rm -f \"\$MERGED\" /tmp/prod.deploy.overlay.env
   echo 'profile-owned keys (post-merge):'
   sudo grep -E '^(CHANNEL_MESSAGE_USER_FANOUT|CHANNEL_MESSAGE_USER_FANOUT_MODE|MESSAGE_USER_FANOUT_HTTP_BLOCKING|WS_AUTO_SUBSCRIBE_MODE|WS_BOOTSTRAP_BATCH_SIZE|WS_BOOTSTRAP_CACHE_TTL_SECONDS|READ_RECEIPT_DEFER_POOL_WAITING|OVERLOAD_HTTP_SHED_ENABLED|OVERLOAD_LAG_SHED_MS)=' /opt/chatapp/shared/.env
   rm -f /tmp/apply-env-profile.py /tmp/prod.required.env
@@ -1638,11 +1452,7 @@ fi
 
 # 8c. Nginx access.log: append request_time + upstream_response_time (idempotent).
 echo "8c. Nginx access log timing fields (idempotent)..."
-# shellcheck disable=SC2086
-scp -o BatchMode=yes -o ConnectTimeout=20 \
-    -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${SCRIPT_DIR}/patch-nginx-access-log-timing.sh" "${PROD_USER}@${PROD_HOST}:/tmp/patch-nginx-access-log-timing.sh"
+chatapp_scp_to_prod "${SCRIPT_DIR}/nginx/patches/patch-nginx-access-log-timing.sh" "${PROD_USER}@${PROD_HOST}:/tmp/patch-nginx-access-log-timing.sh"
 ssh_prod 'sudo bash /tmp/patch-nginx-access-log-timing.sh && sudo rm -f /tmp/patch-nginx-access-log-timing.sh'
 echo "✓ Nginx access log timing patch applied"
 
@@ -1738,393 +1548,30 @@ fi
 # 9.05 Idempotent: longer read timeout for search only (general /api/ stays 30s).
 # Prevents nginx from returning 502 while Node is still working on a successful search.
 echo "9.05 Nginx: ensure /api/v1/search extended proxy timeouts..."
-ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; bash -s" <<'REMOTE'
-set -euo pipefail
-if ! sudo test -f "$SITE"; then
-  echo "9.05: skip — $SITE missing"
-  exit 0
-fi
-if sudo grep -qE 'location[[:space:]]+\^~[[:space:]]+/api/v1/search' "$SITE"; then
-  echo "9.05: search location already present"
-  exit 0
-fi
-TMP=$(mktemp)
-sudo cp "$SITE" "$TMP"
-export TMP
-python3 <<'PY'
-import os
-import re
-from pathlib import Path
-
-p = Path(os.environ['TMP'])
-text = p.read_text()
-if re.search(r'location\s+\^~\s+/api/v1/search', text):
-    raise SystemExit(0)
-needle = '  location /api/ {'
-block = """  location ^~ /api/v1/search {
-    proxy_pass http://app;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_read_timeout 90s;
-    proxy_send_timeout 90s;
-    client_max_body_size 10m;
-  }
-
-"""
-if needle not in text:
-    raise SystemExit('9.05: could not find \"  location /api/ {\" — patch nginx manually')
-p.write_text(text.replace(needle, block + needle, 1))
-PY
-sudo install -m 644 "$TMP" "$SITE"
-rm -f "$TMP"
-sudo nginx -t >/dev/null
-sudo systemctl reload nginx
-echo "9.05: inserted search location + reloaded nginx"
-REMOTE
+patch_nginx_search_location
 echo "✓ Nginx search route OK"
 
 # 9.06 Idempotent: add upstream retry policy for /api/ only (exclude websocket path).
 echo "9.06 Nginx: ensure /api/ upstream retry policy..."
-ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; export RETRY_FULL='${CHATAPP_NGINX_PROXY_RETRY_LINE}'; bash -s" <<'REMOTE'
-set -euo pipefail
-if ! sudo test -f "$SITE"; then
-  echo "9.06: skip — $SITE missing"
-  exit 0
-fi
-if sudo awk '
-  BEGIN {
-    in_api=0
-    seen_api=0
-    all_ok=1
-    retry=0
-    tries=0
-  }
-  /location[[:space:]]+\/api\/[[:space:]]*\{/ {
-    in_api=1
-    seen_api++
-    retry=0
-    tries=0
-    next
-  }
-  in_api && /^[[:space:]]*}/ {
-    if (!(retry && tries)) {
-      all_ok=0
-    }
-    in_api=0
-    next
-  }
-  in_api && /proxy_next_upstream[[:space:]]+error[[:space:]]+timeout[[:space:]]+http_502[[:space:]]+http_503[[:space:]]+http_504[[:space:]]+non_idempotent;/ {retry=1}
-  in_api && /proxy_next_upstream_tries[[:space:]]+0;/ {tries=1}
-  END {
-    if (in_api && !(retry && tries)) {
-      all_ok=0
-    }
-    exit((seen_api > 0 && all_ok) ? 0 : 1)
-  }
-' "$SITE"; then
-  echo "9.06: /api retry + non-idempotent POST policy already present"
-  exit 0
-fi
-TMP=$(mktemp)
-sudo cp "$SITE" "$TMP"
-export TMP
-set +e
-python3 <<'PY'
-import os
-import re
-import sys
-from pathlib import Path
-
-p = Path(os.environ['TMP'])
-text = p.read_text()
-pattern = re.compile(r'(location\s+/api/\s*\{)(.*?)(\n\s*\})', re.DOTALL)
-found = False
-changed = False
-
-def normalize_api_block(match):
-    global found, changed
-    found = True
-    body = match.group(2)
-    orig = body
-    # Remove mistaken standalone directive (not valid nginx); real knob is
-    # `non_idempotent` on the proxy_next_upstream line.
-    body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
-    retry_full = os.environ["RETRY_FULL"]
-    # Normalize all retry directives in /api/ to one canonical pair to keep patching idempotent.
-    body = re.sub(r"\n\s*proxy_next_upstream[^\n]*;", "", body)
-    body = re.sub(r"\n\s*proxy_next_upstream_tries\s+\d+;", "", body)
-    body += f"\n    {retry_full}\n    proxy_next_upstream_tries 0;"
-    if body != orig:
-        changed = True
-    return match.group(1) + body + match.group(3)
-
-text = pattern.sub(normalize_api_block, text)
-if not found:
-    print('9.06: /api location block not found', file=sys.stderr)
-    sys.exit(1)
-if not changed:
-    sys.exit(2)
-p.write_text(text)
-sys.exit(0)
-PY
-py_ret=$?
-set -e
-if [ "$py_ret" -eq 2 ]; then
-  echo "9.06: /api block already complete (race with parallel check); skipping reload"
-  rm -f "$TMP"
-  exit 0
-fi
-if [ "$py_ret" -ne 0 ]; then
-  rm -f "$TMP"
-  exit "$py_ret"
-fi
-sudo install -m 644 "$TMP" "$SITE"
-rm -f "$TMP"
-sudo nginx -t >/dev/null
-sudo systemctl reload nginx
-echo "9.06: updated /api upstream retry policy (proxy_next_upstream … non_idempotent) + reloaded nginx"
-REMOTE
+patch_nginx_api_retry
 echo "✓ Nginx /api retry policy OK"
 
 # 9.07 Idempotent: dedicated /api/v1/auth/ with longer proxy timeouts than generic /api/ (30s).
 # Auth is bcrypt-bound; without this, login/register can see nginx 504 HTML under burst.
 echo "9.07 Nginx: ensure /api/v1/auth/ extended proxy timeouts..."
-ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; bash -s" <<'REMOTE'
-set -euo pipefail
-if ! sudo test -f "$SITE"; then
-  echo "9.07: skip — $SITE missing"
-  exit 0
-fi
-if sudo grep -qE 'location[[:space:]]+\^~[[:space:]]+/api/v1/auth/' "$SITE"; then
-  echo "9.07: auth location already present"
-  exit 0
-fi
-TMP=$(mktemp)
-sudo cp "$SITE" "$TMP"
-export TMP
-python3 <<'PY'
-import os
-import re
-from pathlib import Path
-
-p = Path(os.environ['TMP'])
-text = p.read_text()
-if re.search(r'location\s+\^~\s+/api/v1/auth/', text):
-    raise SystemExit(0)
-needle = '  location /api/ {'
-block = """  location ^~ /api/v1/auth/ {
-    proxy_pass http://app;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_set_header Host $host;
-    proxy_set_header X-Request-Id $request_id;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 0;
-    proxy_read_timeout 75s;
-    proxy_send_timeout 75s;
-    client_max_body_size 10m;
-  }
-
-"""
-if needle not in text:
-    raise SystemExit('9.07: could not find \"  location /api/ {\" — patch nginx manually')
-p.write_text(text.replace(needle, block + needle, 1))
-PY
-sudo install -m 644 "$TMP" "$SITE"
-rm -f "$TMP"
-sudo nginx -t >/dev/null
-sudo systemctl reload nginx
-echo "9.07: inserted auth location + reloaded nginx"
-REMOTE
+patch_nginx_auth_location
 echo "✓ Nginx auth route OK"
 
 # 9.071 Idempotent: critical OAuth/auth flow routes must bypass strict generic auth
 # throttles so start + callback redirects are not dropped by nginx before the app.
 echo "9.071 Nginx: ensure critical OAuth/auth flow routes bypass strict auth rate limits..."
-ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; bash -s" <<'REMOTE'
-set -euo pipefail
-if ! sudo test -f "$SITE"; then
-  echo "9.071: skip — $SITE missing"
-  exit 0
-fi
-TMP=$(mktemp)
-sudo cp "$SITE" "$TMP"
-export TMP
-python3 <<'PY'
-import os
-import re
-from pathlib import Path
-
-p = Path(os.environ['TMP'])
-text = p.read_text()
-needles = [
-    r'location\s+\^~\s+/api/v1/auth/course/callback',
-    r'location\s+\^~\s+/api/v1/auth/course',
-    r'location\s+\^~\s+/api/v1/auth/oauth/complete-create',
-    r'location\s+\^~\s+/api/v1/auth/login',
-    r'location\s+\^~\s+/api/v1/auth/register',
-]
-if all(re.search(pattern, text) for pattern in needles):
-    raise SystemExit(0)
-needle = '  location ^~ /api/v1/auth/ {'
-block = """  location ^~ /api/v1/auth/course/callback {
-    proxy_pass http://app;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_set_header Host $host;
-    proxy_set_header X-Request-Id $request_id;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 0;
-    proxy_read_timeout 75s;
-    proxy_send_timeout 75s;
-    client_max_body_size 10m;
-  }
-
-  location ^~ /api/v1/auth/course {
-    proxy_pass http://app;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_set_header Host $host;
-    proxy_set_header X-Request-Id $request_id;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 0;
-    proxy_read_timeout 75s;
-    proxy_send_timeout 75s;
-    client_max_body_size 10m;
-  }
-
-  location ^~ /api/v1/auth/oauth/complete-create {
-    proxy_pass http://app;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_set_header Host $host;
-    proxy_set_header X-Request-Id $request_id;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 0;
-    proxy_read_timeout 75s;
-    proxy_send_timeout 75s;
-    client_max_body_size 10m;
-  }
-
-  location ^~ /api/v1/auth/login {
-    proxy_pass http://app;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_set_header Host $host;
-    proxy_set_header X-Request-Id $request_id;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 0;
-    proxy_read_timeout 75s;
-    proxy_send_timeout 75s;
-    client_max_body_size 10m;
-  }
-
-  location ^~ /api/v1/auth/register {
-    proxy_pass http://app;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_set_header Host $host;
-    proxy_set_header X-Request-Id $request_id;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
-    proxy_next_upstream_tries 0;
-    proxy_read_timeout 75s;
-    proxy_send_timeout 75s;
-    client_max_body_size 10m;
-  }
-
-"""
-if needle not in text:
-    raise SystemExit('9.071: could not find critical auth insertion point')
-p.write_text(text.replace(needle, block + needle, 1))
-PY
-sudo install -m 644 "$TMP" "$SITE"
-rm -f "$TMP"
-sudo nginx -t >/dev/null
-sudo systemctl reload nginx
-echo "9.071: inserted critical auth flow routes + reloaded nginx"
-REMOTE
+patch_nginx_auth_flow_routes
 echo "✓ Nginx critical auth routes OK"
 
 # 9.075 Idempotent: fix auth block — `non_idempotent` must be on proxy_next_upstream,
 # and remove invalid standalone proxy_next_upstream_non_idempotent if present.
 echo "9.075 Nginx: ensure auth proxy_next_upstream includes non_idempotent..."
-ssh_prod "export SITE='${CHATAPP_NGINX_SITE_PATH}'; export RETRY_FULL='${CHATAPP_NGINX_PROXY_RETRY_LINE}'; export RETRY_LEGACY='${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}'; bash -s" <<'REMOTE'
-set -euo pipefail
-if ! sudo test -f "$SITE"; then
-  echo "9.075: skip — $SITE missing"
-  exit 0
-fi
-TMP=$(mktemp)
-sudo cp "$SITE" "$TMP"
-export TMP
-set +e
-python3 <<'PY'
-import os
-import re
-import sys
-from pathlib import Path
-
-p = Path(os.environ['TMP'])
-text = p.read_text()
-pat = re.compile(r'(location\s+\^~\s+/api/v1/auth/\s*\{)(.*?)(\n\s*\})', re.DOTALL)
-m = pat.search(text)
-if not m:
-    sys.exit(3)
-body = m.group(2)
-orig = body
-body = re.sub(r"\n\s*proxy_next_upstream_non_idempotent\s+on;\s*", "\n", body)
-retry_old = os.environ["RETRY_LEGACY"]
-retry_full = os.environ["RETRY_FULL"]
-if retry_old in body:
-    body = body.replace(retry_old, retry_full, 1)
-elif retry_full in body:
-    pass
-else:
-    sys.exit(2)
-if body == orig:
-    sys.exit(2)
-text = text[: m.start()] + m.group(1) + body + m.group(3) + text[m.end() :]
-p.write_text(text)
-sys.exit(0)
-PY
-py_ret=$?
-set -e
-if [ "$py_ret" -eq 3 ] || [ "$py_ret" -eq 2 ]; then
-  rm -f "$TMP"
-  echo "9.075: skip (no auth block or already patched)"
-  exit 0
-fi
-if [ "$py_ret" -ne 0 ]; then
-  rm -f "$TMP"
-  exit "$py_ret"
-fi
-sudo install -m 644 "$TMP" "$SITE"
-rm -f "$TMP"
-sudo nginx -t >/dev/null
-sudo systemctl reload nginx
-echo "9.075: patched auth proxy_next_upstream (non_idempotent) + reloaded nginx"
-REMOTE
+patch_nginx_auth_non_idempotent
 echo "✓ Nginx auth POST retry OK"
 
 # 9b–9c. Multi-worker: roll all workers to this release, then verify parity.
@@ -2508,10 +1955,7 @@ fi
 
 # 10.6. Push rendered prometheus-host.yml to the monitoring VM and reload Prometheus.
 echo "10.6. Refreshing Prometheus scrape config on monitoring VM (${MONITORING_VM_HOST})..."
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${PROM_BUILD}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/prometheus-host.yml.deploy" || true
+chatapp_scp_to_monitor "${PROM_BUILD}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/prometheus-host.yml.deploy" || true
 rm -f "${PROM_BUILD}"
 ssh_monitor "
   if [ -f /tmp/prometheus-host.yml.deploy ]; then
@@ -2533,52 +1977,19 @@ ssh_monitor "
 
 echo "10.65. Sync monitoring stack to monitoring VM (${MONITORING_VM_HOST})..."
 ENV_PULL="$(mktemp)"
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${PROD_USER}@${PROD_HOST}:/opt/chatapp/shared/.env" "${ENV_PULL}" || true
+chatapp_scp_from_prod "/opt/chatapp/shared/.env" "${ENV_PULL}" || true
 
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/alerts.yml.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/alertmanager.yml.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/monitoring-compose.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/monitoring-compose.yml.deploy" || true
-# shellcheck disable=SC2086
-scp -qr -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/grafana-provisioning-remote.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/prometheus-db-file-sd.py.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/db-node.json.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/db-postgres.json.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/loki-config.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/loki-config.yml.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/tempo-config.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/tempo-config.yml.deploy" || true
+chatapp_scp_to_monitor "${REPO_ROOT}/infrastructure/monitoring/alerts.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/alerts.yml.deploy" || true
+chatapp_scp_to_monitor "${REPO_ROOT}/infrastructure/monitoring/alertmanager.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/alertmanager.yml.deploy" || true
+chatapp_scp_to_monitor "${REPO_ROOT}/infrastructure/monitoring/monitoring-compose.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/monitoring-compose.yml.deploy" || true
+chatapp_scp_recursive_to_monitor "${REPO_ROOT}/infrastructure/monitoring/grafana-provisioning-remote" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/grafana-provisioning-remote.deploy" || true
+chatapp_scp_to_monitor "${REPO_ROOT}/deploy/prometheus-db-file-sd.py" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/prometheus-db-file-sd.py.deploy" || true
+chatapp_scp_to_monitor "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-node.json" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/db-node.json.deploy" || true
+chatapp_scp_to_monitor "${REPO_ROOT}/infrastructure/monitoring/file_sd/db-postgres.json" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/db-postgres.json.deploy" || true
+chatapp_scp_to_monitor "${REPO_ROOT}/infrastructure/monitoring/loki-config.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/loki-config.yml.deploy" || true
+chatapp_scp_to_monitor "${REPO_ROOT}/infrastructure/monitoring/tempo-config.yml" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/tempo-config.yml.deploy" || true
 if [ -f "${ENV_PULL}" ]; then
-  # shellcheck disable=SC2086
-  scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
-      ${DEPLOY_SSH_EXTRA_OPTS} \
-      "${ENV_PULL}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/chatapp-monitoring.env.deploy" || true
+  chatapp_scp_to_monitor "${ENV_PULL}" "${MONITORING_VM_USER}@${MONITORING_VM_HOST}:/tmp/chatapp-monitoring.env.deploy" || true
 fi
 rm -f "${ENV_PULL}"
 
@@ -2652,26 +2063,12 @@ ssh_monitor "
   echo 'Alertmanager Discord webhook wiring verified (monitoring VM)'
 "
 
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/infrastructure/monitoring/promtail-host-config.yml" "$PROD_USER@$PROD_HOST:/tmp/promtail-host-config.yml.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
-# shellcheck disable=SC2086
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/deploy/pgbouncer-exporter.py" "$PROD_USER@$PROD_HOST:/tmp/pgbouncer-exporter.py.deploy" || true
-scp -q -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
-    ${DEPLOY_SSH_EXTRA_OPTS} \
-    "${REPO_ROOT}/deploy/redis_exporter_redis_url.py" "$PROD_USER@$PROD_HOST:/tmp/redis_exporter_redis_url.py.deploy" \
-    || echo "WARN: could not copy redis_exporter_redis_url.py (redis_exporter may use fallback)" >&2
+chatapp_scp_to_prod "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
+chatapp_scp_to_prod "${REPO_ROOT}/infrastructure/monitoring/promtail-host-config.yml" "$PROD_USER@$PROD_HOST:/tmp/promtail-host-config.yml.deploy" || true
+chatapp_scp_to_prod "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
+chatapp_scp_to_prod "${REPO_ROOT}/deploy/pgbouncer-exporter.py" "$PROD_USER@$PROD_HOST:/tmp/pgbouncer-exporter.py.deploy" || true
+chatapp_scp_to_prod "${REPO_ROOT}/deploy/redis_exporter_redis_url.py" "$PROD_USER@$PROD_HOST:/tmp/redis_exporter_redis_url.py.deploy" \
+  || echo "WARN: could not copy redis_exporter_redis_url.py (redis_exporter may use fallback)" >&2
 ssh_prod "
   set -euo pipefail
   if [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/promtail-host-config.yml.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ] || [ -f /tmp/pgbouncer-exporter.py.deploy ]; then

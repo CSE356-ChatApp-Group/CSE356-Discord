@@ -110,6 +110,10 @@ VMX_WORKER_PORTS=(4000 4001 4002 4003 4004 4005)
 # Extra OpenSSH options — mirrors deploy-prod.sh default
 DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-new}"
 
+# shellcheck source=deploy-common.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/deploy-common.sh"
+
 ssh_vm() {
   local host="$1"; shift
   # shellcheck disable=SC2086
@@ -118,11 +122,6 @@ ssh_vm() {
       -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${host}" "$@"
-}
-
-scp_with_opts() {
-  # shellcheck disable=SC2086
-  scp -q ${DEPLOY_SSH_EXTRA_OPTS} "$@"
 }
 
 verify_and_heal_vm_workers() {
@@ -389,7 +388,7 @@ sync_monitoring_post_steps() {
   fi
 
   echo "Starting redis_exporter via SSH ${REDIS_EXPORTER_SSH_HOST} (metrics at ${PROM_REDIS_HOST}:9121 for Prometheus)..."
-  scp_with_opts \
+  chatapp_scp_to_multi_vm "${REDIS_EXPORTER_SSH_HOST}" \
     "${SCRIPT_DIR}/redis_exporter_redis_url.py" \
     "${PROD_USER}@${REDIS_EXPORTER_SSH_HOST}:/tmp/redis_exporter_redis_url.py.deploy"
   # shellcheck disable=SC2086
