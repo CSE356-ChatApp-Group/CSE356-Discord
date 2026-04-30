@@ -15,10 +15,7 @@
 "use strict";
 
 const crypto = require("crypto");
-const os = require("os");
 const express = require("express");
-const { rateLimit } = require("express-rate-limit");
-const { RedisStore } = require("rate-limit-redis");
 const {
   body,
   query: qv,
@@ -39,9 +36,6 @@ const {
   messagePostRealtimePublishFailTotal,
   deliveryTimeoutTotal,
   messagePostFanoutAsyncEnqueueTotal,
-  messagePostIdempotencyPollTotal,
-  messagePostIdempotencyPollWaitMs,
-  messagePostRateLimitHitsTotal,
   messageCacheBustFailuresTotal,
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
@@ -51,7 +45,6 @@ const {
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
   readReceiptDbUpsertTotal,
-  readReceiptCursorCacheHitTotal,
   messagesListAccessCacheHitTotal,
 } = require("../utils/metrics");
 const {
@@ -67,6 +60,10 @@ const { recordAbuseStrikeFromRequest } = require("../utils/autoIpBan");
 const sideEffects = require("./sideEffects");
 const meiliClient = require("../search/meiliClient");
 const fanout = require("../websocket/fanout");
+const {
+  publishConversationMessageCreatedPlan,
+} = require("../realtime/publishPlan");
+const { wsDispatchFields } = require("../realtime/deliveryLogFields");
 const overload = require("../utils/overload");
 const redis = require("../db/redis");
 const logger = require("../utils/logger");
@@ -77,84 +74,44 @@ const {
   withDistributedSingleflight,
 } = require("../utils/distributedSingleflight");
 
-function parsePositiveIntEnv(name, fallback) {
-  const parsed = Number.parseInt(process.env[name] || "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
+const { createMessagePostRateLimiters } = require("./lib/rateLimiters");
+const { messagePostIpRateLimiter, messagePostUserRateLimiter } = createMessagePostRateLimiters();
 
-function messagePostRateLimitNoop(_req, _res, next) {
-  next();
-}
-
-function buildMessagePostUserRateLimiter() {
-  if (
-    process.env.DISABLE_RATE_LIMITS === "true" ||
-    process.env.NODE_ENV === "test"
-  ) {
-    return messagePostRateLimitNoop;
-  }
-  const windowMs = parsePositiveIntEnv(
-    "MESSAGE_POST_PER_USER_WINDOW_MS",
-    60_000,
-  );
-  const limit = parsePositiveIntEnv("MESSAGE_POST_PER_USER_MAX", 90);
-  return rateLimit({
-    windowMs,
-    limit,
-    standardHeaders: "draft-7",
-    legacyHeaders: false,
-    skip: (req) => isPrivateOrInternalNetwork(getTrustedClientIp(req)),
-    keyGenerator: (req) => `mpu:${req.user?.id || "anon"}`,
-    store: new RedisStore({
-      sendCommand: (...args) => redis.call(...args),
-      prefix: "rl:mp:user:",
-    }),
-    message: {
-      error:
-        "Too many messages from this account. Slow down and try again shortly.",
-    },
-    handler: (req, res, _next, options) => {
-      messagePostRateLimitHitsTotal.inc({ scope: "user" });
-      recordAbuseStrikeFromRequest(req);
-      res.status(options.statusCode).json(options.message);
-    },
-  });
-}
-
-function buildMessagePostIpRateLimiter() {
-  if (
-    process.env.DISABLE_RATE_LIMITS === "true" ||
-    process.env.NODE_ENV === "test"
-  ) {
-    return messagePostRateLimitNoop;
-  }
-  const windowMs = parsePositiveIntEnv("MESSAGE_POST_PER_IP_WINDOW_MS", 60_000);
-  const limit = parsePositiveIntEnv("MESSAGE_POST_PER_IP_MAX", 300);
-  return rateLimit({
-    windowMs,
-    limit,
-    standardHeaders: "draft-7",
-    legacyHeaders: false,
-    skip: (req) => isPrivateOrInternalNetwork(getTrustedClientIp(req)),
-    keyGenerator: (req) => `mpi:${getTrustedClientIp(req)}`,
-    store: new RedisStore({
-      sendCommand: (...args) => redis.call(...args),
-      prefix: "rl:mp:ip:",
-    }),
-    message: {
-      error:
-        "Too many messages from this network. Slow down and try again shortly.",
-    },
-    handler: (req, res, _next, options) => {
-      messagePostRateLimitHitsTotal.inc({ scope: "ip" });
-      recordAbuseStrikeFromRequest(req);
-      res.status(options.statusCode).json(options.message);
-    },
-  });
-}
-
-const messagePostIpRateLimiter = buildMessagePostIpRateLimiter();
-const messagePostUserRateLimiter = buildMessagePostUserRateLimiter();
+const {
+  MSG_IDEM_PENDING_TTL_SECS,
+  MSG_IDEM_SUCCESS_TTL_SECS,
+  MSG_IDEM_POLL_DEADLINE_MS,
+  MSG_IDEM_POLL_MAX_SLEEP_MS,
+  hydrateIdemReplayBody,
+  awaitIdempotentPostAfterLeaseContention,
+} = require("./lib/idempotency");
+const {
+  READ_RECEIPT_DEFER_POOL_WAITING,
+  READ_RECEIPT_FANOUT_ENABLED,
+  READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
+  RESET_UNREAD_WATERMARK_LUA,
+  shouldRunCas1SideEffects,
+  shouldCoalesceSameMessageRead,
+  readReceiptScopeCursorCacheSaysNoAdvance,
+  rememberReadReceiptScopeCursor,
+  shouldCoalesceScopeBurstRead,
+  advanceReadStateCursor,
+} = require("./lib/readReceiptState");
+const {
+  isMessagePostInsertDbTimeout,
+  messagePostBusy503Body,
+  buildMessagePostTimeoutPhaseLog,
+  buildMessagePostSuccessPhaseLog,
+  buildMessagePostSlowHolderLog,
+  shouldEmitPostMessagesE2eTrace,
+  buildPostMessagesE2eTracePayload,
+} = require("./lib/postDiagnostics");
+const {
+  checkChannelAccessForUser,
+  ensureActiveConversationParticipant,
+  ensureChannelAccess,
+  ensureMessageAccess,
+} = require("./lib/accessChecks");
 
 /** Redis cache for channel unread watermark (`user:last_read_count:*`). Must expire so keys do not grow without bound. */
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
@@ -194,7 +151,6 @@ const {
 const { loadHydratedMessageById } = require("./messageHydrate");
 const messagePostFanoutAsync = require("./messagePostFanoutAsync");
 const { appendChannelMessageIngested } = require("./messageIngestLog");
-const { batchReadStateRedisKeys } = require("./batchReadState");
 const { getConversationFanoutTargets } = require("./conversationFanoutTargets");
 const {
   publishUserFeedTargets,
@@ -233,45 +189,6 @@ const router = express.Router();
 router.use(authenticate);
 router.use(messagesHotPathLimiter);
 
-const _idemPendingTtl = parseInt(
-  process.env.MSG_IDEM_PENDING_TTL_SECS || "120",
-  10,
-);
-/** Lease TTL for in-flight POST /messages idempotency (seconds). */
-const MSG_IDEM_PENDING_TTL_SECS =
-  Number.isFinite(_idemPendingTtl) && _idemPendingTtl > 0
-    ? _idemPendingTtl
-    : 120;
-const _idemSuccessTtl = parseInt(
-  process.env.MSG_IDEM_SUCCESS_TTL_SECS || "86400",
-  10,
-);
-/** How long to remember a successful idempotent POST /messages (seconds). */
-const MSG_IDEM_SUCCESS_TTL_SECS =
-  Number.isFinite(_idemSuccessTtl) && _idemSuccessTtl > 0
-    ? _idemSuccessTtl
-    : 86400;
-const _idemPollDeadlineMs = parseInt(
-  process.env.MSG_IDEM_POLL_DEADLINE_MS || "5000",
-  10,
-);
-/** Max wall-clock wait when a duplicate Idempotency-Key hits an in-flight lease (was fixed 100ms × 50). */
-const MSG_IDEM_POLL_DEADLINE_MS =
-  Number.isFinite(_idemPollDeadlineMs) && _idemPollDeadlineMs > 0
-    ? Math.min(30000, Math.max(500, Math.floor(_idemPollDeadlineMs)))
-    : 5000;
-const _idemPollMaxSleepMs = parseInt(
-  process.env.MSG_IDEM_POLL_MAX_SLEEP_MS || "150",
-  10,
-);
-/** Cap for exponential backoff between Redis polls while waiting on the idempotency lease. */
-const MSG_IDEM_POLL_MAX_SLEEP_MS =
-  Number.isFinite(_idemPollMaxSleepMs) && _idemPollMaxSleepMs >= 5
-    ? Math.min(500, Math.floor(_idemPollMaxSleepMs))
-    : 150;
-// BG_WRITE_POOL_GUARD: skip fire-and-forget DB writes when pool.waitingCount >= this threshold.
-// These writes (last_message_id updates, read_states inserts) are non-critical — skipping them
-// under pool pressure stops background writes from crowding out sync queries for the pool.
 const BG_WRITE_POOL_GUARD = parseInt(
   process.env.BG_WRITE_POOL_GUARD || "5",
   10,
@@ -321,382 +238,6 @@ const MESSAGE_POST_IMMEDIATE_RECENT_BRIDGE_ENABLED = (() => {
   return raw === "1" || raw === "true";
 })();
 
-/** PgBouncer `query_timeout` or PG `statement_timeout` during insert (often row lock behind channels FK). */
-function isMessagePostInsertDbTimeout(err) {
-  if (!err) return false;
-  const msg = String(err.message || "");
-  const code = err.code;
-  if (code === "57014") return true;
-  if (/query timeout/i.test(msg)) return true;
-  if (/statement timeout/i.test(msg)) return true;
-  if (/canceling statement due to statement timeout/i.test(msg)) return true;
-  if (code === "08P01" && /timeout/i.test(msg)) return true;
-  return false;
-}
-
-const MESSAGE_POST_BUSY_USER_MESSAGE =
-  "Messaging is briefly busy saving your message; please retry.";
-
-/** Stable `code` values on POST /messages 503 JSON for operators and clients (human `error` unchanged). */
-function messagePostBusy503Body(
-  req: { id?: string },
-  apiCode:
-    | "message_post_insert_timeout"
-    | "message_insert_lock_wait_timeout"
-    | "message_insert_lock_recent_shed"
-    | "message_insert_lock_waiter_cap",
-  extras: Record<string, unknown> = {},
-) {
-  return {
-    error: MESSAGE_POST_BUSY_USER_MESSAGE,
-    code: apiCode,
-    requestId: req.id,
-    ...extras,
-  };
-}
-
-function buildMessagePostTimeoutPhaseLog({
-  err,
-  req,
-  channelId,
-  conversationId,
-  attachments,
-  txPhases,
-}: {
-  err: any;
-  req: any;
-  channelId: string | null;
-  conversationId: string | null;
-  attachments: Array<unknown>;
-  txPhases: { t0: number; t_access: number; t_insert: number; t_later: number };
-}) {
-  const now = Date.now();
-  const hadAttachments = attachments.length > 0;
-  const reachedAccess = txPhases.t_access > 0;
-  const reachedInsert = txPhases.t_insert > 0;
-  const reachedLater = txPhases.t_later > 0;
-  let timeoutPhase: "access-check" | "insert" | "later-step" | "commit" =
-    "access-check";
-  let tx_access_check_ms: number | null = null;
-  let tx_insert_ms: number | null = null;
-  let tx_later_step_ms: number | null = null;
-  let tx_commit_ms: number | null = null;
-
-  if (!reachedAccess) {
-    tx_access_check_ms = Math.max(0, now - txPhases.t0);
-  } else if (!reachedInsert) {
-    timeoutPhase = "insert";
-    tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
-    tx_insert_ms = Math.max(0, now - txPhases.t_access);
-  } else if (!reachedLater) {
-    timeoutPhase = "later-step";
-    tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
-    tx_insert_ms = Math.max(0, txPhases.t_insert - txPhases.t_access);
-    tx_later_step_ms = Math.max(0, now - txPhases.t_insert);
-  } else {
-    timeoutPhase = "commit";
-    tx_access_check_ms = Math.max(0, txPhases.t_access - txPhases.t0);
-    tx_insert_ms = Math.max(0, txPhases.t_insert - txPhases.t_access);
-    tx_later_step_ms = Math.max(0, txPhases.t_later - txPhases.t_insert);
-    tx_commit_ms = Math.max(0, now - txPhases.t_later);
-  }
-
-  return {
-    event: "post_messages_tx_timeout_phases",
-    gradingNote: "correlate_with_post_messages_timeout",
-    requestId: req.id,
-    instance: `${os.hostname()}:${process.env.PORT || "unknown"}`,
-    targetType: channelId ? "channel" : "conversation",
-    channelId: channelId ?? undefined,
-    conversationId: conversationId ?? undefined,
-    timeoutPhase,
-    tx_access_check_ms,
-    tx_insert_ms,
-    tx_later_step_ms,
-    tx_commit_ms,
-    hadAttachments,
-    pgCode: err?.code,
-    pgMessage: err?.message,
-  };
-}
-
-function buildMessagePostSuccessPhaseLog({
-  req,
-  channelId,
-  conversationId,
-  attachments,
-  txPhases,
-  txDoneAt,
-}: {
-  req: any;
-  channelId: string | null;
-  conversationId: string | null;
-  attachments: Array<unknown>;
-  txPhases: { t0: number; t_access: number; t_insert: number; t_later: number };
-  txDoneAt: number;
-}) {
-  const tx_total_ms = txDoneAt - txPhases.t0;
-  return {
-    event: "post_messages_tx_phases",
-    gradingNote: "correlate_with_post_messages_timeout",
-    requestId: req.id,
-    channelId: channelId ?? undefined,
-    conversationId: conversationId ?? undefined,
-    targetType: channelId ? "channel" : "conversation",
-    tx_access_check_ms: txPhases.t_access - txPhases.t0,
-    tx_insert_ms: txPhases.t_insert - txPhases.t_access,
-    tx_later_step_ms: txPhases.t_later - txPhases.t_insert,
-    tx_commit_ms: txDoneAt - txPhases.t_later,
-    tx_total_ms,
-    had_attachments: attachments.length > 0,
-  };
-}
-
-function buildMessagePostSlowHolderLog({
-  req,
-  channelId,
-  message,
-  txLog,
-  postInsertMs,
-  postInsertBreakdown,
-  fanoutMeta,
-  cacheHit,
-  searchIndexingTriggered,
-  readStatesWriteTriggered,
-}: {
-  req: any;
-  channelId: string | null;
-  message: any;
-  txLog: any;
-  postInsertMs: number;
-  postInsertBreakdown: {
-    cache_bust_ms: number;
-    fanout_publish_ms: number;
-    side_effects_enqueue_ms: number;
-    idempotency_cache_ms: number;
-    response_build_ms: number;
-  };
-  fanoutMeta: any;
-  cacheHit: boolean | null;
-  searchIndexingTriggered: boolean;
-  readStatesWriteTriggered: boolean;
-}) {
-  const preInsertMs = Number(txLog.tx_access_check_ms || 0);
-  const insertMs = Number(txLog.tx_insert_ms || 0);
-  const txCommitMs = Number(txLog.tx_commit_ms || 0);
-  const txTotalMs = Number(txLog.tx_total_ms || 0);
-  const postMs = Math.max(0, Number(postInsertMs || 0));
-  const messageSizeBytes =
-    Buffer.byteLength(String(message?.content || ""), "utf8") +
-    Number((Array.isArray(message?.attachments) ? message.attachments : []).reduce(
-      (sum: number, a: any) => sum + Number(a?.size_bytes || a?.sizeBytes || 0),
-      0,
-    ));
-  const phases = [
-    { phase: "pre_insert_work", ms: preInsertMs },
-    { phase: "db_insert", ms: insertMs },
-    { phase: "post_insert_work", ms: postMs },
-  ];
-  phases.sort((a, b) => b.ms - a.ms);
-  return {
-    event: "post_messages_lock_holder_slow",
-    requestId: req.id,
-    channelId: channelId ?? undefined,
-    messageId: message?.id,
-    message_size_bytes: messageSizeBytes,
-    tx_total_ms: txTotalMs,
-    tx_commit_ms: txCommitMs,
-    time_before_insert_ms: preInsertMs,
-    time_inside_insert_ms: insertMs,
-    time_after_insert_ms: postMs,
-    dominant_holder_phase: phases[0]?.phase || "unknown",
-    fanout_count:
-      Number(fanoutMeta?.totalTargetCount) ||
-      Number(fanoutMeta?.inlineTargetCount) ||
-      0,
-    fanout_cache_result: fanoutMeta?.cacheResult || "unknown",
-    fanout_cache_hit: cacheHit,
-    fanout_mode: fanoutMeta?.mode || "unknown",
-    search_indexing_triggered: searchIndexingTriggered,
-    read_states_write_triggered: readStatesWriteTriggered,
-    post_insert_breakdown_ms: postInsertBreakdown,
-  };
-}
-
-function parseNonNegIntOr(name, fallback) {
-  const v = Number.parseInt(process.env[name] || "", 10);
-  return Number.isFinite(v) && v >= 0 ? v : fallback;
-}
-function parseUnitIntervalOr(name, fallback) {
-  const v = Number.parseFloat(process.env[name] || "");
-  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : fallback;
-}
-/** Emit `post_messages_e2e_trace` when wall time >= this ms (0 = disabled). */
-const MESSAGE_POST_E2E_TRACE_MIN_MS = parseNonNegIntOr(
-  "MESSAGE_POST_E2E_TRACE_MIN_MS",
-  0,
-);
-/** Random sample of successful POSTs (e.g. 0.01 ~= 1%). Independent of min ms. */
-const MESSAGE_POST_E2E_TRACE_SAMPLE_RATE = parseUnitIntervalOr(
-  "MESSAGE_POST_E2E_TRACE_SAMPLE_RATE",
-  0,
-);
-
-function shouldEmitPostMessagesE2eTrace(totalWallMs) {
-  if (MESSAGE_POST_E2E_TRACE_MIN_MS > 0 && totalWallMs >= MESSAGE_POST_E2E_TRACE_MIN_MS) {
-    return true;
-  }
-  if (
-    MESSAGE_POST_E2E_TRACE_SAMPLE_RATE > 0 &&
-    Math.random() < MESSAGE_POST_E2E_TRACE_SAMPLE_RATE
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function buildPostMessagesE2eTracePayload(args) {
-  const {
-    req,
-    channelId,
-    conversationId,
-    postWallStart,
-    txPhases,
-    total_wall_ms,
-    idem_redis_ms,
-    channel_insert_lock_wait_ms,
-    channel_insert_lock_path,
-    channel_insert_lock_reason_detail,
-    successLog,
-    hydrate_ms,
-    cache_bust_ms,
-    fanout_wall_ms,
-    fanout_mode,
-    community_enqueue_ms,
-    idem_success_redis_ms,
-    serialization_ms,
-    response_body_bytes,
-  } = args;
-  const txAccess = Math.max(0, Number(successLog.tx_access_check_ms || 0));
-  const txInsert = Math.max(0, Number(successLog.tx_insert_ms || 0));
-  const txLater = Math.max(0, Number(successLog.tx_later_step_ms || 0));
-  const txCommit = Math.max(0, Number(successLog.tx_commit_ms || 0));
-  const txTotal = Math.max(0, Number(successLog.tx_total_ms || 0));
-  const preDbHeadMs =
-    txPhases.t0 > 0 && postWallStart > 0
-      ? Math.max(0, txPhases.t0 - postWallStart)
-      : 0;
-  const preDbOtherMs = Math.max(
-    0,
-    preDbHeadMs - idem_redis_ms - channel_insert_lock_wait_ms,
-  );
-  const breakdown = {
-    idem_redis_ms,
-    channel_insert_lock_wait_ms,
-    pre_db_other_ms: preDbOtherMs,
-    tx_access_check_ms: txAccess,
-    tx_insert_ms: txInsert,
-    tx_later_step_ms: txLater,
-    tx_commit_ms: txCommit,
-    hydrate_ms,
-    cache_bust_ms,
-    fanout_wall_ms,
-    community_enqueue_ms,
-    idem_success_redis_ms,
-    serialization_ms,
-  };
-  const accounted =
-    idem_redis_ms +
-    channel_insert_lock_wait_ms +
-    preDbOtherMs +
-    txAccess +
-    txInsert +
-    txLater +
-    txCommit +
-    hydrate_ms +
-    cache_bust_ms +
-    fanout_wall_ms +
-    community_enqueue_ms +
-    idem_success_redis_ms +
-    serialization_ms;
-  const other_unaccounted_ms = Math.max(0, total_wall_ms - accounted);
-  const candidates = {
-    ...breakdown,
-    other_unaccounted_ms,
-  };
-  let dominant_component = "other_unaccounted_ms";
-  let dominant_ms = other_unaccounted_ms;
-  for (const [k, v] of Object.entries(candidates)) {
-    const ms = typeof v === "number" ? v : 0;
-    if (ms > dominant_ms) {
-      dominant_ms = ms;
-      dominant_component = k;
-    }
-  }
-  /** Map breakdown field to coarse bucket for rollups (DB vs Redis vs serialization vs other). */
-  const dominant_bucket = (() => {
-    const d = dominant_component;
-    if (
-      d === "tx_access_check_ms" ||
-      d === "tx_insert_ms" ||
-      d === "tx_later_step_ms" ||
-      d === "tx_commit_ms"
-    ) {
-      return "db";
-    }
-    if (
-      d === "idem_redis_ms" ||
-      d === "channel_insert_lock_wait_ms" ||
-      d === "cache_bust_ms" ||
-      d === "fanout_wall_ms" ||
-      d === "idem_success_redis_ms" ||
-      d === "community_enqueue_ms"
-    ) {
-      return "redis";
-    }
-    if (d === "serialization_ms") return "serialization";
-    if (d === "hydrate_ms") return "hydrate_db";
-    return "other";
-  })();
-  return {
-    event: "post_messages_e2e_trace",
-    gradingNote: "rollup_dominant_component_and_dominant_bucket_in_log_pipeline",
-    requestId: req.id,
-    worker_id: `${os.hostname()}:${process.env.PORT || "?"}`,
-    target_type: channelId ? "channel" : "conversation",
-    channelId: channelId ?? undefined,
-    conversationId: conversationId ?? undefined,
-    total_wall_ms,
-    tx_total_ms: txTotal,
-    fanout_mode,
-    breakdown_ms: { ...breakdown, other_unaccounted_ms },
-    dominant_component,
-    dominant_ms,
-    dominant_bucket,
-    response_body_bytes,
-    correlate_redis_slowlog:
-      "REDIS_SLOWLOG_SSH=user@vm1 ./scripts/redis-slowlog-snapshot.sh (see docs/operations-monitoring.md)",
-    correlate_pg_stat_statements:
-      "DB_SSH=user@db-host ./scripts/pg-stat-statements-snapshot.sh",
-    ...(channel_insert_lock_path != null
-      ? { channel_insert_lock_path: channel_insert_lock_path }
-      : {}),
-    ...(channel_insert_lock_reason_detail != null
-      ? { channel_insert_lock_reason_detail: channel_insert_lock_reason_detail }
-      : {}),
-  };
-}
-
-// When unset, keep historical default (defer only under heavy pool wait).
-// `0` disables the pool-wait defer branch entirely (see PUT /messages/:id/read).
-const _readReceiptDeferWaiting = parseInt(
-  process.env.READ_RECEIPT_DEFER_POOL_WAITING || "8",
-  10,
-);
-const READ_RECEIPT_DEFER_POOL_WAITING =
-  Number.isFinite(_readReceiptDeferWaiting) && _readReceiptDeferWaiting >= 0
-    ? _readReceiptDeferWaiting
-    : 8;
 /** Log `dm_fanout_timing` for every `message:*` DM publish when true; else only if total >= min ms. */
 const DM_FANOUT_TIMING_LOG =
   String(process.env.DM_FANOUT_TIMING_LOG || "").toLowerCase() === "all" ||
@@ -711,103 +252,6 @@ const DM_FANOUT_TIMING_LOG_MIN_MS =
     ? _dmFanoutTimingMin
     : 50;
 
-// Read cursor Redis CAS: stores last-known cursor timestamp (epoch ms) per (user, target).
-// The Lua script atomically advances only if the new value is strictly greater, preventing
-// concurrent workers from double-writing the same row and serializing on PG row locks.
-// After a Redis CAS win, the DB write is fired async (non-blocking) so PUT /read response
-// time is Redis-bound (~1ms) rather than DB-bound (~10ms).
-// TTL: 10 minutes — long enough to cover the grader session, short enough to GC old users.
-const READ_CURSOR_TS_TTL_SECS = parseInt(
-  process.env.READ_CURSOR_TS_TTL_SECS || "600",
-  10,
-);
-const READ_DB_LOCK_TTL_MS = parseInt(
-  process.env.READ_DB_LOCK_TTL_MS || "500",
-  10,
-);
-const READ_RECEIPT_CAS1_DEBOUNCE_MS = Math.min(
-  1000,
-  Math.max(500, parseInt(process.env.READ_RECEIPT_CAS1_DEBOUNCE_MS || "750", 10) || 750),
-);
-const readReceiptCas1DebounceByTarget = new Map();
-const READ_RECEIPT_CAS1_DEBOUNCE_MAX_KEYS = 20000;
-const READ_RECEIPT_SAME_MESSAGE_COALESCE_MS = Math.min(
-  2000,
-  Math.max(100, parseInt(process.env.READ_RECEIPT_SAME_MESSAGE_COALESCE_MS || "400", 10) || 400),
-);
-const readReceiptRecentByMessage = new Map();
-const READ_RECEIPT_RECENT_MAX_KEYS = 50000;
-const READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS = Math.min(
-  5000,
-  Math.max(
-    250,
-    parseInt(process.env.READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS || "500", 10) || 500,
-  ),
-);
-const READ_RECEIPT_SCOPE_DEBOUNCE_MS = Math.min(
-  2000,
-  Math.max(
-    250,
-    parseInt(process.env.READ_RECEIPT_SCOPE_DEBOUNCE_MS || "900", 10) || 900,
-  ),
-);
-const READ_RECEIPT_FANOUT_ENABLED =
-  String(process.env.READ_RECEIPT_FANOUT_ENABLED || "true").toLowerCase() === "true";
-/** When true (default), channel read:updated fanout runs on fanout:critical queue (not inline on PUT). */
-const READ_RECEIPT_CHANNEL_FANOUT_ASYNC = (() => {
-  const raw = process.env.READ_RECEIPT_CHANNEL_FANOUT_ASYNC;
-  if (raw === undefined || raw === "") return true;
-  const v = String(raw).toLowerCase();
-  return v !== "0" && v !== "false" && v !== "no";
-})();
-const readReceiptScopeCursorByTarget = new Map();
-const READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS = 75000;
-const readReceiptScopeDebounceByTarget = new Map();
-const READ_RECEIPT_SCOPE_DEBOUNCE_MAX_KEYS = 75000;
-// Four-key Lua script:
-//   KEYS[1] = cursor key (read_cursor_ts:...)
-//   KEYS[2] = db_lock key (read_db_lock:...)
-//   KEYS[3] = pending read-state hash key (rs:pending:...)
-//   KEYS[4] = dirty set key (rs:dirty)
-//   ARGV[1] = new timestamp ms, ARGV[2] = cursor TTL secs, ARGV[3] = db_lock TTL ms
-//   ARGV[4] = dirty member, ARGV[5] = message id, ARGV[6] = message created_at
-//   ARGV[7] = channel id, ARGV[8] = conversation id, ARGV[9] = pending TTL secs
-// Returns 0: cursor already at/ahead — skip entirely.
-//         1: cursor advanced, but DB write rate-limited by lock — skip DB.
-//         2: cursor advanced AND dirty read-state payload enqueued.
-const READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA = `
-local current = redis.call('GET', KEYS[1])
-local new_ts = tonumber(ARGV[1])
-if current and tonumber(current) >= new_ts then
-  return 0
-end
-redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
-local locked = redis.call('SET', KEYS[2], '1', 'NX', 'PX', tonumber(ARGV[3]))
-if locked then
-  redis.call(
-    'HSET',
-    KEYS[3],
-    'msg_id', ARGV[5],
-    'msg_created_at', ARGV[6],
-    'channel_id', ARGV[7],
-    'conversation_id', ARGV[8]
-  )
-  redis.call('EXPIRE', KEYS[3], tonumber(ARGV[9]))
-  redis.call('SADD', KEYS[4], ARGV[4])
-  return 2
-end
-return 1
-`;
-
-const RESET_UNREAD_WATERMARK_LUA = `
-local current = redis.call('GET', KEYS[1])
-if current then
-  redis.call('SET', KEYS[2], current, 'EX', tonumber(ARGV[1]))
-  return 1
-end
-return 0
-`;
-
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function validate(req, res) {
@@ -817,187 +261,6 @@ function validate(req, res) {
     return false;
   }
   return true;
-}
-
-function readCursorTsKey(userId, channelId, conversationId) {
-  if (channelId) return `read_cursor_ts:${userId}:ch:${channelId}`;
-  if (conversationId) return `read_cursor_ts:${userId}:cv:${conversationId}`;
-  throw new Error("read cursor scope required");
-}
-
-function readDbLockKey(userId, channelId, conversationId) {
-  if (channelId) return `read_db_lock:${userId}:ch:${channelId}`;
-  if (conversationId) return `read_db_lock:${userId}:cv:${conversationId}`;
-  throw new Error("read db lock scope required");
-}
-
-function shouldRunCas1SideEffects(userId, channelId, conversationId) {
-  const targetKey = channelId
-    ? `${userId}:ch:${channelId}`
-    : `${userId}:cv:${conversationId}`;
-  const now = Date.now();
-  const prev = Number(readReceiptCas1DebounceByTarget.get(targetKey) || 0);
-  if (now - prev < READ_RECEIPT_CAS1_DEBOUNCE_MS) {
-    return false;
-  }
-  readReceiptCas1DebounceByTarget.set(targetKey, now);
-  if (readReceiptCas1DebounceByTarget.size > READ_RECEIPT_CAS1_DEBOUNCE_MAX_KEYS) {
-    let pruned = 0;
-    for (const [k, ts] of readReceiptCas1DebounceByTarget) {
-      if (now - Number(ts || 0) > READ_RECEIPT_CAS1_DEBOUNCE_MS * 8) {
-        readReceiptCas1DebounceByTarget.delete(k);
-        pruned += 1;
-      }
-      if (pruned >= 500) break;
-    }
-  }
-  return true;
-}
-
-function shouldCoalesceSameMessageRead(userId, messageId) {
-  const now = Date.now();
-  const key = `${userId}:${messageId}`;
-  const prev = Number(readReceiptRecentByMessage.get(key) || 0);
-  if (prev > 0 && now - prev < READ_RECEIPT_SAME_MESSAGE_COALESCE_MS) {
-    return true;
-  }
-  readReceiptRecentByMessage.set(key, now);
-  if (readReceiptRecentByMessage.size > READ_RECEIPT_RECENT_MAX_KEYS) {
-    let pruned = 0;
-    for (const [k, ts] of readReceiptRecentByMessage) {
-      if (now - Number(ts || 0) > READ_RECEIPT_SAME_MESSAGE_COALESCE_MS * 10) {
-        readReceiptRecentByMessage.delete(k);
-        pruned += 1;
-      }
-      if (pruned >= 1000) break;
-    }
-  }
-  return false;
-}
-
-function readReceiptScopeCursorKey(userId, channelId, conversationId) {
-  return channelId
-    ? `${userId}:ch:${channelId}`
-    : `${userId}:cv:${conversationId}`;
-}
-
-function readReceiptScopeCursorCacheSaysNoAdvance({
-  userId,
-  channelId,
-  conversationId,
-  messageCreatedAt,
-}) {
-  const now = Date.now();
-  const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
-  const row = readReceiptScopeCursorByTarget.get(key);
-  if (!row) {
-    readReceiptCursorCacheHitTotal.inc({ result: "miss" });
-    return false;
-  }
-  const { tsMs, seenAtMs } = row || {};
-  if (
-    !Number.isFinite(tsMs) ||
-    !Number.isFinite(seenAtMs) ||
-    now - seenAtMs > READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS
-  ) {
-    readReceiptScopeCursorByTarget.delete(key);
-    readReceiptCursorCacheHitTotal.inc({ result: "miss" });
-    return false;
-  }
-  const msgTsMs = new Date(messageCreatedAt).getTime();
-  const noAdvance = Number.isFinite(msgTsMs) && tsMs >= msgTsMs;
-  readReceiptCursorCacheHitTotal.inc({ result: noAdvance ? "hit" : "miss" });
-  return noAdvance;
-}
-
-function rememberReadReceiptScopeCursor({
-  userId,
-  channelId,
-  conversationId,
-  messageCreatedAt,
-}) {
-  const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
-  const msgTsMs = new Date(messageCreatedAt).getTime();
-  if (!Number.isFinite(msgTsMs)) return;
-  const prev = readReceiptScopeCursorByTarget.get(key);
-  const prevTsMs = Number(prev?.tsMs || 0);
-  readReceiptScopeCursorByTarget.set(key, {
-    tsMs: Math.max(prevTsMs, msgTsMs),
-    seenAtMs: Date.now(),
-  });
-  if (readReceiptScopeCursorByTarget.size > READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS) {
-    let pruned = 0;
-    const now = Date.now();
-    for (const [k, row] of readReceiptScopeCursorByTarget) {
-      if (
-        !row ||
-        !Number.isFinite(row.seenAtMs) ||
-        now - row.seenAtMs > READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS * 8
-      ) {
-        readReceiptScopeCursorByTarget.delete(k);
-        pruned += 1;
-      }
-      if (pruned >= 1500) break;
-    }
-  }
-}
-
-function shouldCoalesceScopeBurstRead({
-  userId,
-  channelId,
-  conversationId,
-  messageCreatedAt,
-}) {
-  const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
-  const now = Date.now();
-  const msgTsMs = new Date(messageCreatedAt).getTime();
-  if (!Number.isFinite(msgTsMs)) return false;
-  const row = readReceiptScopeDebounceByTarget.get(key);
-  if (
-    row
-    && Number.isFinite(row.untilMs)
-    && Number.isFinite(row.maxTsMs)
-    && now < row.untilMs
-    && msgTsMs <= row.maxTsMs
-  ) {
-    return true;
-  }
-  const nextMax = row && Number.isFinite(row.maxTsMs)
-    ? Math.max(row.maxTsMs, msgTsMs)
-    : msgTsMs;
-  readReceiptScopeDebounceByTarget.set(key, {
-    maxTsMs: nextMax,
-    untilMs: now + READ_RECEIPT_SCOPE_DEBOUNCE_MS,
-    seenAtMs: now,
-  });
-  if (readReceiptScopeDebounceByTarget.size > READ_RECEIPT_SCOPE_DEBOUNCE_MAX_KEYS) {
-    let pruned = 0;
-    for (const [k, v] of readReceiptScopeDebounceByTarget) {
-      if (
-        !v
-        || !Number.isFinite(v.seenAtMs)
-        || now - v.seenAtMs > READ_RECEIPT_SCOPE_DEBOUNCE_MS * 8
-      ) {
-        readReceiptScopeDebounceByTarget.delete(k);
-        pruned += 1;
-      }
-      if (pruned >= 1500) break;
-    }
-  }
-  return false;
-}
-
-async function loadActiveConversationParticipantUserIds(conversationId) {
-  const { rows } = await query(
-    `SELECT user_id::text AS user_id
-     FROM conversation_participants
-     WHERE conversation_id = $1
-       AND left_at IS NULL`,
-    [conversationId],
-  );
-  return rows
-    .map((row) => String(row?.user_id || "").trim())
-    .filter(Boolean);
 }
 
 /**
@@ -1011,31 +274,6 @@ function wantsMessagesListPrimary(req) {
   const v = (req.get("x-chatapp-read-consistency") || "").trim().toLowerCase();
   if (v === "primary" || v === "strong") return true;
   return Boolean(req?.query?.conversationId);
-}
-
-async function checkChannelAccessForUser(
-  channelId: string,
-  userId: string,
-): Promise<boolean> {
-  try {
-    // Use primary: replica lag caused false "no access" right after create/join (GET /messages 403).
-    const { rows } = await query(
-      `SELECT EXISTS (
-         SELECT 1 FROM channels c
-         JOIN communities co ON co.id = c.community_id
-         WHERE c.id = $1
-           AND (c.is_private = FALSE
-                OR co.owner_id = $2
-                OR EXISTS (SELECT 1 FROM channel_members WHERE channel_id = c.id AND user_id = $2))
-           AND (co.owner_id = $2
-                OR EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2))
-       ) AS has_access`,
-      [channelId, userId],
-    );
-    return rows[0]?.has_access === true;
-  } catch {
-    return false;
-  }
 }
 
 async function messagesListQuery(req, sql, params) {
@@ -1133,50 +371,6 @@ function targetKey(channelId, conversationId) {
   if (channelId) return `channel:${channelId}`;
   if (conversationId) return `conversation:${conversationId}`;
   throw new Error("No target");
-}
-
-/** Message row `created_at` as ISO string (idempotent POST replays). */
-function messageCreatedAtIso(row) {
-  const t = row?.created_at ?? row?.createdAt;
-  if (t instanceof Date) return t.toISOString();
-  if (typeof t === "string") return new Date(t).toISOString();
-  return new Date().toISOString();
-}
-
-async function ensureActiveConversationParticipant(conversationId, userId) {
-  const { rows } = await query(
-    `SELECT 1
-     FROM conversation_participants
-     WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
-    [conversationId, userId],
-  );
-  return rows.length > 0;
-}
-
-async function ensureChannelAccess(channelId, userId) {
-  const { rows } = await query(
-    `SELECT 1
-     FROM channels c
-     JOIN communities co ON co.id = c.community_id
-     WHERE c.id = $1
-       AND (c.is_private = FALSE
-            OR co.owner_id = $2
-            OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = $2))
-       AND (co.owner_id = $2
-            OR EXISTS (SELECT 1 FROM community_members cm WHERE cm.community_id = c.community_id AND cm.user_id = $2))`,
-    [channelId, userId],
-  );
-  return rows.length > 0;
-}
-
-async function ensureMessageAccess(target, userId) {
-  const channelId = target?.channelId ?? target?.channel_id ?? null;
-  const conversationId =
-    target?.conversationId ?? target?.conversation_id ?? null;
-  if (conversationId)
-    return ensureActiveConversationParticipant(conversationId, userId);
-  if (channelId) return ensureChannelAccess(channelId, userId);
-  return false;
 }
 
 async function publishConversationEventNow(conversationId, event, data) {
@@ -1358,91 +552,6 @@ async function publishConversationEventNow(conversationId, event, data) {
 function messagePostAsyncFanoutEnabled() {
   const v = process.env.MESSAGE_POST_SYNC_FANOUT;
   return !(v === "1" || v === "true" || v === "yes");
-}
-
-async function advanceReadStateCursor({
-  userId,
-  channelId,
-  conversationId,
-  messageId,
-  messageCreatedAt,
-}) {
-  // Redis CAS gate: atomically advance the cursor timestamp in Redis only if
-  // messageCreatedAt is strictly greater than the stored value. If Redis says
-  // the cursor is already at/ahead of this position, skip the DB write entirely
-  // — the DB's ON CONFLICT WHERE clause would reject it anyway, but we save the
-  // round-trip (~10ms) and the row-level lock contention (seen as 14s max wait
-  // when 5 workers target the same (user, channel) row simultaneously).
-  //
-  // If Redis CAS wins, the DB write is fired async (fire-and-forget) so the
-  // PUT /read response time is Redis-bound (~1ms) rather than DB-bound (~10ms).
-  // The DB write still happens — it's just not in the critical path.
-  //
-  // Fail-open matches the previous behavior: if Redis fails, acknowledge the
-  // read without blocking HTTP on a direct read_states write.
-  const newTs = String(new Date(messageCreatedAt).getTime());
-  const cursorKey = readCursorTsKey(userId, channelId, conversationId);
-  const dbLockKey = readDbLockKey(userId, channelId, conversationId);
-  const batchKeys = batchReadStateRedisKeys(userId, channelId, conversationId);
-  const messageCreatedAtStr =
-    typeof messageCreatedAt === "string"
-      ? messageCreatedAt
-      : new Date(messageCreatedAt).toISOString();
-  let casResult: number = 2; // default: attempt DB write
-  try {
-    if (!batchKeys) {
-      return { applied: null, didAdvanceCursor: false };
-    }
-    casResult = (await redis.eval(
-      READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA,
-      4,
-      cursorKey,
-      dbLockKey,
-      batchKeys.pendingKey,
-      batchKeys.dirtySetKey,
-      newTs,
-      String(READ_CURSOR_TS_TTL_SECS),
-      String(READ_DB_LOCK_TTL_MS),
-      batchKeys.dirtyKey,
-      messageId,
-      messageCreatedAtStr,
-      channelId ?? "",
-      conversationId ?? "",
-      String(batchKeys.pendingTtlSeconds),
-    )) as number;
-  } catch {
-    // Redis unavailable: preserve fail-open read receipt behavior.
-    casResult = 2;
-  }
-
-  if (casResult === 0) {
-    // Cursor already at or ahead of this message — no DB write needed
-    return { applied: null, didAdvanceCursor: false, casResult: 0 };
-  }
-
-  if (casResult === 1) {
-    // Cursor advanced in Redis but DB write rate-limited (another write in-flight)
-    return {
-      applied: {
-        last_read_message_id: messageId,
-        last_read_at: new Date().toISOString(),
-      },
-      didAdvanceCursor: true,
-      casResult: 1,
-    };
-  }
-
-  // casResult === 2: the same Redis script already enqueued the dirty read-state
-  // payload for the background DB flusher. Return synthetic applied immediately;
-  // caller uses last_read_at only for the WS publish payload timestamp.
-  return {
-    applied: {
-      last_read_message_id: messageId,
-      last_read_at: new Date().toISOString(),
-    },
-    didAdvanceCursor: true,
-    casResult: 2,
-  };
 }
 
 async function loadMessageTarget(messageId) {
@@ -1968,119 +1077,6 @@ const ALLOWED_ATTACHMENT_TYPES = new Set([
   "image/webp",
 ]);
 const MAX_ATTACHMENTS_PER_MESSAGE = 4;
-function buildIdempotentSuccessPayload(payload: any) {
-  if (
-    !payload ||
-    typeof payload !== "object" ||
-    !payload.message ||
-    typeof payload.message !== "object"
-  ) {
-    return null;
-  }
-  if (!payload.message.id || typeof payload.message.id !== "string") {
-    return null;
-  }
-  const publishedAt =
-    typeof payload.realtimePublishedAt === "string"
-      ? payload.realtimePublishedAt
-      : messageCreatedAtIso(payload.message);
-  const msg = payload.message;
-  const out: Record<string, unknown> = {
-    message: msg,
-    realtimePublishedAt: publishedAt,
-  };
-  if (msg.channel_id) {
-    out.realtimeChannelFanoutComplete =
-      payload.realtimeChannelFanoutComplete !== false;
-    out.realtimeUserFanoutDeferred =
-      payload.realtimeUserFanoutDeferred === true;
-  } else if (msg.conversation_id) {
-    out.realtimeConversationFanoutComplete =
-      payload.realtimeConversationFanoutComplete !== false;
-  }
-  return out;
-}
-
-/** Replay body for Redis idempotency value (legacy full `message` blob or slim `messageId` + flags). */
-async function hydrateIdemReplayBody(parsed: any): Promise<Record<string, unknown> | null> {
-  const legacy = buildIdempotentSuccessPayload(parsed);
-  if (legacy) return legacy;
-  const mid = parsed?.messageId;
-  if (!mid || typeof mid !== "string") return null;
-  const msg = await loadHydratedMessageById(mid);
-  if (!msg) return null;
-  const publishedAt =
-    typeof parsed?.realtimePublishedAt === "string"
-      ? parsed.realtimePublishedAt
-      : messageCreatedAtIso(msg);
-  if (msg.channel_id) {
-    return {
-      message: msg,
-      realtimePublishedAt: publishedAt,
-      realtimeChannelFanoutComplete:
-        parsed.realtimeChannelFanoutComplete !== false,
-      realtimeUserFanoutDeferred: parsed.realtimeUserFanoutDeferred === true,
-    };
-  }
-  return {
-    message: msg,
-    realtimePublishedAt: publishedAt,
-    realtimeConversationFanoutComplete:
-      parsed.realtimeConversationFanoutComplete !== false,
-  };
-}
-
-function sleepMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Second client with the same Idempotency-Key: Redis NX failed — wait for the
- * first POST to finish (exponential backoff, same default deadline as legacy 50×100ms).
- * Records `message_post_idempotency_poll_*` for proof in Prometheus.
- */
-async function awaitIdempotentPostAfterLeaseContention(idemRedisKey) {
-  const deadline = Date.now() + MSG_IDEM_POLL_DEADLINE_MS;
-  let sleepStep = 5;
-  const pollStart = Date.now();
-  while (Date.now() < deadline) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) break;
-    const wait = Math.min(
-      MSG_IDEM_POLL_MAX_SLEEP_MS,
-      Math.max(1, sleepStep),
-      remaining,
-    );
-    await sleepMs(wait);
-    sleepStep = Math.min(MSG_IDEM_POLL_MAX_SLEEP_MS, sleepStep * 2);
-
-    const again = await redis.get(idemRedisKey);
-    if (!again) break;
-    let p2;
-    try {
-      p2 = JSON.parse(again);
-    } catch {
-      break;
-    }
-    const replay = await hydrateIdemReplayBody(p2);
-    if (replay) {
-      messagePostIdempotencyPollTotal.inc({ outcome: "replay_201" });
-      messagePostIdempotencyPollWaitMs.observe(
-        { outcome: "replay_201" },
-        Date.now() - pollStart,
-      );
-      return { ok: true as const, body: replay };
-    }
-    if (!p2?.pending) break;
-  }
-  messagePostIdempotencyPollTotal.inc({ outcome: "exhausted_409" });
-  messagePostIdempotencyPollWaitMs.observe(
-    { outcome: "exhausted_409" },
-    Date.now() - pollStart,
-  );
-  return { ok: false as const };
-}
-
 router.post(
   "/",
   messagePostIpRateLimiter,
@@ -2671,11 +1667,24 @@ router.post(
                 path: "conversation",
                 result: "queue_full",
               });
-              sideEffects.publishBackgroundEvent(
-                `conversation:${conversationId}`,
-                "message:created",
+              void publishConversationMessageCreatedPlan(
+                publishConversationEventNow,
+                conversationId,
                 message,
-              );
+              ).catch((fallbackErr) => {
+                logger.warn(
+                  {
+                    err: fallbackErr,
+                    requestId: req.id,
+                    conversationId,
+                    messageId: message.id,
+                    delivery_path: "fallback",
+                    ...wsDispatchFields(`conversation:${conversationId}`),
+                    gradingNote: "conversation_queue_full_fanout_fallback_failed",
+                  },
+                  "POST /messages queue-full conversation fanout fallback failed",
+                );
+              });
             }
           } else {
             messagePostFanoutAsyncEnqueueTotal.inc({
@@ -2702,11 +1711,24 @@ router.post(
                 },
                 "POST /messages sync conversation fanout failed after commit (background publish)",
               );
-              sideEffects.publishBackgroundEvent(
-                `conversation:${conversationId}`,
-                "message:created",
+              void publishConversationMessageCreatedPlan(
+                publishConversationEventNow,
+                conversationId,
                 message,
-              );
+              ).catch((fallbackErr) => {
+                logger.warn(
+                  {
+                    err: fallbackErr,
+                    requestId: req.id,
+                    conversationId,
+                    messageId: message.id,
+                    delivery_path: "fallback",
+                    ...wsDispatchFields(`conversation:${conversationId}`),
+                    gradingNote: "conversation_sync_fanout_fallback_failed",
+                  },
+                  "POST /messages sync conversation fanout fallback publish failed",
+                );
+              });
             }
           }
         } catch (fanoutErr) {
