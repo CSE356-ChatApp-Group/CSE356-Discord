@@ -144,7 +144,7 @@ Optional fields: **`waitedMs`**, **`lockWaiters`**. Correlate with **`requestId`
 
 | Area | Metrics | Interpretation |
 |------|---------|------------------|
-| HTTP | `http_server_request_duration_ms`, `http_server_requests_total` | Tail latency and volume by `route`, `method`, `status_class`. **Only responses completed by Node** increment these; **nginx-only** errors (e.g. **502** when every upstream for that try is dead, **504** upstream read timeout) may **not** appear as `status_class="5xx"` here — use **Loki** (`job=nginx` access/error logs) or `curl` timing for edge truth. |
+| HTTP | `http_server_request_duration_ms`, `http_server_requests_total`, `http_server_requests_aborted_total` | Tail latency and volume by `route`, `method`, `status_class`. `http_server_requests_total` counts completed responses; `http_server_requests_aborted_total` captures client disconnect/abort before finish (use both for observed app load). **nginx-only** errors (e.g. **502** when every upstream for that try is dead, **504** upstream read timeout) may **not** appear as `status_class="5xx"` here — use **Loki** (`job=nginx` access/error logs) or `curl` timing for edge truth. |
 | Pool | `pg_pool_waiting`, `pg_pool_idle`, `pg_pool_total`, `pg_pool_circuit_breaker_rejects_total`, `pg_pool_operation_errors_total` | Queueing vs saturation vs checkout/DB errors. |
 | DB / handler | `pg_business_sql_queries_per_http_request`, `pg_queries_per_http_request` | Primary operator view is the business-SQL histogram by `route`; raw `pg_queries_per_http_request` also counts BEGIN/COMMIT/ROLLBACK and is mainly for engineering/debugging. |
 | Cache | `endpoint_list_cache_total` | Redis list cache `hit` / `miss` / `coalesced` by `endpoint`. |
@@ -174,6 +174,10 @@ histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_m
 
 # Request rate
 sum by (route) (rate(http_server_requests_total{job="chatapp-api"}[5m]))
+
+# Observed app load (completed + aborted)
+sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics",route!="/health"}[5m]))
+  + sum(rate(http_server_requests_aborted_total{job="chatapp-api",route!="/metrics",route!="/health"}[5m]))
 
 # Overload
 max(chatapp_overload_stage{job="chatapp-api"})
@@ -211,6 +215,21 @@ max(redis_memory_used_bytes{job="redis"}) / max(redis_memory_max_bytes{job="redi
 sum(rate(ws_reconnects_total{job="chatapp-api"}[5m]))
 histogram_quantile(0.95, sum by (le, path, stage) (rate(fanout_publish_duration_ms_bucket{job="chatapp-api"}[5m])))
 ```
+
+## Optional edge-ingress metric (nginx exporter)
+
+For this app type, compare edge ingress vs app-observed throughput on the same dashboard row:
+
+- **App observed req/s:** `http_server_requests_total + http_server_requests_aborted_total`
+- **Edge ingress req/s:** `nginx_http_requests_total` (requires nginx exporter scrape)
+
+Default repo config keeps nginx scraping disabled. To enable:
+
+1. run nginx prometheus exporter on each edge/app host (default listen **`:9113`**)
+2. uncomment/add `job_name: 'nginx'` in [`infrastructure/monitoring/prometheus.yml`](../infrastructure/monitoring/prometheus.yml) (local) or host Prometheus config used in prod/staging
+3. reload Prometheus and confirm `up{job="nginx"}`
+
+When not enabled, dashboard panels that include `nginx_http_requests_total` should be treated as optional and may show 0/empty.
 
 ## Realtime delivery miss triage (grader: mean vs p95) {#realtime-delivery-miss-triage-grader-mean-vs-p95}
 

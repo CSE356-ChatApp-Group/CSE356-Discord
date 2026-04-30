@@ -75,6 +75,20 @@ __NODE_EXPORTER_TARGETS__
 __PGBOUNCER_TARGETS__
     scrape_interval: 10s
 
+  # Optional: nginx prometheus exporter on edge/app VMs (:9113).
+  # Enable when you want edge-ingress req/s alongside app-observed req/s.
+  # - job_name: 'nginx'
+  #   static_configs:
+  #     - targets: ['10.0.0.237:9113']
+  #       labels:
+  #         vm: vm1
+  #     - targets: ['10.0.3.243:9113']
+  #       labels:
+  #         vm: vm2
+  #     - targets: ['10.0.2.164:9113']
+  #       labels:
+  #         vm: vm3
+
   - job_name: 'prometheus'
     static_configs:
       - targets: ['127.0.0.1:9090']
