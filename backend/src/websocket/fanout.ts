@@ -2,6 +2,10 @@
  * fanout.publish – publishes an event to a Redis Pub/Sub channel.
  * fanout.publishBatch – multiple PUBLISH commands in one ioredis pipeline (one
  * round-trip) to smooth burst load across shards/topics.
+ *
+ * Optional alternate event names are appended here when
+ * `REALTIME_EVENT_ALIAS_FANOUT` is set — see `realtime/realtimeEventAliases.js`
+ * for the canonical ↔ alias table (same source as WS dedupe / reliability).
  */
 
 

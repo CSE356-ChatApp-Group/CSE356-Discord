@@ -5,9 +5,32 @@
 const {
   expandFanoutBatchEntriesWithAliases,
   isRealtimeEventAliasFanoutEnabled,
+  messageDedupeFamily,
+  isMessageLikeFanoutEventName,
+  isReliableRealtimeEventName,
 } = require("../src/realtime/realtimeEventAliases");
 
 describe("realtime/realtimeEventAliases", () => {
+  it("messageDedupeFamily maps alias and canonical message events", () => {
+    expect(messageDedupeFamily("new_message")).toBe("message:created");
+    expect(messageDedupeFamily("message_edited")).toBe("message:updated");
+    expect(messageDedupeFamily("message:created")).toBe("message:created");
+    expect(messageDedupeFamily("read:updated")).toBeNull();
+    expect(isMessageLikeFanoutEventName("new_message")).toBe(true);
+    expect(isMessageLikeFanoutEventName("presence:updated")).toBe(false);
+  });
+
+  it("isReliableRealtimeEventName matches canonical, aliases, and conversation invites", () => {
+    expect(isReliableRealtimeEventName("message:created")).toBe(true);
+    expect(isReliableRealtimeEventName("new_message")).toBe(true);
+    expect(isReliableRealtimeEventName("read:updated")).toBe(true);
+    expect(isReliableRealtimeEventName("read_receipt")).toBe(true);
+    expect(isReliableRealtimeEventName("presence:updated")).toBe(true);
+    expect(isReliableRealtimeEventName("user:status")).toBe(true);
+    expect(isReliableRealtimeEventName("conversation:invite")).toBe(true);
+    expect(isReliableRealtimeEventName("keepalive")).toBe(false);
+  });
+
   const prev = process.env.REALTIME_EVENT_ALIAS_FANOUT;
 
   afterEach(() => {

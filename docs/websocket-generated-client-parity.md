@@ -2,6 +2,16 @@
 
 This document ties the **frozen** harness client behavior to server behavior so ops and graders know what is guaranteed without editing the client.
 
+## Code map (single sources of truth)
+
+| Concern | Location |
+| --- | --- |
+| Canonical vs **alias** event names, optional `REALTIME_EVENT_ALIAS_FANOUT`, **message dedupe family**, and **reliable** (no best-effort drop) classification | [`backend/src/realtime/realtimeEventAliases.js`](../backend/src/realtime/realtimeEventAliases.js) |
+| WS outbound JSON shape, dedupe keys, backpressure skip rules | [`backend/src/websocket/outboundPayload.ts`](../backend/src/websocket/outboundPayload.ts) |
+| Upgrade auth, `ready`, subscribe path, queues | [`backend/src/websocket/server.ts`](../backend/src/websocket/server.ts) |
+| Redis → local delivery, `__wsInternal` subscribe forwarding | [`backend/src/websocket/redisPubsubDelivery.ts`](../backend/src/websocket/redisPubsubDelivery.ts) |
+| Env tunables reference | [`docs/env.md`](env.md) (search `WS_`, `REALTIME_EVENT_ALIAS_FANOUT`, `USER_FEED_SHARD_COUNT`) |
+
 The reference client:
 
 - Connects to `/ws?token=<JWT>` (and may send `Cookie` headers; the server **authenticates WebSocket upgrades using the query token only**).

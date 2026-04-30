@@ -1,29 +1,19 @@
 /**
  * Pure WebSocket outbound payload helpers (dedupe keys, reliable-event detection,
  * JSON shape for browser). Used by Redis→WS delivery and outbound queue flush.
+ *
+ * Message-family + reliable-event classification is delegated to
+ * `realtime/realtimeEventAliases.js` so alias fanout and dedupe/backpressure
+ * rules stay in one place.
  */
 
+const {
+  messageDedupeFamily,
+  isMessageLikeFanoutEventName,
+  isReliableRealtimeEventName,
+} = require('../realtime/realtimeEventAliases');
 
 const WS_SOCKET_MESSAGE_DEDUPE_MAX = 512;
-
-function isMessageLikeFanoutEventName(ev: unknown) {
-  if (typeof ev !== "string") return false;
-  return (
-    ev.startsWith("message:")
-    || ev === "new_message"
-    || ev === "message_deleted"
-    || ev === "message:edited"
-    || ev === "message_edited"
-  );
-}
-
-function messageDedupeFamily(eventName: string) {
-  if (eventName === "new_message") return "message:created";
-  if (eventName === "message:edited" || eventName === "message_edited") return "message:updated";
-  if (eventName === "message_deleted") return "message:deleted";
-  if (eventName.startsWith("message:")) return eventName;
-  return null;
-}
 
 function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
   if (
@@ -36,7 +26,7 @@ function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
   }
 
   const ev = (parsed as { event?: unknown }).event;
-  if (!isMessageLikeFanoutEventName(ev)) return false;
+  if (typeof ev !== 'string' || !isMessageLikeFanoutEventName(ev)) return false;
 
   const data = (parsed as {
     data?: {
@@ -128,31 +118,8 @@ function extractInternalUserFeedCommand(payload) {
   return internal as { kind: string; channels?: unknown; communityIds?: unknown };
 }
 
-function isReliableRealtimeEvent(eventName) {
-  if (typeof eventName !== "string" || !eventName) return false;
-  if (eventName.startsWith("message:")) return true;
-  // Alias names (REALTIME_EVENT_ALIAS_FANOUT) share the same delivery semantics.
-  if (
-    eventName === "new_message"
-    || eventName === "message:edited"
-    || eventName === "message_edited"
-    || eventName === "message_deleted"
-  ) {
-    return true;
-  }
-
-  return (
-    eventName === "read:updated"
-    || eventName === "message:read"
-    || eventName === "read:receipt"
-    || eventName === "read_receipt"
-    || eventName === "presence_update"
-    || eventName === "user:status"
-    || eventName === "conversation:invited"
-    || eventName === "conversation:invite"
-    || eventName === "conversation:created"
-    || eventName === "conversation:participant_added"
-  );
+function isReliableRealtimeEvent(eventName: unknown) {
+  return typeof eventName === 'string' && isReliableRealtimeEventName(eventName);
 }
 
 /** Buckets `ws_reliable_delivery_topic_total` — bounded label cardinality. */
