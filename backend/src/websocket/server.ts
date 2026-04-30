@@ -93,6 +93,7 @@ const {
   allUserFeedRedisChannels,
   userIdFromTarget,
 } = require("./userFeed");
+const { resolvedWsRuntimeConfig } = require("./profile");
 const { allCommunityFeedRedisChannels } = require("./communityFeed");
 const {
   fanoutRecipientsHistogram,
@@ -1304,11 +1305,7 @@ async function invalidateWsBootstrapCaches(userIds) {
 }
 
 function wsAutoSubscribeMode() {
-  const mode = String(process.env.WS_AUTO_SUBSCRIBE_MODE || 'messages')
-    .trim()
-    .toLowerCase();
-  if (mode === 'user_only' || mode === 'full') return mode;
-  return 'messages';
+  return resolvedWsRuntimeConfig().autoSubscribeMode;
 }
 
 /**
