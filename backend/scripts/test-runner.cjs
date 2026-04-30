@@ -38,7 +38,13 @@ function hasArg(args, flag) {
 function getEffectiveJestArgs() {
   const effectiveArgs = [...jestArgs];
 
-  if (isCiEnvironment && !hasArg(effectiveArgs, '--runInBand')) {
+  // Integration tests share one Postgres + Redis; parallel test *files* race and flake
+  // locally (CI already relied on this). Opt out with JEST_PARALLEL=1.
+  if (
+    process.env.JEST_PARALLEL !== '1'
+    && !hasArg(effectiveArgs, '--runInBand')
+    && !hasArg(effectiveArgs, '--maxWorkers')
+  ) {
     effectiveArgs.unshift('--runInBand');
   }
 

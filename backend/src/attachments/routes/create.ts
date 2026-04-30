@@ -2,6 +2,9 @@
  * POST /attachments — record metadata after upload
  */
 
+import type { NextFunction, Response } from "express";
+import type { AuthedRequest } from "../../types/http";
+
 const { body, validationResult } = require("express-validator");
 
 const { query } = require("../../db/pool");
@@ -21,7 +24,7 @@ module.exports = function registerAttachmentCreateRoutes(router: import("express
     body("sizeBytes").isInt({ min: 1 }),
     body("width").optional().isInt(),
     body("height").optional().isInt(),
-    async (req: any, res: any, next: any) => {
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 

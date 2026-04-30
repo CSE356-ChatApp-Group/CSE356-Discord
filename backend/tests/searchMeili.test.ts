@@ -15,7 +15,7 @@
  *   - SEARCH_BACKEND=postgres ignores meiliClient entirely
  */
 
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app, pool } from './runtime';
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
 
 // jest.mock is hoisted — cannot reference const/let variables from outer scope.
@@ -39,12 +39,6 @@ const _meiliMock = require('../src/search/meiliClient');
 const mockSearchCandidates  = _meiliMock.searchMessageCandidates as jest.Mock;
 const mockIsSearchBackend   = _meiliMock.isSearchBackend         as jest.Mock;
 const mockIncFallbackTotal  = _meiliMock.incFallbackTotal        as jest.Mock;
-
-afterAll(async () => {
-  await wsServer.shutdown();
-  await closeRedisConnections();
-  await pool.end();
-});
 
 beforeEach(() => {
   jest.clearAllMocks();

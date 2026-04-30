@@ -2,12 +2,15 @@
  * GET /presence — bulk status lookup
  */
 
+import type { NextFunction, Response } from "express";
+import type { AuthedRequest } from "../../types/http";
+
 const presence = require("../service");
 
 const PRESENCE_MAX_IDS = 100;
 
 module.exports = function registerPresenceGetRoute(router: import("express").IRouter) {
-  router.get("/", async (req: any, res: any, next: any) => {
+  router.get("/", async (req: AuthedRequest, res: Response, next: NextFunction) => {
     try {
       const ids = (req.query.userIds || "").split(",").filter(Boolean).slice(0, PRESENCE_MAX_IDS);
       if (!ids.length) return res.status(400).json({ error: "userIds query param required" });

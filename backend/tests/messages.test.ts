@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { request, app, wsServer, pool, redis, closeRedisConnections } from './runtime';
+import { request, app, pool, redis } from './runtime';
 
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
 const { flushDirtyReadStatesToDB, enqueueBatchReadStateUpdate } = require('../src/messages/batchReadState');
@@ -41,12 +41,6 @@ function messagesRouteSqlHistogramSnapshot() {
   }
   return { count, sum };
 }
-
-afterAll(async () => {
-  await wsServer.shutdown();
-  await closeRedisConnections();
-  await pool.end();
-});
 
 // ── Overload protection ───────────────────────────────────────────────────────
 

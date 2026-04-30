@@ -2,18 +2,12 @@
  * Auth route integration tests.
  */
 
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app, pool } from './runtime';
 
 import { uniqueSuffix, registerUser } from './helpers';
 
 beforeAll(async () => {
   await pool.query("DELETE FROM users WHERE email = 'test@example.com'");
-});
-
-afterAll(async () => {
-  await wsServer.shutdown();
-  await closeRedisConnections();
-  await pool.end();
 });
 
 // ── Register ────────────────────────────────────────────────────────────────

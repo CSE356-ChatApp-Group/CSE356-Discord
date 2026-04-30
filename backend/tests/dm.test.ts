@@ -6,7 +6,7 @@
  */
 
 import http from 'http';
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app, wsServer, pool } from './runtime';
 
 import {
   createAuthenticatedUser,
@@ -29,9 +29,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(resolve));
-  await wsServer.shutdown();
-  await closeRedisConnections();
-  await pool.end();
 });
 
 // ── Invite flow ───────────────────────────────────────────────────────────────

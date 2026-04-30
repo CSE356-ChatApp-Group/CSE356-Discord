@@ -2,10 +2,13 @@
  * PUT /presence — set own status
  */
 
+import type { NextFunction, Response } from "express";
+import type { AuthedRequest } from "../../types/http";
+
 const presence = require("../service");
 
 module.exports = function registerPresencePutRoute(router: import("express").IRouter) {
-  router.put("/", async (req: any, res: any, next: any) => {
+  router.put("/", async (req: AuthedRequest, res: Response, next: NextFunction) => {
     try {
       const { status, awayMessage } = req.body || {};
       const allowed = ["online", "idle", "away"];

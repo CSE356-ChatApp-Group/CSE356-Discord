@@ -2,6 +2,9 @@
  * GET /attachments/:id
  */
 
+import type { NextFunction, Response } from "express";
+import type { AuthedRequest } from "../../types/http";
+
 const { GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { param, validationResult } = require("express-validator");
@@ -14,7 +17,7 @@ module.exports = function registerAttachmentGetRoutes(router: import("express").
   router.get(
     "/:id",
     param("id").isUUID(),
-    async (req: any, res: any, next: any) => {
+    async (req: AuthedRequest, res: Response, next: NextFunction) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
@@ -35,9 +38,10 @@ module.exports = function registerAttachmentGetRoutes(router: import("express").
         assertDirectPresignedUrlMatchesSigner(url);
 
         res.json({ attachment: clientAttachment, url });
-      } catch (err: any) {
-        if (err && err.statusCode === 500 && err.message) {
-          return res.status(500).json({ error: err.message });
+      } catch (err: unknown) {
+        const e = err as { statusCode?: number; message?: string };
+        if (e && e.statusCode === 500 && e.message) {
+          return res.status(500).json({ error: e.message });
         }
         next(err);
       }

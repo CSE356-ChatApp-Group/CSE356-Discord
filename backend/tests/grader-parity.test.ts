@@ -6,7 +6,7 @@
  */
 
 import http from 'http';
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app, wsServer, pool } from './runtime';
 import {
   uniqueSuffix,
   createAuthenticatedUser,
@@ -75,9 +75,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(resolve));
-  await wsServer.shutdown();
-  await closeRedisConnections();
-  await pool.end();
 });
 
 afterEach(async () => {

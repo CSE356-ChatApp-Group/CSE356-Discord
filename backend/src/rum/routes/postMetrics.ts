@@ -2,6 +2,8 @@
  * POST /rum — client RUM batch ingest (handler only; limiter + json applied in router).
  */
 
+import type { Request, Response } from "express";
+
 const {
   clientWebVitalTimingSeconds,
   clientWebVitalClsScore,
@@ -10,7 +12,7 @@ const {
 
 const TIMING_NAMES = new Set(["LCP", "INP", "FCP", "TTFB"]);
 
-module.exports = function rumPostHandler(req: any, res: any) {
+module.exports = function rumPostHandler(req: Request, res: Response): void {
   const metrics = req.body?.metrics;
   if (!Array.isArray(metrics)) {
     return res.status(400).json({ error: "metrics array required" });

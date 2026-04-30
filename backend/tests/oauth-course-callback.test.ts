@@ -3,7 +3,7 @@
  * flow instead of auto-provisioning, and returning users with a linked row get tokens.
  */
 
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app, pool } from './runtime';
 import { createAuthenticatedUser, uniqueSuffix } from './helpers';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -54,12 +54,6 @@ function mockOidpFetch(opts: { sub: string; email: string; preferred_username: s
     throw new Error(`Unexpected fetch URL in mock: ${u}`);
   });
 }
-
-afterAll(async () => {
-  await wsServer.shutdown();
-  await closeRedisConnections();
-  await pool.end();
-});
 
 describe('GET /api/v1/auth/course/callback', () => {
   let fetchSpy: jest.SpyInstance;

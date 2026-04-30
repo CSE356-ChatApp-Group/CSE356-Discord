@@ -2,6 +2,8 @@
  * Redis-backed rate limiter for RUM POST /rum
  */
 
+import type { NextFunction, Request, Response } from "express";
+
 const { rateLimit } = require("express-rate-limit");
 const { RedisStore } = require("rate-limit-redis");
 const redis = require("../db/redis");
@@ -14,13 +16,18 @@ const rumPostLimiter = rateLimit({
   limit: 120,
   standardHeaders: "draft-7",
   legacyHeaders: false,
-  keyGenerator: (req: { ip?: string }) => `rum:${getTrustedClientIp(req) || "unknown"}`,
+  keyGenerator: (req: Request) => `rum:${getTrustedClientIp(req) || "unknown"}`,
   store: new RedisStore({
     sendCommand: (...args: string[]) => redis.call(...args),
     prefix: "rl:rum:",
   }),
   message: { error: "Too many RUM reports. Please try again later." },
-  handler: (req: any, res: any, _next: any, options: { statusCode: number; message?: unknown }) => {
+  handler: (
+    req: Request,
+    res: Response,
+    _next: NextFunction,
+    options: { statusCode: number; message?: unknown },
+  ) => {
     apiRateLimitHitsTotal.inc({ scope: "rum" });
     recordAbuseStrikeFromRequest(req);
     res.status(options.statusCode).json(options.message);
@@ -29,7 +36,7 @@ const rumPostLimiter = rateLimit({
 
 function rumLimiterOrPassthrough() {
   if (process.env.DISABLE_RATE_LIMITS === "true") {
-    return (_req: any, _res: any, next: any) => next();
+    return (_req: Request, _res: Response, next: NextFunction) => next();
   }
   return rumPostLimiter;
 }

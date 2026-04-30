@@ -23,14 +23,8 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({
   ),
 }));
 
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app, pool } from './runtime';
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
-
-afterAll(async () => {
-  await wsServer.shutdown();
-  await closeRedisConnections();
-  await pool.end();
-});
 
 // ── Shared test state ─────────────────────────────────────────────────────────
 let ownerToken: string;

@@ -1,11 +1,5 @@
-import { request, app, wsServer, pool, closeRedisConnections } from './runtime';
+import { request, app } from './runtime';
 import { createAuthenticatedUser, uniqueSuffix } from './helpers';
-
-afterAll(async () => {
-  await wsServer.shutdown();
-  await closeRedisConnections();
-  await pool.end();
-});
 
 describe('community admin channel controls', () => {
   it('lets an owner promote a member to admin and lets that admin manage channels', async () => {
