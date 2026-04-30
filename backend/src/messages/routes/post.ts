@@ -107,6 +107,8 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         // --- POST /messages: idempotency lease (Redis) ---
         postWallStart = Date.now();
         const { content } = authReq.body;
+        const normalizedContent =
+          typeof content === "string" ? content.trim() : "";
         channelId = authReq.body.channelId ?? null;
         conversationId = authReq.body.conversationId ?? null;
         threadId = authReq.body.threadId ?? null;
@@ -124,7 +126,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
             .status(400)
             .json({ error: "Specify only one of channelId or conversationId" });
         }
-        if (!content?.trim() && attachments.length === 0) {
+        if (!normalizedContent && attachments.length === 0) {
           return res
             .status(400)
             .json({ error: "content or at least one attachment is required" });
@@ -246,7 +248,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
             const insertRes = await client.query(MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL, [
               channelId,
               authReq.user.id,
-              content?.trim() || null,
+              normalizedContent || null,
               threadId || null,
             ]);
             txPhases.t_insert = Date.now();
@@ -319,7 +321,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
               [
                 conversationId,
                 authReq.user.id,
-                content?.trim() || null,
+                normalizedContent || null,
                 threadId || null,
               ],
             );
