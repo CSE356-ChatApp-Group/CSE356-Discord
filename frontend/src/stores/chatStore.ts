@@ -212,20 +212,6 @@ async function fetchUnreadCountsSnapshot(force = false): Promise<UnreadCountsSna
   return unreadCountsInFlight;
 }
 
-function upsertConversation(conversations: Entity[], conversation: Entity) {
-  const existing = conversations.find((conv) => conv.id === conversation.id);
-  if (!existing) return [conversation, ...conversations];
-  return conversations.map((conv) =>
-    conv.id === conversation.id
-      ? {
-          ...conv,
-          ...conversation,
-          participants: conversation.participants || conv.participants,
-        }
-      : conv
-  );
-}
-
 function ensureUserWsSubscription(handler: (event: any) => void) {
   const userId = useAuthStore.getState().user?.id;
   if (!userId || wsUserSubscriptionId === userId) return;
