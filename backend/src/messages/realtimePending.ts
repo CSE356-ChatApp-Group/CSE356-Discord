@@ -9,6 +9,7 @@ const {
   wsReplayPendingEligibilityKey,
   WS_REPLAY_RECENT_USER_WINDOW_SECONDS,
 } = require('../websocket/recentConnect');
+const { realtimePendingConfig } = require('./realtimePendingConfig');
 const {
   wsPendingReplayUserTrimmedTotal,
   wsPendingUserZsetSize,
@@ -19,65 +20,23 @@ const {
   offlinePendingSkippedTotal,
 } = require('../utils/metrics');
 
-const rawPendingTtlSeconds = Number(process.env.WS_REPLAY_PENDING_TTL_SECONDS || '180');
-const WS_REPLAY_PENDING_TTL_SECONDS =
-  Number.isFinite(rawPendingTtlSeconds) && rawPendingTtlSeconds >= 60 && rawPendingTtlSeconds <= 300
-    ? Math.floor(rawPendingTtlSeconds)
-    : 180;
-
-const rawPendingDrainLimit = Number(process.env.WS_REPLAY_PENDING_DRAIN_LIMIT || '300');
-const WS_REPLAY_PENDING_DRAIN_LIMIT =
-  Number.isFinite(rawPendingDrainLimit) && rawPendingDrainLimit > 0
-    ? Math.min(2000, Math.max(10, Math.floor(rawPendingDrainLimit)))
-    : 300;
-
-const rawPendingUserCap = Number(process.env.WS_REPLAY_PENDING_USER_MAX_ZSET || '400');
-const WS_REPLAY_PENDING_USER_MAX_ZSET =
-  Number.isFinite(rawPendingUserCap) && rawPendingUserCap > 0
-    ? Math.min(5000, Math.max(50, Math.floor(rawPendingUserCap)))
-    : 400;
-
-const rawPendingMemoryGuardPct = Number(process.env.WS_REPLAY_PENDING_MEMORY_GUARD_PCT || '85');
-const WS_REPLAY_PENDING_MEMORY_GUARD_PCT =
-  Number.isFinite(rawPendingMemoryGuardPct) && rawPendingMemoryGuardPct >= 50
-    ? Math.min(98, Math.max(50, Math.floor(rawPendingMemoryGuardPct)))
-    : 85;
-
-const WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED =
-  String(process.env.WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED || 'true').toLowerCase() !== 'false';
-const WS_REPLAY_PENDING_MEMORY_GUARD_CACHE_MS = 2000;
-
-/** When true (default), only enqueue `ws:pending:user:*` for users with an active WS or a recent session marker. */
-const WS_REPLAY_PENDING_ONLY_ACTIVE =
-  String(process.env.WS_REPLAY_PENDING_ONLY_ACTIVE ?? 'true').toLowerCase() !== 'false';
-
-/** Emergency: enqueue pending pointers for every fanout target (pre-redesign behavior). */
-const WS_REPLAY_PENDING_LEGACY_ALL =
-  String(process.env.WS_REPLAY_PENDING_LEGACY_ALL || 'false').toLowerCase() === 'true';
-
-/**
- * Rollout safety: when `ws:pending_eligible:*` is absent (sessions before unified marker),
- * re-check `ws:recent_connect:*` / `ws:replay_pending_eligible:*` (second pipeline, only for
- * phase-1 pending-miss + zero connections). Set **`false`** after fleet + reconnect window.
- */
-const WS_PENDING_ELIGIBLE_LEGACY_FALLBACK =
-  String(process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK ?? 'true').toLowerCase() !== 'false';
-
-/**
- * When global legacy fallback is off, still run the second EXISTS probe for enqueue paths that
- * do not pass `recentTargets` (conversation fanout). Channel fanout always passes explicit
- * `recentTargets` and keeps the strict single-phase path to preserve Redis savings at scale.
- */
-const WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK =
-  String(process.env.WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK ?? 'true').toLowerCase() !==
-  'false';
-
-const PENDING_MIN_MARKER = '__pendingMin';
+const {
+  WS_REPLAY_PENDING_TTL_SECONDS,
+  WS_REPLAY_PENDING_DRAIN_LIMIT,
+  WS_REPLAY_PENDING_USER_MAX_ZSET,
+  WS_REPLAY_PENDING_MEMORY_GUARD_PCT,
+  WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED,
+  WS_REPLAY_PENDING_MEMORY_GUARD_CACHE_MS,
+  WS_REPLAY_PENDING_ONLY_ACTIVE,
+  WS_REPLAY_PENDING_LEGACY_ALL,
+  WS_PENDING_ELIGIBLE_LEGACY_FALLBACK,
+  WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK,
+  REDIS_PENDING_CLASSIFY_BATCH,
+  PENDING_MIN_MARKER,
+} = realtimePendingConfig;
 let pendingGuardCachedUntilMs = 0;
 let pendingGuardCachedShouldSkip = false;
 let pendingGuardLastWarnAtMs = 0;
-
-const REDIS_PENDING_CLASSIFY_BATCH = 48;
 
 function pendingUserKey(userId: string) {
   return `ws:pending:user:${userId}`;

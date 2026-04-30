@@ -5,14 +5,15 @@ const {
   fanoutTargetCacheTotal,
   conversationFanoutTargetsCacheVersionRetryTotal,
 } = require('../utils/metrics');
-
-const rawConversationFanoutTargetsCacheTtl = Number(
-  process.env.CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS || '180',
-);
-const CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS =
-  Number.isFinite(rawConversationFanoutTargetsCacheTtl) && rawConversationFanoutTargetsCacheTtl > 0
-    ? Math.floor(rawConversationFanoutTargetsCacheTtl)
-    : 180;
+const {
+  conversationFanoutConfig: {
+    CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS,
+  },
+} = require('./conversationFanoutConfig');
+const {
+  readVersionedCacheState,
+  invalidateVersionedCache,
+} = require('./fanoutCacheStoreUtils');
 const conversationFanoutTargetsInflight: Map<string, Promise<string[]>> = new Map();
 
 function conversationFanoutTargetsCacheKey(conversationId: string) {
@@ -50,40 +51,10 @@ function parseConversationFanoutTargetsCached(
   return null;
 }
 
-async function readConversationFanoutCacheState(cacheKey: string, versionKey: string) {
-  const mget = typeof redis.mget === 'function' ? redis.mget.bind(redis) : null;
-  if (!mget) {
-    const [cached, version] = await Promise.all([
-      redis.get(cacheKey).catch(() => null),
-      redis.get(versionKey).catch(() => null),
-    ]);
-    return { cached, version };
-  }
-
-  try {
-    const [cached, version] = await mget(cacheKey, versionKey);
-    return { cached: cached || null, version: version || null };
-  } catch {
-    const [cached, version] = await Promise.all([
-      redis.get(cacheKey).catch(() => null),
-      redis.get(versionKey).catch(() => null),
-    ]);
-    return { cached, version };
-  }
-}
-
 async function invalidateConversationFanoutTargetsCache(conversationId: string) {
   const cacheKey = conversationFanoutTargetsCacheKey(conversationId);
   const versionKey = conversationFanoutTargetsVersionKey(conversationId);
-  try {
-    const p = redis.pipeline();
-    p.del(cacheKey);
-    p.incr(versionKey);
-    await p.exec();
-  } catch {
-    await redis.del(cacheKey).catch(() => {});
-    await redis.incr(versionKey).catch(() => {});
-  }
+  await invalidateVersionedCache(cacheKey, versionKey);
 }
 
 async function loadUniqueFanoutTargetsFromDb(conversationId: string): Promise<string[]> {
@@ -103,7 +74,7 @@ async function loadUniqueFanoutTargetsFromDb(conversationId: string): Promise<st
 async function getConversationFanoutTargets(conversationId: string): Promise<string[]> {
   const cacheKey = conversationFanoutTargetsCacheKey(conversationId);
   const versionKey = conversationFanoutTargetsVersionKey(conversationId);
-  const { cached, version: cachedVersion } = await readConversationFanoutCacheState(cacheKey, versionKey);
+  const { cached, version: cachedVersion } = await readVersionedCacheState(cacheKey, versionKey);
   if (cached) {
     const fromCache = parseConversationFanoutTargetsCached(conversationId, cached);
     if (fromCache !== null) {

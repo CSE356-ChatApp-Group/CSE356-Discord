@@ -21,20 +21,12 @@ const {
   splitUserTargets,
   userFeedRedisChannelForUserId,
 } = require("../../websocket/userFeed");
-
-/** Log `dm_fanout_timing` for every `message:*` DM publish when true; else only if total >= min ms. */
-const DM_FANOUT_TIMING_LOG =
-  String(process.env.DM_FANOUT_TIMING_LOG || "").toLowerCase() === "all" ||
-  process.env.DM_FANOUT_TIMING_LOG === "1" ||
-  process.env.DM_FANOUT_TIMING_LOG === "true";
-const _dmFanoutTimingMin = parseInt(
-  process.env.DM_FANOUT_TIMING_LOG_MIN_MS || "50",
-  10,
-);
-const DM_FANOUT_TIMING_LOG_MIN_MS =
-  Number.isFinite(_dmFanoutTimingMin) && _dmFanoutTimingMin >= 0
-    ? _dmFanoutTimingMin
-    : 50;
+const {
+  conversationFanoutConfig: {
+    DM_FANOUT_TIMING_LOG,
+    DM_FANOUT_TIMING_LOG_MIN_MS,
+  },
+} = require("../conversationFanoutConfig");
 
 async function publishConversationEventNow(
   conversationId: string,
