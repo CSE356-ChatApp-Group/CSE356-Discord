@@ -221,6 +221,37 @@ jobs:
           fi
           chmod 600 ~/.ssh/known_hosts
 
+      - name: Runner and SSH preflight diagnostics
+        shell: bash
+        env:
+          DEPLOY_ENV: ${{ inputs.environment }}
+          DEPLOY_SCRIPT_PATH: ${{ inputs.script_path }}
+          DEPLOY_HOST: ${{ inputs.host }}
+          DEPLOY_USER: ${{ inputs.user }}
+          RUNS_ON_JSON: ${{ inputs.runs_on_json }}
+          RUNNER_NAME_CTX: ${{ runner.name }}
+          RUNNER_OS_CTX: ${{ runner.os }}
+          RUNNER_ARCH_CTX: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          echo "Runner diagnostics:"
+          echo "  runs_on_json=${RUNS_ON_JSON}"
+          echo "  runner.name=${RUNNER_NAME_CTX}"
+          echo "  runner.os=${RUNNER_OS_CTX}"
+          echo "  runner.arch=${RUNNER_ARCH_CTX}"
+          echo "  deploy_env=${DEPLOY_ENV}"
+          echo "  deploy_script=${DEPLOY_SCRIPT_PATH}"
+          echo "  deploy_target=${DEPLOY_USER}@${DEPLOY_HOST}"
+          ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" "echo target-ok && hostname"
+          if [[ "${DEPLOY_ENV}" == "production" && "${DEPLOY_SCRIPT_PATH}" == "deploy/deploy-prod-multi.sh" ]]; then
+            echo "Multi-VM production deploy detected; checking SSH reachability to all app VMs..."
+            for vm in 130.245.136.44 130.245.136.137 130.245.136.54; do
+              ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+                "${DEPLOY_USER}@${vm}" "echo vm-ok:${vm} && hostname"
+            done
+          fi
+
       # Rollback deploys check out an old SHA whose prod-nginx-audit.sh may still
       # fail on benign nginx/worker drift. Always audit using origin/main's script.
       - name: Resolve prod nginx audit script from main
