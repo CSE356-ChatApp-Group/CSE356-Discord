@@ -2,15 +2,15 @@ import { create } from 'zustand';
 import { api, getToken, invalidateApiCache } from '../lib/api';
 import { wsManager } from '../lib/ws';
 import { useAuthStore } from './authStore';
-import { PRESENCE_STATUSES } from './chatStoreTypes';
-import type {
-  ChatState,
-  Entity,
-  MessagePaginationState,
-  PresenceStatus,
-  SearchFilters,
-  SendMessageInput,
-  UnreadCountsSnapshot,
+import {
+  PRESENCE_STATUSES,
+  type ChatState,
+  type Entity,
+  type MessagePaginationState,
+  type PresenceStatus,
+  type SearchFilters,
+  type SendMessageInput,
+  type UnreadCountsSnapshot,
 } from './chatStoreTypes';
 export type {
   ChatState,
@@ -68,7 +68,6 @@ const DEFAULT_SEARCH_FILTERS: SearchFilters = {
 };
 
 let latestSearchRequestSeq = 0;
-
 
 let communitiesInFlight: Promise<Entity[]> | null = null;
 const channelsInFlightByCommunity = new Map<string, Promise<Entity[]>>();
