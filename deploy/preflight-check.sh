@@ -58,19 +58,35 @@ else
 fi
 
 SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+PREFLIGHT_SSH_ATTEMPTS="${PREFLIGHT_SSH_ATTEMPTS:-6}"
+PREFLIGHT_SSH_RETRY_DELAY_SECS="${PREFLIGHT_SSH_RETRY_DELAY_SECS:-10}"
+PREFLIGHT_SSH_CONNECT_TIMEOUT_SECS="${PREFLIGHT_SSH_CONNECT_TIMEOUT_SECS:-20}"
 
 echo "Checking SSH connectivity..."
 SSH_OK=0
-for attempt in 1 2 3; do
-  if ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
+_PREFLIGHT_SSH_OPTS=(
+  -o BatchMode=yes
+  -o ConnectTimeout="${PREFLIGHT_SSH_CONNECT_TIMEOUT_SECS}"
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=3
+)
+if [[ -n "${DEPLOY_SSH_EXTRA_OPTS:-}" ]]; then
+  # shellcheck disable=SC2206 # split like shell args, e.g. "-o StrictHostKeyChecking=accept-new"
+  _DEPLOY_SSH_EXTRA_ARR=( ${DEPLOY_SSH_EXTRA_OPTS} )
+  _PREFLIGHT_SSH_OPTS+=( "${_DEPLOY_SSH_EXTRA_ARR[@]}" )
+fi
+for attempt in $(seq 1 "${PREFLIGHT_SSH_ATTEMPTS}"); do
+  if ssh "${_PREFLIGHT_SSH_OPTS[@]}" "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
     SSH_OK=1
     break
   fi
-  echo "SSH attempt ${attempt}/3 failed; retrying in 10s..."
-  sleep 10
+  if [[ "${attempt}" -lt "${PREFLIGHT_SSH_ATTEMPTS}" ]]; then
+    echo "SSH attempt ${attempt}/${PREFLIGHT_SSH_ATTEMPTS} failed; retrying in ${PREFLIGHT_SSH_RETRY_DELAY_SECS}s..."
+    sleep "${PREFLIGHT_SSH_RETRY_DELAY_SECS}"
+  fi
 done
 if [[ "$SSH_OK" -eq 0 ]]; then
-  echo "ERROR: Unable to SSH to ${SSH_TARGET} after 3 attempts."
+  echo "ERROR: Unable to SSH to ${SSH_TARGET} after ${PREFLIGHT_SSH_ATTEMPTS} attempts."
   echo "Check that port 22 is open in the cloud firewall/security group for this host."
   exit 1
 fi
@@ -129,8 +145,7 @@ case "$DATABASE_URL_VAL" in
 esac
 REMOTE_PROD
   fi
-} | ssh -o BatchMode=yes -o ConnectTimeout=25 -o StrictHostKeyChecking=yes \
-    "$SSH_TARGET" bash -s || {
+} | ssh "${_PREFLIGHT_SSH_OPTS[@]}" "$SSH_TARGET" bash -s || {
   echo "ERROR: Remote prerequisite checks failed."
   exit 1
 }
