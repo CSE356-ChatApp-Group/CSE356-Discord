@@ -358,7 +358,7 @@ sync_monitoring_post_steps() {
   for vm in "$VM1" "$VM2" "$VM3"; do
     ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
     if [ "$vm" = "$VM1" ]; then
-      ports=("${VM1_WORKER_PORTS[@]}" 9100 9126)
+      ports=("${VM1_WORKER_PORTS[@]}" 9100 9126 9113)
     fi
     if [ "${PROM_REDIS_HOST}" = "${VM1_INTERNAL}" ] && [ "$vm" = "$VM1" ]; then
       ports+=(9121)
@@ -423,6 +423,37 @@ sync_monitoring_post_steps() {
       echo 'WARN: monitoring VM cannot reach ${PROM_REDIS_HOST}:9121 (check firewall/security groups)'
     fi
   " || true
+
+  echo "Syncing app-VM remote-compose (node-exporter / promtail / edge nginx-exporter)..."
+  _rc_local="${SCRIPT_DIR}/../infrastructure/monitoring/remote-compose.yml"
+  for vm in "$VM1" "$VM2" "$VM3"; do
+    chatapp_scp_to_multi_vm "$vm" "${_rc_local}" "${PROD_USER}@${vm}:/tmp/remote-compose.yml.deploy" || true
+    if [ "$vm" = "$VM1" ]; then
+      ssh_vm "$vm" "
+        set -euo pipefail
+        if [ -f /tmp/remote-compose.yml.deploy ]; then
+          sudo mkdir -p /opt/chatapp-monitoring
+          sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
+          rm -f /tmp/remote-compose.yml.deploy
+        fi
+        if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
+          sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml --profile edge up -d --remove-orphans node-exporter promtail nginx-exporter
+        fi
+      " || echo "WARN: remote-compose / nginx-exporter refresh failed on ${vm}"
+    else
+      ssh_vm "$vm" "
+        set -euo pipefail
+        if [ -f /tmp/remote-compose.yml.deploy ]; then
+          sudo mkdir -p /opt/chatapp-monitoring
+          sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
+          rm -f /tmp/remote-compose.yml.deploy
+        fi
+        if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
+          sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml up -d --remove-orphans node-exporter promtail
+        fi
+      " || echo "WARN: remote-compose refresh failed on ${vm}"
+    fi
+  done
 }
 
 run_preflight_db_check() {

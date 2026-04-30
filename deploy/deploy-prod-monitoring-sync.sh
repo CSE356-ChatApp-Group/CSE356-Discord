@@ -185,7 +185,7 @@ ssh_prod "
     rm -f /tmp/promtail-host-config.yml.deploy
   fi
   if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
-    sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml up -d --remove-orphans node-exporter promtail >/dev/null
+    sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml --profile edge up -d --remove-orphans node-exporter promtail nginx-exporter >/dev/null
   fi
   if [ -f /tmp/redis_exporter_redis_url.py.deploy ]; then
     sudo install -m 755 /tmp/redis_exporter_redis_url.py.deploy /opt/chatapp-monitoring/redis_exporter_redis_url.py

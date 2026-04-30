@@ -32,3 +32,8 @@ patch_nginx_auth_non_idempotent() {
   _chatapp_scp_deploy_script_prod_tmp patch-nginx-auth-non-idempotent.py
   ssh_prod "sudo python3 /tmp/patch-nginx-auth-non-idempotent.py --site-path '${CHATAPP_NGINX_SITE_PATH}' --retry-full '${CHATAPP_NGINX_PROXY_RETRY_LINE}' --retry-legacy '${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}' && sudo rm -f /tmp/patch-nginx-auth-non-idempotent.py"
 }
+
+patch_nginx_stub_status() {
+  _chatapp_scp_deploy_script_prod_tmp patch-nginx-stub-status.py
+  ssh_prod "sudo python3 /tmp/patch-nginx-stub-status.py --site-path '${CHATAPP_NGINX_SITE_PATH}' && sudo rm -f /tmp/patch-nginx-stub-status.py"
+}

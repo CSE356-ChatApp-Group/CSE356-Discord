@@ -29,3 +29,14 @@ services:
       - /var/log:/var/log:ro
       - /opt/chatapp/shared/logs:/opt/chatapp/shared/logs:ro
       - ./promtail-host-config.yml:/etc/promtail/config.yml:ro
+
+  # Edge VM1 only: scrape stub_status on host (127.0.0.1:18080) after patch-nginx-stub-status.py.
+  # Use: docker compose --profile edge -f remote-compose.yml up -d nginx-exporter
+  nginx-exporter:
+    profiles: ["edge"]
+    image: nginx/nginx-prometheus-exporter:1.5.1
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --nginx.scrape-uri=http://127.0.0.1:18080/stub_status
+      - --web.listen-address=0.0.0.0:9113

@@ -607,7 +607,8 @@ python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
   --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
   --output "${PROM_BUILD_STG}" \
   --app-host "${PROM_APP_HOST}" \
-  --workers "${CHATAPP_INSTANCES}"
+  --workers "${CHATAPP_INSTANCES}" \
+  --omit-nginx-job
 scp -q "${PROM_BUILD_STG}" "${STAGING_USER}@${STAGING_DB_HOST}:/tmp/prometheus-host.yml.deploy" || true
 rm -f "${PROM_BUILD_STG}"
 ssh_staging_db "

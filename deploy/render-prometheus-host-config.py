@@ -6,6 +6,7 @@ Replaces:
   __CHATAPP_API_STATIC_CONFIGS__ — one chatapp-api scrape target per HTTP worker (4000..)
   __NODE_EXPORTER_TARGETS__      — node_exporter targets for all app VMs (with vm label in multi-VM)
   __PGBOUNCER_TARGETS__          — pgbouncer-exporter targets for all app VMs
+  __NGINX_JOB__                   — full nginx scrape job or empty (--omit-nginx-job)
 
 Single-VM mode (default, backward-compatible):
     render-prometheus-host-config.py --template ... --output ... --app-host IP --workers N
@@ -94,6 +95,16 @@ def _pgbouncer_targets(hosts_and_labels: list[tuple[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _nginx_job_yaml(vm1_host: str) -> str:
+    """Full prometheus scrape_configs entry for nginx-prometheus-exporter on VM1."""
+    return f"""  - job_name: 'nginx'
+    static_configs:
+      - targets: ['{vm1_host}:9113']
+        labels:
+          vm: vm1
+"""
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--template", type=Path, required=True)
@@ -110,6 +121,11 @@ def main() -> None:
     ap.add_argument("--vm2-workers", type=int, default=0, help="VM2 worker count (multi-VM mode)")
     ap.add_argument("--vm3-host", default="", help="VM3 private IP (multi-VM mode)")
     ap.add_argument("--vm3-workers", type=int, default=0, help="VM3 worker count (multi-VM mode)")
+    ap.add_argument(
+        "--omit-nginx-job",
+        action="store_true",
+        help="Leave __NGINX_JOB__ empty (staging / no edge exporter)",
+    )
     args = ap.parse_args()
 
     text = args.template.read_text(encoding="utf-8")
@@ -121,6 +137,8 @@ def main() -> None:
         raise SystemExit("template missing __NODE_EXPORTER_TARGETS__ marker")
     if "__PGBOUNCER_TARGETS__" not in text:
         raise SystemExit("template missing __PGBOUNCER_TARGETS__ marker")
+    if "__NGINX_JOB__" not in text:
+        raise SystemExit("template missing __NGINX_JOB__ marker")
 
     # Multi-VM mode: --vm1-workers triggers it; falls back to single-VM if only --workers given
     vm1_workers = args.vm1_workers if args.vm1_workers > 0 else args.workers
@@ -145,12 +163,15 @@ def main() -> None:
         node_config = _node_exporter_targets([(args.app_host, "vm1")])
         pgb_config = _pgbouncer_targets([(args.app_host, "vm1")])
 
+    nginx_job = "" if args.omit_nginx_job else _nginx_job_yaml(args.app_host)
+
     redis_host = args.redis_host or args.app_host
 
     text = text.replace("__CHATAPP_API_STATIC_CONFIGS__", api_config)
     text = text.replace("__PROM_REDIS_HOST__", redis_host)
     text = text.replace("__NODE_EXPORTER_TARGETS__", node_config)
     text = text.replace("__PGBOUNCER_TARGETS__", pgb_config)
+    text = text.replace("__NGINX_JOB__", nginx_job)
     args.output.write_text(text, encoding="utf-8")
 
 

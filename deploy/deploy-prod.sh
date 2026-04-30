@@ -1053,6 +1053,11 @@ echo "9.075 Nginx: ensure auth proxy_next_upstream includes non_idempotent..."
 patch_nginx_auth_non_idempotent
 echo "✓ Nginx auth POST retry OK"
 
+# 9.076 Idempotent: localhost stub_status for nginx-prometheus-exporter (remote-compose edge profile).
+echo "9.076 Nginx: ensure localhost stub_status (:18080) for edge metrics..."
+patch_nginx_stub_status
+echo "✓ Nginx stub_status for exporter OK"
+
 # 9b–9c. Multi-worker: roll all workers to this release, then verify parity.
 if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then
   if [ "${ROLLING_RESTART:-false}" = "true" ]; then
