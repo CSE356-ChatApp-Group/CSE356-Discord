@@ -1165,7 +1165,7 @@ describe('Channel realtime delivery', () => {
     });
   });
 
-  it('does not deliver channel read:updated to other channel members', async () => {
+  it('delivers channel read:updated to other channel members', async () => {
     const owner = await createAuthenticatedUser('wsreadprivowner');
     const member = await createAuthenticatedUser('wsreadprivmember');
 
@@ -1208,13 +1208,12 @@ describe('Channel realtime delivery', () => {
           && e.data?.lastReadMessageId === messageId,
       );
 
-      const ownerSeesNoRead = waitForNoWsEvent(
+      const ownerReadPromise = waitForWsEvent(
         ownerSocket,
         (e) =>
           e.event === 'read:updated'
           && e.data?.channelId === channelId
           && e.data?.lastReadMessageId === messageId,
-        1500,
       );
 
       const readRes = await request(app)
@@ -1223,7 +1222,9 @@ describe('Channel realtime delivery', () => {
 
       expect(readRes.status).toBe(200);
       await memberReadPromise;
-      await ownerSeesNoRead;
+      const ownerReadEvent = await ownerReadPromise;
+      expect(ownerReadEvent.data.userId).toBe(member.user.id);
+      expect(ownerReadEvent.data.channelId).toBe(channelId);
     } finally {
       await closeWebSocket(ownerSocket);
       await closeWebSocket(memberSocket);

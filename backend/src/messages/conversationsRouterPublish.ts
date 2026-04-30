@@ -60,7 +60,7 @@ async function publishConversationInviteNotifications(
 ) {
   // Emit compatibility aliases because different clients/tests may listen for
   // either invited/invite/created when a user is added to a DM conversation.
-  const inviteEvents = ['conversation:invited', 'conversation:invite', 'conversation:created'];
+  const inviteEvents = ['conversation:invited', 'conversation:invite', 'conversation:created', 'dm:invite'];
   const payloads = inviteEvents.map((event) => wrapFanoutPayload(event, data));
   const uniqueTargets = [...new Set((Array.isArray(targets) ? targets : []).filter(Boolean))];
   if (!uniqueTargets.length) return;

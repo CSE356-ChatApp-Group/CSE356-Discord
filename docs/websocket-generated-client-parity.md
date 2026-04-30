@@ -34,9 +34,9 @@ The reference client:
 | `message:updated` / `message:deleted` | Emitted with DB-shaped rows; outbound frames include `channel: <logical-topic>` for delete routing when ids are only on the topic. |
 | `read:updated` | Emitted with `userId`, `channelId`, `conversationId`, `lastReadMessageId` as needed for read-receipt handlers. |
 | `presence:updated` | Fanout with `data.userId`, `data.status`, etc.; inbound `{ type: 'presence' \| 'away_message' }` is accepted on the socket. |
-| DM / conversation invites | `conversation:invited`, `conversation:invite`, `conversation:created` (and related) published for invite flows ([`conversationsRouter.ts`](../backend/src/messages/conversationsRouter.ts)). |
+| DM / conversation invites | `conversation:invited`, `conversation:invite`, `conversation:created`, and `dm:invite` are published for invite flows ([`conversationsRouter.ts`](../backend/src/messages/conversationsRouter.ts), [`conversationsRouterPublish.ts`](../backend/src/messages/conversationsRouterPublish.ts)). |
 | `__wsInternal.subscribe_channels` on wire | After server-side auto-subscribe, the same internal payload is **sent to the browser** so the client’s post-`ready` invite path can run ([`redisPubsubDelivery.ts`](../backend/src/websocket/redisPubsubDelivery.ts)). |
-| Community join on `community:` topic | On `POST /communities/:id/join`, the server publishes **`community:member_joined`** (legacy name), **`community:joined`**, and **`community:member_added`** with the same `{ userId, communityId }` payload ([`communities/router.ts`](../backend/src/communities/router.ts)). The client’s `switch` includes `community:joined` and `community:member_added` but **not** `community:member_joined`; the extra names exist so `onInvite` fires without client edits. |
+| Community join on `community:` topic | On `POST /communities/:id/join`, the server publishes **`community:member_joined`** (legacy name), **`community:joined`**, **`community:member_added`**, and **`community:invite`** with the same `{ userId, communityId }` payload ([`communityShared.ts`](../backend/src/communities/communityShared.ts)). The client’s `switch` includes `community:invite`, `community:joined`, and `community:member_added`; the legacy name remains for backward compatibility. |
 
 ## Optional: `REALTIME_EVENT_ALIAS_FANOUT`
 
@@ -60,13 +60,7 @@ These are **not** required for correct behavior against the current server; they
 2. **Deduplicate `onInvite` for the same `community:<id>`**  
    **Reason:** A member may receive **`subscribe_channels`** (with `community:<id>`) **and** one or more community-topic events (`community:joined`, `community:member_added`, …) in quick succession. Coalescing by id prevents double UI or double harness assertions.
 
-3. **`community:invite` server event**  
-   **Reason:** The client has a branch for `community:invite`, but the API does not currently emit that name for join; invites are covered by `joined` / `member_added` / `__wsInternal`. If you add a dedicated “invited to community” realtime path on the server, either emit `community:invite` or remove the unused client case.
-
-4. **`dm:invite`**  
-   **Reason:** Same as above: client supports it; server uses `conversation:*` names. Optional alignment only.
-
-5. **Document cookie vs token for WS**  
+3. **Document cookie vs token for WS**  
    **Reason:** Avoids the assumption that cookies authenticate the WebSocket; today **token is required** on `/ws`.
 
 ## Related env documentation

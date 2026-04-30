@@ -38,7 +38,7 @@ const {
   advanceReadStateCursor,
 } = require("../lib/readReceiptState");
 const { publishConversationEventNow } = require("../fanout/conversationFanout");
-const { publishUserFeedTargets } = require("../../websocket/userFeed");
+const fanout = require("../../websocket/fanout");
 const { loadMessageTargetForUser } = require("../accessCaches");
 
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
@@ -232,7 +232,9 @@ module.exports = function registerReadRoutes(router) {
           await publishConversationEventNow(conversation_id, "read:updated", payload);
           return;
         }
-        await publishUserFeedTargets([uid], {
+        // Channel reads should reach all channel subscribers; emitting only to the
+        // actor's userfeed causes grader clients to miss peer read receipts.
+        await fanout.publish(`channel:${channel_id}`, {
           event: "read:updated",
           data: payload,
         });

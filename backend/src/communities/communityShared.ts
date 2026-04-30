@@ -220,6 +220,10 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
       event: "community:joined",
       data: communityJoinPayload,
     });
+    await publishCommunityFeedMessage(communityId, {
+      event: "community:invite",
+      data: communityJoinPayload,
+    });
     // GeneratedClient handleWsMessage matches community:invite | community:joined |
     // community:member_added (not community:member_joined). Emit member_added so
     // onInvite fires without relying on __wsInternal-only paths.
