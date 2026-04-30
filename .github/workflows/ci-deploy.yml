@@ -29,6 +29,7 @@ jobs:
         run: |
           bash -n deploy/preflight-check.sh
           bash -n deploy/inventory-defaults.sh
+          bash -n deploy/deploy-prod-remote-sizing.sh
           bash -n deploy/deploy-prod-rolling.sh
           bash -n deploy/deploy-prod-nginx-patches.sh
           bash -n deploy/deploy-staging.sh
@@ -36,6 +37,18 @@ jobs:
           bash -n deploy/deploy-prod-multi.sh
           bash -n deploy/deploy-prod-multi-emergency.sh
           bash -n deploy/deploy-prod-multi-fast-stabilize.sh
+          bash -n deploy/deploy-common.sh
+          bash -n deploy/rollback.sh
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck deploy/inventory-defaults.sh \
+            deploy/deploy-prod-remote-sizing.sh \
+            deploy/deploy-prod-rolling.sh \
+            deploy/deploy-prod-nginx-patches.sh \
+            deploy/deploy-common.sh \
+            deploy/rollback.sh
           bash -n scripts/ops/prod-observe.sh
           bash -n scripts/ops/prod-nginx-audit.sh
           bash -n scripts/ops/prod-observe-loop.sh

@@ -1,4 +1,4 @@
-# deploy/rollback.sh — sourced by deploy-prod.sh after deploy-common.sh
+# deploy/rollback.sh - sourced by deploy-prod.sh after deploy-common.sh
 # Uses: ssh_prod, chatapp_scp_to_prod, capture_previous_release_map, rewrite_nginx_upstream,
 #       deploy_log_phase, notify_discord_prod, gate_* , RELEASE_*, PROD_*, TARGET_PORTS, etc.
 # shellcheck shell=bash
@@ -21,13 +21,13 @@ do_fast_rollback() {
     ssh_prod "ls -1t '${RELEASE_DIR}' 2>/dev/null | head -10" || true
     exit 1
   fi
-  echo "✓ Release found on server"
+  echo "OK: Release found on server"
 
   # Ensure health-check.sh is in place on the server
   chatapp_scp_to_prod "${SCRIPT_DIR}/health-check.sh" "${PROD_USER}@${PROD_HOST}:/tmp/health-check.sh"
   ssh_prod "chmod +x /tmp/health-check.sh"
 
-  notify_discord_prod ":arrow_left: **Prod rollback starting** \`${sha:0:7}\` · ${CHATAPP_INSTANCES} workers"
+  notify_discord_prod ":arrow_left: **Prod rollback starting** \`${sha:0:7}\` | ${CHATAPP_INSTANCES} workers"
   deploy_log_phase "rollback: beginning rolling worker swap"
 
   # Reapply the release-owned env profile when present. Runtime env lives in
@@ -105,19 +105,19 @@ do_fast_rollback() {
 
   # Update current symlink to the rollback release
   ssh_prod "ln -sfn '${release_path}' '${CURRENT_LINK}'" \
-    && echo "✓ /opt/chatapp/current → ${sha}" \
+    && echo "OK: /opt/chatapp/current -> ${sha}" \
     || echo "WARN: symlink update failed (non-fatal)"
 
   # Final verification gates
   if gate_all_worker_health && gate_upstream_parity && gate_same_release; then
     local _rb_done
     _rb_done=$(date +%s)
-    notify_discord_prod ":white_check_mark: **Prod rollback complete** \`${sha:0:7}\` · $((${_rb_done} - ${_DEPLOY_T0}))s"
+    notify_discord_prod ":white_check_mark: **Prod rollback complete** \`${sha:0:7}\` | $((_rb_done - _DEPLOY_T0))s"
     echo ""
     echo "=== Rollback Complete ==="
     echo "Production is now running: ${sha}"
   else
-    echo "ERROR: Final gates failed after rollback — production may be degraded."
+    echo "ERROR: Final gates failed after rollback - production may be degraded."
     echo "       Manual intervention required: check journalctl -u 'chatapp@*' on ${PROD_HOST}"
     exit 1
   fi

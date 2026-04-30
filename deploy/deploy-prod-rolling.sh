@@ -36,7 +36,7 @@ if not ports:
 # Keepalive tuning for performance: lower pool size + shorter lifetime force faster
 # connection rotation and more even distribution of new requests across workers.
 # This is especially important in multi-worker setups to avoid connection reuse bias.
-# Nginx has no "round_robin" directive; default multi-upstream scheduling is round-robin.
+# Nginx has no explicit round_robin keyword; default multi-upstream scheduling is round-robin.
 keepalive = '''  keepalive 16;
   keepalive_requests 100;
   keepalive_timeout 10s;
@@ -383,5 +383,6 @@ rollback_cutover() {
   restore_previous_release_map || true
   restore_previous_upstream_topology || true
   reclaim_spare_candidate_on_rollback || true
+  # shellcheck disable=SC2034 # deploy-prod.sh reads after rollback_cutover (trap/cleanup)
   NGINX_CANDIDATE_PIN_ACTIVE=0
 }

@@ -14,7 +14,7 @@ This document describes the staged deployment pipeline for ChatApp:
 
 **Infrastructure inventory:** see [docs/infrastructure-inventory.md](../docs/infrastructure-inventory.md) for current VM shapes (staging, prod, runners).
 
-**Prod deploy shell layout:** default prod IPs live in [`deploy/inventory-defaults.sh`](./inventory-defaults.sh) (override with env; keep aligned with the inventory doc). Rolling nginx upstream edits, health gates, worker restart, and `rollback_cutover` live in [`deploy/deploy-prod-rolling.sh`](./deploy-prod-rolling.sh). Idempotent nginx Python patch steps live in [`deploy/deploy-prod-nginx-patches.sh`](./deploy-prod-nginx-patches.sh). [`deploy/deploy-prod.sh`](./deploy-prod.sh) wires phases and sources those modules.
+**Prod deploy shell layout:** default prod IPs live in [`deploy/inventory-defaults.sh`](./inventory-defaults.sh) (override with env; keep aligned with the inventory doc). Remote pool sizing and Node heap tuning (SSH reads + derived env) live in [`deploy/deploy-prod-remote-sizing.sh`](./deploy-prod-remote-sizing.sh), sourced early from [`deploy/deploy-prod.sh`](./deploy-prod.sh). Rolling nginx upstream edits, health gates, worker restart, and `rollback_cutover` live in [`deploy/deploy-prod-rolling.sh`](./deploy-prod-rolling.sh). Idempotent nginx Python patch steps live in [`deploy/deploy-prod-nginx-patches.sh`](./deploy-prod-nginx-patches.sh). `deploy-prod.sh` wires phases and sources those modules.
 
 ## Architecture Overview
 

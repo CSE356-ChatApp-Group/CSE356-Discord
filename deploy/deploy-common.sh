@@ -14,7 +14,9 @@
 # Use proxy_next_upstream_tries 0 (nginx default semantics: try all peers in the group).
 # tries=2 breaks multi-VM rolling deploys: least_conn can pick two restarting workers →
 # connect() refused to upstream while other workers are healthy.
+# shellcheck disable=SC2034 # read by preflight-check.sh and deploy-prod-nginx-patches.sh after sourcing
 CHATAPP_NGINX_PROXY_RETRY_LINE='proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;'
+# shellcheck disable=SC2034
 CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY='proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;'
 
 # --- Multiplexed scp to a prod-family VM (ControlPath must match deploy-prod-multi.sh ssh_vm). ---
