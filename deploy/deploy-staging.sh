@@ -28,6 +28,9 @@ DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-
 # shellcheck source=deploy-common.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/deploy-common.sh"
+# shellcheck source=deploy-monitoring-shared.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/deploy-monitoring-shared.sh"
 
 ssh_staging_db() {
   ssh -o BatchMode=yes -o ConnectTimeout=25 "${STAGING_USER}@${STAGING_DB_HOST}" "$@"
@@ -603,12 +606,12 @@ echo "7a) Monitoring: staging DB VM stack + app VM (node-exporter, promtail, red
 PROM_BUILD_STG="$(mktemp)"
 PROM_APP_HOST="${STAGING_PROM_APP_HOST:-$(chatapp_ssh_staging_app 'hostname -I 2>/dev/null' | awk '{print $1}')}"
 PROM_APP_HOST="${PROM_APP_HOST:-10.128.0.2}"
-python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
-  --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
-  --output "${PROM_BUILD_STG}" \
-  --app-host "${PROM_APP_HOST}" \
-  --workers "${CHATAPP_INSTANCES}" \
-  --omit-nginx-job
+deploy_render_prometheus_host_config \
+  "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
+  "${PROM_BUILD_STG}" \
+  "${PROM_APP_HOST}" \
+  "${CHATAPP_INSTANCES}" \
+  "1"
 scp -q "${PROM_BUILD_STG}" "${STAGING_USER}@${STAGING_DB_HOST}:/tmp/prometheus-host.yml.deploy" || true
 rm -f "${PROM_BUILD_STG}"
 ssh_staging_db "
@@ -734,7 +737,7 @@ chatapp_ssh_staging_app "
     rm -f /tmp/promtail-host-config.yml.deploy
   fi
   if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
-    sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml up -d --remove-orphans node-exporter promtail >/dev/null 2>&1 || true
+    $(deploy_monitoring_remote_compose_up_cmd "/opt/chatapp-monitoring/remote-compose.yml" "0") >/dev/null 2>&1 || true
   fi
   if sudo docker ps -a --format '{{.Names}}' | grep -qx redis_exporter; then
     sudo docker rm -f redis_exporter 2>/dev/null || true

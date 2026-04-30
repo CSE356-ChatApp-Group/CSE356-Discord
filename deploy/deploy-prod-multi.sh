@@ -116,6 +116,9 @@ DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-
 # shellcheck source=deploy-common.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/deploy-common.sh"
+# shellcheck source=deploy-monitoring-shared.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/deploy-monitoring-shared.sh"
 
 ssh_vm() {
   local host="$1"; shift
@@ -276,16 +279,18 @@ emergency_quick_final_check() {
 sync_monitoring_stack() {
   echo "=== Phase 5: Sync monitoring stack to monitoring VM (${MONITORING_VM_HOST}) ==="
   PROM_BUILD="$(mktemp)"
-  python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
-    --template "${SCRIPT_DIR}/../infrastructure/monitoring/prometheus-host.yml" \
-    --output "${PROM_BUILD}" \
-    --app-host "${VM1_INTERNAL}" \
-    --redis-host "${PROM_REDIS_HOST}" \
-    --vm1-workers 4 \
-    --vm2-host "${VM2_INTERNAL}" \
-    --vm2-workers 6 \
-    --vm3-host "${VM3_INTERNAL}" \
-    --vm3-workers 6
+  deploy_render_prometheus_host_config \
+    "${SCRIPT_DIR}/../infrastructure/monitoring/prometheus-host.yml" \
+    "${PROM_BUILD}" \
+    "${VM1_INTERNAL}" \
+    "0" \
+    "0" \
+    "4" \
+    "${VM2_INTERNAL}" \
+    "6" \
+    "${VM3_INTERNAL}" \
+    "6" \
+    "${PROM_REDIS_HOST}"
   # shellcheck disable=SC2086
   push_monitoring_artifact "${PROM_BUILD}" "/tmp/prometheus-host.yml.deploy"
   rm -f "${PROM_BUILD}"
@@ -427,32 +432,19 @@ sync_monitoring_post_steps() {
   echo "Syncing app-VM remote-compose (node-exporter / promtail / edge nginx-exporter)..."
   _rc_local="${SCRIPT_DIR}/../infrastructure/monitoring/remote-compose.yml"
   for vm in "$VM1" "$VM2" "$VM3"; do
+    _compose_cmd="$(deploy_monitoring_remote_compose_up_cmd "/opt/chatapp-monitoring/remote-compose.yml" "$([ "$vm" = "$VM1" ] && echo 1 || echo 0)")"
     chatapp_scp_to_multi_vm "$vm" "${_rc_local}" "${PROD_USER}@${vm}:/tmp/remote-compose.yml.deploy" || true
-    if [ "$vm" = "$VM1" ]; then
-      ssh_vm "$vm" "
-        set -euo pipefail
-        if [ -f /tmp/remote-compose.yml.deploy ]; then
-          sudo mkdir -p /opt/chatapp-monitoring
-          sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
-          rm -f /tmp/remote-compose.yml.deploy
-        fi
-        if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
-          sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml --profile edge up -d --remove-orphans node-exporter promtail nginx-exporter
-        fi
-      " || echo "WARN: remote-compose / nginx-exporter refresh failed on ${vm}"
-    else
-      ssh_vm "$vm" "
-        set -euo pipefail
-        if [ -f /tmp/remote-compose.yml.deploy ]; then
-          sudo mkdir -p /opt/chatapp-monitoring
-          sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
-          rm -f /tmp/remote-compose.yml.deploy
-        fi
-        if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
-          sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml up -d --remove-orphans node-exporter promtail
-        fi
-      " || echo "WARN: remote-compose refresh failed on ${vm}"
-    fi
+    ssh_vm "$vm" "
+      set -euo pipefail
+      if [ -f /tmp/remote-compose.yml.deploy ]; then
+        sudo mkdir -p /opt/chatapp-monitoring
+        sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
+        rm -f /tmp/remote-compose.yml.deploy
+      fi
+      if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
+        ${_compose_cmd}
+      fi
+    " || echo "WARN: remote-compose refresh failed on ${vm}"
   done
 }
 

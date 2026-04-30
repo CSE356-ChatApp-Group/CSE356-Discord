@@ -4,6 +4,10 @@
 # Sourced after deploy-common (scp helpers) and ssh_monitor / ssh_prod exist.
 # shellcheck shell=bash
 
+# shellcheck source=deploy-monitoring-shared.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/deploy-monitoring-shared.sh"
+
 deploy_prod_start_monitoring_refresh_background() {
   local REPO_ROOT
   REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -23,24 +27,24 @@ PROM_BUILD="$(mktemp)"
 PROM_APP_HOST="${PROM_APP_HOST:-$(ssh_prod 'hostname -I 2>/dev/null' | awk '{print $1}')}"
 PROM_APP_HOST="${PROM_APP_HOST:-10.0.0.237}"
 if [ "${PROM_VM1_WORKERS:-0}" -gt 0 ]; then
-  PROM_EXTRA_ARGS=""
-  [ -n "${PROM_VM2_HOST:-}" ] && [ "${PROM_VM2_WORKERS:-0}" -gt 0 ] && \
-    PROM_EXTRA_ARGS="$PROM_EXTRA_ARGS --vm2-host ${PROM_VM2_HOST} --vm2-workers ${PROM_VM2_WORKERS}"
-  [ -n "${PROM_VM3_HOST:-}" ] && [ "${PROM_VM3_WORKERS:-0}" -gt 0 ] && \
-    PROM_EXTRA_ARGS="$PROM_EXTRA_ARGS --vm3-host ${PROM_VM3_HOST} --vm3-workers ${PROM_VM3_WORKERS}"
-  # shellcheck disable=SC2086
-  python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
-    --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
-    --output "${PROM_BUILD}" \
-    --app-host "${PROM_APP_HOST}" \
-    --vm1-workers "${PROM_VM1_WORKERS}" \
-    $PROM_EXTRA_ARGS
+  deploy_render_prometheus_host_config \
+    "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
+    "${PROM_BUILD}" \
+    "${PROM_APP_HOST}" \
+    "0" \
+    "0" \
+    "${PROM_VM1_WORKERS}" \
+    "${PROM_VM2_HOST:-}" \
+    "${PROM_VM2_WORKERS:-0}" \
+    "${PROM_VM3_HOST:-}" \
+    "${PROM_VM3_WORKERS:-0}"
 else
-  python3 "${SCRIPT_DIR}/render-prometheus-host-config.py" \
-    --template "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
-    --output "${PROM_BUILD}" \
-    --app-host "${PROM_APP_HOST}" \
-    --workers "${CHATAPP_INSTANCES}"
+  deploy_render_prometheus_host_config \
+    "${REPO_ROOT}/infrastructure/monitoring/prometheus-host.yml" \
+    "${PROM_BUILD}" \
+    "${PROM_APP_HOST}" \
+    "${CHATAPP_INSTANCES}" \
+    "0"
 fi
 
 # 10.6. Push rendered prometheus-host.yml to the monitoring VM and reload Prometheus.
@@ -185,7 +189,7 @@ ssh_prod "
     rm -f /tmp/promtail-host-config.yml.deploy
   fi
   if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
-    sudo docker compose -f /opt/chatapp-monitoring/remote-compose.yml --profile edge up -d --remove-orphans node-exporter promtail nginx-exporter >/dev/null
+    $(deploy_monitoring_remote_compose_up_cmd "/opt/chatapp-monitoring/remote-compose.yml" "1") >/dev/null
   fi
   if [ -f /tmp/redis_exporter_redis_url.py.deploy ]; then
     sudo install -m 755 /tmp/redis_exporter_redis_url.py.deploy /opt/chatapp-monitoring/redis_exporter_redis_url.py
