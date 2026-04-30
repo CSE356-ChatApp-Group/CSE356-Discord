@@ -92,6 +92,8 @@ const { resolvedWsRuntimeConfig } = require("./profile");
 const { allCommunityFeedRedisChannels } = require("./communityFeed");
 const { createWsHotLogger } = require("./hotLog");
 const { createReplayAdmissionState } = require("./replayAdmissionState");
+const { createWsAclCacheStore } = require("./aclCacheStore");
+const { createRedisSubscriptionRegistry } = require("./subscriptionRegistry");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -184,19 +186,6 @@ function cancelPendingPresenceRecompute(userId: string) {
 }
 let shuttingDown = false;
 
-// ── WS ACL in-process cache ────────────────────────────────────────────────────
-// Caches the result of isAllowedChannel to avoid a DB round-trip on every
-// subscribe message.  Keys are `${userId}:${channel}`.  A 30 s TTL is safe
-// because membership changes (join/leave/delete) explicitly call
-// invalidateWsAclCache() before the client is notified.
-//
-// Bursty clients (e.g. automation that spams subscribe) are handled by (1)
-// warming this cache from the same list used for auto-bootstrap, and (2)
-// coalescing concurrent isAllowedChannel calls for the same key so only one
-// DB query runs per cache miss.
-const aclCache: Map<string, { allowed: boolean; expiresAt: number }> = new Map();
-/** In-flight ACL lookups — shared waiters get the same Promise (thundering herd guard). */
-const aclCheckInFlight: Map<string, Promise<boolean>> = new Map();
 const wsHotLogger = createWsHotLogger({
   logger,
   isRuntimeLogCategoryEnabled,
@@ -232,76 +221,20 @@ const {
   endReplayForIp,
   waitForReplayGateOpen,
 } = replayAdmissionState;
-
-function aclCacheKey(userId: string, channel: string) {
-  return `${userId}:${channel}`;
-}
-
-function aclRedisCacheKey(userId: string, channel: string) {
-  return `ws:acl:${userId}:${channel}`;
-}
-
-function parseAclRedisValue(raw: string | null): boolean | null {
-  if (raw === "1") return true;
-  if (raw === "0") return false;
-  return null;
-}
-
-function setAclDecisionLocal(userId: string, channel: string, allowed: boolean) {
-  const key = aclCacheKey(userId, channel);
-  if (aclCache.size >= ACL_CACHE_MAX_ENTRIES) {
-    const oldestKey = aclCache.keys().next().value;
-    if (oldestKey) aclCache.delete(oldestKey);
-  }
-  aclCache.set(key, { allowed, expiresAt: Date.now() + ACL_CACHE_TTL_MS });
-}
-
-function setAclDecisionShared(userId: string, channel: string, allowed: boolean) {
-  if (WS_ACL_REDIS_TTL_SECS <= 0) return;
-  redis.set(
-    aclRedisCacheKey(userId, channel),
-    allowed ? "1" : "0",
-    "EX",
-    WS_ACL_REDIS_TTL_SECS,
-  ).catch(() => {});
-}
-
-function setAclDecision(
-  userId: string,
-  channel: string,
-  allowed: boolean,
-  opts: { writeShared?: boolean } = {},
-) {
-  setAclDecisionLocal(userId, channel, allowed);
-  if (opts.writeShared !== false) {
-    setAclDecisionShared(userId, channel, allowed);
-  }
-}
-
-async function readAclSharedCacheEntry(userId: string, channel: string): Promise<boolean | null> {
-  if (WS_ACL_REDIS_TTL_SECS <= 0) return null;
-  try {
-    return parseAclRedisValue(await redis.get(aclRedisCacheKey(userId, channel)));
-  } catch {
-    return null;
-  }
-}
-
-/** Mark channels as allowed — same membership projection as listAutoSubscriptionChannels. */
-function warmWsAclCacheFromChannelList(userId: string, channels: string[]) {
-  for (const channel of channels) {
-    // Bootstrap warming is local-only to avoid high Redis write volume on reconnect bursts.
-    setAclDecision(userId, channel, true, { writeShared: false });
-  }
-}
-
-function invalidateWsAclCache(userId: string, channel: string) {
-  const key = aclCacheKey(userId, channel);
-  aclCache.delete(key);
-  aclCheckInFlight.delete(key);
-  if (WS_ACL_REDIS_TTL_SECS <= 0) return;
-  redis.del(aclRedisCacheKey(userId, channel)).catch(() => {});
-}
+const {
+  aclCache,
+  aclCheckInFlight,
+  aclCacheKey,
+  readAclSharedCacheEntry,
+  setAclDecision,
+  warmWsAclCacheFromChannelList,
+  invalidateWsAclCache,
+} = createWsAclCacheStore({
+  redis,
+  aclCacheTtlMs: ACL_CACHE_TTL_MS,
+  aclCacheMaxEntries: ACL_CACHE_MAX_ENTRIES,
+  wsAclRedisTtlSecs: WS_ACL_REDIS_TTL_SECS,
+});
 
 async function evictUnauthorizedChannelSubscribers(channelId) {
   const redisChannel = `channel:${channelId}`;
@@ -328,14 +261,6 @@ async function evictUnauthorizedChannelSubscribers(channelId) {
     }),
   );
 }
-
-// Evict expired entries periodically to prevent unbounded growth.
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of aclCache) {
-    if (v.expiresAt <= now) aclCache.delete(k);
-  }
-}, 60_000).unref();
 
 function isRedisOperational(client) {
   return ["wait", "connecting", "connect", "ready", "reconnecting"].includes(
@@ -482,18 +407,18 @@ const localUserClients = new Map(); // userId → Set<WebSocket>
 // Sharded community feed membership. Keyed by communityId (without prefix).
 const communityClients = new Map(); // communityId → Set<WebSocket>
 
-/**
- * Keep track of which Redis channels this process has subscribed to.
- * ioredis re-uses one SUBSCRIBE connection; calling subscribe multiple
- * times for the same channel is a no-op.
- */
-const redisSubscribed = new Set();
-const redisSubscribeInFlight = new Map();
 const USER_FEED_SHARD_CHANNELS = allUserFeedRedisChannels();
 const USER_FEED_SHARD_CHANNEL_SET = new Set(USER_FEED_SHARD_CHANNELS);
 const COMMUNITY_FEED_SHARD_CHANNELS = allCommunityFeedRedisChannels();
 const COMMUNITY_FEED_SHARD_CHANNEL_SET = new Set(COMMUNITY_FEED_SHARD_CHANNELS);
 let wsStartupPromise: Promise<void> | null = null;
+const {
+  ensureRedisChannelSubscribed,
+  releaseRedisChannelSubscription,
+} = createRedisSubscriptionRegistry({
+  redisSub,
+  isRedisOperational,
+});
 
 const {
   shouldSkipSocketForLogicalChannel,
@@ -715,34 +640,6 @@ const {
   WS_BOOTSTRAP_CACHE_TTL_SECONDS,
   WS_BOOTSTRAP_BATCH_SIZE,
 });
-
-function hasLocalSubscribers(redisChannel) {
-  return (channelClients.get(redisChannel)?.size || 0) > 0;
-}
-
-async function ensureRedisChannelSubscribed(redisChannel) {
-  if (redisSubscribed.has(redisChannel)) return;
-
-  if (redisSubscribeInFlight.has(redisChannel)) {
-    await redisSubscribeInFlight.get(redisChannel);
-    return;
-  }
-
-  if (!isRedisOperational(redisSub)) {
-    throw new Error("Redis subscriber is not available");
-  }
-
-  const op = Promise.resolve(redisSub.subscribe(redisChannel))
-    .then(() => {
-      redisSubscribed.add(redisChannel);
-    })
-    .finally(() => {
-      redisSubscribeInFlight.delete(redisChannel);
-    });
-
-  redisSubscribeInFlight.set(redisChannel, op);
-  await op;
-}
 
 async function ensureUserFeedShardSubscriptions() {
   await Promise.all([
@@ -1248,10 +1145,7 @@ async function unsubscribeClient(ws, redisChannel) {
     channelClients.delete(redisChannel);
     // No local subscribers remain — release the Redis subscription so the
     // subscriber connection doesn't accumulate channels indefinitely.
-    if (redisSubscribed.has(redisChannel) && isRedisOperational(redisSub)) {
-      redisSubscribed.delete(redisChannel);
-      redisSub.unsubscribe(redisChannel).catch(() => {});
-    }
+    releaseRedisChannelSubscription(redisChannel);
   }
 }
 
