@@ -5,6 +5,7 @@ import { useAuthStore  } from '../stores/authStore';
 import { api, invalidateApiCache, resolveApiAbsolutePath } from '../lib/api';
 import { wsManager } from '../lib/ws';
 import { readPresenceIntent, writePresenceIntent } from '../lib/presenceIntent';
+import { isConversationUnread } from '../lib/unread';
 import Modal from './Modal';
 import styles from './CommunitySidebar.module.css';
 
@@ -539,16 +540,6 @@ function communityHasUnreadChannels(community) {
   if (hasActivity) return true;
   const unreadCount = Number(community.unread_channel_count ?? community.unreadChannelCount ?? 0);
   return Boolean(community.has_unread_channels ?? community.hasUnreadChannels ?? unreadCount > 0);
-}
-
-function isConversationUnread(conv, active, currentUserId) {
-  if (active) return false;
-  const lastMessageAuthorId = conv?.last_message_author_id || conv?.lastMessageAuthorId;
-  const lastMessageId = conv?.last_message_id || conv?.lastMessageId;
-  const myLastReadMessageId = conv?.my_last_read_message_id || conv?.myLastReadMessageId;
-  if (!lastMessageId) return false;
-  if (lastMessageAuthorId === currentUserId) return false;
-  return myLastReadMessageId !== lastMessageId;
 }
 
 function CommunityIcon({ community, unread, active, onClick }) {

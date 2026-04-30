@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { api } from '../lib/api';
+import { getEntityUnreadCountWithFallback } from '../lib/unread';
 import Modal from './Modal';
 import styles from './ChannelSidebar.module.css';
 
@@ -161,7 +162,7 @@ export default function ChannelSidebar() {
                 channel={ch}
                 active={activeChannel?.id === ch.id}
                 canAccess={canAccess}
-                unreadCount={getChannelUnreadCount(ch, activeChannel?.id === ch.id)}
+                unreadCount={getChannelUnreadCount(ch, activeChannel?.id === ch.id, user?.id)}
                 canDelete={canManage}
                 onDelete={() => setChannelToDelete(ch)}
                 onClick={() => {
@@ -192,7 +193,7 @@ export default function ChannelSidebar() {
                 key={conv.id}
                 conv={conv}
                 currentUserId={user?.id}
-                unread={isConversationUnread(conv, activeConv?.id === conv.id, user?.id)}
+                unreadCount={getConversationUnreadCount(conv, activeConv?.id === conv.id, user?.id)}
                 active={activeConv?.id === conv.id}
                 onClick={() => selectConversation(conv)}
               />
@@ -391,40 +392,32 @@ function isCommunityOwner(community) {
   return role === 'owner';
 }
 
-function getChannelUnreadCount(channel, active): number {
-  if (active) return 0;
+function getChannelUnreadCount(channel, active, currentUserId): number {
   const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
   if (!canAccess) return 0;
-  const count = channel?.unread_message_count ?? 0;
-  // Fall back to at-least-1 if has_new_activity is set but count hasn't propagated yet
-  if (count === 0 && Boolean(channel?.has_new_activity ?? channel?.hasNewActivity)) return 1;
-  return count;
+  return getEntityUnreadCountWithFallback(channel, active, currentUserId);
 }
 
-function isConversationUnread(conv, active, currentUserId) {
-  if (active) return false;
-  const lastMessageAuthorId = conv?.last_message_author_id || conv?.lastMessageAuthorId;
-  const lastMessageId = conv?.last_message_id || conv?.lastMessageId;
-  const myLastReadMessageId = conv?.my_last_read_message_id || conv?.myLastReadMessageId;
-  if (!lastMessageId) return false;
-  if (lastMessageAuthorId === currentUserId) return false;
-  return myLastReadMessageId !== lastMessageId;
+function getConversationUnreadCount(conv, active, currentUserId): number {
+  return getEntityUnreadCountWithFallback(conv, active, currentUserId);
 }
 
-function DmRow({ conv, currentUserId, unread, active, onClick }: { conv: any, currentUserId?: string, unread: boolean, active: boolean, onClick: () => void }) {
+function DmRow({ conv, currentUserId, unreadCount, active, onClick }: { conv: any, currentUserId?: string, unreadCount: number, active: boolean, onClick: () => void }) {
   const others = (conv.participants || []).filter(p => p.id !== currentUserId);
   const name   = conv.name || others.map(p => p.displayName || p.username).join(', ') || 'Group DM';
   return (
-    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} data-read-state={unread ? 'UNREAD' : 'READ'} aria-label={`Open direct conversation ${name}`}>
+    <button className={`${styles.row} ${active ? styles.rowActive : ''}`} onClick={onClick} data-testid={`dm-item-${conv.id}`} data-conversation-id={conv.id} data-read-state={unreadCount > 0 ? 'UNREAD' : 'READ'} aria-label={`Open direct conversation ${name}`}>
       <span className={styles.dmIcon}>@</span>
       <span className={styles.rowName}>{name}</span>
-      {unread && (
+      {unreadCount > 0 && (
         <span
-          className={styles.unreadDot}
+          className={styles.unreadBadge}
           data-testid={`dm-unread-indicator-${conv.id}`}
           data-read-state="UNREAD"
-          aria-label="Unread conversation"
-        />
+          aria-label={`${unreadCount} unread messages`}
+        >
+          {unreadCount > 99 ? '99+' : unreadCount}
+        </span>
       )}
     </button>
   );

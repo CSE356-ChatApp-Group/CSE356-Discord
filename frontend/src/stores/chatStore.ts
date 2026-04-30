@@ -288,6 +288,51 @@ function channelMyLastReadMessageId(channel: Entity) {
   return channel?.my_last_read_message_id || channel?.myLastReadMessageId || null;
 }
 
+function conversationLastMessageId(conversation: Entity) {
+  return conversation?.last_message_id || conversation?.lastMessageId || null;
+}
+
+function conversationLastMessageAuthorId(conversation: Entity) {
+  return conversation?.last_message_author_id || conversation?.lastMessageAuthorId || null;
+}
+
+function conversationMyLastReadMessageId(conversation: Entity) {
+  return conversation?.my_last_read_message_id || conversation?.myLastReadMessageId || null;
+}
+
+function normalizeConversationUnreadMetadata(
+  conversation: Entity,
+  currentUserId?: string,
+): Entity {
+  const hasActivity = Boolean(conversation?.has_new_activity ?? conversation?.hasNewActivity);
+  const rawCount = Number(conversation?.unread_message_count ?? 0);
+  if (rawCount > 0 || hasActivity) {
+    return {
+      ...conversation,
+      unread_message_count: Math.max(0, rawCount),
+      has_new_activity: hasActivity,
+      hasNewActivity: hasActivity,
+    };
+  }
+
+  const lastMessageId = conversationLastMessageId(conversation);
+  const authoredByMe = Boolean(
+    currentUserId
+    && conversationLastMessageAuthorId(conversation)
+    && conversationLastMessageAuthorId(conversation) === currentUserId,
+  );
+  const unread =
+    Boolean(lastMessageId)
+    && !authoredByMe
+    && conversationMyLastReadMessageId(conversation) !== lastMessageId;
+  return {
+    ...conversation,
+    unread_message_count: unread ? 1 : 0,
+    has_new_activity: unread,
+    hasNewActivity: unread,
+  };
+}
+
 function isChannelUnreadForUser(channel: Entity, currentUserId?: string, activeChannelId?: string | null) {
   if (!channel || !currentUserId) return false;
   if (activeChannelId && channel.id === activeChannelId) return false;
@@ -300,6 +345,18 @@ function isChannelUnreadForUser(channel: Entity, currentUserId?: string, activeC
 function countUnreadChannels(channels: Entity[], currentUserId?: string, activeChannelId?: string | null) {
   if (!currentUserId || !Array.isArray(channels)) return 0;
   return channels.reduce((count, channel) => count + (isChannelUnreadForUser(channel, currentUserId, activeChannelId) ? 1 : 0), 0);
+}
+
+function patchConversationRowById(
+  conversations: Entity[],
+  conversationId: string,
+  patch: Record<string, unknown>,
+): Entity[] {
+  const idx = conversations.findIndex((c) => c.id === conversationId);
+  if (idx === -1) return conversations;
+  const next = [...conversations];
+  next[idx] = { ...next[idx], ...patch };
+  return next;
 }
 
 /** Immutable single-row patch by channel id; returns original ref if id not found. */
@@ -1073,7 +1130,29 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const { conversations } = await api.get('/conversations');
     const me = useAuthStore.getState().user;
     const visibleConversations = (conversations || []).filter((conv: Entity) => isVisibleConversation(conv, me?.id));
-    set({ conversations: visibleConversations });
+    set((s) => ({
+      conversations: visibleConversations.map((conversation: Entity) => {
+        const previous = s.conversations.find((existing: Entity) => existing.id === conversation.id);
+        const normalized = normalizeConversationUnreadMetadata(conversation, me?.id);
+        if (!previous) return normalized;
+        const hadActivity = Boolean(previous?.has_new_activity ?? previous?.hasNewActivity);
+        const unreadCount = Math.max(
+          Number(normalized.unread_message_count ?? 0),
+          Number(previous?.unread_message_count ?? 0),
+        );
+        return hadActivity
+          ? {
+              ...normalized,
+              has_new_activity: true,
+              hasNewActivity: true,
+              unread_message_count: unreadCount,
+            }
+          : {
+              ...normalized,
+              unread_message_count: unreadCount,
+            };
+      }),
+    }));
     visibleConversations.forEach((conv: Entity) => {
       if (conv?.id) {
         wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
@@ -1111,11 +1190,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             participants: conversation.participants || existing.participants,
           }
         : conversation;
+      const clearedActiveConv = {
+        ...activeConv,
+        has_new_activity: false,
+        hasNewActivity: false,
+        unread_message_count: 0,
+      };
       return {
         conversations: existing
-          ? s.conversations.map(c => (c.id === conversation.id ? activeConv : c))
-          : [activeConv, ...s.conversations],
-        activeConv,
+          ? s.conversations.map(c => (c.id === conversation.id ? clearedActiveConv : c))
+          : [clearedActiveConv, ...s.conversations],
+        activeConv: clearedActiveConv,
         activeChannel: null,
       };
     });
@@ -1133,25 +1218,25 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const lastMessage = msgs[msgs.length - 1];
       const lastId = lastMessage.id;
       const shouldSendRead = !entityAlreadyReadAtOrBeyond(conversationReadState, msgs, lastId);
-      set(s => ({
-        conversations: s.conversations.map((conv) =>
-          conv.id === conversation.id
-            ? {
-                ...conv,
-                my_last_read_message_id: lastId,
-                myLastReadMessageId: lastId,
-              }
-            : conv
-        ),
-        activeConv:
-          s.activeConv?.id === conversation.id
-            ? {
-                ...s.activeConv,
-                my_last_read_message_id: lastId,
-                myLastReadMessageId: lastId,
-              }
-            : s.activeConv,
-      }));
+      set(s => {
+        const rowPatch = {
+          my_last_read_message_id: lastId,
+          myLastReadMessageId: lastId,
+          has_new_activity: false,
+          hasNewActivity: false,
+          unread_message_count: 0,
+        };
+        return {
+          conversations: patchConversationRowById(s.conversations, conversation.id, rowPatch),
+          activeConv:
+            s.activeConv?.id === conversation.id
+              ? {
+                  ...s.activeConv,
+                  ...rowPatch,
+                }
+              : s.activeConv,
+        };
+      });
       if (shouldSendRead) {
         queueMarkMessageRead(lastId, {
           conversationId: conversation.id,
@@ -1173,8 +1258,18 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
 
     set(s => ({
-      activeConv: s.conversations.find((c) => c.id === conv.id) || conv,
+      activeConv: {
+        ...(s.conversations.find((c) => c.id === conv.id) || conv),
+        has_new_activity: false,
+        hasNewActivity: false,
+        unread_message_count: 0,
+      },
       activeChannel: null,
+      conversations: patchConversationRowById(s.conversations, conv.id, {
+        has_new_activity: false,
+        hasNewActivity: false,
+        unread_message_count: 0,
+      }),
     }));
     if (shouldFetchLatestMessages(get(), conv.id)) {
       await get().fetchMessages({ conversationId: conv.id });
@@ -1190,25 +1285,25 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const lastMessage = msgs[msgs.length - 1];
       const lastId = lastMessage.id;
       const shouldSendRead = !entityAlreadyReadAtOrBeyond(conversationReadState, msgs, lastId);
-      set(s => ({
-        conversations: s.conversations.map((c) =>
-          c.id === conv.id
-            ? {
-                ...c,
-                my_last_read_message_id: lastId,
-                myLastReadMessageId: lastId,
-              }
-            : c
-        ),
-        activeConv:
-          s.activeConv?.id === conv.id
-            ? {
-                ...s.activeConv,
-                my_last_read_message_id: lastId,
-                myLastReadMessageId: lastId,
-              }
-            : s.activeConv,
-      }));
+      set(s => {
+        const rowPatch = {
+          my_last_read_message_id: lastId,
+          myLastReadMessageId: lastId,
+          has_new_activity: false,
+          hasNewActivity: false,
+          unread_message_count: 0,
+        };
+        return {
+          conversations: patchConversationRowById(s.conversations, conv.id, rowPatch),
+          activeConv:
+            s.activeConv?.id === conv.id
+              ? {
+                  ...s.activeConv,
+                  ...rowPatch,
+                }
+              : s.activeConv,
+        };
+      });
       if (shouldSendRead) {
         queueMarkMessageRead(lastId, {
           conversationId: conv.id,
@@ -1815,10 +1910,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                 lastMessageAuthorId: msg.author_id,
                 last_message_at: updatedAt,
                 lastMessageAt: updatedAt,
+                has_new_activity: !viewingDm,
+                hasNewActivity: !viewingDm,
+                unread_message_count: dmAtLiveTail && viewingDm
+                  ? 0
+                  : (next[idx].unread_message_count ?? 0) + 1,
                 ...(dmAtLiveTail
                   ? {
                       my_last_read_message_id: msg.id,
                       myLastReadMessageId: msg.id,
+                      has_new_activity: false,
+                      hasNewActivity: false,
                     }
                   : {}),
               };
@@ -1838,10 +1940,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                     lastMessageAuthorId: msg.author_id,
                     last_message_at: msg.created_at || msg.createdAt || s.activeConv.last_message_at,
                     lastMessageAt: msg.created_at || msg.createdAt || s.activeConv.lastMessageAt,
+                    has_new_activity: !viewingDm,
+                    hasNewActivity: !viewingDm,
+                    unread_message_count: dmAtLiveTail && viewingDm
+                      ? 0
+                      : (s.activeConv.unread_message_count ?? 0) + 1,
                     ...(dmAtLiveTail
                       ? {
                           my_last_read_message_id: msg.id,
                           myLastReadMessageId: msg.id,
+                          has_new_activity: false,
+                          hasNewActivity: false,
                         }
                       : {}),
                   }
@@ -2002,6 +2111,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                   myLastReadMessageId: lastReadMessageId,
                   my_last_read_at: lastReadAt,
                   myLastReadAt: lastReadAt,
+                  unread_message_count: 0,
+                  has_new_activity: false,
+                  hasNewActivity: false,
                 }
               : {
                   ...base,
@@ -2021,6 +2133,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
                         myLastReadMessageId: lastReadMessageId,
                         my_last_read_at: lastReadAt,
                         myLastReadAt: lastReadAt,
+                        unread_message_count: 0,
+                        has_new_activity: false,
+                        hasNewActivity: false,
                       }
                     : {
                         ...s.activeConv,
