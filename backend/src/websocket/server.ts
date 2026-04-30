@@ -81,11 +81,6 @@ const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { loadReplayableMessagesForUser } = require("../messages/pending/reconnectReplay");
 const { drainPendingMessagesForUser } = require("../messages/pending/realtimePending");
 const { markWsRecentConnect, markChannelRecentConnect } = require("./recentConnect");
-const {
-  parseReplayAdmissionConfig,
-  evaluateReplayGate,
-  computeReplayDeferredDelayMs,
-} = require("./replayAdmission");
 const { isWsReplayDisabled } = require("../utils/abuseKillSwitch");
 const { clientIpFromReq } = require("../middleware/wsUpgradeLimiter");
 const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
@@ -96,6 +91,7 @@ const {
 const { resolvedWsRuntimeConfig } = require("./profile");
 const { allCommunityFeedRedisChannels } = require("./communityFeed");
 const { createWsHotLogger } = require("./hotLog");
+const { createReplayAdmissionState } = require("./replayAdmissionState");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -201,107 +197,41 @@ let shuttingDown = false;
 const aclCache: Map<string, { allowed: boolean; expiresAt: number }> = new Map();
 /** In-flight ACL lookups — shared waiters get the same Promise (thundering herd guard). */
 const aclCheckInFlight: Map<string, Promise<boolean>> = new Map();
-const replayAdmissionConfig = parseReplayAdmissionConfig(process.env);
-wsReplaySemaphoreCapGauge.set(replayAdmissionConfig.replaySemaphoreMax);
-
 const wsHotLogger = createWsHotLogger({
   logger,
   isRuntimeLogCategoryEnabled,
   defaultRate: WS_HOT_LOG_SAMPLE_RATE,
 });
 const logWsHotInfo = wsHotLogger.logWsHotInfo;
-let wsReplayInFlightCount = 0;
-wsReplayConcurrentGauge.set(0);
-const recentReplayByUser = new Map();
-
-function tryAcquireReplaySlot() {
-  if (wsReplayInFlightCount >= replayAdmissionConfig.replaySemaphoreMax) return false;
-  wsReplayInFlightCount += 1;
-  wsReplayConcurrentGauge.set(wsReplayInFlightCount);
-  return true;
-}
-
-function releaseReplaySlot() {
-  wsReplayInFlightCount = Math.max(0, wsReplayInFlightCount - 1);
-  wsReplayConcurrentGauge.set(wsReplayInFlightCount);
-}
-
-function canRunReplayForUser(userId) {
-  const now = Date.now();
-  const last = recentReplayByUser.get(userId) || 0;
-  if (now - last < WS_REPLAY_USER_COOLDOWN_MS) {
-    return false;
-  }
-  recentReplayByUser.set(userId, now);
-  return true;
-}
-
 /** Concurrent reconnect-replay DB loads per public client IP (hard cap 1). RFC1918/loopback exempt. */
-const replayIpConcurrency = new Map();
 
 function isReplayIpExemptFromPerIpCap(ip) {
   return isPrivateOrInternalNetwork(ip);
 }
 
-function tryBeginReplayForIp(ip) {
-  if (isReplayIpExemptFromPerIpCap(ip)) return true;
-  const key = ip || "unknown";
-  const n = replayIpConcurrency.get(key) || 0;
-  if (n >= 1) return false;
-  replayIpConcurrency.set(key, n + 1);
-  return true;
-}
-
-function endReplayForIp(ip) {
-  if (isReplayIpExemptFromPerIpCap(ip)) return;
-  const key = ip || "unknown";
-  const n = (replayIpConcurrency.get(key) || 0) - 1;
-  if (n <= 0) replayIpConcurrency.delete(key);
-  else replayIpConcurrency.set(key, n);
-}
-
 function replayStartupJitterMs() {
   return 100 + Math.floor(Math.random() * 201);
 }
-
-function replayGateSnapshot() {
-  const pool = poolStats();
-  const gate = evaluateReplayGate(
-    Number(pool.waiting || 0),
-    wsReplayInFlightCount,
-    replayAdmissionConfig,
-  );
-  return { ...gate, pool };
-}
-
-function sleepMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForReplayGateOpen(ws, userId) {
-  let attempts = 0;
-  let totalWaitMs = 0;
-  let lastGate = replayGateSnapshot();
-  while (!lastGate.ok && attempts < replayAdmissionConfig.replayDeferMaxAttempts) {
-    attempts += 1;
-    if (ws.readyState !== WebSocket.OPEN) {
-      return { ok: false, gate: lastGate, attempts, totalWaitMs, cancelled: true };
-    }
-    const delayMs = computeReplayDeferredDelayMs(attempts, replayAdmissionConfig);
-    totalWaitMs += delayMs;
-    await sleepMs(delayMs);
-    lastGate = replayGateSnapshot();
-  }
-  if (attempts > 0 && lastGate.ok) {
-    logWsHotInfo(() => ({
-        userId,
-        attempts,
-        totalWaitMs,
-      }),
-      "WS reconnect replay admission deferred before success");
-  }
-  return { ok: lastGate.ok, gate: lastGate, attempts, totalWaitMs, cancelled: false };
-}
+const replayAdmissionState = createReplayAdmissionState({
+  env: process.env,
+  poolStats,
+  wsReplayConcurrentGauge,
+  wsReplaySemaphoreCapGauge,
+  logWsHotInfo,
+  replayUserCooldownMs: WS_REPLAY_USER_COOLDOWN_MS,
+  isReplayIpExemptFromPerIpCap,
+  isSocketOpen: (ws) => ws.readyState === WebSocket.OPEN,
+});
+const {
+  replayAdmissionConfig,
+  getReplayInFlightCount,
+  tryAcquireReplaySlot,
+  releaseReplaySlot,
+  canRunReplayForUser,
+  tryBeginReplayForIp,
+  endReplayForIp,
+  waitForReplayGateOpen,
+} = replayAdmissionState;
 
 function aclCacheKey(userId: string, channel: string) {
   return `${userId}:${channel}`;
@@ -588,6 +518,7 @@ const {
 const { createRecentDisconnectHelpers } = require("./recentDisconnect");
 const { createPresenceActivityHelpers } = require("./presenceActivity");
 const { createChannelAclHelpers } = require("./channelAcl");
+const { createBootstrapSubscriptionsHelpers } = require("./bootstrapSubscriptions");
 
 const {
   recordRecentDisconnect,
@@ -744,284 +675,46 @@ function maybeSendAppKeepaliveFrame(ws) {
   }
 }
 
-const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
-const wsBootstrapIngressInFlight: Map<string, Promise<string[]>> = new Map();
-let wsBootstrapDbInFlight = 0;
-
 const {
   wsBootstrapIngressKey,
   readWsBootstrapIngressCache: readWsBootstrapIngressCacheBase,
   writeWsBootstrapIngressCache: writeWsBootstrapIngressCacheBase,
 } = require("./bootstrapIngressCache");
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function readWsBootstrapIngressCache(userId, scope = "default") {
-  return readWsBootstrapIngressCacheBase(redis, isRedisOperational, userId, scope);
-}
-
-async function writeWsBootstrapIngressCache(userId, channels, scope = "default") {
-  return writeWsBootstrapIngressCacheBase(
-    redis,
-    isRedisOperational,
-    userId,
-    channels,
-    WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
-    scope,
-  );
-}
-
-async function tryAcquireBootstrapDbSlot() {
-  let waited = 0;
-  while (wsBootstrapDbInFlight >= WS_BOOTSTRAP_DB_MAX_IN_FLIGHT) {
-    if (waited === 0) {
-      wsBootstrapBlockedTotal.inc({ reason: "concurrency_cap" });
-    }
-    const step = Math.min(50, Math.max(10, WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS || 20));
-    waited += step;
-    await sleep(step + Math.floor(Math.random() * 15));
-  }
-  wsBootstrapDbInFlight += 1;
-}
-
-function releaseBootstrapDbSlot() {
-  wsBootstrapDbInFlight = Math.max(0, wsBootstrapDbInFlight - 1);
-}
-
-function wsBootstrapCacheKey(userId, scope = 'full') {
-  return `ws:bootstrap:${userId}:${scope}`;
-}
-
-/** Invalidate the cached WS subscription list for a user. Call this whenever
- *  their community membership, channel access, or conversation list changes. */
-async function invalidateWsBootstrapCache(userId) {
-  await invalidateWsBootstrapCaches([userId]);
-}
-
-async function invalidateWsBootstrapCaches(userIds) {
-  const keys = [];
-  const seen = new Set();
-  for (const userId of Array.isArray(userIds) ? userIds : []) {
-    if (typeof userId !== 'string' || !userId || seen.has(userId)) continue;
-    seen.add(userId);
-    const messagesKey = wsBootstrapCacheKey(userId, 'messages');
-    const fullKey = wsBootstrapCacheKey(userId, 'full');
-    const userOnlyKey = wsBootstrapCacheKey(userId, 'user_only');
-    keys.push(
-      `ws:bootstrap:${userId}`,
-      wsBootstrapIngressKey(userId, 'messages'),
-      wsBootstrapIngressKey(userId, 'full'),
-      wsBootstrapIngressKey(userId, 'user_only'),
-      messagesKey,
-      staleCacheKey(messagesKey),
-      fullKey,
-      staleCacheKey(fullKey),
-      userOnlyKey,
-      staleCacheKey(userOnlyKey),
-    );
-  }
-  if (!keys.length) return;
-  // Batch into ≤500 keys per UNLINK to avoid blocking Redis event loop on large community invalidations.
-  const UNLINK_BATCH = 500;
-  if (keys.length <= UNLINK_BATCH) {
-    await redis.unlink(...keys);
-    return;
-  }
-  const pipeline = redis.pipeline();
-  for (let i = 0; i < keys.length; i += UNLINK_BATCH) {
-    pipeline.unlink(...keys.slice(i, i + UNLINK_BATCH));
-  }
-  await pipeline.exec();
-}
-
-function wsAutoSubscribeMode() {
-  return resolvedWsRuntimeConfig().autoSubscribeMode;
-}
-
-/**
- * Lists every community, channel, and DM for Redis SUBSCRIBE on connect — fine at
- * class scale. If load tests show Redis CPU or pub/sub delivery dominating as
- * membership grows, revisit with aggregated feeds, lazy subscribe, or
- * server-side filtering (phase-2).
- */
-async function listAutoSubscriptionChannels(userId, mode = 'full') {
-  const scope = mode === 'full' ? 'full' : (mode === 'user_only' ? 'user_only' : 'messages');
-  const cacheKey = wsBootstrapCacheKey(userId, scope);
-  const cached = await getJsonCache(redis, cacheKey);
-  if (Array.isArray(cached)) {
-    wsBootstrapListCacheTotal.inc({ result: 'hit' });
-    wsBootstrapChannelsHistogram.observe(cached.length);
-    return cached.filter((value) => typeof value === 'string');
-  }
-
-  if (wsBootstrapListInFlight.has(cacheKey)) {
-    wsBootstrapListCacheTotal.inc({ result: 'coalesced' });
-    const channels = await wsBootstrapListInFlight.get(cacheKey);
-    wsBootstrapChannelsHistogram.observe(channels.length);
-    return channels;
-  }
-
-  wsBootstrapListCacheTotal.inc({ result: 'miss' });
-  const load = withDistributedSingleflight({
-    redis,
-    cacheKey,
-    inflight: wsBootstrapListInFlight,
-    readFresh: async () => {
-      const parsed = await getJsonCache(redis, cacheKey);
-      return Array.isArray(parsed) ? parsed : null;
-    },
-    readStale: async () => {
-      const parsed = await getJsonCache(redis, staleCacheKey(cacheKey));
-      return Array.isArray(parsed) ? parsed : null;
-    },
-    load: async () => {
-      wsBootstrapDbTotal.inc();
-      const [conversationRes, communityRes, channelRes] = await Promise.all([
-        scope === 'user_only'
-          ? Promise.resolve({ rows: [] })
-          : query(
-            `SELECT conversation_id::text AS id
-             FROM conversation_participants
-             WHERE user_id = $1 AND left_at IS NULL`,
-            [userId],
-          ),
-        query(
-          `SELECT community_id::text AS id
-           FROM community_members
-           WHERE user_id = $1`,
-          [userId],
-        ),
-        scope === 'user_only'
-          ? Promise.resolve({ rows: [] })
-          : query(
-            `SELECT c.id::text AS id
-             FROM channels c
-             JOIN community_members cm
-               ON cm.community_id = c.community_id
-              AND cm.user_id = $1
-             LEFT JOIN channel_members chm
-               ON chm.channel_id = c.id
-              AND chm.user_id = $1
-             WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
-            [userId],
-          ),
-      ]);
-
-      // `community:` entries are delivered through sharded communityfeed topics,
-      // not one Redis SUBSCRIBE per community.  This gives every connected
-      // community member public-channel notifications without per-message
-      // audience cache staleness.
-      const channels = [
-        ...channelRes.rows.map((row) => `channel:${row.id}`),
-        ...conversationRes.rows.map((row) => `conversation:${row.id}`),
-        ...communityRes.rows.map((row) => `community:${row.id}`),
-      ];
-      wsBootstrapChannelsHistogram.observe(channels.length);
-      await setJsonCacheWithStale(redis, cacheKey, channels, WS_BOOTSTRAP_CACHE_TTL_SECONDS, {
-        staleMultiplier: 1.5,
-        maxStaleTtlSeconds: 600,
-      });
-      return channels;
-    },
-  });
-  return load;
-}
-
-async function subscribeBootstrapChannel(ws, channel) {
-  if (typeof channel === "string" && channel.startsWith("community:")) {
-    const parsed = parseChannelKey(channel);
-    if (parsed?.type === "community") subscribeCommunityClient(ws, parsed.id);
-    return;
-  }
-  await subscribeClient(ws, channel);
-}
-
-async function bootstrapUserSubscriptions(ws, userId) {
-  const mode = wsAutoSubscribeMode();
-  const ingressScope = mode === 'full' ? 'full' : (mode === 'user_only' ? 'user_only' : 'messages');
-  const ingressCached = await readWsBootstrapIngressCache(userId, ingressScope);
-  if (Array.isArray(ingressCached)) {
-    wsBootstrapCachedTotal.inc({ source: 'ttl' });
-    warmWsAclCacheFromChannelList(userId, ingressCached);
-    for (let i = 0; i < ingressCached.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-      const batch = ingressCached.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-      await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
-      if (ws.readyState !== WebSocket.OPEN) return;
-    }
-    return;
-  }
-
-  if (wsBootstrapIngressInFlight.has(userId)) {
-    wsBootstrapCachedTotal.inc({ source: 'inflight' });
-    const channels = await wsBootstrapIngressInFlight.get(userId);
-    warmWsAclCacheFromChannelList(userId, channels);
-    for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-      const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-      await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
-      if (ws.readyState !== WebSocket.OPEN) return;
-    }
-    return;
-  }
-
-  await tryAcquireBootstrapDbSlot();
-  const loadPromise = listAutoSubscriptionChannels(userId, mode)
-    .finally(() => {
-      wsBootstrapIngressInFlight.delete(userId);
-      releaseBootstrapDbSlot();
-    });
-  wsBootstrapIngressInFlight.set(userId, loadPromise);
-
-  const channels = await loadPromise;
-  await writeWsBootstrapIngressCache(userId, channels, ingressScope);
-  warmWsAclCacheFromChannelList(userId, channels);
-  
-  // Populate channel:recent_connect ZSETs immediately for all channel: topics
-  // before async subscription work begins. This closes a timing gap where
-  // users could receive messages on user:<id> but not be in channel ZSETs,
-  // causing delivery failures with CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect.
-  const channelTopics = channels.filter((ch) => ch.startsWith('channel:'));
-  if (channelTopics.length > 0) {
-    const zaddPromises = channelTopics.map((channel) => 
-      markChannelRecentConnect(userId, channel.slice('channel:'.length)).catch(() => {})
-    );
-    await Promise.allSettled(zaddPromises);
-  }
-  
-  for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-    const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-    await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
-    if (ws.readyState !== WebSocket.OPEN) return;
-  }
-}
-
-// Retry bootstrap on pool circuit-breaker fires (transient under burst load).
-// The connection stays open while we wait; if pool drains within ~3.5s the
-// user gets their subscriptions without noticing anything.
-async function bootstrapWithRetry(ws, userId, attempt = 0) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  if (attempt === 0) {
-    ws._bootstrapWallStart = Date.now();
-  }
-  try {
-    await bootstrapUserSubscriptions(ws, userId);
-    const wallStart = ws._bootstrapWallStart || Date.now();
-    const bootstrapWallMs = Date.now() - wallStart;
-    wsBootstrapWallDurationMs.observe(bootstrapWallMs);
-    if (bootstrapWallMs > 5000) {
-      logger.warn({ userId, bootstrapWallMs }, "WS auto-subscribe bootstrap slow");
-    }
-  } catch (err) {
-    const isCircuitOpen = err && err.code === 'POOL_CIRCUIT_OPEN';
-    if (isCircuitOpen && attempt < 3) {
-      const delayMs = (attempt + 1) * 600; // 600 ms → 1200 ms → 1800 ms
-      await new Promise((r) => setTimeout(r, delayMs));
-      return bootstrapWithRetry(ws, userId, attempt + 1);
-    }
-    throw err; // non-retryable or exhausted – caller logs
-  }
-}
+const {
+  invalidateWsBootstrapCache,
+  invalidateWsBootstrapCaches,
+  subscribeBootstrapChannel,
+  bootstrapWithRetry,
+} = createBootstrapSubscriptionsHelpers({
+  redis,
+  isRedisOperational,
+  query,
+  logger,
+  staleCacheKey,
+  getJsonCache,
+  setJsonCacheWithStale,
+  withDistributedSingleflight,
+  wsBootstrapIngressKey,
+  readWsBootstrapIngressCacheBase,
+  writeWsBootstrapIngressCacheBase,
+  resolvedWsRuntimeConfig,
+  warmWsAclCacheFromChannelList,
+  markChannelRecentConnect,
+  subscribeClient,
+  subscribeCommunityClient,
+  parseChannelKey,
+  wsBootstrapListCacheTotal,
+  wsBootstrapChannelsHistogram,
+  wsBootstrapBlockedTotal,
+  wsBootstrapCachedTotal,
+  wsBootstrapDbTotal,
+  wsBootstrapWallDurationMs,
+  WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
+  WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
+  WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
+  WS_BOOTSTRAP_CACHE_TTL_SECONDS,
+  WS_BOOTSTRAP_BATCH_SIZE,
+});
 
 function hasLocalSubscribers(redisChannel) {
   return (channelClients.get(redisChannel)?.size || 0) > 0;
@@ -1076,6 +769,10 @@ function ready() {
       });
   }
   return wsStartupPromise;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── Connection handling ────────────────────────────────────────────────────────
@@ -1171,7 +868,7 @@ wss.on("connection", async (ws, req) => {
                 userId: user.id,
                 reason: admission.gate.reason,
                 waiting: admission.gate.pool.waiting,
-                inFlight: wsReplayInFlightCount,
+                inFlight: getReplayInFlightCount(),
                 maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
                 attempts: admission.attempts,
                 deferredWaitMs: admission.totalWaitMs,
@@ -1191,7 +888,7 @@ wss.on("connection", async (ws, req) => {
                 logger.warn(
                   {
                     userId: user.id,
-                    inFlight: wsReplayInFlightCount,
+                    inFlight: getReplayInFlightCount(),
                     maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
                   },
                   "WS reconnect replay skipped: semaphore slot unavailable at execution",
