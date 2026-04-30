@@ -94,6 +94,7 @@ const { createWsHotLogger } = require("./hotLog");
 const { createReplayAdmissionState } = require("./replayAdmissionState");
 const { createWsAclCacheStore } = require("./aclCacheStore");
 const { createRedisSubscriptionRegistry } = require("./subscriptionRegistry");
+const { createPresenceCoordinator } = require("./presenceCoordinator");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -166,24 +167,6 @@ const wss = new WebSocketServer({ noServer: true });
 /** Max `ws.send` calls per setImmediate drain tick per socket. */
 /** After enqueueing this many replay frames on one socket, yield so the event loop serves other sockets/work. */
 /** When primary queue is full, `message:*` jobs wait here (FIFO) until drain makes room. */
-// Skip the sweeper for users whose presence was just recomputed by a real
-// event (activity ping, status change, connect/disconnect).  5 s is well
-// below the 15 s sweep interval so we never miss an idle transition.
-// Tracks the last time recomputeUserPresence ran for each user so the
-// reconcile sweeper can skip recently-computed slots.
-const lastPresenceComputedAt: Map<string, number> = new Map();
-// For clean (1005) disconnects, we debounce the post-disconnect presence
-// recompute so that brief reconnects (e.g. grader 30ms cycles) don't cause
-// unnecessary offline→online churn. The timeout is cancelled when the user
-// reconnects within the debounce window.
-const pendingPresenceRecompute = new Map<string, ReturnType<typeof setTimeout>>();
-function cancelPendingPresenceRecompute(userId: string) {
-  const t = pendingPresenceRecompute.get(userId);
-  if (t !== undefined) {
-    clearTimeout(t);
-    pendingPresenceRecompute.delete(userId);
-  }
-}
 let shuttingDown = false;
 
 const wsHotLogger = createWsHotLogger({
@@ -268,136 +251,6 @@ function isRedisOperational(client) {
   );
 }
 
-async function upsertConnectionState(userId, connectionId, status) {
-  await redis
-    .multi()
-    .sadd(connectionSetKey(userId), connectionId)
-    .sadd(connectedUsersKey(), userId)
-    .hset(connectionStatusHashKey(userId), connectionId, status)
-    .exec();
-}
-
-function resolveAggregateStatus(states) {
-  let hasAway = false;
-  let hasOnline = false;
-
-  for (const state of states) {
-    if (state === "away") hasAway = true;
-    else if (state === "online") hasOnline = true;
-  }
-
-  if (hasAway) return "away";
-  if (hasOnline) return "online";
-  return "idle";
-}
-
-async function removeConnection(userId, connectionId) {
-  await redis
-    .multi()
-    .srem(connectionSetKey(userId), connectionId)
-    .hdel(connectionStatusHashKey(userId), connectionId)
-    .del(connectionActivityKey(userId, connectionId))
-    .del(connectionAliveKey(userId, connectionId))
-    .exec();
-}
-
-async function recomputeUserPresence(userId) {
-  lastPresenceComputedAt.set(userId, Date.now());
-  const connIds = await redis.smembers(connectionSetKey(userId));
-  if (!connIds.length) {
-    await redis.srem(connectedUsersKey(), userId);
-    await presenceService.setPresence(userId, "offline");
-    lastPresenceComputedAt.delete(userId); // no longer connected; free the Map entry
-    return;
-  }
-
-  const statusHash = connectionStatusHashKey(userId);
-  const pipeline = redis.pipeline();
-  for (const connId of connIds) {
-    pipeline.hget(statusHash, connId);
-    pipeline.exists(connectionActivityKey(userId, connId));
-    pipeline.exists(connectionAliveKey(userId, connId));
-  }
-  const results = await pipeline.exec();
-
-  const stateByConn = [];
-  const staleConnIds = [];
-  for (let i = 0; i < connIds.length; i += 1) {
-    const statusRes = results[i * 3];
-    const activityRes = results[i * 3 + 1];
-    const aliveRes = results[i * 3 + 2];
-    const connId = connIds[i];
-
-    const status = statusRes?.[1] || "online";
-    const isActive = Number(activityRes?.[1] || 0) === 1;
-    const isAlive = Number(aliveRes?.[1] || 0) === 1;
-
-    if (!isAlive) {
-      staleConnIds.push(connId);
-      continue;
-    }
-
-    if (status === "away") {
-      stateByConn.push("away");
-    } else if (status === "idle") {
-      stateByConn.push("idle");
-    } else {
-      if (!isActive) {
-        logger.debug({
-          event: "presence.activity_expired",
-          userId,
-          connectionId: connId,
-        });
-      }
-      stateByConn.push(isActive ? "online" : "idle");
-    }
-  }
-
-  if (staleConnIds.length) {
-    const stalePipe = redis.pipeline();
-    for (const connId of staleConnIds) {
-      stalePipe.srem(connectionSetKey(userId), connId);
-      stalePipe.hdel(statusHash, connId);
-      stalePipe.del(connectionActivityKey(userId, connId));
-      stalePipe.del(connectionAliveKey(userId, connId));
-    }
-    await stalePipe.exec();
-  }
-
-  if (!stateByConn.length) {
-    await redis.srem(connectedUsersKey(), userId);
-    await presenceService.setPresence(userId, "offline");
-    lastPresenceComputedAt.delete(userId); // no longer connected; free the Map entry
-    return;
-  }
-
-  const aggregateStatus = resolveAggregateStatus(stateByConn);
-  if (aggregateStatus === "away") {
-    await presenceService.setPresence(userId, "away", undefined);
-    return;
-  } else {
-    await presenceService.setPresence(userId, aggregateStatus, null);
-  }
-}
-
-async function reconcileAllConnectedUsers() {
-  const userIds = await redis.smembers(connectedUsersKey());
-  const now = Date.now();
-  const stale = userIds.filter((userId) => {
-    const last = lastPresenceComputedAt.get(userId) || 0;
-    return now - last >= PRESENCE_SWEEPER_DEBOUNCE_MS;
-  });
-
-  // Process in parallel with bounded concurrency so the sweeper does not
-  // monopolize the event loop when many users are connected.
-  const CONCURRENCY = 10;
-  for (let i = 0; i < stale.length; i += CONCURRENCY) {
-    await Promise.allSettled(
-      stale.slice(i, i + CONCURRENCY).map((userId) => recomputeUserPresence(userId)),
-    );
-  }
-}
-
 /**
  * Map from Redis channel key → Set of WebSocket clients subscribed to it.
  * This map is LOCAL to this process (node).
@@ -472,6 +325,25 @@ const {
   connectionActivityKey,
   CONNECTION_ALIVE_TTL_SECONDS,
   IDLE_TTL_SECONDS,
+});
+const {
+  cancelPendingPresenceRecompute,
+  scheduleDebouncedPresenceRecompute,
+  upsertConnectionState,
+  removeConnection,
+  recomputeUserPresence,
+  reconcileAllConnectedUsers,
+} = createPresenceCoordinator({
+  redis,
+  presenceService,
+  logger,
+  connectionSetKey,
+  connectionStatusHashKey,
+  connectionActivityKey,
+  connectionAliveKey,
+  connectedUsersKey,
+  presenceSweeperDebounceMs: PRESENCE_SWEEPER_DEBOUNCE_MS,
+  presenceDisconnectDebounceMs: PRESENCE_DISCONNECT_DEBOUNCE_MS,
 });
 const { parseChannelKey, isAllowedChannel } = createChannelAclHelpers({
   query,
@@ -1216,13 +1088,7 @@ function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
       }
       // Clean disconnect — debounce presence recompute so short-gap reconnects
       // (grader 30ms cycles) skip the offline→online churn entirely.
-      cancelPendingPresenceRecompute(userId);
-      const t = setTimeout(() => {
-        pendingPresenceRecompute.delete(userId);
-        recomputeUserPresence(userId).catch(() => {});
-      }, PRESENCE_DISCONNECT_DEBOUNCE_MS);
-      t.unref();
-      pendingPresenceRecompute.set(userId, t);
+      scheduleDebouncedPresenceRecompute(userId);
     })
     .catch((err) => {
       if (/Connection is closed/i.test(String(err?.message || err))) {
