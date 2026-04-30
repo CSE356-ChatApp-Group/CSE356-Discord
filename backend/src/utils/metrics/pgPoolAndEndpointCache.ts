@@ -86,6 +86,13 @@ const endpointListCacheTotal = new client.Counter({
   help: 'Redis list cache outcomes for hot GET list endpoints',
   labelNames: ['endpoint', 'result'],
 });
+
+/** First-page GET /messages cache skipped a Redis write (e.g. epoch bumped during load). */
+const messageListCacheStoreSkippedTotal = new client.Counter({
+  name: 'message_list_cache_store_skipped_total',
+  help: 'Skipped writing Redis JSON for first-page message list cache after DB load',
+  labelNames: ['scope', 'reason'],
+});
 const endpointListCacheBypassTotal = new client.Counter({
   name: 'endpoint_list_cache_bypass_total',
   help: 'Redis list cache bypasses by endpoint and reason',
@@ -157,6 +164,7 @@ module.exports = {
   pgQueriesPerRequestHistogram,
   pgBusinessSqlQueriesPerRequestHistogram,
   endpointListCacheTotal,
+  messageListCacheStoreSkippedTotal,
   endpointListCacheBypassTotal,
   endpointListCacheInvalidationsTotal,
   messagesListAccessCacheHitTotal,

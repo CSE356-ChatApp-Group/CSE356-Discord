@@ -15,6 +15,12 @@ function filterOnFromEnv() {
 const redisMock = {
   status: 'ready',
   info: jest.fn().mockResolvedValue('used_memory:100\nmaxmemory:1000\n'),
+  /** Batched `presence:connected_users` probe (see realtimePending filter). */
+  call: jest.fn(async (command: string, ...rest: unknown[]) => {
+    if (String(command).toUpperCase() !== 'SMISMEMBER') return null;
+    const members = rest.slice(1) as string[];
+    return members.map(() => 0);
+  }),
   pipeline: jest.fn(() => {
     pipelineCallCount += 1;
     const p = {
@@ -78,6 +84,12 @@ describe('realtimePending recipient filter', () => {
     jest.resetModules();
     pipelineCallCount = 0;
     redisMock.pipeline.mockClear();
+    (redisMock.call as jest.Mock).mockReset();
+    (redisMock.call as jest.Mock).mockImplementation(async (command: string, ...rest: unknown[]) => {
+      if (String(command).toUpperCase() !== 'SMISMEMBER') return null;
+      const members = rest.slice(1) as string[];
+      return members.map(() => 0);
+    });
     classifyExec.mockReset();
     enqueueExec.mockReset();
     pendingClassMetric.inc.mockReset();
@@ -95,7 +107,7 @@ describe('realtimePending recipient filter', () => {
 
   it('skips Redis pending writes when no user is connected or recent', async () => {
     classifyExec
-      .mockResolvedValueOnce([[null, 0], [null, 0]])
+      .mockResolvedValueOnce([[null, 0]])
       .mockResolvedValueOnce([[null, 0], [null, 0]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:ghost'], {
@@ -109,8 +121,9 @@ describe('realtimePending recipient filter', () => {
     expect(pipelineCallCount).toBe(2);
   });
 
-  it('enqueues when user has active connections (scard>0)', async () => {
-    classifyExec.mockResolvedValue([[null, 0], [null, 1]]);
+  it('enqueues when user has active connections (connections set key exists)', async () => {
+    classifyExec.mockResolvedValueOnce([[null, 0]]);
+    (redisMock.call as jest.Mock).mockResolvedValueOnce([1]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
       [null, 1],
@@ -130,7 +143,7 @@ describe('realtimePending recipient filter', () => {
   });
 
   it('skips second EXISTS probe when recentTargets is present but empty (channel-style)', async () => {
-    classifyExec.mockResolvedValue([[null, 0], [null, 0]]);
+    classifyExec.mockResolvedValueOnce([[null, 0]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(
       ['user:ghost'],
@@ -144,7 +157,7 @@ describe('realtimePending recipient filter', () => {
 
   it('conversation path skips second probe when WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK=false', async () => {
     process.env.WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK = 'false';
-    classifyExec.mockResolvedValue([[null, 0], [null, 0]]);
+    classifyExec.mockResolvedValueOnce([[null, 0]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:strict'], {
       event: 'message:created',
@@ -157,7 +170,7 @@ describe('realtimePending recipient filter', () => {
 
   it('conversation path (no recentTargets opt) second-probes ws:recent_connect when unified misses', async () => {
     classifyExec
-      .mockResolvedValueOnce([[null, 0], [null, 0]])
+      .mockResolvedValueOnce([[null, 0]])
       .mockResolvedValueOnce([[null, 1], [null, 0]]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
@@ -177,8 +190,8 @@ describe('realtimePending recipient filter', () => {
     expect(classifyExec).toHaveBeenCalledTimes(2);
   });
 
-  it('enqueues recent class when recentTargets hints user and scard=0 (no EXISTS)', async () => {
-    classifyExec.mockResolvedValue([[null, 0]]);
+  it('enqueues recent class when recentTargets hints user (skips pending EXISTS; connections absent)', async () => {
+    (redisMock.call as jest.Mock).mockResolvedValueOnce([0]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
       [null, 1],
@@ -195,13 +208,13 @@ describe('realtimePending recipient filter', () => {
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'recent' }, 1);
     expect(pendingEntriesHist.observe).toHaveBeenCalledWith(1);
     expect(enqueueExec).toHaveBeenCalled();
-    expect(pipelineCallCount).toBe(2);
+    expect(pipelineCallCount).toBe(1);
   });
 
   it('legacy fallback enqueues recent when unified key miss but ws:recent_connect set', async () => {
     process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK = 'true';
     classifyExec
-      .mockResolvedValueOnce([[null, 0], [null, 0]])
+      .mockResolvedValueOnce([[null, 0]])
       .mockResolvedValueOnce([[null, 1], [null, 0]]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
@@ -224,7 +237,7 @@ describe('realtimePending recipient filter', () => {
   it('legacy fallback still skips when unified and legacy markers all absent', async () => {
     process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK = 'true';
     classifyExec
-      .mockResolvedValueOnce([[null, 0], [null, 0]])
+      .mockResolvedValueOnce([[null, 0]])
       .mockResolvedValueOnce([[null, 0], [null, 0]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:gone'], {
@@ -236,8 +249,9 @@ describe('realtimePending recipient filter', () => {
     expect(classifyExec).toHaveBeenCalledTimes(2);
   });
 
-  it('enqueues when pending eligible marker exists (single EXISTS + scard)', async () => {
-    classifyExec.mockResolvedValue([[null, 1], [null, 0]]);
+  it('enqueues when pending eligible marker exists (pending EXISTS + connections EXISTS)', async () => {
+    classifyExec.mockResolvedValueOnce([[null, 1]]);
+    (redisMock.call as jest.Mock).mockResolvedValueOnce([0]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
       [null, 1],

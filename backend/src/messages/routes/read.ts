@@ -1,13 +1,14 @@
 /**
  * PUT /messages/:id/read
+ * PUT /messages/batch-read — batched read receipts (same semantics per message; one HTTP round-trip).
  *
  * Log prefix: `PUT /messages:` for grep.
  */
 
 
-const { param } = require("express-validator");
+const { param, body } = require("express-validator");
 const { validate } = require("./validation");
-const { poolStats } = require("../../db/pool");
+const { poolStats, query } = require("../../db/pool");
 const {
   readReceiptShedTotal,
   readReceiptRequestsTotal,
@@ -27,6 +28,7 @@ const sideEffects = require("../sideEffects");
 const {
   READ_RECEIPT_DEFER_POOL_WAITING,
   READ_RECEIPT_FANOUT_ENABLED,
+  READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE,
   READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
   hasConfirmedRecentMessageRead,
   rememberConfirmedMessageRead,
@@ -34,6 +36,7 @@ const {
   shouldCoalesceSameMessageRead,
   readReceiptScopeCursorCacheSaysNoAdvance,
   rememberReadReceiptScopeCursor,
+  rememberReadReceiptScopeCursorMergedWithRedis,
   shouldCoalesceScopeBurstRead,
   advanceReadStateCursor,
 } = require("../lib/readReceiptState");
@@ -46,121 +49,148 @@ const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
   10,
 );
 
-module.exports = function registerReadRoutes(router) {
-  // --- PUT /messages/:id/read: read receipt ---
-  router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
-    if (!validate(req, res)) return;
-    if (getShouldDeferReadReceiptForInsertLockPressure()) {
-      readReceiptShedTotal.inc({
-        reason: "message_channel_insert_lock_pressure",
-      });
-      readReceiptRequestsTotal.inc({
-        result: "deferred_message_channel_insert_lock_pressure",
-      });
-      return res.json({
+const READ_RECEIPT_BATCH_MAX = (() => {
+  const raw = parseInt(process.env.READ_RECEIPT_BATCH_MAX || "50", 10);
+  if (!Number.isFinite(raw)) return 50;
+  return Math.min(100, Math.max(1, Math.floor(raw)));
+})();
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuidString(value) {
+  return typeof value === "string" && UUID_RE.test(value);
+}
+
+/**
+ * Shared early exits (insert-lock shed, pool-wait defer, overload stage ≥3).
+ * @returns {{ respond: true, status: number, body: Record<string, unknown> } | { respond: false, dropReadReceiptFanout: boolean }}
+ */
+function readReceiptPreflightResponse() {
+  if (getShouldDeferReadReceiptForInsertLockPressure()) {
+    readReceiptShedTotal.inc({
+      reason: "message_channel_insert_lock_pressure",
+    });
+    readReceiptRequestsTotal.inc({
+      result: "deferred_message_channel_insert_lock_pressure",
+    });
+    return {
+      respond: true,
+      status: 200,
+      body: {
         success: true,
         deferred: true,
         reason: "message_channel_insert_lock_pressure",
-      });
-    }
-    const pool = poolStats();
-    // `READ_RECEIPT_DEFER_POOL_WAITING=0` means "disable pool-wait defer".
-    if (
-      READ_RECEIPT_DEFER_POOL_WAITING > 0 &&
-      pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
-    ) {
-      return res.json({ success: true, deferred: true, reason: "pool_waiting" });
-    }
-    // Under sustained pressure, keep the cheap cursor advance but drop realtime
-    // read-receipt fanout so Redis pub/sub does not sit in the request amplifier.
-    const overloadStage = overload.getStage();
-    const dropReadReceiptFanout = overloadStage === 2;
-    if (overloadStage >= 3) {
-      readReceiptShedTotal.inc({ reason: "overload_stage_high" });
-      readReceiptRequestsTotal.inc({ result: "deferred_overload_stage_high" });
-      return res.json({
+      },
+    };
+  }
+  const pool = poolStats();
+  if (
+    READ_RECEIPT_DEFER_POOL_WAITING > 0 &&
+    pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
+  ) {
+    return {
+      respond: true,
+      status: 200,
+      body: { success: true, deferred: true, reason: "pool_waiting" },
+    };
+  }
+  const overloadStage = overload.getStage();
+  const dropReadReceiptFanout = overloadStage === 2;
+  if (overloadStage >= 3) {
+    readReceiptShedTotal.inc({ reason: "overload_stage_high" });
+    readReceiptRequestsTotal.inc({ result: "deferred_overload_stage_high" });
+    return {
+      respond: true,
+      status: 200,
+      body: {
         success: true,
         deferred: true,
         reason: "overload_stage_high",
-      });
-    }
-    try {
-      if (hasConfirmedRecentMessageRead(req.user.id, req.params.id)) {
-        // Fast-path duplicate ACK for already-confirmed reads from the same user.
-        return res.json({ success: true });
-      }
+      },
+    };
+  }
+  return { respond: false, dropReadReceiptFanout };
+}
 
-      const target = await loadMessageTargetForUser(req.params.id, req.user.id, {
-        preferCache: true,
-      });
-      if (!target) return res.status(404).json({ error: "Message not found" });
-      if (!target.has_access) {
-        return res.status(403).json({ error: "Access denied" });
-      }
+/**
+ * Core per-message read receipt (after preflight). Returns HTTP status + JSON body.
+ */
+async function executeReadReceiptMark(
+  userId,
+  messageId,
+  dropReadReceiptFanout,
+) {
+  if (hasConfirmedRecentMessageRead(userId, messageId)) {
+    return { status: 200, body: { success: true } };
+  }
 
-      const { channel_id, conversation_id } = target;
-      const uid = req.user.id;
-      const messageId = req.params.id;
-      if (shouldCoalesceSameMessageRead(uid, messageId)) {
-        return res.json({ success: true });
-      }
-      const messageCreatedAt = target.created_at;
-      const messageTsMs = new Date(messageCreatedAt).getTime();
-      if (
-        shouldCoalesceScopeBurstRead({
-          userId: uid,
-          channelId: channel_id,
-          conversationId: conversation_id,
-          messageCreatedAt,
-          messageTsMs,
-        })
-      ) {
-        return res.json({ success: true });
-      }
-      if (
-        readReceiptScopeCursorCacheSaysNoAdvance({
-          userId: uid,
-          channelId: channel_id,
-          conversationId: conversation_id,
-          messageCreatedAt,
-          messageTsMs,
-        })
-      ) {
-        // Strict fast path for burst duplicates: skip Redis/DB/metrics/fanout work.
-        return res.json({ success: true });
-      }
+  const target = await loadMessageTargetForUser(messageId, userId, {
+    preferCache: true,
+  });
+  if (!target) return { status: 404, body: { error: "Message not found" } };
+  if (!target.has_access) {
+    return { status: 403, body: { error: "Access denied" } };
+  }
 
-      const { applied, didAdvanceCursor, casResult } = await advanceReadStateCursor({
+  const { channel_id, conversation_id } = target;
+  const uid = userId;
+  if (shouldCoalesceSameMessageRead(uid, messageId)) {
+    return { status: 200, body: { success: true } };
+  }
+  const messageCreatedAt = target.created_at;
+  const messageTsMs = new Date(messageCreatedAt).getTime();
+  if (
+    shouldCoalesceScopeBurstRead({
+      userId: uid,
+      channelId: channel_id,
+      conversationId: conversation_id,
+      messageCreatedAt,
+      messageTsMs,
+    })
+  ) {
+    return { status: 200, body: { success: true } };
+  }
+  if (
+    readReceiptScopeCursorCacheSaysNoAdvance({
+      userId: uid,
+      channelId: channel_id,
+      conversationId: conversation_id,
+      messageCreatedAt,
+      messageTsMs,
+    })
+  ) {
+    return { status: 200, body: { success: true } };
+  }
+
+  const { applied, didAdvanceCursor, casResult, redisCursorMsAtCas0 } =
+    await advanceReadStateCursor({
+      userId: uid,
+      channelId: channel_id,
+      conversationId: conversation_id,
+      messageId,
+      messageCreatedAt,
+      messageTsMs,
+    });
+  const readScope = conversation_id ? "conversation" : "channel";
+  readReceiptScopeTotal.inc({ scope: readScope });
+  readReceiptCursorCasTotal.inc({
+    scope: readScope,
+    cas_result: String(Number(casResult) || 0),
+  });
+
+  if (!didAdvanceCursor) {
+    rememberConfirmedMessageRead(uid, messageId);
+    if (casResult === 0) {
+      await rememberReadReceiptScopeCursorMergedWithRedis({
         userId: uid,
         channelId: channel_id,
         conversationId: conversation_id,
-        messageId,
         messageCreatedAt,
         messageTsMs,
+        redisCursorMsAtCas0,
       });
-      const readScope = conversation_id ? "conversation" : "channel";
-      readReceiptScopeTotal.inc({ scope: readScope });
-      readReceiptCursorCasTotal.inc({
-        scope: readScope,
-        cas_result: String(Number(casResult) || 0),
-      });
-
-      if (!didAdvanceCursor) {
-        rememberConfirmedMessageRead(uid, messageId);
-        rememberReadReceiptScopeCursor({
-          userId: uid,
-          channelId: channel_id,
-          conversationId: conversation_id,
-          messageCreatedAt,
-          messageTsMs,
-        });
-        return res.json({ success: true });
-      }
-      if (casResult === 2) {
-        readReceiptDbUpsertTotal.inc({ result: "enqueued" });
-      } else if (casResult === 1) {
-        readReceiptDbUpsertTotal.inc({ result: "rate_limited" });
-      }
+    } else {
       rememberReadReceiptScopeCursor({
         userId: uid,
         channelId: channel_id,
@@ -168,101 +198,232 @@ module.exports = function registerReadRoutes(router) {
         messageCreatedAt,
         messageTsMs,
       });
+    }
+    return { status: 200, body: { success: true } };
+  }
+  if (casResult === 2) {
+    readReceiptDbUpsertTotal.inc({ result: "enqueued" });
+  } else if (casResult === 1) {
+    readReceiptDbUpsertTotal.inc({ result: "rate_limited" });
+  }
+  rememberReadReceiptScopeCursor({
+    userId: uid,
+    channelId: channel_id,
+    conversationId: conversation_id,
+    messageCreatedAt,
+    messageTsMs,
+  });
 
-      const shouldRunDebouncedSideEffects =
-        casResult !== 1 || shouldRunCas1SideEffects(uid, channel_id, conversation_id);
-      if (!shouldRunDebouncedSideEffects) {
-        rememberConfirmedMessageRead(uid, messageId);
-        readReceiptOptimizationTotal.inc({ reason: "cas1_side_effects_debounced" });
-        return res.json({ success: true });
+  const shouldRunDebouncedSideEffects =
+    casResult !== 1 || shouldRunCas1SideEffects(uid, channel_id, conversation_id);
+  if (!shouldRunDebouncedSideEffects) {
+    rememberConfirmedMessageRead(uid, messageId);
+    readReceiptOptimizationTotal.inc({ reason: "cas1_side_effects_debounced" });
+    return { status: 200, body: { success: true } };
+  }
+
+  const communityIdForCache = target.community_id;
+  if (channel_id) {
+    try {
+      const countKey = `channel:msg_count:${channel_id}`;
+      const readKey = `user:last_read_count:${channel_id}:${uid}`;
+      const wmSha = await ensureRedisLuaSha(
+        redis,
+        REDIS_LUA_IDS.READ_RECEIPT_RESET_UNREAD_WATERMARK,
+      );
+      const pipeline = redis.pipeline();
+      if (
+        READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
+        READ_RECEIPT_FANOUT_ENABLED &&
+        !dropReadReceiptFanout &&
+        communityIdForCache
+      ) {
+        pipeline.del(`channels:list:${communityIdForCache}:${uid}`);
       }
+      pipeline.evalsha(
+        wmSha,
+        2,
+        countKey,
+        readKey,
+        String(USER_LAST_READ_COUNT_REDIS_TTL_SEC),
+      );
+      await pipeline.exec();
+    } catch (err) {
+      logger.warn(
+        { err, channel_id },
+        "Failed to update read watermark/cache in Redis",
+      );
+    }
+  } else if (
+    READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
+    READ_RECEIPT_FANOUT_ENABLED &&
+    !dropReadReceiptFanout &&
+    communityIdForCache
+  ) {
+    redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
+  }
 
-      const communityIdForCache = target.community_id;
-      // Batch non-critical Redis updates into one pipeline to cut round trips
-      // for the hottest route.
-      if (channel_id) {
-        try {
-          const countKey = `channel:msg_count:${channel_id}`;
-          const readKey = `user:last_read_count:${channel_id}:${uid}`;
-          const wmSha = await ensureRedisLuaSha(
-            redis,
-            REDIS_LUA_IDS.READ_RECEIPT_RESET_UNREAD_WATERMARK,
-          );
-          const pipeline = redis.pipeline();
-          if (READ_RECEIPT_FANOUT_ENABLED && !dropReadReceiptFanout && communityIdForCache) {
-            pipeline.del(`channels:list:${communityIdForCache}:${uid}`);
-          }
-          pipeline.evalsha(
-            wmSha,
-            2,
-            countKey,
-            readKey,
-            String(USER_LAST_READ_COUNT_REDIS_TTL_SEC),
-          );
-          await pipeline.exec();
-        } catch (err) {
-          logger.warn(
-            { err, channel_id },
-            "Failed to update read watermark/cache in Redis",
-          );
-        }
-      } else if (READ_RECEIPT_FANOUT_ENABLED && !dropReadReceiptFanout && communityIdForCache) {
-        redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
+  if (dropReadReceiptFanout || !READ_RECEIPT_FANOUT_ENABLED) {
+    return {
+      status: 200,
+      body: {
+        success: true,
+        deferred: true,
+        reason: dropReadReceiptFanout ? "overload" : "fanout_disabled",
+      },
+    };
+  }
+
+  const payload = {
+    userId: uid,
+    channelId: channel_id,
+    conversationId: conversation_id,
+    lastReadMessageId: messageId,
+    lastReadAt: applied?.last_read_at || new Date().toISOString(),
+  };
+
+  const publishReadUpdated = async () => {
+    if (conversation_id) {
+      readReceiptOptimizationTotal.inc({ reason: "conversation_read_reliable_fanout" });
+      await publishConversationEventNow(conversation_id, "read:updated", payload);
+      return;
+    }
+    await fanout.publish(`channel:${channel_id}`, {
+      event: "read:updated",
+      data: payload,
+    });
+  };
+
+  try {
+    if (conversation_id) {
+      await publishReadUpdated();
+    } else if (READ_RECEIPT_CHANNEL_FANOUT_ASYNC) {
+      const enqueued = sideEffects.enqueueFanoutJob("fanout.read_receipt", publishReadUpdated);
+      if (!enqueued) {
+        await publishReadUpdated();
       }
+    } else {
+      await publishReadUpdated();
+    }
+  } catch (err) {
+    logger.warn(
+      { err, channel_id, conversation_id, messageId },
+      "read receipt fanout failed",
+    );
+  }
 
-      if (dropReadReceiptFanout || !READ_RECEIPT_FANOUT_ENABLED) {
-        return res.json({
-          success: true,
-          deferred: true,
-          reason: dropReadReceiptFanout ? "overload" : "fanout_disabled",
+  rememberConfirmedMessageRead(uid, messageId);
+  return { status: 200, body: { success: true } };
+}
+
+/**
+ * Process newest message first so in-batch scope cursor / debounce state matches
+ * single-request semantics (final cursor = max(created_at) of the batch).
+ */
+async function sortMessageIdsByCreatedAtDesc(messageIds) {
+  if (messageIds.length <= 1) return messageIds;
+  const { rows } = await query(
+    `SELECT id::text AS id, extract(epoch from created_at) * 1000 AS ts_ms
+     FROM messages WHERE id = ANY($1::uuid[])`,
+    [messageIds],
+  );
+  const tsById = new Map(
+    rows.map((r) => [String(r.id), Number(r.ts_ms) || 0]),
+  );
+  return [...messageIds].sort(
+    (a, b) => Number(tsById.get(b) || 0) - Number(tsById.get(a) || 0),
+  );
+}
+
+function normalizeBatchMessageIds(rawReads) {
+  if (!Array.isArray(rawReads)) {
+    return { error: "reads must be a non-empty array" };
+  }
+  const out = [];
+  const seen = new Set();
+  for (const entry of rawReads) {
+    const id =
+      typeof entry === "string"
+        ? entry
+        : entry && typeof entry === "object"
+          ? entry.messageId || entry.message_id
+          : null;
+    if (!isUuidString(id)) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  if (!out.length) {
+    return { error: "reads must contain at least one valid UUID messageId" };
+  }
+  if (out.length > READ_RECEIPT_BATCH_MAX) {
+    return { error: `reads exceeds max of ${READ_RECEIPT_BATCH_MAX}` };
+  }
+  return { messageIds: out };
+}
+
+module.exports = function registerReadRoutes(router) {
+  // --- PUT /messages/batch-read (must register before /:id/read) ---
+  router.put(
+    "/batch-read",
+    body("reads").isArray({ min: 1 }),
+    async (req, res, next) => {
+      if (!validate(req, res)) return;
+      const parsed = normalizeBatchMessageIds(req.body.reads);
+      if (parsed.error) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const pre = readReceiptPreflightResponse();
+      if (pre.respond) {
+        return res.status(pre.status).json({
+          ...pre.body,
+          batch: true,
         });
       }
-
-      const payload = {
-        userId: uid,
-        channelId: channel_id,
-        conversationId: conversation_id,
-        lastReadMessageId: messageId,
-        lastReadAt: applied?.last_read_at || new Date().toISOString(),
-      };
-
-      const publishReadUpdated = async () => {
-        if (conversation_id) {
-          readReceiptOptimizationTotal.inc({ reason: "conversation_read_reliable_fanout" });
-          await publishConversationEventNow(conversation_id, "read:updated", payload);
-          return;
-        }
-        // Channel reads should reach all channel subscribers; emitting only to the
-        // actor's userfeed causes grader clients to miss peer read receipts.
-        await fanout.publish(`channel:${channel_id}`, {
-          event: "read:updated",
-          data: payload,
-        });
-      };
-
+      const { messageIds } = parsed;
       try {
-        if (conversation_id) {
-          await publishReadUpdated();
-        } else if (READ_RECEIPT_CHANNEL_FANOUT_ASYNC) {
-          const enqueued = sideEffects.enqueueFanoutJob("fanout.read_receipt", publishReadUpdated);
-          if (!enqueued) {
-            await publishReadUpdated();
-          }
-        } else {
-          await publishReadUpdated();
+        const sortedIds = await sortMessageIdsByCreatedAtDesc(messageIds);
+        const results = [];
+        for (const messageId of sortedIds) {
+          const out = await executeReadReceiptMark(
+            req.user.id,
+            messageId,
+            pre.dropReadReceiptFanout,
+          );
+          results.push({
+            messageId,
+            status: out.status,
+            ...out.body,
+          });
         }
+        results.sort((a, b) => {
+          const ai = messageIds.indexOf(a.messageId);
+          const bi = messageIds.indexOf(b.messageId);
+          return ai - bi;
+        });
+        return res.json({ success: true, results });
       } catch (err) {
-        logger.warn(
-          { err, channel_id, conversation_id, messageId },
-          "read receipt fanout failed",
-        );
+        next(err);
       }
+    },
+  );
 
-      rememberConfirmedMessageRead(uid, messageId);
-      res.json({ success: true });
+  // --- PUT /messages/:id/read: read receipt ---
+  router.put("/:id/read", param("id").isUUID(), async (req, res, next) => {
+    if (!validate(req, res)) return;
+    const pre = readReceiptPreflightResponse();
+    if (pre.respond) {
+      return res.status(pre.status).json(pre.body);
+    }
+    try {
+      const out = await executeReadReceiptMark(
+        req.user.id,
+        req.params.id,
+        pre.dropReadReceiptFanout,
+      );
+      return res.status(out.status).json(out.body);
     } catch (err) {
       next(err);
     }
   });
 };
-

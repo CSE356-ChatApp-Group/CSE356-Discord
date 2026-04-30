@@ -10,7 +10,8 @@
  *   ARGV[1] = new timestamp ms, ARGV[2] = cursor TTL secs, ARGV[3] = db_lock TTL ms
  *   ARGV[4] = dirty member, ARGV[5] = message id, ARGV[6] = message created_at
  *   ARGV[7] = channel id, ARGV[8] = conversation id, ARGV[9] = pending TTL secs
- * Returns 0: cursor already at/ahead — skip entirely.
+ * Returns {0, current}: cursor already at/ahead — skip entirely (`current` is the
+ * authoritative cursor ms string so callers can align in-process caches without GET).
  *         1: cursor advanced, but DB write rate-limited by lock — skip DB.
  *         2: cursor advanced AND dirty read-state payload enqueued.
  */
@@ -18,7 +19,7 @@ const READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA = `
 local current = redis.call('GET', KEYS[1])
 local new_ts = tonumber(ARGV[1])
 if current and tonumber(current) >= new_ts then
-  return 0
+  return {0, current}
 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
 local locked = redis.call('SET', KEYS[2], '1', 'NX', 'PX', tonumber(ARGV[3]))

@@ -194,6 +194,58 @@ describe('Read state writes', () => {
     expect(flushedRows[0]?.last_read_message_id).toBe(secondMessageId);
   });
 
+  it('PUT /messages/batch-read marks multiple messages in one request', async () => {
+    const owner = await createAuthenticatedUser('readbatch');
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'read-batch',
+      channelPrefix: 'read-batch-ch',
+      description: 'batch read receipts',
+    });
+
+    const m1 = await postMessage(owner.accessToken, { channelId, content: 'batch a' });
+    const m2 = await postMessage(owner.accessToken, { channelId, content: 'batch b' });
+    expect(m1.status).toBe(201);
+    expect(m2.status).toBe(201);
+    const id1 = m1.body.message.id as string;
+    const id2 = m2.body.message.id as string;
+
+    const batchRes = await request(app)
+      .put('/api/v1/messages/batch-read')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({
+        reads: [{ messageId: id1 }, id2],
+      });
+    expect(batchRes.status).toBe(200);
+    expect(batchRes.body.success).toBe(true);
+    expect(Array.isArray(batchRes.body.results)).toBe(true);
+    expect(batchRes.body.results).toHaveLength(2);
+    const byId = new Map<string, { messageId: string; status?: number; success?: boolean }>(
+      batchRes.body.results.map((r: { messageId: string; status?: number; success?: boolean }) => [
+        r.messageId,
+        r,
+      ]),
+    );
+    expect(byId.get(id1)?.status).toBe(200);
+    expect(byId.get(id1)?.success).toBe(true);
+    expect(byId.get(id2)?.status).toBe(200);
+    expect(byId.get(id2)?.success).toBe(true);
+
+    await flushDirtyReadStatesToDB();
+    const { rows: newestRows } = await pool.query(
+      `SELECT id::text FROM messages WHERE id = ANY($1::uuid[]) ORDER BY created_at DESC LIMIT 1`,
+      [[id1, id2]],
+    );
+    const newestId = newestRows[0]?.id;
+    const { rows } = await pool.query(
+      `SELECT last_read_message_id::text AS last_read_message_id
+       FROM read_states
+       WHERE user_id = $1
+         AND channel_id = $2`,
+      [owner.user.id, channelId],
+    );
+    expect(rows[0]?.last_read_message_id).toBe(newestId);
+  });
+
   it('flush silently drops dirty entry when referenced message has been hard-deleted', async () => {
     const owner = await createAuthenticatedUser('rsdeleted');
     const { channelId } = await createCommunityChannelFixture(owner.accessToken, {

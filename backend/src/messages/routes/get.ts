@@ -15,7 +15,10 @@ const {
   param,
 } = require("express-validator");
 const { validate } = require("./validation");
-const { messagesListAccessCacheHitTotal } = require("../../utils/metrics");
+const {
+  messagesListAccessCacheHitTotal,
+  messageListCacheStoreSkippedTotal,
+} = require("../../utils/metrics");
 const overload = require("../../utils/overload");
 const redis = require("../../db/redis");
 const {
@@ -263,6 +266,11 @@ module.exports = function registerGetRoutes(router) {
                   MESSAGES_CACHE_TTL_SECS,
                   { writeStale: false },
                 );
+              } else {
+                messageListCacheStoreSkippedTotal.inc({
+                  scope: "channel",
+                  reason: "epoch_changed",
+                });
               }
               return body;
             },
@@ -365,6 +373,11 @@ module.exports = function registerGetRoutes(router) {
                   MESSAGES_CACHE_TTL_SECS,
                   { writeStale: false },
                 );
+              } else {
+                messageListCacheStoreSkippedTotal.inc({
+                  scope: "conversation",
+                  reason: "epoch_changed",
+                });
               }
               return body;
             },

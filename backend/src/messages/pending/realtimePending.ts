@@ -1,5 +1,6 @@
 
 const redis = require('../../db/redis');
+const { connectedUsersKey } = require('../../websocket/presenceKeys');
 const logger = require('../../utils/logger');
 const { loadHydratedMessagesByIds } = require('../messageHydrate');
 const { wrapFanoutPayload } = require('../realtimePayload');
@@ -46,9 +47,38 @@ function pendingMessageKey(messageId: string) {
   return `ws:pending:message:${messageId}`;
 }
 
-/** Same pattern as `connectionSetKey` in `websocket/server.ts` / presence (cluster-wide WS registry). */
+/** Per-user WS connection id set (authoritative; used when SMISMEMBER is unavailable). */
 function userConnectionSetKey(userId: string) {
   return `user:${userId}:connections`;
+}
+
+/**
+ * True when the user is in `presence:connected_users`, which the WS presence coordinator
+ * keeps in sync with non-empty `user:<id>:connections` (see `createPresenceCoordinator`).
+ * Batching via SMISMEMBER collapses N per-user EXISTS into one Redis command per batch.
+ */
+async function batchUsersAppearGloballyConnected(userIds: string[]): Promise<boolean[]> {
+  if (!userIds.length) return [];
+  const globalKey = connectedUsersKey();
+  try {
+    const raw = await redis.call('SMISMEMBER', globalKey, ...userIds);
+    const values = Array.isArray(raw) ? raw : [];
+    if (values.length !== userIds.length) {
+      throw new Error('SMISMEMBER result length mismatch');
+    }
+    return values.map((v: unknown) => Number(v) === 1);
+  } catch (err: unknown) {
+    const message = String((err as { message?: string })?.message || '');
+    if (!/unknown command|wrong number of arguments|SMISMEMBER/i.test(message)) {
+      throw err;
+    }
+    const pipe = redis.pipeline();
+    for (const uid of userIds) {
+      pipe.exists(userConnectionSetKey(uid));
+    }
+    const results = await pipe.exec();
+    return results.map((row: [Error | null, unknown] | undefined) => Number(row?.[1] || 0) === 1);
+  }
 }
 
 function isRedisOperational() {
@@ -118,19 +148,25 @@ async function filterUsersEligibleForPendingReplay(
 
   for (let offset = 0; offset < userIds.length; offset += REDIS_PENDING_CLASSIFY_BATCH) {
     const slice = userIds.slice(offset, offset + REDIS_PENDING_CLASSIFY_BATCH);
-    const pipe = redis.pipeline();
-    for (const uid of slice) {
-      if (!knownRecent.has(uid)) {
-        pipe.exists(wsPendingEligibleKey(uid));
+    const pendingProbeUids = slice.filter((uid) => !knownRecent.has(uid));
+    let pendingRaw: Array<[Error | null, unknown] | null> = [];
+    if (pendingProbeUids.length) {
+      const pendingPipe = redis.pipeline();
+      for (const uid of pendingProbeUids) {
+        pendingPipe.exists(wsPendingEligibleKey(uid));
       }
-      pipe.scard(userConnectionSetKey(uid));
+      pendingRaw = (await pendingPipe.exec()) as Array<[Error | null, unknown] | null>;
     }
-    const results = await pipe.exec();
-    let idx = 0;
+    const pendingByUid = new Map<string, boolean>();
+    pendingProbeUids.forEach((uid, i) => {
+      pendingByUid.set(uid, Number(pendingRaw[i]?.[1] || 0) === 1);
+    });
+
+    const hasConnFlags = await batchUsersAppearGloballyConnected(slice);
 
     const phase1: Array<{
       uid: string;
-      connCount: number;
+      hasActiveConnection: boolean;
       pendingExists: boolean;
       fromHint: boolean;
     }> = [];
@@ -138,19 +174,14 @@ async function filterUsersEligibleForPendingReplay(
     for (let i = 0; i < slice.length; i += 1) {
       const uid = slice[i];
       const fromHint = knownRecent.has(uid);
-      let pendingExists = false;
-      if (fromHint) {
-        pendingExists = false;
-      } else {
-        pendingExists = Number(results[idx++]?.[1] || 0) === 1;
-      }
-      const connCount = Number(results[idx++]?.[1] || 0) || 0;
-      phase1.push({ uid, connCount, pendingExists, fromHint });
+      const pendingExists = fromHint ? false : pendingByUid.get(uid) === true;
+      const hasActiveConnection = hasConnFlags[i] === true;
+      phase1.push({ uid, hasActiveConnection, pendingExists, fromHint });
     }
 
     const needLegacyProbe: string[] = [];
     for (const row of phase1) {
-      if (row.connCount > 0) {
+      if (row.hasActiveConnection) {
         eligible.push(row.uid);
         perClass.connected += 1;
       } else if (row.fromHint) {

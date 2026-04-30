@@ -10,7 +10,7 @@
  * - `post.ts`   — POST `/`
  * - `patch.ts`  — PATCH `/:id`
  * - `delete.ts` — DELETE `/:id`
- * - `read.ts`   — PUT `/:id/read`
+ * - `read.ts`   — PUT `/:id/read`, PUT `/batch-read`
  */
 
 

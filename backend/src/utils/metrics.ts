@@ -52,6 +52,7 @@ const {
   pgQueriesPerRequestHistogram,
   pgBusinessSqlQueriesPerRequestHistogram,
   endpointListCacheTotal,
+  messageListCacheStoreSkippedTotal,
   endpointListCacheBypassTotal,
   endpointListCacheInvalidationsTotal,
   messagesListAccessCacheHitTotal,
@@ -377,6 +378,8 @@ const overloadStageGauge = new client.Gauge({
     endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'hit' }, 0);
     endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'miss' }, 0);
     endpointListCacheTotal.inc({ endpoint: 'conversations', result: 'coalesced' }, 0);
+    messageListCacheStoreSkippedTotal.inc({ scope: 'channel', reason: 'epoch_changed' }, 0);
+    messageListCacheStoreSkippedTotal.inc({ scope: 'conversation', reason: 'epoch_changed' }, 0);
     endpointListCacheBypassTotal.inc({ endpoint: 'messages_channel', reason: 'pagination' }, 0);
     endpointListCacheBypassTotal.inc({ endpoint: 'messages_conversation', reason: 'pagination' }, 0);
     endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_channel', reason: 'write' }, 0);
@@ -636,6 +639,7 @@ module.exports = {
   pgQueriesPerRequestHistogram,
   pgBusinessSqlQueriesPerRequestHistogram,
   endpointListCacheTotal,
+  messageListCacheStoreSkippedTotal,
   endpointListCacheBypassTotal,
   endpointListCacheInvalidationsTotal,
   messagesListAccessCacheHitTotal,

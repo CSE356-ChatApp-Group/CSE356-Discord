@@ -29,6 +29,7 @@ const {
   READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS,
   READ_RECEIPT_SCOPE_DEBOUNCE_MS,
   READ_RECEIPT_FANOUT_ENABLED,
+  READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE,
   READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
   READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS,
   READ_RECEIPT_SCOPE_DEBOUNCE_MAX_KEYS,
@@ -314,11 +315,12 @@ async function advanceReadStateCursor({
       ? messageCreatedAt
       : new Date(messageCreatedAt).toISOString();
   let casResult: number = 2; // default: attempt DB write
+  let redisCursorMsAtCas0: number | undefined;
   try {
     if (!batchKeys) {
       return { applied: null, didAdvanceCursor: false };
     }
-    casResult = (await redisEvalSha(
+    const rawCas = await redisEvalSha(
       redis,
       REDIS_LUA_IDS.READ_RECEIPT_CURSOR_ADVANCE,
       4,
@@ -335,7 +337,19 @@ async function advanceReadStateCursor({
       channelId ?? "",
       conversationId ?? "",
       String(batchKeys.pendingTtlSeconds),
-    )) as number;
+    );
+    if (Array.isArray(rawCas)) {
+      casResult = Number(rawCas[0]);
+      if (casResult === 0 && rawCas[1] != null) {
+        const r = Number(rawCas[1]);
+        if (Number.isFinite(r)) redisCursorMsAtCas0 = r;
+      }
+    } else if (typeof rawCas === "number" && Number.isFinite(rawCas)) {
+      casResult = rawCas;
+    } else {
+      const n = Number(rawCas);
+      casResult = Number.isFinite(n) ? n : 2;
+    }
   } catch {
     // Redis unavailable: preserve fail-open read receipt behavior.
     casResult = 2;
@@ -343,7 +357,12 @@ async function advanceReadStateCursor({
 
   if (casResult === 0) {
     // Cursor already at or ahead of this message — no DB write needed
-    return { applied: null, didAdvanceCursor: false, casResult: 0 };
+    return {
+      applied: null,
+      didAdvanceCursor: false,
+      casResult: 0,
+      redisCursorMsAtCas0,
+    };
   }
 
   if (casResult === 1) {
@@ -377,9 +396,63 @@ registerRedisLuaScript(
   RESET_UNREAD_WATERMARK_LUA,
 );
 
+/**
+ * After Redis Lua returns CAS 0, merge the authoritative `read_cursor_ts:*` value into
+ * the in-process scope cursor cache. Without this, a worker that only sees CAS 0
+ * (cursor advanced elsewhere) records the *attempted* message timestamp and
+ * under-estimates the real cursor, so `readReceiptScopeCursorCacheSaysNoAdvance` rarely
+ * short-circuits before the next EVAL.
+ */
+async function rememberReadReceiptScopeCursorMergedWithRedis({
+  userId,
+  channelId,
+  conversationId,
+  messageCreatedAt,
+  messageTsMs,
+  redisCursorMsAtCas0,
+}: {
+  userId: string;
+  channelId: string | null;
+  conversationId: string | null;
+  messageCreatedAt: string | Date;
+  messageTsMs?: number;
+  /** When set (from Lua CAS-0), avoids an extra Redis GET on the hot path. */
+  redisCursorMsAtCas0?: number;
+}) {
+  const normalizedMsgMs = Number.isFinite(messageTsMs)
+    ? Number(messageTsMs)
+    : new Date(messageCreatedAt).getTime();
+  let mergedMs = normalizedMsgMs;
+  if (Number.isFinite(mergedMs)) {
+    if (Number.isFinite(redisCursorMsAtCas0)) {
+      mergedMs = Math.max(mergedMs, Number(redisCursorMsAtCas0));
+    } else {
+      try {
+        const raw = await redis.get(readCursorTsKey(userId, channelId, conversationId));
+        if (raw != null) {
+          const r = Number(raw);
+          if (Number.isFinite(r)) mergedMs = Math.max(mergedMs, r);
+        }
+      } catch {
+        // Fail open: keep message-only hint.
+      }
+    }
+  }
+  rememberReadReceiptScopeCursor({
+    userId,
+    channelId,
+    conversationId,
+    messageCreatedAt: Number.isFinite(mergedMs)
+      ? new Date(mergedMs).toISOString()
+      : messageCreatedAt,
+    messageTsMs: Number.isFinite(mergedMs) ? mergedMs : messageTsMs,
+  });
+}
+
 module.exports = {
   READ_RECEIPT_DEFER_POOL_WAITING,
   READ_RECEIPT_FANOUT_ENABLED,
+  READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE,
   READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
   hasConfirmedRecentMessageRead,
   rememberConfirmedMessageRead,
@@ -389,4 +462,5 @@ module.exports = {
   rememberReadReceiptScopeCursor,
   shouldCoalesceScopeBurstRead,
   advanceReadStateCursor,
+  rememberReadReceiptScopeCursorMergedWithRedis,
 };
