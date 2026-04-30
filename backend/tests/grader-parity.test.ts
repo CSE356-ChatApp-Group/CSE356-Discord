@@ -11,6 +11,7 @@ import {
   uniqueSuffix,
   createAuthenticatedUser,
   connectWebSocket,
+  connectWebSocketOpenOnly,
   closeWebSocket,
   waitForWsEvent,
 } from './helpers';
@@ -28,6 +29,39 @@ function expectConversationId(res: any) {
   expect([200, 201]).toContain(res.status);
   expect(res.body?.conversation?.id).toBeDefined();
   return res.body.conversation.id as string;
+}
+
+async function withEnv<T>(
+  env: Record<string, string | undefined>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  for (const key of Object.keys(env)) {
+    previous.set(key, process.env[key]);
+    const value = env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function generatedClientConversationId(frame: any): string {
+  const data = frame?.data || frame || {};
+  return String(
+    data.conversationId
+    || data.conversation_id
+    || data.channelId
+    || data.channel_id
+    || '',
+  );
 }
 
 beforeAll(async () => {
@@ -390,6 +424,100 @@ describe('Grader parity: DM invite realtime', () => {
 });
 
 describe('Grader parity: messaging, search, and read state', () => {
+  it('emits generated-client compatible realtime identifiers for channel and DM creates', async () => {
+    await withEnv(
+      {
+        WS_AUTO_SUBSCRIBE_MODE: 'user_only',
+        CHANNEL_MESSAGE_USER_FANOUT_MODE: 'all',
+        MESSAGE_POST_SYNC_FANOUT: 'true',
+        MESSAGE_USER_FANOUT_HTTP_BLOCKING: 'true',
+      },
+      async () => {
+        const channelOwner = await createAuthenticatedUser('graderwschanowner');
+        const channelMember = await createAuthenticatedUser('graderwschanmember');
+
+        const slug = `grader-ws-${uniqueSuffix()}`;
+        const communityRes = await request(app)
+          .post('/api/v1/communities')
+          .set('Authorization', `Bearer ${channelOwner.accessToken}`)
+          .send({ slug, name: slug, description: 'grader ws payload contract' });
+        expect(communityRes.status).toBe(201);
+        const communityId = communityRes.body.community.id;
+
+        const joinRes = await request(app)
+          .post(`/api/v1/communities/${communityId}/join`)
+          .set('Authorization', `Bearer ${channelMember.accessToken}`)
+          .send({});
+        expect(joinRes.status).toBe(200);
+
+        const channelRes = await request(app)
+          .post('/api/v1/channels')
+          .set('Authorization', `Bearer ${channelOwner.accessToken}`)
+          .send({
+            communityId,
+            name: `grader-ws-${uniqueSuffix()}`,
+            isPrivate: false,
+            description: 'grader ws payload contract channel',
+          });
+        expect(channelRes.status).toBe(201);
+        const channelId = channelRes.body.channel.id;
+
+        const channelSocket = trackSocket(await connectWebSocketOpenOnly(port, channelMember.accessToken));
+        const channelContent = `grader-channel-ws-${uniqueSuffix()}`;
+        const channelEventPromise = waitForWsEvent(
+          channelSocket,
+          (event) =>
+            event.event === 'message:created'
+            && generatedClientConversationId(event) === channelId
+            && event.data?.content === channelContent,
+          15_000,
+        );
+
+        const channelSendRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${channelOwner.accessToken}`)
+          .send({ channelId, content: channelContent });
+        expect(channelSendRes.status).toBe(201);
+
+        const channelEvent = await channelEventPromise;
+        expect(channelEvent.data.id).toBe(channelSendRes.body.message.id);
+        expect(channelEvent.data.author_id || channelEvent.data.authorId).toBe(channelOwner.user.id);
+        expect(channelEvent.data.channel_id || channelEvent.data.channelId).toBe(channelId);
+
+        const dmSender = await createAuthenticatedUser('graderwsdmsender');
+        const dmRecipient = await createAuthenticatedUser('graderwsdmrecipient');
+        const dmSocket = trackSocket(await connectWebSocketOpenOnly(port, dmRecipient.accessToken));
+
+        const dmRes = await request(app)
+          .post('/api/v1/conversations')
+          .set('Authorization', `Bearer ${dmSender.accessToken}`)
+          .send({ participantIds: [dmRecipient.user.id] });
+        const conversationId = expectConversationId(dmRes);
+
+        const dmContent = `grader-dm-ws-${uniqueSuffix()}`;
+        const dmEventPromise = waitForWsEvent(
+          dmSocket,
+          (event) =>
+            event.event === 'message:created'
+            && generatedClientConversationId(event) === conversationId
+            && event.data?.content === dmContent,
+          15_000,
+        );
+
+        const dmSendRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${dmSender.accessToken}`)
+          .send({ conversationId, content: dmContent });
+        expect(dmSendRes.status).toBe(201);
+
+        const dmEvent = await dmEventPromise;
+        expect(dmEvent.data.id).toBe(dmSendRes.body.message.id);
+        expect(dmEvent.data.author_id || dmEvent.data.authorId).toBe(dmSender.user.id);
+        expect(dmEvent.data.conversation_id || dmEvent.data.conversationId).toBe(conversationId);
+      },
+    );
+  }, 30_000);
+
   it('supports message lifecycle, pagination, search filters, and read receipts', async () => {
     const sender = await createAuthenticatedUser('gradermsgsender');
     const recipient = await createAuthenticatedUser('gradermsgrecipient');
