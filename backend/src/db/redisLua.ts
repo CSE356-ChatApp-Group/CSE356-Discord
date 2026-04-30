@@ -15,6 +15,11 @@ type RedisWithScripts = {
   evalsha?: (sha: string, numKeys: number, ...args: (string | number)[]) => Promise<unknown>;
   eval?: (script: string, numKeys: number, ...args: (string | number)[]) => Promise<unknown>;
 };
+const {
+  redisLuaScriptLoadTotal,
+  redisLuaEvalTotal,
+  redisLuaNoScriptRetryTotal,
+} = require('../utils/metrics');
 
 const scriptSourceById = new Map<string, string>();
 const scriptShaById = new Map<string, string>();
@@ -45,15 +50,32 @@ function isNoScriptError(err: unknown): boolean {
   return msg.includes('NOSCRIPT');
 }
 
+function metricSafeInc(metric: { inc: (...args: any[]) => void }, labels: Record<string, string>) {
+  try {
+    metric.inc(labels);
+  } catch {
+    // Metrics are best-effort; never break script execution paths.
+  }
+}
+
 async function loadRedisLuaScript(redis: RedisWithScripts, id: string): Promise<string> {
   if (typeof redis.call !== 'function') {
+    metricSafeInc(redisLuaScriptLoadTotal, { script_id: id, result: 'error' });
     throw new Error(`Redis SCRIPT LOAD unavailable for script: ${id}`);
   }
   const body = scriptSourceById.get(id);
   if (!body) {
+    metricSafeInc(redisLuaScriptLoadTotal, { script_id: id, result: 'error' });
     throw new Error(`unknown Redis Lua script id: ${id}`);
   }
-  const sha = String(await redis.call('SCRIPT', 'LOAD', body));
+  let sha: string;
+  try {
+    sha = String(await redis.call('SCRIPT', 'LOAD', body));
+  } catch (err) {
+    metricSafeInc(redisLuaScriptLoadTotal, { script_id: id, result: 'error' });
+    throw err;
+  }
+  metricSafeInc(redisLuaScriptLoadTotal, { script_id: id, result: 'ok' });
   scriptShaById.set(id, sha);
   return sha;
 }
@@ -75,20 +97,39 @@ async function redisEvalSha(
   if (typeof redis.evalsha !== 'function' || typeof redis.call !== 'function') {
     const body = scriptSourceById.get(id);
     if (!body || typeof redis.eval !== 'function') {
+      metricSafeInc(redisLuaEvalTotal, { script_id: id, mode: 'eval_fallback', result: 'error' });
       throw new Error(`Redis Lua fallback unavailable for script: ${id}`);
     }
-    return redis.eval(body, numKeys, ...keysAndArgs);
+    try {
+      const result = await redis.eval(body, numKeys, ...keysAndArgs);
+      metricSafeInc(redisLuaEvalTotal, { script_id: id, mode: 'eval_fallback', result: 'ok' });
+      return result;
+    } catch (err) {
+      metricSafeInc(redisLuaEvalTotal, { script_id: id, mode: 'eval_fallback', result: 'error' });
+      throw err;
+    }
   }
   let sha = await ensureRedisLuaSha(redis, id);
   try {
-    return await redis.evalsha(sha, numKeys, ...keysAndArgs);
+    const result = await redis.evalsha(sha, numKeys, ...keysAndArgs);
+    metricSafeInc(redisLuaEvalTotal, { script_id: id, mode: 'evalsha', result: 'ok' });
+    return result;
   } catch (err) {
     if (!isNoScriptError(err)) {
+      metricSafeInc(redisLuaEvalTotal, { script_id: id, mode: 'evalsha', result: 'error' });
       throw err;
     }
+    metricSafeInc(redisLuaNoScriptRetryTotal, { script_id: id });
     scriptShaById.delete(id);
     sha = await loadRedisLuaScript(redis, id);
-    return redis.evalsha(sha, numKeys, ...keysAndArgs);
+    try {
+      const retried = await redis.evalsha(sha, numKeys, ...keysAndArgs);
+      metricSafeInc(redisLuaEvalTotal, { script_id: id, mode: 'evalsha', result: 'ok' });
+      return retried;
+    } catch (retryErr) {
+      metricSafeInc(redisLuaEvalTotal, { script_id: id, mode: 'evalsha', result: 'error' });
+      throw retryErr;
+    }
   }
 }
 

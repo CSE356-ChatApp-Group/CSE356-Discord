@@ -121,6 +121,25 @@ const fanoutRetryTotal = new client.Counter({
   labelNames: ['path'],
 });
 
+/** Redis Lua SCRIPT LOAD / EVALSHA behavior for registered scripts. */
+const redisLuaScriptLoadTotal = new client.Counter({
+  name: 'redis_lua_script_load_total',
+  help: 'Redis Lua script load outcomes by script id',
+  labelNames: ['script_id', 'result'],
+});
+
+const redisLuaEvalTotal = new client.Counter({
+  name: 'redis_lua_eval_total',
+  help: 'Redis Lua eval outcomes by script id and mode',
+  labelNames: ['script_id', 'mode', 'result'],
+});
+
+const redisLuaNoScriptRetryTotal = new client.Counter({
+  name: 'redis_lua_noscript_retry_total',
+  help: 'Redis Lua NOSCRIPT retries by script id',
+  labelNames: ['script_id'],
+});
+
 /**
  * Post-insert work hit a wall-clock budget (cache bust or legacy timed publish).
  * Informational only — HTTP 201 still returned when the message row is committed.
@@ -1219,6 +1238,20 @@ function startPgPoolMetrics(pool) {
     communityCountPgReconcileSkippedTotal.inc({ reason: 'empty' }, 0);
     communityCountCacheTotal.inc({ result: 'hit' }, 0);
     communityCountCacheTotal.inc({ result: 'miss' }, 0);
+    for (const script_id of [
+      'read_receipt_cursor_advance',
+      'read_receipt_reset_unread_watermark',
+      'lock_release_if_match',
+      'presence_db_cas',
+    ] as const) {
+      redisLuaScriptLoadTotal.inc({ script_id, result: 'ok' }, 0);
+      redisLuaScriptLoadTotal.inc({ script_id, result: 'error' }, 0);
+      redisLuaEvalTotal.inc({ script_id, mode: 'evalsha', result: 'ok' }, 0);
+      redisLuaEvalTotal.inc({ script_id, mode: 'evalsha', result: 'error' }, 0);
+      redisLuaEvalTotal.inc({ script_id, mode: 'eval_fallback', result: 'ok' }, 0);
+      redisLuaEvalTotal.inc({ script_id, mode: 'eval_fallback', result: 'error' }, 0);
+      redisLuaNoScriptRetryTotal.inc({ script_id }, 0);
+    }
   } catch {
     /* ignore during unusual test setups */
   }
@@ -1255,6 +1288,9 @@ module.exports = {
   fanoutJobLatencyMs,
   fanoutQueueDepth,
   fanoutRetryTotal,
+  redisLuaScriptLoadTotal,
+  redisLuaEvalTotal,
+  redisLuaNoScriptRetryTotal,
   deliveryTimeoutTotal,
   messagePostIdempotencyPollTotal,
   messagePostIdempotencyPollWaitMs,
