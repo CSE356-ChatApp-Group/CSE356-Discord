@@ -13,6 +13,14 @@ const {
   invalidateVersionedCache,
 } = require('./fanoutCacheStoreUtils');
 
+function pgRows(result: unknown): { user_id?: string; id?: string; community_id?: string; is_private?: boolean }[] {
+  if (result && typeof result === 'object' && Array.isArray((result as { rows?: unknown }).rows)) {
+    return (result as { rows: { user_id?: string; id?: string; community_id?: string; is_private?: boolean }[] })
+      .rows;
+  }
+  return [];
+}
+
 const channelUserFanoutTargetsInflight: Map<string, Promise<string[]>> = new Map();
 const channelRealtimeMetaCache: Map<string, {
   communityId: string | null;
@@ -68,9 +76,8 @@ async function invalidateChannelUserFanoutTargetsCache(channelId: string) {
 }
 
 async function getCommunityChannelIds(communityId: string): Promise<string[]> {
-  const { rows } = await query(
-    `SELECT id::text AS id FROM channels WHERE community_id = $1`,
-    [communityId],
+  const rows = pgRows(
+    await query(`SELECT id::text AS id FROM channels WHERE community_id = $1`, [communityId]),
   );
   return rows.map((row: { id: string }) => row.id);
 }
@@ -88,11 +95,13 @@ async function getChannelRealtimeMeta(channelId: string): Promise<{
   if (inFlight) return inFlight;
 
   const load = (async () => {
-    const { rows } = await query(
-      `SELECT community_id::text AS community_id, is_private
-       FROM channels
-       WHERE id = $1`,
-      [channelId],
+    const rows = pgRows(
+      await query(
+        `SELECT community_id::text AS community_id, is_private
+         FROM channels
+         WHERE id = $1`,
+        [channelId],
+      ),
     );
     const row = rows[0] || {};
     const meta = {
@@ -171,19 +180,21 @@ async function getChannelUserFanoutTargetKeysWithMeta(channelId: string): Promis
       const vBeforeQuery = attempt === 0
         ? Number(cachedVersion || 0)
         : Number((await redis.get(versionKey).catch(() => null)) || 0);
-      const { rows } = await query(
-        `SELECT DISTINCT cm.user_id::text AS user_id
-         FROM channels c
-         JOIN community_members cm ON cm.community_id = c.community_id
-         WHERE c.id = $1
-           AND (
-             c.is_private = FALSE
-             OR EXISTS (
-               SELECT 1 FROM channel_members chm
-               WHERE chm.channel_id = c.id AND chm.user_id = cm.user_id
-             )
-           )`,
-        [channelId],
+      const rows = pgRows(
+        await query(
+          `SELECT DISTINCT cm.user_id::text AS user_id
+           FROM channels c
+           JOIN community_members cm ON cm.community_id = c.community_id
+           WHERE c.id = $1
+             AND (
+               c.is_private = FALSE
+               OR EXISTS (
+                 SELECT 1 FROM channel_members chm
+                 WHERE chm.channel_id = c.id AND chm.user_id = cm.user_id
+               )
+             )`,
+          [channelId],
+        ),
       );
       const vAfterQuery = Number((await redis.get(versionKey).catch(() => null)) || 0);
       if (vBeforeQuery !== vAfterQuery) {
@@ -202,19 +213,21 @@ async function getChannelUserFanoutTargetKeysWithMeta(channelId: string): Promis
       return uniqueKeys;
     }
 
-    const { rows } = await query(
-      `SELECT DISTINCT cm.user_id::text AS user_id
-       FROM channels c
-       JOIN community_members cm ON cm.community_id = c.community_id
-       WHERE c.id = $1
-         AND (
-           c.is_private = FALSE
-           OR EXISTS (
-             SELECT 1 FROM channel_members chm
-             WHERE chm.channel_id = c.id AND chm.user_id = cm.user_id
-           )
-         )`,
-      [channelId],
+    const rows = pgRows(
+      await query(
+        `SELECT DISTINCT cm.user_id::text AS user_id
+         FROM channels c
+         JOIN community_members cm ON cm.community_id = c.community_id
+         WHERE c.id = $1
+           AND (
+             c.is_private = FALSE
+             OR EXISTS (
+               SELECT 1 FROM channel_members chm
+               WHERE chm.channel_id = c.id AND chm.user_id = cm.user_id
+             )
+           )`,
+        [channelId],
+      ),
     );
     return Array.from(new Set(rows.map((r: { user_id: string }) => `user:${r.user_id}`)));
   })().finally(() => {

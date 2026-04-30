@@ -1,22 +1,29 @@
 /**
  * Read-receipt Redis CAS cursor, in-memory coalescing, and Lua used by PUT /messages/:id/read.
+ * Tunables are frozen in `config/readReceiptConfig.ts`.
  */
 
 
 const redis = require("../../db/redis");
 const { readReceiptCursorCacheHitTotal } = require("../../utils/metrics");
 const { batchReadStateRedisKeys } = require("../readState/batchReadState");
+const { readReceiptConfig } = require("../config/readReceiptConfig");
 
-// When unset, keep historical default (defer only under heavy pool wait).
-// `0` disables the pool-wait defer branch entirely (see PUT /messages/:id/read).
-const _readReceiptDeferWaiting = parseInt(
-  process.env.READ_RECEIPT_DEFER_POOL_WAITING || "8",
-  10,
-);
-const READ_RECEIPT_DEFER_POOL_WAITING =
-  Number.isFinite(_readReceiptDeferWaiting) && _readReceiptDeferWaiting >= 0
-    ? _readReceiptDeferWaiting
-    : 8;
+const {
+  READ_RECEIPT_DEFER_POOL_WAITING,
+  READ_CURSOR_TS_TTL_SECS,
+  READ_DB_LOCK_TTL_MS,
+  READ_RECEIPT_CAS1_DEBOUNCE_MS,
+  READ_RECEIPT_CAS1_DEBOUNCE_MAX_KEYS,
+  READ_RECEIPT_SAME_MESSAGE_COALESCE_MS,
+  READ_RECEIPT_RECENT_MAX_KEYS,
+  READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS,
+  READ_RECEIPT_SCOPE_DEBOUNCE_MS,
+  READ_RECEIPT_FANOUT_ENABLED,
+  READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
+  READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS,
+  READ_RECEIPT_SCOPE_DEBOUNCE_MAX_KEYS,
+} = readReceiptConfig;
 
 // Read cursor Redis CAS: stores last-known cursor timestamp (epoch ms) per (user, target).
 // The Lua script atomically advances only if the new value is strictly greater, preventing
@@ -24,53 +31,10 @@ const READ_RECEIPT_DEFER_POOL_WAITING =
 // After a Redis CAS win, the DB write is fired async (non-blocking) so PUT /read response
 // time is Redis-bound (~1ms) rather than DB-bound (~10ms).
 // TTL: 10 minutes — long enough to cover the grader session, short enough to GC old users.
-const READ_CURSOR_TS_TTL_SECS = parseInt(
-  process.env.READ_CURSOR_TS_TTL_SECS || "600",
-  10,
-);
-const READ_DB_LOCK_TTL_MS = parseInt(
-  process.env.READ_DB_LOCK_TTL_MS || "500",
-  10,
-);
-const READ_RECEIPT_CAS1_DEBOUNCE_MS = Math.min(
-  1000,
-  Math.max(500, parseInt(process.env.READ_RECEIPT_CAS1_DEBOUNCE_MS || "750", 10) || 750),
-);
 const readReceiptCas1DebounceByTarget = new Map();
-const READ_RECEIPT_CAS1_DEBOUNCE_MAX_KEYS = 20000;
-const READ_RECEIPT_SAME_MESSAGE_COALESCE_MS = Math.min(
-  2000,
-  Math.max(100, parseInt(process.env.READ_RECEIPT_SAME_MESSAGE_COALESCE_MS || "400", 10) || 400),
-);
 const readReceiptRecentByMessage = new Map();
-const READ_RECEIPT_RECENT_MAX_KEYS = 50000;
-const READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS = Math.min(
-  5000,
-  Math.max(
-    250,
-    parseInt(process.env.READ_RECEIPT_SCOPE_CURSOR_CACHE_TTL_MS || "500", 10) || 500,
-  ),
-);
-const READ_RECEIPT_SCOPE_DEBOUNCE_MS = Math.min(
-  2000,
-  Math.max(
-    250,
-    parseInt(process.env.READ_RECEIPT_SCOPE_DEBOUNCE_MS || "900", 10) || 900,
-  ),
-);
-const READ_RECEIPT_FANOUT_ENABLED =
-  String(process.env.READ_RECEIPT_FANOUT_ENABLED || "true").toLowerCase() === "true";
-/** When true (default), channel read:updated fanout runs on fanout:critical queue (not inline on PUT). */
-const READ_RECEIPT_CHANNEL_FANOUT_ASYNC = (() => {
-  const raw = process.env.READ_RECEIPT_CHANNEL_FANOUT_ASYNC;
-  if (raw === undefined || raw === "") return true;
-  const v = String(raw).toLowerCase();
-  return v !== "0" && v !== "false" && v !== "no";
-})();
 const readReceiptScopeCursorByTarget = new Map();
-const READ_RECEIPT_SCOPE_CURSOR_MAX_KEYS = 75000;
 const readReceiptScopeDebounceByTarget = new Map();
-const READ_RECEIPT_SCOPE_DEBOUNCE_MAX_KEYS = 75000;
 // Four-key Lua script:
 //   KEYS[1] = cursor key (read_cursor_ts:...)
 //   KEYS[2] = db_lock key (read_db_lock:...)
