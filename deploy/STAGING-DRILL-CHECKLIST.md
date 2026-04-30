@@ -1,5 +1,7 @@
 # Staging drill checklist (~15 minutes)
 
+Documentation hub: [`../docs/README.md`](../docs/README.md).
+
 Run after risky deploys or before demos. Staging base URL: use your `STAGING_HOST` / course staging URL.
 
 ## Auth
@@ -34,4 +36,4 @@ Run after risky deploys or before demos. Staging base URL: use your `STAGING_HOS
 
 ## Sign-off
 
-Record date, git SHA deployed, and initials. If any box fails, file an issue and link [`docs/RUNBOOKS.md`](../docs/RUNBOOKS.md).
+Record date, git SHA deployed, and initials. If any box fails, file an issue and link [`docs/runbooks.md`](../docs/runbooks.md).

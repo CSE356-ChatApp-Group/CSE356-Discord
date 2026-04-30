@@ -1,5 +1,7 @@
 # Deployment Guide
 
+**Documentation hub (canonical env, topology, update rules):** [docs/README.md](../docs/README.md)
+
 This document describes the staged deployment pipeline for ChatApp:
 
 - **Dev**: Local + CI containers
@@ -607,11 +609,11 @@ Create `/opt/chatapp/shared/.env` on production VM:
 
 **Fanout:** `FANOUT_QUEUE_CONCURRENCY` is written by `deploy-prod.sh` from VM shape; raise only after staging load tests show headroom.
 
-**Channel `message:created`:** the app **defaults to** logical per-member user delivery, implemented internally via sharded Redis **`userfeed:<n>`** publishes that route to each socket’s **`user:<id>`** stream (see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md)). Deploys now run [`deploy/apply-env-profile.py`](./apply-env-profile.py) against git-tracked required profiles ([`deploy/env/staging.required.env`](./env/staging.required.env), [`deploy/env/prod.required.env`](./env/prod.required.env)) so critical realtime keys (including `WS_AUTO_SUBSCRIBE_MODE=messages` and `READ_RECEIPT_DEFER_POOL_WAITING=0`) are deterministically enforced on every deploy. To change these intentionally, update the profile files in git and deploy that SHA (manual host-only `.env` edits will be overwritten for required keys).
+**Channel `message:created`:** the app **defaults to** logical per-member user delivery, implemented internally via sharded Redis **`userfeed:<n>`** publishes that route to each socket’s **`user:<id>`** stream (see [`docs/grading-delivery-semantics.md`](../docs/grading-delivery-semantics.md)). Deploys now run [`deploy/apply-env-profile.py`](./apply-env-profile.py) against git-tracked required profiles ([`deploy/env/staging.required.env`](./env/staging.required.env), [`deploy/env/prod.required.env`](./env/prod.required.env)) so critical realtime keys (including `WS_AUTO_SUBSCRIBE_MODE=messages` and `READ_RECEIPT_DEFER_POOL_WAITING=0`) are deterministically enforced on every deploy. To change these intentionally, update the profile files in git and deploy that SHA (manual host-only `.env` edits will be overwritten for required keys).
 
 ### Course grader: “delivery fails” vs HTTP 403
 
-**Throughput / delivery SLA (15s per listener, outage rollup):** see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md) — maps the forum definition to WebSocket vs HTTP and lists common non-bug patterns.
+**Throughput / delivery SLA (15s per listener, outage rollup):** see [`docs/grading-delivery-semantics.md`](../docs/grading-delivery-semantics.md) — maps the forum definition to WebSocket vs HTTP and lists common non-bug patterns.
 
 Automated graders often count **`POST /api/v1/messages` without `201`** as a delivery failure. Your API returns **`403`** when the user may not post to that **private channel** or **conversation** (`Access denied` / `Not a participant`). That is **authorization**, not network or WebSocket failure. Under heavy grader traffic, **201 and 403 can each be ~half** of message POSTs if the harness mixes allowed and forbidden cases—or if clients post before join completes. Use `./scripts/ops/prod-observe.sh` (POST /messages status breakdown) and `./scripts/ops/prod-log-correlate.sh` for an hour-bucketed split.
 

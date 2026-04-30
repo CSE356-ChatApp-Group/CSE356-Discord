@@ -25,7 +25,7 @@ Supports real-time messaging, communities, channels, DMs, presence, search, and 
                      │  Redis Pub/Sub│  ← WS fanout, presence, cache
                      └───────┬───────┘
                      ┌───────▼───────┐
-                     │   Postgres    │  ← relational data (Node 1)
+                     │   Postgres    │  ← DB host / replica (see docs/infrastructure-inventory.md)
                      └───────────────┘
 ```
 
@@ -39,7 +39,9 @@ When a message is created on any API node:
 
 This means *any* client connected to *any* node receives real-time events instantly.
 
-**Course grading / throughput (“Failed deliveries”, outages):** see [`docs/GRADING-DELIVERY-SEMANTICS.md`](docs/GRADING-DELIVERY-SEMANTICS.md) for how the 15s-per-listener rule maps to HTTP 201, WebSocket `message:created`, and common false positives (403, harness scope).
+**Course grading / throughput (“Failed deliveries”, outages):** see [`docs/grading-delivery-semantics.md`](docs/grading-delivery-semantics.md) for how the 15s-per-listener rule maps to HTTP 201, WebSocket `message:created`, and common false positives (403, harness scope).
+
+**Documentation:** [`docs/README.md`](docs/README.md) (canonical sources and update rules), [`AGENTS.md`](AGENTS.md) (quick links for contributors and coding agents).
 
 ---
 
@@ -329,36 +331,15 @@ GET /search?q=hello&communityId=<uuid>&authorId=<uuid>&after=2024-01-01&limit=20
 
 ---
 
-## Cloud Deployment (4-Node Split)
+## Cloud deployment
 
-### Node 1 – Database
-- Services: `postgres`, `redis`
-- Security group: allow 5432 and 6379 only from Node 2/3/4
+**Current staging/production hosts, SSH defaults, and sizing** — [`docs/infrastructure-inventory.md`](docs/infrastructure-inventory.md) (update that file when infra changes; do not treat the README architecture diagram as the only source of truth).
 
-### Node 2 – Proxy + Primary API
-- Services: `nginx`, `api`
-- Exposes port 80/443 to public internet
+**CI, release artifacts, and deploy flow** — [`deploy/README.md`](deploy/README.md).
 
-### Node 3 – API (replica)
-- Services: `api`
-- Internal traffic only (no public port)
+**Required env profiles (what the fleet is meant to run)** — [`deploy/env/prod.required.env`](deploy/env/prod.required.env), [`deploy/env/staging.required.env`](deploy/env/staging.required.env). **Semantics and defaults** for every variable — [`docs/env.md`](docs/env.md).
 
-### Node 4 – API + Monitoring
-- Services: `api`, `prometheus`, `grafana`
-- Grafana may be exposed with auth on a non-standard port
-
-### Split docker-compose:
-Each node uses a `docker-compose.override.yml` that includes only its services:
-
-```bash
-# Node 1
-docker compose -f docker-compose.yml -f deploy/node1.yml up -d
-
-# Node 2
-docker compose -f docker-compose.yml -f deploy/node2.yml up -d
-```
-
-All nodes share the same `.env` file with connection strings pointing at Node 1's private IP.
+**Multi-host split compose:** if you run DB, cache, and API on different machines, use per-host `docker compose` overrides and point `DATABASE_URL` / `REDIS_URL` at the real targets. For the **course / Linode** layout, use the deploy guide and inventory — do not assume a fixed “4-node” split that matches this repo’s current production.
 
 ---
 

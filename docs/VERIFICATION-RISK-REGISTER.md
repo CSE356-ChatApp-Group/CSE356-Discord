@@ -1,4 +1,6 @@
-# Verification risk register
+# Verification Risk Register
+
+Maintenance index and canonical env/topology docs: [`README.md`](README.md).
 
 Living map: **scenario → automated tests → metrics/alerts → owner / N/A**.
 
@@ -14,8 +16,8 @@ Living map: **scenario → automated tests → metrics/alerts → owner / N/A**.
 | Attachments | Presign, ACL | [`backend/tests/attachments.test.ts`](../backend/tests/attachments.test.ts); [`frontend/e2e/attachments.spec.ts`](../frontend/e2e/attachments.spec.ts) | N/A | MinIO / S3 URL signing |
 | Overload | 503 sheds non-essential | [`backend/tests/messages.test.ts`](../backend/tests/messages.test.ts) | `http_overload_shed`, `ChatAppHigh5xxRate` | Document UX |
 | Deploy / WS proxy | Nginx upgrade, health | [`deploy/candidate-ws-smoke.cjs`](../deploy/candidate-ws-smoke.cjs) (CI syntax); manual | `ChatAppApiDown`, `ChatAppProcessRestartFlapping` | |
-| Load / SLO | Steady-state latency & KPIs | [`load-tests/staging-capacity.js`](../load-tests/staging-capacity.js); [`.github/workflows/staging-load-gate.yml`](../.github/workflows/staging-load-gate.yml) | k6 `optimization_*` counters | See [`docs/SLOS-AND-CHAOS.md`](SLOS-AND-CHAOS.md) |
-| Ops response | On-call actions | N/A | [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) | [`docs/RUNBOOKS.md`](RUNBOOKS.md), [`deploy/STAGING-DRILL-CHECKLIST.md`](../deploy/STAGING-DRILL-CHECKLIST.md) |
+| Load / SLO | Steady-state latency & KPIs | [`load-tests/staging-capacity.js`](../load-tests/staging-capacity.js); [`.github/workflows/staging-load-gate.yml`](../.github/workflows/staging-load-gate.yml) | k6 `optimization_*` counters | See [`docs/slos-and-chaos.md`](slos-and-chaos.md) |
+| Ops response | On-call actions | N/A | [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) | [`docs/runbooks.md`](runbooks.md), [`deploy/staging-drill-checklist.md`](../deploy/staging-drill-checklist.md) |
 
 **CI vs staging:** [`ci-deploy`](../.github/workflows/ci-deploy.yml) runs Jest + Vitest on PRs and `main`. **E2E** runs after deploy to staging (`e2e:staging:ci`) and on [nightly staging](../.github/workflows/staging-e2e-nightly.yml), plus API contract.
 

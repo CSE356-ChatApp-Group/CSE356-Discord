@@ -1,6 +1,8 @@
 # Incremental rollout: full `user:` fanout → channel-first (`recent_connect`)
 
-**Prod:** ship **Stage A** code first with **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`** unchanged. **Do not** flip fanout mode until gates pass on **Stage B** (VM3 canary).
+Documentation hub: [`README.md`](README.md).
+
+> Historical rollout plan: stages below describe the migration path. Current prod/staging target profile is git-tracked in [`deploy/env/prod.required.env`](../deploy/env/prod.required.env) and [`deploy/env/staging.required.env`](../deploy/env/staging.required.env).
 
 Related design: [`docs/architecture-channel-first-realtime.md`](architecture-channel-first-realtime.md).
 

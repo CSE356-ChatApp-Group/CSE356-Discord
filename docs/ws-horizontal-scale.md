@@ -1,5 +1,7 @@
 # WebSocket horizontal scale (design)
 
+Maintenance index and canonical env/topology docs: [`README.md`](README.md).
+
 ## Current shape
 
 - Each API process runs a WebSocket server and subscribes to Redis Pub/Sub channels needed by its local sockets ([`backend/src/websocket/server.ts`](../backend/src/websocket/server.ts)).

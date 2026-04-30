@@ -1,5 +1,7 @@
 # Performance Baseline Pack
 
+Maintenance index and canonical env/topology docs: [`README.md`](README.md).
+
 Use this pack to compare performance runs consistently before and after tuning.
 
 ## Current baseline runs (2026-04-14)

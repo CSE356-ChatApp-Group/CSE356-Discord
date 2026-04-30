@@ -207,6 +207,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PG_READ_QUERY_TIMEOUT_MS` | Optional read-replica query timeout in milliseconds. When set above `0`, a slow replica SELECT times out and, if `PG_READ_FALLBACK_TO_PRIMARY` is enabled, retries on primary. Prod currently pins **`750`** during incident stabilization. |
 | `UNREAD_COUNTS_QUERY_TIMEOUT_MS` | Read-replica query timeout for `GET /api/v1/unread-counts` aggregate channel/DM unread counts. Default **750** ms; falls back through `queryRead()` if the replica times out and primary fallback is enabled. |
 | `UNREAD_COUNTS_MAX_INFLIGHT` | Per-process cap for concurrent `GET /api/v1/unread-counts` DB queries. Default **48**. When saturated, the route returns an empty unread payload (HTTP 200) to shed pressure and avoid cascading timeouts. |
+| `UNREAD_COUNTS_DEFER_POOL_WAITING` | Pg pool waiting-depth guard for `GET /api/v1/unread-counts`. Default **8**. When `pg_pool_waiting` is at/above this threshold, the route immediately returns an empty unread payload (HTTP 200) to protect hot write/read paths. Set `0` to disable. |
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
 | `PRESENCE_SWEEPER_MS` | Interval for presence sweeper ticks (`websocket/server.ts`; default **15000** ms). |
 | `PRESENCE_DB_CURSOR_TTL_SECS` | TTL for presence DB cursor keys (default **300** s). |

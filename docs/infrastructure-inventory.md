@@ -1,5 +1,7 @@
 # Infrastructure Inventory
 
+Documentation hub: [`README.md`](README.md).
+
 Last updated: 2026-04-29
 
 This is the source of truth for current environment shape. Update this file whenever VM sizing, hosts, or provider changes.

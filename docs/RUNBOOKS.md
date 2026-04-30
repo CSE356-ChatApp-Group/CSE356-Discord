@@ -2,6 +2,10 @@
 
 Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml). Replace hostnames with your environment.
 
+**Documentation hub (canonical sources, env drift rules):** [`README.md`](README.md).
+
+**Agent diagnosis workflow (SSH, logs, profiling, improvement rubric):** [`agent-operations-playbook.md`](agent-operations-playbook.md).
+
 **Metric names, PromQL, and how to export a snapshot for debugging:** [`operations-monitoring.md`](operations-monitoring.md).
 
 **Production deploy baseline:** `deploy-prod.sh` / `deploy-prod-multi.sh` merge git-tracked [`deploy/env/prod.required.env`](../deploy/env/prod.required.env) into `/opt/chatapp/shared/.env` on every rollout. Deploying an **older SHA** or a fork that never merged `origin/main` can **revert** realtime/search/replay behavior (fanout mode, WS replay limits, search semantics). Prefer **prod from current `origin/main`** (or a release tag cut from it); after deploy, spot-check `readlink /opt/chatapp/current` and that required keys in the merged `.env` match the profile you expect.
@@ -103,7 +107,7 @@ If realtime is broken but REST is healthy:
 
 ## Grader-oriented delivery checks
 
-**Course definitions** (15s per listener, outage windows): [`GRADING-DELIVERY-SEMANTICS.md`](GRADING-DELIVERY-SEMANTICS.md).
+**Course definitions** (15s per listener, outage windows): [`grading-delivery-semantics.md`](grading-delivery-semantics.md).
 
 Automated graders (browser clients) should treat **HTTP as the source of truth** for whether a message exists, not the DOM immediately after `POST /messages` returns.
 
@@ -111,7 +115,7 @@ Automated graders (browser clients) should treat **HTTP as the source of truth**
 2. **If checking the UI only:** For **`POST /messages`** (`message:created`) and for **`PATCH` / `DELETE` on a message**, the server **awaits `fanout.publish`** before returning, so the UI can update immediately after success on those routes. **`read:updated`** and some other paths may still use the in-process fanout queue — for those, a **short wait** or **GET** assertion is safer than WS-only zero-wait.
 3. **Do not** rely solely on WebSocket delivery for grading unless you accept occasional false negatives under normal load.
 
-**Throughput harnesses:** channel **`message:created`** is duplicated to **`user:<member>`** by default so listeners receive it as soon as the **`user:`** Redis subscription is live (before full **`channel:`** bootstrap). The generated grading client currently does **not** wait for WS `ready` and does **not** explicitly subscribe to `channel:` / `conversation:` topics, so when you debug “delivery timeout” reports, first reason about **`user:<self>` compatibility** rather than rich-client pane state. See [`GRADING-DELIVERY-SEMANTICS.md`](GRADING-DELIVERY-SEMANTICS.md). Watch **`ws_bootstrap_wall_duration_ms`** if accounts have extreme community counts.
+**Throughput harnesses:** channel **`message:created`** is duplicated to **`user:<member>`** by default so listeners receive it as soon as the **`user:`** Redis subscription is live (before full **`channel:`** bootstrap). The generated grading client currently does **not** wait for WS `ready` and does **not** explicitly subscribe to `channel:` / `conversation:` topics, so when you debug “delivery timeout” reports, first reason about **`user:<self>` compatibility** rather than rich-client pane state. See [`grading-delivery-semantics.md`](grading-delivery-semantics.md). Watch **`ws_bootstrap_wall_duration_ms`** if accounts have extreme community counts.
 
 ## Metrics during grader or load-test runs
 
@@ -309,4 +313,4 @@ On an API host (or centralized log store), narrow to **incident time ±90s** and
 
 ## After mitigation
 
-Update the incident log, trigger a **staging drill** ([`deploy/STAGING-DRILL-CHECKLIST.md`](../deploy/STAGING-DRILL-CHECKLIST.md)), and open a follow-up if the root cause is uncaught by tests (see [`docs/VERIFICATION-RISK-REGISTER.md`](VERIFICATION-RISK-REGISTER.md)).
+Update the incident log, trigger a **staging drill** ([`deploy/staging-drill-checklist.md`](../deploy/staging-drill-checklist.md)), and open a follow-up if the root cause is uncaught by tests (see [`docs/verification-risk-register.md`](verification-risk-register.md)).

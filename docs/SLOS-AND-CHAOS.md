@@ -1,4 +1,6 @@
-# SLOs, load gate, and chaos drills
+# SLOs, Load Gate, and Chaos Drills
+
+Maintenance index and canonical env/topology docs: [`README.md`](README.md).
 
 ## Staging load gate
 

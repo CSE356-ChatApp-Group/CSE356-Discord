@@ -1,5 +1,7 @@
 # Deployment Safety Runbook
 
+**IPs and SSH users drift** — verify against [`docs/infrastructure-inventory.md`](docs/infrastructure-inventory.md) before relying on examples below. **Documentation hub:** [`docs/README.md`](docs/README.md).
+
 Safe, predictable deployments to production (3 VMs, 16 workers).
 
 ## Quick Reference

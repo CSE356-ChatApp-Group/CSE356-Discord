@@ -1,6 +1,6 @@
 # ChatApp Frontend
 
-Barebones React + Vite SPA for testing the ChatApp MVP API.
+Barebones React + Vite SPA for testing the ChatApp MVP API. Repo-wide docs hub: [`../docs/README.md`](../docs/README.md).
 
 ## Stack
 

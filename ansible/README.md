@@ -1,5 +1,7 @@
 # Ansible
 
+Documentation hub: [`../docs/README.md`](../docs/README.md).
+
 This directory drives **inventory** and optional **playbooks** around the existing shell deploy tooling in `deploy/`. Behavior matches `./deploy/deploy-staging.sh` and `./deploy/deploy-prod.sh`; Ansible supplies host/user defaults from `inventory/hosts.yml` (aligned with `docs/infrastructure-inventory.md`).
 
 ## Prerequisites

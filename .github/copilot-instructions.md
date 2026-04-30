@@ -4,6 +4,8 @@
 
 A Discord-like chat API graded by automated bots (course autograder at CSE 356, Stony Brook). The grader sends messages and checks delivery within **15 seconds**. There are no real users. Delivery failures are scored as misses; 503s are delivery failures.
 
+**Docs upkeep:** [`docs/README.md`](../docs/README.md) lists canonical sources (do **not** duplicate full prod env blocks — link [`deploy/env/prod.required.env`](../deploy/env/prod.required.env) and [`docs/env.md`](../docs/env.md)).
+
 ---
 
 ## Infrastructure
@@ -174,7 +176,7 @@ Use `git log` for incident-linked SHAs; avoid pinning “current prod SHA” in 
 ## Known issues / watch list
 
 1. **`DROP INDEX CONCURRENTLY` in migrations** — migrations run in a transaction wrapper; use plain `DROP INDEX IF EXISTS` (see migration comments in-repo).
-2. **Pool / PgBouncer / replica** — triage with [`docs/RUNBOOKS.md`](../docs/RUNBOOKS.md) and Prometheus alerts in `infrastructure/monitoring/alerts.yml`.
+2. **Pool / PgBouncer / replica** — triage with [`docs/runbooks.md`](../docs/runbooks.md) and Prometheus alerts in `infrastructure/monitoring/alerts.yml`.
 
 ---
 

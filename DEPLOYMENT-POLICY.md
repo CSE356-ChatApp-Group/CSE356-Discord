@@ -1,5 +1,7 @@
 # Deployment Policy
 
+**Canonical hosts and deploy flow** — [`docs/infrastructure-inventory.md`](docs/infrastructure-inventory.md), [`deploy/README.md`](deploy/README.md). **Docs maintenance** — [`docs/README.md`](docs/README.md).
+
 ## Principle
 
 **Production deployments must never bypass verification.** Code is validated in staging before any production traffic shift happens.

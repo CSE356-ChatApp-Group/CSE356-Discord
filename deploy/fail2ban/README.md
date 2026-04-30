@@ -1,5 +1,7 @@
 # Fail2ban: nginx rate-limit / edge 503 auto-ban (VM1)
 
+Documentation hub: [`../../docs/README.md`](../../docs/README.md).
+
 Blocks **external** IPs that generate many **503** responses with **`urt=-`** in `access.log` (nginx-served errors, not upstream timing). Complements app-layer **`AUTO_IP_BAN`** (Redis) which keys off **429** from Express.
 
 ## Fix: regex must match real log format

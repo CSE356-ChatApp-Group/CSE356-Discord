@@ -1,5 +1,7 @@
 # Grading throughput: delivery success, failure, and outages
 
+Maintenance index and canonical env/topology docs: [`README.md`](README.md).
+
 This page aligns the **course throughput / “Failed deliveries”** view with how ChatApp behaves, so you can separate **application bugs**, **harness timing**, and **capacity noise**.
 
 ## Definitions (course staff)
@@ -48,7 +50,7 @@ So for grading-style investigations, treat **“open WS subscribed to `user:<sel
 | Many **POST ≠ 201** | Mix of **403** (not allowed to post to private channel / not a participant) vs real failures. **403 is authorization, not “WS dropped the message”.** See **Course grader** in [`deploy/README.md`](../deploy/README.md). |
 | **201** but WS miss | WS not connected, reconnect race, client too slow (**backpressure** — kill still drops), or harness waits only on a topic the client has not subscribed to yet (mitigated by default **`user:`** duplicate fanout for channel messages). |
 | Intermittent misses under load | **Fanout queue backlog** or **overload** (presence/search throttling does not replace message fanout, but shared CPU/Redis/DB pressure does). |
-| Everyone slow after ~same time | **Redis**, **Postgres pool**, or **API CPU** saturation; check Grafana / [`docs/RUNBOOKS.md`](RUNBOOKS.md) § *Grader-oriented delivery checks* and *Metrics during grader or load-test runs*. |
+| Everyone slow after ~same time | **Redis**, **Postgres pool**, or **API CPU** saturation; check Grafana / [`docs/runbooks.md`](runbooks.md) § *Grader-oriented delivery checks* and *Metrics during grader or load-test runs*. |
 | Strict “after HTTP return” UI checks | For **`POST` / `PATCH` / `DELETE` on messages**, the API **awaits fanout** before success, so the UI can update right after success; other events may still prefer a short wait or **GET** (same Runbook section). |
 
 ## Load test mirror (optional)
@@ -57,4 +59,4 @@ So for grading-style investigations, treat **“open WS subscribed to `user:<sel
 
 ## Short answer you can post (forum-style)
 
-> **Success:** Each expected listener gets the message within **15s** of send; **one failure** on any listener counts as a failed delivery for that send. **Outage:** **>50%** failures over **10 events** or **30s** (per course definition). **Our stack:** **201** means DB + **Redis fanout publish completed**; whether each **browser** counts as “received” within 15s is usually a **WebSocket `message:created`** observation. **403** on POST is **permission**, not delivery drop. For debugging sustained failures, correlate **fanout queue depth/delay**, **WS backpressure**, **POST status mix**, and overload — see repo **`docs/GRADING-DELIVERY-SEMANTICS.md`** and **`docs/RUNBOOKS.md`**.
+> **Success:** Each expected listener gets the message within **15s** of send; **one failure** on any listener counts as a failed delivery for that send. **Outage:** **>50%** failures over **10 events** or **30s** (per course definition). **Our stack:** **201** means DB + **Redis fanout publish completed**; whether each **browser** counts as “received” within 15s is usually a **WebSocket `message:created`** observation. **403** on POST is **permission**, not delivery drop. For debugging sustained failures, correlate **fanout queue depth/delay**, **WS backpressure**, **POST status mix**, and overload — see repo **`docs/grading-delivery-semantics.md`** and **`docs/runbooks.md`**.

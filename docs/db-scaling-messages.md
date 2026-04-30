@@ -1,5 +1,7 @@
 # Database scaling: messages and read path
 
+Maintenance index and canonical env/topology docs: [`README.md`](README.md).
+
 ## Read replica (`PG_READ_REPLICA_URL`)
 
 When `PG_READ_REPLICA_URL` is set, `GET /api/v1/messages` list queries use `queryRead()` against the replica by default. **Access-control checks** still hit the primary so authorization stays consistent; only the heavy `SELECT` for message rows may lag replication.

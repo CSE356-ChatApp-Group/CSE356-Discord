@@ -1,4 +1,6 @@
-# Staging capacity testing
+# Staging Capacity Testing
+
+Documentation hub: [`../docs/README.md`](../docs/README.md).
 
 This folder contains a repeatable **staging-only** load test that ramps traffic until the system degrades and records artifacts for later analysis.
 
