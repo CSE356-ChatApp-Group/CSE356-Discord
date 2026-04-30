@@ -60,11 +60,15 @@ import { hydrateAuthorFromSession } from './chatStoreHydrate';
 const VALID_PRESENCE_STATUSES = new Set<string>(PRESENCE_STATUSES);
 const MESSAGE_CONTEXT_SIDE_LIMIT = 25;
 const MESSAGE_PAGE_LIMIT = 50;
+const PRESENCE_BULK_BATCH_SIZE = 2000;
 
 let communitiesInFlight: Promise<Entity[]> | null = null;
 const channelsInFlightByCommunity = new Map<string, Promise<Entity[]>>();
 let channelsFetchTokenCounter = 0;
 const latestChannelsFetchTokenByCommunity = new Map<string, number>();
+const membersInFlightByCommunity = new Map<string, Promise<void>>();
+let membersFetchTokenCounter = 0;
+const latestMembersFetchTokenByCommunity = new Map<string, number>();
 const presenceFreshness = new Map<string, number>();
 let presenceFreshnessSeq = 0;
 
@@ -99,6 +103,7 @@ export function resetChatStore() {
   // Cancel any in-flight community fetch so the next user starts fresh.
   communitiesInFlight = null;
   channelsInFlightByCommunity.clear();
+  membersInFlightByCommunity.clear();
   resetReadReceiptState();
   presenceFreshness.clear();
   presenceFreshnessSeq = 0;
@@ -1001,11 +1006,55 @@ export const useChatStore = create<ChatState>()((set, get) => {
   // ── Members ───────────────────────────────────────────────────────────────
   async fetchMembers(communityId: string) {
     const normalizedCommunityId = requireCommunityId(communityId, 'fetchMembers');
-    const { members } = await api.get(`/communities/${normalizedCommunityId}/members`);
-    set({ members });
-    await get().hydratePresenceForUsers(
-      (members || []).map((m: Entity) => String(m?.id || '')).filter(Boolean)
-    );
+    if (membersInFlightByCommunity.has(normalizedCommunityId)) {
+      return membersInFlightByCommunity.get(normalizedCommunityId)!;
+    }
+
+    const requestToken = ++membersFetchTokenCounter;
+    latestMembersFetchTokenByCommunity.set(normalizedCommunityId, requestToken);
+    const requestedAt = ++presenceFreshnessSeq;
+
+    const inFlight = (async () => {
+      const { members } = await api.get(`/communities/${normalizedCommunityId}/members`);
+      const roster = Array.isArray(members) ? members : [];
+
+      if (latestMembersFetchTokenByCommunity.get(normalizedCommunityId) !== requestToken) {
+        return;
+      }
+
+      set((s) => {
+        const nextPresence = { ...s.presence };
+        const nextAwayMessages = { ...s.awayMessages };
+
+        roster.forEach((member: Entity) => {
+          const userId = String(member?.id || '').trim();
+          if (!userId || (presenceFreshness.get(userId) || 0) >= requestedAt) return;
+
+          const status = normalizePresenceStatus(member?.status);
+          nextPresence[userId] = status;
+          nextAwayMessages[userId] =
+            status === 'away' ? (member?.away_message ?? member?.awayMessage ?? null) : null;
+          presenceFreshness.set(userId, requestedAt);
+        });
+
+        const activeCommunityId = normalizeCommunityId(s.activeCommunity);
+        const shouldReplaceVisibleMembers =
+          !activeCommunityId || activeCommunityId === normalizedCommunityId;
+
+        return {
+          ...(shouldReplaceVisibleMembers ? { members: roster } : {}),
+          presence: nextPresence,
+          awayMessages: nextAwayMessages,
+        };
+      });
+    })();
+
+    membersInFlightByCommunity.set(normalizedCommunityId, inFlight);
+    try {
+      return await inFlight;
+    } finally {
+      membersInFlightByCommunity.delete(normalizedCommunityId);
+    }
   },
 
   async hydratePresenceForUsers(userIds: string[]) {
@@ -1013,9 +1062,21 @@ export const useChatStore = create<ChatState>()((set, get) => {
     if (!ids.length) return;
 
     const requestedAt = ++presenceFreshnessSeq;
-    const data = await api.post('/presence/bulk', { userIds: ids });
-    const presenceMap: Record<string, unknown> = data?.presence || {};
-    const awayMap: Record<string, string | null> = data?.awayMessages || {};
+    const batches: string[][] = [];
+    for (let index = 0; index < ids.length; index += PRESENCE_BULK_BATCH_SIZE) {
+      batches.push(ids.slice(index, index + PRESENCE_BULK_BATCH_SIZE));
+    }
+
+    const responses = await Promise.all(
+      batches.map((batch) => api.post('/presence/bulk', { userIds: batch })),
+    );
+    const presenceMap: Record<string, unknown> = {};
+    const awayMap: Record<string, string | null> = {};
+
+    responses.forEach((data) => {
+      Object.assign(presenceMap, data?.presence || {});
+      Object.assign(awayMap, data?.awayMessages || {});
+    });
 
     set((s) => {
       const nextPresence = { ...s.presence };

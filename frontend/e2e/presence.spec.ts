@@ -61,7 +61,7 @@ test.describe('presence display', () => {
         await expect(pageB.getByTestId('member-list')).toBeVisible({ timeout: 15_000 });
 
         // B's member list must show A as "online".
-        // hydratePresenceForUsers polls GET /api/v1/presence for the member IDs.
+        // Community member presence is returned directly by /communities/:id/members.
         const memberRowA = pageB.getByTestId(`member-row-${userAId}`);
         await expect(memberRowA).toBeVisible({ timeout: 20_000 });
         await expect.poll(

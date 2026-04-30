@@ -145,6 +145,37 @@ describe('chatStore quick actions', () => {
     expect(useChatStore.getState().presence['user-2']).toBe('online');
   });
 
+  it('fetchMembers reuses presence from the members endpoint instead of bulk rehydrating it', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path !== '/communities/comm-1/members') {
+        throw new Error(`Unexpected GET ${path}`);
+      }
+      return Promise.resolve({
+        members: [
+          { id: 'user-1', username: 'sam', status: 'online' },
+          { id: 'user-2', username: 'alex', status: 'away', away_message: 'AFK' },
+        ],
+      });
+    });
+
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      presence: {},
+      awayMessages: {},
+      members: [],
+    } as any);
+
+    await useChatStore.getState().fetchMembers('comm-1');
+
+    const state = useChatStore.getState();
+    expect(apiGet).toHaveBeenCalledWith('/communities/comm-1/members');
+    expect(apiPost).not.toHaveBeenCalled();
+    expect(state.members.map((member) => member.id)).toEqual(['user-1', 'user-2']);
+    expect(state.presence['user-1']).toBe('online');
+    expect(state.presence['user-2']).toBe('away');
+    expect(state.awayMessages['user-2']).toBe('AFK');
+  });
+
   it('hydrates presence via POST /presence/bulk with all requested ids', async () => {
     apiPost.mockImplementation((path: string, body: any) => {
       if (path !== '/presence/bulk') {
@@ -166,6 +197,29 @@ describe('chatStore quick actions', () => {
     expect(presence['user-1']).toBe('online');
     expect(presence['user-100']).toBe('online');
     expect(presence['user-205']).toBe('online');
+  });
+
+  it('batches very large presence hydration requests to stay within the bulk endpoint limit', async () => {
+    apiPost.mockImplementation((path: string, body: any) => {
+      if (path !== '/presence/bulk') {
+        throw new Error(`Unexpected POST ${path}`);
+      }
+      const ids = Array.isArray(body?.userIds) ? body.userIds : [];
+      expect(ids.length).toBeLessThanOrEqual(2000);
+      return Promise.resolve({
+        presence: Object.fromEntries(ids.map((id) => [id, 'idle'])),
+        awayMessages: {},
+      });
+    });
+
+    const ids = Array.from({ length: 4005 }, (_, idx) => `user-${idx + 1}`);
+    await useChatStore.getState().hydratePresenceForUsers(ids);
+
+    const presence = useChatStore.getState().presence;
+    expect(apiPost).toHaveBeenCalledTimes(3);
+    expect(presence['user-1']).toBe('idle');
+    expect(presence['user-2000']).toBe('idle');
+    expect(presence['user-4005']).toBe('idle');
   });
 
   it('inviteToChannel posts invited users and refreshes active community channels', async () => {

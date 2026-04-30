@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import MemberList from './MemberList';
 import { useAuthStore } from '../stores/authStore';
-import { useChatStore } from '../stores/chatStore';
+import { resetChatStore, useChatStore } from '../stores/chatStore';
 
 const { apiGetMock, apiPostMock } = vi.hoisted(() => ({
   apiGetMock: vi.fn(),
@@ -25,6 +25,7 @@ describe('MemberList DM presence', () => {
     apiGetMock.mockReset();
     apiPostMock.mockReset();
     act(() => {
+      resetChatStore();
       useAuthStore.setState({
         user: {
           id: 'user-1',
@@ -51,6 +52,7 @@ describe('MemberList DM presence', () => {
 
   afterEach(() => {
     act(() => {
+      resetChatStore();
       useAuthStore.setState({ user: null } as any);
       useChatStore.setState({
         activeConv: null,
@@ -92,10 +94,13 @@ describe('MemberList community role management', () => {
   const updateCommunityMemberRole = vi.fn();
 
   beforeEach(() => {
+    apiGetMock.mockReset();
+    apiPostMock.mockReset();
     updateCommunityMemberRole.mockReset();
     updateCommunityMemberRole.mockResolvedValue(undefined);
 
     act(() => {
+      resetChatStore();
       useAuthStore.setState({
         user: {
           id: 'user-1',
@@ -109,13 +114,10 @@ describe('MemberList community role management', () => {
         activeConv: null,
         activeCommunity: { id: 'community-1', my_role: 'owner' },
         members: [
-          { id: 'user-1', username: 'owner', role: 'owner' },
-          { id: 'user-2', username: 'alex', role: 'member' },
+          { id: 'user-1', username: 'owner', role: 'owner', status: 'online' },
+          { id: 'user-2', username: 'alex', role: 'member', status: 'away', away_message: 'Reviewing PRs' },
         ],
-        presence: {
-          'user-1': 'online',
-          'user-2': 'online',
-        },
+        presence: {},
         awayMessages: {},
         updateCommunityMemberRole,
       } as any);
@@ -124,6 +126,7 @@ describe('MemberList community role management', () => {
 
   afterEach(() => {
     act(() => {
+      resetChatStore();
       useAuthStore.setState({ user: null } as any);
       useChatStore.setState({
         activeCommunity: null,
@@ -143,5 +146,14 @@ describe('MemberList community role management', () => {
     });
 
     expect(updateCommunityMemberRole).toHaveBeenCalledWith('community-1', 'user-2', 'admin');
+  });
+
+  it('renders community presence from the members payload without rehydrating in bulk', async () => {
+    render(<MemberList />);
+
+    expect(apiPostMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId('member-row-user-1')).toHaveAttribute('data-member-status', 'online');
+    expect(screen.getByTestId('member-row-user-2')).toHaveAttribute('data-member-status', 'away');
+    expect(screen.getByText('Reviewing PRs')).toBeInTheDocument();
   });
 });

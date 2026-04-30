@@ -41,13 +41,15 @@ export default function MemberList() {
   const canManageRoles = !isDm && (activeCommunity?.my_role || activeCommunity?.myRole) === 'owner';
 
   useEffect(() => {
+    if (!isDm) return;
+
     const ids: string[] = Array.from(
       new Set((list || []).map((m) => (m?.id ? String(m.id) : '')).filter(Boolean))
     );
     if (!ids.length) return;
 
     hydratePresenceForUsers(ids).catch(() => {});
-  }, [list, hydratePresenceForUsers]);
+  }, [isDm, list, hydratePresenceForUsers]);
 
   const groups = useMemo(() => {
     const g = { online: [], idle: [], away: [], offline: [] };
