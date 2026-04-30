@@ -19,6 +19,11 @@ on:
         required: false
         default: false
         type: boolean
+      prod_canary_vm3_only:
+        description: "Prod only — deploy the SHA to VM3 workers only, then stop (DEPLOY_STOP_AFTER_VM3). Soak; then run Manual Deploy prod again without this flag for full VM3→VM2→VM1 rollout."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -191,6 +196,7 @@ jobs:
       auto_confirm: true
       artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
       clear_prod_deploy_lock: ${{ inputs.clear_prod_deploy_lock }}
+      prod_canary_vm3_only: ${{ inputs.environment == 'prod' && inputs.prod_canary_vm3_only }}
       # Prod runs five app workers by default (chatapp@4000..@4004) unless the repo/org
       # variable overrides it explicitly for a smaller recovery footprint.
       chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '5' }}

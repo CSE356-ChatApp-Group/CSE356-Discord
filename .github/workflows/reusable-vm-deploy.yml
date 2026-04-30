@@ -53,6 +53,11 @@ on:
         required: false
         default: false
         type: boolean
+      prod_canary_vm3_only:
+        description: "Production only — set DEPLOY_STOP_AFTER_VM3=1 (deploy-prod-multi updates VM3 then exits). Requires script_path deploy/deploy-prod-multi.sh and normal release/artifact flow. Mutually exclusive with prod_fast_rollback."
+        required: false
+        default: false
+        type: boolean
     secrets:
       DEPLOY_SSH_KEY:
         required: true
@@ -150,6 +155,20 @@ jobs:
             fi
             if [[ -n "${{ inputs.artifact_name }}" ]]; then
               echo "ERROR: prod_fast_rollback cannot be combined with artifact_name (no tarball needed)."
+              exit 1
+            fi
+          fi
+          if [[ "${{ inputs.prod_fast_rollback }}" == "true" ]] && [[ "${{ inputs.prod_canary_vm3_only }}" == "true" ]]; then
+            echo "ERROR: prod_fast_rollback and prod_canary_vm3_only cannot be used together."
+            exit 1
+          fi
+          if [[ "${{ inputs.prod_canary_vm3_only }}" == "true" ]]; then
+            if [[ "${{ inputs.environment }}" != "production" ]]; then
+              echo "ERROR: prod_canary_vm3_only is only valid for environment production."
+              exit 1
+            fi
+            if [[ "${{ inputs.script_path }}" != "deploy/deploy-prod-multi.sh" ]]; then
+              echo "ERROR: prod_canary_vm3_only requires script_path deploy/deploy-prod-multi.sh"
               exit 1
             fi
           fi
@@ -254,6 +273,7 @@ jobs:
           DEPLOY_ENV: ${{ inputs.environment }}
           DEPLOY_SCRIPT_PATH: ${{ inputs.script_path }}
           PROD_FAST_ROLLBACK: ${{ inputs.prod_fast_rollback }}
+          PROD_CANARY_VM3_ONLY: ${{ inputs.prod_canary_vm3_only }}
         run: |
           set -euo pipefail
 
@@ -296,6 +316,11 @@ jobs:
               LP="${LOCAL_ARTIFACT_PATH}"
               [[ "${LP}" != /* ]] && LP="${GITHUB_WORKSPACE}/${LP}"
               export LOCAL_ARTIFACT_PATH="${LP}"
+            fi
+
+            if [[ "${PROD_CANARY_VM3_ONLY:-false}" == "true" ]]; then
+              export DEPLOY_STOP_AFTER_VM3=1
+              echo "prod_canary_vm3_only: DEPLOY_STOP_AFTER_VM3=1 (rollout pauses after VM3)"
             fi
 
             bash "${SCRIPT}" "${TARGET_SHA}"
