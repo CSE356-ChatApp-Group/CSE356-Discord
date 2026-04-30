@@ -220,7 +220,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (route) (rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m]))",
+          "expr": "sum by (route) (rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m])) + sum by (route) (rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m]))",
           "legendFormat": "{{route}}",
           "refId": "A"
         }
@@ -1070,7 +1070,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m]))",
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m])) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m]))",
           "legendFormat": "total req/s",
           "refId": "A"
         }
@@ -1126,7 +1126,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m])) / clamp_min(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m] offset 15m)), 0.001)",
+          "expr": "(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m])) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m]))) / clamp_min((sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m] offset 15m)) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m] offset 15m))), 0.001)",
           "legendFormat": "current / 15m ago",
           "refId": "A"
         }
