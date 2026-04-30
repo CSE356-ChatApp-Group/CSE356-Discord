@@ -36,6 +36,7 @@ import {
   queueMarkMessageRead,
   resetReadReceiptState,
 } from './chatStoreReadReceipts';
+import { normalizeSearchDateTime, resolveSearchAuthorId } from './chatStoreSearchHelpers';
 export const PRESENCE_STATUSES = ['online', 'idle', 'away', 'offline'] as const;
 export type PresenceStatus = (typeof PRESENCE_STATUSES)[number];
 const VALID_PRESENCE_STATUSES = new Set<string>(PRESENCE_STATUSES);
@@ -234,29 +235,6 @@ function ensureUserWsSubscription(handler: (event: any) => void) {
 
 function normalizePresenceStatus(value: any): PresenceStatus {
   return VALID_PRESENCE_STATUSES.has(value) ? value : 'offline';
-}
-
-function normalizeSearchDateTime(value?: string | null) {
-  const trimmed = String(value || '').trim();
-  if (!trimmed) return '';
-  const parsed = new Date(trimmed);
-  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString();
-}
-
-function resolveSearchAuthorId(authorText: string, members: Entity[], activeConv: Entity | null) {
-  const normalized = String(authorText || '').trim().toLowerCase();
-  if (!normalized) return '';
-
-  const candidates = activeConv
-    ? (Array.isArray(activeConv.participants) ? activeConv.participants : [])
-    : (Array.isArray(members) ? members : []);
-
-  const exactUsername = candidates.find((entry) => {
-    const username = String(entry?.username || '').trim().toLowerCase();
-    return username === normalized;
-  });
-
-  return exactUsername?.id || '';
 }
 
 export function resetChatStore() {
