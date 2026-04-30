@@ -94,12 +94,26 @@ groups:
             The textfile gauge from /opt/chatapp-monitoring/synthetic-probe.sh reports failure for 10 minutes.
             This is independent of load-harness traffic. Check curl to /health, chatapp@ units, and nginx.
 
+      - alert: ChatAppSyntheticProbeMetricMissing
+        expr: absent(chatapp_synthetic_probe_success{job="node"})
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Synthetic probe metric is missing
+          description: >
+            `chatapp_synthetic_probe_success` has not been scraped for 15 minutes.
+            The textfile probe may be broken or node_exporter textfile collection may be misconfigured.
+            Runbook: docs/runbooks.md (ChatAppSyntheticProbeMetricMissing)
+
       - alert: ChatAppHigh5xxRate
         expr: |
           sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[5m]))
             /
           clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m])), 1)
             > 0.05
+          and
+          sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m])) > 1
         for: 10m
         labels:
           severity: warning
@@ -142,6 +156,8 @@ groups:
             /
           clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[2m])), 1)
             > 0.06
+          and
+          sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[2m])) > 2
         for: 2m
         labels:
           severity: critical
@@ -191,13 +207,13 @@ groups:
       - alert: ChatAppCpuSaturationHigh
         expr: |
           max by (instance) (rate(process_cpu_seconds_total{job="chatapp-api"}[5m])) > 0.90
-          and (
+          and on(instance) (
             max by (instance) (nodejs_eventloop_lag_p99_seconds{job="chatapp-api"}) > 0.12
             or
             (
-              sum(rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[5m]))
+              sum by (instance) (rate(http_server_requests_total{job="chatapp-api",status_class="5xx",route!="/metrics"}[5m]))
               /
-              clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m])), 1)
+              clamp_min(sum by (instance) (rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m])), 0.1)
             ) > 0.02
           )
         for: 15m
@@ -366,6 +382,18 @@ groups:
           summary: ChatApp overload shedding is active
           description: The overload guard has reached stage {{ $value }}, which means search or write protection is engaged. This is a strong signal that the current server size is under pressure.
 
+      - alert: ChatAppOverloadSheddingCritical
+        expr: max(chatapp_overload_stage{job="chatapp-api"}) >= 3
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: ChatApp overload shedding reached write-shed stage
+          description: >
+            The overload guard reached stage 3 for 3 minutes. The system is actively shedding write pressure;
+            treat as urgent capacity incident.
+            Runbook: docs/runbooks.md (ChatAppOverloadSheddingActive / ChatAppOverloadSheddingCritical)
+
       # MinIO is not scraped from the DB-VM Prometheus (S3 API is 127.0.0.1 on the app VM).
       # Validate attachments with curl on the app host or application-level checks.
 
@@ -506,7 +534,7 @@ groups:
           description: >
             Prometheus cannot scrape postgres_exporter (job db-postgres) on {{ $labels.instance }}.
             Fix the exporter unit, DATA_SOURCE_NAME, or firewall from the monitoring VM to :9187.
-            Runbook: docs/operations-monitoring.md (DB metrics).
+            Runbook: docs/runbooks.md (ChatAppDbPostgresExporterDown)
 
       - alert: ChatAppDbReplicationPhysicalSlotInactive
         expr: pg_replication_slots_active{job="db-postgres", slot_name="replica_155_nvme"} == 0
@@ -591,8 +619,19 @@ groups:
           (
             sum(rate(http_server_requests_aborted_total{job="chatapp-api"}[5m]))
             /
-            clamp_min(sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m])), 0.001)
+            clamp_min(
+              sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m]))
+              +
+              sum(rate(http_server_requests_aborted_total{job="chatapp-api"}[5m])),
+              0.1
+            )
           ) > 0.08
+          and
+          (
+            sum(rate(http_server_requests_total{job="chatapp-api",route!="/metrics"}[5m]))
+            +
+            sum(rate(http_server_requests_aborted_total{job="chatapp-api"}[5m]))
+          ) > 1
         for: 10m
         labels:
           severity: warning
@@ -615,9 +654,9 @@ groups:
 
       - alert: ChatAppAuthBcryptQueuePressure
         expr: |
-          max(auth_bcrypt_waiters{job="chatapp-api",environment="production"}) > 20
+          max(auth_bcrypt_waiters{job="chatapp-api",env="production"}) > 20
           or
-          sum(rate(auth_bcrypt_queue_rejects_total{job="chatapp-api",environment="production"}[5m])) > 0.05
+          sum(rate(auth_bcrypt_queue_rejects_total{job="chatapp-api",env="production"}[5m])) > 0.05
         for: 5m
         labels:
           severity: warning
@@ -627,6 +666,31 @@ groups:
             The app-level bcrypt queue has sustained waiters or is actively rejecting/timing out work.
             This indicates auth bursts are saturating the threadpool gate. Correlate with auth latency,
             `auth_bcrypt_active`, `auth_bcrypt_waiters`, CPU saturation, and current `BCRYPT_MAX_CONCURRENT`.
+
+      - alert: ChatAppPgQueryGateRejects
+        expr: sum(rate(pg_query_gate_rejects_total{job="chatapp-api"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Query-gate rejects indicate DB saturation pressure
+          description: >
+            `pg_query_gate_rejects_total` is increasing for at least 5 minutes. The DB query gate is
+            rejecting work under pressure; correlate with `pg_pool_waiting`, `pg_pool_circuit_breaker_rejects_total`,
+            and DB host iowait.
+            Runbook: docs/runbooks.md (ChatAppPgPoolPressure Family)
+
+      - alert: ChatAppPgPoolOperationErrors
+        expr: sum(rate(pg_pool_operation_errors_total{job="chatapp-api",operation="query"}[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Postgres query operation errors are elevated
+          description: >
+            `pg_pool_operation_errors_total{operation="query"}` is sustained above baseline.
+            This often indicates acquire/query timeout or connectivity instability in the DB path.
+            Runbook: docs/runbooks.md (ChatAppPgPoolPressure Family)
 
       - alert: ChatAppCriticalFanoutQueueBacklog
         expr: max(side_effect_queue_depth{job="chatapp-api",queue="fanout:critical"}) > 3000
@@ -768,6 +832,42 @@ groups:
             Fanout stage {{ $labels.path }}/{{ $labels.stage }} exceeded 1s p95 with sustained activity.
             Correlate with `fanout_publish_targets`, `fanout_target_cache_total`, Redis publish failures,
             and WS backpressure to see whether the bottleneck is audience size, cache misses, or Redis delivery.
+
+      - alert: ChatAppMessagePostRealtimePublishFailures
+        expr: sum(rate(message_post_realtime_publish_fail_total{job="chatapp-api"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Message realtime publish failures are elevated
+          description: >
+            `message_post_realtime_publish_fail_total` is increasing despite successful DB commits.
+            Users may observe delayed realtime delivery; correlate with Redis health and fanout queue depth.
+            Runbook: docs/runbooks.md (ChatAppRealtimeDeliveryFailures Family)
+
+      - alert: ChatAppRedisFanoutPublishFailures
+        expr: sum(rate(redis_fanout_publish_failures_total{job="chatapp-api"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis fanout publish failures are elevated
+          description: >
+            `redis_fanout_publish_failures_total` is above baseline. Investigate Redis connectivity,
+            latency spikes, and side-effect queue backlog before delivery SLOs regress.
+            Runbook: docs/runbooks.md (ChatAppRealtimeDeliveryFailures Family)
+
+      - alert: ChatAppWsReplayFailOpenRateHigh
+        expr: sum(rate(ws_replay_fail_open_total{job="chatapp-api",reason!="disabled"}[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: WS replay fail-open behavior is elevated
+          description: >
+            `ws_replay_fail_open_total` is increasing, which means replay safety checks are bypassing under stress.
+            Realtime consistency may degrade; correlate with DB pool pressure and replay queue signals.
+            Runbook: docs/runbooks.md (ChatAppRealtimeDeliveryFailures Family)
 
       - alert: ChatAppDeliveryFailsWarning
         expr: |

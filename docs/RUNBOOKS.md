@@ -101,6 +101,86 @@ Prometheus must **fire** an alert; Alertmanager must **deliver** it. Common gaps
 2. **Per process:** rule uses `process_resident_memory_bytes` per `chatapp-api` target (~650 MiB × **each** worker). Compare host **MemAvailable** / **MemTotal** (node_exporter) to total RSS of all API processes.
 3. Tune alert threshold in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) if VM RAM or instance count changed.
 
+## ChatAppSyntheticProbeMetricMissing
+
+1. On the host: `ls -l /opt/chatapp-monitoring/node_exporter_textfile/` and confirm the synthetic probe output file is updating.
+2. Run probe manually: `TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile /opt/chatapp-monitoring/synthetic-probe.sh`.
+3. Verify node exporter textfile collector path and service health (`systemctl status prometheus-node-exporter`).
+4. If probe runs but metric is absent, restart exporter and confirm `curl -sS http://127.0.0.1:9100/metrics | grep chatapp_synthetic_probe_success`.
+
+## ChatAppPgPoolPressure Family
+
+Applies to: `ChatAppPgPoolWaitingNonZero`, `ChatAppPgPoolPressure`, `ChatAppPgPoolWaitSpikeFast`, `ChatAppPgPoolSevereSaturation`, `ChatAppPgPoolCircuitOpenSustained`, `ChatAppPgPoolMostlyCheckedOut`, `ChatAppPgQueryGateRejects`, `ChatAppPgPoolOperationErrors`, `ChatAppHighDbQueriesPerRequest`.
+
+1. Check pressure shape first:
+   - `max(pg_pool_waiting{job="chatapp-api"})`
+   - `sum(rate(pg_pool_circuit_breaker_rejects_total{job="chatapp-api"}[5m]))`
+   - `sum(rate(pg_pool_operation_errors_total{job="chatapp-api"}[5m]))`
+2. Correlate with DB host stress (`db-node` iowait, disk, CPU) and current request rate; if queueing rises while RPS is flat, prioritize DB contention/root query cause.
+3. Capture query evidence:
+   - `PROD_DB_SSH=ubuntu@130.245.136.21 ./scripts/postgres/pg-stat-statements-snapshot.sh`
+   - `PROD_DB_SSH=ubuntu@130.245.136.21 DB_NAME=chatapp_prod bash scripts/postgres/prod-pg-stat-activity.sh`
+4. Mitigate in this order: reduce burst/load, increase DB headroom, then tune app pool/concurrency. Avoid only increasing app workers when pool waiting is already high.
+
+## ChatAppOverloadSheddingActive / ChatAppOverloadSheddingCritical
+
+1. Confirm stage and slope: `max(chatapp_overload_stage{job="chatapp-api"})` and `sum(rate(http_overload_shed_total{job="chatapp-api"}[5m]))`.
+2. Stage 2 (`shed-search`) is warning; stage 3 (`shed-writes`) is critical and should be treated as immediate capacity action.
+3. Check paired symptoms (`pg_pool_waiting`, event-loop lag, 5xx, fanout queue depth) to locate bottleneck before changing thresholds.
+4. If incident-driven override is needed, document any `FORCE_OVERLOAD_STAGE` usage and remove as soon as pressure stabilizes.
+
+## ChatAppHostPressure Family
+
+Applies to: `ChatAppHostCpuHigh`, `ChatAppHostLoadPerCoreHigh`, `ChatAppHostIoWaitHigh`, `ChatAppDbHostIoWaitHigh`, `ChatAppHostMemoryPressure`, `ChatAppHostSwapIoHigh`, `ChatAppCpuSaturationHigh`.
+
+1. Validate host vs app cause:
+   - host: `top`, `vmstat 1 10`, `iostat -x 1 10`, `free -h`, `df -h`
+   - app: event-loop lag, process RSS, route latency/5xx
+2. If host pressure is isolated to one VM, drain or reduce traffic to that node before global tuning.
+3. If DB iowait is elevated with pool waiting, treat as DB-first bottleneck and follow `ChatAppPgPoolPressure Family`.
+4. Record whether issue is transient deploy churn vs sustained capacity ceiling before resizing.
+
+## ChatAppDiskSpaceLow / ChatAppDbDiskSpaceLow / ChatAppDbDiskSpaceCritical
+
+1. Confirm exact mount and host from alert labels (`job`, `instance`, `mountpoint`); avoid conflating staging vs prod.
+2. Check usage directly:
+   - app/host root: `df -h /`
+   - DB root: `ssh ubuntu@<db-host> 'df -h /'`
+3. For DB incidents, inspect largest relation/index growth:
+   - `sudo -u postgres psql chatapp_prod -c "SELECT pg_size_pretty(pg_total_relation_size('messages'))"`
+   - `sudo -u postgres psql chatapp_prod -c "\di+"`
+4. Mitigate by expanding volume first when near critical; only drop/prune DB objects with explicit rollback plan.
+
+## ChatAppDbPostgresExporterDown
+
+1. On DB host: `systemctl status prometheus-postgres-exporter` (or service name used by deploy scripts).
+2. Validate exporter DSN/env and local endpoint: `curl -sS http://127.0.0.1:9187/metrics | head`.
+3. Confirm monitoring VM can scrape DB `:9187` (firewall/VPC path).
+4. If exporter is down but DB is healthy, classify as observability incident and avoid paging app owners as DB outage.
+
+## ChatAppRealtimeDeliveryFailures Family
+
+Applies to: `ChatAppCriticalFanoutQueueBacklog`, `ChatAppCriticalFanoutQueueDelayHigh`, `ChatAppMessagePostFanoutJobLatencyP99High`, `ChatAppMessagePostFanoutJobLatencyP999High`, `ChatAppMessagePostRealtimePublishFailures`, `ChatAppRedisFanoutPublishFailures`, `ChatAppWsReplayFailOpenRateHigh`, `ChatAppRealtimeFanoutSlow`, `ChatAppDeliveryFailsWarning`, `ChatAppDeliveryFailsFastBurn`, `ChatAppMessagePostFanoutQueueFull`, `ChatAppFanoutCriticalQueueSustainedBacklog`, `ChatAppWsBackpressure`, `ChatAppWsBootstrapSlow`, `ChatAppWsUnauthorizedBurst`, `ChatAppMessagePost401RateHigh`.
+
+1. Determine if failures are write-path, fanout-path, or client-auth path:
+   - write-path: `/api/v1/messages` 5xx/401 mix and `message_post_response_total`
+   - fanout-path: queue depth/delay, `fanout_job_latency_ms`, publish failure counters
+   - client path: WS unauthorized/reconnect/backpressure
+2. Check Redis health and latency concurrently (`redis_up`, used/max memory, evictions, SLOWLOG if available).
+3. If queue depth grows with low publish throughput, scale side-effect capacity and reduce fanout work before raising retry budgets.
+4. For grader-impacting regressions, use `scripts/grader/grader-watch-gate.sh` and correlate timestamps with Prometheus/Loki.
+
+## ChatAppRedis Health Family
+
+Applies to: `ChatAppRedisExporterDown`, `ChatAppRedisMemoryHigh80`, `ChatAppRedisMemoryHigh90`, `ChatAppRedisMemoryHigh95`, `ChatAppRedisClientsElevated`, `ChatAppRedisExporterNotReady`, `ChatAppRedisEvictionsNonZero`, `ChatAppRedisRejectedConnections`, `ChatAppRedisAclDeniedOperations`, `ChatAppRedisRdbOrAofLoadingStall`, `ChatAppRedisOOMRiskComposite`.
+
+1. Confirm exporter vs Redis distinction first:
+   - exporter down != Redis down
+   - `redis_up` + direct `INFO` determine Redis availability
+2. For memory pressure, inspect used/maxmemory, eviction rate, and client count before changing policy.
+3. For ACL/rejected connections, verify app/exporter credentials and source network policy changes.
+4. Critical memory alerts (90/95/OOM composite) require immediate headroom action (raise maxmemory/resize or reduce key volume).
+
 ## WebSocket / fanout
 
 If realtime is broken but REST is healthy:

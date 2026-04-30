@@ -21,6 +21,21 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/postgres/pg-stat-statements-snapshot.sh`](../scripts/postgres/pg-stat-statements-snapshot.sh) |
 | **Primary DB + read replica (Prometheus)** | Alert group **`chatapp-database`** in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml): `ChatAppDbPostgresExporterDown`, replication slot **`replica_155_nvme`** inactive / WAL retain size, **`ChatAppDbReplicaNodeExporterDown`**, replica **`/mnt/replica-data`** disk. Scrape targets: [`deploy/prometheus-db-file-sd.py`](../deploy/prometheus-db-file-sd.py) writes **`file_sd/db-node.json`** (primary `:9100` + replica `:9100` when **`PG_READ_REPLICA_URL`** host differs) and **`db-postgres.json`** (primary `:9187` only). Replica **`postgres_exporter`** is optional (needs its own DSN on that host). |
 
+## Alert families (operator map)
+
+Use this map to jump from a page/Discord alert to the right triage section quickly.
+
+| Family | Alert names (prefix) | First metric to check | Runbook section |
+|--------|-----------------------|-----------------------|-----------------|
+| API availability | `ChatAppApiDown`, `ChatAppApiDownFast`, `ChatAppSomeWorkersUnreachable` | `sum(up{job="chatapp-api"})`, `count(up{job="chatapp-api"})` | [`runbooks.md`](runbooks.md#chatappapidown--chatappapidownfast) |
+| API errors/latency | `ChatAppHigh5xxRate`, `ChatAppFast5xxBurn`, `ChatApp5xxAbsoluteRate`, `ChatAppHighP95Latency`, `ChatAppSevereP95Latency`, `ChatAppHighHttpAbortRate` | `http_server_requests_total`, `http_server_requests_aborted_total`, `http_server_request_duration_ms` | [`runbooks.md`](runbooks.md#chatapphigh5xxrate--chatappfast5xxburn) |
+| Pool/DB pressure | `ChatAppPgPool*`, `ChatAppPgQueryGateRejects`, `ChatAppPgPoolOperationErrors`, `ChatAppHighDbQueriesPerRequest` | `pg_pool_waiting`, `pg_pool_circuit_breaker_rejects_total`, `pg_pool_operation_errors_total` | [`runbooks.md`](runbooks.md#chatapppgpoolpressure-family) |
+| Overload/shedding | `ChatAppOverloadSheddingActive`, `ChatAppOverloadSheddingCritical`, `ChatAppHttpOverloadShedding` | `chatapp_overload_stage`, `http_overload_shed_total` | [`runbooks.md`](runbooks.md#chatappoverloadsheddingactive--chatappoverloadsheddingcritical) |
+| Host/resource pressure | `ChatAppHost*`, `ChatAppCpuSaturationHigh`, `ChatAppDiskSpaceLow`, `ChatAppDbDiskSpace*` | node exporter CPU/memory/iowait/filesystem series | [`runbooks.md`](runbooks.md#chatapphostpressure-family) |
+| DB observability/replication | `ChatAppDbPostgresExporterDown`, `ChatAppDbReplication*`, `ChatAppDbReplica*` | `up{job="db-postgres"}`, replication slot metrics, replica disk series | [`runbooks.md`](runbooks.md#chatappdbpostgresexporterdown) |
+| Realtime/delivery | `ChatAppCriticalFanout*`, `ChatAppMessagePostFanout*`, `ChatAppRealtimeFanoutSlow`, `ChatAppDeliveryFails*`, `ChatAppWs*` | `fanout_queue_depth`, `fanout_job_latency_ms`, `ws_reliable_delivery_total`, publish failure counters | [`runbooks.md`](runbooks.md#chatapprealtimedeliveryfailures-family) |
+| Redis | `ChatAppRedis*` | `redis_up`, `redis_memory_used_bytes`, `redis_evicted_keys_total`, `redis_rejected_connections_total` | [`runbooks.md`](runbooks.md#chatappredis-health-family) |
+
 ## Where latency comes from (split app + DB VMs)
 
 Under load, **PostgreSQL is usually the limiting factor**, not nginx or Node in isolation:

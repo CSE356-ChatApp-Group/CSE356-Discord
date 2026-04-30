@@ -55,3 +55,30 @@ inhibit_rules:
     target_matchers:
       - severity=~"warning|info"
     equal: ['alertname', 'job', 'instance']
+
+  # Fast-burn API outage supersedes slower confirmation alert.
+  - source_matchers:
+      - alertname="ChatAppApiDownFast"
+    target_matchers:
+      - alertname="ChatAppApiDown"
+    equal: ['job']
+
+  # Severe route latency supersedes warning p95 for same route.
+  - source_matchers:
+      - alertname="ChatAppSevereP95Latency"
+    target_matchers:
+      - alertname="ChatAppHighP95Latency"
+    equal: ['job', 'route']
+
+  # Redis higher-threshold criticals supersede lower-threshold pages.
+  - source_matchers:
+      - alertname="ChatAppRedisMemoryHigh95"
+    target_matchers:
+      - alertname=~"ChatAppRedisMemoryHigh90|ChatAppRedisMemoryHigh80"
+    equal: ['job', 'instance']
+
+  - source_matchers:
+      - alertname="ChatAppRedisMemoryHigh90"
+    target_matchers:
+      - alertname="ChatAppRedisMemoryHigh80"
+    equal: ['job', 'instance']

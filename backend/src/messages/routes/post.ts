@@ -223,6 +223,29 @@ async function insertMessageAttachments(
   );
 }
 
+function isValidMessageAttachment(attachment: any): boolean {
+  return Boolean(
+    attachment &&
+      typeof attachment.storageKey === "string" &&
+      attachment.storageKey.trim() &&
+      typeof attachment.filename === "string" &&
+      attachment.filename.trim() &&
+      ALLOWED_ATTACHMENT_TYPES.has(attachment.contentType) &&
+      Number.isInteger(Number(attachment.sizeBytes)) &&
+      Number(attachment.sizeBytes) > 0,
+  );
+}
+
+function validateAttachmentsPayload(attachments: any[]): string | null {
+  const hasInvalidAttachment = attachments.some(
+    (attachment) => !isValidMessageAttachment(attachment),
+  );
+  if (hasInvalidAttachment) {
+    return "attachments must include storageKey, filename, contentType, and sizeBytes";
+  }
+  return null;
+}
+
 function validatePostTargetAndPayload({
   channelId,
   conversationId,
@@ -534,23 +557,9 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           return res.status(400).json({ error: payloadValidationError });
         }
 
-        const invalidAttachment = attachments.find(
-          (attachment) =>
-            !attachment ||
-            typeof attachment.storageKey !== "string" ||
-            !attachment.storageKey.trim() ||
-            typeof attachment.filename !== "string" ||
-            !attachment.filename.trim() ||
-            !ALLOWED_ATTACHMENT_TYPES.has(attachment.contentType) ||
-            !Number.isInteger(Number(attachment.sizeBytes)) ||
-            Number(attachment.sizeBytes) <= 0,
-        );
-
-        if (invalidAttachment) {
-          return res.status(400).json({
-            error:
-              "attachments must include storageKey, filename, contentType, and sizeBytes",
-          });
+        const attachmentValidationError = validateAttachmentsPayload(attachments);
+        if (attachmentValidationError) {
+          return res.status(400).json({ error: attachmentValidationError });
         }
         const idemResult = await processPostMessageIdempotency(authReq, userId);
         idemRedisKey = idemResult.idemRedisKey;

@@ -120,6 +120,63 @@ function logSearchTrace(payload: Record<string, unknown>) {
   logger.info({ search_trace: true, ...payload }, 'search_trace');
 }
 
+function throwIfScopeDenied(rows: any[]) {
+  if (rows[0]?.__scopeAccess === false) {
+    const err: any = new Error('Access denied');
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
+function buildBaseSearchTracePayload({
+  requestId,
+  query,
+  scopeLabel,
+  tsqueryText,
+  tsqueryNodes,
+  ftsHitCount,
+  strictTermCount,
+  strictFtsHitCount,
+  queryMs,
+  totalMs,
+}: {
+  requestId: string | undefined;
+  query: string;
+  scopeLabel: string;
+  tsqueryText: string;
+  tsqueryNodes: number;
+  ftsHitCount: number;
+  strictTermCount: number;
+  strictFtsHitCount: number;
+  queryMs: number;
+  totalMs: number;
+}): Record<string, unknown> {
+  return {
+    requestId,
+    query,
+    resolved_scope: scopeLabel,
+    tsquery_text: tsqueryText,
+    tsquery_node_count: tsqueryNodes,
+    fts_hit_count: ftsHitCount,
+    strict_term_count: strictTermCount,
+    strict_fts_hit_count: strictFtsHitCount,
+    total_ms: totalMs,
+    query_ms: queryMs,
+  };
+}
+
+function buildCommunityTraceFields(
+  scopeLabel: string,
+  communityFtsCandidateCount: unknown,
+  resultCount: number,
+): Record<string, unknown> {
+  if (scopeLabel !== 'community') return {};
+  return {
+    fts_candidate_count: communityFtsCandidateCount,
+    result_count: resultCount,
+  };
+}
+
 async function runSearchQuery(
   sql: string,
   params: any[],
@@ -607,13 +664,17 @@ async function searchOnce(
 
   return await runSearchTransaction(async (client) => {
     let queryMsAccum = 0;
-    const tMeta = Date.now();
-    const tsqueryMetaRes = await client.query(
+    const timedQuery = async (sql: string, params: any[]) => {
+      const t = Date.now();
+      const result = await client.query(sql, params);
+      queryMsAccum += Date.now() - t;
+      return result;
+    };
+    const tsqueryMetaRes = await timedQuery(
       `SELECT websearch_to_tsquery('english', $1)::text AS tsquery_text,
               numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes`,
       [trimmed],
     );
-    queryMsAccum += Date.now() - tMeta;
     const tsqueryText = String(tsqueryMetaRes.rows[0]?.tsquery_text ?? '');
     const tsqueryNodes = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0);
     const strictTerms = tokenizeStrictSearchTerms(trimmed);
@@ -621,14 +682,8 @@ async function searchOnce(
     const weakTsquery = strictMultiWord && tsqueryNodes <= 1;
 
     const ftsMeta = buildFtsParts(trimmed, opts);
-    const tFts = Date.now();
-    const ftsRes = await client.query(ftsMeta.sql, ftsMeta.params);
-    queryMsAccum += Date.now() - tFts;
-    if (ftsRes.rows[0]?.__scopeAccess === false) {
-      const err: any = new Error('Access denied');
-      err.statusCode = 403;
-      throw err;
-    }
+    const ftsRes = await timedQuery(ftsMeta.sql, ftsMeta.params);
+    throwIfScopeDenied(ftsRes.rows);
 
     const ftsHits = ftsRes.rows.filter((row: any) => row && row.id);
     const strictFtsHits = strictMultiWord
@@ -643,25 +698,27 @@ async function searchOnce(
 
     if (strictFtsHitCount > 0 && !weakTsquery) {
       const totalMs = Date.now() - tSearchStart;
-      logSearchTrace({
+      const basePayload = buildBaseSearchTracePayload({
         requestId,
         query: trimmed,
-        resolved_scope: scopeLabel,
-        tsquery_text: tsqueryText,
-        tsquery_node_count: tsqueryNodes,
-        fts_hit_count: ftsHitCount,
-        strict_term_count: strictTerms.length,
-        strict_fts_hit_count: strictFtsHitCount,
+        scopeLabel,
+        tsqueryText,
+        tsqueryNodes,
+        ftsHitCount,
+        strictTermCount: strictTerms.length,
+        strictFtsHitCount,
+        queryMs: queryMsAccum,
+        totalMs,
+      });
+      logSearchTrace({
+        ...basePayload,
         fallback_used: false,
         fallback_hit_count: 0,
-        total_ms: totalMs,
-        query_ms: queryMsAccum,
-        ...(scopeLabel === 'community'
-          ? {
-              fts_candidate_count: communityFtsCandidateCount,
-              result_count: strictFtsHitCount,
-            }
-          : {}),
+        ...buildCommunityTraceFields(
+          scopeLabel,
+          communityFtsCandidateCount,
+          strictFtsHitCount,
+        ),
       });
       return buildResult(strictFtsHits, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
     }
@@ -672,39 +729,35 @@ async function searchOnce(
       strictTerms,
       literalRecentCandidateCapDeep(),
     );
-    const tLit = Date.now();
-    const literalRes = await client.query(literalMeta.sql, literalMeta.params);
-    queryMsAccum += Date.now() - tLit;
-    if (literalRes.rows[0]?.__scopeAccess === false) {
-      const err: any = new Error('Access denied');
-      err.statusCode = 403;
-      throw err;
-    }
+    const literalRes = await timedQuery(literalMeta.sql, literalMeta.params);
+    throwIfScopeDenied(literalRes.rows);
     const fallbackHits = literalRes.rows.filter((row: any) => row && row.id);
     const combinedHits = weakTsquery || strictMultiWord
       ? mergeSearchRowsPreferLiteral(fallbackHits, strictFtsHits, limit, offset)
       : fallbackHits;
     const totalMs = Date.now() - tSearchStart;
-    logSearchTrace({
+    const basePayload = buildBaseSearchTracePayload({
       requestId,
       query: trimmed,
-      resolved_scope: scopeLabel,
-      tsquery_text: tsqueryText,
-      tsquery_node_count: tsqueryNodes,
-      fts_hit_count: ftsHitCount,
-      strict_term_count: strictTerms.length,
-      strict_fts_hit_count: strictFtsHitCount,
+      scopeLabel,
+      tsqueryText,
+      tsqueryNodes,
+      ftsHitCount,
+      strictTermCount: strictTerms.length,
+      strictFtsHitCount,
+      queryMs: queryMsAccum,
+      totalMs,
+    });
+    logSearchTrace({
+      ...basePayload,
       fallback_used: true,
       fallback_hit_count: fallbackHits.length,
       weak_tsquery: weakTsquery,
-      total_ms: totalMs,
-      query_ms: queryMsAccum,
-      ...(scopeLabel === 'community'
-        ? {
-            fts_candidate_count: communityFtsCandidateCount,
-            result_count: combinedHits.length,
-          }
-        : {}),
+      ...buildCommunityTraceFields(
+        scopeLabel,
+        communityFtsCandidateCount,
+        combinedHits.length,
+      ),
     });
     return buildResult(combinedHits, literalMeta.q, literalMeta.offset, literalMeta.limit);
   }, { forcePrimary });
