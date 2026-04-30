@@ -36,7 +36,6 @@ const {
   messagePostRealtimePublishFailTotal,
   deliveryTimeoutTotal,
   messagePostFanoutAsyncEnqueueTotal,
-  messageCacheBustFailuresTotal,
   readReceiptShedTotal,
   readReceiptRequestsTotal,
   readReceiptCursorCasTotal,
@@ -111,6 +110,13 @@ const {
   ensureMessageAccess,
 } = require("./lib/accessChecks");
 const { publishConversationEventNow } = require("./lib/conversationFanout");
+const {
+  MESSAGES_CACHE_TTL_SECS,
+  msgInflight,
+  convMsgInflight,
+  bustMessagesCacheSafe,
+  withBoundedPostInsertTimeout,
+} = require("./lib/messageListCache");
 
 /** Redis cache for channel unread watermark (`user:last_read_count:*`). Must expire so keys do not grow without bound. */
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
@@ -123,13 +129,10 @@ const {
   channelMsgCacheEpochKey,
   conversationMsgCacheEpochKey,
   readMessageCacheEpoch,
-  bustChannelMessagesCache,
-  bustConversationMessagesCache,
 } = require("./messageCacheBust");
 const {
   recordEndpointListCache,
   recordEndpointListCacheBypass,
-  recordEndpointListCacheInvalidation,
 } = require("../utils/endpointCacheMetrics");
 const { messageFanoutEnvelope } = require("./realtimePayload");
 const {
@@ -277,70 +280,6 @@ async function channelMessagesListQueryWithPrimaryRetry(req, sql, params) {
   return query(sql, params);
 }
 
-async function bustMessagesCacheSafe(opts: {
-  channelId?: string;
-  conversationId?: string;
-}) {
-  const { channelId, conversationId } = opts;
-  try {
-    if (channelId) {
-      await bustChannelMessagesCache(redis, channelId);
-      recordEndpointListCacheInvalidation("messages_channel", "write");
-    } else if (conversationId) {
-      await bustConversationMessagesCache(redis, conversationId);
-      recordEndpointListCacheInvalidation("messages_conversation", "write");
-    }
-  } catch (err) {
-    messageCacheBustFailuresTotal.inc({
-      target: channelId ? "channel" : "conversation",
-    });
-    logger.warn(
-      { err, channelId, conversationId },
-      "message list cache bust failed",
-    );
-  }
-}
-
-async function withBoundedPostInsertTimeout<T>(
-  opName: string,
-  work: Promise<T>,
-  timeoutMs: number,
-): Promise<{ ok: boolean; timedOut: boolean; value?: T }> {
-  let timeoutHandle: NodeJS.Timeout | null = null;
-  try {
-    const value = await Promise.race([
-      work,
-      new Promise<T>((_, reject) => {
-        timeoutHandle = setTimeout(() => {
-          const err: any = new Error(`post-insert ${opName} timed out`);
-          err.code = "POST_INSERT_REDIS_TIMEOUT";
-          reject(err);
-        }, timeoutMs);
-      }),
-    ]);
-    return { ok: true, timedOut: false, value };
-  } catch (err: any) {
-    const timedOut = err?.code === "POST_INSERT_REDIS_TIMEOUT";
-    logger.warn(
-      {
-        err,
-        opName,
-        timeoutMs,
-        timedOut,
-        gradingNote: timedOut
-          ? "post_insert_delivery_timeout_not_http_failure"
-          : "post_insert_work_error",
-      },
-      timedOut
-        ? "POST /messages post-insert work exceeded wall budget (message still persisted)"
-        : "POST /messages post-insert work failed",
-    );
-    return { ok: false, timedOut };
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-  }
-}
-
 function messagePostAsyncFanoutEnabled() {
   const v = process.env.MESSAGE_POST_SYNC_FANOUT;
   return !(v === "1" || v === "true" || v === "yes");
@@ -363,15 +302,7 @@ async function loadMessageTarget(messageId) {
 }
 
 // ── Helpers ── message cache ─────────────────────────────────────────────────
-const MESSAGES_CACHE_TTL_SECS = 15;
 const DEFAULT_CONTEXT_SIDE_LIMIT = 25;
-
-// In-process singleflight: prevents thundering-herd when the channel/conversation
-// message cache expires.  All concurrent requests for the same key share one DB
-// query in flight, eliminating the avalanche of identical queries that fires
-// when a popular target's cache key expires simultaneously for many readers.
-const msgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
-const convMsgInflight: Map<string, Promise<{ messages: any[] }>> = new Map();
 
 // ── GET /messages ──────────────────────────────────────────────────────────────
 router.get(
