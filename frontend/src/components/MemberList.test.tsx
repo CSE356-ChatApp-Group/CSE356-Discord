@@ -4,14 +4,15 @@ import MemberList from './MemberList';
 import { useAuthStore } from '../stores/authStore';
 import { useChatStore } from '../stores/chatStore';
 
-const { apiGetMock } = vi.hoisted(() => ({
+const { apiGetMock, apiPostMock } = vi.hoisted(() => ({
   apiGetMock: vi.fn(),
+  apiPostMock: vi.fn(),
 }));
 
 vi.mock('../lib/api', () => ({
   api: {
     get: apiGetMock,
-    post: vi.fn(),
+    post: apiPostMock,
     postForm: vi.fn(),
     patch: vi.fn(),
     put: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock('../lib/api', () => ({
 describe('MemberList DM presence', () => {
   beforeEach(() => {
     apiGetMock.mockReset();
+    apiPostMock.mockReset();
     act(() => {
       useAuthStore.setState({
         user: {
@@ -60,7 +62,10 @@ describe('MemberList DM presence', () => {
   });
 
   it('fetches and renders latest participant statuses for DMs', async () => {
-    apiGetMock.mockResolvedValue({
+    apiPostMock.mockImplementation((path: string, body: any) => {
+      expect(path).toBe('/presence/bulk');
+      expect(body?.userIds).toEqual(expect.arrayContaining(['user-1', 'user-2']));
+      return Promise.resolve({
       presence: {
         'user-1': 'online',
         'user-2': 'away',
@@ -69,11 +74,12 @@ describe('MemberList DM presence', () => {
         'user-2': 'Lunch',
       },
     });
+    });
 
     render(<MemberList />);
 
     await waitFor(() => {
-      expect(apiGetMock).toHaveBeenCalled();
+      expect(apiPostMock).toHaveBeenCalled();
       expect(screen.getByTestId('member-row-user-1')).toHaveAttribute('data-member-status', 'online');
       expect(screen.getByTestId('member-row-user-2')).toHaveAttribute('data-member-status', 'away');
     });
