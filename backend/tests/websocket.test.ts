@@ -870,7 +870,13 @@ describe('Channel realtime delivery', () => {
 
         expect(sendRes.status).toBe(201);
         const event = await createdEventPromise;
-        expect(event.channel).toBe(`user:${member.user.id}`);
+        // Channel-first fanout can deliver on community:/channel: before user: duplicate.
+        // For open-only sockets all three are valid delivery channels for the same message.
+        expect([
+          `user:${member.user.id}`,
+          `channel:${channelId}`,
+          `community:${communityId}`,
+        ]).toContain(event.channel);
       } finally {
         await closeWebSocket(memberSocket);
       }
