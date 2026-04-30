@@ -15,37 +15,18 @@
 const { query } = require('../db/pool');
 const redis = require('../db/redis');
 const logger = require('../utils/logger');
-
-const RS_DIRTY_SET = 'rs:dirty';
-const RS_PENDING_KEY_PREFIX = 'rs:pending:';
-const RS_FLUSH_LOCK_KEY = 'rs:flush:lock';
-const RS_PENDING_TTL_SECS = 86400;
-
-const READ_STATE_FLUSH_INTERVAL_MS = parseInt(
-  process.env.READ_STATE_FLUSH_INTERVAL_MS || '10000', 10,
-);
-const READ_STATE_FLUSH_BATCH_SIZE = Math.min(
-  200,
-  Math.max(25, parseInt(process.env.READ_STATE_FLUSH_BATCH_SIZE || '100', 10) || 100),
-);
-const READ_STATE_FLUSH_SCAN_COUNT = Math.min(
-  1000,
-  Math.max(
-    READ_STATE_FLUSH_BATCH_SIZE,
-    parseInt(process.env.READ_STATE_FLUSH_SCAN_COUNT || '200', 10) || 200,
-  ),
-);
-const READ_STATE_FLUSH_LOCK_TTL_MS = Math.min(
-  60000,
-  Math.max(
-    READ_STATE_FLUSH_INTERVAL_MS,
-    parseInt(process.env.READ_STATE_FLUSH_LOCK_TTL_MS || '30000', 10) || 30000,
-  ),
-);
-const READ_STATE_FLUSH_RETRY_MAX = Math.min(
-  3,
-  Math.max(0, parseInt(process.env.READ_STATE_FLUSH_RETRY_MAX || '2', 10) || 2),
-);
+const { batchReadStateConfig } = require('./batchReadStateConfig');
+const {
+  RS_DIRTY_SET,
+  RS_PENDING_KEY_PREFIX,
+  RS_FLUSH_LOCK_KEY,
+  RS_PENDING_TTL_SECS,
+  READ_STATE_FLUSH_INTERVAL_MS,
+  READ_STATE_FLUSH_BATCH_SIZE,
+  READ_STATE_FLUSH_SCAN_COUNT,
+  READ_STATE_FLUSH_LOCK_TTL_MS,
+  READ_STATE_FLUSH_RETRY_MAX,
+} = batchReadStateConfig;
 
 let localFlushInFlight = false;
 let readStateFlushScanCursor = '0';
