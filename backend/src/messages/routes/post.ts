@@ -270,6 +270,72 @@ async function rollbackInsertedChannelMessage(
     .catch(() => {});
 }
 
+async function processPostMessageIdempotency(
+  req: MessagesAuthedRequest,
+  userId: string,
+) {
+  let idemRedisKey: string | null = null;
+  let idemLease = false;
+  let idemWallMs = 0;
+  let replayBody: any = null;
+  let duplicateInFlight = false;
+
+  const rawIdem = req.get("idempotency-key") || req.get("Idempotency-Key");
+  if (!rawIdem || typeof rawIdem !== "string") {
+    return { idemRedisKey, idemLease, idemWallMs, replayBody, duplicateInFlight };
+  }
+  const trimmed = rawIdem.trim();
+  if (!(trimmed.length > 0 && trimmed.length <= 200)) {
+    return { idemRedisKey, idemLease, idemWallMs, replayBody, duplicateInFlight };
+  }
+
+  const idemPhaseStart = Date.now();
+  try {
+    idemRedisKey = `msg:idem:${userId}:${crypto.createHash("sha256").update(trimmed, "utf8").digest("hex")}`;
+    try {
+      const existing = await redis.get(idemRedisKey);
+      if (existing) {
+        let parsed: any;
+        try {
+          parsed = JSON.parse(existing);
+        } catch {
+          parsed = null;
+        }
+        const replay = await hydrateIdemReplayBody(parsed);
+        if (replay) {
+          replayBody = replay;
+        }
+      }
+      if (!replayBody) {
+        const gotLease = await redis.set(
+          idemRedisKey,
+          JSON.stringify({ pending: true }),
+          "EX",
+          MSG_IDEM_PENDING_TTL_SECS,
+          "NX",
+        );
+        if (gotLease !== "OK") {
+          const waited =
+            await awaitIdempotentPostAfterLeaseContention(idemRedisKey);
+          if (waited.ok) {
+            replayBody = waited.body;
+          } else {
+            duplicateInFlight = true;
+          }
+        }
+        if (!replayBody && !duplicateInFlight) idemLease = true;
+      }
+    } catch {
+      idemRedisKey = null;
+      idemLease = false;
+    }
+  } finally {
+    idemWallMs = Date.now() - idemPhaseStart;
+  }
+
+  return { idemRedisKey, idemLease, idemWallMs, replayBody, duplicateInFlight };
+}
+
 async function configureMessageInsertTransaction(
   client: any,
   statementTimeoutMs: number,
@@ -486,56 +552,19 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
               "attachments must include storageKey, filename, contentType, and sizeBytes",
           });
         }
-
-        const rawIdem = authReq.get("idempotency-key") || authReq.get("Idempotency-Key");
-        if (rawIdem && typeof rawIdem === "string") {
-          const trimmed = rawIdem.trim();
-          if (trimmed.length > 0 && trimmed.length <= 200) {
-            const idemPhaseStart = Date.now();
-            try {
-              idemRedisKey = `msg:idem:${authReq.user.id}:${crypto.createHash("sha256").update(trimmed, "utf8").digest("hex")}`;
-              try {
-                const existing = await redis.get(idemRedisKey);
-                if (existing) {
-                  let parsed: any;
-                  try {
-                    parsed = JSON.parse(existing);
-                  } catch {
-                    parsed = null;
-                  }
-                  const replay = await hydrateIdemReplayBody(parsed);
-                  if (replay) {
-                    return res.status(201).json(replay);
-                  }
-                }
-                const gotLease = await redis.set(
-                  idemRedisKey,
-                  JSON.stringify({ pending: true }),
-                  "EX",
-                  MSG_IDEM_PENDING_TTL_SECS,
-                  "NX",
-                );
-                if (gotLease !== "OK") {
-                  const waited =
-                    await awaitIdempotentPostAfterLeaseContention(idemRedisKey);
-                  if (waited.ok) {
-                    return res.status(201).json(waited.body);
-                  }
-                  res.set("Retry-After", "1");
-                  return res.status(409).json({
-                    error: "Duplicate request in flight",
-                    requestId: authReq.id,
-                  });
-                }
-                idemLease = true;
-              } catch {
-                idemRedisKey = null;
-                idemLease = false;
-              }
-            } finally {
-              idemWallMs = Date.now() - idemPhaseStart;
-            }
-          }
+        const idemResult = await processPostMessageIdempotency(authReq, userId);
+        idemRedisKey = idemResult.idemRedisKey;
+        idemLease = idemResult.idemLease;
+        idemWallMs = idemResult.idemWallMs;
+        if (idemResult.replayBody) {
+          return res.status(201).json(idemResult.replayBody);
+        }
+        if (idemResult.duplicateInFlight) {
+          res.set("Retry-After", "1");
+          return res.status(409).json({
+            error: "Duplicate request in flight",
+            requestId: authReq.id,
+          });
         }
 
         // --- POST /messages: DB insert (channel merged path or DM transaction) ---
