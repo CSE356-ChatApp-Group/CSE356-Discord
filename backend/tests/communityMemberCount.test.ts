@@ -62,6 +62,7 @@ jest.mock('../src/middleware/authenticate', () => ({
 }));
 jest.mock('../src/presence/service', () => ({
   invalidatePresenceFanoutTargets: jest.fn().mockResolvedValue(undefined),
+  invalidatePresenceFanoutTargetsBulk: jest.fn().mockResolvedValue(undefined),
   getBulkPresenceDetails: jest.fn().mockResolvedValue({}),
 }));
 jest.mock('../src/websocket/fanout', () => {
@@ -71,6 +72,9 @@ jest.mock('../src/websocket/fanout', () => {
   });
   return { publish: fanoutPublishMock, publishBatch: fanoutPublishBatchMock };
 });
+jest.mock('../src/websocket/communityFeed', () => ({
+  publishCommunityFeedMessage: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('../src/websocket/userFeed', () => ({ publishUserFeedTargets: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../src/websocket/server', () => ({
   invalidateWsBootstrapCache: jest.fn().mockResolvedValue(undefined),
@@ -359,7 +363,8 @@ describe('communities router — join fires Redis incr, leave fires Redis decr',
     poolMock.query
       .mockResolvedValueOnce({ rows: [{ id: COMMUNITY_ID, is_public: true }] }) // resolve community
       .mockResolvedValueOnce({ rowCount: 1 }) // INSERT community_members
-      .mockResolvedValueOnce({ rows: [] }); // listCommunityRealtimeTargets (primary query)
+      .mockResolvedValueOnce({ rows: [] }) // listCommunityRealtimeTargets (primary query)
+      .mockResolvedValueOnce({ rows: [{ user_id: USER_ID }] }); // reload members for presence invalidation
 
     const app = buildApp();
     const res = await request(app)

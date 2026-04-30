@@ -32,6 +32,7 @@ jest.mock('../src/middleware/authenticate', () => ({
 jest.mock('../src/presence/service', () => ({
   getBulkPresenceDetails: jest.fn(),
   invalidatePresenceFanoutTargets: jest.fn(),
+  invalidatePresenceFanoutTargetsBulk: jest.fn(),
 }));
 jest.mock('../src/websocket/fanout', () => {
   const fanoutPublishMock = jest.fn();
