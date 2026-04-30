@@ -63,7 +63,7 @@ router.get('/', async (req, res, next) => {
             ON m.channel_id = rc.id
            AND m.deleted_at IS NULL
            AND m.author_id IS DISTINCT FROM $1
-           AND m.created_at > COALESCE(rs.last_read_message_created_at, last_read.created_at, '-infinity'::timestamptz)
+           AND m.created_at > COALESCE(last_read.created_at, '-infinity'::timestamptz)
           GROUP BY rc.id`,
         values: [userId],
         query_timeout: UNREAD_COUNTS_QUERY_TIMEOUT_MS,
@@ -92,7 +92,7 @@ router.get('/', async (req, res, next) => {
             ON m.conversation_id = c.id
            AND m.deleted_at IS NULL
            AND m.author_id IS DISTINCT FROM $1
-           AND m.created_at > COALESCE(rs.last_read_message_created_at, last_read.created_at, '-infinity'::timestamptz)
+           AND m.created_at > COALESCE(last_read.created_at, '-infinity'::timestamptz)
           GROUP BY c.id`,
         values: [userId],
         query_timeout: UNREAD_COUNTS_QUERY_TIMEOUT_MS,

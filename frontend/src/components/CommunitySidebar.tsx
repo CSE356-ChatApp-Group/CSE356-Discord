@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
-import { api, resolveApiAbsolutePath } from '../lib/api';
+import { api, invalidateApiCache, resolveApiAbsolutePath } from '../lib/api';
 import { wsManager } from '../lib/ws';
 import { readPresenceIntent, writePresenceIntent } from '../lib/presenceIntent';
 import Modal from './Modal';
@@ -57,6 +57,10 @@ export default function CommunitySidebar() {
   const [presenceMsg, setPresenceMsg] = useState('');
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarMsg, setAvatarMsg] = useState('');
+  const [unreadDebugBusy, setUnreadDebugBusy] = useState(false);
+  const [unreadDebugJson, setUnreadDebugJson] = useState('');
+  const [unreadDebugError, setUnreadDebugError] = useState('');
+  const [showUnreadDebug, setShowUnreadDebug] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const accountRequestIdRef = useRef(0);
   // Tracks whether the user has interacted with the presence select after the
@@ -213,6 +217,22 @@ export default function CommunitySidebar() {
     } finally {
       setAvatarBusy(false);
       e.target.value = '';
+    }
+  }
+
+  async function openUnreadDebugModal() {
+    setUnreadDebugBusy(true);
+    setUnreadDebugError('');
+    setUnreadDebugJson('');
+    setShowUnreadDebug(true);
+    try {
+      invalidateApiCache('/unread-counts');
+      const data = await api.get('/unread-counts');
+      setUnreadDebugJson(JSON.stringify(data, null, 2));
+    } catch (err: any) {
+      setUnreadDebugError(err?.message || 'Could not load unread counts');
+    } finally {
+      setUnreadDebugBusy(false);
     }
   }
 
@@ -465,6 +485,19 @@ export default function CommunitySidebar() {
               </p>
             </div>
 
+            <div>
+              <p className={styles.accountSectionTitle}>Debug</p>
+              <button
+                type="button"
+                className={styles.linkBtn}
+                disabled={unreadDebugBusy}
+                onClick={openUnreadDebugModal}
+                data-testid="account-unread-debug-open"
+              >
+                {unreadDebugBusy ? 'Loading…' : 'Show unread counts JSON'}
+              </button>
+            </div>
+
             {accountError && <p className={styles.err} role="alert" data-testid="account-error">{accountError}</p>}
 
             <button
@@ -479,6 +512,20 @@ export default function CommunitySidebar() {
             >
               Log out
             </button>
+          </div>
+        </Modal>
+      )}
+
+      {showUnreadDebug && (
+        <Modal title="Unread Counts JSON" onClose={() => setShowUnreadDebug(false)}>
+          <div className={styles.debugJsonWrap}>
+            {unreadDebugBusy ? (
+              <p className={styles.accountMuted}>Loading…</p>
+            ) : unreadDebugError ? (
+              <p className={styles.err} role="alert" data-testid="account-unread-debug-error">{unreadDebugError}</p>
+            ) : (
+              <pre className={styles.debugJson} data-testid="account-unread-debug-json">{unreadDebugJson}</pre>
+            )}
           </div>
         </Modal>
       )}
