@@ -499,6 +499,106 @@ async function runConversationInsertTransaction({
   return row;
 }
 
+async function runPostInsertPhase({
+  authReq,
+  channelId,
+  conversationId,
+  userId,
+  normalizedContent,
+  threadId,
+  attachments,
+  txPhases,
+  setChannelInsertLockMeta,
+}: {
+  authReq: MessagesAuthedRequest;
+  channelId: string | null;
+  conversationId: string | null;
+  userId: string;
+  normalizedContent: string;
+  threadId: string | null;
+  attachments: any[];
+  txPhases: { t0: number; t_access: number; t_insert: number; t_later: number };
+  setChannelInsertLockMeta: (meta: {
+    waitMs: number;
+    lockPath: string | null;
+    bypassReasonDetail: unknown;
+  }) => void;
+}) {
+  let communityId: string | null = null;
+
+  const runChannelMessageRowUnderInsertLock = () =>
+    withTransaction(async (client) => {
+      const { row, communityId: nextCommunityId } =
+        await runChannelInsertTransaction({
+          client,
+          channelId: channelId!,
+          userId,
+          normalizedContent,
+          threadId,
+          txPhases,
+        });
+      communityId = nextCommunityId;
+      return row;
+    });
+
+  const runDmMessageInsertTransaction = () =>
+    withTransaction(async (client) => {
+      return runConversationInsertTransaction({
+        client,
+        conversationId: conversationId!,
+        userId,
+        normalizedContent,
+        threadId,
+        attachments,
+        txPhases,
+      });
+    });
+
+  let baseMessage: any;
+  if (channelId) {
+    baseMessage = await runChannelMessageInsertSerialized(
+      channelId,
+      runChannelMessageRowUnderInsertLock,
+      {
+        requestId: authReq.id,
+        onInsertLock: ({
+          waitMs,
+          lockPath,
+          bypassReasonDetail,
+        }) => {
+          setChannelInsertLockMeta({ waitMs, lockPath, bypassReasonDetail });
+        },
+      },
+    );
+    if (attachments.length > 0) {
+      try {
+        await withTransaction(async (client) => {
+          await client.query(
+            `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+          );
+          await insertMessageAttachments(
+            client,
+            baseMessage.id,
+            userId,
+            attachments,
+          );
+        });
+      } catch (attachErr) {
+        await rollbackInsertedChannelMessage(
+          baseMessage.id,
+          channelId,
+          userId,
+        );
+        throw attachErr;
+      }
+    }
+  } else {
+    baseMessage = await runDmMessageInsertTransaction();
+  }
+
+  return { baseMessage, communityId };
+}
+
 module.exports = function registerPostRoutes(router: import("express").IRouter) {
   router.post(
     "/",
@@ -577,79 +677,24 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         }
 
         // --- POST /messages: DB insert (channel merged path or DM transaction) ---
-        let communityId: string | null = null;
-        let baseMessage: any;
-
-        const runChannelMessageRowUnderInsertLock = () =>
-          withTransaction(async (client) => {
-            const { row, communityId: nextCommunityId } =
-              await runChannelInsertTransaction({
-                client,
-                channelId,
-                userId,
-                normalizedContent,
-                threadId,
-                txPhases,
-              });
-            communityId = nextCommunityId;
-            return row;
-          });
-
-        const runDmMessageInsertTransaction = () =>
-          withTransaction(async (client) => {
-            return runConversationInsertTransaction({
-              client,
-              conversationId: conversationId!,
-              userId,
-              normalizedContent,
-              threadId,
-              attachments,
-              txPhases,
-            });
-          });
-
-        if (channelId) {
-          baseMessage = await runChannelMessageInsertSerialized(
-            channelId,
-            runChannelMessageRowUnderInsertLock,
-            {
-              requestId: authReq.id,
-              onInsertLock: ({
-                waitMs,
-                lockPath,
-                bypassReasonDetail,
-              }) => {
-                channelInsertLockWaitMs = waitMs;
-                channelInsertLockPath = lockPath;
-                channelInsertLockReasonDetail = bypassReasonDetail;
-              },
-            },
-          );
-          if (attachments.length > 0) {
-            try {
-              await withTransaction(async (client) => {
-                await client.query(
-                  `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
-                );
-                await insertMessageAttachments(
-                  client,
-                  baseMessage.id,
-                  userId,
-                  attachments,
-                );
-              });
-            } catch (attachErr) {
-              await rollbackInsertedChannelMessage(
-                baseMessage.id,
-                channelId,
-                userId,
-              );
-              throw attachErr;
-            }
-          }
-        } else {
-          baseMessage = await runDmMessageInsertTransaction();
-        }
+        const {
+          baseMessage,
+          communityId,
+        } = await runPostInsertPhase({
+          authReq,
+          channelId,
+          conversationId,
+          userId,
+          normalizedContent,
+          threadId,
+          attachments,
+          txPhases,
+          setChannelInsertLockMeta: ({ waitMs, lockPath, bypassReasonDetail }) => {
+            channelInsertLockWaitMs = waitMs;
+            channelInsertLockPath = lockPath;
+            channelInsertLockReasonDetail = bypassReasonDetail;
+          },
+        });
 
         const t_tx_done = Date.now();
         let t_after_cache_bust = t_tx_done;
