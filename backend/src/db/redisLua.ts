@@ -11,8 +11,9 @@
  */
 
 type RedisWithScripts = {
-  call: (...args: (string | number | Buffer)[]) => Promise<unknown>;
-  evalsha: (sha: string, numKeys: number, ...args: (string | number)[]) => Promise<unknown>;
+  call?: (...args: (string | number | Buffer)[]) => Promise<unknown>;
+  evalsha?: (sha: string, numKeys: number, ...args: (string | number)[]) => Promise<unknown>;
+  eval?: (script: string, numKeys: number, ...args: (string | number)[]) => Promise<unknown>;
 };
 
 const scriptSourceById = new Map<string, string>();
@@ -22,6 +23,8 @@ const scriptShaById = new Map<string, string>();
 const REDIS_LUA_IDS = Object.freeze({
   READ_RECEIPT_CURSOR_ADVANCE: 'read_receipt_cursor_advance',
   READ_RECEIPT_RESET_UNREAD_WATERMARK: 'read_receipt_reset_unread_watermark',
+  LOCK_RELEASE_IF_MATCH: 'lock_release_if_match',
+  PRESENCE_DB_CAS: 'presence_db_cas',
 });
 
 function registerRedisLuaScript(id: string, source: string) {
@@ -29,7 +32,9 @@ function registerRedisLuaScript(id: string, source: string) {
   if (!body) {
     throw new Error(`empty Redis Lua script: ${id}`);
   }
-  if (scriptSourceById.has(id)) {
+  const existing = scriptSourceById.get(id);
+  if (existing != null) {
+    if (existing === body) return;
     throw new Error(`duplicate Redis Lua script id: ${id}`);
   }
   scriptSourceById.set(id, body);
@@ -41,6 +46,9 @@ function isNoScriptError(err: unknown): boolean {
 }
 
 async function loadRedisLuaScript(redis: RedisWithScripts, id: string): Promise<string> {
+  if (typeof redis.call !== 'function') {
+    throw new Error(`Redis SCRIPT LOAD unavailable for script: ${id}`);
+  }
   const body = scriptSourceById.get(id);
   if (!body) {
     throw new Error(`unknown Redis Lua script id: ${id}`);
@@ -64,6 +72,13 @@ async function redisEvalSha(
   numKeys: number,
   ...keysAndArgs: (string | number)[]
 ): Promise<unknown> {
+  if (typeof redis.evalsha !== 'function' || typeof redis.call !== 'function') {
+    const body = scriptSourceById.get(id);
+    if (!body || typeof redis.eval !== 'function') {
+      throw new Error(`Redis Lua fallback unavailable for script: ${id}`);
+    }
+    return redis.eval(body, numKeys, ...keysAndArgs);
+  }
   let sha = await ensureRedisLuaSha(redis, id);
   try {
     return await redis.evalsha(sha, numKeys, ...keysAndArgs);
@@ -79,6 +94,7 @@ async function redisEvalSha(
 
 /** Load every registered script into the current Redis instance (call after PING). */
 async function warmRedisLuaScripts(redis: RedisWithScripts) {
+  if (typeof redis.call !== 'function') return;
   const ids = [...scriptSourceById.keys()];
   if (!ids.length) {
     return;

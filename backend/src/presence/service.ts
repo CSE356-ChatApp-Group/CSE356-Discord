@@ -12,6 +12,11 @@
 
 
 const redis = require("../db/redis");
+const {
+  REDIS_LUA_IDS,
+  registerRedisLuaScript,
+  redisEvalSha,
+} = require("../db/redisLua");
 const { publishUserFeedTargets } = require("../websocket/userFeed");
 const { query, withTransaction } = require("../db/pool");
 const overload = require("../utils/overload");
@@ -39,6 +44,7 @@ if not current or current ~= ARGV[1] then
 end
 return 0
 `;
+registerRedisLuaScript(REDIS_LUA_IDS.PRESENCE_DB_CAS, PRESENCE_DB_CAS_LUA);
 
 function presenceDbCursorKey(userId) {
   return `presence_db_cursor:${userId}`;
@@ -278,8 +284,9 @@ async function setPresence(userId, status, awayMessage) {
     const cursorValue = `${status}:${status === "away" ? (nextAwayMessage || "") : ""}`;
     let shouldWriteDb = true;
     try {
-      const casResult = await redis.eval(
-        PRESENCE_DB_CAS_LUA,
+      const casResult = await redisEvalSha(
+        redis,
+        REDIS_LUA_IDS.PRESENCE_DB_CAS,
         1,
         dbCursorKey,
         cursorValue,

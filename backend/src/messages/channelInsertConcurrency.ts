@@ -10,6 +10,11 @@
 const crypto = require('crypto');
 const os = require('os');
 const redis = require('../db/redis');
+const {
+  REDIS_LUA_IDS,
+  registerRedisLuaScript,
+  redisEvalSha,
+} = require('../db/redisLua');
 const logger = require('../utils/logger');
 const {
   messageChannelInsertLockTotal,
@@ -110,6 +115,7 @@ if redis.call("get", KEYS[1]) == ARGV[1] then
 else
   return 0
 end`;
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, MESSAGE_INSERT_LOCK_RELEASE_LUA);
 const MESSAGE_INSERT_LOCK_TIMEOUT_CODE = 'MESSAGE_INSERT_LOCK_TIMEOUT';
 const MESSAGE_INSERT_LOCK_QUEUE_REJECT_CODE = 'MESSAGE_INSERT_LOCK_QUEUE_REJECT';
 const channelQueues = new Map<string, ChannelQueue>();
@@ -551,8 +557,9 @@ async function releaseChannelInsertLease(
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         released = await withRedisOpTimeout(
-          redis.eval(
-            MESSAGE_INSERT_LOCK_RELEASE_LUA,
+          redisEvalSha(
+            redis,
+            REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH,
             1,
             lease.lockKey,
             lease.token,

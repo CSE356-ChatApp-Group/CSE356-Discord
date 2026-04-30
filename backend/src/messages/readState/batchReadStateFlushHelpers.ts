@@ -1,5 +1,10 @@
 const { query } = require('../../db/pool');
 const redis = require('../../db/redis');
+const {
+  REDIS_LUA_IDS,
+  registerRedisLuaScript,
+  redisEvalSha,
+} = require('../../db/redisLua');
 const logger = require('../../utils/logger');
 const {
   batchReadStateConfig: {
@@ -12,6 +17,13 @@ const {
 } = require('../config/batchReadStateConfig');
 
 let readStateFlushScanCursor = '0';
+const FLUSH_LOCK_RELEASE_LUA = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+end
+return 0
+`;
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, FLUSH_LOCK_RELEASE_LUA);
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,17 +64,7 @@ async function acquireFlushLock(): Promise<string | null> {
 
 async function releaseFlushLock(token: string): Promise<void> {
   try {
-    await redis.eval(
-      `
-        if redis.call("get", KEYS[1]) == ARGV[1] then
-          return redis.call("del", KEYS[1])
-        end
-        return 0
-      `,
-      1,
-      RS_FLUSH_LOCK_KEY,
-      token,
-    );
+    await redisEvalSha(redis, REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, 1, RS_FLUSH_LOCK_KEY, token);
   } catch {
     // ignore
   }

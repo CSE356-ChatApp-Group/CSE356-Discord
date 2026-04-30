@@ -2,6 +2,11 @@
 const crypto = require('crypto');
 const { query, poolStats } = require('../db/pool');
 const redis = require('../db/redis');
+const {
+  REDIS_LUA_IDS,
+  registerRedisLuaScript,
+  redisEvalSha,
+} = require('../db/redisLua');
 const logger = require('../utils/logger');
 const sideEffects = require('./sideEffects');
 
@@ -36,6 +41,7 @@ if redis.call("get", KEYS[1]) == ARGV[1] then
 else
   return 0
 end`;
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, MSG_COUNT_RECONCILE_LOCK_RELEASE_LUA);
 
 function countKeyForChannel(channelId: string) {
   return `channel:msg_count:${channelId}`;
@@ -58,7 +64,7 @@ async function withReconcileLock(channelId: string, fn: () => Promise<void>) {
     await fn();
   } finally {
     try {
-      await redis.eval(MSG_COUNT_RECONCILE_LOCK_RELEASE_LUA, 1, lockKey, token);
+      await redisEvalSha(redis, REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, 1, lockKey, token);
     } catch {
       // Best effort lock release; TTL ensures eventual unlock.
     }

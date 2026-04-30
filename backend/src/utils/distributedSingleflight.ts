@@ -11,13 +11,20 @@
 
 
 const crypto = require('crypto');
+const {
+  REDIS_LUA_IDS,
+  registerRedisLuaScript,
+  redisEvalSha,
+} = require('../db/redisLua');
 
 type JsonRedisLike = {
   get(key: string): Promise<string | null>;
   set(...args: any[]): Promise<unknown>;
   setex(key: string, ttlSeconds: number, value: string): Promise<unknown>;
   del(...keys: string[]): Promise<unknown>;
-  eval(script: string, numKeys: number, ...args: any[]): Promise<unknown>;
+  call?: (...args: (string | number | Buffer)[]) => Promise<unknown>;
+  evalsha?: (sha: string, numKeys: number, ...args: any[]) => Promise<unknown>;
+  eval?: (script: string, numKeys: number, ...args: any[]) => Promise<unknown>;
 };
 
 type SingleflightParams<T> = {
@@ -128,10 +135,11 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0
 `;
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, RELEASE_LOCK_LUA);
 
 async function releaseLock(redis: JsonRedisLike, lockKey: string, token: string) {
   try {
-    await redis.eval(RELEASE_LOCK_LUA, 1, lockKey, token);
+    await redisEvalSha(redis, REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, 1, lockKey, token);
   } catch {
     // non-fatal
   }

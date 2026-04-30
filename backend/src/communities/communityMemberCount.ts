@@ -14,6 +14,11 @@
 
 const { query, poolStats } = require('../db/pool');
 const redis = require('../db/redis');
+const {
+  REDIS_LUA_IDS,
+  registerRedisLuaScript,
+  redisEvalSha,
+} = require('../db/redisLua');
 const logger = require('../utils/logger');
 const {
   communityCountRedisUpdateTotal,
@@ -45,6 +50,9 @@ const COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE = parseInt(
 );
 
 let localReconcileInFlight = false;
+const COMMUNITY_RECONCILE_LOCK_RELEASE_LUA =
+  `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) end return 0`;
+registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, COMMUNITY_RECONCILE_LOCK_RELEASE_LUA);
 
 const RECONCILE_SQL = `
   WITH counts AS (
@@ -79,8 +87,9 @@ async function acquireReconcileLock(): Promise<string | null> {
 
 async function releaseReconcileLock(token: string): Promise<void> {
   try {
-    await redis.eval(
-      `if redis.call("get",KEYS[1])==ARGV[1] then return redis.call("del",KEYS[1]) end return 0`,
+    await redisEvalSha(
+      redis,
+      REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH,
       1,
       COMMUNITY_COUNT_RECONCILE_LOCK_KEY,
       token,
