@@ -38,6 +38,7 @@ const {
   buildFilters,
   buildStrictLiteralPredicate,
 } = require('./sqlParts');
+const { createSearchRetryPolicy } = require('./retryPolicy');
 
 const SEARCH_USE_READ_REPLICA =
   String(process.env.SEARCH_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
@@ -587,32 +588,15 @@ async function searchFilteredOnly(
   return buildResult(rows, '', offset, limit);
 }
 
-function shouldRetrySearchOnPrimary(
-  forcePrimary: boolean,
-  result: { hits?: any[] } | null,
-  err?: any,
-) {
-  if (forcePrimary || !SEARCH_USE_READ_REPLICA || !db.readPool) return false;
-  if (err?.statusCode === 403) return true;
-  return Array.isArray(result?.hits) && result!.hits.length === 0;
-}
-
-function logPrimaryRetry(query: string, opts: Record<string, any>, reason: string) {
-  logger.info(
-    {
-      query,
-      communityId: opts.communityId,
-      conversationId: opts.conversationId,
-    },
-    reason,
-  );
-}
-
-function createMeiliFallbackError(code: string) {
-  const err: any = new Error(code);
-  err.meiliUnavailable = true;
-  return err;
-}
+const {
+  shouldRetrySearchOnPrimary,
+  logPrimaryRetry,
+  createMeiliFallbackError,
+} = createSearchRetryPolicy({
+  logger,
+  searchUseReadReplica: SEARCH_USE_READ_REPLICA,
+  hasReadPool: Boolean(db.readPool),
+});
 
 /**
  * search – main entry point. FTS-only.
