@@ -838,6 +838,17 @@ function shouldRetrySearchOnPrimary(
   return Array.isArray(result?.hits) && result!.hits.length === 0;
 }
 
+function logPrimaryRetry(query: string, opts: Record<string, any>, reason: string) {
+  logger.info(
+    {
+      query,
+      communityId: opts.communityId,
+      conversationId: opts.conversationId,
+    },
+    reason,
+  );
+}
+
 /**
  * search – main entry point. FTS-only.
  *
@@ -1193,12 +1204,9 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
     if (!shouldRetrySearchOnPrimary(initialForcePrimary, result)) {
       return result;
     }
-    logger.info(
-      {
-        query: trimmed,
-        communityId: opts.communityId,
-        conversationId: opts.conversationId,
-      },
+    logPrimaryRetry(
+      trimmed,
+      opts,
       'search: replica returned empty result set, retrying on primary',
     );
     return await searchOnce(trimmed, opts, true);
@@ -1206,12 +1214,9 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
     if (!shouldRetrySearchOnPrimary(initialForcePrimary, null, err)) {
       throw err;
     }
-    logger.info(
-      {
-        query: trimmed,
-        communityId: opts.communityId,
-        conversationId: opts.conversationId,
-      },
+    logPrimaryRetry(
+      trimmed,
+      opts,
       'search: replica access check may be stale, retrying on primary',
     );
     return searchOnce(trimmed, opts, true);
