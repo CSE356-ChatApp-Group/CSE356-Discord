@@ -12,6 +12,10 @@ type PendingUpload = {
   width?: number;
   height?: number;
 };
+type UnreadCountsSnapshot = {
+  channelCounts: Map<string, number>;
+  conversationCounts: Map<string, number>;
+};
 
 type SendMessageInput = {
   content?: string;
@@ -441,6 +445,53 @@ let lastTabVisibleMessageRefetchAt = 0;
 const ACTIVE_MESSAGE_REFETCH_MIN_MS = 2000;
 let lastActiveMessageRefetchAt = 0;
 let activeMessageRefetchInFlight: Promise<void> | null = null;
+let unreadCountsInFlight: Promise<UnreadCountsSnapshot> | null = null;
+let unreadCountsCache: { at: number; value: UnreadCountsSnapshot } | null = null;
+const UNREAD_COUNTS_CACHE_TTL_MS = 2000;
+
+function emptyUnreadCountsSnapshot(): UnreadCountsSnapshot {
+  return {
+    channelCounts: new Map<string, number>(),
+    conversationCounts: new Map<string, number>(),
+  };
+}
+
+async function fetchUnreadCountsSnapshot(force = false): Promise<UnreadCountsSnapshot> {
+  const now = Date.now();
+  if (!force && unreadCountsCache && now - unreadCountsCache.at <= UNREAD_COUNTS_CACHE_TTL_MS) {
+    return unreadCountsCache.value;
+  }
+  if (unreadCountsInFlight) return unreadCountsInFlight;
+
+  unreadCountsInFlight = (async () => {
+    try {
+      const payload = await api.get('/unread-counts');
+      const rows = payload?.unreadCounts || payload?.counts || payload?.data || [];
+      const snapshot = emptyUnreadCountsSnapshot();
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const type = row?.type === 'conversation' ? 'conversation' : 'channel';
+        const count = Math.max(0, Number(row?.count || 0));
+        if (type === 'channel') {
+          const id = String(row?.channel_id || row?.channelId || row?.conversation_id || row?.conversationId || '');
+          if (id) snapshot.channelCounts.set(id, count);
+          continue;
+        }
+        const id = String(row?.conversation_id || row?.conversationId || '');
+        if (id) snapshot.conversationCounts.set(id, count);
+      }
+      unreadCountsCache = { at: Date.now(), value: snapshot };
+      return snapshot;
+    } catch {
+      const fallback = emptyUnreadCountsSnapshot();
+      unreadCountsCache = { at: Date.now(), value: fallback };
+      return fallback;
+    } finally {
+      unreadCountsInFlight = null;
+    }
+  })();
+
+  return unreadCountsInFlight;
+}
 
 function hookReadFlushOnVisibilityHidden() {
   if (readFlushVisibilityHooked || typeof document === 'undefined') return;
@@ -889,7 +940,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 
     const inFlight = (async () => {
       invalidateApiCache(`/channels?communityId=${normalizedCommunityId}`);
-      const { channels } = await api.get(`/channels?communityId=${normalizedCommunityId}`);
+      const [{ channels }, unreadSnapshot] = await Promise.all([
+        api.get(`/channels?communityId=${normalizedCommunityId}`),
+        fetchUnreadCountsSnapshot(),
+      ]);
       if (latestChannelsFetchTokenByCommunity.get(normalizedCommunityId) !== requestToken) {
         return channels;
       }
@@ -915,7 +969,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
             const previous = s.channels.find((ch: Entity) => ch.id === channel.id);
             const hadActivity = Boolean(previous?.has_new_activity ?? previous?.hasNewActivity);
             // Prefer the larger of: server-provided count vs in-memory incremented count
-            const serverCount = channel.unread_message_count ?? 0;
+            const endpointCount = unreadSnapshot.channelCounts.get(String(channel.id)) ?? 0;
+            const serverCount = Math.max(Number(channel.unread_message_count ?? 0), endpointCount);
             const prevCount = previous?.unread_message_count ?? 0;
             const unreadCount = Math.max(serverCount, prevCount);
             return hadActivity
@@ -1127,13 +1182,26 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   async fetchConversations() {
     ensureUserWsSubscription(get()._handleWsEvent);
     invalidateApiCache('/conversations');
-    const { conversations } = await api.get('/conversations');
+    const [{ conversations }, unreadSnapshot] = await Promise.all([
+      api.get('/conversations'),
+      fetchUnreadCountsSnapshot(),
+    ]);
     const me = useAuthStore.getState().user;
     const visibleConversations = (conversations || []).filter((conv: Entity) => isVisibleConversation(conv, me?.id));
     set((s) => ({
       conversations: visibleConversations.map((conversation: Entity) => {
         const previous = s.conversations.find((existing: Entity) => existing.id === conversation.id);
-        const normalized = normalizeConversationUnreadMetadata(conversation, me?.id);
+        const endpointCount = unreadSnapshot.conversationCounts.get(String(conversation.id)) ?? 0;
+        const normalized = normalizeConversationUnreadMetadata({
+          ...conversation,
+          unread_message_count: Math.max(Number(conversation.unread_message_count ?? 0), endpointCount),
+          has_new_activity: endpointCount > 0
+            ? true
+            : Boolean(conversation.has_new_activity ?? conversation.hasNewActivity),
+          hasNewActivity: endpointCount > 0
+            ? true
+            : Boolean(conversation.hasNewActivity ?? conversation.has_new_activity),
+        }, me?.id);
         if (!previous) return normalized;
         const hadActivity = Boolean(previous?.has_new_activity ?? previous?.hasNewActivity);
         const unreadCount = Math.max(

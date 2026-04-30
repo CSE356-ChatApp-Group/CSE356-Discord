@@ -3,7 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore  } from '../stores/authStore';
 import { api } from '../lib/api';
-import { getEntityUnreadCountWithFallback } from '../lib/unread';
+import { getEntityUnreadCount, isConversationUnread } from '../lib/unread';
 import Modal from './Modal';
 import styles from './ChannelSidebar.module.css';
 
@@ -395,11 +395,18 @@ function isCommunityOwner(community) {
 function getChannelUnreadCount(channel, active, currentUserId): number {
   const canAccess = channel?.can_access ?? channel?.canAccess ?? !channel?.is_private;
   if (!canAccess) return 0;
-  return getEntityUnreadCountWithFallback(channel, active, currentUserId);
+  return getEntityUnreadCountWithFallbackLocal(channel, active, currentUserId);
 }
 
 function getConversationUnreadCount(conv, active, currentUserId): number {
-  return getEntityUnreadCountWithFallback(conv, active, currentUserId);
+  return getEntityUnreadCountWithFallbackLocal(conv, active, currentUserId);
+}
+
+function getEntityUnreadCountWithFallbackLocal(entity, active, currentUserId): number {
+  if (isConversationUnread(entity, active, currentUserId)) {
+    return getEntityUnreadCount(entity, active) || 1;
+  }
+  return 0;
 }
 
 function DmRow({ conv, currentUserId, unreadCount, active, onClick }: { conv: any, currentUserId?: string, unreadCount: number, active: boolean, onClick: () => void }) {
