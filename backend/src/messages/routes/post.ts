@@ -246,6 +246,30 @@ function validatePostTargetAndPayload({
   return null;
 }
 
+function buildMessagePostError(
+  message: string,
+  statusCode: number,
+  reason: string,
+) {
+  const err: any = new Error(message);
+  err.statusCode = statusCode;
+  err.messagePostDenyReason = reason;
+  return err;
+}
+
+async function rollbackInsertedChannelMessage(
+  messageId: string,
+  channelId: string,
+  authorId: string,
+) {
+  await pool
+    .query(
+      `DELETE FROM messages WHERE id = $1 AND channel_id = $2 AND author_id = $3`,
+      [messageId, channelId, authorId],
+    )
+    .catch(() => {});
+}
+
 module.exports = function registerPostRoutes(router: import("express").IRouter) {
   router.post(
     "/",
@@ -402,15 +426,13 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
               txPhases.t_later = Date.now();
               const accessRow = accessRes.rows[0];
               if (accessRow && accessRow.author_exists === false) {
-                const err: any = new Error("Session no longer valid");
-                err.statusCode = 401;
-                err.messagePostDenyReason = "author_missing";
-                throw err;
+                throw buildMessagePostError(
+                  "Session no longer valid",
+                  401,
+                  "author_missing",
+                );
               }
-              const err: any = new Error("Access denied");
-              err.statusCode = 403;
-              err.messagePostDenyReason = "channel_access";
-              throw err;
+              throw buildMessagePostError("Access denied", 403, "channel_access");
             }
 
             const row = insertRes.rows[0];
@@ -442,16 +464,18 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
             txPhases.t_access = Date.now();
             const accessRow = accessRes.rows[0];
             if (accessRow && accessRow.author_exists === false) {
-              const err: any = new Error("Session no longer valid");
-              err.statusCode = 401;
-              err.messagePostDenyReason = "author_missing";
-              throw err;
+              throw buildMessagePostError(
+                "Session no longer valid",
+                401,
+                "author_missing",
+              );
             }
             if (!accessRow?.has_access) {
-              const err: any = new Error("Not a participant");
-              err.statusCode = 403;
-              err.messagePostDenyReason = "conversation_participant";
-              throw err;
+              throw buildMessagePostError(
+                "Not a participant",
+                403,
+                "conversation_participant",
+              );
             }
 
             const insertRes = await client.query(
@@ -511,12 +535,11 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
                 );
               });
             } catch (attachErr) {
-              await pool
-                .query(
-                  `DELETE FROM messages WHERE id = $1 AND channel_id = $2 AND author_id = $3`,
-                  [baseMessage.id, channelId, authReq.user.id],
-                )
-                .catch(() => {});
+              await rollbackInsertedChannelMessage(
+                baseMessage.id,
+                channelId,
+                authReq.user.id,
+              );
               throw attachErr;
             }
           }
