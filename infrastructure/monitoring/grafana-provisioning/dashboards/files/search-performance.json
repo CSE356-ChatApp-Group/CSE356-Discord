@@ -75,7 +75,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",status_class=\"2xx\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",status_class=\"2xx\"}[$__rate_interval])))",
           "refId": "A"
         }
       ],
@@ -136,7 +136,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",status_class=\"2xx\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",status_class=\"2xx\"}[$__rate_interval])))",
           "refId": "A"
         }
       ],
@@ -221,12 +221,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\"}[$__rate_interval])))",
           "legendFormat": "Search p95",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\"}[$__rate_interval])))",
           "legendFormat": "Search p99",
           "refId": "B"
         }
@@ -586,12 +586,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[$__rate_interval])))",
           "legendFormat": "p95 {{vm}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[$__rate_interval])))",
           "legendFormat": "p99 {{vm}}",
           "refId": "B"
         }
