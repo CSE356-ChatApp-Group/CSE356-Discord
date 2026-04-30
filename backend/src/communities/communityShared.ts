@@ -181,13 +181,24 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
       listCommunityRealtimeTargets(communityId, req.user.id),
       getCommunityChannelIds(communityId),
     ]);
+    const { rows: memberRows } = await query(
+      `SELECT user_id::text AS user_id
+         FROM community_members
+        WHERE community_id = $1`,
+      [communityId],
+    );
+    const affectedPresenceUserIds = [...new Set(
+      memberRows
+        .map((row) => row.user_id)
+        .filter((value) => typeof value === 'string' && value)
+    )];
     warmChannelAccessCacheForUser(redis, channelIds, req.user.id).catch(
       () => {},
     );
 
     await Promise.allSettled([
       invalidateCommunityChannelUserFanoutTargetsCache(communityId, channelIds),
-      presenceService.invalidatePresenceFanoutTargets(req.user.id),
+      presenceService.invalidatePresenceFanoutTargetsBulk(affectedPresenceUserIds),
       invalidateWsBootstrapCache(req.user.id),
       publishUserFeedTargets([req.user.id], {
         __wsInternal: {

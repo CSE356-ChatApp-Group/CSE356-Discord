@@ -12,7 +12,7 @@ const {
 const { wrapFanoutPayload } = require('./realtimePayload');
 const logger = require('../utils/logger');
 
-const INVITE_NOTIFICATION_RETRY_DELAY_MS = 75;
+const INVITE_NOTIFICATION_RETRY_DELAYS_MS = [75, 250, 1000];
 
 function publishConversationEvents(targets, event, data) {
   const uniqueTargets = [...new Set(targets.filter(Boolean))];
@@ -109,33 +109,36 @@ function scheduleGroupDmInviteRetry(participantUpdateTargets, invitedUserTargets
   )];
   if (!uniqueParticipantTargets.length && !uniqueInviteTargets.length) return;
 
-  setTimeout(() => {
-    Promise.allSettled([
-      uniqueParticipantTargets.length
-        ? publishConversationEventsStrict(
-          uniqueParticipantTargets,
-          'conversation:participant_added',
-          data
-        )
-        : Promise.resolve(),
-      uniqueInviteTargets.length
-        ? publishConversationInviteNotifications(uniqueInviteTargets, data, { strict: true })
-        : Promise.resolve(),
-    ]).then((results) => {
-      const rejected = results.find((result) => result.status === 'rejected');
-      if (rejected?.status === 'rejected') {
-        logger.warn(
-          {
-            err: rejected.reason,
-            participantTargetCount: uniqueParticipantTargets.length,
-            inviteTargetCount: uniqueInviteTargets.length,
-            conversationId: data?.conversationId,
-          },
-          'group DM invite realtime retry failed',
-        );
-      }
-    }).catch(() => {});
-  }, INVITE_NOTIFICATION_RETRY_DELAY_MS);
+  for (const delayMs of INVITE_NOTIFICATION_RETRY_DELAYS_MS) {
+    setTimeout(() => {
+      Promise.allSettled([
+        uniqueParticipantTargets.length
+          ? publishConversationEventsStrict(
+            uniqueParticipantTargets,
+            'conversation:participant_added',
+            data
+          )
+          : Promise.resolve(),
+        uniqueInviteTargets.length
+          ? publishConversationInviteNotifications(uniqueInviteTargets, data, { strict: true })
+          : Promise.resolve(),
+      ]).then((results) => {
+        const rejected = results.find((result) => result.status === 'rejected');
+        if (rejected?.status === 'rejected') {
+          logger.warn(
+            {
+              err: rejected.reason,
+              delayMs,
+              participantTargetCount: uniqueParticipantTargets.length,
+              inviteTargetCount: uniqueInviteTargets.length,
+              conversationId: data?.conversationId,
+            },
+            'group DM invite realtime retry failed',
+          );
+        }
+      }).catch(() => {});
+    }, delayMs);
+  }
 }
 
 module.exports = {

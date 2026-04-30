@@ -414,6 +414,7 @@ async function publishGroupDmInviteSideEffects({
   const participantUpdateTargets = [
     `conversation:${conversationId}`,
     ...currentParticipantIds.map((participantId) => `user:${participantId}`),
+    ...invitedUserTargets,
   ];
 
   await publishConversationEvents(
@@ -517,7 +518,7 @@ async function addParticipantsHandler(req, res, next) {
     if (participantIdsToAdd.length > 0) {
       await Promise.allSettled([
         invalidateConversationFanoutTargetsCache(req.params.id),
-        presenceService.invalidatePresenceFanoutTargetsBulk(participantIdsToAdd),
+        presenceService.invalidatePresenceFanoutTargetsBulk(activeParticipantIds),
         invalidateWsBootstrapCaches(participantIdsToAdd),
         // Invalidate conversation list cache for newly added AND existing
         // participants so everyone sees the updated participant list immediately.
@@ -610,7 +611,7 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     await client.query('COMMIT');
     await Promise.allSettled([
       invalidateConversationFanoutTargetsCache(req.params.id),
-      presenceService.invalidatePresenceFanoutTargets(req.user.id),
+      presenceService.invalidatePresenceFanoutTargetsBulk([req.user.id, ...activeParticipantIds]),
       invalidateWsBootstrapCache(req.user.id),
     ]);
     // DM latest-page cache: leave adds a system row or deletes the thread; POST /messages is not used.

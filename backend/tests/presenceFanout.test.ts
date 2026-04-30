@@ -73,14 +73,9 @@ describe('presence fanout', () => {
     pool.query
       .mockResolvedValueOnce({
         rows: [
-          { target_type: 'community', target_id: '11111111-1111-1111-1111-111111111111' },
-          { target_type: 'conversation', target_id: '22222222-2222-2222-2222-222222222222' },
-        ],
-      })
-      .mockResolvedValueOnce({
-        rows: [
-          { user_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' },
           { user_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' },
+          { user_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' },
+          { user_id: 'cccccccc-cccc-cccc-cccc-cccccccccccc' },
         ],
       });
 
@@ -93,8 +88,8 @@ describe('presence fanout', () => {
     expect(publishUserFeedTargets).toHaveBeenCalledTimes(1);
     expect(publishUserFeedTargets).toHaveBeenCalledWith(
       [
-        'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
         'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+        'cccccccc-cccc-cccc-cccc-cccccccccccc',
       ],
       {
         event: 'presence:updated',
@@ -112,34 +107,53 @@ describe('presence fanout', () => {
     pool.query
       .mockResolvedValueOnce({
         rows: [
-          { target_type: 'community', target_id: '11111111-1111-1111-1111-111111111111' },
-          { target_type: 'conversation', target_id: '22222222-2222-2222-2222-222222222222' },
-        ],
-      })
-      .mockResolvedValueOnce({
-        rows: [
-          { user_id: actorUserId },
           { user_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' },
           { user_id: 'cccccccc-cccc-cccc-cccc-cccccccccccc' },
+          { user_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' },
         ],
       });
 
     await setPresence(actorUserId, 'online');
 
-    const fanoutQueryCall = pool.query.mock.calls[1];
+    const fanoutQueryCall = pool.query.mock.calls[0];
     expect(fanoutQueryCall).toBeDefined();
     const [sqlText, sqlParams] = fanoutQueryCall;
     expect(typeof sqlText).toBe('string');
     expect(sqlText).toContain('SELECT recipient_id::text AS user_id');
+    expect(sqlText).toContain('JOIN community_members cm_other');
+    expect(sqlText).toContain('JOIN conversation_participants cp_other');
     expect(sqlText).toContain('UNION');
     expect(sqlText).toContain('WHERE recipient_id IS NOT NULL');
-    expect(sqlText).toContain('AND cm.user_id <> $1::uuid');
-    expect(sqlText).toContain('AND cp.user_id <> $1::uuid');
+    expect(sqlText).toContain('AND cm_other.user_id <> $1::uuid');
+    expect(sqlText).toContain('AND cp_other.user_id <> $1::uuid');
     expect(sqlParams[0]).toBe(actorUserId);
 
     const publishedRecipients = publishUserFeedTargets.mock.calls[0][0] as string[];
     const uniquePublishedRecipients = new Set(publishedRecipients);
     expect(uniquePublishedRecipients.size).toBe(publishedRecipients.length);
+    expect(uniquePublishedRecipients.has(actorUserId)).toBe(false);
+  });
+
+  it('uses cached recipient ids when the fanout cache is warm', async () => {
+    redis.get.mockResolvedValueOnce(JSON.stringify({
+      v: 2,
+      u: ['bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],
+    }));
+
+    await setPresence('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'online');
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(publishUserFeedTargets).toHaveBeenCalledWith(
+      ['bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],
+      {
+        event: 'presence:updated',
+        data: {
+          userId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          status: 'online',
+          awayMessage: null,
+        },
+      },
+    );
   });
 
   it('matches old UNION semantics for overlapping branch fixtures', () => {

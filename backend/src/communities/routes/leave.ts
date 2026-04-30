@@ -51,7 +51,10 @@ router.delete("/:id/leave", param("id").isUUID(), async (req, res, next) => {
       [req.params.id],
     );
 
-    await presenceService.invalidatePresenceFanoutTargets(req.user.id);
+    const affectedPresenceUserIds = [
+      req.user.id,
+      ...remainingMembers.map((member) => member.user_id),
+    ];
     invalidateWsBootstrapCache(req.user.id).catch(() => {});
     invalidateWsAclCache(req.user.id, `community:${req.params.id}`);
 
@@ -67,6 +70,7 @@ router.delete("/:id/leave", param("id").isUUID(), async (req, res, next) => {
         req.params.id,
         leaveChannelIds,
       ),
+      presenceService.invalidatePresenceFanoutTargetsBulk(affectedPresenceUserIds),
       C.invalidateCommunitiesCaches(
         [req.user.id, ...remainingMembers.map((member) => member.user_id)],
         publicVersion,

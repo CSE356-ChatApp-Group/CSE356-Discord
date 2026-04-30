@@ -1,6 +1,7 @@
 
 const express = require('express');
 const { queryRead, poolStats } = require('../db/pool');
+const redis = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const logger = require('../utils/logger');
 const {
@@ -45,6 +46,39 @@ function normalizeCountRow(row) {
   };
 }
 
+function toNonNegativeInt(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return parsed;
+}
+
+function buildUnreadCountsPayload(rows) {
+  const unreadCounts = (Array.isArray(rows) ? rows : []).map(normalizeCountRow);
+  const channels = {};
+  const conversations = {};
+  let totalUnreadCount = 0;
+
+  for (const row of unreadCounts) {
+    totalUnreadCount += row.count;
+    if (row.type === 'channel' && row.channelId) {
+      channels[row.channelId] = row.count;
+      continue;
+    }
+    if (row.conversationId) {
+      conversations[row.conversationId] = row.count;
+    }
+  }
+
+  return {
+    unreadCounts,
+    counts: unreadCounts,
+    data: unreadCounts,
+    channels,
+    conversations,
+    totalUnreadCount,
+  };
+}
+
 function isUnreadCountsTimeout(err) {
   const msg = String(err?.message || '').toLowerCase();
   return (
@@ -71,7 +105,18 @@ async function safeUnreadCountsQuery(scope, fn) {
 }
 
 function emptyUnreadCountsPayload() {
-  return { unreadCounts: [], counts: [], data: [] };
+  return buildUnreadCountsPayload([]);
+}
+
+function inferUnreadCountFromChannelMeta(row, userId) {
+  const lastMessageId = row?.last_message_id ? String(row.last_message_id) : '';
+  const myLastReadMessageId = row?.my_last_read_message_id ? String(row.my_last_read_message_id) : '';
+  const lastMessageAuthorId = row?.last_message_author_id ? String(row.last_message_author_id) : '';
+  const hasUnread =
+    Boolean(lastMessageId) &&
+    lastMessageId !== myLastReadMessageId &&
+    lastMessageAuthorId !== String(userId);
+  return hasUnread ? 1 : 0;
 }
 
 router.get('/', async (req, res, next) => {
@@ -109,14 +154,19 @@ router.get('/', async (req, res, next) => {
 
     const loadPromise = (async () => {
       unreadCountsInFlight += 1;
-      let channelResult;
-      let conversationResult;
+      let channelMetaResult = { rows: [] };
+      let conversationResult = { rows: [] };
+      const channelCountsById = new Map();
       try {
-        // Run sequentially to avoid doubling per-request DB pressure on the read pool.
-        channelResult = await safeUnreadCountsQuery('channel', () => queryRead({
+        // Channels: fetch access + last-read metadata first, then use Redis counters
+        // for the hot path and fall back to exact SQL only for cold/missing keys.
+        channelMetaResult = await safeUnreadCountsQuery('channel_meta', () => queryRead({
           text: `
           WITH readable_channels AS (
-            SELECT ch.id
+            SELECT
+              ch.id,
+              ch.last_message_id,
+              ch.last_message_author_id
             FROM channels ch
             JOIN communities co ON co.id = ch.community_id
             LEFT JOIN community_members cm
@@ -129,30 +179,85 @@ router.get('/', async (req, res, next) => {
               AND (ch.is_private = FALSE OR chm.user_id IS NOT NULL OR co.owner_id = $1)
           )
           SELECT
-            'channel'::text AS type,
             rc.id::text AS channel_id,
-            rc.id::text AS conversation_id,
-            COUNT(m.id)::int AS count
+            rc.last_message_id::text AS last_message_id,
+            rc.last_message_author_id::text AS last_message_author_id,
+            rs.last_read_message_id::text AS my_last_read_message_id
           FROM readable_channels rc
           LEFT JOIN read_states rs
             ON rs.channel_id = rc.id
-           AND rs.user_id = $1
-          LEFT JOIN messages last_read
-            ON rs.last_read_message_created_at IS NULL
-           AND last_read.id = rs.last_read_message_id
-          LEFT JOIN messages m
-            ON m.channel_id = rc.id
-           AND m.deleted_at IS NULL
-           AND m.author_id IS DISTINCT FROM $1
-           AND m.created_at > COALESCE(
-             rs.last_read_message_created_at,
-             last_read.created_at,
-             '-infinity'::timestamptz
-           )
-          GROUP BY rc.id`,
+           AND rs.user_id = $1`,
           values: [userId],
           query_timeout: UNREAD_COUNTS_QUERY_TIMEOUT_MS,
         }));
+
+        const channelRows = Array.isArray(channelMetaResult.rows) ? channelMetaResult.rows : [];
+        if (channelRows.length > 0) {
+          let fallbackChannelIds = [];
+          try {
+            const countKeys = channelRows.map((row) => `channel:msg_count:${row.channel_id}`);
+            const readKeys = channelRows.map((row) => `user:last_read_count:${row.channel_id}:${userId}`);
+            const [rawCounts, rawReads] = await Promise.all([
+              redis.mget(...countKeys),
+              redis.mget(...readKeys),
+            ]);
+
+            for (let i = 0; i < channelRows.length; i += 1) {
+              const channelRow = channelRows[i];
+              const rawCount = rawCounts[i];
+              const rawRead = rawReads[i];
+              if (rawCount !== null && rawRead !== null) {
+                channelCountsById.set(
+                  channelRow.channel_id,
+                  Math.max(0, toNonNegativeInt(rawCount) - toNonNegativeInt(rawRead)),
+                );
+                continue;
+              }
+              fallbackChannelIds.push(channelRow.channel_id);
+            }
+          } catch (err) {
+            logger.warn({ err, userId }, 'Unread-counts Redis channel counter lookup failed; using SQL/metadata fallback');
+            fallbackChannelIds = channelRows.map((row) => row.channel_id);
+          }
+
+          if (fallbackChannelIds.length > 0) {
+            const channelFallbackResult = await safeUnreadCountsQuery('channel_fallback', () => queryRead({
+              text: `
+              WITH readable_channels AS (
+                SELECT unnest($2::uuid[]) AS id
+              )
+              SELECT
+                'channel'::text AS type,
+                rc.id::text AS channel_id,
+                rc.id::text AS conversation_id,
+                COUNT(m.id)::int AS count
+              FROM readable_channels rc
+              LEFT JOIN read_states rs
+                ON rs.channel_id = rc.id
+               AND rs.user_id = $1
+              LEFT JOIN messages last_read
+                ON rs.last_read_message_created_at IS NULL
+               AND last_read.id = rs.last_read_message_id
+              LEFT JOIN messages m
+                ON m.channel_id = rc.id
+               AND m.deleted_at IS NULL
+               AND m.author_id IS DISTINCT FROM $1
+               AND m.created_at > COALESCE(
+                 rs.last_read_message_created_at,
+                 last_read.created_at,
+                 '-infinity'::timestamptz
+               )
+              GROUP BY rc.id`,
+              values: [userId, fallbackChannelIds],
+              query_timeout: UNREAD_COUNTS_QUERY_TIMEOUT_MS,
+            }));
+
+            for (const row of channelFallbackResult.rows || []) {
+              channelCountsById.set(String(row.channel_id || row.conversation_id || ''), toNonNegativeInt(row.count));
+            }
+          }
+        }
+
         conversationResult = await safeUnreadCountsQuery('conversation', () => queryRead({
           text: `
           SELECT
@@ -188,11 +293,19 @@ router.get('/', async (req, res, next) => {
         unreadCountsInFlight = Math.max(0, unreadCountsInFlight - 1);
       }
 
+      const channelUnreadRows = (channelMetaResult.rows || []).map((row) => ({
+        type: 'channel',
+        channel_id: String(row.channel_id),
+        conversation_id: String(row.channel_id),
+        count: channelCountsById.has(String(row.channel_id))
+          ? channelCountsById.get(String(row.channel_id))
+          : inferUnreadCountFromChannelMeta(row, userId),
+      }));
       const unreadCounts = [
-        ...channelResult.rows.map(normalizeCountRow),
-        ...conversationResult.rows.map(normalizeCountRow),
+        ...channelUnreadRows,
+        ...(conversationResult.rows || []),
       ];
-      return { unreadCounts, counts: unreadCounts, data: unreadCounts };
+      return buildUnreadCountsPayload(unreadCounts);
     })();
     unreadCountsByUserInFlight.set(userId, loadPromise);
     try {

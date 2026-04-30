@@ -67,6 +67,8 @@ function fanoutTargetsKey(userId) {
   return `presence:${userId}:fanout_targets`;
 }
 
+const PRESENCE_FANOUT_RECIPIENTS_CACHE_VERSION = 2;
+
 async function invalidatePresenceFanoutTargets(userId) {
   await redis.del(fanoutTargetsKey(userId));
 }
@@ -81,78 +83,77 @@ async function invalidatePresenceFanoutTargetsBulk(userIds) {
   await redis.del(...keys);
 }
 
-async function getPresenceFanoutTargets(userId) {
+function parsePresenceFanoutRecipientsCached(cached) {
+  try {
+    const parsed = JSON.parse(cached);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      parsed.v === PRESENCE_FANOUT_RECIPIENTS_CACHE_VERSION &&
+      Array.isArray(parsed.u)
+    ) {
+      return [...new Set(
+        parsed.u.filter((value) => typeof value === 'string' && value)
+      )];
+    }
+    if (Array.isArray(parsed)) {
+      return [...new Set(
+        parsed.filter((value) => typeof value === 'string' && value)
+      )];
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function getPresenceFanoutRecipientUserIds(userId) {
   const cacheKey = fanoutTargetsKey(userId);
   const cached = await redis.get(cacheKey);
   if (cached) {
-    try {
-      const parsed = JSON.parse(cached);
-      return {
-        communityIds: Array.isArray(parsed.communityIds) ? parsed.communityIds : [],
-        conversationIds: Array.isArray(parsed.conversationIds) ? parsed.conversationIds : [],
-      };
-    } catch {
-      await redis.del(cacheKey);
-    }
+    const parsed = parsePresenceFanoutRecipientsCached(cached);
+    if (parsed) return parsed;
+    await redis.del(cacheKey);
   }
-
-  const { rows } = await query(
-    `SELECT 'community' AS target_type, community_id::text AS target_id
-       FROM community_members
-      WHERE user_id = $1
-      UNION ALL
-     SELECT 'conversation' AS target_type, conversation_id::text AS target_id
-       FROM conversation_participants
-      WHERE user_id = $1
-        AND left_at IS NULL`,
-    [userId],
-  );
-
-  const targets = { communityIds: [], conversationIds: [] };
-  for (const row of rows) {
-    if (row.target_type === 'community') targets.communityIds.push(row.target_id);
-    if (row.target_type === 'conversation') targets.conversationIds.push(row.target_id);
-  }
-
-  await redis.set(
-    cacheKey,
-    JSON.stringify(targets),
-    'EX',
-    PRESENCE_FANOUT_CACHE_TTL_SECONDS,
-  );
-
-  return targets;
-}
-
-async function getPresenceFanoutRecipientUserIds(userId, targets) {
-  const communityIds = [...new Set(
-    (targets?.communityIds || []).filter((communityId) => typeof communityId === 'string' && communityId)
-  )];
-  const conversationIds = [...new Set(
-    (targets?.conversationIds || []).filter((conversationId) => typeof conversationId === 'string' && conversationId)
-  )];
 
   const { rows } = await query(
     `SELECT recipient_id::text AS user_id
        FROM (
-         SELECT cm.user_id AS recipient_id
-           FROM community_members cm
-          WHERE cm.community_id = ANY($2::uuid[])
-            AND cm.user_id <> $1::uuid
+         SELECT cm_other.user_id AS recipient_id
+           FROM community_members cm_self
+           JOIN community_members cm_other
+             ON cm_other.community_id = cm_self.community_id
+          WHERE cm_self.user_id = $1
+            AND cm_other.user_id <> $1::uuid
          UNION
-         SELECT cp.user_id AS recipient_id
-           FROM conversation_participants cp
-          WHERE cp.conversation_id = ANY($3::uuid[])
-            AND cp.left_at IS NULL
-            AND cp.user_id <> $1::uuid
+         SELECT cp_other.user_id AS recipient_id
+           FROM conversation_participants cp_self
+           JOIN conversation_participants cp_other
+             ON cp_other.conversation_id = cp_self.conversation_id
+            AND cp_other.left_at IS NULL
+          WHERE cp_self.user_id = $1
+            AND cp_self.left_at IS NULL
+            AND cp_other.user_id <> $1::uuid
        ) recipients
       WHERE recipient_id IS NOT NULL`,
-    [userId, communityIds, conversationIds],
+    [userId],
   );
 
-  return rows
-    .map((row) => row.user_id)
-    .filter((value) => typeof value === 'string' && value);
+  const recipientUserIds = [...new Set(
+    rows
+      .map((row) => row.user_id)
+      .filter((value) => typeof value === 'string' && value)
+  )];
+
+  await redis.set(
+    cacheKey,
+    JSON.stringify({ v: PRESENCE_FANOUT_RECIPIENTS_CACHE_VERSION, u: recipientUserIds }),
+    'EX',
+    PRESENCE_FANOUT_CACHE_TTL_SECONDS,
+  );
+
+  return recipientUserIds;
 }
 
 function normalizeAwayMessage(value) {
@@ -254,8 +255,7 @@ async function setPresence(userId, status, awayMessage) {
     };
 
     try {
-      const targets = await getPresenceFanoutTargets(userId);
-      const recipientUserIds = await getPresenceFanoutRecipientUserIds(userId, targets);
+      const recipientUserIds = await getPresenceFanoutRecipientUserIds(userId);
       await publishUserFeedTargets(
         recipientUserIds.length ? recipientUserIds : [userId],
         payload,

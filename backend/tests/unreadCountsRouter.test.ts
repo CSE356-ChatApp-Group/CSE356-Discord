@@ -7,6 +7,10 @@ jest.mock('../src/db/pool', () => ({
   poolStats: jest.fn(() => ({ waiting: 0 })),
 }));
 
+jest.mock('../src/db/redis', () => ({
+  mget: jest.fn(),
+}));
+
 jest.mock('../src/middleware/authenticate', () => ({
   authenticate: (req, _res, next) => {
     req.user = { id: req.headers?.['x-test-user-id'] || userId };
@@ -17,6 +21,18 @@ jest.mock('../src/middleware/authenticate', () => ({
 const pool = require('../src/db/pool') as {
   queryRead: jest.Mock;
   poolStats: jest.Mock;
+};
+const redis = require('../src/db/redis') as {
+  mget: jest.Mock;
+};
+
+const emptyUnreadCountsPayload = {
+  unreadCounts: [],
+  counts: [],
+  data: [],
+  channels: {},
+  conversations: {},
+  totalUnreadCount: 0,
 };
 
 function requestUnreadCounts(testUserId?: string) {
@@ -57,10 +73,10 @@ describe('GET /unread-counts', () => {
       .mockResolvedValueOnce({
         rows: [
           {
-            type: 'channel',
             channel_id: channelId,
-            conversation_id: channelId,
-            count: 137,
+            last_message_id: '00000000-0000-4000-8000-000000000010',
+            last_message_author_id: '00000000-0000-4000-8000-000000000011',
+            my_last_read_message_id: '00000000-0000-4000-8000-000000000009',
           },
         ],
       })
@@ -74,6 +90,9 @@ describe('GET /unread-counts', () => {
           },
         ],
       });
+    redis.mget
+      .mockResolvedValueOnce(['144'])
+      .mockResolvedValueOnce(['7']);
   });
 
   it('returns aggregate unread counts using schema-compatible queries', async () => {
@@ -96,19 +115,34 @@ describe('GET /unread-counts', () => {
         count: 2,
       },
     ]);
+    expect(res.body.channels).toEqual({ [channelId]: 137 });
+    expect(res.body.conversations).toEqual({ [conversationId]: 2 });
+    expect(res.body.totalUnreadCount).toBe(139);
 
     const queryTexts = pool.queryRead.mock.calls.map(([arg]) => arg.text).join('\n');
     expect(queryTexts).not.toContain('LIMIT 100');
+    expect(queryTexts).toContain('last_message_author_id');
     expect(queryTexts).toContain('rs.last_read_message_created_at');
-    expect(queryTexts).toContain('rs.last_read_message_created_at IS NULL');
     expect(pool.queryRead).toHaveBeenCalledWith(
       expect.objectContaining({ values: [userId] }),
     );
+    expect(redis.mget).toHaveBeenCalledTimes(2);
   });
 
   it('falls back to empty counts when either unread query times out', async () => {
     pool.queryRead.mockReset();
+    redis.mget.mockReset();
     pool.queryRead
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            channel_id: channelId,
+            last_message_id: '00000000-0000-4000-8000-000000000010',
+            last_message_author_id: '00000000-0000-4000-8000-000000000011',
+            my_last_read_message_id: null,
+          },
+        ],
+      })
       .mockRejectedValueOnce(Object.assign(new Error('Query read timeout'), { code: '57014' }))
       .mockResolvedValueOnce({
         rows: [
@@ -120,11 +154,22 @@ describe('GET /unread-counts', () => {
           },
         ],
       });
+    redis.mget
+      .mockResolvedValueOnce([null])
+      .mockResolvedValueOnce([null]);
 
     const res = await requestUnreadCounts();
 
     expect(res.statusCode).toBe(200);
     expect(res.body.unreadCounts).toEqual([
+      {
+        conversationId: channelId,
+        conversation_id: channelId,
+        channelId,
+        channel_id: channelId,
+        type: 'channel',
+        count: 1,
+      },
       {
         conversationId: conversationId,
         conversation_id: conversationId,
@@ -136,6 +181,7 @@ describe('GET /unread-counts', () => {
 
   it('propagates non-timeout errors to the global error handler', async () => {
     pool.queryRead.mockReset();
+    redis.mget.mockReset();
     pool.queryRead.mockRejectedValueOnce(new Error('database exploded'));
 
     await expect(requestUnreadCounts()).rejects.toThrow('database exploded');
@@ -143,6 +189,7 @@ describe('GET /unread-counts', () => {
 
   it('sheds unread-counts queries under inflight pressure with a 200 empty payload', async () => {
     pool.queryRead.mockReset();
+    redis.mget.mockReset();
 
     let releaseBlockedRead;
     const blockedRead = new Promise((resolve) => {
@@ -157,7 +204,7 @@ describe('GET /unread-counts', () => {
 
     const shedRes = await requestUnreadCounts('user-over-cap');
     expect(shedRes.statusCode).toBe(200);
-    expect(shedRes.body).toEqual({ unreadCounts: [], counts: [], data: [] });
+    expect(shedRes.body).toEqual(emptyUnreadCountsPayload);
 
     releaseBlockedRead({ rows: [] });
     await Promise.all(inFlightRequests);
@@ -165,17 +212,19 @@ describe('GET /unread-counts', () => {
 
   it('sheds unread-counts queries when pg pool waiting is above threshold', async () => {
     pool.queryRead.mockReset();
+    redis.mget.mockReset();
     pool.poolStats.mockReturnValue({ waiting: 8 });
 
     const res = await requestUnreadCounts();
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ unreadCounts: [], counts: [], data: [] });
+    expect(res.body).toEqual(emptyUnreadCountsPayload);
     expect(pool.queryRead).not.toHaveBeenCalled();
   });
 
   it('coalesces concurrent unread-count requests for the same user', async () => {
     pool.queryRead.mockReset();
+    redis.mget.mockReset();
     pool.poolStats.mockReturnValue({ waiting: 0 });
 
     let releaseFirstRead;
@@ -194,6 +243,9 @@ describe('GET /unread-counts', () => {
           },
         ],
       });
+    redis.mget
+      .mockResolvedValueOnce(['0'])
+      .mockResolvedValueOnce(['0']);
 
     const req1 = requestUnreadCounts();
     const req2 = requestUnreadCounts();

@@ -726,6 +726,49 @@ describe('Grader-oriented WS contract (__wsInternal wire + community names)', ()
       });
     });
   });
+
+  it('delivers a group DM invite to a socket that only waited for websocket open', async () => {
+    const owner = await createAuthenticatedUser('dmopeninviteowner');
+    const existing = await createAuthenticatedUser('dmopeninviteexisting');
+    const base = await createAuthenticatedUser('dmopeninvitebase');
+    const invitee = await createAuthenticatedUser('dmopeninviteinvitee');
+
+    const inviteeSocket = await connectWebSocketOpenOnly(port, invitee.accessToken);
+
+    try {
+      const createConversationRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [existing.user.id, base.user.id] });
+
+      expect(createConversationRes.status).toBe(201);
+      const conversationId = createConversationRes.body.conversation.id;
+
+      const inviteEventPromise = waitForWsEvent(
+        inviteeSocket,
+        (event) =>
+          ['conversation:invited', 'conversation:invite', 'conversation:created', 'conversation:participant_added']
+            .includes(event.event)
+          && event.data?.conversationId === conversationId
+          && Array.isArray(event.data?.participantIds)
+          && event.data.participantIds.includes(invitee.user.id),
+      );
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/conversations/${conversationId}/participants`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [invitee.user.id] });
+
+      expect(inviteRes.status).toBe(200);
+
+      const inviteEvent = await inviteEventPromise;
+      expect(inviteEvent.data.conversationId).toBe(conversationId);
+      expect(inviteEvent.data.invitedBy).toBe(owner.user.id);
+      expect(inviteEvent.data.participantIds).toContain(invitee.user.id);
+    } finally {
+      await closeWebSocket(inviteeSocket);
+    }
+  });
 });
 
 // ── Channel realtime delivery ────────────────────────────────────────────────

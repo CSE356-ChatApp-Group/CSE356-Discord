@@ -74,8 +74,14 @@ router.delete(
       }
 
       const publicVersion = await C.getPublicCommunitiesVersion();
+      const affectedPresenceUserIds = [...new Set(
+        memberRows
+          .map((r) => r.user_id)
+          .filter((value) => typeof value === 'string' && value)
+      )];
 
       await Promise.allSettled([
+        presenceService.invalidatePresenceFanoutTargetsBulk(affectedPresenceUserIds),
         C.invalidateCommunitiesCaches(
           memberRows.map((r) => r.user_id),
           publicVersion,
