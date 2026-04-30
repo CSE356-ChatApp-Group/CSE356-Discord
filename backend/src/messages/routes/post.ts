@@ -223,6 +223,29 @@ async function insertMessageAttachments(
   );
 }
 
+function validatePostTargetAndPayload({
+  channelId,
+  conversationId,
+  normalizedContent,
+  attachments,
+}: {
+  channelId: string | null;
+  conversationId: string | null;
+  normalizedContent: string;
+  attachments: any[];
+}): string | null {
+  if (!channelId && !conversationId) {
+    return "channelId or conversationId required";
+  }
+  if (channelId && conversationId) {
+    return "Specify only one of channelId or conversationId";
+  }
+  if (!normalizedContent && attachments.length === 0) {
+    return "content or at least one attachment is required";
+  }
+  return null;
+}
+
 module.exports = function registerPostRoutes(router: import("express").IRouter) {
   router.post(
     "/",
@@ -270,20 +293,14 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           ? authReq.body.attachments
           : [];
 
-        if (!channelId && !conversationId) {
-          return res
-            .status(400)
-            .json({ error: "channelId or conversationId required" });
-        }
-        if (channelId && conversationId) {
-          return res
-            .status(400)
-            .json({ error: "Specify only one of channelId or conversationId" });
-        }
-        if (!normalizedContent && attachments.length === 0) {
-          return res
-            .status(400)
-            .json({ error: "content or at least one attachment is required" });
+        const payloadValidationError = validatePostTargetAndPayload({
+          channelId,
+          conversationId,
+          normalizedContent,
+          attachments,
+        });
+        if (payloadValidationError) {
+          return res.status(400).json({ error: payloadValidationError });
         }
 
         const invalidAttachment = attachments.find(
