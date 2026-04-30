@@ -95,6 +95,7 @@ const {
 } = require("./userFeed");
 const { resolvedWsRuntimeConfig } = require("./profile");
 const { allCommunityFeedRedisChannels } = require("./communityFeed");
+const { createWsHotLogger } = require("./hotLog");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -203,19 +204,12 @@ const aclCheckInFlight: Map<string, Promise<boolean>> = new Map();
 const replayAdmissionConfig = parseReplayAdmissionConfig(process.env);
 wsReplaySemaphoreCapGauge.set(replayAdmissionConfig.replaySemaphoreMax);
 
-function shouldSampleWsHotLog(rate = WS_HOT_LOG_SAMPLE_RATE) {
-  if (!isRuntimeLogCategoryEnabled("ws_hot_info", rate > 0)) return false;
-  if (rate >= 1) return true;
-  if (rate <= 0) return false;
-  return Math.random() < rate;
-}
-
-function logWsHotInfo(payloadFactory, message, rate = WS_HOT_LOG_SAMPLE_RATE) {
-  if (!shouldSampleWsHotLog(rate)) return;
-  const payload =
-    typeof payloadFactory === "function" ? payloadFactory() : payloadFactory;
-  logger.info(payload, message);
-}
+const wsHotLogger = createWsHotLogger({
+  logger,
+  isRuntimeLogCategoryEnabled,
+  defaultRate: WS_HOT_LOG_SAMPLE_RATE,
+});
+const logWsHotInfo = wsHotLogger.logWsHotInfo;
 let wsReplayInFlightCount = 0;
 wsReplayConcurrentGauge.set(0);
 const recentReplayByUser = new Map();
