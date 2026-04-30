@@ -6,7 +6,7 @@ This document ties the **frozen** harness client behavior to server behavior so 
 
 | Concern | Location |
 | --- | --- |
-| Canonical vs **alias** event names, optional `REALTIME_EVENT_ALIAS_FANOUT`, **message dedupe family**, and **reliable** (no best-effort drop) classification | [`backend/src/realtime/realtimeEventAliases.js`](../backend/src/realtime/realtimeEventAliases.js) |
+| Canonical vs **alias** event names, optional `REALTIME_EVENT_ALIAS_FANOUT`, **message dedupe family**, and **reliable** (no best-effort drop) classification | [`backend/src/realtime/realtimeEventAliases.ts`](../backend/src/realtime/realtimeEventAliases.ts) |
 | WS outbound JSON shape, dedupe keys, backpressure skip rules | [`backend/src/websocket/outboundPayload.ts`](../backend/src/websocket/outboundPayload.ts) |
 | Upgrade auth, `ready`, subscribe path, queues | [`backend/src/websocket/server.ts`](../backend/src/websocket/server.ts) |
 | Redis → local delivery, `__wsInternal` subscribe forwarding | [`backend/src/websocket/redisPubsubDelivery.ts`](../backend/src/websocket/redisPubsubDelivery.ts) |
@@ -34,7 +34,7 @@ The reference client:
 
 ## Optional: `REALTIME_EVENT_ALIAS_FANOUT`
 
-**What it does:** When set to `1` / `true` / `yes`, [`fanout.publish` / `publishBatch`](../backend/src/websocket/fanout.ts) duplicate selected Redis publishes with **alternate event names** on the **same** channel (see [`realtimeEventAliases.js`](../backend/src/realtime/realtimeEventAliases.js)): e.g. `new_message` beside `message:created`, read-receipt aliases beside `read:updated`, etc.
+**What it does:** When set to `1` / `true` / `yes`, [`fanout.publish` / `publishBatch`](../backend/src/websocket/fanout.ts) duplicate selected Redis publishes with **alternate event names** on the **same** channel (see [`realtimeEventAliases.ts`](../backend/src/realtime/realtimeEventAliases.ts)): e.g. `new_message` beside `message:created`, read-receipt aliases beside `read:updated`, etc.
 
 **Does the shipped `GeneratedClient` need it?** **No.** That client already branches on the **canonical** names for messages, edits, deletes, presence, and reads (`message:created`, `message:updated`, …, `read:updated`, `presence:updated`). Alias fanout is **not** required for parity with the pasted `handleWsMessage`.
 

@@ -3,7 +3,7 @@
  * JSON shape for browser). Used by Redis→WS delivery and outbound queue flush.
  *
  * Message-family + reliable-event classification is delegated to
- * `realtime/realtimeEventAliases.js` so alias fanout and dedupe/backpressure
+ * `realtime/realtimeEventAliases.ts` so alias fanout and dedupe/backpressure
  * rules stay in one place.
  */
 

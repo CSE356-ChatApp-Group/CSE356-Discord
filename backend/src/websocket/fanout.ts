@@ -4,7 +4,7 @@
  * round-trip) to smooth burst load across shards/topics.
  *
  * Optional alternate event names are appended here when
- * `REALTIME_EVENT_ALIAS_FANOUT` is set — see `realtime/realtimeEventAliases.js`
+ * `REALTIME_EVENT_ALIAS_FANOUT` is set — see `realtime/realtimeEventAliases.ts`
  * for the canonical ↔ alias table (same source as WS dedupe / reliability).
  */
 
