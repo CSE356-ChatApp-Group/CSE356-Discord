@@ -129,11 +129,11 @@ describe('presence fanout', () => {
     expect(fanoutQueryCall).toBeDefined();
     const [sqlText, sqlParams] = fanoutQueryCall;
     expect(typeof sqlText).toBe('string');
-    expect(sqlText).toContain('SELECT DISTINCT recipient_id');
-    expect(sqlText).toContain('UNION ALL');
+    expect(sqlText).toContain('SELECT recipient_id::text AS user_id');
+    expect(sqlText).toContain('UNION');
     expect(sqlText).toContain('WHERE recipient_id IS NOT NULL');
-    expect(sqlText).toContain('AND recipient_id <> $1::uuid');
-    expect(sqlText).not.toContain('UNION\n');
+    expect(sqlText).toContain('AND cm.user_id <> $1::uuid');
+    expect(sqlText).toContain('AND cp.user_id <> $1::uuid');
     expect(sqlParams[0]).toBe(actorUserId);
 
     const publishedRecipients = publishUserFeedTargets.mock.calls[0][0] as string[];
