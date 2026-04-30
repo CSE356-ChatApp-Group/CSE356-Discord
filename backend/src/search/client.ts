@@ -310,6 +310,21 @@ function buildFilters(params: any[], opts: Record<string, any>): string {
   return parts.join('\n');
 }
 
+function buildStrictLiteralPredicate(
+  contentExpr: string,
+  strictMultiWord: boolean,
+  strictTermLikePhs: string[],
+  rawQueryPh: string,
+): string {
+  if (strictMultiWord) {
+    return strictTermLikePhs
+      .map((ph) => `lower(coalesce(${contentExpr}, '')) LIKE ('%' || ${ph}::text || '%')`)
+      .join('\n             AND ');
+  }
+  return `lower(coalesce(${contentExpr}, '')) LIKE ('%' || lower(${rawQueryPh}::text) || '%')
+             OR position(lower(${rawQueryPh}::text) in lower(coalesce(${contentExpr}, ''))) > 0`;
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -641,6 +656,18 @@ function buildScopedLiteralParts(
   const recentCapPh = p(params, scopedRecentCap);
   const limitPh = p(params, limit);
   const offsetPh = p(params, offset);
+  const communityStrictPredicate = buildStrictLiteralPredicate(
+    'mc.content',
+    strictMultiWord,
+    strictTermLikePhs,
+    rawQueryPh,
+  );
+  const conversationStrictPredicate = buildStrictLiteralPredicate(
+    'm.content',
+    strictMultiWord,
+    strictTermLikePhs,
+    rawQueryPh,
+  );
 
   if (scope.scopeType === 'community') {
     return {
@@ -689,14 +716,7 @@ function buildScopedLiteralParts(
           JOIN community_channels cc
             ON cc.id = mc.channel_id
           JOIN users u ON u.id = mc.author_id
-          WHERE ${
-            strictMultiWord
-              ? strictTermLikePhs
-                  .map((ph) => `lower(coalesce(mc.content, '')) LIKE ('%' || ${ph}::text || '%')`)
-                  .join('\n             AND ')
-              : `lower(coalesce(mc.content, '')) LIKE ('%' || lower(${rawQueryPh}::text) || '%')
-             OR position(lower(${rawQueryPh}::text) in lower(coalesce(mc.content, ''))) > 0`
-          }
+          WHERE ${communityStrictPredicate}
           ORDER BY mc.created_at DESC, mc.id DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
         ) search_rows ON scope_access.has_access = TRUE`,
@@ -737,14 +757,7 @@ function buildScopedLiteralParts(
           ) m
           JOIN users u ON u.id = m.author_id
           LEFT JOIN channels ch ON ch.id = m.channel_id
-          WHERE ${
-            strictMultiWord
-              ? strictTermLikePhs
-                  .map((ph) => `lower(coalesce(m.content, '')) LIKE ('%' || ${ph}::text || '%')`)
-                  .join('\n             AND ')
-              : `lower(coalesce(m.content, '')) LIKE ('%' || lower(${rawQueryPh}::text) || '%')
-             OR position(lower(${rawQueryPh}::text) in lower(coalesce(m.content, ''))) > 0`
-          }
+          WHERE ${conversationStrictPredicate}
           ORDER BY m.created_at DESC, m.id DESC
           LIMIT ${limitPh} OFFSET ${offsetPh}
         ) search_rows ON scope_access.has_access = TRUE`,
