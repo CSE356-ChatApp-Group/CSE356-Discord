@@ -1,5 +1,9 @@
 # Environment variables
 
+Status: operational
+Owner: platform-operations
+Last reviewed: 2026-04-30
+
 **Maintainers:** When you add or change a tunable, update [`.env.example`](../.env.example), this file, and (if staging/prod must pin it) [`deploy/env/`](../deploy/env/). See **[`docs/README.md`](README.md)** for the full maintenance checklist and single sources of truth.
 
 Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool sizing on staging/production VMs (`deploy/deploy-staging.sh`, `deploy/deploy-prod.sh`).

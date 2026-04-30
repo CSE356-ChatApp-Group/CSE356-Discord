@@ -1,5 +1,9 @@
 # Infrastructure Inventory
 
+Status: operational
+Owner: platform-operations
+Last reviewed: 2026-04-30
+
 Documentation hub: [`README.md`](README.md).
 
 Last updated: 2026-04-29

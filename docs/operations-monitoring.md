@@ -1,5 +1,9 @@
 # Operations: metrics, snapshots, and triage
 
+Status: operational
+Owner: platform-operations
+Last reviewed: 2026-04-30
+
 This document exists so operators (and the coding agent) can **ground decisions in the same metric names and queries** the app exposes. Source of truth for names is [`backend/src/utils/metrics.ts`](../backend/src/utils/metrics.ts).
 
 **Documentation hub** (single sources of truth, update checklist): [`README.md`](README.md).

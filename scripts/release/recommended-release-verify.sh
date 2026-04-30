@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Recommended checks after a risky deploy or before production cutover.
-# See deploy/README.md (zero-downtime rollout) and docs/RUNBOOKS.md (grader watcher).
+# See deploy/README.md (zero-downtime rollout) and docs/runbooks.md (grader watcher).
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/repo-root.sh"

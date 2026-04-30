@@ -1,5 +1,9 @@
 # Runbooks (ChatApp)
 
+Status: operational
+Owner: platform-operations
+Last reviewed: 2026-04-30
+
 Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml). Replace hostnames with your environment.
 
 **Documentation hub (canonical sources, env drift rules):** [`README.md`](README.md).

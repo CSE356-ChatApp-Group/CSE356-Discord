@@ -1,5 +1,9 @@
 # Agent Operations Playbook
 
+Status: operational
+Owner: platform-operations
+Last reviewed: 2026-04-30
+
 Documentation hub: [`README.md`](README.md). This playbook is the end-to-end workflow for agents/operators diagnosing incidents and proposing improvements.
 
 ## Scope and goals

@@ -14,7 +14,7 @@ groups:
             or http://136.114.103.71/health (staging).
             On the host: systemctl status 'chatapp@*'; journalctl -u 'chatapp@*' -n 50.
             Nginx may log "no live upstreams" if every Node backend is down or upstream `app` is misconfigured.
-            Runbook: docs/RUNBOOKS.md (repo root).
+            Runbook: docs/runbooks.md (repo root).
 
       # Faster page than ChatAppApiDown — catches brief total outages before the 5m window.
       - alert: ChatAppApiDownFast
@@ -80,7 +80,7 @@ groups:
             Request rate is below 20% of the rate 15 minutes ago, while at least one chatapp-api target is up
             and the prior window was above ~40 req/s. This often indicates the load generator or client path
             stalled, not an API crash (5xx ratio may stay near 0). Correlate with nginx access volume,
-            `journalctl -t chatapp-deploy`, and harness logs. Runbook: docs/RUNBOOKS.md (ChatAppTrafficCliffWhileInstancesUp).
+            `journalctl -t chatapp-deploy`, and harness logs. Runbook: docs/runbooks.md (ChatAppTrafficCliffWhileInstancesUp).
 
       # Requires scripts/ops/synthetic-probe.sh + TEXTFILE_DIR on the host (see deploy-prod monitoring sync).
       - alert: ChatAppSyntheticProbeFailed

@@ -71,6 +71,28 @@ Workspace notes live under [`.cursor/rules/`](../.cursor/rules/) (e.g. infrastru
 
 ---
 
+## Folder buckets
+
+Prefer organizing content by function (without churn-heavy file moves unless needed):
+
+- **Operations**: `env.md`, `infrastructure-inventory.md`, `operations-monitoring.md`, `runbooks.md`, `agent-operations-playbook.md`
+- **Architecture / contracts**: `realtime-delivery-contract.md`, `websocket-generated-client-parity.md`, `ws-horizontal-scale.md`, `db-scaling-messages.md`
+- **History / rollout notes**: `plan-recent-connect-rollout.md`, `canary-read-receipt-insert-lock-shedding.md`, `remove-channels-last-message-hot-path.md`, `performance-baseline-pack.md`
+
+---
+
+## Metadata convention
+
+Operational docs should include near the top:
+
+- `Status: operational`
+- `Owner: <team-or-role>`
+- `Last reviewed: YYYY-MM-DD`
+
+Use this lightweight header to prevent stale docs without adding heavy process.
+
+---
+
 ## All markdown files (repo map)
 
 | Path | Role |
@@ -119,6 +141,7 @@ Workspace notes live under [`.cursor/rules/`](../.cursor/rules/) (e.g. infrastru
 2. **New metric** — Export in `backend/src/utils/metrics.ts` (and related); document name/purpose in [`operations-monitoring.md`](operations-monitoring.md) if operators need it.
 3. **Behavioral contract (realtime, reads, search)** — Update [`realtime-delivery-contract.md`](realtime-delivery-contract.md) or tests-first; link from [`runbooks.md`](runbooks.md) only if on-call needs it.
 4. **Infra (VM, IP, provider)** — Update [`infrastructure-inventory.md`](infrastructure-inventory.md) in the **same** change set.
+5. **Doc consistency guardrail** — Run `npm run docs:check` before opening a PR that modifies docs.
 
 ---
 

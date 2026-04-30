@@ -1,5 +1,9 @@
 # Realtime delivery contract (server ↔ reference client)
 
+Status: operational
+Owner: platform-operations
+Last reviewed: 2026-04-30
+
 This document is the **authoritative** contract between ChatApp’s WebSocket/Redis fanout and the in-repo reference client ([`docs/reference/generated-client-from-grader.ts`](./reference/generated-client-from-grader.ts)). Use it when debugging “delivery failures” vs HTTP **201** / **101** health.
 
 **Maintenance:** Prefer updating this file (and tests) when delivery paths change; link from other docs instead of duplicating handler paths — see [`README.md`](README.md).

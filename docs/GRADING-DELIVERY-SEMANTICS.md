@@ -1,5 +1,9 @@
 # Grading throughput: delivery success, failure, and outages
 
+Status: operational
+Owner: platform-operations
+Last reviewed: 2026-04-30
+
 Maintenance index and canonical env/topology docs: [`README.md`](README.md).
 
 This page aligns the **course throughput / “Failed deliveries”** view with how ChatApp behaves, so you can separate **application bugs**, **harness timing**, and **capacity noise**.

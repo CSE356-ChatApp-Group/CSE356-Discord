@@ -1,5 +1,9 @@
 # WebSocket parity: `GeneratedClient` (grader harness) vs this backend
 
+Status: operational
+Owner: platform-operations
+Last reviewed: 2026-04-30
+
 Documentation hub: [`README.md`](README.md).
 
 This document ties the **frozen** harness client behavior to server behavior so ops and graders know what is guaranteed without editing the client.
