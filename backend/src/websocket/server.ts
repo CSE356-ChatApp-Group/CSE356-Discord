@@ -61,7 +61,6 @@
  *     bootstrap + selective resubscribe; not silent data loss for committed writes.
  */
 
-"use strict";
 
 const { randomUUID } = require("crypto");
 const { WebSocketServer, WebSocket } = require("ws");
@@ -91,14 +90,9 @@ const { clientIpFromReq } = require("../middleware/wsUpgradeLimiter");
 const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
 const {
   allUserFeedRedisChannels,
-  isUserFeedEnvelope,
-  publishUserFeedTargets,
   userIdFromTarget,
 } = require("./userFeed");
-const {
-  allCommunityFeedRedisChannels,
-  isCommunityFeedEnvelope,
-} = require("./communityFeed");
+const { allCommunityFeedRedisChannels } = require("./communityFeed");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -124,7 +118,6 @@ const {
   wsReliableDeliveryTotal,
   wsReliableDeliveryLatencyMs,
   wsReliableDeliveryTopicTotal,
-  realtimeMissAttributionTotal,
 } = require("../utils/metrics");
 
 const wss = new WebSocketServer({ noServer: true });
@@ -580,93 +573,6 @@ function observeRecentReconnect(userId, connectionId, previous) {
     "WS reconnect observed shortly after disconnect");
 }
 
-async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reconnectObservedAtMs) {
-  const disconnectedAt = Number(previousDisconnect?.disconnectedAt || 0);
-  const reconnectObservedAt = Number(reconnectObservedAtMs || 0);
-  if (!Number.isFinite(disconnectedAt) || disconnectedAt <= 0) return;
-  if (!Number.isFinite(reconnectObservedAt) || reconnectObservedAt <= disconnectedAt) return;
-  if (ws.readyState !== WebSocket.OPEN) return;
-
-  const closeCode: number | undefined = typeof previousDisconnect?.closeCode === 'number'
-    ? previousDisconnect.closeCode
-    : undefined;
-
-  const messages = await loadReplayableMessagesForUser(
-    userId,
-    disconnectedAt,
-    reconnectObservedAt,
-    closeCode,
-  );
-  if (!messages.length) return;
-  const userChannel = `user:${userId}`;
-  const publishedAt = new Date().toISOString();
-
-  logWsHotInfo(() => ({
-      event: "ws.replay.missed_messages",
-      userId,
-      connectionId: ws._connectionId,
-      disconnectedAt,
-      reconnectObservedAt,
-      replayedMessages: messages.length,
-      source: "db",
-    }),
-    "Replaying missed websocket messages after reconnect gap");
-
-  // sendPayloadToSocket enqueues synchronously and drains with setImmediate.
-  // bypassLogicalDuplicateSuppression skips only the explicit-channel
-  // unsub gate — wasSocketMessageRecentlyDelivered in flushOutboundJob still
-  // suppresses replay when the same message id was already delivered live.
-  let replayed = 0;
-  for (const message of messages) {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    const payload = {
-      event: "message:created",
-      data: message,
-      publishedAt,
-    };
-    sendPayloadToSocket(
-      ws,
-      userChannel,
-      payload,
-      null,
-      {
-        bypassLogicalDuplicateSuppression: true,
-        deliveryPath: "replay",
-        deliverySource: "missed_db",
-      },
-    );
-    replayed += 1;
-    if (replayed % WS_REPLAY_OUTBOUND_YIELD_EVERY === 0 && replayed < messages.length) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-  }
-}
-
-async function replayPendingMessagesToSocket(ws, userId) {
-  const pendingPayloads = await drainPendingMessagesForUser(userId);
-  if (!pendingPayloads.length) return 0;
-  let n = 0;
-  for (const payload of pendingPayloads) {
-    if (ws.readyState !== WebSocket.OPEN) return 0;
-    sendPayloadToSocket(
-      ws,
-      `user:${userId}`,
-      payload,
-      null,
-      {
-        bypassLogicalDuplicateSuppression: true,
-        deliveryPath: "replay",
-        deliverySource: "pending_queue",
-      },
-    );
-    n += 1;
-    if (n % WS_REPLAY_OUTBOUND_YIELD_EVERY === 0 && n < pendingPayloads.length) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-  }
-  return pendingPayloads.length;
-}
-
 async function markConnectionAlive(userId, connectionId) {
   await redis.set(
     connectionAliveKey(userId, connectionId),
@@ -848,7 +754,6 @@ const channelClients = new Map(); // key → Set<WebSocket>
 const localUserClients = new Map(); // userId → Set<WebSocket>
 // Sharded community feed membership. Keyed by communityId (without prefix).
 const communityClients = new Map(); // communityId → Set<WebSocket>
-const WS_SOCKET_MESSAGE_DEDUPE_MAX = 512;
 
 /**
  * Keep track of which Redis channels this process has subscribed to.
@@ -863,181 +768,18 @@ const COMMUNITY_FEED_SHARD_CHANNELS = allCommunityFeedRedisChannels();
 const COMMUNITY_FEED_SHARD_CHANNEL_SET = new Set(COMMUNITY_FEED_SHARD_CHANNELS);
 let wsStartupPromise: Promise<void> | null = null;
 
-// ── Redis subscriber listener ──────────────────────────────────────────────────
-function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
-  if (
-    !(logicalChannel.startsWith("user:") || logicalChannel.startsWith("community:"))
-    || !parsed
-    || typeof parsed !== "object"
-    || Array.isArray(parsed)
-  ) {
-    return false;
-  }
+const {
+  shouldSkipSocketForLogicalChannel,
+  socketMessageDedupeKey,
+  wasSocketMessageRecentlyDelivered,
+  markSocketMessageDelivered,
+  isReliableRealtimeEvent,
+  wsDeliveryTopicPrefixForMetrics,
+  parsePayloadReferenceTimeMs,
+  prepareSocketPayload,
+} = require("./outboundPayload");
 
-  const ev = (parsed as { event?: unknown }).event;
-  if (typeof ev !== "string" || !ev.startsWith("message:")) return false;
-
-  const data = (parsed as {
-    data?: {
-      channel_id?: string;
-      channelId?: string;
-      conversation_id?: string;
-      conversationId?: string;
-    };
-  }).data;
-  const chId = data?.channel_id || data?.channelId;
-  return !!(
-    chId
-    && (ws as { _explicitChannelUnsub?: Set<string> })._explicitChannelUnsub?.has(`channel:${chId}`)
-  );
-}
-
-function socketMessageDedupeKey(parsed) {
-  if (
-    !parsed
-    || typeof parsed !== "object"
-    || Array.isArray(parsed)
-  ) {
-    return null;
-  }
-
-  const eventName = (parsed as { event?: unknown }).event;
-  if (typeof eventName !== "string" || !eventName.startsWith("message:")) {
-    return null;
-  }
-
-  const data = (parsed as {
-    data?: {
-      id?: unknown;
-      messageId?: unknown;
-      message_id?: unknown;
-    };
-  }).data;
-  const messageId = data?.id || data?.messageId || data?.message_id;
-  if (typeof messageId !== "string" || !messageId) {
-    return null;
-  }
-
-  return `${eventName}:${messageId}`;
-}
-
-function wasSocketMessageRecentlyDelivered(ws, dedupeKey) {
-  if (!dedupeKey) return false;
-  const recent = (ws as { _recentMessageKeys?: Map<string, number> })._recentMessageKeys;
-  return !!recent?.has(dedupeKey);
-}
-
-function markSocketMessageDelivered(ws, dedupeKey) {
-  if (!dedupeKey) return;
-  if (!(ws as { _recentMessageKeys?: Map<string, number> })._recentMessageKeys) {
-    (ws as { _recentMessageKeys?: Map<string, number> })._recentMessageKeys = new Map();
-  }
-  const recent = (ws as { _recentMessageKeys: Map<string, number> })._recentMessageKeys;
-  recent.set(dedupeKey, Date.now());
-  while (recent.size > WS_SOCKET_MESSAGE_DEDUPE_MAX) {
-    const oldestKey = recent.keys().next().value;
-    if (!oldestKey) break;
-    recent.delete(oldestKey);
-  }
-}
-
-function extractInternalUserFeedCommand(payload) {
-  if (
-    !payload
-    || typeof payload !== "object"
-    || Array.isArray(payload)
-  ) {
-    return null;
-  }
-
-  const internal = (payload as { __wsInternal?: unknown }).__wsInternal;
-  if (
-    !internal
-    || typeof internal !== "object"
-    || Array.isArray(internal)
-    || typeof (internal as { kind?: unknown }).kind !== "string"
-  ) {
-    return null;
-  }
-
-  return internal as { kind: string; channels?: unknown; communityIds?: unknown };
-}
-
-function isReliableRealtimeEvent(eventName) {
-  if (typeof eventName !== "string" || !eventName) return false;
-  if (eventName.startsWith("message:")) return true;
-
-  return (
-    eventName === "read:updated"
-    || eventName === "conversation:invited"
-    || eventName === "conversation:invite"
-    || eventName === "conversation:created"
-    || eventName === "conversation:participant_added"
-  );
-}
-
-/** Buckets `ws_reliable_delivery_topic_total` — bounded label cardinality. */
-function wsDeliveryTopicPrefixForMetrics(logicalChannel) {
-  if (typeof logicalChannel !== "string") return "other";
-  const idx = logicalChannel.indexOf(":");
-  if (idx <= 0) return "other";
-  const prefix = logicalChannel.slice(0, idx);
-  if (
-    prefix === "channel"
-    || prefix === "user"
-    || prefix === "conversation"
-    || prefix === "community"
-    || prefix === "userfeed"
-  ) {
-    return prefix;
-  }
-  return "other";
-}
-
-/** Epoch ms for latency (message row time or fanout publishedAt); null if unknown. */
-function parsePayloadReferenceTimeMs(parsed) {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const data = (parsed as { data?: unknown }).data;
-  if (data && typeof data === "object" && !Array.isArray(data)) {
-    const row = data as Record<string, unknown>;
-    const ca = row.created_at ?? row.createdAt;
-    if (typeof ca === "string") {
-      const t = Date.parse(ca);
-      if (Number.isFinite(t)) return t;
-    }
-    if (typeof ca === "number" && Number.isFinite(ca)) return Math.floor(ca);
-  }
-  const pub = (parsed as { publishedAt?: unknown }).publishedAt;
-  if (typeof pub === "string") {
-    const t = Date.parse(pub);
-    if (Number.isFinite(t)) return t;
-  }
-  return null;
-}
-
-function prepareSocketPayload(logicalChannel, parsed, rawMessage) {
-  const dedupeKey = socketMessageDedupeKey(parsed);
-  let payloadEventName;
-  let skipDropForBackpressure = false;
-  let outbound = rawMessage;
-  if (
-    parsed &&
-    typeof parsed === "object" &&
-    parsed !== null &&
-    !Array.isArray(parsed)
-  ) {
-    const ev = (parsed as { event?: unknown }).event;
-    if (typeof ev === "string") {
-      payloadEventName = ev;
-      if (isReliableRealtimeEvent(ev)) {
-        skipDropForBackpressure = true;
-      }
-    }
-    outbound = JSON.stringify({ ...parsed, channel: logicalChannel });
-  }
-
-  return { dedupeKey, outbound, payloadEventName, skipDropForBackpressure };
-}
+// ── Redis subscriber (delivery impl: redisPubsubDelivery.ts) ───────────────────
 
 function ensureOutboundQueue(ws) {
   if (!(ws as any)._outboundQueue) {
@@ -1082,6 +824,8 @@ function flushOutboundJob(ws, job) {
     deliveryPath = "realtime",
     deliverySource = "live_pubsub",
   } = job;
+  const delivery_target_kind = wsDeliveryTopicPrefixForMetrics(logicalChannel);
+  const delivery_path_kind = deliveryPath === "replay" ? "replay" : "realtime";
   if (ws.readyState !== WebSocket.OPEN) return;
   if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
     return;
@@ -1111,6 +855,8 @@ function flushOutboundJob(ws, job) {
         buffered,
         redisChannel: logicalChannel,
         payloadEvent: payloadEventName,
+        delivery_target_kind,
+        delivery_path: delivery_path_kind,
         gradingNote: "correlate_with_failed_deliveries",
       },
       "WS slow consumer: terminating connection due to excessive backpressure",
@@ -1129,6 +875,8 @@ function flushOutboundJob(ws, job) {
         buffered,
         redisChannel: logicalChannel,
         payloadEvent: payloadEventName,
+        delivery_target_kind,
+        delivery_path: delivery_path_kind,
         gradingNote: "correlate_with_failed_deliveries",
       },
       "WS slow consumer: dropping frame due to backpressure",
@@ -1173,6 +921,8 @@ function flushOutboundJob(ws, job) {
         userId: (ws as any)._userId,
         redisChannel: logicalChannel,
         payloadEvent: payloadEventName,
+        delivery_target_kind,
+        delivery_path: delivery_path_kind,
         gradingNote: "correlate_with_failed_deliveries",
       },
       "WS send failed; terminating socket",
@@ -1309,6 +1059,8 @@ function sendPayloadToSocket(
             userId: (ws as any)._userId,
             waiters: waiters.length,
             queue: q.length,
+            delivery_target_kind: wsDeliveryTopicPrefixForMetrics(logicalChannel),
+            delivery_path: deliveryPath,
             gradingNote: "correlate_with_failed_deliveries",
           },
           "WS outbound: message waiter backlog exceeded hard cap; terminating socket",
@@ -1350,6 +1102,33 @@ function sendPayloadToSocket(
   wsOutboundQueueDepthHistogram.observe({ priority }, q.length);
   scheduleOutboundDrain(ws);
   return true;
+}
+
+const replayWs = require("./replay");
+async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reconnectObservedAtMs) {
+  return replayWs.replayMissedMessagesToSocket(
+    {
+      loadReplayableMessagesForUser,
+      logWsHotInfo,
+      sendPayloadToSocket,
+      WS_REPLAY_OUTBOUND_YIELD_EVERY,
+    },
+    ws,
+    userId,
+    previousDisconnect,
+    reconnectObservedAtMs,
+  );
+}
+async function replayPendingMessagesToSocket(ws, userId) {
+  return replayWs.replayPendingMessagesToSocket(
+    {
+      drainPendingMessagesForUser,
+      sendPayloadToSocket,
+      WS_REPLAY_OUTBOUND_YIELD_EVERY,
+    },
+    ws,
+    userId,
+  );
 }
 
 function maybeSendAppKeepaliveFrame(ws) {
@@ -1410,312 +1189,6 @@ function maybeSendAppKeepaliveFrame(ws) {
   }
 }
 
-function recipientClientsForChannel(channel) {
-  const userId = userIdFromTarget(channel);
-  if (channel.startsWith("user:") && userId) {
-    return localUserClients.get(userId) || null;
-  }
-  return channelClients.get(channel) || null;
-}
-
-function normalizeCommunityTopic(value) {
-  if (typeof value !== "string") return null;
-  const parsed = parseChannelKey(value.startsWith("community:") ? value : `community:${value}`);
-  if (!parsed || parsed.type !== "community") return null;
-  return parsed.id;
-}
-
-/**
- * Remove closed sockets from a local subscription set so Redis→WS fanout does not
- * treat CLOSING/CLOSED tabs as delivery targets (avoids ws.realtime_delivery_blocked
- * when the harness still expects userfeed delivery on another worker or after dup).
- */
-function pruneNonOpenSocketsFromLocalTopicSubscribers(topicChannel, clients) {
-  if (!clients || clients.size === 0) return [];
-  const recoveredUserIds = [];
-  for (const ws of [...clients]) {
-    if (ws.readyState === WebSocket.OPEN) continue;
-    const uid = ws._userId;
-    if (typeof uid === "string" && uid.trim()) recoveredUserIds.push(uid.trim());
-    unsubscribeClient(ws, topicChannel).catch((err) => {
-      logger.warn({ err, topicChannel, userId: uid }, "WS prune: unsubscribeClient failed");
-    });
-  }
-  return [...new Set(recoveredUserIds)];
-}
-
-function pruneNonOpenFromCommunitySubscribers(communityId, clients) {
-  if (!clients || clients.size === 0) return;
-  for (const ws of [...clients]) {
-    if (ws.readyState === WebSocket.OPEN) continue;
-    unsubscribeCommunityClient(ws, communityId);
-  }
-}
-
-async function userfeedRecoveryAfterStaleTopicMap(channel, parsed, userIds) {
-  if (!userIds.length || parsed === null || typeof parsed !== "object") return false;
-  const ev = parsed.event;
-  if (typeof ev !== "string" || !ev.startsWith("message:")) return false;
-  try {
-    await publishUserFeedTargets(
-      userIds.map((id) => `user:${id}`),
-      parsed,
-    );
-    realtimeMissAttributionTotal.inc(
-      { reason: "channel_topic_stale_map_userfeed_recovery" },
-      userIds.length,
-    );
-    return true;
-  } catch (err) {
-    logger.warn(
-      { err, channel, userIds },
-      "WS userfeed recovery after stale topic subscribers failed",
-    );
-    return false;
-  }
-}
-
-function deliverUserFeedMessage(channel, routed) {
-  const payload = routed.payload;
-  const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
-  if (!userIds.length) return;
-
-  let recipientCount = 0;
-  for (const userId of userIds) {
-    recipientCount += localUserClients.get(userId)?.size || 0;
-  }
-  fanoutRecipientsHistogram.observe({ channel_type: "user" }, recipientCount);
-
-  if (recipientCount === 0 && !logger.isLevelEnabled("debug")) return;
-
-  const internalCommand = extractInternalUserFeedCommand(payload);
-  const internalSubscribeChannels = internalCommand?.kind === "subscribe_channels"
-    ? [...new Set(
-      (Array.isArray(internalCommand.channels) ? internalCommand.channels : [])
-        .filter((value) => typeof value === "string")
-        .filter((value) => parseChannelKey(value)),
-    )]
-    : null;
-  const internalSubscribeCommunities = internalCommand?.kind === "subscribe_communities"
-    ? [...new Set(
-      (Array.isArray(internalCommand.communityIds) ? internalCommand.communityIds : [])
-        .map((value) => normalizeCommunityTopic(value))
-        .filter((value) => typeof value === "string"),
-    )]
-    : null;
-
-  const payloadEvent = (payload as any)?.event;
-  const isMessageEvent = typeof payloadEvent === "string" && payloadEvent.startsWith("message:");
-  if (isMessageEvent && logger.isLevelEnabled("debug")) {
-    logger.debug(
-      {
-        channel,
-        event: payloadEvent,
-        messageId: (payload as any)?.data?.id,
-        userIdCount: userIds.length,
-        recipientCount,
-      },
-      recipientCount > 0
-        ? "WS userfeed: delivering message to local clients"
-        : "WS userfeed: no local clients for message event",
-    );
-  }
-
-  if (recipientCount === 0) return;
-
-  for (const userId of userIds) {
-    const clients = localUserClients.get(userId);
-    if (!clients || clients.size === 0) continue;
-    const logicalChannel = `user:${userId}`;
-    pruneNonOpenSocketsFromLocalTopicSubscribers(logicalChannel, clients);
-    if (!clients.size) continue;
-    const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
-    for (const ws of clients) {
-      if (internalSubscribeChannels) {
-        if (!internalSubscribeChannels.length) continue;
-        Promise.allSettled(
-          internalSubscribeChannels.map((targetChannel) => subscribeClient(ws, targetChannel)),
-        ).catch((err) => {
-          logger.warn(
-            { err, userId, channelCount: internalSubscribeChannels.length },
-            "WS internal auto-subscribe command failed",
-          );
-        });
-        continue;
-      }
-      if (internalSubscribeCommunities) {
-        for (const communityId of internalSubscribeCommunities) {
-          subscribeCommunityClient(ws, communityId);
-        }
-        continue;
-      }
-
-      sendPayloadToSocket(ws, logicalChannel, payload, null, { preparedPayload });
-    }
-  }
-}
-
-function deliverCommunityFeedMessage(channel, routed) {
-  const communityId = routed.__wsRoute.communityId;
-  if (typeof communityId !== "string" || !communityId) return;
-  const clients = communityClients.get(communityId);
-  const recipientCount = clients ? clients.size : 0;
-  fanoutRecipientsHistogram.observe({ channel_type: "communityfeed" }, recipientCount);
-  if (!clients || recipientCount === 0) return;
-
-  pruneNonOpenFromCommunitySubscribers(communityId, clients);
-  if (!clients.size) return;
-
-  const payload = routed.payload;
-  const logicalChannel = `community:${communityId}`;
-  const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
-  for (const ws of clients) {
-    sendPayloadToSocket(ws, logicalChannel, payload, null, { preparedPayload });
-  }
-}
-
-async function deliverPubsubMessage(channel, message) {
-  if (USER_FEED_SHARD_CHANNEL_SET.has(channel)) {
-    let routed: unknown = null;
-    try {
-      routed = JSON.parse(message);
-    } catch {
-      return;
-    }
-    if (isUserFeedEnvelope(routed)) {
-      deliverUserFeedMessage(channel, routed);
-    }
-    return;
-  }
-
-  if (COMMUNITY_FEED_SHARD_CHANNEL_SET.has(channel)) {
-    let routed: unknown = null;
-    try {
-      routed = JSON.parse(message);
-    } catch {
-      return;
-    }
-    if (isCommunityFeedEnvelope(routed)) {
-      deliverCommunityFeedMessage(channel, routed);
-    }
-    return;
-  }
-
-  const clients = recipientClientsForChannel(channel);
-  const recipientCount = clients ? clients.size : 0;
-  const channelType = channel.split(":")[0] || "unknown";
-  fanoutRecipientsHistogram.observe(
-    { channel_type: channelType },
-    recipientCount,
-  );
-
-  if (!clients || recipientCount === 0) {
-    if (!logger.isLevelEnabled("debug")) return;
-  }
-
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(message);
-  } catch {
-  }
-
-  if (channelType === "conversation" && logger.isLevelEnabled("debug")) {
-    const parsedEvent = (parsed as any)?.event;
-    const isMessageEvent = typeof parsedEvent === "string" && parsedEvent.startsWith("message:");
-    if (isMessageEvent) {
-      const messageId = (parsed as any)?.data?.id;
-      logger.debug(
-        { channel, event: parsedEvent, messageId, recipientCount },
-        recipientCount > 0
-          ? "WS conversation channel: delivering message to subscribers"
-          : "WS conversation channel: no subscribers for message event",
-      );
-    }
-  }
-
-  if (!clients || recipientCount === 0) return;
-
-  let staleTopicRecoveryUserIds: string[] = [];
-  if (channelType === "channel" || channelType === "conversation" || channelType === "user") {
-    staleTopicRecoveryUserIds = pruneNonOpenSocketsFromLocalTopicSubscribers(channel, clients);
-  }
-
-  if (!clients.size) {
-    if (
-      (channelType === "channel" || channelType === "conversation")
-      && staleTopicRecoveryUserIds.length > 0
-      && parsed !== null
-    ) {
-      await userfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
-    }
-    return;
-  }
-
-  if (channelType === "user" && clients.size > 0 && parsed !== null && logger.isLevelEnabled("debug")) {
-    logger.debug({
-      event: "presence.fanout.delivered",
-      channel,
-      recipientCount: clients.size,
-      payload: parsed,
-    });
-  }
-
-  const openRecipientSlots = clients.size;
-  const preparedPayload = prepareSocketPayload(channel, parsed, message);
-  let deliveredCount = 0;
-  const reasonCounts: Record<string, number> = {};
-  for (const ws of clients) {
-    if (sendPayloadToSocket(ws, channel, parsed, message, { preparedPayload, debugReasonCounts: reasonCounts })) {
-      deliveredCount += 1;
-    }
-  }
-
-  const parsedEvent =
-    parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as { event?: unknown }).event
-      : null;
-  const isReliableChannelMsg =
-    typeof parsedEvent === "string"
-    && parsedEvent.startsWith("message:")
-    && (channelType === "channel" || channelType === "conversation");
-  if (isReliableChannelMsg) {
-    let recovered = false;
-    if (deliveredCount === 0 && staleTopicRecoveryUserIds.length > 0 && parsed !== null) {
-      recovered = await userfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
-    }
-    if (deliveredCount === 0 && !recovered) {
-      realtimeMissAttributionTotal.inc({ reason: "topic_message_send_blocked" });
-      const messageId =
-        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-          ? (parsed as { data?: { id?: unknown; messageId?: unknown; message_id?: unknown } }).data
-          : null;
-      const resolvedMessageId = messageId?.id || messageId?.messageId || messageId?.message_id || null;
-      logger.warn(
-        {
-          event: "ws.realtime_delivery_blocked",
-          channel,
-          channelType,
-          parsedEvent,
-          messageId: typeof resolvedMessageId === "string" ? resolvedMessageId : null,
-          recipientCount,
-          reasonCounts,
-          staleTopicRecoveryUserIds,
-          gradingNote: "correlate_with_delivery_timeout_missing_recipient",
-        },
-        "Reliable realtime message had recipients but zero successful socket sends",
-      );
-    } else if (deliveredCount < openRecipientSlots) {
-      realtimeMissAttributionTotal.inc({ reason: "topic_message_partial_delivery" });
-    }
-  }
-}
-
-redisSub.on("message", (channel, message) => {
-  void deliverPubsubMessage(channel, message).catch((err) => {
-    logger.error({ err, channel }, "deliverPubsubMessage failed");
-  });
-});
-
 const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
   process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '180',
   10,
@@ -1740,39 +1213,29 @@ const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
 const wsBootstrapIngressInFlight: Map<string, Promise<string[]>> = new Map();
 let wsBootstrapDbInFlight = 0;
 
-function wsBootstrapIngressKey(userId, scope = 'default') {
-  return `ws:bootstrap:${userId}:ingress:${scope}`;
-}
+const {
+  wsBootstrapIngressKey,
+  readWsBootstrapIngressCache: readWsBootstrapIngressCacheBase,
+  writeWsBootstrapIngressCache: writeWsBootstrapIngressCacheBase,
+} = require("./bootstrapIngressCache");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function readWsBootstrapIngressCache(userId, scope = 'default') {
-  if (!isRedisOperational(redis)) return null;
-  try {
-    const raw = await redis.get(wsBootstrapIngressKey(userId, scope));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-    return parsed.filter((value) => typeof value === "string");
-  } catch {
-    return null;
-  }
+async function readWsBootstrapIngressCache(userId, scope = "default") {
+  return readWsBootstrapIngressCacheBase(redis, isRedisOperational, userId, scope);
 }
 
-async function writeWsBootstrapIngressCache(userId, channels, scope = 'default') {
-  if (!isRedisOperational(redis)) return;
-  try {
-    await redis.set(
-      wsBootstrapIngressKey(userId, scope),
-      JSON.stringify(channels),
-      "EX",
-      WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
-    );
-  } catch {
-    // fail-open
-  }
+async function writeWsBootstrapIngressCache(userId, channels, scope = "default") {
+  return writeWsBootstrapIngressCacheBase(
+    redis,
+    isRedisOperational,
+    userId,
+    channels,
+    WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
+    scope,
+  );
 }
 
 async function tryAcquireBootstrapDbSlot() {
@@ -2858,6 +2321,28 @@ async function shutdown() {
     wss.close(() => resolve());
   });
 }
+
+const { createRedisPubsubDelivery } = require("./redisPubsubDelivery");
+const { deliverPubsubMessage } = createRedisPubsubDelivery({
+  WebSocket,
+  channelClients,
+  localUserClients,
+  communityClients,
+  USER_FEED_SHARD_CHANNEL_SET,
+  COMMUNITY_FEED_SHARD_CHANNEL_SET,
+  subscribeClient,
+  unsubscribeClient,
+  subscribeCommunityClient,
+  unsubscribeCommunityClient,
+  parseChannelKey,
+  sendPayloadToSocket,
+});
+
+redisSub.on("message", (channel, message) => {
+  void deliverPubsubMessage(channel, message).catch((err) => {
+    logger.error({ err, channel }, "deliverPubsubMessage failed");
+  });
+});
 
 module.exports = {
   handleUpgrade,
