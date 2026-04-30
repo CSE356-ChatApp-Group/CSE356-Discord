@@ -7,6 +7,11 @@ export type MessagePaginationState = {
   hasNewer: boolean;
 };
 
+export type UnreadCountsSnapshot = {
+  channelCounts: Map<string, number>;
+  conversationCounts: Map<string, number>;
+};
+
 /** Narrow slice used when stripping a community from local state. */
 export type ChatStateCommunityRemovalSlice = {
   communities: Entity[];
