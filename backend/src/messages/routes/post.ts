@@ -188,6 +188,41 @@ function handlePostMessageError({
   return next(err);
 }
 
+async function insertMessageAttachments(
+  client: any,
+  messageId: string,
+  uploaderId: string,
+  attachments: any[],
+) {
+  if (attachments.length === 0) return;
+  const values: string[] = [];
+  const params: any[] = [];
+  let index = 1;
+
+  for (const attachment of attachments) {
+    values.push(
+      `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`,
+    );
+    params.push(
+      messageId,
+      uploaderId,
+      attachment.filename,
+      attachment.contentType,
+      attachment.sizeBytes,
+      attachment.storageKey,
+      attachment.width || null,
+      attachment.height || null,
+    );
+  }
+
+  await client.query(
+    `INSERT INTO attachments
+       (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
+     VALUES ${values.join(", ")}`,
+    params,
+  );
+}
+
 module.exports = function registerPostRoutes(router: import("express").IRouter) {
   router.post(
     "/",
@@ -325,36 +360,6 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         let communityId: string | null = null;
         let baseMessage: any;
 
-        const insertAttachmentRows = async (client: any, messageId: string) => {
-          if (attachments.length === 0) return;
-          const values: string[] = [];
-          const params: any[] = [];
-          let index = 1;
-
-          for (const attachment of attachments) {
-            values.push(
-              `($${index++}, $${index++}, 'image', $${index++}, $${index++}, $${index++}, $${index++}, $${index++}, $${index++})`,
-            );
-            params.push(
-              messageId,
-              authReq.user.id,
-              attachment.filename,
-              attachment.contentType,
-              attachment.sizeBytes,
-              attachment.storageKey,
-              attachment.width || null,
-              attachment.height || null,
-            );
-          }
-
-          await client.query(
-            `INSERT INTO attachments
-               (message_id, uploader_id, type, filename, content_type, size_bytes, storage_key, width, height)
-             VALUES ${values.join(", ")}`,
-            params,
-          );
-        };
-
         const runChannelMessageRowUnderInsertLock = () =>
           withTransaction(async (client) => {
             txPhases.t0 = Date.now();
@@ -447,7 +452,12 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
             txPhases.t_insert = Date.now();
             row = insertRes.rows[0];
 
-            await insertAttachmentRows(client, row.id);
+            await insertMessageAttachments(
+              client,
+              row.id,
+              authReq.user.id,
+              attachments,
+            );
 
             txPhases.t_later = Date.now();
             return row;
@@ -476,7 +486,12 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
                 await client.query(
                   `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
                 );
-                await insertAttachmentRows(client, baseMessage.id);
+                await insertMessageAttachments(
+                  client,
+                  baseMessage.id,
+                  authReq.user.id,
+                  attachments,
+                );
               });
             } catch (attachErr) {
               await pool
