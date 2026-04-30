@@ -1,4 +1,3 @@
-'use strict';
 
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(),

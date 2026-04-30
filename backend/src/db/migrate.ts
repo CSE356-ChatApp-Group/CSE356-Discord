@@ -5,7 +5,6 @@
  * Local / CI: use `npm run migrate` → node scripts/run-migrations.cjs (no tsx/esbuild).
  */
 
-'use strict';
 
 const path = require('path');
 

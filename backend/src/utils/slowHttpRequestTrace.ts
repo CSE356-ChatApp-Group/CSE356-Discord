@@ -1,4 +1,3 @@
-'use strict';
 
 /**
  * Optional structured log for slow HTTP requests (excluding message routes by default),

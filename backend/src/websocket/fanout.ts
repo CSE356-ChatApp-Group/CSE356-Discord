@@ -4,7 +4,6 @@
  * round-trip) to smooth burst load across shards/topics.
  */
 
-'use strict';
 
 const redis = require('../db/redis');
 const logger = require('../utils/logger');

@@ -2,7 +2,6 @@
  * Bounded structured fields for correlating Redis fanout with WS dispatch logs.
  */
 
-"use strict";
 
 const { wsDeliveryTopicPrefixForMetrics } = require("../websocket/outboundPayload");
 

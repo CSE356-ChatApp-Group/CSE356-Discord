@@ -3,7 +3,6 @@
  * Attaches req.user = { id, username, email } on success.
  */
 
-'use strict';
 
 const { authenticateAccessToken } = require('../utils/jwt');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('../auth/bypass');

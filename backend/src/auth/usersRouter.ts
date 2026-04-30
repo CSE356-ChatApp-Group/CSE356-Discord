@@ -9,7 +9,6 @@
  * GET   /api/v1/users/:id/avatar   – serve avatar image
  */
 
-'use strict';
 
 const express  = require('express');
 const { randomUUID } = require('crypto');

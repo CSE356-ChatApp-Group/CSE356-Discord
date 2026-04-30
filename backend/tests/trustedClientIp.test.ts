@@ -1,4 +1,3 @@
-'use strict';
 
 const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('../src/utils/trustedClientIp') as {
   getTrustedClientIp: (req: Record<string, unknown>) => string;

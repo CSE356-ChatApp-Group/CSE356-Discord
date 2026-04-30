@@ -1,4 +1,3 @@
-'use strict';
 
 const pino = require('pino');
 

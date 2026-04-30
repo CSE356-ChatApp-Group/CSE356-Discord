@@ -1,4 +1,3 @@
-'use strict';
 
 const client = require('prom-client');
 

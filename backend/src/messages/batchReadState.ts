@@ -1,4 +1,3 @@
-'use strict';
 
 /**
  * Option C — read_states Redis batch flush.

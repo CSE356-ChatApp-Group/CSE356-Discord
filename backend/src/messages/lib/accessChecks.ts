@@ -2,7 +2,6 @@
  * Channel / conversation / message access checks for the messages router (primary DB).
  */
 
-"use strict";
 
 const { query } = require("../../db/pool");
 

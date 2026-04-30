@@ -13,7 +13,6 @@
  * PATCH  /api/v1/communities/:id/members/:userId – owner-only role update
  */
 
-"use strict";
 
 const express = require("express");
 const { rateLimit } = require("express-rate-limit");

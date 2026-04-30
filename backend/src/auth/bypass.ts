@@ -1,4 +1,3 @@
-'use strict';
 
 const { query } = require('../db/pool');
 

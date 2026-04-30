@@ -1,4 +1,3 @@
-'use strict';
 
 /**
  * Shared S3/MinIO clients and helpers for the attachments router and

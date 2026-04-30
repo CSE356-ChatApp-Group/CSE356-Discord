@@ -8,7 +8,6 @@
  * boundary (message id + durable dedupe), not only Redis consumer-group delivery guarantees.
  */
 
-'use strict';
 
 const redis = require('../db/redis');
 const logger = require('../utils/logger');

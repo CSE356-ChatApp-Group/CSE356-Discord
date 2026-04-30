@@ -1,4 +1,3 @@
-'use strict';
 
 /**
  * Async community member_count maintenance.

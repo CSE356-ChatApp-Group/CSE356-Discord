@@ -7,7 +7,6 @@
  * DELETE /api/v1/channels/:id                  – delete
  */
 
-'use strict';
 
 const express = require('express');
 const { body, query: qv, param, validationResult } = require('express-validator');

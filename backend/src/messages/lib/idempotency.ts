@@ -2,7 +2,6 @@
  * POST /messages idempotency: Redis lease polling, replay body hydration, TTL constants.
  */
 
-"use strict";
 
 const redis = require("../../db/redis");
 const {

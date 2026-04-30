@@ -1,4 +1,3 @@
-'use strict';
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
   const parsed = Number.parseInt(process.env[name] || '', 10);

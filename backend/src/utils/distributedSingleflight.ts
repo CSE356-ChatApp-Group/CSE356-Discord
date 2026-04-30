@@ -9,7 +9,6 @@
  * 5) If no stale, briefly wait for fresh to appear, then fail open to local load.
  */
 
-'use strict';
 
 const crypto = require('crypto');
 

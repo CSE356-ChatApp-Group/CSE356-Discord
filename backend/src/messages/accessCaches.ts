@@ -1,4 +1,3 @@
-'use strict';
 
 const { query, queryRead } = require('../db/pool');
 const redis = require('../db/redis');

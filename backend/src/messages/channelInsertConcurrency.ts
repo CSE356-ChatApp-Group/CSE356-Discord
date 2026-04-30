@@ -6,7 +6,6 @@
  * wall time to the statement_timeout. Serializing removes same-channel overlap.
  */
 
-'use strict';
 
 const crypto = require('crypto');
 const os = require('os');

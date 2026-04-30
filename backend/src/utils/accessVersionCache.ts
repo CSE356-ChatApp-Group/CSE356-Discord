@@ -1,4 +1,3 @@
-'use strict';
 
 function channelAccessVersionKey(channelId) {
   return `channel:${channelId}:user_fanout_targets_v`;

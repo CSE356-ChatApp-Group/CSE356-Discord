@@ -10,7 +10,6 @@
  * When a key expires, the user is effectively 'offline'.
  */
 
-"use strict";
 
 const redis = require("../db/redis");
 const { publishUserFeedTargets } = require("../websocket/userFeed");

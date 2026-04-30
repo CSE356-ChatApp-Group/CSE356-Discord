@@ -6,7 +6,6 @@
  * A deny-list in Redis handles logout before expiry.
  */
 
-'use strict';
 
 const crypto = require('crypto');
 const jwt   = require('jsonwebtoken');

@@ -1,4 +1,3 @@
-'use strict';
 
 const crypto = require('crypto');
 const { query, poolStats } = require('../db/pool');

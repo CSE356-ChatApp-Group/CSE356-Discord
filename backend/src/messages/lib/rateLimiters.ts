@@ -2,7 +2,6 @@
  * POST /messages per-user and per-IP rate limiters (Redis-backed express-rate-limit).
  */
 
-"use strict";
 
 const { rateLimit } = require("express-rate-limit");
 const { RedisStore } = require("rate-limit-redis");

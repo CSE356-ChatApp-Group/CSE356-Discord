@@ -9,7 +9,6 @@
  * cannot issue regular commands.
  */
 
-'use strict';
 
 const Redis  = require('ioredis');
 const logger = require('../utils/logger');

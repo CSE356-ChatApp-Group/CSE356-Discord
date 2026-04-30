@@ -1,4 +1,3 @@
-'use strict';
 
 const { endpointListCacheTotal, endpointListCacheBypassTotal, endpointListCacheInvalidationsTotal } = require('./metrics');
 

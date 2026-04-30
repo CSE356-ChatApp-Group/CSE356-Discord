@@ -16,7 +16,6 @@
  *     conversation participation).
  */
 
-'use strict';
 
 const db = require('../db/pool');
 const { getClientTimed } = db;

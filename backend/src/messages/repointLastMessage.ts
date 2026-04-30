@@ -3,7 +3,6 @@
  * Concurrent deletes can cause FK 23503 on repoint; we clear and retry.
  */
 
-'use strict';
 
 const { query } = require('../db/pool');
 const redis = require('../db/redis');

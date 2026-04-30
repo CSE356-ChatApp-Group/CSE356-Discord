@@ -3,7 +3,6 @@
  * Documents channel vs conversation paths; delegates to existing implementations.
  */
 
-"use strict";
 
 /**
  * Channel `message:created` after commit — same as {@link publishChannelMessageCreated}.

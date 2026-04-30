@@ -2,7 +2,6 @@
  * Read-receipt Redis CAS cursor, in-memory coalescing, and Lua used by PUT /messages/:id/read.
  */
 
-"use strict";
 
 const redis = require("../../db/redis");
 const { readReceiptCursorCacheHitTotal } = require("../../utils/metrics");

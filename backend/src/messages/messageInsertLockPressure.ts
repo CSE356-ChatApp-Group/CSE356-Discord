@@ -4,7 +4,6 @@
  * pressure is high (same worker view).
  */
 
-'use strict';
 
 const {
   messageChannelInsertLockPressureWaitP95MsGauge,

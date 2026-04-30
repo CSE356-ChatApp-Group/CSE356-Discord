@@ -5,7 +5,6 @@
  * PUT  /api/v1/presence                       – set own status
  */
 
-'use strict';
 
 const express = require('express');
 const { authenticate } = require('../middleware/authenticate');

@@ -10,7 +10,6 @@
  * Course OIDC uses the discovery-based /auth/course routes in router.ts (not Passport).
  */
 
-'use strict';
 
 const passport         = require('passport');
 const LocalStrategy    = require('passport-local').Strategy;

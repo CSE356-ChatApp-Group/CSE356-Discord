@@ -1,4 +1,3 @@
-'use strict';
 
 /**
  * OpenTelemetry SDK bootstrap.

@@ -1,4 +1,3 @@
-'use strict';
 
 /**
  * Meilisearch HTTP client – candidate-generation layer for message search.

@@ -6,7 +6,6 @@
  * GET  /api/v1/attachments/:id      – get attachment info (returns a pre-signed GET URL)
  */
 
-'use strict';
 
 const express   = require('express');
 const { randomUUID } = require('crypto');

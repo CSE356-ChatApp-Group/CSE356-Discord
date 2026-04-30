@@ -2,7 +2,6 @@
  * POST /messages diagnostics: timeout classification, 503 bodies, phase logs, optional e2e trace payload.
  */
 
-"use strict";
 
 const os = require("os");
 

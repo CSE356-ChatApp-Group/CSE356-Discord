@@ -1,4 +1,3 @@
-'use strict';
 
 /**
  * Per-request AsyncLocalStorage for attributing `pool.query` / wrapped `client.query`

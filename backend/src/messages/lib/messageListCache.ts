@@ -2,7 +2,6 @@
  * Message list Redis cache bust helpers and POST-insert bounded waits (shared in-flight maps).
  */
 
-"use strict";
 
 const redis = require("../../db/redis");
 const logger = require("../../utils/logger");

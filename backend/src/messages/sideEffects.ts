@@ -1,4 +1,3 @@
-'use strict';
 
 const fanout = require('../websocket/fanout');
 const { publishUserFeedTargets, userIdFromTarget } = require('../websocket/userFeed');

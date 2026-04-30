@@ -10,7 +10,6 @@
  * Omitting both scope ids is rejected. channelId is not a search scope.
  */
 
-'use strict';
 
 const express = require('express');
 const { authenticate } = require('../middleware/authenticate');

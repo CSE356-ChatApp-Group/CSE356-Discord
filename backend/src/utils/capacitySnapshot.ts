@@ -1,4 +1,3 @@
-'use strict';
 
 /**
  * Periodic structured log + /health?diagnostic=1 payload builder.

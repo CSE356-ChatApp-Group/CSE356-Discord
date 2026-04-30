@@ -3,7 +3,6 @@
  * Kept separate from index.js so tests can import without starting a server.
  */
 
-'use strict';
 
 const crypto       = require('crypto');
 const express      = require('express');

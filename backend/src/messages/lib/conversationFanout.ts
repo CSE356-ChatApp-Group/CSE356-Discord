@@ -2,7 +2,6 @@
  * Synchronous conversation-wide Redis/WebSocket fanout (DM timing logs, read:updated, etc.).
  */
 
-"use strict";
 
 const fanout = require("../../websocket/fanout");
 const redis = require("../../db/redis");

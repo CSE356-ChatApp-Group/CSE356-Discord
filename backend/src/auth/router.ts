@@ -11,7 +11,6 @@
  * GET  /api/v1/auth/github/callback
  */
 
-'use strict';
 
 const express  = require('express');
 const { rateLimit } = require('express-rate-limit');

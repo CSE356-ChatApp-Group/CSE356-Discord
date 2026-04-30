@@ -3,7 +3,6 @@
  * then optionally duplicate to each visible member's `user:<id>` (grading / legacy).
  */
 
-'use strict';
 
 const { query } = require('../db/pool');
 const redis = require('../db/redis');

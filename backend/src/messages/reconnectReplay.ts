@@ -1,4 +1,3 @@
-'use strict';
 
 const { withTransaction, poolStats } = require('../db/pool');
 const redis = require('../db/redis');

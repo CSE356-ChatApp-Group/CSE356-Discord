@@ -6,7 +6,6 @@
  * GET  /api/v1/conversations/:id      – get single conversation
  */
 
-'use strict';
 
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');

@@ -3,7 +3,6 @@
  * after Redis accepts the publish) for throughput / grading probes.
  */
 
-'use strict';
 
 export function isMessageFanoutEvent(event: string): boolean {
   return (

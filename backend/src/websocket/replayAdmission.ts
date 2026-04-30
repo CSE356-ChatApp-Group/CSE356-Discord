@@ -1,4 +1,3 @@
-'use strict';
 
 type ReplayGateReason = 'pool_waiting' | 'semaphore_full';
 

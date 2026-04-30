@@ -37,7 +37,6 @@
  *   PgBouncer and Postgres headroom allow.
  */
 
-'use strict';
 
 const { Pool } = require('pg');
 const logger = require('../utils/logger');

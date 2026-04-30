@@ -3,7 +3,6 @@
  * done marker to suppress duplicate delivery after success.
  */
 
-"use strict";
 
 const redis = require("../db/redis");
 const logger = require("../utils/logger");

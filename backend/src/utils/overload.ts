@@ -1,4 +1,3 @@
-'use strict';
 
 const { monitorEventLoopDelay } = require('node:perf_hooks');
 const logger = require('./logger');
