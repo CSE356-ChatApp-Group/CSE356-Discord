@@ -95,7 +95,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by(le)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[$__rate_interval])))",
           "interval": "",
           "legendFormat": "p99 latency",
           "refId": "A"
@@ -178,7 +178,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le, vm, worker_port)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by(le, vm, worker_port)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval])))",
           "interval": "",
           "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
@@ -261,7 +261,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le, route)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[1m]))) > 0",
+          "expr": "histogram_quantile(0.99, sum by(le, route)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[$__rate_interval]))) > 0",
           "interval": "",
           "legendFormat": "{{route}}",
           "refId": "A"
@@ -344,7 +344,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\"}[1m]))",
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\"}[$__rate_interval])) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\"}[$__rate_interval]))",
           "interval": "",
           "legendFormat": "Total RPS",
           "refId": "A"
@@ -427,7 +427,7 @@
       },
       "targets": [
         {
-          "expr": "sum by(vm, worker_port)(rate(http_server_requests_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[1m]))",
+          "expr": "sum by(vm, worker_port)(rate(http_server_requests_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval])) + sum by(vm, worker_port)(rate(http_server_requests_aborted_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval]))",
           "interval": "",
           "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
@@ -593,7 +593,7 @@
       },
       "targets": [
         {
-          "expr": "topk(8, sum by(vm, worker_port)(rate(process_cpu_seconds_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[1m]) * 100))",
+          "expr": "topk(8, sum by(vm, worker_port)(rate(process_cpu_seconds_total{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval]) * 100))",
           "interval": "",
           "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
@@ -676,7 +676,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\"}[1m]))",
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\"}[$__rate_interval]))",
           "interval": "",
           "legendFormat": "5xx RPS",
           "refId": "A"
@@ -759,7 +759,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le, vm, worker_port)(rate(nodejs_gc_duration_seconds_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[1m]))) * 1000",
+          "expr": "histogram_quantile(0.99, sum by(le, vm, worker_port)(rate(nodejs_gc_duration_seconds_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval]))) * 1000",
           "interval": "",
           "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
@@ -842,7 +842,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by(le)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[1m])))",
+          "expr": "histogram_quantile(0.95, sum by(le)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[$__rate_interval])))",
           "interval": "",
           "legendFormat": "p95 latency",
           "refId": "A"
@@ -867,7 +867,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, histogram_quantile(0.99, sum by(le, route)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[1m]))))",
+          "expr": "topk(1, histogram_quantile(0.99, sum by(le, route)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\"}[$__rate_interval]))))",
           "legendFormat": "{{route}}"
         }
       ],
@@ -916,7 +916,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le, vm)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=\"/api/v1/search/\",vm=~\"$vm\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by(le, vm)(rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"^/api/v1/search/?$\",vm=~\"$vm\"}[$__rate_interval])))",
           "legendFormat": "p99"
         }
       ],
@@ -951,7 +951,7 @@
       },
       "targets": [
         {
-          "expr": "sum by(vm)(rate(http_server_request_duration_ms_sum{job=\"chatapp-api\",route=\"/api/v1/search/\",vm=~\"$vm\"}[1m])) / clamp_min(sum by(vm)(rate(http_server_request_duration_ms_count{job=\"chatapp-api\",route=\"/api/v1/search/\",vm=~\"$vm\"}[1m])), 1e-9)",
+          "expr": "sum by(vm)(rate(http_server_request_duration_ms_sum{job=\"chatapp-api\",route=~\"^/api/v1/search/?$\",vm=~\"$vm\"}[$__rate_interval])) / clamp_min(sum by(vm)(rate(http_server_request_duration_ms_count{job=\"chatapp-api\",route=~\"^/api/v1/search/?$\",vm=~\"$vm\"}[$__rate_interval])), 1e-9)",
           "legendFormat": "avg"
         }
       ],
@@ -986,7 +986,7 @@
       },
       "targets": [
         {
-          "expr": "sum by(vm)(rate(http_server_requests_total{job=\"chatapp-api\",route=\"/api/v1/search/\",vm=~\"$vm\"}[1m]))",
+          "expr": "sum by(vm)(rate(http_server_requests_total{job=\"chatapp-api\",route=~\"^/api/v1/search/?$\",vm=~\"$vm\"}[$__rate_interval])) + sum by(vm)(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route=~\"^/api/v1/search/?$\",vm=~\"$vm\"}[$__rate_interval]))",
           "legendFormat": "RPS"
         }
       ],

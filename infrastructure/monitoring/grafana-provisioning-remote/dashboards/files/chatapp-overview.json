@@ -220,7 +220,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (route) (rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m])) + sum by (route) (rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m]))",
+          "expr": "sum by (route) (rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval])) + sum by (route) (rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval]))",
           "legendFormat": "{{route}}",
           "refId": "A"
         }
@@ -259,7 +259,7 @@
       },
       "targets": [
         {
-          "expr": "(100 * sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m])) / clamp_min(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\"}[5m])), 1)) or vector(0)",
+          "expr": "(100 * sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval])), 1)) or vector(0)",
           "legendFormat": "5xx %",
           "refId": "A"
         }
@@ -298,7 +298,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval])))",
           "legendFormat": "p95 latency",
           "refId": "A"
         }
@@ -508,7 +508,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route=~\"/api/v1/auth.*\",status_class=\"5xx\"}[5m]))",
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route=~\"/api/v1/auth.*\",status_class=\"5xx\"}[$__rate_interval]))",
           "legendFormat": "auth 5xx",
           "refId": "A"
         }
@@ -586,7 +586,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\"}[5m]))",
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval]))",
           "legendFormat": "5xx / s",
           "refId": "A"
         }
@@ -953,7 +953,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (method, status_class) (rate(http_server_requests_total{job=\"chatapp-api\",route=~\"^/api/v1/messages/?$\"}[5m]))",
+          "expr": "sum by (method, status_class) (rate(http_server_requests_total{job=\"chatapp-api\",route=~\"^/api/v1/messages/?$\"}[$__rate_interval]))",
           "legendFormat": "{{method}} {{status_class}}",
           "refId": "A"
         }
@@ -1031,7 +1031,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route=~\"^/api/v1/messages/?$\"}[5m]))",
+          "expr": "sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route=~\"^/api/v1/messages/?$\"}[$__rate_interval]))",
           "legendFormat": "aborted / s",
           "refId": "A"
         }
@@ -1070,7 +1070,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m])) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m]))",
+          "expr": "sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval])) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval]))",
           "legendFormat": "total req/s",
           "refId": "A"
         }
@@ -1126,7 +1126,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m])) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m]))) / clamp_min((sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m] offset 15m)) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[5m] offset 15m))), 0.001)",
+          "expr": "(sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval])) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval]))) / clamp_min((sum(rate(http_server_requests_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval] offset 15m)) + sum(rate(http_server_requests_aborted_total{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\"}[$__rate_interval] offset 15m))), 0.001)",
           "legendFormat": "current / 15m ago",
           "refId": "A"
         }
@@ -1248,12 +1248,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[$__rate_interval])))",
           "legendFormat": "p95 {{vm}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route=~\"/api/v1/search.*\",vm=~\"$vm\"}[$__rate_interval])))",
           "legendFormat": "p99 {{vm}}",
           "refId": "B"
         }
@@ -2388,7 +2388,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (vm, route) (rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m]))",
+          "expr": "sum by (vm, route) (rate(http_server_requests_total{job=\"chatapp-api\",status_class=\"5xx\",route!=\"/metrics\",route!=\"/health\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval]))",
           "legendFormat": "{{vm}} {{route}}",
           "refId": "A"
         }
@@ -2446,7 +2446,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval])))",
           "legendFormat": "{{route}}",
           "refId": "A"
         }
@@ -2504,7 +2504,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval])))",
           "legendFormat": "{{route}}",
           "refId": "A"
         }
@@ -2562,12 +2562,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval])))",
           "legendFormat": "p95 {{vm}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",route!=\"/metrics\",route!=\"/health\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval])))",
           "legendFormat": "p99 {{vm}}",
           "refId": "B"
         }
@@ -2625,12 +2625,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",method=\"POST\",route=~\"/api/v1/messages/?\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",method=\"POST\",route=~\"^/api/v1/messages/?$\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval])))",
           "legendFormat": "p95 {{vm}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",method=\"POST\",route=~\"/api/v1/messages/?\",vm=~\"$vm\",worker_port=~\"$worker\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job=\"chatapp-api\",method=\"POST\",route=~\"^/api/v1/messages/?$\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval])))",
           "legendFormat": "p99 {{vm}}",
           "refId": "B"
         }
