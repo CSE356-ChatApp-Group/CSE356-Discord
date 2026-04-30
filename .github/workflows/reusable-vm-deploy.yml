@@ -48,6 +48,11 @@ on:
         required: false
         default: false
         type: boolean
+      prod_fast_rollback:
+        description: "Production only — run deploy-prod-multi with --rollback (no GitHub Release wait; uses /opt/chatapp/releases/<sha> on VMs). Cannot be combined with artifact_name."
+        required: false
+        default: false
+        type: boolean
     secrets:
       DEPLOY_SSH_KEY:
         required: true
@@ -79,7 +84,7 @@ jobs:
           fetch-depth: 0
 
       - name: Ensure GitHub CLI exists
-        if: ${{ inputs.artifact_name == '' }}
+        if: ${{ inputs.artifact_name == '' && inputs.prod_fast_rollback != true }}
         shell: bash
         run: |
           if ! command -v gh >/dev/null 2>&1; then
@@ -88,7 +93,7 @@ jobs:
           fi
 
       - name: Wait for release artifact
-        if: ${{ inputs.artifact_name == '' }}
+        if: ${{ inputs.artifact_name == '' && inputs.prod_fast_rollback != true }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -138,6 +143,16 @@ jobs:
         run: |
           test -n "${{ inputs.host }}" || { echo "Missing deployment host"; exit 1; }
           test -n "${{ inputs.user }}" || { echo "Missing deployment user"; exit 1; }
+          if [[ "${{ inputs.prod_fast_rollback }}" == "true" ]]; then
+            if [[ "${{ inputs.environment }}" != "production" ]]; then
+              echo "ERROR: prod_fast_rollback is only valid for environment production."
+              exit 1
+            fi
+            if [[ -n "${{ inputs.artifact_name }}" ]]; then
+              echo "ERROR: prod_fast_rollback cannot be combined with artifact_name (no tarball needed)."
+              exit 1
+            fi
+          fi
 
       - name: Setup SSH key
         shell: bash
@@ -185,7 +200,7 @@ jobs:
       # Rollback deploys check out an old SHA whose prod-nginx-audit.sh may still
       # fail on benign nginx/worker drift. Always audit using origin/main's script.
       - name: Resolve prod nginx audit script from main
-        if: ${{ inputs.environment == 'production' }}
+        if: ${{ inputs.environment == 'production' && inputs.prod_fast_rollback != true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -195,7 +210,7 @@ jobs:
           chmod +x .nginx-audit/prod-nginx-audit.sh
 
       - name: Audit prod nginx parity before deploy
-        if: ${{ inputs.environment == 'production' }}
+        if: ${{ inputs.environment == 'production' && inputs.prod_fast_rollback != true }}
         shell: bash
         env:
           PROD_HOST: ${{ inputs.host }}
@@ -238,6 +253,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           DEPLOY_ENV: ${{ inputs.environment }}
           DEPLOY_SCRIPT_PATH: ${{ inputs.script_path }}
+          PROD_FAST_ROLLBACK: ${{ inputs.prod_fast_rollback }}
         run: |
           set -euo pipefail
 
@@ -266,17 +282,24 @@ jobs:
           export GITHUB_REPO="${GITHUB_REPOSITORY}"
           export DEPLOY_NON_INTERACTIVE=true
 
-          if [[ -n "${LOCAL_ARTIFACT_PATH:-}" ]]; then
-            LP="${LOCAL_ARTIFACT_PATH}"
-            [[ "${LP}" != /* ]] && LP="${GITHUB_WORKSPACE}/${LP}"
-            export LOCAL_ARTIFACT_PATH="${LP}"
-          fi
-
           if [[ -n "${CHATAPP_INSTANCES_INPUT:-}" ]]; then
             export CHATAPP_INSTANCES="${CHATAPP_INSTANCES_INPUT}"
           fi
 
-          bash "${SCRIPT}" "${TARGET_SHA}"
+          if [[ "${PROD_FAST_ROLLBACK:-false}" == "true" ]]; then
+            unset LOCAL_ARTIFACT_PATH || true
+            export SKIP_DB_SSH_PREFLIGHT=1
+            echo "prod_fast_rollback: skipping tarball; running ${SCRIPT} ${TARGET_SHA} --rollback"
+            bash "${SCRIPT}" "${TARGET_SHA}" --rollback
+          else
+            if [[ -n "${LOCAL_ARTIFACT_PATH:-}" ]]; then
+              LP="${LOCAL_ARTIFACT_PATH}"
+              [[ "${LP}" != /* ]] && LP="${GITHUB_WORKSPACE}/${LP}"
+              export LOCAL_ARTIFACT_PATH="${LP}"
+            fi
+
+            bash "${SCRIPT}" "${TARGET_SHA}"
+          fi
 
       - name: Audit prod nginx parity after deploy
         if: ${{ always() && inputs.environment == 'production' }}

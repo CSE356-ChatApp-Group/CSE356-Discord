@@ -101,6 +101,8 @@ Staging deploys automatically from GitHub Actions after **CI Build & Package** s
 
 You can still deploy manually from GitHub Actions using **Manual Deploy** (`workflow_dispatch`) in `.github/workflows/deploy-manual.yml`.
 
+**Production fast rollback (GitHub):** use **Production fast rollback** (`.github/workflows/rollback-prod-fast.yml`). It resolves your `sha`, skips waiting for a GitHub Release tarball, and runs `deploy-prod-multi.sh <sha> --rollback` so workers move back to a build **already present** under `/opt/chatapp/releases/<sha>` on each VM. Use **Manual Deploy** instead if you need a full redeploy from a release artifact (migrations, new tarball, etc.).
+
 ### Required GitHub configuration
 
 - Secret: `DEPLOY_SSH_KEY` — private key whose public half is in `authorized_keys` on the deploy VMs (Ed25519 matches [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml), which writes `~/.ssh/id_ed25519`).

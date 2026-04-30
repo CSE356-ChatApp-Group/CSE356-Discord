@@ -252,7 +252,7 @@ jobs:
             gh release upload "$TAG" "$FILE" --clobber
           else
             gh release create "$TAG" "$FILE" \
-              --notes "Deploy to staging or production using:\n\n./deploy/deploy-staging.sh ${{ github.sha }}\n./deploy/deploy-prod-multi.sh ${{ github.sha }}"
+              --notes "Deploy: ./deploy/deploy-staging.sh ${{ github.sha }} | Prod: ./deploy/deploy-prod-multi.sh ${{ github.sha }} | Fast rollback (Actions): rollback-prod-fast.yml"
           fi
 
   deploy-staging:
@@ -357,6 +357,7 @@ jobs:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           DEPLOY_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/deploy-manual.yml
+          ROLLBACK_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/rollback-prod-fast.yml
         run: |
           python3 - <<'PYEOF'
           import os, json, urllib.request, sys
@@ -370,11 +371,13 @@ jobs:
           commit_msg   = os.environ.get('COMMIT_MSG', '').split('\n')[0][:200]
           run_url      = os.environ.get('RUN_URL', '')
           deploy_url   = os.environ.get('DEPLOY_URL', '')
+          rollback_url = os.environ.get('ROLLBACK_URL', '')
 
           content = (
               f"✅ **Staging green** — `{sha}` is ready to deploy to prod\n"
               f"> {commit_msg}\n\n"
               f"🚀 **Trigger prod deploy:** <{deploy_url}>\n"
+              f"↩ **Fast rollback (prior SHA on VMs):** <{rollback_url}>\n"
               f"CI run: <{run_url}>"
           )
 

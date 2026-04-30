@@ -1,0 +1,68 @@
+# Fast rollback: re-point all prod workers to a release already on disk under
+# /opt/chatapp/releases/<sha> on each VM (no new tarball from GitHub Releases).
+# Same flags as: ./deploy/deploy-prod-multi.sh <sha> --rollback
+name: Production fast rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Known-good commit (ref or full SHA). Must exist under /opt/chatapp/releases/ on VM1/VM2/VM3."
+        required: true
+        type: string
+      clear_prod_deploy_lock:
+        description: "Remove stale /opt/chatapp/.deploy-lock-prod on all prod app VMs first (e.g. after a cancelled deploy)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: rollback-prod-fast
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  resolve-target:
+    runs-on: ubuntu-latest
+    outputs:
+      resolved_sha: ${{ steps.resolve.outputs.resolved_sha }}
+    steps:
+      - name: Resolve target SHA
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ref = `${{ inputs.sha }}`.trim();
+            if (!ref) {
+              core.setFailed('sha input is required');
+              return;
+            }
+            const { data } = await github.rest.repos.getCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref,
+            });
+            core.setOutput('resolved_sha', data.sha);
+            core.info(`Rollback target ${ref} -> ${data.sha}`);
+
+  rollback:
+    needs: resolve-target
+    uses: ./.github/workflows/reusable-vm-deploy.yml
+    secrets: inherit
+    with:
+      environment: production
+      target_sha: ${{ needs.resolve-target.outputs.resolved_sha }}
+      host: ${{ vars.PROD_HOST }}
+      user: ${{ vars.PROD_USER }}
+      script_path: deploy/deploy-prod-multi.sh
+      verify_public_host: true
+      auto_confirm: true
+      prod_fast_rollback: true
+      clear_prod_deploy_lock: ${{ inputs.clear_prod_deploy_lock }}
+      chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '5' }}
