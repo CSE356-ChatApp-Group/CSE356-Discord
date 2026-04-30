@@ -65,9 +65,9 @@ describe('batchReadState flush', () => {
       'user-a|chan-1',
     ]);
     redis.pipeline.mockReturnValueOnce(makePipeline([
-      [null, { msg_id: 'msg-1', msg_created_at: '2026-04-24T22:41:11.000Z', channel_id: 'chan-1', conversation_id: '' }],
-      [null, { msg_id: 'msg-3', msg_created_at: '2026-04-24T22:41:13.000Z', channel_id: 'chan-3', conversation_id: '' }],
       [null, { msg_id: 'msg-2', msg_created_at: '2026-04-24T22:41:12.000Z', channel_id: 'chan-2', conversation_id: '' }],
+      [null, { msg_id: 'msg-3', msg_created_at: '2026-04-24T22:41:13.000Z', channel_id: 'chan-3', conversation_id: '' }],
+      [null, { msg_id: 'msg-1', msg_created_at: '2026-04-24T22:41:11.000Z', channel_id: 'chan-1', conversation_id: '' }],
     ]));
     query.mockRejectedValueOnce(deadlockErr);
     query.mockResolvedValueOnce({ rowCount: 3, rows: [] });
