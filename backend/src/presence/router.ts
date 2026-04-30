@@ -2,6 +2,7 @@
  * Presence API — mounts route modules under /api/v1/presence.
  *
  * - `routes/bulkGet.ts` — GET `/`
+ * - `routes/bulkPost.ts` — POST `/bulk`
  * - `routes/putStatus.ts` — PUT `/`
  */
 
@@ -10,6 +11,7 @@ const { authenticate } = require("../middleware/authenticate");
 const { createUserIpTokenLimiter } = require("../middleware/inMemoryApiLimiter");
 
 const registerPresenceGetRoute = require("./routes/bulkGet");
+const registerPresencePostBulkRoute = require("./routes/bulkPost");
 const registerPresencePutRoute = require("./routes/putStatus");
 
 const presenceLimiter = createUserIpTokenLimiter({
@@ -27,6 +29,7 @@ router.use(authenticate);
 router.use(presenceLimiter);
 
 registerPresenceGetRoute(router);
+registerPresencePostBulkRoute(router);
 registerPresencePutRoute(router);
 
 module.exports = router;

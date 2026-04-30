@@ -142,9 +142,9 @@ describe('Grader parity: profile & presence', () => {
       expect(setPresenceRes.status).toBe(200);
 
       const bulkPresenceRes = await request(app)
-        .get('/api/v1/presence')
+        .post('/api/v1/presence/bulk')
         .set('Authorization', `Bearer ${userB.accessToken}`)
-        .query({ userIds: userA.user.id });
+        .send({ userIds: [userA.user.id] });
 
       expect(bulkPresenceRes.status).toBe(200);
       expect(bulkPresenceRes.body.presence[userA.user.id]).toBe('away');

@@ -60,7 +60,6 @@ type SearchFilters = {
 };
 const MESSAGE_CONTEXT_SIDE_LIMIT = 25;
 const MESSAGE_PAGE_LIMIT = 50;
-const PRESENCE_BULK_GET_BATCH_SIZE = 100;
 
 type ChatState = {
   communities: Entity[];
@@ -121,6 +120,7 @@ const DEFAULT_SEARCH_FILTERS: SearchFilters = {
   after: '',
   before: '',
 };
+
 let latestSearchRequestSeq = 0;
 
 function hydrateAuthorFromSession(message: Entity) {
@@ -1169,20 +1169,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (!ids.length) return;
 
     const requestedAt = ++presenceFreshnessSeq;
-    const batchRequests: Promise<any>[] = [];
-    for (let start = 0; start < ids.length; start += PRESENCE_BULK_GET_BATCH_SIZE) {
-      const batch = ids.slice(start, start + PRESENCE_BULK_GET_BATCH_SIZE);
-      if (!batch.length) continue;
-      const qs = encodeURIComponent(batch.join(','));
-      batchRequests.push(api.get(`/presence?userIds=${qs}`));
-    }
-    const batchResponses = await Promise.all(batchRequests);
-    const presenceMap: Record<string, unknown> = {};
-    const awayMap: Record<string, string | null> = {};
-    for (const data of batchResponses) {
-      Object.assign(presenceMap, data?.presence || {});
-      Object.assign(awayMap, data?.awayMessages || {});
-    }
+    const data = await api.post('/presence/bulk', { userIds: ids });
+    const presenceMap: Record<string, unknown> = data?.presence || {};
+    const awayMap: Record<string, string | null> = data?.awayMessages || {};
 
     set((s) => {
       const nextPresence = { ...s.presence };

@@ -123,8 +123,8 @@ describe('chatStore quick actions', () => {
 
   it('does not let stale presence hydration overwrite a newer realtime update', async () => {
     let resolvePresence: ((value: any) => void) | null = null;
-    apiGet.mockImplementation((path: string) => {
-      if (path.startsWith('/presence?userIds=')) {
+    apiPost.mockImplementation((path: string) => {
+      if (path === '/presence/bulk') {
         return new Promise((resolve) => {
           resolvePresence = resolve;
         });
@@ -145,14 +145,13 @@ describe('chatStore quick actions', () => {
     expect(useChatStore.getState().presence['user-2']).toBe('online');
   });
 
-  it('hydrates presence in bounded batches to avoid oversized request URIs', async () => {
-    apiGet.mockImplementation((path: string) => {
-      if (!path.startsWith('/presence?userIds=')) {
-        throw new Error(`Unexpected GET ${path}`);
+  it('hydrates presence via POST /presence/bulk with all requested ids', async () => {
+    apiPost.mockImplementation((path: string, body: any) => {
+      if (path !== '/presence/bulk') {
+        throw new Error(`Unexpected POST ${path}`);
       }
-      const qs = path.split('/presence?userIds=')[1] || '';
-      const ids = decodeURIComponent(qs).split(',').filter(Boolean);
-      expect(ids.length).toBeLessThanOrEqual(100);
+      const ids = Array.isArray(body?.userIds) ? body.userIds : [];
+      expect(ids.length).toBe(205);
       return Promise.resolve({
         presence: Object.fromEntries(ids.map((id) => [id, 'online'])),
         awayMessages: {},
@@ -163,7 +162,7 @@ describe('chatStore quick actions', () => {
     await useChatStore.getState().hydratePresenceForUsers(ids);
 
     const presence = useChatStore.getState().presence;
-    expect(apiGet).toHaveBeenCalledTimes(3);
+    expect(apiPost).toHaveBeenCalledTimes(1);
     expect(presence['user-1']).toBe('online');
     expect(presence['user-100']).toBe('online');
     expect(presence['user-205']).toBe('online');
@@ -258,10 +257,6 @@ describe('chatStore quick actions', () => {
       if (path === '/messages?channelId=ch-1&limit=50') {
         return Promise.resolve({ messages: [] });
       }
-      if (path.startsWith('/presence?userIds=')) {
-        return Promise.resolve({ presence: { 'user-1': 'offline' }, awayMessages: {} });
-      }
-
       throw new Error(`Unexpected GET ${path}`);
     });
 
@@ -302,10 +297,6 @@ describe('chatStore quick actions', () => {
       if (path === '/messages?channelId=ch-1&limit=50') {
         return Promise.resolve({ messages: [] });
       }
-      if (path.startsWith('/presence?userIds=')) {
-        return Promise.resolve({ presence: { 'user-1': 'offline' }, awayMessages: {} });
-      }
-
       throw new Error(`Unexpected GET ${path}`);
     });
 
@@ -346,10 +337,6 @@ describe('chatStore quick actions', () => {
       if (path === '/messages?channelId=ch-1&limit=50') {
         return Promise.resolve({ messages: [] });
       }
-      if (path.startsWith('/presence?userIds=')) {
-        return Promise.resolve({ presence: { 'user-1': 'offline' }, awayMessages: {} });
-      }
-
       throw new Error(`Unexpected GET ${path}`);
     });
 
