@@ -21,6 +21,7 @@ const { startChannelLastMessageFlushInterval } = require('./messages/repointLast
 const { startReadStateFlushInterval } = require('./messages/readState/batchReadState');
 const { startCommunityCountReconcileInterval } = require('./communities/communityMemberCount');
 const redis    = require('./db/redis');
+const { warmRedisLuaScripts } = require('./db/redisLua');
 const { startPgPoolMetrics } = require('./utils/metrics');
 const { startCapacitySnapshotHeartbeat } = require('./utils/capacitySnapshot');
 
@@ -88,6 +89,7 @@ async function waitForDependencies() {
     attempt += 1;
     try {
       await redis.ping();
+      await warmRedisLuaScripts(redis);
       logger.info({ attempt }, 'Redis connected');
       return;
     } catch (err) {

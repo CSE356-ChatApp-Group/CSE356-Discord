@@ -21,13 +21,13 @@ const {
 } = require("../messageInsertLockPressure");
 const overload = require("../../utils/overload");
 const redis = require("../../db/redis");
+const { ensureRedisLuaSha, REDIS_LUA_IDS } = require("../../db/redisLua");
 const logger = require("../../utils/logger");
 const sideEffects = require("../sideEffects");
 const {
   READ_RECEIPT_DEFER_POOL_WAITING,
   READ_RECEIPT_FANOUT_ENABLED,
   READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
-  RESET_UNREAD_WATERMARK_LUA,
   hasConfirmedRecentMessageRead,
   rememberConfirmedMessageRead,
   shouldRunCas1SideEffects,
@@ -184,12 +184,16 @@ module.exports = function registerReadRoutes(router) {
         try {
           const countKey = `channel:msg_count:${channel_id}`;
           const readKey = `user:last_read_count:${channel_id}:${uid}`;
+          const wmSha = await ensureRedisLuaSha(
+            redis,
+            REDIS_LUA_IDS.READ_RECEIPT_RESET_UNREAD_WATERMARK,
+          );
           const pipeline = redis.pipeline();
           if (READ_RECEIPT_FANOUT_ENABLED && !dropReadReceiptFanout && communityIdForCache) {
             pipeline.del(`channels:list:${communityIdForCache}:${uid}`);
           }
-          pipeline.eval(
-            RESET_UNREAD_WATERMARK_LUA,
+          pipeline.evalsha(
+            wmSha,
             2,
             countKey,
             readKey,
