@@ -3,10 +3,38 @@
  * HTTP handlers live in `routes/*.ts`.
  */
 
-const { rateLimit } = require("express-rate-limit");
-const { RedisStore } = require("rate-limit-redis");
 const { validate: uuidValidate } = require("uuid");
 const { body, param, validationResult } = require("express-validator");
+const {
+  parsePositiveIntEnv,
+  clientIp,
+  isInternalIp,
+  parseCommunitiesPageQuery,
+} = require("./common");
+const {
+  communityJoinRateLimitNoop,
+  buildCommunityJoinIpRateLimiter,
+  buildCommunityJoinUserRateLimiter,
+  communityJoinIpRateLimiter,
+  communityJoinUserRateLimiter,
+} = require("./joinRateLimit");
+const {
+  PUBLIC_COMMUNITIES_VERSION_KEY,
+  COMMUNITIES_USER_VERSION_KEY_PREFIX,
+  communitiesCacheKey,
+  communitiesPagedCacheKey,
+  communitiesUserVersionKey,
+  communitiesLastGoodCacheKey,
+  membersCacheKey,
+} = require("./cacheKeys");
+const {
+  MEMBERS_CACHE_TTL_SECS,
+  communityMembersInflight,
+  COMMUNITY_MEMBERS_ROSTER_SQL,
+  hydrateCommunityMembersFromIds,
+  readMembersCacheValue,
+  loadCommunityMembersRoster,
+} = require("./membersRoster");
 
 const { query, queryRead, getClient } = require("../db/pool");
 const redis = require("../db/redis");
@@ -30,8 +58,6 @@ const {
   recordEndpointListCache,
   recordEndpointListCacheBypass,
 } = require("../utils/endpointCacheMetrics");
-const { apiRateLimitHitsTotal } = require("../utils/metrics");
-const { recordAbuseStrikeFromRequest } = require("../utils/autoIpBan");
 const {
   staleCacheKey,
   getJsonCache,
@@ -197,123 +223,6 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
   }
 }
 
-function parsePositiveIntEnv(name, fallback) {
-  const parsed = Number.parseInt(process.env[name] || "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function clientIp(req) {
-  const realIp = req.headers["x-real-ip"];
-  const firstRealIp = Array.isArray(realIp) ? realIp[0] : realIp;
-  if (firstRealIp) return firstRealIp.trim();
-
-  if (req.ip) return req.ip.trim();
-
-  const forwardedFor = req.headers["x-forwarded-for"];
-  const firstForwarded = Array.isArray(forwardedFor)
-    ? forwardedFor[0]
-    : forwardedFor;
-  return (
-    firstForwarded
-      ? firstForwarded.split(",")[0]
-      : req.socket?.remoteAddress || "unknown"
-  ).trim();
-}
-
-function isInternalIp(ip) {
-  const normalized = String(ip || "").replace(/^::ffff:/, "");
-  const parts = normalized.split(".");
-  const secondOctet = Number.parseInt(parts[1] || "", 10);
-  return (
-    normalized === "localhost" ||
-    normalized === "127.0.0.1" ||
-    normalized.startsWith("127.") ||
-    ip === "::1" ||
-    normalized.startsWith("10.") ||
-    (parts[0] === "172" &&
-      Number.isFinite(secondOctet) &&
-      secondOctet >= 16 &&
-      secondOctet <= 31) ||
-    normalized.startsWith("192.168.")
-  );
-}
-
-function communityJoinRateLimitNoop(_req, _res, next) {
-  next();
-}
-
-function buildCommunityJoinIpRateLimiter() {
-  if (
-    process.env.DISABLE_RATE_LIMITS === "true" ||
-    process.env.NODE_ENV === "test"
-  ) {
-    return communityJoinRateLimitNoop;
-  }
-  const windowMs = parsePositiveIntEnv(
-    "COMMUNITY_JOIN_PER_IP_WINDOW_MS",
-    60_000,
-  );
-  const limit = parsePositiveIntEnv("COMMUNITY_JOIN_PER_IP_MAX", 300);
-  return rateLimit({
-    windowMs,
-    limit,
-    standardHeaders: "draft-7",
-    legacyHeaders: false,
-    skip: (req) => isInternalIp(clientIp(req)),
-    keyGenerator: (req) => `cji:${clientIp(req)}`,
-    store: new RedisStore({
-      sendCommand: (...args) => redis.call(...args),
-      prefix: "rl:community_join:ip:",
-    }),
-    message: {
-      error:
-        "Too many community join requests from this network. Slow down and try again shortly.",
-    },
-    handler: (req, res, _next, options) => {
-      apiRateLimitHitsTotal.inc({ scope: "community_join_ip" });
-      recordAbuseStrikeFromRequest(req);
-      res.status(options.statusCode).json(options.message);
-    },
-  });
-}
-
-function buildCommunityJoinUserRateLimiter() {
-  if (
-    process.env.DISABLE_RATE_LIMITS === "true" ||
-    process.env.NODE_ENV === "test"
-  ) {
-    return communityJoinRateLimitNoop;
-  }
-  const windowMs = parsePositiveIntEnv(
-    "COMMUNITY_JOIN_PER_USER_WINDOW_MS",
-    60_000,
-  );
-  const limit = parsePositiveIntEnv("COMMUNITY_JOIN_PER_USER_MAX", 120);
-  return rateLimit({
-    windowMs,
-    limit,
-    standardHeaders: "draft-7",
-    legacyHeaders: false,
-    skip: (req) => isInternalIp(clientIp(req)),
-    keyGenerator: (req) => `cju:${req.user?.id || "anon"}`,
-    store: new RedisStore({
-      sendCommand: (...args) => redis.call(...args),
-      prefix: "rl:community_join:user:",
-    }),
-    message: {
-      error:
-        "Too many community join requests from this account. Slow down and try again shortly.",
-    },
-    handler: (_req, res, _next, options) => {
-      apiRateLimitHitsTotal.inc({ scope: "community_join_user" });
-      res.status(options.statusCode).json(options.message);
-    },
-  });
-}
-
-const communityJoinIpRateLimiter = buildCommunityJoinIpRateLimiter();
-const communityJoinUserRateLimiter = buildCommunityJoinUserRateLimiter();
-
 /** Middleware: load caller's community membership into req.membership */
 async function loadMembership(req, res, next) {
   const { rows } = await query(
@@ -356,8 +265,6 @@ const COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT =
   Number.isFinite(_communitiesHeavyInflight) && _communitiesHeavyInflight > 0
     ? _communitiesHeavyInflight
     : 4;
-const PUBLIC_COMMUNITIES_VERSION_KEY = "communities:list:public_version";
-const COMMUNITIES_USER_VERSION_KEY_PREFIX = "communities:list:user_version:";
 let communitiesUnreadQueriesInFlight = 0;
 const COMMUNITIES_LAST_GOOD_CACHE_TTL_SECS = Math.max(
   COMMUNITIES_CACHE_TTL_SECS,
@@ -424,28 +331,6 @@ const COMMUNITY_DETAIL_CHANNEL_JSON = `
   )
   ORDER BY ch.position`;
 
-function communitiesCacheKey(userId, publicVersion = "0") {
-  return `communities:list:${userId}:v${publicVersion}`;
-}
-
-function communitiesPagedCacheKey(
-  userId,
-  publicVersion,
-  userVersion,
-  limit,
-  after,
-) {
-  return `communities:list:${userId}:v${publicVersion}:uv${userVersion}:paged:l${limit}:a${after || "_"}`;
-}
-
-function communitiesUserVersionKey(userId) {
-  return `${COMMUNITIES_USER_VERSION_KEY_PREFIX}${userId}`;
-}
-
-function communitiesLastGoodCacheKey(userId) {
-  return `communities:list:last_good:${userId}`;
-}
-
 async function invalidateCommunitiesCaches(userIds, publicVersion = "0") {
   const normalizedUserIds = [
     ...new Set(
@@ -501,91 +386,6 @@ async function getCommunitiesUserVersion(userId) {
   const v = (await redis.get(key).catch(() => null)) || "0";
   void redisExpireBestEffort(key, COMMUNITIES_VERSION_CACHE_TTL_SECS);
   return v;
-}
-
-const MEMBERS_CACHE_TTL_SECS = 30;
-function membersCacheKey(communityId) {
-  return `community:${communityId}:members`;
-}
-const communityMembersInflight: Map<string, Promise<any[]>> = new Map();
-const COMMUNITY_MEMBERS_ROSTER_SQL = `
-  SELECT u.id, u.username, u.display_name, u.avatar_url, cm.role, cm.joined_at
-  FROM community_members cm
-  JOIN users u ON u.id = cm.user_id
-  WHERE cm.community_id = $1
-  ORDER BY cm.role DESC, u.username`;
-
-/** Hydrate `{ id, role, joined_at }[]` with user profile fields (smaller Redis payload than full rows). */
-async function hydrateCommunityMembersFromIds(minimal) {
-  const ids = (Array.isArray(minimal) ? minimal : [])
-    .map((m) => (m && typeof m.id === "string" ? m.id : null))
-    .filter(Boolean);
-  if (!ids.length) return [];
-  const { rows: userRows } = await query(
-    `SELECT id, username, display_name, avatar_url
-       FROM users
-      WHERE id = ANY($1::uuid[])`,
-    [ids],
-  );
-  const userById = new Map(userRows.map((u: any) => [String(u.id), u]));
-  return minimal.map((m: any) => {
-    const u = (userById.get(String(m.id)) as any) || {};
-    return {
-      id: m.id,
-      username: u.username,
-      display_name: u.display_name,
-      avatar_url: u.avatar_url,
-      role: m.role,
-      joined_at: m.joined_at,
-    };
-  });
-}
-
-async function readMembersCacheValue(cacheKey) {
-  const raw = await getJsonCache(redis, cacheKey);
-  if (!raw) return null;
-  if (
-    typeof raw === "object" &&
-    !Array.isArray(raw) &&
-    raw.v === 2 &&
-    Array.isArray(raw.members)
-  ) {
-    return await hydrateCommunityMembersFromIds(raw.members);
-  }
-  if (Array.isArray(raw) && raw.length) return raw;
-  return null;
-}
-
-async function loadCommunityMembersRoster(communityId) {
-  const cacheKey = membersCacheKey(communityId);
-  const cached = await readMembersCacheValue(cacheKey);
-  if (cached) return cached;
-
-  return withDistributedSingleflight({
-    redis,
-    cacheKey,
-    inflight: communityMembersInflight,
-    readFresh: async () => {
-      const fresh = await readMembersCacheValue(cacheKey);
-      return fresh;
-    },
-    load: async () => {
-      const { rows } = await query(COMMUNITY_MEMBERS_ROSTER_SQL, [communityId]);
-      const minimal = rows.map((r) => ({
-        id: r.id,
-        role: r.role,
-        joined_at: r.joined_at,
-      }));
-      redis
-        .setex(
-          cacheKey,
-          MEMBERS_CACHE_TTL_SECS,
-          JSON.stringify({ v: 2, members: minimal }),
-        )
-        .catch(() => {});
-      return rows;
-    },
-  });
 }
 
 async function listCommunityRealtimeTargets(communityId, userId) {
@@ -835,27 +635,6 @@ function applyCommunityChannelLastMessageMetadata(channels, latestByChannel) {
     ch.last_message_author_id = latest.author_id || null;
     ch.last_message_at = latest.at || null;
   }
-}
-
-function parseCommunitiesPageQuery(req) {
-  const rawL = req.query.limit;
-  const rawA = req.query.after;
-  let limit = null;
-  if (rawL !== undefined && String(rawL).length) {
-    const n = parseInt(String(rawL), 10);
-    if (!Number.isFinite(n) || n < 1 || n > 100) {
-      return { error: "limit must be an integer from 1 to 100" };
-    }
-    limit = n;
-  }
-  let after = null;
-  if (rawA !== undefined && String(rawA).length) {
-    const s = String(rawA).trim();
-    if (!uuidValidate(s)) return { error: "after must be a UUID" };
-    after = s;
-  }
-  if (after && !limit) return { error: "after requires limit" };
-  return { limit, after };
 }
 
 module.exports = {
