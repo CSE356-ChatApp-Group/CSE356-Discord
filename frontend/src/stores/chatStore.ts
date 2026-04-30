@@ -3,13 +3,31 @@ import { api, getToken, invalidateApiCache } from '../lib/api';
 import { wsManager } from '../lib/ws';
 import { useAuthStore } from './authStore';
 import type { Entity, MessagePaginationState } from './chatStoreTypes';
-export type { Entity, MessagePaginationState } from './chatStoreTypes';
+export type { ChatStateCommunityRemovalSlice, Entity, MessagePaginationState } from './chatStoreTypes';
 import {
   dedupeMessages,
   mergeLatestPageWithExisting,
   sortMessagesChronologically,
   upsertMessageChronologically,
 } from './chatStoreMessageList';
+import {
+  canAccessChannel,
+  channelCommunityId,
+  normalizeCommunityId,
+  preserveRecentLocalChannels,
+  requireCommunityId,
+  upsertChannel,
+} from './chatStoreChannelHelpers';
+import { removeCommunityState } from './chatStoreCommunityRemoval';
+import { loadedHistoryIncludesLatest, shouldFetchLatestMessages } from './chatStorePagination';
+import {
+  countUnreadChannels,
+  isChannelUnreadForUser,
+  isVisibleConversation,
+  normalizeConversationUnreadMetadata,
+  patchChannelRowById,
+  patchConversationRowById,
+} from './chatStoreUnreadModel';
 export const PRESENCE_STATUSES = ['online', 'idle', 'away', 'offline'] as const;
 export type PresenceStatus = (typeof PRESENCE_STATUSES)[number];
 const VALID_PRESENCE_STATUSES = new Set<string>(PRESENCE_STATUSES);
@@ -97,88 +115,6 @@ const DEFAULT_SEARCH_FILTERS: SearchFilters = {
 };
 let latestSearchRequestSeq = 0;
 
-function channelCommunityId(channel: Entity) {
-  return channel?.community_id || channel?.communityId || null;
-}
-
-function normalizeCommunityId(input: any): string {
-  const id = String(
-    input?.id
-      ?? input?.communityId
-      ?? input?.community_id
-      ?? input?.community?.id
-      ?? input?.community?.communityId
-      ?? input?.community?.community_id
-      ?? input?.data?.id
-      ?? '',
-  ).trim();
-  return id;
-}
-
-function requireCommunityId(id: string | null | undefined, action: string): string {
-  const normalized = String(id ?? '').trim();
-  if (!normalized) {
-    throw new Error(`${action} requires a valid community id`);
-  }
-  return normalized;
-}
-
-function canAccessChannel(channel: Entity | null | undefined) {
-  return Boolean(channel && (channel?.can_access ?? channel?.canAccess ?? !channel?.is_private));
-}
-
-function upsertChannel(channels: Entity[], incoming: Entity) {
-  if (!incoming?.id) return channels || [];
-  const list = Array.isArray(channels) ? channels : [];
-  const index = list.findIndex((channel) => channel.id === incoming.id);
-  if (index === -1) return [...list, incoming];
-
-  const next = [...list];
-  next[index] = { ...next[index], ...incoming };
-  return next;
-}
-
-function preserveRecentLocalChannels(serverChannels: Entity[], existingChannels: Entity[], communityId: string) {
-  const merged = Array.isArray(serverChannels) ? [...serverChannels] : [];
-  const seen = new Set(merged.map((channel) => channel?.id).filter(Boolean));
-  const now = Date.now();
-
-  for (const channel of Array.isArray(existingChannels) ? existingChannels : []) {
-    if (!channel?.id || seen.has(channel.id)) continue;
-    if (channelCommunityId(channel) !== communityId) continue;
-    const localCreatedAt = Number(channel._localCreatedAt || 0);
-    if (!localCreatedAt || now - localCreatedAt > 15_000) continue;
-    merged.push(channel);
-    seen.add(channel.id);
-  }
-
-  return merged;
-}
-
-function shouldFetchLatestMessages(state: Pick<ChatState, 'messages' | 'messagePagination'>, key?: string | null) {
-  if (!key) return true;
-  const loadedMessages = state.messages[key];
-  if (!Array.isArray(loadedMessages) || loadedMessages.length === 0) {
-    return true;
-  }
-
-  const pagination = state.messagePagination[key];
-  if (!pagination) return true;
-  return Boolean(pagination.hasNewer);
-}
-
-/** Only mark read / advance my_last_read when the loaded history includes the channel tail (no newer pages). */
-function loadedHistoryIncludesLatest(state: Pick<ChatState, 'messagePagination'>, key?: string | null) {
-  if (!key) return false;
-  return !state.messagePagination[key]?.hasNewer;
-}
-
-function removeKeyedState<T>(state: Record<string, T>, removedIds: Set<string>) {
-  return Object.fromEntries(
-    Object.entries(state || {}).filter(([key]) => !removedIds.has(key))
-  ) as Record<string, T>;
-}
-
 function hydrateAuthorFromSession(message: Entity) {
   if (!message || message.author) return message;
 
@@ -194,131 +130,6 @@ function hydrateAuthorFromSession(message: Entity) {
       display_name: currentUser.displayName,
       email: currentUser.email,
     },
-  };
-}
-
-function channelLastMessageId(channel: Entity) {
-  return channel?.last_message_id || channel?.lastMessageId || null;
-}
-
-function channelLastMessageAuthorId(channel: Entity) {
-  return channel?.last_message_author_id || channel?.lastMessageAuthorId || null;
-}
-
-function channelMyLastReadMessageId(channel: Entity) {
-  return channel?.my_last_read_message_id || channel?.myLastReadMessageId || null;
-}
-
-function conversationLastMessageId(conversation: Entity) {
-  return conversation?.last_message_id || conversation?.lastMessageId || null;
-}
-
-function conversationLastMessageAuthorId(conversation: Entity) {
-  return conversation?.last_message_author_id || conversation?.lastMessageAuthorId || null;
-}
-
-function conversationMyLastReadMessageId(conversation: Entity) {
-  return conversation?.my_last_read_message_id || conversation?.myLastReadMessageId || null;
-}
-
-function normalizeConversationUnreadMetadata(
-  conversation: Entity,
-  currentUserId?: string,
-): Entity {
-  const hasActivity = Boolean(conversation?.has_new_activity ?? conversation?.hasNewActivity);
-  const rawCount = Number(conversation?.unread_message_count ?? 0);
-  if (rawCount > 0 || hasActivity) {
-    return {
-      ...conversation,
-      unread_message_count: Math.max(0, rawCount),
-      has_new_activity: hasActivity,
-      hasNewActivity: hasActivity,
-    };
-  }
-
-  const lastMessageId = conversationLastMessageId(conversation);
-  const authoredByMe = Boolean(
-    currentUserId
-    && conversationLastMessageAuthorId(conversation)
-    && conversationLastMessageAuthorId(conversation) === currentUserId,
-  );
-  const unread =
-    Boolean(lastMessageId)
-    && !authoredByMe
-    && conversationMyLastReadMessageId(conversation) !== lastMessageId;
-  return {
-    ...conversation,
-    unread_message_count: unread ? 1 : 0,
-    has_new_activity: unread,
-    hasNewActivity: unread,
-  };
-}
-
-function isChannelUnreadForUser(channel: Entity, currentUserId?: string, activeChannelId?: string | null) {
-  if (!channel || !currentUserId) return false;
-  if (activeChannelId && channel.id === activeChannelId) return false;
-  const lastMessageId = channelLastMessageId(channel);
-  if (!lastMessageId) return false;
-  if (channelLastMessageAuthorId(channel) === currentUserId) return false;
-  return channelMyLastReadMessageId(channel) !== lastMessageId;
-}
-
-function countUnreadChannels(channels: Entity[], currentUserId?: string, activeChannelId?: string | null) {
-  if (!currentUserId || !Array.isArray(channels)) return 0;
-  return channels.reduce((count, channel) => count + (isChannelUnreadForUser(channel, currentUserId, activeChannelId) ? 1 : 0), 0);
-}
-
-function patchConversationRowById(
-  conversations: Entity[],
-  conversationId: string,
-  patch: Record<string, unknown>,
-): Entity[] {
-  const idx = conversations.findIndex((c) => c.id === conversationId);
-  if (idx === -1) return conversations;
-  const next = [...conversations];
-  next[idx] = { ...next[idx], ...patch };
-  return next;
-}
-
-/** Immutable single-row patch by channel id; returns original ref if id not found. */
-function patchChannelRowById(
-  channels: Entity[],
-  channelId: string,
-  patch: Record<string, unknown>,
-): Entity[] {
-  const idx = channels.findIndex((c) => c.id === channelId);
-  if (idx === -1) return channels;
-  const next = [...channels];
-  next[idx] = { ...next[idx], ...patch };
-  return next;
-}
-
-function isVisibleConversation(conv: Entity, currentUserId?: string) {
-  if (!conv) return false;
-  if (!currentUserId) return true;
-  if (conv.is_group) return true;
-  const participants = Array.isArray(conv.participants) ? conv.participants : [];
-  return participants.some((participant: Entity) => participant?.id && participant.id !== currentUserId);
-}
-
-function removeCommunityState(state: ChatState, communityId: string) {
-  const removedChannelIds = state.channels
-    .filter((channel) => (channel.community_id || channel.communityId) === communityId)
-    .map((channel) => channel.id);
-  const removedSet = new Set(removedChannelIds);
-  const nextMessages = removeKeyedState(state.messages, removedSet);
-  const nextMessagePagination = removeKeyedState(state.messagePagination, removedSet);
-  const isActiveCommunity = state.activeCommunity?.id === communityId;
-  const activeChannelRemoved = state.activeChannel?.id ? removedSet.has(state.activeChannel.id) : false;
-
-  return {
-    communities: state.communities.filter((community) => community.id !== communityId),
-    activeCommunity: isActiveCommunity ? null : state.activeCommunity,
-    channels: isActiveCommunity ? [] : state.channels,
-    activeChannel: isActiveCommunity || activeChannelRemoved ? null : state.activeChannel,
-    members: isActiveCommunity ? [] : state.members,
-    messages: nextMessages,
-    messagePagination: nextMessagePagination,
   };
 }
 
