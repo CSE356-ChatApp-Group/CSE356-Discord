@@ -13,10 +13,15 @@ const { wsReconnectsTotal } = require('../src/utils/metrics');
 import {
   uniqueSuffix,
   createAuthenticatedUser,
+  counterTotal,
   connectWebSocket,
   connectWebSocketOpenOnly,
   connectWebSocketWithOpenFrame,
   closeWebSocket,
+  waitForCounterTotal,
+  waitForLoggedWsEvent,
+  waitForRedisValue,
+  withEnv,
   waitForWsEvent,
   waitForNoWsEvent,
   waitForRejectedWebSocketConnection,
@@ -24,63 +29,6 @@ import {
 
 let server: any;
 let port: number;
-
-async function counterTotal(metric: { get?: () => any; hashMap?: Record<string, { value?: number }> }): Promise<number> {
-  const hashMap = metric?.hashMap;
-  if (hashMap && typeof hashMap === 'object') {
-    return Object.values(hashMap).reduce(
-      (sum: number, entry: { value?: number }) => sum + Number(entry?.value || 0),
-      0,
-    );
-  }
-
-  const snapshot = await Promise.resolve(metric.get?.());
-  const values = Array.isArray(snapshot?.values) ? snapshot.values : [];
-  return values.reduce((sum: number, entry: { value?: number }) => sum + Number(entry?.value || 0), 0);
-}
-
-async function waitForCounterTotal(
-  metric: { get?: () => any; hashMap?: Record<string, { value?: number }> },
-  expected: number,
-  timeoutMs = 1500,
-): Promise<number> {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    const total = await counterTotal(metric);
-    if (total >= expected) return total;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-
-  return counterTotal(metric);
-}
-
-async function waitForLoggedWsEvent(
-  ws: any,
-  frames: any[],
-  predicate: (event: any) => boolean,
-  timeoutMs = 4000,
-): Promise<any> {
-  const existing = frames.find(predicate);
-  if (existing) return existing;
-
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      ws.off('message', onMessage);
-      reject(new Error('Timed out waiting for websocket event'));
-    }, timeoutMs);
-
-    const onMessage = () => {
-      const match = frames.find(predicate);
-      if (!match) return;
-      clearTimeout(timer);
-      ws.off('message', onMessage);
-      resolve(match);
-    };
-
-    ws.on('message', onMessage);
-  });
-}
 
 async function waitForServerSideSocket(
   userId: string,
@@ -94,42 +42,6 @@ async function waitForServerSideSocket(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for server-side websocket for user ${userId}`);
-}
-
-async function waitForRedisValue(
-  key: string,
-  timeoutMs = 1500,
-): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await redis.get(key);
-    if (typeof value === 'string' && value.length) return value;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`Timed out waiting for redis key ${key}`);
-}
-
-async function withEnv<T>(
-  key: string,
-  value: string | undefined,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const previous = process.env[key];
-  if (value === undefined) {
-    delete process.env[key];
-  } else {
-    process.env[key] = value;
-  }
-
-  try {
-    return await fn();
-  } finally {
-    if (previous === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = previous;
-    }
-  }
 }
 
 beforeAll(async () => {

@@ -9,7 +9,12 @@
 import { randomUUID } from 'crypto';
 import { request, app, pool, redis } from './runtime';
 
-import { uniqueSuffix, createAuthenticatedUser } from './helpers';
+import {
+  uniqueSuffix,
+  createAuthenticatedUser,
+  createCommunityChannelFixture,
+  postMessage,
+} from './helpers';
 const { flushDirtyReadStatesToDB, enqueueBatchReadStateUpdate } = require('../src/messages/readState/batchReadState');
 const {
   flushDirtyLastMessagePointers,
@@ -47,28 +52,15 @@ function messagesRouteSqlHistogramSnapshot() {
 describe('POST /messages idempotency', () => {
   it('returns the same message id when retrying with the same Idempotency-Key', async () => {
     const owner = await createAuthenticatedUser('idemretry');
-    const slug = `idem-${uniqueSuffix()}`;
-    const communityRes = await request(app)
-      .post('/api/v1/communities')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ slug, name: slug, description: 'idempotency' });
-    expect(communityRes.status).toBe(201);
-    const communityId = communityRes.body.community.id;
-
-    const chanRes = await request(app)
-      .post('/api/v1/channels')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ communityId, name: `idem-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
-    expect(chanRes.status).toBe(201);
-    const channelId = chanRes.body.channel.id;
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'idem',
+      channelPrefix: 'idem-ch',
+      description: 'idempotency',
+    });
 
     const idemKey = `idem-${uniqueSuffix()}`;
     const body = { channelId, content: 'idempotent body' };
-    const r1 = await request(app)
-      .post('/api/v1/messages')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .set('Idempotency-Key', idemKey)
-      .send(body);
+    const r1 = await postMessage(owner.accessToken, body, { idempotencyKey: idemKey });
     expect(r1.status).toBe(201);
     const id1 = r1.body.message.id;
     // Channel `message:created` fanout runs on fanout:critical after HTTP 201 (default).
@@ -76,11 +68,7 @@ describe('POST /messages idempotency', () => {
     expect(r1.body.realtimeUserFanoutDeferred).toBe(true);
     expect(typeof r1.body.realtimePublishedAt).toBe('string');
 
-    const r2 = await request(app)
-      .post('/api/v1/messages')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .set('Idempotency-Key', idemKey)
-      .send(body);
+    const r2 = await postMessage(owner.accessToken, body, { idempotencyKey: idemKey });
     expect(r2.status).toBe(201);
     expect(r2.body.message.id).toBe(id1);
     expect(r2.body.realtimeChannelFanoutComplete).toBe(false);
@@ -90,34 +78,17 @@ describe('POST /messages idempotency', () => {
 
   it('concurrent POSTs with the same Idempotency-Key resolve to one message', async () => {
     const owner = await createAuthenticatedUser('idemconc');
-    const slug = `idemc-${uniqueSuffix()}`;
-    const communityRes = await request(app)
-      .post('/api/v1/communities')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ slug, name: slug, description: 'idempotency concurrent' });
-    expect(communityRes.status).toBe(201);
-    const communityId = communityRes.body.community.id;
-
-    const chanRes = await request(app)
-      .post('/api/v1/channels')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ communityId, name: `idemc-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
-    expect(chanRes.status).toBe(201);
-    const channelId = chanRes.body.channel.id;
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'idemc',
+      channelPrefix: 'idemc-ch',
+      description: 'idempotency concurrent',
+    });
 
     const idemKey = `idem-conc-${uniqueSuffix()}`;
     const body = { channelId, content: 'concurrent idempotent' };
     const [a, b] = await Promise.all([
-      request(app)
-        .post('/api/v1/messages')
-        .set('Authorization', `Bearer ${owner.accessToken}`)
-        .set('Idempotency-Key', idemKey)
-        .send(body),
-      request(app)
-        .post('/api/v1/messages')
-        .set('Authorization', `Bearer ${owner.accessToken}`)
-        .set('Idempotency-Key', idemKey)
-        .send(body),
+      postMessage(owner.accessToken, body, { idempotencyKey: idemKey }),
+      postMessage(owner.accessToken, body, { idempotencyKey: idemKey }),
     ]);
 
     expect([a.status, b.status].every((s) => s === 201 || s === 409)).toBe(true);
@@ -140,32 +111,23 @@ describe('POST /messages idempotency', () => {
 describe('Read state writes', () => {
   it('treats concurrent mark-read requests idempotently and never moves the cursor backwards', async () => {
     const owner = await createAuthenticatedUser('readrace');
-    const slug = `read-race-${uniqueSuffix()}`;
-    const communityRes = await request(app)
-      .post('/api/v1/communities')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ slug, name: slug, description: 'read race coverage' });
-    expect(communityRes.status).toBe(201);
-    const communityId = communityRes.body.community.id;
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'read-race',
+      channelPrefix: 'read-race',
+      description: 'read race coverage',
+    });
 
-    const channelRes = await request(app)
-      .post('/api/v1/channels')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ communityId, name: `read-race-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
-    expect(channelRes.status).toBe(201);
-    const channelId = channelRes.body.channel.id;
-
-    const firstMessageRes = await request(app)
-      .post('/api/v1/messages')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ channelId, content: 'first read target' });
+    const firstMessageRes = await postMessage(owner.accessToken, {
+      channelId,
+      content: 'first read target',
+    });
     expect(firstMessageRes.status).toBe(201);
     const firstMessageId = firstMessageRes.body.message.id;
 
-    const secondMessageRes = await request(app)
-      .post('/api/v1/messages')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ channelId, content: 'second read target' });
+    const secondMessageRes = await postMessage(owner.accessToken, {
+      channelId,
+      content: 'second read target',
+    });
     expect(secondMessageRes.status).toBe(201);
     const secondMessageId = secondMessageRes.body.message.id;
 
@@ -207,25 +169,13 @@ describe('Read state writes', () => {
 
   it('flush silently drops dirty entry when referenced message has been hard-deleted', async () => {
     const owner = await createAuthenticatedUser('rsdeleted');
-    const slug = `rsdel-${uniqueSuffix()}`;
-    const communityRes = await request(app)
-      .post('/api/v1/communities')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ slug, name: slug, description: 'deleted msg flush' });
-    expect(communityRes.status).toBe(201);
-    const communityId = communityRes.body.community.id;
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'rsdel',
+      channelPrefix: 'rsdel-ch',
+      description: 'deleted msg flush',
+    });
 
-    const channelRes = await request(app)
-      .post('/api/v1/channels')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ communityId, name: `rsdel-ch-${uniqueSuffix()}`.slice(0, 32), isPrivate: false });
-    expect(channelRes.status).toBe(201);
-    const channelId = channelRes.body.channel.id;
-
-    const msgRes = await request(app)
-      .post('/api/v1/messages')
-      .set('Authorization', `Bearer ${owner.accessToken}`)
-      .send({ channelId, content: 'to be deleted' });
+    const msgRes = await postMessage(owner.accessToken, { channelId, content: 'to be deleted' });
     expect(msgRes.status).toBe(201);
     const messageId = msgRes.body.message.id;
     const messageCreatedAt = msgRes.body.message.created_at;

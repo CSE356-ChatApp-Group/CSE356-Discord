@@ -6,7 +6,7 @@
  */
 
 import { WebSocket } from 'ws';
-import { request, app } from './runtime';
+import { request, app, redis } from './runtime';
 
 // ── User helpers ──────────────────────────────────────────────────────────────
 
@@ -280,4 +280,174 @@ export function waitForNoWsEvent(
 
     ws.on('message', onMessage);
   });
+}
+
+// ── Reusable HTTP fixture helpers ────────────────────────────────────────────
+
+export async function createCommunity(
+  accessToken: string,
+  opts: { slugPrefix: string; description?: string; name?: string },
+): Promise<{ id: string; slug: string }> {
+  const slug = `${opts.slugPrefix}-${uniqueSuffix()}`;
+  const name = opts.name || slug;
+  const description = opts.description || opts.slugPrefix;
+  const res = await request(app)
+    .post('/api/v1/communities')
+    .set('Authorization', `Bearer ${accessToken}`)
+    .send({ slug, name, description });
+  expect(res.status).toBe(201);
+  return { id: res.body.community.id, slug };
+}
+
+export async function createChannel(
+  accessToken: string,
+  opts: {
+    communityId: string;
+    namePrefix: string;
+    isPrivate?: boolean;
+    description?: string;
+  },
+): Promise<{ id: string }> {
+  const channelName = `${opts.namePrefix}-${uniqueSuffix()}`.slice(0, 32);
+  const res = await request(app)
+    .post('/api/v1/channels')
+    .set('Authorization', `Bearer ${accessToken}`)
+    .send({
+      communityId: opts.communityId,
+      name: channelName,
+      isPrivate: Boolean(opts.isPrivate),
+      ...(opts.description ? { description: opts.description } : {}),
+    });
+  expect(res.status).toBe(201);
+  return { id: res.body.channel.id };
+}
+
+export async function createCommunityChannelFixture(
+  accessToken: string,
+  opts: {
+    slugPrefix: string;
+    channelPrefix: string;
+    description?: string;
+    isPrivate?: boolean;
+  },
+): Promise<{ communityId: string; channelId: string }> {
+  const { id: communityId } = await createCommunity(accessToken, {
+    slugPrefix: opts.slugPrefix,
+    description: opts.description,
+  });
+  const { id: channelId } = await createChannel(accessToken, {
+    communityId,
+    namePrefix: opts.channelPrefix,
+    isPrivate: opts.isPrivate,
+  });
+  return { communityId, channelId };
+}
+
+export async function postMessage(
+  accessToken: string,
+  payload: { channelId?: string; conversationId?: string; content: string },
+  opts: { idempotencyKey?: string } = {},
+) {
+  const req = request(app)
+    .post('/api/v1/messages')
+    .set('Authorization', `Bearer ${accessToken}`);
+  if (opts.idempotencyKey) req.set('Idempotency-Key', opts.idempotencyKey);
+  return req.send(payload);
+}
+
+// ── Reusable websocket/metrics polling helpers ───────────────────────────────
+
+export async function counterTotal(
+  metric: { get?: () => any; hashMap?: Record<string, { value?: number }> },
+): Promise<number> {
+  const hashMap = metric?.hashMap;
+  if (hashMap && typeof hashMap === 'object') {
+    return Object.values(hashMap).reduce(
+      (sum: number, entry: { value?: number }) => sum + Number(entry?.value || 0),
+      0,
+    );
+  }
+
+  const snapshot = await Promise.resolve(metric.get?.());
+  const values = Array.isArray(snapshot?.values) ? snapshot.values : [];
+  return values.reduce((sum: number, entry: { value?: number }) => sum + Number(entry?.value || 0), 0);
+}
+
+export async function waitForCounterTotal(
+  metric: { get?: () => any; hashMap?: Record<string, { value?: number }> },
+  expected: number,
+  timeoutMs = 1500,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const total = await counterTotal(metric);
+    if (total >= expected) return total;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  return counterTotal(metric);
+}
+
+export async function waitForLoggedWsEvent(
+  ws: any,
+  frames: any[],
+  predicate: (event: any) => boolean,
+  timeoutMs = 4000,
+): Promise<any> {
+  const existing = frames.find(predicate);
+  if (existing) return existing;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.off('message', onMessage);
+      reject(new Error('Timed out waiting for websocket event'));
+    }, timeoutMs);
+
+    const onMessage = () => {
+      const match = frames.find(predicate);
+      if (!match) return;
+      clearTimeout(timer);
+      ws.off('message', onMessage);
+      resolve(match);
+    };
+
+    ws.on('message', onMessage);
+  });
+}
+
+export async function waitForRedisValue(
+  key: string,
+  timeoutMs = 1500,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await redis.get(key);
+    if (typeof value === 'string' && value.length) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for redis key ${key}`);
+}
+
+export async function withEnv<T>(
+  key: string,
+  value: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = process.env[key];
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = previous;
+    }
+  }
 }
