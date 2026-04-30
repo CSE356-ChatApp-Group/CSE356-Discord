@@ -167,6 +167,46 @@ function applyChannelLastMessageMetadata(
   }
 }
 
+async function fetchUnreadCountsForChannels(userId, channelIds) {
+  if (!channelIds.length) return new Map();
+  const { rows } = await queryRead({
+    text: `
+      WITH requested_channels AS (
+        SELECT unnest($2::uuid[]) AS id
+      )
+      SELECT
+        rc.id::text AS channel_id,
+        COUNT(m.id)::int AS unread_count
+      FROM requested_channels rc
+      LEFT JOIN read_states rs
+        ON rs.channel_id = rc.id
+       AND rs.user_id = $1
+      LEFT JOIN LATERAL (
+        SELECT last_read.created_at
+        FROM messages last_read
+        WHERE last_read.id = rs.last_read_message_id
+      ) last_read ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT m.id
+        FROM messages m
+        WHERE m.channel_id = rc.id
+          AND m.deleted_at IS NULL
+          AND m.author_id IS DISTINCT FROM $1
+          AND m.created_at > COALESCE(rs.last_read_message_created_at, last_read.created_at, '-infinity'::timestamptz)
+        LIMIT 100
+      ) m ON TRUE
+      GROUP BY rc.id`,
+    values: [userId, channelIds],
+    query_timeout: CHANNELS_UNREAD_FALLBACK_QUERY_TIMEOUT_MS,
+  });
+  return new Map(
+    rows.map((row) => [
+      row.channel_id,
+      Math.max(0, Number(row.unread_count || 0)),
+    ]),
+  );
+}
+
 async function listCommunityUserIds(communityId, client = { query }) {
   const { rows } = await client.query(
     'SELECT user_id::text AS user_id FROM community_members WHERE community_id = $1',
@@ -302,6 +342,14 @@ const CHANNELS_LIST_CACHE_TTL_SECS =
 const _channelMsgCountTtl = parseInt(process.env.CHANNEL_MSG_COUNT_REDIS_TTL_SECS || '2592000', 10);
 const CHANNEL_MSG_COUNT_REDIS_TTL_SECS =
   Number.isFinite(_channelMsgCountTtl) && _channelMsgCountTtl > 0 ? _channelMsgCountTtl : 2_592_000;
+const _channelsUnreadFallbackQueryTimeout = parseInt(
+  process.env.CHANNELS_UNREAD_FALLBACK_QUERY_TIMEOUT_MS || '750',
+  10,
+);
+const CHANNELS_UNREAD_FALLBACK_QUERY_TIMEOUT_MS =
+  Number.isFinite(_channelsUnreadFallbackQueryTimeout) && _channelsUnreadFallbackQueryTimeout >= 100
+    ? Math.min(5000, _channelsUnreadFallbackQueryTimeout)
+    : 750;
 const channelsListInflight = new Map();
 
 // ── List ───────────────────────────────────────────────────────────────────────
@@ -415,15 +463,12 @@ router.get('/',
               }
 
               if (missingChannels.length > 0) {
-                // Avoid cold COUNT(*) fallback in this hot path. When Redis counters
-                // are missing, infer an unread indicator from denormalized last-read
-                // metadata and let async write paths repopulate exact counters.
+                const fallbackCounts = await fetchUnreadCountsForChannels(
+                  userId,
+                  missingChannels.map((ch) => ch.id),
+                );
                 for (const ch of missingChannels) {
-                  const hasUnread =
-                    Boolean(ch.last_message_id) &&
-                    ch.last_message_id !== ch.my_last_read_message_id &&
-                    ch.last_message_author_id !== userId;
-                  ch.unread_message_count = hasUnread ? 1 : 0;
+                  ch.unread_message_count = fallbackCounts.get(String(ch.id)) || 0;
                 }
               }
               // Opportunistic TTL repair for legacy channel:msg_count keys created without EX.
