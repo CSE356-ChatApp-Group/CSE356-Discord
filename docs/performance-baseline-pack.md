@@ -11,14 +11,14 @@ Use this pack to compare performance runs consistently before and after tuning.
 ## Regenerate runs
 
 ```bash
-./scripts/run-staging-capacity.sh slo
-./scripts/run-staging-capacity.sh break
+./scripts/load/run-staging-capacity.sh slo
+./scripts/load/run-staging-capacity.sh break
 ```
 
 ## Compare any two runs
 
 ```bash
-node "./scripts/compare-capacity-runs.mjs" \
+node "./scripts/load/compare-capacity-runs.mjs" \
   "/absolute/path/to/baseline-run-dir" \
   "/absolute/path/to/candidate-run-dir" \
   > "artifacts/load-tests/compare-$(date -u +%Y%m%dT%H%M%SZ).md"
@@ -40,7 +40,7 @@ Channel posts publish to **`channel:<uuid>` first**, then duplicate to each visi
 2. After a load test, pull Prometheus (see [`docs/operations-monitoring.md`](./operations-monitoring.md)) or run:
 
 ```bash
-PROMETHEUS_URL='https://your-prometheus' ./scripts/measure-fanout-baseline.sh
+PROMETHEUS_URL='https://your-prometheus' ./scripts/ops/measure-fanout-baseline.sh
 ```
 
 3. Correlate `POST /api/v1/messages` latency with `presence_fanout_recipients` / Redis publish rates.

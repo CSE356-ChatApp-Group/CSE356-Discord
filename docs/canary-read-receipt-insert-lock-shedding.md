@@ -22,7 +22,7 @@ Conservative `PUT /api/v1/messages/:id/read` soft-defer under per-process channe
 
 3. **Pause rollout** — do **not** unset `DEPLOY_STOP_AFTER_VM3` or run the rest of the multi script until soak completes.
 
-4. **Observe 10–15 minutes** — Prometheus (or `./scripts/metrics-snapshot.sh` from a host that can reach it).
+4. **Observe 10–15 minutes** — Prometheus (or `./scripts/metrics/metrics-snapshot.sh` from a host that can reach it).
 
 5. **Compare `vm="vm3"` (treatment) vs `vm=~"vm1|vm2"` (control)** — same queries on both slices; control stays on the previous build during the canary.
 
@@ -104,10 +104,10 @@ Correlate nginx **502/504** in Loki if Node metrics look healthy but users repor
 ## Snapshot CLI
 
 ```bash
-PROMETHEUS_URL='http://<prometheus-host>:9090' ./scripts/metrics-snapshot.sh --write var/metrics-snapshot.txt
+PROMETHEUS_URL='http://<prometheus-host>:9090' ./scripts/metrics/metrics-snapshot.sh --write var/metrics-snapshot.txt
 ```
 
-[`scripts/metrics-snapshot.sh`](../scripts/metrics-snapshot.sh) includes several of the series above for paste-into-chat triage.
+[`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh) includes several of the series above for paste-into-chat triage.
 
 ## Staging (optional)
 

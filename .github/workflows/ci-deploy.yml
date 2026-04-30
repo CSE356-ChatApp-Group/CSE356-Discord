@@ -33,23 +33,23 @@ jobs:
           bash -n deploy/deploy-prod-multi.sh
           bash -n deploy/deploy-prod-multi-emergency.sh
           bash -n deploy/deploy-prod-multi-fast-stabilize.sh
-          bash -n scripts/prod-observe.sh
-          bash -n scripts/prod-nginx-audit.sh
-          bash -n scripts/prod-observe-loop.sh
-          bash -n scripts/prod-log-correlate.sh
-          bash -n scripts/prod-capacity-snapshot.sh
-          bash -n scripts/prod-prom-snapshot.sh
+          bash -n scripts/ops/prod-observe.sh
+          bash -n scripts/ops/prod-nginx-audit.sh
+          bash -n scripts/ops/prod-observe-loop.sh
+          bash -n scripts/ops/prod-log-correlate.sh
+          bash -n scripts/ops/prod-capacity-snapshot.sh
+          bash -n scripts/ops/prod-prom-snapshot.sh
           bash -n deploy/cutover-to-remote-db.sh
           bash -n deploy/tune-remote-db-postgres.sh
           bash -n deploy/postgres-migrate-data-volume.sh
           bash -n deploy/install-db-metrics-exporters.sh
           node --check deploy/candidate-ws-smoke.cjs
-          bash -n scripts/synthetic-probe.sh
-          bash -n scripts/metrics-snapshot.sh
-          bash -n scripts/self-hosted-actions-runner-disk-cleanup.sh
-          bash -n scripts/gh-set-deploy-ssh-secrets.sh
-          bash -n scripts/recommended-release-verify.sh
-          bash -n scripts/measure-fanout-baseline.sh
+          bash -n scripts/ops/synthetic-probe.sh
+          bash -n scripts/metrics/metrics-snapshot.sh
+          bash -n scripts/ops/self-hosted-actions-runner-disk-cleanup.sh
+          bash -n scripts/ops/gh-set-deploy-ssh-secrets.sh
+          bash -n scripts/release/recommended-release-verify.sh
+          bash -n scripts/ops/measure-fanout-baseline.sh
           python3 -m py_compile deploy/ensure-pgdump-env.py
           python3 -m py_compile deploy/apply-env-profile.py
           python3 -m py_compile deploy/prometheus-db-file-sd.py
@@ -64,7 +64,7 @@ jobs:
             check rules /rules/alerts.yml
 
       - name: Validate Grafana dashboards
-        run: node scripts/validate-grafana-dashboards.mjs
+        run: node scripts/monitoring/validate-grafana-dashboards.mjs
 
       - name: Validate Ansible playbooks (syntax)
         run: |

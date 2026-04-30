@@ -11,6 +11,6 @@ When the user asks about **latency, outages, capacity, alerts, or production beh
 2. **Triage** with `docs/RUNBOOKS.md` and exact thresholds in `infrastructure/monitoring/alerts.yml`.
 3. **Code truth** for exported series: `backend/src/utils/metrics.ts` and `backend/src/utils/overload.ts`.
 
-**Telemetry for the agent:** Ask the user to run `PROMETHEUS_URL=... ./scripts/metrics-snapshot.sh` (optionally `--write var/metrics-snapshot.txt`) from any host that can reach Prometheus, then **paste the output**. Do not invent metric values.
+**Telemetry for the agent:** Ask the user to run `PROMETHEUS_URL=... ./scripts/metrics/metrics-snapshot.sh` (optionally `--write var/metrics-snapshot.txt`) from any host that can reach Prometheus, then **paste the output**. Do not invent metric values.
 
 Prefer **evidence → change**: snapshot + logs correlation, then **minimal** code or config patches. Keep `docs/env.md` in sync when adding tunables.

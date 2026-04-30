@@ -17,7 +17,7 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
-      # Synthetic probe metrics from scripts/synthetic-probe.sh (TEXTFILE_DIR on host).
+      # Synthetic probe metrics from scripts/ops/synthetic-probe.sh (TEXTFILE_DIR on host).
       - ./node_exporter_textfile:/var/lib/node_exporter/textfile_collector:ro
 
   promtail:

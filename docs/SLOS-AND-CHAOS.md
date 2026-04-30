@@ -5,7 +5,7 @@
 - **Workflow:** [`.github/workflows/staging-load-gate.yml`](../.github/workflows/staging-load-gate.yml)
 - **Script:** [`load-tests/staging-capacity.js`](../load-tests/staging-capacity.js)
 - **`LOAD_PROFILE=slo`:** fixed arrival rate for steady-state checks; summary exported as `k6-slo-summary.json`.
-- **Run comparison helper:** [`scripts/compare-capacity-runs.mjs`](../scripts/compare-capacity-runs.mjs)
+- **Run comparison helper:** [`scripts/load/compare-capacity-runs.mjs`](../scripts/load/compare-capacity-runs.mjs)
 - **Baseline pack guide:** [`docs/performance-baseline-pack.md`](performance-baseline-pack.md)
 
 ### KPIs (optimization counters)
@@ -24,7 +24,7 @@ If the weekly gate is skipped (missing secrets) or profiles change, record **why
 When evaluating tuning changes, always compare same-profile runs (`slo` vs `slo`, `break` vs `break`) with:
 
 ```bash
-node ./scripts/compare-capacity-runs.mjs <baseline-run-dir> <candidate-run-dir>
+node ./scripts/load/compare-capacity-runs.mjs <baseline-run-dir> <candidate-run-dir>
 ```
 
 ## Chaos drills (staging only)

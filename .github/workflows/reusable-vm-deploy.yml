@@ -191,7 +191,7 @@ jobs:
           set -euo pipefail
           mkdir -p .nginx-audit
           git fetch origin main
-          git show "origin/main:scripts/prod-nginx-audit.sh" > .nginx-audit/prod-nginx-audit.sh
+          git show "origin/main:scripts/ops/prod-nginx-audit.sh" > .nginx-audit/prod-nginx-audit.sh
           chmod +x .nginx-audit/prod-nginx-audit.sh
 
       - name: Audit prod nginx parity before deploy

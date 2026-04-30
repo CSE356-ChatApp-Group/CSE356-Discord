@@ -70,7 +70,7 @@ function maybeLogSlowHttpRequestTrace(args) {
       db_wall_parallel_overlap_hint: overlap || undefined,
       db_query_samples: store.dbSamples,
       correlate_pg_stat_statements:
-        'DB_SSH=user@db-host ./scripts/pg-stat-statements-snapshot.sh',
+        'DB_SSH=user@db-host ./scripts/postgres/pg-stat-statements-snapshot.sh',
       explain_workflow: 'docs/operations-monitoring.md#slow-route-explain-workflow',
     },
     'Slow HTTP request (SLOW_HTTP_TRACE_MIN_MS) outside excluded path prefixes',

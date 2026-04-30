@@ -76,7 +76,7 @@ GitHub’s unauthenticated API is easy to rate-limit; **`gh release download`** 
 **Preferred:** build the same tarball CI produces, then point `deploy-prod.sh` at it (no `gh` on the release step; preflight skips `gh` when this is set):
 
 ```bash
-./scripts/package-release-artifact.sh
+./scripts/release/package-release-artifact.sh
 SHA=$(git rev-parse HEAD)
 export LOCAL_ARTIFACT_PATH="$PWD/releases/chatapp-${SHA}.tar.gz"
 
@@ -119,10 +119,10 @@ Log in (`gh auth login`) with permission to manage secrets. Environments **`stag
 One-shot helper (scans host keys, then uploads):
 
 ```bash
-./scripts/gh-set-deploy-ssh-secrets.sh --key ~/.ssh/your-deploy-key.ed25519 \
+./scripts/ops/gh-set-deploy-ssh-secrets.sh --key ~/.ssh/your-deploy-key.ed25519 \
   --scan-hosts "136.114.103.71" --env staging
 
-./scripts/gh-set-deploy-ssh-secrets.sh --key ~/.ssh/your-deploy-key.ed25519 \
+./scripts/ops/gh-set-deploy-ssh-secrets.sh --key ~/.ssh/your-deploy-key.ed25519 \
   --scan-hosts "130.245.136.44,130.245.136.21" --env production
 ```
 
@@ -276,7 +276,7 @@ Production deploys are designed for **no hard cut** while old and new binaries b
 3. **Preflight prod** — `./deploy/preflight-check.sh prod <sha> <PROD_USER> <PROD_HOST> <GITHUB_REPO>` from a host that can SSH and reach the artifact (VPN/firewall as needed).
 4. **Run prod deploy** — `CHATAPP_INSTANCES=4 ./deploy/deploy-prod.sh <sha>` (or **Manual Deploy** → `production` in GitHub Actions). The script: **pg_dump backup** → candidate on a **spare non-live port** when prod already has 3+ live workers (or the legacy alternate port in 1–2 worker layouts) → health + smoke **before** nginx sends live traffic → **pin candidate → roll non-candidate workers → restore upstream** so users keep an upstream during the swap.
 5. **Migrations** — keep changes **backward compatible** across the window where both versions may answer (see step 9 narrative below). Destructive DDL only with a separate maintenance plan.
-6. **After cutover** — `./scripts/prod-nginx-audit.sh`, watch Grafana/Prometheus, keep old release on disk for rollback. For a single local bundle (backend tests + staging API contract + deploy script sanity + optional grader gate): `npm run verify:release` (set `SKIP_GRADER_WATCH_GATE=1` if you are not in an active soak window, or truncate stale `artifacts/rollout-monitoring/grader-watch-events.jsonl` before gating).
+6. **After cutover** — `./scripts/ops/prod-nginx-audit.sh`, watch Grafana/Prometheus, keep old release on disk for rollback. For a single local bundle (backend tests + staging API contract + deploy script sanity + optional grader gate): `npm run verify:release` (set `SKIP_GRADER_WATCH_GATE=1` if you are not in an active soak window, or truncate stale `artifacts/rollout-monitoring/grader-watch-events.jsonl` before gating).
 7. **Rollback** — re-run `deploy-prod.sh` with the **previous SHA**, or use the script’s rollback path / nginx upstream fix (see **Immediate Rollback** below); do not blind-`sed` nginx ports.
 
 **Not touched by this process:** DNS (same VM), Postgres availability (brief pool pressure only if migrations are heavy). **Downtime risk** is usually mis-nginx or bad migration, not the Node swap itself.
@@ -311,7 +311,7 @@ This:
 After any hand-edited nginx config or if you see `no live upstreams` in `error.log`:
 
 ```bash
-./scripts/prod-nginx-audit.sh
+./scripts/ops/prod-nginx-audit.sh
 ```
 
 This fails if active `chatapp@` workers are missing from `upstream app` (for example `4000/4001` in dual-worker mode, or `4000..4003` in 4-worker mode).
@@ -355,10 +355,10 @@ Run load on **staging** first (same `CHATAPP_INSTANCES` shape as prod when possi
 
 ```bash
 # Steady SLO probe (~8m) — see optimization_* thresholds in staging-capacity.js
-./scripts/run-staging-capacity.sh slo
+./scripts/load/run-staging-capacity.sh slo
 
 # Stress envelope (expect threshold breaches; read optimization_* and failure mix)
-./scripts/run-staging-capacity.sh break
+./scripts/load/run-staging-capacity.sh break
 ```
 
 Promote pool / `FANOUT_QUEUE_CONCURRENCY` / `OVERLOAD_*` changes to prod only after staging artifacts look acceptable.
@@ -528,8 +528,8 @@ sudo journalctl -u 'chatapp@*' -f
 sudo journalctl -u 'chatapp@*' --since '1 hour ago' -p warning --no-pager | less
 
 # One-shot snapshot from your laptop (requires SSH key)
-./scripts/prod-observe.sh
-# Optional: SINCE='24 hours ago' ./scripts/prod-observe.sh
+./scripts/ops/prod-observe.sh
+# Optional: SINCE='24 hours ago' ./scripts/ops/prod-observe.sh
 ```
 
 **Nginx** (upstream dead, timeouts) — always check alongside the app:
@@ -544,7 +544,7 @@ sudo grep '\[error\]' /var/log/nginx/error.log | tail -n 20
 
 ```bash
 # Example: Apr 8 grader window 19:00–22:00 on the server clock
-./scripts/prod-log-correlate.sh '08/Apr/2026' '2026/04/08' 19 22
+./scripts/ops/prod-log-correlate.sh '08/Apr/2026' '2026/04/08' 19 22
 ```
 
 If the UI is **US/Eastern**, shift hours (e.g. 20:00 EDT ≈ next calendar day 00:00 UTC).
@@ -606,7 +606,7 @@ Create `/opt/chatapp/shared/.env` on production VM:
 
 **Throughput / delivery SLA (15s per listener, outage rollup):** see [`docs/GRADING-DELIVERY-SEMANTICS.md`](../docs/GRADING-DELIVERY-SEMANTICS.md) — maps the forum definition to WebSocket vs HTTP and lists common non-bug patterns.
 
-Automated graders often count **`POST /api/v1/messages` without `201`** as a delivery failure. Your API returns **`403`** when the user may not post to that **private channel** or **conversation** (`Access denied` / `Not a participant`). That is **authorization**, not network or WebSocket failure. Under heavy grader traffic, **201 and 403 can each be ~half** of message POSTs if the harness mixes allowed and forbidden cases—or if clients post before join completes. Use `./scripts/prod-observe.sh` (POST /messages status breakdown) and `./scripts/prod-log-correlate.sh` for an hour-bucketed split.
+Automated graders often count **`POST /api/v1/messages` without `201`** as a delivery failure. Your API returns **`403`** when the user may not post to that **private channel** or **conversation** (`Access denied` / `Not a participant`). That is **authorization**, not network or WebSocket failure. Under heavy grader traffic, **201 and 403 can each be ~half** of message POSTs if the harness mixes allowed and forbidden cases—or if clients post before join completes. Use `./scripts/ops/prod-observe.sh` (POST /messages status breakdown) and `./scripts/ops/prod-log-correlate.sh` for an hour-bucketed split.
 
 **Ask your instructor explicitly:** does the leaderboard treat **expected `403`** on `POST /messages` as a *delivery fail*, or only **5xx / timeouts / missed WebSocket delivery**?
 
@@ -680,7 +680,7 @@ ssh ssperrottet@136.114.103.71 "sudo systemctl reload nginx"
 
 ## Checklist: After Production Deploy
 
-- [ ] `./scripts/prod-nginx-audit.sh` passes (dual workers ⇒ both `:4000` and `:4001` in `upstream app`)
+- [ ] `./scripts/ops/prod-nginx-audit.sh` passes (dual workers ⇒ both `:4000` and `:4001` in `upstream app`)
 
 - [ ] Confirm all metrics normal
 - [ ] No unusual error spikes
@@ -705,6 +705,6 @@ No rebuild happens for staging/prod deploys — use the exact CI artifact.
 For deployment issues, check logs:
 - **CI logs**: GitHub Actions → Workflow runs
 - **Staging logs**: SSH to staging, `sudo journalctl -u 'chatapp@*' -f` and nginx under `/var/log/nginx/`
-- **Prod logs**: SSH to `ubuntu@130.245.136.44`, then `sudo journalctl -u 'chatapp@*' …` (see **Observability** above) or run `./scripts/prod-observe.sh`
+- **Prod logs**: SSH to `ubuntu@130.245.136.44`, then `sudo journalctl -u 'chatapp@*' …` (see **Observability** above) or run `./scripts/ops/prod-observe.sh`
 
 For architectural questions, refer to the main [README.md](../README.md).

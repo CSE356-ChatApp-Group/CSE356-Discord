@@ -11,8 +11,8 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Incident steps | [`RUNBOOKS.md`](RUNBOOKS.md) |
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
 | Grafana dashboards (repo JSON) | **Overview:** [`chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) — **Redis / cache:** [`redis-cache-store.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/redis-cache-store.json) (`job=redis` + app-side Redis-adjacent counters). Overview top links jump to Failure modes, Latency RCA, Redis, Overload, API routes. |
-| Instant Prometheus triage | [`scripts/metrics-snapshot.sh`](../scripts/metrics-snapshot.sh) |
-| Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) |
+| Instant Prometheus triage | [`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh) |
+| Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/postgres/pg-stat-statements-snapshot.sh`](../scripts/postgres/pg-stat-statements-snapshot.sh) |
 | **Primary DB + read replica (Prometheus)** | Alert group **`chatapp-database`** in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml): `ChatAppDbPostgresExporterDown`, replication slot **`replica_155_nvme`** inactive / WAL retain size, **`ChatAppDbReplicaNodeExporterDown`**, replica **`/mnt/replica-data`** disk. Scrape targets: [`deploy/prometheus-db-file-sd.py`](../deploy/prometheus-db-file-sd.py) writes **`file_sd/db-node.json`** (primary `:9100` + replica `:9100` when **`PG_READ_REPLICA_URL`** host differs) and **`db-postgres.json`** (primary `:9187` only). Replica **`postgres_exporter`** is optional (needs its own DSN on that host). |
 
 ## Where latency comes from (split app + DB VMs)
@@ -35,10 +35,10 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    # Example: tunnel Prometheus on a host that listens on 127.0.0.1:9090
    # ssh -L 9090:127.0.0.1:9090 user@monitoring-host -N
 
-   PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics-snapshot.sh
-   PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics-snapshot.sh --write var/metrics-snapshot.txt
+   PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics/metrics-snapshot.sh
+   PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics/metrics-snapshot.sh --write var/metrics-snapshot.txt
    # 10-minute windows for stability audits (replaces embedded `[5m]` in each query):
-   METRICS_SNAPSHOT_RANGE=10m PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics-snapshot.sh
+   METRICS_SNAPSHOT_RANGE=10m PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics/metrics-snapshot.sh
    ```
 
    Paste the **stdout** or the contents of `var/metrics-snapshot.txt` into the chat. The `var/` directory is gitignored.
@@ -50,7 +50,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - realtime fanout cache hit/miss/coalesced rates
    - realtime fanout stage/target p95 plus candidate-audience p95 before recent-connect filtering
    - deferred POST fanout: `fanout_job_latency_ms` p99, `fanout_queue_depth`, `fanout_retry_total`, `delivery_timeout_total`
-   - Redis: `redis_up`, used/max memory, evictions, commands/sec (`redis_commands_processed_total` rate); SLOWLOG via `REDIS_SLOWLOG_SSH=ubuntu@<vm1> ./scripts/redis-slowlog-snapshot.sh` or embed in `PROMETHEUS_URL=... REDIS_SLOWLOG_SSH=... ./scripts/metrics-snapshot.sh`
+   - Redis: `redis_up`, used/max memory, evictions, commands/sec (`redis_commands_processed_total` rate); SLOWLOG via `REDIS_SLOWLOG_SSH=ubuntu@<vm1> ./scripts/redis/redis-slowlog-snapshot.sh` or embed in `PROMETHEUS_URL=... REDIS_SLOWLOG_SSH=... ./scripts/metrics/metrics-snapshot.sh`
    - websocket bootstrap wall-time, breadth, and cache-hit rate
    - websocket reliable delivery mix (`ws_reliable_delivery_total` replay %, `ws_reliable_delivery_latency_ms` p95 by path) plus reconnect rate for correlation
    - channel message user-topic fanout split (`channel_message_fanout_recipient_total`) and miss hints (`realtime_miss_attribution_total`)
@@ -59,16 +59,16 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 
 3. **`/metrics` on an app instance** — for a single process view only; use for debugging, not cluster-wide SLOs.
 
-4. **On-VM host + pool lines (no Prometheus)** — [`scripts/prod-capacity-snapshot.sh`](../scripts/prod-capacity-snapshot.sh) curls `/health`, `diagnostic=1`, and key lines from `:4000` / `:4001` `/metrics`; run over SSH and paste the file.
+4. **On-VM host + pool lines (no Prometheus)** — [`scripts/ops/prod-capacity-snapshot.sh`](../scripts/ops/prod-capacity-snapshot.sh) curls `/health`, `diagnostic=1`, and key lines from `:4000` / `:4001` `/metrics`; run over SSH and paste the file.
 
 5. **DB fingerprint snapshot** — when p95 moves but route-level metrics are too coarse, capture the top normalized statements from `pg_stat_statements`:
 
    ```bash
-   DATABASE_URL='postgresql://...' ./scripts/pg-stat-statements-snapshot.sh
-   DB_SSH='ubuntu@130.245.136.21' DB_NAME='chatapp_prod' ./scripts/pg-stat-statements-snapshot.sh
-   PROD_DB_SSH='ubuntu@130.245.136.21' ./scripts/pg-stat-statements-snapshot.sh   # alias for DB_SSH (same as prod-pg-stat-activity.sh)
+   DATABASE_URL='postgresql://...' ./scripts/postgres/pg-stat-statements-snapshot.sh
+   DB_SSH='ubuntu@130.245.136.21' DB_NAME='chatapp_prod' ./scripts/postgres/pg-stat-statements-snapshot.sh
+   PROD_DB_SSH='ubuntu@130.245.136.21' ./scripts/postgres/pg-stat-statements-snapshot.sh   # alias for DB_SSH (same as prod-pg-stat-activity.sh)
 
-   During an incident window: `DELTA_SECONDS=120 PROD_DB_SSH=ubuntu@130.245.136.21 ./scripts/pg-stat-statements-snapshot.sh` prints **total_exec_time deltas** between two samples.
+   During an incident window: `DELTA_SECONDS=120 PROD_DB_SSH=ubuntu@130.245.136.21 ./scripts/postgres/pg-stat-statements-snapshot.sh` prints **total_exec_time deltas** between two samples.
    ```
 
    This prints three ranked views:
@@ -79,10 +79,10 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
 6. **Live slow backends (`pg_stat_activity`)** — when **5xx or p99 move without RPS moving** (per-route blocking, not pool saturation), capture what is running *right now*:
 
    ```bash
-   PROD_DB_SSH=ubuntu@130.245.136.21 DB_NAME=chatapp_prod bash scripts/prod-pg-stat-activity.sh
+   PROD_DB_SSH=ubuntu@130.245.136.21 DB_NAME=chatapp_prod bash scripts/postgres/prod-pg-stat-activity.sh
    ```
 
-   The script prints non-idle sessions ordered by **wait_event**, then the **longest `now() - query_start`** (top 15). For lock chains, see also [`scripts/sql/pg-blocking-wait-chain.sql`](../scripts/sql/pg-blocking-wait-chain.sql). `MODE=wait` or `MODE=longest` limits output to one section.
+   The script prints non-idle sessions ordered by **wait_event**, then the **longest `now() - query_start`** (top 15). For lock chains, see also [`scripts/postgres/sql/pg-blocking-wait-chain.sql`](../scripts/postgres/sql/pg-blocking-wait-chain.sql). `MODE=wait` or `MODE=longest` limits output to one section.
 
 ## POST `/messages` end-to-end trace (`post_messages_e2e_trace`)
 
@@ -95,8 +95,8 @@ Each line includes **`requestId`**, **`worker_id`** (`hostname:PORT` from the sy
 
 **Correlate slow spikes**
 
-1. **Redis** — same wall clock on the app host (or VM1 if Redis is managed): `REDIS_SLOWLOG_SSH=ubuntu@<host> ./scripts/redis-slowlog-snapshot.sh` or embed in `metrics-snapshot.sh` (see Quick links table). Compare **`channel_insert_lock_wait_ms`** and **`cache_bust_ms`** with **`SLOWLOG`** timestamps.
-2. **Postgres** — `DB_SSH=ubuntu@<db-host> ./scripts/pg-stat-statements-snapshot.sh` (or **`DELTA_SECONDS`** during an incident). Match **`tx_insert_ms`** / **`tx_commit_ms`** spikes to normalized statements (insert lock, `messages` insert, attachments).
+1. **Redis** — same wall clock on the app host (or VM1 if Redis is managed): `REDIS_SLOWLOG_SSH=ubuntu@<host> ./scripts/redis/redis-slowlog-snapshot.sh` or embed in `metrics-snapshot.sh` (see Quick links table). Compare **`channel_insert_lock_wait_ms`** and **`cache_bust_ms`** with **`SLOWLOG`** timestamps.
+2. **Postgres** — `DB_SSH=ubuntu@<db-host> ./scripts/postgres/pg-stat-statements-snapshot.sh` (or **`DELTA_SECONDS`** during an incident). Match **`tx_insert_ms`** / **`tx_commit_ms`** spikes to normalized statements (insert lock, `messages` insert, attachments).
 3. **Cross-worker** — filter logs by **`worker_id`** to see if one **`chatapp@`** port dominates (pool partition, hot channel serialization).
 
 **Aggregating “% of spikes by component”** — in Loki (or any log SQL), count lines where **`dominant_bucket="db"`** vs **`redis`** vs **`serialization`** etc., divided by total **`post_messages_e2e_trace`** lines in the window. **`max()` of each numeric field in `breakdown_ms`** over the window gives worst-case per component; **`dominant_component`** answers “single biggest slice” per request (no global single cause unless one bucket dominates the rollup counts).
@@ -109,7 +109,7 @@ When **`SLOW_HTTP_TRACE_MIN_MS`** is set (for example **`2000`**), successful an
 
 ## Slow route EXPLAIN workflow {#slow-route-explain-workflow}
 
-1. Capture **`slow_http_request_trace`** (or **`pg: slow query`** lines from **`PG_SLOW_QUERY_MS`**) for the window; note **`db_query_samples`** and **`queryid`** from [`scripts/pg-stat-statements-snapshot.sh`](../scripts/pg-stat-statements-snapshot.sh) (`DB_SSH` / **`DATABASE_URL`**). The snapshot includes **top `total_exec_time`**, **top `max_exec_time`**, **top `stddev_exec_time`** (calls ≥ **`MIN_CALLS_STDDEV`**, default 10), slowest **mean** among frequent callers, and **IO-heavy** statements.
+1. Capture **`slow_http_request_trace`** (or **`pg: slow query`** lines from **`PG_SLOW_QUERY_MS`**) for the window; note **`db_query_samples`** and **`queryid`** from [`scripts/postgres/pg-stat-statements-snapshot.sh`](../scripts/postgres/pg-stat-statements-snapshot.sh) (`DB_SSH` / **`DATABASE_URL`**). The snapshot includes **top `total_exec_time`**, **top `max_exec_time`**, **top `stddev_exec_time`** (calls ≥ **`MIN_CALLS_STDDEV`**, default 10), slowest **mean** among frequent callers, and **IO-heavy** statements.
 2. On the DB, ensure **`pg_stat_statements`** is available (`shared_preload_libraries` + **`CREATE EXTENSION`** as appropriate for your host).
 3. Take the normalized SQL (from **`pg_stat_statements.query`** or app sample), bind realistic parameters, then run:
    ```sql
@@ -152,7 +152,7 @@ Optional fields: **`waitedMs`**, **`lockWaiters`**. Correlate with **`requestId`
 
 ## Example PromQL (instant or range)
 
-Use these in Prometheus **Graph** or in `scripts/metrics-snapshot.sh` (overlapping queries are included there).
+Use these in Prometheus **Graph** or in `scripts/metrics/metrics-snapshot.sh` (overlapping queries are included there).
 
 ```promql
 # Workers reachable for scrape (multi-VM: expect count == configured targets, often 16)
@@ -294,7 +294,7 @@ Per-credential rate limits use **IP + username/email** as the Redis key. A harne
 
 ## Synthetic probe (host alert)
 
-`chatapp_synthetic_probe_success` comes from [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) via node_exporter textfile — see `RUNBOOKS.md` (ChatAppSyntheticProbeFailed).
+`chatapp_synthetic_probe_success` comes from [`scripts/ops/synthetic-probe.sh`](../scripts/ops/synthetic-probe.sh) via node_exporter textfile — see `RUNBOOKS.md` (ChatAppSyntheticProbeFailed).
 
 ## DB scaling trigger thresholds (objective gate)
 

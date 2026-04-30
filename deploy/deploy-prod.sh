@@ -4,7 +4,7 @@
 # Usage: ./deploy-prod.sh <release-sha> [--rollback]
 #
 # Avoid GitHub at deploy time (no gh / rate limits): build a tarball that matches CI
-# (see scripts/package-release-artifact.sh), then:
+# (see scripts/release/package-release-artifact.sh), then:
 #   LOCAL_ARTIFACT_PATH=/abs/path/to/releases/chatapp-<sha>.tar.gz ./deploy-prod.sh <sha>
 #
 # Flags:
@@ -129,11 +129,11 @@ notify_discord_prod() {
 }
 
 run_local_prod_nginx_audit() {
-  if [ ! -x "${SCRIPT_DIR}/../scripts/prod-nginx-audit.sh" ]; then
+  if [ ! -x "${SCRIPT_DIR}/../scripts/ops/prod-nginx-audit.sh" ]; then
     echo "WARN: prod-nginx-audit.sh not found or not executable; skipping local audit."
     return 0
   fi
-  PROD_HOST="${PROD_HOST}" PROD_USER="${PROD_USER}" "${SCRIPT_DIR}/../scripts/prod-nginx-audit.sh"
+  PROD_HOST="${PROD_HOST}" PROD_USER="${PROD_USER}" "${SCRIPT_DIR}/../scripts/ops/prod-nginx-audit.sh"
 }
 
 cleanup_on_exit() {
@@ -1211,7 +1211,7 @@ else
   done
   if [[ "${_gh_download_ok}" -ne 1 ]]; then
     echo "ERROR: Failed to download artifact after 5 attempts."
-    echo "      Build locally: ./scripts/package-release-artifact.sh"
+    echo "      Build locally: ./scripts/release/package-release-artifact.sh"
     echo "      Then: LOCAL_ARTIFACT_PATH=\$PWD/releases/chatapp-${RELEASE_SHA}.tar.gz ./deploy/deploy-prod.sh ${RELEASE_SHA}"
     exit 1
   fi
@@ -2065,7 +2065,7 @@ ssh_monitor "
 
 chatapp_scp_to_prod "${REPO_ROOT}/infrastructure/monitoring/remote-compose.yml" "$PROD_USER@$PROD_HOST:/tmp/remote-compose.yml.deploy" || true
 chatapp_scp_to_prod "${REPO_ROOT}/infrastructure/monitoring/promtail-host-config.yml" "$PROD_USER@$PROD_HOST:/tmp/promtail-host-config.yml.deploy" || true
-chatapp_scp_to_prod "${REPO_ROOT}/scripts/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
+chatapp_scp_to_prod "${REPO_ROOT}/scripts/ops/synthetic-probe.sh" "$PROD_USER@$PROD_HOST:/tmp/synthetic-probe.sh.deploy" || true
 chatapp_scp_to_prod "${REPO_ROOT}/deploy/pgbouncer-exporter.py" "$PROD_USER@$PROD_HOST:/tmp/pgbouncer-exporter.py.deploy" || true
 chatapp_scp_to_prod "${REPO_ROOT}/deploy/redis_exporter_redis_url.py" "$PROD_USER@$PROD_HOST:/tmp/redis_exporter_redis_url.py.deploy" \
   || echo "WARN: could not copy redis_exporter_redis_url.py (redis_exporter may use fallback)" >&2

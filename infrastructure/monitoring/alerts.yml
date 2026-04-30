@@ -82,7 +82,7 @@ groups:
             stalled, not an API crash (5xx ratio may stay near 0). Correlate with nginx access volume,
             `journalctl -t chatapp-deploy`, and harness logs. Runbook: docs/RUNBOOKS.md (ChatAppTrafficCliffWhileInstancesUp).
 
-      # Requires scripts/synthetic-probe.sh + TEXTFILE_DIR on the host (see deploy-prod monitoring sync).
+      # Requires scripts/ops/synthetic-probe.sh + TEXTFILE_DIR on the host (see deploy-prod monitoring sync).
       - alert: ChatAppSyntheticProbeFailed
         expr: chatapp_synthetic_probe_success{job="node"} == 0
         for: 10m

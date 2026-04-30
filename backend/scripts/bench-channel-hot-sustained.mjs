@@ -12,7 +12,7 @@
  *   node backend/scripts/bench-channel-hot-sustained.mjs
  *
  * Outputs JSON: client-side latency p50/p95/p99, status histogram, msgs/sec (201 only),
- * total requests, 503 count. Correlate with Prometheus (see scripts/hot-channel-convoy-validate.sh).
+ * total requests, 503 count. Correlate with Prometheus (see scripts/load/hot-channel-convoy-validate.sh).
  */
 const baseUrl = (process.env.BASE_URL || 'http://127.0.0.1:3000/api/v1').replace(/\/$/, '');
 const token = process.env.TOKEN || '';

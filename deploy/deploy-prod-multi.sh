@@ -20,7 +20,7 @@
 # Canary: set DEPLOY_STOP_AFTER_VM3=1 to run Phase -1 + Phase 0 + Phase 0.5 only, then exit
 # (deploy VM3 workers, pause rollout, observe before VM2/VM1). Unset for a normal full rollout.
 #
-# Deploy without GitHub: ./scripts/package-release-artifact.sh then
+# Deploy without GitHub: ./scripts/release/package-release-artifact.sh then
 #   LOCAL_ARTIFACT_PATH=$PWD/releases/chatapp-<sha>.tar.gz DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>
 # SSH: PROD_USER defaults to ubuntu (DB + app hosts); override only if your hosts use another login.
 #

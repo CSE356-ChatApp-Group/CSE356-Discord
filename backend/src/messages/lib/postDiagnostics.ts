@@ -360,9 +360,9 @@ function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
     dominant_bucket,
     response_body_bytes,
     correlate_redis_slowlog:
-      "REDIS_SLOWLOG_SSH=user@vm1 ./scripts/redis-slowlog-snapshot.sh (see docs/operations-monitoring.md)",
+      "REDIS_SLOWLOG_SSH=user@vm1 ./scripts/redis/redis-slowlog-snapshot.sh (see docs/operations-monitoring.md)",
     correlate_pg_stat_statements:
-      "DB_SSH=user@db-host ./scripts/pg-stat-statements-snapshot.sh",
+      "DB_SSH=user@db-host ./scripts/postgres/pg-stat-statements-snapshot.sh",
     ...(channel_insert_lock_path != null
       ? { channel_insert_lock_path: channel_insert_lock_path }
       : {}),

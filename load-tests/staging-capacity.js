@@ -212,7 +212,7 @@ const PROFILES = {
   },
   /**
    * Steady-state SLO probe: fixed HTTP arrival rate (not a ramp-to-break curve).
-   * Use scripts/run-staging-capacity.sh slo — metadata.txt records git SHA + env placeholders.
+   * Use scripts/load/run-staging-capacity.sh slo — metadata.txt records git SHA + env placeholders.
    */
   slo: {
     arrivalMode: 'constant',

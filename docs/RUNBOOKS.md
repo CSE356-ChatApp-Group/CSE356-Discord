@@ -10,7 +10,7 @@ Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastr
 
 ## ChatAppSyntheticProbeFailed
 
-Fires when the **host-local** synthetic probe (see [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh), `TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile`) reports **`chatapp_synthetic_probe_success == 0`** for 10 minutes. This is **not** the COMPAS harness; it is a curl to **`http://127.0.0.1/health`** through normal routing.
+Fires when the **host-local** synthetic probe (see [`scripts/ops/synthetic-probe.sh`](../scripts/ops/synthetic-probe.sh), `TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile`) reports **`chatapp_synthetic_probe_success == 0`** for 10 minutes. This is **not** the COMPAS harness; it is a curl to **`http://127.0.0.1/health`** through normal routing.
 
 1. `curl -fsS -v http://127.0.0.1/health` on the VM.
 2. `systemctl status 'chatapp@*'` and nginx `error.log` for upstream errors.
@@ -23,7 +23,7 @@ Fires when Prometheus still scrapes at least one `chatapp-api` target but **comp
 1. Confirm **no deploy** in the window: `journalctl -t chatapp-deploy --since '2026-04-13 14:00:00' --until '2026-04-13 15:00:00'` (adjust UTC).
 2. **Compare ingress vs app:** on the VM, `zgrep` nginx `access.log` for **requests per minute** in the incident window — if edge volume collapsed, the bottleneck is **load generators / network path** to the site, not necessarily Node.
 3. **5xx panels** can stay flat: if clients stop sending requests, you see a **traffic cliff** with **no** `ChatAppHigh5xxRate`.
-4. Optional: run a probe **outside** the harness — [`scripts/synthetic-probe.sh`](../scripts/synthetic-probe.sh) against the public `/health`. If it stays green while Grafana RPS drops, the API process path is likely fine.
+4. Optional: run a probe **outside** the harness — [`scripts/ops/synthetic-probe.sh`](../scripts/ops/synthetic-probe.sh) against the public `/health`. If it stays green while Grafana RPS drops, the API process path is likely fine.
 
 Tune or silence this alert if your normal traffic pattern routinely drops >80% in 15 minutes (e.g. end of graded window).
 
@@ -69,7 +69,7 @@ Fires when **completed** 5xx responses stay above ~0.25/s (5m rate) for 4 minute
 
 1. Check hot routes; inspect DB slow queries and Redis latency.
 2. Compare with k6 `slo` summary from the same week.
-3. If **errors or latency spike while RPS is flat** (tail-latency regime), run [`scripts/prod-pg-stat-activity.sh`](../scripts/prod-pg-stat-activity.sh) on the DB host during the spike — longest `pg_stat_activity` rows surface unbounded worst-case queries and wait events without guessing.
+3. If **errors or latency spike while RPS is flat** (tail-latency regime), run [`scripts/postgres/prod-pg-stat-activity.sh`](../scripts/postgres/prod-pg-stat-activity.sh) on the DB host during the spike — longest `pg_stat_activity` rows surface unbounded worst-case queries and wait events without guessing.
 
 ## Discord did not notify but the app looked unhealthy
 
@@ -166,12 +166,12 @@ Use a local authenticated watcher to detect grader-side delivery regressions wit
 3. Use for gated 1->2->4 scale-up:
    - Keep watcher running during each soak window.
    - Treat any new `sendMessage failed: 5xx`, `Delivery timeout`, or repeated 403 bursts as an abort signal.
-   - Correlate event timestamps with `scripts/prod-harness-window.sh`, `scripts/prod-nginx-audit.sh`, and Prometheus snapshots.
+   - Correlate event timestamps with `scripts/ops/prod-harness-window.sh`, `scripts/ops/prod-nginx-audit.sh`, and Prometheus snapshots.
 
 4. Enforce watcher as a rollout gate:
 
    ```bash
-   ./scripts/grader-watch-gate.sh --window-seconds 900
+   ./scripts/grader/grader-watch-gate.sh --window-seconds 900
    ```
 
    Exit code is non-zero when recent watcher events include critical delivery errors (`Delivery timeout` or `sendMessage failed: 5xx`) or repeated 403s.
@@ -179,7 +179,7 @@ Use a local authenticated watcher to detect grader-side delivery regressions wit
    For post-deploy soak monitoring against a long-lived watcher file, prefer anchored novel-only mode so a stale "Last error — 27m ago" refresh does not count as a new regression:
 
    ```bash
-   ./scripts/grader-watch-gate.sh --since "2026-04-17T14:10:40Z" --novel-only
+   ./scripts/grader/grader-watch-gate.sh --since "2026-04-17T14:10:40Z" --novel-only
    ```
 
    `--novel-only` only fails on critical signatures that did not already exist before the anchor time.
@@ -194,17 +194,17 @@ COMPAS **outage** bands are often **short**. Repo-wide HTTP **5xx%** panels can 
 2. From a machine with SSH to prod:
 
    ```bash
-   ./scripts/prod-harness-window.sh '2026-04-12 05:14:00' '2026-04-12 05:22:00'
-   ./scripts/prod-harness-window.sh '2026-04-12 05:53:00' '2026-04-12 06:03:00'
+   ./scripts/ops/prod-harness-window.sh '2026-04-12 05:14:00' '2026-04-12 05:22:00'
+   ./scripts/ops/prod-harness-window.sh '2026-04-12 05:53:00' '2026-04-12 06:03:00'
    ```
 
-   Optional: widen padding around deploys: `PADDING_MIN=3 ./scripts/prod-harness-window.sh '...' '...'`
+   Optional: widen padding around deploys: `PADDING_MIN=3 ./scripts/ops/prod-harness-window.sh '...' '...'`
 
    The script prints **`chatapp-deploy`** events, **`chatapp@` journal** (warning+), **nginx error.log** lines (upstream reset/refused/timeout), and an **access.log** status histogram for both a **padded** window and your **strict** harness interval (scans the last **ACCESS_TAIL_LINES** lines of access.log — increase if the window is old).
 
 3. **Grafana / Prometheus** for the same UTC range: zoom the dashboard to the outage; check **event-loop lag p99**, **p95 latency**, **WS accepted rate**, **`http_server_requests_aborted_total`** (if panel exists), **fanout queue wait p95**. Harness failures without **5xx** usually show as **lag + aborts + reconnects**, not **ChatAppHigh5xxRate**.
 
-4. Hour-granular nginx only: [`scripts/prod-log-correlate.sh`](../scripts/prod-log-correlate.sh) (POST `/messages` mix per clock hour).
+4. Hour-granular nginx only: [`scripts/ops/prod-log-correlate.sh`](../scripts/ops/prod-log-correlate.sh) (POST `/messages` mix per clock hour).
 
 ### Example (prod `group-8`, 2026-04-12) — evidence already pulled
 
@@ -215,7 +215,7 @@ If Grafana shows **traffic drop ~14:35** and **p95 + event-loop spike ~15:55** (
 - **Third band (~15:45–15:55 EDT → 19:45–19:55 UTC):** **no reboot**; **`journalctl` lines from `pgbouncer` (`stats:`)** show **`wait`** in the **multi‑second** range per minute bucket and **`xacts/s`** collapsing (e.g. **~1.1k/s → ~142/s** at **19:50 UTC**). **`grep` of nginx `error.log` for `19:4x` / `19:5x` returned 0** `[error]` lines in that prefix — not the same signature as the **14:57** upstream outage.
 - **App logs in that window:** **`23503`** on **`channels_last_message_id_fkey`** from **`repointChannelLastMessage`** (logged at **error** before mitigation). Repo fix: **`repointLastMessage`** now **nulls `last_message_*` and returns** after exhausted FK retries so **`DELETE /messages` does not 500 after the row is already gone**.
 
-**Repeatable snapshot on the VM:** `scripts/prod-capacity-snapshot.sh` (see repo; also validated in CI `bash -n`).
+**Repeatable snapshot on the VM:** `scripts/ops/prod-capacity-snapshot.sh` (see repo; also validated in CI `bash -n`).
 
 ## DM delivery timeout — 2-minute triage (conversationId + missingUserId)
 
