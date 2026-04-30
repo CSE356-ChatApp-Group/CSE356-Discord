@@ -100,6 +100,9 @@ const { createSubscriptionManager } = require("./subscriptionManager");
 const { createClientMessageRouter } = require("./clientMessageRouter");
 const { createDisconnectLifecycle } = require("./disconnectLifecycle");
 const { createConnectionLifecycle } = require("./connectionLifecycle");
+const { createStartupSubscriptionsLifecycle } = require("./startupSubscriptions");
+const { createRuntimeIntervals } = require("./runtimeIntervals");
+const { bindRedisSubscriber } = require("./redisSubscriberBinding");
 const {
   fanoutRecipientsHistogram,
   wsConnectionResultTotal,
@@ -269,13 +272,18 @@ const USER_FEED_SHARD_CHANNELS = allUserFeedRedisChannels();
 const USER_FEED_SHARD_CHANNEL_SET = new Set(USER_FEED_SHARD_CHANNELS);
 const COMMUNITY_FEED_SHARD_CHANNELS = allCommunityFeedRedisChannels();
 const COMMUNITY_FEED_SHARD_CHANNEL_SET = new Set(COMMUNITY_FEED_SHARD_CHANNELS);
-let wsStartupPromise: Promise<void> | null = null;
 const {
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
 } = createRedisSubscriptionRegistry({
   redisSub,
   isRedisOperational,
+});
+const { ready } = createStartupSubscriptionsLifecycle({
+  ensureRedisChannelSubscribed,
+  userFeedShardChannels: USER_FEED_SHARD_CHANNELS,
+  communityFeedShardChannels: COMMUNITY_FEED_SHARD_CHANNELS,
+  logWsHotInfo,
 });
 
 const {
@@ -547,33 +555,6 @@ const { handleClientMessage } = createClientMessageRouter({
   presenceService,
 });
 
-async function ensureUserFeedShardSubscriptions() {
-  await Promise.all([
-    ...USER_FEED_SHARD_CHANNELS.map((redisChannel) => ensureRedisChannelSubscribed(redisChannel)),
-    ...COMMUNITY_FEED_SHARD_CHANNELS.map((redisChannel) => ensureRedisChannelSubscribed(redisChannel)),
-  ]);
-}
-
-function ready() {
-  if (!wsStartupPromise) {
-    wsStartupPromise = ensureUserFeedShardSubscriptions()
-      .then(() => {
-        logWsHotInfo(
-          () => ({
-            userfeedShards: USER_FEED_SHARD_CHANNELS.length,
-            communityfeedShards: COMMUNITY_FEED_SHARD_CHANNELS.length,
-          }),
-          'WS userfeed + communityfeed shard subscriptions ready',
-        );
-      })
-      .catch((err) => {
-        wsStartupPromise = null;
-        throw err;
-      });
-  }
-  return wsStartupPromise;
-}
-
 // ── Heartbeat (server → client WS ping/pong) ──────────────────────────────────
 // Uses one global setInterval(WS_HEARTBEAT_INTERVAL_MS). Each tick sets isAlive=false,
 // sends ws.ping(); the next tick terminates if no pong arrived. Connect time relative
@@ -581,25 +562,16 @@ function ready() {
 // ~2×heartbeat (e.g. ~20–40s at 20s) — not a fixed 2× from connect unless connects align.
 // Missed pongs (slow client, stalled TCP, proxy dropping ping frames, event loop delay)
 // produce the same pattern; correlate with ws.disconnected 1006 heartbeat_timeout.
-const heartbeatInterval = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (!ws.isAlive) {
-      noteRecentDisconnectForSocket(ws, 1006, "heartbeat_timeout");
-      ws.terminate();
-      return;
-    }
-    ws.isAlive = false;
-    ws.ping();
-    maybeSendAppKeepaliveFrame(ws);
-  });
-}, WS_HEARTBEAT_INTERVAL_MS);
-
-// Periodically reconcile global user presence from client-reported connection state.
-const presenceSweepInterval = setInterval(() => {
-  reconcileAllConnectedUsers().catch((err) => {
-    logger.warn({ err }, "Presence sweeper failed");
-  });
-}, PRESENCE_SWEEPER_MS);
+const runtimeIntervals = createRuntimeIntervals({
+  wss,
+  WebSocket,
+  wsHeartbeatIntervalMs: WS_HEARTBEAT_INTERVAL_MS,
+  presenceSweeperMs: PRESENCE_SWEEPER_MS,
+  noteRecentDisconnectForSocket,
+  maybeSendAppKeepaliveFrame,
+  reconcileAllConnectedUsers,
+  logger,
+});
 
 // ── HTTP upgrade handler (attached to http.Server in index.js) ─────────────────
 function handleUpgrade(request, socket, head) {
@@ -676,8 +648,8 @@ const { handleConnection } = createConnectionLifecycle({
 const { shutdown } = createShutdownLifecycle({
   WebSocket,
   wss,
-  clearHeartbeatInterval: () => clearInterval(heartbeatInterval),
-  clearPresenceSweepInterval: () => clearInterval(presenceSweepInterval),
+  clearHeartbeatInterval: runtimeIntervals.stopHeartbeat,
+  clearPresenceSweepInterval: runtimeIntervals.stopPresenceSweep,
   recordRecentDisconnect,
   recentDisconnectPayloadForSocket,
   removeConnection,
@@ -709,10 +681,10 @@ const { deliverPubsubMessage } = createRedisPubsubDelivery({
   sendPayloadToSocket,
 });
 
-redisSub.on("message", (channel, message) => {
-  void deliverPubsubMessage(channel, message).catch((err) => {
-    logger.error({ err, channel }, "deliverPubsubMessage failed");
-  });
+bindRedisSubscriber({
+  redisSub,
+  deliverPubsubMessage,
+  logger,
 });
 
 module.exports = {

@@ -143,6 +143,62 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+async function publishConversationSubscribeChannels(userIds, conversationId, logContext) {
+  await publishUserFeedTargets(userIds, {
+    __wsInternal: {
+      kind: 'subscribe_channels',
+      channels: [`conversation:${conversationId}`],
+    },
+  }).catch((err) => {
+    logger.warn({ err, conversationId }, logContext);
+  });
+}
+
+async function runExistingDmSideEffects({ existingId, pairIds }) {
+  await Promise.allSettled([
+    invalidateConversationFanoutTargetsCache(existingId),
+    invalidateWsBootstrapCaches(pairIds),
+    invalidateConversationsListCaches(pairIds),
+  ]);
+  await publishConversationSubscribeChannels(
+    pairIds,
+    existingId,
+    'subscribe_channels push failed (existing 1:1 DM)',
+  );
+}
+
+async function runCreatedConversationSideEffects({
+  conversation,
+  conversationId,
+  allIds,
+  invitedUserIds,
+  invitedBy,
+}) {
+  await Promise.allSettled([
+    invalidateConversationFanoutTargetsCache(conversationId),
+    presenceService.invalidatePresenceFanoutTargetsBulk(allIds),
+    invalidateWsBootstrapCaches(allIds),
+    invalidateConversationsListCaches(allIds),
+  ]);
+
+  if (!conversation) return;
+  await publishConversationSubscribeChannels(
+    allIds,
+    conversationId,
+    'subscribe_channels push failed (new DM)',
+  );
+  await publishConversationInviteNotifications(
+    invitedUserIds.map((userId) => `user:${userId}`),
+    {
+      conversation,
+      conversationId: conversation.id,
+      invitedBy,
+      participantIds: invitedUserIds,
+    },
+    { strict: true },
+  );
+}
+
 // ── Create or get existing 1:1 ─────────────────────────────────────────────────
 router.post('/',
   body('participantIds').optional().isArray({ min: 1 }),
@@ -196,19 +252,7 @@ router.post('/',
           // create-or-get 1:1 with fresh WS sessions; without subscribe + cache bust,
           // an existing thread can miss message:created on conversation:<id> until reconnect.
           const pairIds = [req.user.id, otherId].filter(Boolean);
-          await Promise.allSettled([
-            invalidateConversationFanoutTargetsCache(existingId),
-            invalidateWsBootstrapCaches(pairIds),
-            invalidateConversationsListCaches(pairIds),
-          ]);
-          publishUserFeedTargets(pairIds, {
-            __wsInternal: {
-              kind: 'subscribe_channels',
-              channels: [`conversation:${existingId}`],
-            },
-          }).catch((err) => {
-            logger.warn({ err, conversationId: existingId }, 'subscribe_channels push failed (existing 1:1 DM)');
-          });
+          await runExistingDmSideEffects({ existingId, pairIds });
           return res.json({ conversation: existing || rows[0], created: false });
         }
       }
@@ -225,36 +269,13 @@ router.post('/',
       const conversation = await loadConversationWithParticipants(client, conv.id);
       const invitedUserIds = allIds.filter(id => id !== req.user.id);
       await client.query('COMMIT');
-      await Promise.allSettled([
-        invalidateConversationFanoutTargetsCache(conv.id),
-        presenceService.invalidatePresenceFanoutTargetsBulk(allIds),
-        invalidateWsBootstrapCaches(allIds),
-        invalidateConversationsListCaches(allIds),
-      ]);
-
-      if (conversation) {
-        // Push subscribe_channels to all participants so their active WS sessions
-        // subscribe to conversation:<id> immediately — same pattern as private channel
-        // invites. Without this, connected users miss messages until they reconnect.
-        publishUserFeedTargets(allIds, {
-          __wsInternal: {
-            kind: 'subscribe_channels',
-            channels: [`conversation:${conv.id}`],
-          },
-        }).catch((err) => {
-          logger.warn({ err, conversationId: conv.id }, 'subscribe_channels push failed (new DM)');
-        });
-        await publishConversationInviteNotifications(
-          invitedUserIds.map((userId) => `user:${userId}`),
-          {
-            conversation,
-            conversationId: conversation.id,
-            invitedBy: req.user.id,
-            participantIds: invitedUserIds,
-          },
-          { strict: true }
-        );
-      }
+      await runCreatedConversationSideEffects({
+        conversation,
+        conversationId: conv.id,
+        allIds,
+        invitedUserIds,
+        invitedBy: req.user.id,
+      });
 
       res.status(201).json({ conversation: conversation || conv, created: true });
     } catch (err) {
@@ -350,6 +371,85 @@ const addParticipantsValidators = [
   body('userId').optional().isString(),
 ];
 
+async function rollbackAndRespond(client, res, status, body) {
+  await client.query('ROLLBACK');
+  return res.status(status).json(body);
+}
+
+async function publishGroupDmJoinMessagesIfAny({
+  joinedGroupMessages,
+  conversationId,
+  activeParticipantIds,
+}) {
+  if (joinedGroupMessages.length === 0) return;
+  // System messages bypass POST /messages and its cache bust; await DEL so a tight
+  // invite→GET poll cannot read stale first-page JSON (same guarantee as POST /messages).
+  try {
+    await bustConversationMessagesCache(redis, conversationId);
+  } catch {
+    /* non-fatal: TTL backstop if Redis errors */
+  }
+  const targets = [
+    `conversation:${conversationId}`,
+    ...activeParticipantIds.map((uid) => `user:${uid}`),
+  ];
+  for (const joinedGroupMessage of joinedGroupMessages) {
+    await publishConversationEvents(targets, 'message:created', {
+      ...joinedGroupMessage,
+      author: null,
+      attachments: [],
+    });
+  }
+}
+
+async function publishGroupDmInviteSideEffects({
+  conversationId,
+  currentParticipantIds,
+  participantIdsToAdd,
+  sharedEventData,
+}) {
+  if (!participantIdsToAdd.length) return;
+
+  const invitedUserTargets = participantIdsToAdd.map((participantId) => `user:${participantId}`);
+  const participantUpdateTargets = [
+    `conversation:${conversationId}`,
+    ...currentParticipantIds.map((participantId) => `user:${participantId}`),
+  ];
+
+  await publishConversationEvents(
+    participantUpdateTargets,
+    'conversation:participant_added',
+    sharedEventData,
+  );
+
+  // Push subscribe_channels to newly added participants so active WS sessions
+  // subscribe to the conversation channel without waiting for a reconnect.
+  try {
+    await publishUserFeedTargets(participantIdsToAdd, {
+      __wsInternal: {
+        kind: 'subscribe_channels',
+        channels: [`conversation:${conversationId}`],
+      },
+    });
+  } catch (err) {
+    logger.warn(
+      { err, conversationId, participantCount: participantIdsToAdd.length },
+      'subscribe_channels push failed (group DM invite)',
+    );
+  }
+
+  await publishConversationInviteNotifications(
+    invitedUserTargets,
+    sharedEventData,
+    { strict: true },
+  );
+  scheduleGroupDmInviteRetry(
+    participantUpdateTargets,
+    invitedUserTargets,
+    sharedEventData,
+  );
+}
+
 async function addParticipantsHandler(req, res, next) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -369,20 +469,17 @@ async function addParticipantsHandler(req, res, next) {
       [req.params.id]
     );
     if (!conversationExists.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Conversation not found' });
+      return rollbackAndRespond(client, res, 404, { error: 'Conversation not found' });
     }
 
     const isParticipant = await requireActiveConversationParticipant(client, req.params.id, req.user.id);
     if (!isParticipant) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Not a participant' });
+      return rollbackAndRespond(client, res, 403, { error: 'Not a participant' });
     }
 
     const resolvedParticipants = await resolveParticipantIds(client, providedParticipants);
     if (!resolvedParticipants) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'One or more participants were not found' });
+      return rollbackAndRespond(client, res, 400, { error: 'One or more participants were not found' });
     }
 
     const currentParticipantIds = await getActiveParticipantIds(client, req.params.id);
@@ -397,8 +494,7 @@ async function addParticipantsHandler(req, res, next) {
     );
 
     if (!convMeta.is_group && participantIdsToAdd.length > 0) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Cannot invite users to a 1-to-1 DM' });
+      return rollbackAndRespond(client, res, 403, { error: 'Cannot invite users to a 1-to-1 DM' });
     }
 
     await upsertConversationParticipantsBatch(client, req.params.id, participantIdsToAdd);
@@ -429,26 +525,11 @@ async function addParticipantsHandler(req, res, next) {
       ]);
     }
 
-    if (joinedGroupMessages.length > 0) {
-      // System messages bypass POST /messages and its cache bust; await DEL so a tight
-      // invite→GET poll cannot read stale first-page JSON (same guarantee as POST /messages).
-      try {
-        await bustConversationMessagesCache(redis, req.params.id);
-      } catch {
-        /* non-fatal: TTL backstop if Redis errors */
-      }
-      const targets = [
-        `conversation:${req.params.id}`,
-        ...activeParticipantIds.map((uid) => `user:${uid}`),
-      ];
-      for (const joinedGroupMessage of joinedGroupMessages) {
-        await publishConversationEvents(targets, 'message:created', {
-          ...joinedGroupMessage,
-          author: null,
-          attachments: [],
-        });
-      }
-    }
+    await publishGroupDmJoinMessagesIfAny({
+      joinedGroupMessages,
+      conversationId: req.params.id,
+      activeParticipantIds,
+    });
 
     const sharedEventData = {
       conversation,
@@ -457,50 +538,12 @@ async function addParticipantsHandler(req, res, next) {
       invitedBy: req.user.id,
     };
 
-    if (participantIdsToAdd.length) {
-      const invitedUserTargets = participantIdsToAdd.map((participantId) => `user:${participantId}`);
-      await publishConversationEvents(
-        [
-          `conversation:${req.params.id}`,
-          ...currentParticipantIds.map((participantId) => `user:${participantId}`),
-        ],
-        'conversation:participant_added',
-        sharedEventData
-      );
-    }
-
-    if (participantIdsToAdd.length) {
-      const invitedUserTargets = participantIdsToAdd.map((participantId) => `user:${participantId}`);
-      const participantUpdateTargets = [
-        `conversation:${req.params.id}`,
-        ...currentParticipantIds.map((participantId) => `user:${participantId}`),
-      ];
-      // Push subscribe_channels to newly added participants so active WS sessions
-      // subscribe to the conversation channel without waiting for a reconnect.
-      try {
-        await publishUserFeedTargets(participantIdsToAdd, {
-          __wsInternal: {
-            kind: 'subscribe_channels',
-            channels: [`conversation:${req.params.id}`],
-          },
-        });
-      } catch (err) {
-        logger.warn(
-          { err, conversationId: req.params.id, participantCount: participantIdsToAdd.length },
-          'subscribe_channels push failed (group DM invite)',
-        );
-      }
-      await publishConversationInviteNotifications(
-        invitedUserTargets,
-        sharedEventData,
-        { strict: true }
-      );
-      scheduleGroupDmInviteRetry(
-        participantUpdateTargets,
-        invitedUserTargets,
-        sharedEventData
-      );
-    }
+    await publishGroupDmInviteSideEffects({
+      conversationId: req.params.id,
+      currentParticipantIds,
+      participantIdsToAdd,
+      sharedEventData,
+    });
 
     res.json({ conversation, addedParticipantIds: participantIdsToAdd });
   } catch (err) {

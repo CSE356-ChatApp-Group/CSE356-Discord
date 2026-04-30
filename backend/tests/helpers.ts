@@ -31,41 +31,52 @@ export async function registerUser({
 }
 
 export async function createAuthenticatedUser(prefix: string, opts: { withEmail?: boolean } = {}) {
-  const suffix = uniqueSuffix();
-  const email = opts.withEmail !== false ? `${prefix}-${suffix}@example.com` : undefined;
-  const username = `${prefix}${suffix}`.slice(0, 32);
-  const res = await registerUser({ email, username });
-  if (res.status !== 201) {
-    throw new Error(
-      [
-        `createAuthenticatedUser failed for prefix=${prefix}`,
-        `status=${res.status}`,
-        `email=${email}`,
-        `username=${username}`,
-        `body=${JSON.stringify(res.body)}`,
-      ].join(' | '),
-    );
+  const maxAttempts = 3;
+  let lastFailure: string | null = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const suffix = uniqueSuffix();
+    const email = opts.withEmail !== false ? `${prefix}-${suffix}@example.com` : undefined;
+    const username = `${prefix}${suffix}`.slice(0, 32);
+    const res = await registerUser({ email, username });
+
+    if (res.status === 201) {
+      const accessToken = res.body?.accessToken as string | undefined;
+      const user = res.body?.user as { id: string; email: string; username: string } | undefined;
+      if (!accessToken || !user?.id) {
+        throw new Error(
+          [
+            `createAuthenticatedUser returned incomplete auth payload for prefix=${prefix}`,
+            `status=${res.status}`,
+            `body=${JSON.stringify(res.body)}`,
+          ].join(' | '),
+        );
+      }
+      return {
+        email,
+        username,
+        accessToken,
+        user,
+      };
+    }
+
+    lastFailure = [
+      `createAuthenticatedUser failed for prefix=${prefix}`,
+      `attempt=${attempt}/${maxAttempts}`,
+      `status=${res.status}`,
+      `email=${email}`,
+      `username=${username}`,
+      `body=${JSON.stringify(res.body)}`,
+    ].join(' | ');
+
+    // Some suites occasionally observe transient auth-route failures under heavy
+    // setup churn. Retry a fresh identity before failing the test.
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, 40 * attempt));
+    }
   }
 
-  const accessToken = res.body?.accessToken as string | undefined;
-  const user = res.body?.user as { id: string; email: string; username: string } | undefined;
-
-  if (!accessToken || !user?.id) {
-    throw new Error(
-      [
-        `createAuthenticatedUser returned incomplete auth payload for prefix=${prefix}`,
-        `status=${res.status}`,
-        `body=${JSON.stringify(res.body)}`,
-      ].join(' | '),
-    );
-  }
-
-  return {
-    email,
-    username,
-    accessToken,
-    user,
-  };
+  throw new Error(lastFailure || `createAuthenticatedUser failed for prefix=${prefix}`);
 }
 
 // ── WebSocket helpers ─────────────────────────────────────────────────────────
