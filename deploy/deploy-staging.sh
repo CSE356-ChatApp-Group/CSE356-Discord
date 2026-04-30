@@ -525,7 +525,8 @@ chatapp_ssh_staging_app "
   set +a
   MIGRATE_DATABASE_URL=\${PGDUMP_DATABASE_URL:-\$DATABASE_URL}
   export DATABASE_URL=\"\$MIGRATE_DATABASE_URL\"
-  node "\${RELEASE_PATH}/backend/dist/db/migrate.js"
+  # shellcheck disable=SC1083 # braces are remote \$RELEASE_PATH; outer ssh string is double-quoted.
+  node \"\${RELEASE_PATH}/backend/dist/db/migrate.js\"
 
   chmod +x /tmp/health-check.sh /tmp/smoke-test.sh
 "
@@ -782,9 +783,9 @@ if [[ ${CHATAPP_INSTANCES} -ge 2 ]]; then
     set -euo pipefail
     # Rewrite the upstream block to include both ports. max_fails=0 disables
     # nginx's passive health check — the Node-level circuit breaker already
-    # handles overload via fast 503s; if nginx also marks upstreams "down" on
+    # handles overload via fast 503s; if nginx also marks upstreams down on
     # 503s, both instances get marked unavailable simultaneously and nginx
-    # returns 502 "no live upstreams" for every subsequent request (death spiral).
+    # returns 502 with no live upstreams for every subsequent request (death spiral).
     sudo python3 - <<'PYEOF'
 import re
 
