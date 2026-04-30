@@ -1,6 +1,6 @@
 # Performance Baseline Pack
 
-Maintenance index and canonical env/topology docs: [`README.md`](README.md).
+Maintenance index and canonical env/topology docs: [`README.md`](../README.md).
 
 Use this pack to compare performance runs consistently before and after tuning.
 

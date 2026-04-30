@@ -16,6 +16,6 @@
 --   CREATE TABLE messages_2026_q2 PARTITION OF messages_partitioned
 --     FOR VALUES FROM ('2026-04-01') TO ('2026-07-01');
 --
--- See docs/db-scaling-messages.md for operational notes.
+-- See docs/architecture/db-scaling-messages.md for operational notes.
 
 SELECT 1;

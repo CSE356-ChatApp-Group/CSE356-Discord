@@ -39,7 +39,7 @@ When a message is created on any API node:
 
 This means *any* client connected to *any* node receives real-time events instantly.
 
-**Course grading / throughput (“Failed deliveries”, outages):** see [`docs/grading-delivery-semantics.md`](docs/grading-delivery-semantics.md) for how the 15s-per-listener rule maps to HTTP 201, WebSocket `message:created`, and common false positives (403, harness scope).
+**Course grading / throughput (“Failed deliveries”, outages):** see [`docs/architecture/grading-delivery-semantics.md`](docs/architecture/grading-delivery-semantics.md) for how the 15s-per-listener rule maps to HTTP 201, WebSocket `message:created`, and common false positives (403, harness scope).
 
 **Documentation:** [`docs/README.md`](docs/README.md) (canonical sources and update rules), [`AGENTS.md`](AGENTS.md) (quick links for contributors and coding agents).
 

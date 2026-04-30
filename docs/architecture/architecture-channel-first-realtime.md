@@ -1,6 +1,6 @@
 # Target architecture: channel-first realtime delivery
 
-Documentation hub: [`README.md`](README.md).
+Documentation hub: [`README.md`](../README.md).
 
 This document defines the **end state** and the **incremental path** from dense **`user:`** duplicates (**`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`** in code defaults). Production may already run **`recent_connect`** based on [`deploy/env/prod.required.env`](../deploy/env/prod.required.env).
 
@@ -36,7 +36,7 @@ This document defines the **end state** and the **incremental path** from dense 
 
 ## 4. Rollout stages & gates
 
-See **`docs/plan-recent-connect-rollout.md`** for **Stages A–D**, Prometheus comparisons, and abort rules.
+See **`docs/history/plan-recent-connect-rollout.md`** for **Stages A–D**, Prometheus comparisons, and abort rules.
 
 **Gates (all must hold or roll back the stage):**
 

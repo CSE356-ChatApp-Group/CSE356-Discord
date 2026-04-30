@@ -13,7 +13,7 @@ Start here for **where to look** and **how to keep docs from going stale**.
 | **Alert / on-call playbooks** | [`docs/runbooks.md`](runbooks.md) | — |
 | **Agent diagnosis + profiling workflow** | [`docs/agent-operations-playbook.md`](agent-operations-playbook.md) | Ad-hoc debugging checklists scattered across unrelated docs |
 | **Deploy pipeline & CI gates** | [`deploy/README.md`](../deploy/README.md) | — |
-| **Realtime delivery contract (code pointers)** | [`docs/realtime-delivery-contract.md`](realtime-delivery-contract.md) | File paths to handlers — **grep or open file** before citing; link this doc instead of duplicating tables |
+| **Realtime delivery contract (code pointers)** | [`docs/architecture/realtime-delivery-contract.md`](architecture/realtime-delivery-contract.md) | File paths to handlers — **grep or open file** before citing; link this doc instead of duplicating tables |
 | **WebSocket profile / generated client** | [`backend/src/websocket/profile.ts`](../backend/src/websocket/profile.ts) | “Default” claims without checking **unset** behavior vs **required env** |
 
 **Rule:** If two docs disagree, **code + git-tracked `deploy/env/*.required.env` win**; then update the prose doc.
@@ -29,7 +29,7 @@ Start here for **where to look** and **how to keep docs from going stale**.
 | **Search** | `backend/src/search/client.ts`, `backend/src/search/routes/get.ts` |
 | **Metrics & overload** | `backend/src/utils/metrics.ts`, `backend/src/utils/overload.ts` |
 
-Prefer linking these paths from [`realtime-delivery-contract.md`](realtime-delivery-contract.md) instead of maintaining parallel tables in multiple files.
+Prefer linking these paths from [`architecture/realtime-delivery-contract.md`](architecture/realtime-delivery-contract.md) instead of maintaining parallel tables in multiple files.
 
 ### IDE / automation
 
@@ -43,7 +43,7 @@ Workspace notes live under [`.cursor/rules/`](../.cursor/rules/) (e.g. infrastru
 |-------------|------------|
 | **Operating prod / staging** | [`runbooks.md`](runbooks.md), [`operations-monitoring.md`](operations-monitoring.md), [`infrastructure-inventory.md`](infrastructure-inventory.md), [`deploy/README.md`](../deploy/README.md) |
 | **Acting as an ops/debug agent** | [`agent-operations-playbook.md`](agent-operations-playbook.md), [`operations-monitoring.md`](operations-monitoring.md), [`infrastructure-inventory.md`](infrastructure-inventory.md) |
-| **Debugging delivery / graders** | [`grading-delivery-semantics.md`](grading-delivery-semantics.md), [`realtime-delivery-contract.md`](realtime-delivery-contract.md) |
+| **Debugging delivery / graders** | [`architecture/grading-delivery-semantics.md`](architecture/grading-delivery-semantics.md), [`architecture/realtime-delivery-contract.md`](architecture/realtime-delivery-contract.md) |
 | **Changing env or capacity** | [`env.md`](env.md), [`deploy/env/`](../deploy/env/), host sizing in [`infrastructure-inventory.md`](infrastructure-inventory.md) |
 | **On-call / incident depth** | [`slos-and-chaos.md`](slos-and-chaos.md), [`verification-risk-register.md`](verification-risk-register.md) |
 
@@ -67,17 +67,17 @@ Workspace notes live under [`.cursor/rules/`](../.cursor/rules/) (e.g. infrastru
 | **Playbook** | Procedure may evolve; keep steps and links working. |
 | **Design / rollout history** | May describe past stages; **check date and required-env** before treating as “how prod works today.” |
 
-**Design / rollout examples:** [`plan-recent-connect-rollout.md`](plan-recent-connect-rollout.md), [`architecture-channel-first-realtime.md`](architecture-channel-first-realtime.md), [`remove-channels-last-message-hot-path.md`](remove-channels-last-message-hot-path.md), [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md).
+**Design / rollout examples:** [`history/plan-recent-connect-rollout.md`](history/plan-recent-connect-rollout.md), [`architecture/architecture-channel-first-realtime.md`](architecture/architecture-channel-first-realtime.md), [`history/remove-channels-last-message-hot-path.md`](history/remove-channels-last-message-hot-path.md), [`history/canary-read-receipt-insert-lock-shedding.md`](history/canary-read-receipt-insert-lock-shedding.md).
 
 ---
 
 ## Folder buckets
 
-Prefer organizing content by function (without churn-heavy file moves unless needed):
+Organize navigation by function via subdirectory indexes (keep canonical operational docs at top-level paths to avoid breaking automation):
 
-- **Operations**: `env.md`, `infrastructure-inventory.md`, `operations-monitoring.md`, `runbooks.md`, `agent-operations-playbook.md`
-- **Architecture / contracts**: `realtime-delivery-contract.md`, `websocket-generated-client-parity.md`, `ws-horizontal-scale.md`, `db-scaling-messages.md`
-- **History / rollout notes**: `plan-recent-connect-rollout.md`, `canary-read-receipt-insert-lock-shedding.md`, `remove-channels-last-message-hot-path.md`, `performance-baseline-pack.md`
+- **Operations index**: [`docs/operations/README.md`](operations/README.md)
+- **Architecture / contracts index**: [`docs/architecture/README.md`](architecture/README.md)
+- **History / rollout notes index**: [`docs/history/README.md`](history/README.md)
 
 ---
 
@@ -120,18 +120,26 @@ Use this lightweight header to prevent stale docs without adding heavy process.
 | [`operations-monitoring.md`](operations-monitoring.md) | Operational — metrics & queries |
 | [`runbooks.md`](runbooks.md) | Operational — incident response |
 | [`agent-operations-playbook.md`](agent-operations-playbook.md) | Operational — agent diagnosis/profiling workflow |
-| [`grading-delivery-semantics.md`](grading-delivery-semantics.md) | Operational / course |
-| [`realtime-delivery-contract.md`](realtime-delivery-contract.md) | Operational — delivery map |
-| [`websocket-generated-client-parity.md`](websocket-generated-client-parity.md) | Operational — client/server parity |
-| [`ws-horizontal-scale.md`](ws-horizontal-scale.md) | Playbook / architecture |
-| [`db-scaling-messages.md`](db-scaling-messages.md) | Design / scaling notes |
-| [`performance-baseline-pack.md`](performance-baseline-pack.md) | Benchmarks |
+| [`architecture/grading-delivery-semantics.md`](architecture/grading-delivery-semantics.md) | Operational / course |
+| [`architecture/realtime-delivery-contract.md`](architecture/realtime-delivery-contract.md) | Operational — delivery map |
+| [`architecture/websocket-generated-client-parity.md`](architecture/websocket-generated-client-parity.md) | Operational — client/server parity |
+| [`architecture/ws-horizontal-scale.md`](architecture/ws-horizontal-scale.md) | Playbook / architecture |
+| [`architecture/db-scaling-messages.md`](architecture/db-scaling-messages.md) | Design / scaling notes |
+| [`history/performance-baseline-pack.md`](history/performance-baseline-pack.md) | Benchmarks |
 | [`slos-and-chaos.md`](slos-and-chaos.md) | SLO / chaos |
 | [`verification-risk-register.md`](verification-risk-register.md) | Risk register |
-| [`plan-recent-connect-rollout.md`](plan-recent-connect-rollout.md) | Rollout history / playbook |
-| [`architecture-channel-first-realtime.md`](architecture-channel-first-realtime.md) | Target architecture |
-| [`remove-channels-last-message-hot-path.md`](remove-channels-last-message-hot-path.md) | Design proposal |
-| [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md) | Canary note |
+| [`history/plan-recent-connect-rollout.md`](history/plan-recent-connect-rollout.md) | Rollout history / playbook |
+| [`architecture/architecture-channel-first-realtime.md`](architecture/architecture-channel-first-realtime.md) | Target architecture |
+| [`history/remove-channels-last-message-hot-path.md`](history/remove-channels-last-message-hot-path.md) | Design proposal |
+| [`history/canary-read-receipt-insert-lock-shedding.md`](history/canary-read-receipt-insert-lock-shedding.md) | Canary note |
+
+### Subdirectory indexes
+
+| Directory | Purpose |
+|------|------|
+| [`docs/operations/`](operations/) | Operational runbooks and ops-oriented references |
+| [`docs/architecture/`](architecture/) | Delivery contracts and architecture/scaling references |
+| [`docs/history/`](history/) | Rollout history, benchmarks, and superseded plans |
 
 ---
 
@@ -139,7 +147,7 @@ Use this lightweight header to prevent stale docs without adding heavy process.
 
 1. **New or renamed env var** — Add to [`.env.example`](../.env.example) and describe semantics in [`env.md`](env.md). If prod/staging must pin it, add to [`deploy/env/*.required.env`](../deploy/env/).
 2. **New metric** — Export in `backend/src/utils/metrics.ts` (and related); document name/purpose in [`operations-monitoring.md`](operations-monitoring.md) if operators need it.
-3. **Behavioral contract (realtime, reads, search)** — Update [`realtime-delivery-contract.md`](realtime-delivery-contract.md) or tests-first; link from [`runbooks.md`](runbooks.md) only if on-call needs it.
+3. **Behavioral contract (realtime, reads, search)** — Update [`architecture/realtime-delivery-contract.md`](architecture/realtime-delivery-contract.md) or tests-first; link from [`runbooks.md`](runbooks.md) only if on-call needs it.
 4. **Infra (VM, IP, provider)** — Update [`infrastructure-inventory.md`](infrastructure-inventory.md) in the **same** change set.
 5. **Doc consistency guardrail** — Run `npm run docs:check` before opening a PR that modifies docs.
 

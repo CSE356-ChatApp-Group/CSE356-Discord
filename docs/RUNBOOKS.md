@@ -14,7 +14,7 @@ Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastr
 
 **Production deploy baseline:** `deploy-prod.sh` / `deploy-prod-multi.sh` merge git-tracked [`deploy/env/prod.required.env`](../deploy/env/prod.required.env) into `/opt/chatapp/shared/.env` on every rollout. Deploying an **older SHA** or a fork that never merged `origin/main` can **revert** realtime/search/replay behavior (fanout mode, WS replay limits, search semantics). Prefer **prod from current `origin/main`** (or a release tag cut from it); after deploy, spot-check `readlink /opt/chatapp/current` and that required keys in the merged `.env` match the profile you expect.
 
-**Canary (read receipt shedding vs insert-lock pressure):** [`canary-read-receipt-insert-lock-shedding.md`](canary-read-receipt-insert-lock-shedding.md) — **prod VM3 first** (`PROD_USER=ubuntu DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>`), 10–15m soak, PromQL `vm3` vs `vm1|vm2`; POST **503** flat/down + correctness are the hard gates (zero read defers during low pressure is OK).
+**Canary (read receipt shedding vs insert-lock pressure):** [`history/canary-read-receipt-insert-lock-shedding.md`](history/canary-read-receipt-insert-lock-shedding.md) — **prod VM3 first** (`PROD_USER=ubuntu DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>`), 10–15m soak, PromQL `vm3` vs `vm1|vm2`; POST **503** flat/down + correctness are the hard gates (zero read defers during low pressure is OK).
 
 ## ChatAppSyntheticProbeFailed
 
@@ -191,7 +191,7 @@ If realtime is broken but REST is healthy:
 
 ## Grader-oriented delivery checks
 
-**Course definitions** (15s per listener, outage windows): [`grading-delivery-semantics.md`](grading-delivery-semantics.md).
+**Course definitions** (15s per listener, outage windows): [`architecture/grading-delivery-semantics.md`](architecture/grading-delivery-semantics.md).
 
 Automated graders (browser clients) should treat **HTTP as the source of truth** for whether a message exists, not the DOM immediately after `POST /messages` returns.
 
@@ -199,7 +199,7 @@ Automated graders (browser clients) should treat **HTTP as the source of truth**
 2. **If checking the UI only:** For **`POST /messages`** (`message:created`) and for **`PATCH` / `DELETE` on a message**, the server **awaits `fanout.publish`** before returning, so the UI can update immediately after success on those routes. **`read:updated`** and some other paths may still use the in-process fanout queue — for those, a **short wait** or **GET** assertion is safer than WS-only zero-wait.
 3. **Do not** rely solely on WebSocket delivery for grading unless you accept occasional false negatives under normal load.
 
-**Throughput harnesses:** channel **`message:created`** is duplicated to **`user:<member>`** by default so listeners receive it as soon as the **`user:`** Redis subscription is live (before full **`channel:`** bootstrap). The generated grading client currently does **not** wait for WS `ready` and does **not** explicitly subscribe to `channel:` / `conversation:` topics, so when you debug “delivery timeout” reports, first reason about **`user:<self>` compatibility** rather than rich-client pane state. See [`grading-delivery-semantics.md`](grading-delivery-semantics.md). Watch **`ws_bootstrap_wall_duration_ms`** if accounts have extreme community counts.
+**Throughput harnesses:** channel **`message:created`** is duplicated to **`user:<member>`** by default so listeners receive it as soon as the **`user:`** Redis subscription is live (before full **`channel:`** bootstrap). The generated grading client currently does **not** wait for WS `ready` and does **not** explicitly subscribe to `channel:` / `conversation:` topics, so when you debug “delivery timeout” reports, first reason about **`user:<self>` compatibility** rather than rich-client pane state. See [`architecture/grading-delivery-semantics.md`](architecture/grading-delivery-semantics.md). Watch **`ws_bootstrap_wall_duration_ms`** if accounts have extreme community counts.
 
 ## Metrics during grader or load-test runs
 

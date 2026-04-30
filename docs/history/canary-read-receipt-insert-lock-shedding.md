@@ -1,6 +1,6 @@
 # Canary: read receipt shedding (insert lock pressure) — **production VM3**
 
-Documentation hub: [`README.md`](README.md).
+Documentation hub: [`README.md`](../README.md).
 
 Conservative `PUT /api/v1/messages/:id/read` soft-defer under per-process channel insert-lock pressure (see [`env.md`](env.md): `READ_SHED_MESSAGE_INSERT_LOCK_*`, `MESSAGE_INSERT_LOCK_PRESSURE_WINDOW_MS`).
 

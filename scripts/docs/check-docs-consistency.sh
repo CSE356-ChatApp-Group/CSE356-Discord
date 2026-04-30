@@ -18,12 +18,12 @@ fi
 required_docs=(
   "docs/agent-operations-playbook.md"
   "docs/env.md"
-  "docs/grading-delivery-semantics.md"
+  "docs/architecture/grading-delivery-semantics.md"
   "docs/infrastructure-inventory.md"
   "docs/operations-monitoring.md"
-  "docs/realtime-delivery-contract.md"
+  "docs/architecture/realtime-delivery-contract.md"
   "docs/runbooks.md"
-  "docs/websocket-generated-client-parity.md"
+  "docs/architecture/websocket-generated-client-parity.md"
 )
 
 for file in "${required_docs[@]}"; do

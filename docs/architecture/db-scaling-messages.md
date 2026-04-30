@@ -1,6 +1,6 @@
 # Database scaling: messages and read path
 
-Maintenance index and canonical env/topology docs: [`README.md`](README.md).
+Maintenance index and canonical env/topology docs: [`README.md`](../README.md).
 
 ## Read replica (`PG_READ_REPLICA_URL`)
 

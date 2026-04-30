@@ -6,7 +6,7 @@ Last reviewed: 2026-04-30
 
 This document is the **authoritative** contract between ChatApp’s WebSocket/Redis fanout and the in-repo reference client ([`docs/reference/generated-client-from-grader.ts`](./reference/generated-client-from-grader.ts)). Use it when debugging “delivery failures” vs HTTP **201** / **101** health.
 
-**Maintenance:** Prefer updating this file (and tests) when delivery paths change; link from other docs instead of duplicating handler paths — see [`README.md`](README.md).
+**Maintenance:** Prefer updating this file (and tests) when delivery paths change; link from other docs instead of duplicating handler paths — see [`README.md`](../README.md).
 
 ## Connection and `ready`
 
@@ -56,5 +56,5 @@ Envelope for `message:*` includes **`publishedAt`** after Redis accepts the publ
 
 ## Related docs
 
-- Course rubric alignment and “15s delivery” wording: [`grading-delivery-semantics.md`](grading-delivery-semantics.md)
-- Operations / metrics: [`runbooks.md`](runbooks.md), [`operations-monitoring.md`](operations-monitoring.md)
+- Course rubric alignment and “15s delivery” wording: [`grading-delivery-semantics.md`](./grading-delivery-semantics.md)
+- Operations / metrics: [`runbooks.md`](../runbooks.md), [`operations-monitoring.md`](../operations-monitoring.md)

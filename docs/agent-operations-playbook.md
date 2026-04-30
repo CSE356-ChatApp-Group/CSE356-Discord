@@ -27,7 +27,7 @@ This document is process-oriented. Canonical source data still lives in:
 ## 0) Fast routing by symptom
 
 1. **Delivery misses / realtime complaints**
-   - start: [`grading-delivery-semantics.md`](grading-delivery-semantics.md), [`realtime-delivery-contract.md`](realtime-delivery-contract.md)
+   - start: [`architecture/grading-delivery-semantics.md`](architecture/grading-delivery-semantics.md), [`architecture/realtime-delivery-contract.md`](architecture/realtime-delivery-contract.md)
    - then: `backend/src/websocket/server.ts`, fanout paths in `backend/src/messages/fanout/*`
 2. **High latency / 5xx**
    - start: [`operations-monitoring.md`](operations-monitoring.md), [`runbooks.md`](runbooks.md)

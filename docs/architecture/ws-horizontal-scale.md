@@ -1,6 +1,6 @@
 # WebSocket horizontal scale (design)
 
-Maintenance index and canonical env/topology docs: [`README.md`](README.md).
+Maintenance index and canonical env/topology docs: [`README.md`](../README.md).
 
 ## Current shape
 

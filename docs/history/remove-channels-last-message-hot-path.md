@@ -1,6 +1,6 @@
 # Remove `channels.last_message_*` From Write Hot Path
 
-Maintenance index and canonical env/topology docs: [`README.md`](README.md).
+Maintenance index and canonical env/topology docs: [`README.md`](../README.md).
 
 ## Why
 
