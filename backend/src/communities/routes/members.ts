@@ -1,43 +1,34 @@
 /**
  * Communities routes — members
  */
-const { body, param } = require('express-validator');
-const { query, queryRead, getClient } = require('../../db/pool');
-const redis = require('../../db/redis');
-const logger = require('../../utils/logger');
-const presenceService = require('../../presence/service');
-const fanout = require('../../websocket/fanout');
-const { publishUserFeedTargets } = require('../../websocket/userFeed');
 const {
+  body,
+  param,
+  query,
+  queryRead,
+  getClient,
+  redis,
+  logger,
+  presenceService,
+  fanout,
+  publishUserFeedTargets,
   invalidateWsBootstrapCache,
   invalidateWsAclCache,
-} = require('../../websocket/server');
-const {
   invalidateCommunityChannelUserFanoutTargetsCache,
   getCommunityChannelIds,
-} = require('../../messages/channelRealtimeFanout');
-const {
   warmChannelAccessCacheForUser,
   evictChannelAccessCacheForUser,
-} = require('../../messages/channelAccessCache');
-const {
   recordEndpointListCache,
   recordEndpointListCacheBypass,
-} = require('../../utils/endpointCacheMetrics');
-const {
   staleCacheKey,
   getJsonCache,
   setJsonCacheWithStale,
   withDistributedSingleflight,
-} = require('../../utils/distributedSingleflight');
-const {
   getChannelLastMessageMetaMapFromRedis,
-} = require('../../messages/repointLastMessage');
-const {
   incrCommunityMemberCount,
   decrCommunityMemberCount,
   getCommunityMemberCountsFromRedis,
-} = require('../communityMemberCount');
+} = require('./_deps');
 const C = require('../communityShared');
 
 module.exports = function register(router) {
