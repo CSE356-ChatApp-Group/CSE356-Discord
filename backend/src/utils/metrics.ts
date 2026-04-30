@@ -128,294 +128,49 @@ const {
   wsBootstrapCachedTotal,
   wsBootstrapDbTotal,
 } = require('./metrics/wsRuntimeAndDelivery');
-
-/** POST /messages rejected after access check (channel private / not a DM participant). */
-const messagePostAccessDeniedTotal = new client.Counter({
-  name: 'message_post_access_denied_total',
-  help: 'Message create rejected with 403 after target access check',
-  labelNames: ['reason'],
-});
-
-/** POST /api/v1/messages only — exact HTTP status (correlates with grader sendMessage failures). */
-const messageIngestStreamAppendedTotal = new client.Counter({
-  name: 'message_ingest_stream_appended_total',
-  help: 'Redis Stream XADD for message ingest log',
-  labelNames: ['result'],
-});
-
-const messageIngestStreamConsumedTotal = new client.Counter({
-  name: 'message_ingest_stream_consumed_total',
-  help: 'Redis Stream messages ACKed by ingest consumer',
-  labelNames: ['result'],
-});
-
-const messagePostResponseTotal = new client.Counter({
-  name: 'message_post_response_total',
-  help: 'POST /api/v1/messages responses by HTTP status code',
-  labelNames: ['status_code'],
-});
-
-/** POST /messages: Postgres succeeded but Redis pub/sub fanout threw (client still gets 201 + complete:false). */
-const messagePostRealtimePublishFailTotal = new client.Counter({
-  name: 'message_post_realtime_publish_fail_total',
-  help: 'POST /messages realtime fanout failed after DB commit (Redis publish exhausted retries or lookup error)',
-  labelNames: ['target'],
-});
-
-/** POST /messages async fanout: enqueue outcome (queued vs critical queue full fallback). */
-const messagePostFanoutAsyncEnqueueTotal = new client.Counter({
-  name: 'message_post_fanout_async_enqueue_total',
-  help: 'POST /messages deferred fanout enqueue by path and result',
-  labelNames: ['path', 'result'],
-});
-
-/** Deferred POST /messages fanout job terminal outcomes (after dedupe lock acquired). */
-const messagePostFanoutJobTotal = new client.Counter({
-  name: 'message_post_fanout_job_total',
-  help: 'Deferred POST /messages fanout job outcomes',
-  labelNames: ['path', 'result'],
-});
-
-const messagePostFanoutJobRetriesTotal = new client.Counter({
-  name: 'message_post_fanout_job_retries_total',
-  help: 'Deferred POST /messages fanout publish retries after transient failure',
-  labelNames: ['path'],
-});
-
-const messagePostFanoutJobDurationMs = new client.Histogram({
-  name: 'message_post_fanout_job_duration_ms',
-  help: 'Wall-clock duration of deferred POST /messages fanout job',
-  labelNames: ['path', 'result'],
-  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000],
-});
-
-/** POST message fanout job wall time (success / dead_letter / error); SLO alerts use p99 on `result=success`. */
-const fanoutJobLatencyMs = new client.Histogram({
-  name: 'fanout_job_latency_ms',
-  help: 'Deferred POST /messages fanout job wall-clock latency',
-  labelNames: ['path', 'result'],
-  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000],
-});
-
-/** Fanout side-effect queue depth (mirrors fanout:* segment of side_effect_queue_depth). */
-const fanoutQueueDepth = new client.Gauge({
-  name: 'fanout_queue_depth',
-  help: 'Pending jobs on fanout side-effect queues',
-  labelNames: ['queue'],
-});
-
-const fanoutRetryTotal = new client.Counter({
-  name: 'fanout_retry_total',
-  help: 'Retries inside deferred POST /messages fanout job after publish failure',
-  labelNames: ['path'],
-});
-
-/** Redis Lua SCRIPT LOAD / EVALSHA behavior for registered scripts. */
-const redisLuaScriptLoadTotal = new client.Counter({
-  name: 'redis_lua_script_load_total',
-  help: 'Redis Lua script load outcomes by script id',
-  labelNames: ['script_id', 'result'],
-});
-
-const redisLuaEvalTotal = new client.Counter({
-  name: 'redis_lua_eval_total',
-  help: 'Redis Lua eval outcomes by script id and mode',
-  labelNames: ['script_id', 'mode', 'result'],
-});
-
-const redisLuaNoScriptRetryTotal = new client.Counter({
-  name: 'redis_lua_noscript_retry_total',
-  help: 'Redis Lua NOSCRIPT retries by script id',
-  labelNames: ['script_id'],
-});
-
-/**
- * Post-insert work hit a wall-clock budget (cache bust or legacy timed publish).
- * Informational only — HTTP 201 still returned when the message row is committed.
- */
-const deliveryTimeoutTotal = new client.Counter({
-  name: 'delivery_timeout_total',
-  help: 'Post-insert delivery-path wall-clock timeouts (does not imply HTTP failure)',
-  labelNames: ['phase'],
-});
-
-/**
- * Second POST /messages with the same Idempotency-Key while the first holds the
- * Redis NX lease: polls until replay or deadline (see router exponential backoff).
- */
-const messagePostIdempotencyPollTotal = new client.Counter({
-  name: 'message_post_idempotency_poll_total',
-  help: 'POST /messages idempotency duplicate-lease poll outcomes',
-  labelNames: ['outcome'],
-});
-
-const messagePostIdempotencyPollWaitMs = new client.Histogram({
-  name: 'message_post_idempotency_poll_wait_ms',
-  help: 'Milliseconds spent in duplicate-lease wait loop before 201 replay or 409',
-  labelNames: ['outcome'],
-  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
-});
-
-/** POST /messages rejected by Redis-backed per-user / per-IP rate limits. */
-const messagePostRateLimitHitsTotal = new client.Counter({
-  name: 'message_post_rate_limit_hits_total',
-  help: 'POST /api/v1/messages requests rejected by message-post rate limiters',
-  labelNames: ['scope'],
-});
-
-/** POST /messages channel-only cross-worker insert lock outcomes. */
-const messageChannelInsertLockTotal = new client.Counter({
-  name: 'message_channel_insert_lock_total',
-  help: 'Cross-worker Redis lease outcomes for channel-scoped POST /messages inserts',
-  labelNames: ['result'],
-});
-
-/**
- * Per-request insert path for channel POST /messages (orthogonal to message_channel_insert_lock_total).
- * path: optimistic_bypass | acquired_immediate | acquired_after_wait | redis_fallback_null_lease
- * reason_detail: env_optimistic | env_mode_off | env_lock_disabled | none | redis_set_error
- */
-const messageChannelInsertPathTotal = new client.Counter({
-  name: 'message_channel_insert_path_total',
-  help: 'POST /messages channel insert path decision (bypass vs serialized acquire vs Redis fallback)',
-  labelNames: ['path', 'reason_detail'],
-});
-
-/** Milliseconds from POST insert-path entry to DB txn start (queue + Redis spin; 0 for optimistic bypass). */
-const messageChannelInsertPathPrecallMs = new client.Histogram({
-  name: 'message_channel_insert_path_precall_ms',
-  help: 'Time spent before channel insert DB work, by insert path',
-  labelNames: ['path'],
-  buckets: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
-});
-
-const messageChannelInsertLockWaitMs = new client.Histogram({
-  name: 'message_channel_insert_lock_wait_ms',
-  help: 'Milliseconds spent waiting on the channel-scoped POST /messages insert lock',
-  labelNames: ['result'],
-  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
-});
-
-/** Current number of in-process POST /messages lock waiters across channels. */
-const messageInsertLockWaitersCurrentGauge = new client.Gauge({
-  name: 'message_insert_lock_waiters_current',
-  help: 'Current number of in-process channel insert lock waiters',
-});
-
-/** Requests rejected early because per-channel lock waiter cap was reached. */
-const messageInsertLockQueueRejectTotal = new client.Counter({
-  name: 'message_insert_lock_queue_reject_total',
-  help: 'POST /messages rejects when channel insert lock waiter cap is exceeded',
-  labelNames: ['reason'],
-});
-
-/** Number of channel insert lock wait timeout events. */
-const messageInsertLockWaitTimeoutTotal = new client.Counter({
-  name: 'message_insert_lock_wait_timeout_total',
-  help: 'POST /messages lock wait timeout events',
-});
-
-/** Successful lock acquires that had to wait at least one poll interval. */
-const messageInsertLockAcquiredAfterWaitTotal = new client.Counter({
-  name: 'message_insert_lock_acquired_after_wait_total',
-  help: 'POST /messages lock acquires after non-zero waiting time',
-});
-
-/** Time spent holding the channel insert lease (acquire -> release attempt). */
-const messageInsertLockHolderDurationMs = new client.Histogram({
-  name: 'message_insert_lock_holder_duration_ms',
-  help: 'Milliseconds spent holding the channel-scoped POST /messages insert lock',
-  labelNames: ['result'],
-  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
-});
-
-/** PUT /messages/:id/read early soft-defer events by reason. */
-const readReceiptShedTotal = new client.Counter({
-  name: 'read_receipt_shed_total',
-  help: 'PUT /messages/:id/read requests soft-deferred before handler work, by reason',
-  labelNames: ['reason'],
-});
-
-/** PUT /messages/:id/read labeled outcomes (sparse priming for deferred paths). */
-const readReceiptRequestsTotal = new client.Counter({
-  name: 'read_receipt_requests_total',
-  help: 'PUT /messages/:id/read outcomes by result label',
-  labelNames: ['result'],
-});
-
-/** Distribution of Redis CAS outcomes for read cursor advance, by scope. */
-const readReceiptCursorCasTotal = new client.Counter({
-  name: 'read_receipt_cursor_cas_total',
-  help: 'Redis CAS result distribution for PUT /messages/:id/read by scope',
-  labelNames: ['scope', 'cas_result'],
-});
-
-/** Split of read requests by target scope. */
-const readReceiptScopeTotal = new client.Counter({
-  name: 'read_receipt_scope_total',
-  help: 'PUT /messages/:id/read requests by scope',
-  labelNames: ['scope'],
-});
-
-/** Read-path optimizations applied on the hot path. */
-const readReceiptOptimizationTotal = new client.Counter({
-  name: 'read_receipt_optimization_total',
-  help: 'PUT /messages/:id/read optimization events by reason',
-  labelNames: ['reason'],
-});
-
-/** PUT /messages/:id/read skipped because cursor already at/ahead of target message. */
-const readReceiptNoopSkipTotal = new client.Counter({
-  name: 'read_receipt_noop_skip_total',
-  help: 'PUT /messages/:id/read requests that performed no state change and skipped side effects',
-  labelNames: ['reason'],
-});
-
-/** PUT /messages/:id/read coalesced bursts (same message or same cursor scope cooldown). */
-const readReceiptCoalescedTotal = new client.Counter({
-  name: 'read_receipt_coalesced_total',
-  help: 'PUT /messages/:id/read requests coalesced to avoid duplicate work',
-  labelNames: ['reason'],
-});
-
-/** GET /unread-counts requests shed before DB work under pressure safeguards. */
-const unreadCountsShedTotal = new client.Counter({
-  name: 'unread_counts_shed_total',
-  help: 'GET /api/v1/unread-counts requests shed before DB work due to pressure safeguards',
-  labelNames: ['reason'],
-});
-
-/** GET /unread-counts requests reused an in-flight per-user computation. */
-const unreadCountsCoalescedTotal = new client.Counter({
-  name: 'unread_counts_coalesced_total',
-  help: 'GET /api/v1/unread-counts requests reused an in-flight response for the same user',
-});
-
-/** PUT /messages/:id/read DB upsert path outcome after Redis cursor CAS. */
-const readReceiptDbUpsertTotal = new client.Counter({
-  name: 'read_receipt_db_upsert_total',
-  help: 'PUT /messages/:id/read DB upsert enqueue/skip outcomes after Redis CAS',
-  labelNames: ['result'],
-});
-
-/** PUT /messages/:id/read in-process cursor cache outcomes (short TTL). */
-const readReceiptCursorCacheHitTotal = new client.Counter({
-  name: 'read_receipt_cursor_cache_hit_total',
-  help: 'PUT /messages/:id/read in-process cursor cache outcomes by result',
-  labelNames: ['result'],
-});
-
-/** Rolling-window p95 insert-lock wait (ms) on this worker; updated when evaluating read shed. */
-const messageChannelInsertLockPressureWaitP95MsGauge = new client.Gauge({
-  name: 'message_channel_insert_lock_pressure_wait_p95_ms',
-  help: 'Rolling-window p95 wait for successful channel insert lock acquires (read shed signal)',
-});
-
-/** Count of insert-lock timeouts in the rolling pressure window on this worker. */
-const messageChannelInsertLockPressureRecentTimeoutsGauge = new client.Gauge({
-  name: 'message_channel_insert_lock_pressure_recent_timeout_count',
-  help: 'Channel insert lock timeouts in the rolling MESSAGE_INSERT_LOCK_PRESSURE_WINDOW_MS window',
-});
+const {
+  messagePostAccessDeniedTotal,
+  messageIngestStreamAppendedTotal,
+  messageIngestStreamConsumedTotal,
+  messagePostResponseTotal,
+  messagePostRealtimePublishFailTotal,
+  messagePostFanoutAsyncEnqueueTotal,
+  messagePostFanoutJobTotal,
+  messagePostFanoutJobRetriesTotal,
+  messagePostFanoutJobDurationMs,
+  fanoutJobLatencyMs,
+  fanoutQueueDepth,
+  fanoutRetryTotal,
+  redisLuaScriptLoadTotal,
+  redisLuaEvalTotal,
+  redisLuaNoScriptRetryTotal,
+  deliveryTimeoutTotal,
+  messagePostIdempotencyPollTotal,
+  messagePostIdempotencyPollWaitMs,
+  messagePostRateLimitHitsTotal,
+  messageChannelInsertLockTotal,
+  messageChannelInsertPathTotal,
+  messageChannelInsertPathPrecallMs,
+  messageChannelInsertLockWaitMs,
+  messageInsertLockWaitersCurrentGauge,
+  messageInsertLockQueueRejectTotal,
+  messageInsertLockWaitTimeoutTotal,
+  messageInsertLockAcquiredAfterWaitTotal,
+  messageInsertLockHolderDurationMs,
+  readReceiptShedTotal,
+  readReceiptRequestsTotal,
+  readReceiptCursorCasTotal,
+  readReceiptScopeTotal,
+  readReceiptOptimizationTotal,
+  readReceiptNoopSkipTotal,
+  readReceiptCoalescedTotal,
+  unreadCountsShedTotal,
+  unreadCountsCoalescedTotal,
+  readReceiptDbUpsertTotal,
+  readReceiptCursorCacheHitTotal,
+  messageChannelInsertLockPressureWaitP95MsGauge,
+  messageChannelInsertLockPressureRecentTimeoutsGauge,
+} = require('./metrics/messageWritePath');
 
 // ── Overload stage ───────────────────────────────────────────────────────────
 
