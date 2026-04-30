@@ -101,9 +101,23 @@ You can still deploy manually from GitHub Actions using **Manual Deploy** (`work
    - `STAGING_USER` (default: `ssperrottet`)
    - `PROD_HOST` (default: `130.245.136.44`)
    - `PROD_USER` (default: `ubuntu`)
+   - `DEPLOY_RUNS_ON_STAGING` (default: `["ubuntu-latest"]`)
+   - `DEPLOY_RUNS_ON_PROD` (default: `["ubuntu-latest"]`)
    - If you move production to a new VM/IP, update `PROD_HOST` in GitHub environment variables before running deploys.
 - GitHub Environment protection:
    - Set approvals on `production` environment to require manual reviewer approval.
+
+#### Self-hosted deploy runners (recommended, no new VMs required)
+
+If GitHub-hosted runners cannot reliably SSH to your VMs, keep build/test on `ubuntu-latest` and move only deploy jobs to self-hosted labels.
+
+- **Staging deploy runner:** existing staging app VM (`136.114.103.71`) with label `deploy-staging`.
+- **Prod deploy runner:** existing monitoring VM (`130.245.136.120`) with label `deploy-prod` (keeps deploy orchestration load off VM1 during rollouts).
+- Set repository variables:
+  - `DEPLOY_RUNS_ON_STAGING` = `["self-hosted","deploy-staging"]`
+  - `DEPLOY_RUNS_ON_PROD` = `["self-hosted","deploy-prod"]`
+
+Workflows default to `["ubuntu-latest"]` when these variables are unset, so cutover is reversible without code changes.
 
 #### Set secrets with `gh` (from a maintainer laptop)
 

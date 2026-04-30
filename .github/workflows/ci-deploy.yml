@@ -266,6 +266,7 @@ jobs:
       target_sha: ${{ github.sha }}
       host: ${{ vars.STAGING_HOST || '136.114.103.71' }}
       user: ${{ vars.STAGING_USER || 'ssperrottet' }}
+      runs_on_json: ${{ vars.DEPLOY_RUNS_ON_STAGING != '' && vars.DEPLOY_RUNS_ON_STAGING || '["ubuntu-latest"]' }}
       script_path: deploy/deploy-staging.sh
       artifact_name: release-${{ github.sha }}
       clear_prod_deploy_lock: false

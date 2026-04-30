@@ -60,6 +60,7 @@ jobs:
       target_sha: ${{ needs.resolve-target.outputs.resolved_sha }}
       host: ${{ vars.PROD_HOST }}
       user: ${{ vars.PROD_USER }}
+      runs_on_json: ${{ vars.DEPLOY_RUNS_ON_PROD != '' && vars.DEPLOY_RUNS_ON_PROD || '["ubuntu-latest"]' }}
       script_path: deploy/deploy-prod-multi.sh
       verify_public_host: true
       auto_confirm: true

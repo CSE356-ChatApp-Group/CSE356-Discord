@@ -23,6 +23,11 @@ on:
         description: Deployment script path relative to repo root
         required: true
         type: string
+      runs_on_json:
+        description: JSON array for runs-on labels (e.g. ["self-hosted","deploy-prod"])
+        required: false
+        default: '["ubuntu-latest"]'
+        type: string
       artifact_name:
         description: Current-run artifact name to deploy instead of polling GitHub Releases
         required: false
@@ -77,7 +82,7 @@ env:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs_on_json) }}
     timeout-minutes: 45
     environment: ${{ inputs.environment }}
     steps:
