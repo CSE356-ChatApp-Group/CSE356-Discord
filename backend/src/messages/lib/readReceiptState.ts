@@ -5,9 +5,18 @@
 
 
 const redis = require("../../db/redis");
+const {
+  registerRedisLuaScript,
+  REDIS_LUA_IDS,
+  redisEvalSha,
+} = require("../../db/redisLua");
 const { readReceiptCursorCacheHitTotal } = require("../../utils/metrics");
 const { batchReadStateRedisKeys } = require("../readState/batchReadState");
 const { readReceiptConfig } = require("../config/readReceiptConfig");
+const {
+  READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA,
+  RESET_UNREAD_WATERMARK_LUA,
+} = require("./readReceiptStateLua");
 
 const {
   READ_RECEIPT_DEFER_POOL_WAITING,
@@ -35,49 +44,6 @@ const readReceiptCas1DebounceByTarget = new Map();
 const readReceiptRecentByMessage = new Map();
 const readReceiptScopeCursorByTarget = new Map();
 const readReceiptScopeDebounceByTarget = new Map();
-// Four-key Lua script:
-//   KEYS[1] = cursor key (read_cursor_ts:...)
-//   KEYS[2] = db_lock key (read_db_lock:...)
-//   KEYS[3] = pending read-state hash key (rs:pending:...)
-//   KEYS[4] = dirty set key (rs:dirty)
-//   ARGV[1] = new timestamp ms, ARGV[2] = cursor TTL secs, ARGV[3] = db_lock TTL ms
-//   ARGV[4] = dirty member, ARGV[5] = message id, ARGV[6] = message created_at
-//   ARGV[7] = channel id, ARGV[8] = conversation id, ARGV[9] = pending TTL secs
-// Returns 0: cursor already at/ahead — skip entirely.
-//         1: cursor advanced, but DB write rate-limited by lock — skip DB.
-//         2: cursor advanced AND dirty read-state payload enqueued.
-const READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA = `
-local current = redis.call('GET', KEYS[1])
-local new_ts = tonumber(ARGV[1])
-if current and tonumber(current) >= new_ts then
-  return 0
-end
-redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
-local locked = redis.call('SET', KEYS[2], '1', 'NX', 'PX', tonumber(ARGV[3]))
-if locked then
-  redis.call(
-    'HSET',
-    KEYS[3],
-    'msg_id', ARGV[5],
-    'msg_created_at', ARGV[6],
-    'channel_id', ARGV[7],
-    'conversation_id', ARGV[8]
-  )
-  redis.call('EXPIRE', KEYS[3], tonumber(ARGV[9]))
-  redis.call('SADD', KEYS[4], ARGV[4])
-  return 2
-end
-return 1
-`;
-
-const RESET_UNREAD_WATERMARK_LUA = `
-local current = redis.call('GET', KEYS[1])
-if current then
-  redis.call('SET', KEYS[2], current, 'EX', tonumber(ARGV[1]))
-  return 1
-end
-return 0
-`;
 
 function readCursorTsKey(userId: string, channelId: string | null, conversationId: string | null) {
   if (channelId) return `read_cursor_ts:${userId}:ch:${channelId}`;
@@ -352,8 +318,9 @@ async function advanceReadStateCursor({
     if (!batchKeys) {
       return { applied: null, didAdvanceCursor: false };
     }
-    casResult = (await redis.eval(
-      READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA,
+    casResult = (await redisEvalSha(
+      redis,
+      REDIS_LUA_IDS.READ_RECEIPT_CURSOR_ADVANCE,
       4,
       cursorKey,
       dbLockKey,
@@ -404,11 +371,16 @@ async function advanceReadStateCursor({
   };
 }
 
+registerRedisLuaScript(REDIS_LUA_IDS.READ_RECEIPT_CURSOR_ADVANCE, READ_CURSOR_ADVANCE_AND_ENQUEUE_LUA);
+registerRedisLuaScript(
+  REDIS_LUA_IDS.READ_RECEIPT_RESET_UNREAD_WATERMARK,
+  RESET_UNREAD_WATERMARK_LUA,
+);
+
 module.exports = {
   READ_RECEIPT_DEFER_POOL_WAITING,
   READ_RECEIPT_FANOUT_ENABLED,
   READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
-  RESET_UNREAD_WATERMARK_LUA,
   hasConfirmedRecentMessageRead,
   rememberConfirmedMessageRead,
   shouldRunCas1SideEffects,
