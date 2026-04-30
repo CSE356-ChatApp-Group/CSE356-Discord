@@ -8,6 +8,17 @@ Last reviewed: 2026-04-30
 
 Developer copy: [`.env.example`](../.env.example). Deploy scripts compute pool sizing on staging/production VMs (`deploy/deploy-staging.sh`, `deploy/deploy-prod.sh`).
 
+## Variable lifecycle policy (keep env professional and lean)
+
+Use these rules before adding or keeping a variable:
+
+1. **Belongs in env** only if operators reasonably need to change it without code edits (capacity, safety knobs, provider credentials, deployment profile pins).
+2. **Do not keep dead knobs**: if code no longer reads it, remove it from docs and `.env.example`.
+3. **Default-first**: if the default is correct for almost all deployments, keep it undocumented in `.env.example` unless it is a frequent incident knob.
+4. **One canonical explanation**: full semantics live here (`docs/env.md`); `.env.example` should stay concise and point here.
+5. **Promotion rule**: pin in `deploy/env/*.required.env` only when staging/prod must converge on that value every deploy.
+6. **Deprecation**: when replacing a variable, mark it as deprecated in this doc for one release window, then remove it from `.env.example` and required env profiles.
+
 **Deploy script (runner environment, not app `.env`):** `INGRESS_POST_DEPLOY_SECONDS` (default **20**) controls how long `deploy-prod.sh` hammers **`http://127.0.0.1/health`** through nginx after cutover. **`DEPLOY_NON_INTERACTIVE=true`** skips the production confirmation prompt (Ansible / CI); **`GITHUB_ACTIONS=true`** does the same.
 
 **Prod monitoring VM (`/opt/chatapp-monitoring/.env`, optional):** Compose reads **`PROMETHEUS_RETENTION`**, **`PROMETHEUS_GOMEMLIMIT`** (Go heap hint for Prometheus), **`PROMETHEUS_CPU_LIMIT`**, **`LOKI_MEM_LIMIT`**, **`GRAFANA_MEM_LIMIT`**, **`TEMPO_MEM_LIMIT`**, etc. **`PROMETHEUS_MEM_LIMIT`** sets a Docker **hard memory cap** for Prometheus only if set; the repo default compose leaves it unset on the monitoring VM because prod RSS exceeded **7g** cgroup and was **memcg-OOM-killed**—prefer a **≥16 GiB** VM or a deliberate cap plus shorter retention if you must stay on **8 GiB**.
