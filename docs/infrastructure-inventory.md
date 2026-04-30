@@ -13,7 +13,7 @@ This is the source of truth for current environment shape. Update this file when
 
 ## Production hosts
 
-**SSH:** interactive and **`deploy-prod-multi.sh` / `deploy-prod.sh`** use **`ubuntu@<host>`** by default (`PROD_USER`, `MONITORING_VM_USER`); override only if a host uses another login.
+**SSH:** interactive and **`deploy-prod-multi.sh` / `deploy-prod.sh`** use **`ubuntu@<host>`** by default (`PROD_USER`, `MONITORING_VM_USER`); override only if a host uses another login. **Default prod public/private IPs** for those scripts are centralized in **`deploy/inventory-defaults.sh`** — update that file when this inventory changes so deploy defaults stay in sync.
 
 **Copy-paste SSH (prod, `ubuntu@`, verify IPs if this drifts from the bullets below):** App **vm1** `ssh ubuntu@130.245.136.44` (nginx + local workers), **vm2** `ssh ubuntu@130.245.136.137`, **vm3** `ssh ubuntu@130.245.136.54`, **DB** `ssh ubuntu@130.245.136.21`, **monitoring** (Grafana/Prometheus/Loki stack) `ssh ubuntu@130.245.136.120`. AI agents and operators should treat the numbered bullets in this section as authoritative if a value differs.
 

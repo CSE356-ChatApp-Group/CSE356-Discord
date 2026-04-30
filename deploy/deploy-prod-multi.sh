@@ -24,9 +24,8 @@
 #   LOCAL_ARTIFACT_PATH=$PWD/releases/chatapp-<sha>.tar.gz DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>
 # SSH: PROD_USER defaults to ubuntu (DB + app hosts); override only if your hosts use another login.
 #
-# VM3 (130.245.136.54)  runs Node workers only; no shared services.
-# VM2 (130.245.136.137) runs Node workers only; no shared services.
-# VM1 (130.245.136.44)  runs Node workers + PgBouncer + MinIO + nginx.
+# VM topology defaults: deploy/inventory-defaults.sh (override VM1/VM2/VM3 / *_INTERNAL).
+# VM3 runs Node workers only; VM2 workers only; VM1 workers + PgBouncer + MinIO + nginx.
 
 set -euo pipefail
 
@@ -72,14 +71,19 @@ if [[ "${EMERGENCY_MODE}" == "true" ]]; then
   FAST_STABILIZE_MODE="true"
 fi
 
-VM1=130.245.136.44
-VM2=130.245.136.137
-VM3=130.245.136.54
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=inventory-defaults.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/inventory-defaults.sh"
+
+VM1="${VM1:-${CHATAPP_INV_VM1_PUBLIC}}"
+VM2="${VM2:-${CHATAPP_INV_VM2_PUBLIC}}"
+VM3="${VM3:-${CHATAPP_INV_VM3_PUBLIC}}"
 # VM1 app private IP (ens3). Do not use the DB VM (10.0.1.62) — Prometheus chatapp-api
 # scrape targets must hit Node workers on this host or Grafana shows 12/16 "up".
-VM1_INTERNAL=10.0.0.237
-VM2_INTERNAL=10.0.3.243
-VM3_INTERNAL=10.0.2.164
+VM1_INTERNAL="${VM1_INTERNAL:-${CHATAPP_INV_VM1_INTERNAL}}"
+VM2_INTERNAL="${VM2_INTERNAL:-${CHATAPP_INV_VM2_INTERNAL}}"
+VM3_INTERNAL="${VM3_INTERNAL:-${CHATAPP_INV_VM3_INTERNAL}}"
 DB_TARGET_MAX_CONNECTIONS="${DB_TARGET_MAX_CONNECTIONS:-450}"
 VM1_PGBOUNCER_POOL_SIZE="${VM1_PGBOUNCER_POOL_SIZE:-90}"
 VM2_PGBOUNCER_POOL_SIZE="${VM2_PGBOUNCER_POOL_SIZE:-135}"
@@ -93,15 +97,14 @@ VM3_PG_POOL_MAX_PER_INSTANCE="${VM3_PG_POOL_MAX_PER_INSTANCE:-25}"
 PGBOUNCER_MIN_POOL_SIZE="${PGBOUNCER_MIN_POOL_SIZE:-5}"
 PGBOUNCER_RESERVE_SIZE="${PGBOUNCER_RESERVE_SIZE:-5}"
 PROD_USER="${PROD_USER:-ubuntu}"
-MONITORING_VM_HOST="${MONITORING_VM_HOST:-130.245.136.120}"
+MONITORING_VM_HOST="${MONITORING_VM_HOST:-${CHATAPP_INV_MONITORING_PUBLIC}}"
 MONITORING_VM_USER="${MONITORING_VM_USER:-${PROD_USER}}"
-MONITORING_VM_SCRAPE_SOURCE="${MONITORING_VM_SCRAPE_SOURCE:-10.0.1.102}"
+MONITORING_VM_SCRAPE_SOURCE="${MONITORING_VM_SCRAPE_SOURCE:-${CHATAPP_INV_MONITORING_SCRAPE_SOURCE}}"
 # Managed Redis is off-host (see docs/infrastructure-inventory.md). redis_exporter runs in Docker
 # on an app VM with --network host; Prometheus on the monitoring VM scrapes :9121 on a *VPC*
 # address. Do not SSH to a private IP from a laptop — use the public app host for SSH.
 PROM_REDIS_HOST="${PROM_REDIS_HOST:-${VM1_INTERNAL}}"
 REDIS_EXPORTER_SSH_HOST="${REDIS_EXPORTER_SSH_HOST:-$VM1}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # VM1 runs fewer workers than VM2/VM3; deploy-prod.sh reads CHATAPP_INSTANCES from the target
 # host's /opt/chatapp/shared/.env so systemd/nginx match (Phase 6 health checks use these lists).
 VM1_WORKER_PORTS=(4000 4001 4002 4003)

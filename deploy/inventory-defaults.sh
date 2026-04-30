@@ -1,0 +1,15 @@
+# deploy/inventory-defaults.sh
+# Default public/private addresses for production deploy scripts. Keep aligned with
+# docs/infrastructure-inventory.md — override any variable by exporting before deploy.
+# Sourced by: deploy-prod.sh, deploy-prod-multi.sh (not for staging).
+# shellcheck shell=bash
+
+CHATAPP_INV_VM1_PUBLIC="${CHATAPP_INV_VM1_PUBLIC:-130.245.136.44}"
+CHATAPP_INV_VM2_PUBLIC="${CHATAPP_INV_VM2_PUBLIC:-130.245.136.137}"
+CHATAPP_INV_VM3_PUBLIC="${CHATAPP_INV_VM3_PUBLIC:-130.245.136.54}"
+CHATAPP_INV_VM1_INTERNAL="${CHATAPP_INV_VM1_INTERNAL:-10.0.0.237}"
+CHATAPP_INV_VM2_INTERNAL="${CHATAPP_INV_VM2_INTERNAL:-10.0.3.243}"
+CHATAPP_INV_VM3_INTERNAL="${CHATAPP_INV_VM3_INTERNAL:-10.0.2.164}"
+CHATAPP_INV_DB_HOST="${CHATAPP_INV_DB_HOST:-130.245.136.21}"
+CHATAPP_INV_MONITORING_PUBLIC="${CHATAPP_INV_MONITORING_PUBLIC:-130.245.136.120}"
+CHATAPP_INV_MONITORING_SCRAPE_SOURCE="${CHATAPP_INV_MONITORING_SCRAPE_SOURCE:-10.0.1.102}"
