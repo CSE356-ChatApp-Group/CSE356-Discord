@@ -86,6 +86,45 @@ const CONVERSATION_LAST_MESSAGE_FLUSH_SQL = `
      AND (last_message_at IS NULL OR $3 >= last_message_at)
      AND EXISTS (SELECT 1 FROM messages WHERE id = $1)`;
 
+const CHANNEL_LAST_MESSAGE_FLUSH_BATCH_SQL = `
+  WITH payload AS (
+    SELECT
+      UNNEST($1::uuid[]) AS target_id,
+      UNNEST($2::uuid[]) AS msg_id,
+      UNNEST($3::uuid[]) AS author_id,
+      UNNEST($4::timestamptz[]) AS msg_at
+  )
+  UPDATE channels ch
+     SET last_message_id = p.msg_id,
+         last_message_author_id = p.author_id,
+         last_message_at = p.msg_at
+    FROM payload p
+    JOIN messages m ON m.id = p.msg_id
+   WHERE ch.id = p.target_id
+     AND (ch.last_message_at IS NULL OR p.msg_at >= ch.last_message_at)
+     AND ch.last_message_id IS DISTINCT FROM p.msg_id
+  RETURNING ch.id`;
+
+const CONVERSATION_LAST_MESSAGE_FLUSH_BATCH_SQL = `
+  WITH payload AS (
+    SELECT
+      UNNEST($1::uuid[]) AS target_id,
+      UNNEST($2::uuid[]) AS msg_id,
+      UNNEST($3::uuid[]) AS author_id,
+      UNNEST($4::timestamptz[]) AS msg_at
+  )
+  UPDATE conversations conv
+     SET last_message_id = p.msg_id,
+         last_message_author_id = p.author_id,
+         last_message_at = p.msg_at,
+         updated_at = NOW()
+    FROM payload p
+    JOIN messages m ON m.id = p.msg_id
+   WHERE conv.id = p.target_id
+     AND (conv.last_message_at IS NULL OR p.msg_at >= conv.last_message_at)
+     AND conv.last_message_id IS DISTINCT FROM p.msg_id
+  RETURNING conv.id`;
+
 async function clearChannelLastMessagePointers(channelId: string) {
   await query(
     `UPDATE channels
@@ -284,27 +323,59 @@ async function flushDirtyTargetsToDB(
       results = await pipeline.exec();
     } catch { continue; }
 
-    const batchQueries: Promise<unknown>[] = [];
+    const targetIds: string[] = [];
+    const messageIds: string[] = [];
+    const authorIds: (string | null)[] = [];
+    const timestamps: string[] = [];
     for (let j = 0; j < batch.length; j++) {
       const id = batch[j];
       const [pipeErr, data] = results[j];
       if (pipeErr || !data || !data.msg_id) continue;
+      if (!data.at) continue;
+      targetIds.push(id);
+      messageIds.push(data.msg_id);
       // authorId stored as '' for null (system messages); restore null.
-      const authorId = data.author_id === '' ? null : data.author_id;
-      batchQueries.push(
-        query(sql, [data.msg_id, authorId, data.at, id])
-          .then(() => {
-            channelLastMessageUpdateFlushedTotal.inc({ target });
-            lastMessagePgReconcileTotal.inc({ target, result: 'ok' });
-          })
-          .catch((qErr: any) => {
-            channelLastMessageUpdateFailedTotal.inc({ target });
-            lastMessagePgReconcileTotal.inc({ target, result: 'error' });
-            logger.debug({ err: qErr, id }, `${target} last_msg bg flush query failed`);
-          }),
-      );
+      authorIds.push(data.author_id === '' ? null : data.author_id);
+      timestamps.push(data.at);
     }
-    if (batchQueries.length) await Promise.all(batchQueries);
+    if (!targetIds.length) continue;
+
+    try {
+      const batchSql =
+        target === 'channel'
+          ? CHANNEL_LAST_MESSAGE_FLUSH_BATCH_SQL
+          : CONVERSATION_LAST_MESSAGE_FLUSH_BATCH_SQL;
+      const updated = await query(batchSql, [targetIds, messageIds, authorIds, timestamps]);
+      channelLastMessageUpdateFlushedTotal.inc({ target }, targetIds.length);
+      lastMessagePgReconcileTotal.inc({ target, result: 'ok' }, updated.rowCount || 0);
+    } catch (qErr: any) {
+      channelLastMessageUpdateFailedTotal.inc({ target }, targetIds.length);
+      lastMessagePgReconcileTotal.inc({ target, result: 'error' }, targetIds.length);
+      logger.debug(
+        { err: qErr, target, batchSize: targetIds.length },
+        `${target} last_msg bg flush batch query failed`,
+      );
+      // Fallback to the prior single-row strategy for resilience under edge SQL/type cases.
+      const fallbackQueries: Promise<unknown>[] = [];
+      for (let k = 0; k < targetIds.length; k += 1) {
+        fallbackQueries.push(
+          query(sql, [messageIds[k], authorIds[k], timestamps[k], targetIds[k]])
+            .then(() => {
+              channelLastMessageUpdateFlushedTotal.inc({ target });
+              lastMessagePgReconcileTotal.inc({ target, result: 'ok' });
+            })
+            .catch((singleErr: any) => {
+              channelLastMessageUpdateFailedTotal.inc({ target });
+              lastMessagePgReconcileTotal.inc({ target, result: 'error' });
+              logger.debug(
+                { err: singleErr, target, id: targetIds[k] },
+                `${target} last_msg bg flush single fallback failed`,
+              );
+            }),
+        );
+      }
+      if (fallbackQueries.length) await Promise.all(fallbackQueries);
+    }
   }
 }
 

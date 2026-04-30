@@ -33,6 +33,17 @@ const channelRealtimeMetaInflight: Map<string, Promise<{
 }>> = new Map();
 const CHANNEL_REALTIME_META_CACHE_MS = 5 * 60 * 1000;
 
+const CHANNEL_USER_FANOUT_TARGETS_SQL = `
+  SELECT DISTINCT cm.user_id::text AS user_id
+  FROM channels c
+  JOIN community_members cm ON cm.community_id = c.community_id
+  LEFT JOIN channel_members chm
+    ON chm.channel_id = c.id
+   AND chm.user_id = cm.user_id
+  WHERE c.id = $1
+    AND (c.is_private = FALSE OR chm.user_id IS NOT NULL)
+`;
+
 function channelUserFanoutTargetsCacheKey(channelId: string) {
   return `channel:${channelId}:user_fanout_targets`;
 }
@@ -146,6 +157,11 @@ async function getChannelUserFanoutTargetKeys(channelId: string): Promise<string
   return targets;
 }
 
+async function queryChannelUserFanoutTargets(channelId: string): Promise<string[]> {
+  const rows = pgRows(await query(CHANNEL_USER_FANOUT_TARGETS_SQL, [channelId]));
+  return Array.from(new Set(rows.map((r: { user_id: string }) => `user:${r.user_id}`)));
+}
+
 async function getChannelUserFanoutTargetKeysWithMeta(channelId: string): Promise<{
   targets: string[];
   cacheResult: 'hit' | 'miss' | 'coalesced';
@@ -180,56 +196,23 @@ async function getChannelUserFanoutTargetKeysWithMeta(channelId: string): Promis
       const vBeforeQuery = attempt === 0
         ? Number(cachedVersion || 0)
         : Number((await redis.get(versionKey).catch(() => null)) || 0);
-      const rows = pgRows(
-        await query(
-          `SELECT DISTINCT cm.user_id::text AS user_id
-           FROM channels c
-           JOIN community_members cm ON cm.community_id = c.community_id
-           WHERE c.id = $1
-             AND (
-               c.is_private = FALSE
-               OR EXISTS (
-                 SELECT 1 FROM channel_members chm
-                 WHERE chm.channel_id = c.id AND chm.user_id = cm.user_id
-               )
-             )`,
-          [channelId],
-        ),
-      );
+      const keys = await queryChannelUserFanoutTargets(channelId);
       const vAfterQuery = Number((await redis.get(versionKey).catch(() => null)) || 0);
       if (vBeforeQuery !== vAfterQuery) {
         continue;
       }
 
-      const keys: string[] = rows.map((r: { user_id: string }) => `user:${r.user_id}`);
-      const uniqueKeys = Array.from(new Set(keys));
       const compact = {
         v: 2 as const,
-        u: uniqueKeys.map((k) => (k.startsWith('user:') ? k.slice('user:'.length) : k)),
+        u: keys.map((k) => (k.startsWith('user:') ? k.slice('user:'.length) : k)),
       };
       redis
         .set(cacheKey, JSON.stringify(compact), 'EX', CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS)
         .catch(() => {});
-      return uniqueKeys;
+      return keys;
     }
 
-    const rows = pgRows(
-      await query(
-        `SELECT DISTINCT cm.user_id::text AS user_id
-         FROM channels c
-         JOIN community_members cm ON cm.community_id = c.community_id
-         WHERE c.id = $1
-           AND (
-             c.is_private = FALSE
-             OR EXISTS (
-               SELECT 1 FROM channel_members chm
-               WHERE chm.channel_id = c.id AND chm.user_id = cm.user_id
-             )
-           )`,
-        [channelId],
-      ),
-    );
-    return Array.from(new Set(rows.map((r: { user_id: string }) => `user:${r.user_id}`)));
+    return queryChannelUserFanoutTargets(channelId);
   })().finally(() => {
     channelUserFanoutTargetsInflight.delete(cacheKey);
   });

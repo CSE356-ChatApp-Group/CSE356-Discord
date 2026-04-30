@@ -126,7 +126,7 @@ async function getPresenceFanoutRecipientUserIds(userId) {
              ON cm_other.community_id = cm_self.community_id
           WHERE cm_self.user_id = $1
             AND cm_other.user_id <> $1::uuid
-         UNION
+         UNION ALL
          SELECT cp_other.user_id AS recipient_id
            FROM conversation_participants cp_self
            JOIN conversation_participants cp_other
