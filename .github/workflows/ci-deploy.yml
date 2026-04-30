@@ -43,7 +43,8 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y shellcheck
           fi
-          shellcheck deploy/inventory-defaults.sh \
+          shellcheck deploy/preflight-check.sh \
+            deploy/inventory-defaults.sh \
             deploy/deploy-prod-remote-sizing.sh \
             deploy/deploy-prod-rolling.sh \
             deploy/deploy-prod-nginx-patches.sh \

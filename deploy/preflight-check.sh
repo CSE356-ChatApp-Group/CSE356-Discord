@@ -129,7 +129,8 @@ case "$DATABASE_URL_VAL" in
 esac
 REMOTE_PROD
   fi
-} | ssh "$SSH_TARGET" bash -s || {
+} | ssh -o BatchMode=yes -o ConnectTimeout=25 -o StrictHostKeyChecking=yes \
+    "$SSH_TARGET" bash -s || {
   echo "ERROR: Remote prerequisite checks failed."
   exit 1
 }

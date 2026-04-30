@@ -5,7 +5,11 @@
 #
 # Maintainability: default hosts live in inventory-defaults.sh; nginx upstream / gates /
 # worker rolling helpers in deploy-prod-rolling.sh; nginx Python patches in
-# deploy-prod-nginx-patches.sh.
+# deploy-prod-nginx-patches.sh; pool sizing in deploy-prod-remote-sizing.sh.
+#
+# Robustness: preflight runs before sizing SSH fan-out; RELEASE_SHA is hex-only; ssh_prod
+# uses BatchMode + ConnectTimeout; after confirm we take a remote deploy lock and register
+# EXIT cleanup (lock release + optional rollback when nginx candidate pin is active).
 #
 # Avoid GitHub at deploy time (no gh / rate limits): build a tarball that matches CI
 # (see scripts/release/package-release-artifact.sh), then:
@@ -21,6 +25,11 @@
 set -euo pipefail
 
 RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy-prod.sh <sha> [--rollback]}
+# Refuse odd SHAs early so they never reach unquoted remote snippets.
+if ! [[ "${RELEASE_SHA}" =~ ^[A-Fa-f0-9]{7,40}$ ]]; then
+  echo "ERROR: RELEASE_SHA must be a 7-40 character hexadecimal commit id (got '${RELEASE_SHA}')."
+  exit 1
+fi
 # --rollback flag: skip artifact download, backup, npm ci, migrations, pgbouncer setup,
 # and monitoring refresh — only do the rolling restart + health gates.
 FAST_ROLLBACK="${FAST_ROLLBACK:-false}"
@@ -71,7 +80,8 @@ DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-
 
 ssh_prod() {
   # shellcheck disable=SC2086
-  ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+  ssh -o BatchMode=yes -o ConnectTimeout=25 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
       -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${PROD_HOST}" "$@"
@@ -79,7 +89,8 @@ ssh_prod() {
 
 ssh_prod_db() {
   # shellcheck disable=SC2086
-  ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+  ssh -o BatchMode=yes -o ConnectTimeout=25 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
       -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${PROD_DB_HOST}" "$@"
@@ -87,7 +98,8 @@ ssh_prod_db() {
 
 ssh_monitor() {
   # shellcheck disable=SC2086
-  ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+  ssh -o BatchMode=yes -o ConnectTimeout=25 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
       -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${MONITORING_VM_USER}@${MONITORING_VM_HOST}" "$@"
@@ -121,11 +133,12 @@ run_local_prod_nginx_audit() {
 
 cleanup_on_exit() {
   local status=$?
+  trap - EXIT
   set +e
   if [ "${status}" -ne 0 ] && [ "${NGINX_CANDIDATE_PIN_ACTIVE:-0}" -eq 1 ] && [ "${ROLLBACK_ALREADY_ATTEMPTED:-0}" -eq 0 ]; then
     ROLLBACK_ALREADY_ATTEMPTED=1
     echo "↩ Exit trap: deploy failed after nginx was pinned to candidate; attempting recovery..."
-    notify_discord_prod ":x: **Prod deploy FAILED** \`${RELEASE_SHA:0:7}\` — rollback triggered"
+    notify_discord_prod ":x: **Prod deploy FAILED** \`${RELEASE_SHA:0:7}\` - rollback triggered"
     rollback_cutover
   elif [ "${status}" -ne 0 ]; then
     notify_discord_prod ":x: **Prod deploy FAILED** \`${RELEASE_SHA:0:7}\` (pre-cutover)"
@@ -194,6 +207,29 @@ WORKER_SETTLE_SECS="${WORKER_SETTLE_SECS:-10}"
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
 
+if [[ -z "${PROD_HOST}" || -z "${PROD_DB_HOST}" ]]; then
+  echo "ERROR: PROD_HOST and PROD_DB_HOST must be non-empty (see deploy/inventory-defaults.sh or set env)."
+  exit 1
+fi
+
+_DEPLOY_T0=$(date +%s)
+deploy_log_phase() {
+  local now
+  now=$(date +%s)
+  printf '%s deploy +%ss: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((now - _DEPLOY_T0))" "$1"
+}
+
+# Connectivity + remote prerequisites before any CHATAPP_INSTANCES / sizing SSH fan-out.
+"${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
+deploy_log_phase "preflight OK"
+if [ "${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT}" = "true" ]; then
+  echo "Running prod nginx parity audit before deploy..."
+  run_local_prod_nginx_audit
+  echo "✓ Prod nginx parity audit passed"
+else
+  echo "WARN: skipping prod nginx parity audit preflight (ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT=false)"
+fi
+
 # Number of Node.js HTTP workers (systemd chatapp@ ports).
 # Prefer the value persisted on the deploy target in /opt/chatapp/shared/.env so VM1 can run
 # 4 workers (no chatapp@4004) while CI omits CHATAPP_INSTANCES; otherwise deploy-prod-multi
@@ -220,22 +256,6 @@ echo "  PG_POOL_MAX/instance: ${PG_POOL_MAX_PER_INSTANCE}  pool_circuit_queue: $
 echo "  UV threadpool/instance: ${UV_THREADPOOL_PER_INSTANCE}  bcrypt_conc: ${BCRYPT_MAX_CONCURRENT}"
 echo "  communities_heavy_max_inflight: ${COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT}"
 notify_discord_prod ":rocket: **Prod deploy starting** \`${RELEASE_SHA:0:7}\` · ${CHATAPP_INSTANCES} workers · SKIP_BACKUP=${SKIP_BACKUP:-false}"
-_DEPLOY_T0=$(date +%s)
-deploy_log_phase() {
-  local now
-  now=$(date +%s)
-  printf '%s deploy +%ss: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((now - _DEPLOY_T0))" "$1"
-}
-
-"${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
-deploy_log_phase "preflight OK"
-if [ "${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT}" = "true" ]; then
-  echo "Running prod nginx parity audit before deploy..."
-  run_local_prod_nginx_audit
-  echo "✓ Prod nginx parity audit passed"
-else
-  echo "WARN: skipping prod nginx parity audit preflight (ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT=false)"
-fi
 
 if ! [[ "${CHATAPP_INSTANCES}" =~ ^[0-9]+$ ]] || [ "${CHATAPP_INSTANCES}" -lt 1 ]; then
   echo "ERROR: CHATAPP_INSTANCES must be a positive integer (got '${CHATAPP_INSTANCES}')."
@@ -345,10 +365,12 @@ else
   fi
 fi
 
+acquire_remote_deploy_lock
+trap cleanup_on_exit EXIT
+
 # Fast rollback: skip backup, artifact download, npm ci, migrations, pgbouncer, monitoring
 if [[ "${FAST_ROLLBACK}" == "true" ]]; then
   do_fast_rollback
-  release_remote_deploy_lock
   exit 0
 fi
 
@@ -681,7 +703,7 @@ echo "✓ Copied to production"
 # 5. Unpack candidate release
 echo "5. Unpacking candidate release..."
 ssh_prod "
-  set -e
+  set -eo pipefail
   REMOTE_TGZ=/tmp/chatapp-${RELEASE_SHA}.tar.gz
   GOT=\$(openssl dgst -sha256 \"\$REMOTE_TGZ\" | awk '{print \$2}')
   if [ \"\$GOT\" != \"${ARTIFACT_SHA256}\" ]; then
@@ -787,7 +809,7 @@ _PROD_DEPLOY_OVERLAY_ENV=$(mktemp)
 chatapp_scp_to_prod "${_PROD_DEPLOY_OVERLAY_ENV}" "${PROD_USER}@${PROD_HOST}:/tmp/prod.deploy.overlay.env"
 rm -f "${_PROD_DEPLOY_OVERLAY_ENV}"
 ssh_prod "
-  set -e
+  set -eo pipefail
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
   sed 's/__DEPLOY_USER__/${PROD_USER}/g' /tmp/chatapp-template.service | sudo tee /etc/systemd/system/chatapp@.service > /dev/null
   sudo cp /tmp/redis-wait.sh /opt/chatapp/shared/redis-wait.sh
@@ -832,7 +854,7 @@ fi
 # 6. Start candidate on alternate port via systemd
 echo "6. Starting candidate process via systemd..."
 ssh_prod "
-  set -e
+  set -euo pipefail
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
 
   # Write per-port drop-in so systemd uses this release's working directory.
@@ -852,7 +874,7 @@ echo "✓ Candidate process started on port $NEW_PORT"
 
 # 7. Health checks
 echo "7. Running health checks on candidate..."
-ssh_prod "/tmp/health-check.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
+ssh_prod "/tmp/health-check.sh ${NEW_PORT} http://127.0.0.1:${NEW_PORT}" || {
   echo "ERROR: Health check failed. Stopping candidate."
   stop_chatapp_port "$NEW_PORT"
   exit 1
@@ -861,7 +883,7 @@ echo "✓ Health checks passed"
 
 # 8. Smoke tests
 echo "8. Running smoke tests..."
-ssh_prod "/tmp/smoke-test.sh $NEW_PORT http://127.0.0.1:$NEW_PORT" || {
+ssh_prod "/tmp/smoke-test.sh ${NEW_PORT} http://127.0.0.1:${NEW_PORT}" || {
   echo "ERROR: Smoke tests failed. Stopping candidate."
   stop_chatapp_port "$NEW_PORT"
   exit 1
@@ -943,7 +965,7 @@ else
   # collapses dual server lines into duplicate ports (no load balancing + capacity loss).
   echo "9. Switching Nginx to candidate (single-upstream cutover)..."
   ssh_prod "
-    set -e
+    set -euo pipefail
     export NEW_PORT='${NEW_PORT}'
     export OLD_PORT='${OLD_PORT}'
     export SITE='${CHATAPP_NGINX_SITE_PATH}'
@@ -1620,10 +1642,16 @@ fi
 # 11. Update current symlink
 echo "11. Updating current release symlink..."
 if ssh_prod "
-  ln -sfn $RELEASE_DIR/$RELEASE_SHA $CURRENT_LINK
-  echo 'Symlink: $CURRENT_LINK -> $RELEASE_SHA'
-  # Keep only the 3 most recent releases to prevent disk exhaustion (node_modules ~200MB each).
-  ls -t $RELEASE_DIR | tail -n +4 | xargs -I{} rm -rf $RELEASE_DIR/{}
+  set -euo pipefail
+  ln -sfn '${RELEASE_DIR}/${RELEASE_SHA}' '${CURRENT_LINK}'
+  echo 'Symlink: ${CURRENT_LINK} -> ${RELEASE_SHA}'
+  # Keep only the N most recent releases to prevent disk exhaustion (node_modules ~200MB each).
+  if [ -d '${RELEASE_DIR}' ] && compgen -G '${RELEASE_DIR}/*' >/dev/null; then
+    ls -1dt '${RELEASE_DIR}'/* | tail -n +$((KEEP_RELEASES + 1)) | while IFS= read -r path; do
+      [ -n \"\${path}\" ] || continue
+      rm -rf \"\${path}\"
+    done
+  fi
 "; then
   echo "✓ Symlink updated"
 else
@@ -1674,7 +1702,7 @@ ssh_prod "sudo logger -t chatapp-deploy \"event=complete sha=${RELEASE_SHA} cand
 echo ""
 echo "=== Deployment Complete ==="
 echo "Release: $RELEASE_SHA"
-echo "Production: https://$(echo $PROD_HOST | sed 's/.internal.*//')"
+echo "Production: https://$(echo "${PROD_HOST}" | sed 's/.internal.*//')"
 echo ""
 echo "To rollback: re-run ./deploy/deploy-prod.sh <previous-sha>"
 echo ""
