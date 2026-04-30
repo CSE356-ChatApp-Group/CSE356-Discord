@@ -13,12 +13,12 @@ Supports real-time messaging, communities, channels, DMs, presence, search, and 
 └────────────────────────────┬────────────────────────────────────────┘
                              │ HTTP/WebSocket
                     ┌────────▼────────┐
-                    │  Nginx (Node 2) │  ← TLS termination, load balancing
+                    │ Nginx (prod VM1)│  ← TLS / reverse proxy; workers on VM1–3
                     └────────┬────────┘
           ┌─────────────────┼────────────────┐
    ┌──────▼──────┐   ┌──────▼──────┐  ┌──────▼──────┐
-   │ API  Node 2 │   │ API  Node 3 │  │ API  Node 4 │
-   │ (primary)   │   │ + Search    │  │ + Monitoring│
+   │  API workers │   │  API workers │  │  API workers │
+   │   (VM1)      │   │   (VM2)      │  │   (VM3)      │
    └──────┬──────┘   └──────┬──────┘  └──────┬──────┘
           └──────────────────┼────────────────┘
                      ┌───────▼───────┐
@@ -47,7 +47,7 @@ This means *any* client connected to *any* node receives real-time events instan
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/your-org/chatapp.git
+git clone https://github.com/CSE356-ChatApp-Group/CSE356-Discord.git chatapp
 cd chatapp
 cp .env.example .env          # edit secrets as needed
 
@@ -81,7 +81,7 @@ When something breaks in production, start here:
 - **Remote browser access:**
   - Staging Grafana: `http://136.114.103.71/grafana/`
   - Production Grafana: `https://group-8.cse356.compas.cs.stonybrook.edu/grafana/`
-- **Prometheus alerts:** check `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, `ChatAppEventLoopLagHigh`, `ChatAppHighMemoryUsage`, `ChatAppCpuSaturationHigh`, `ChatAppPgPoolPressure`, `ChatAppOverloadSheddingActive`, `ChatAppHostCpuHigh`, `ChatAppHostMemoryPressure`, `ChatAppHostSwapIoHigh`, `ChatAppDiskSpaceLow`, and `ChatAppMinioDown`.
+- **Prometheus alerts:** representative names include `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, `ChatAppEventLoopLagHigh`, `ChatAppHighMemoryUsage`, `ChatAppCpuSaturationHigh`, `ChatAppPgPoolPressure`, `ChatAppPgPoolSevereSaturation`, `ChatAppOverloadSheddingActive`, `ChatAppHostCpuHigh`, `ChatAppHostMemoryPressure`, `ChatAppHostSwapIoHigh`, and `ChatAppDiskSpaceLow`. There is **no** `ChatAppMinioDown` rule in-repo; the full set is `infrastructure/monitoring/alerts.yml`.
 
 ### Monitoring quick commands
 
@@ -108,7 +108,7 @@ If you only have shell access, `docker compose logs -f api nginx` is still the f
 If your main question is **"do we need a bigger prod server yet?"**, the best alerts are:
 
 1. `ChatAppHostCpuHigh` or `ChatAppCpuSaturationHigh` for 10–15 minutes
-2. `ChatAppPgPoolSaturated` or `ChatAppOverloadSheddingActive`
+2. `ChatAppPgPoolPressure`, `ChatAppPgPoolSevereSaturation`, or `ChatAppOverloadSheddingActive`
 3. `ChatAppHighP95Latency` together with CPU / memory pressure
 
 Those three together are the clearest early warning that prod needs more headroom.
@@ -238,7 +238,7 @@ chatapp/
 │   │   │   ├── service.ts         Redis TTL + fanout logic
 │   │   │   └── router.ts
 │   │   ├── search/
-│   │   │   ├── client.ts          Postgres FTS client (tsvector + websearch_to_tsquery)
+│   │   │   ├── client.ts          Postgres FTS (+ optional Meilisearch path)
 │   │   │   └── router.ts
 │   │   ├── attachments/router.ts  S3 pre-sign + metadata
 │   │   ├── websocket/
@@ -257,7 +257,7 @@ chatapp/
 ├── infrastructure/
 │   ├── nginx/nginx.conf
 │   └── monitoring/prometheus.yml
-├── .github/workflows/ci-cd.yml
+├── .github/workflows/ci-deploy.yml
 ├── docker-compose.yml
 └── .env.example
 ```
@@ -287,7 +287,7 @@ All protected endpoints require: `Authorization: Bearer <accessToken>`
 | GET    | /messages/context/:messageId | Message window around an id (search “jump”): optional `limit` (per side, 1–50, default 25). Response includes `hasOlder` / `hasNewer` and chronological `messages`. |
 | POST   | /messages                 | Send message                       |
 | PATCH  | /messages/:id             | Edit own message                   |
-| DELETE | /messages/:id             | Soft-delete own message            |
+| DELETE | /messages/:id             | Delete own message (hard delete)   |
 | PUT    | /messages/:id/read        | Update read cursor                 |
 
 **POST /messages — retries:** send header `Idempotency-Key: <opaque string>` (≤200 chars, same user). While the key is held in Redis, duplicate posts return the same created message with **201** instead of creating twice. Optional env: `MSG_IDEM_PENDING_TTL_SECS` (in-flight lease, default 120), `MSG_IDEM_SUCCESS_TTL_SECS` (stored result, default 86400), `MSG_IDEM_POLL_DEADLINE_MS` / `MSG_IDEM_POLL_MAX_SLEEP_MS` (duplicate-lease wait: exponential backoff, default deadline 5000ms). If Redis is unavailable, idempotency is skipped so messaging still works.

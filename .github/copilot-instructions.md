@@ -8,14 +8,18 @@ A Discord-like chat API graded by automated bots (course autograder at CSE 356, 
 
 ## Infrastructure
 
-| Role | IP | SSH | Specs |
-|------|-----|-----|-------|
-| **Prod app VM** | `130.245.136.44` | `ssh ubuntu@130.245.136.44` | 8 vCPU, 16 GB, Linode |
-| **Prod DB VM** | `130.245.136.21` | `ssh ubuntu@130.245.136.21` | 8 vCPU, 16 GB, Linode |
-| **Staging app VM** | `136.114.103.71` | `ssh ssperrottet@136.114.103.71` | 8 vCPU, 32 GB, GCP (internal `10.128.0.2`) |
-| **Staging DB VM** | `34.122.64.224` | `ssh ssperrottet@34.122.64.224` | 8 vCPU, 8 GB, GCP Debian 12 (internal `10.128.0.5`) |
+Canonical hosts, sizes, and SSH users: [`docs/infrastructure-inventory.md`](../docs/infrastructure-inventory.md). Default prod IPs for deploy scripts: [`deploy/inventory-defaults.sh`](../deploy/inventory-defaults.sh).
 
-CI uses GitHub-hosted `ubuntu-latest` runners (no self-hosted). Prod app runs **5 Node workers** on ports 4000–4004. Staging runs 5 workers (4000–4001). Prod DB is a remote Linode VM (`10.0.1.62` internal). Staging DB is a remote GCP VM (`10.128.0.5` internal).
+| Role | Public IP (defaults) | SSH user |
+|------|----------------------|----------|
+| **Prod app VM1** (nginx + workers) | `130.245.136.44` | `ubuntu` |
+| **Prod app VM2 / VM3** | `130.245.136.137`, `130.245.136.54` | `ubuntu` |
+| **Prod DB** | `130.245.136.21` | `ubuntu` |
+| **Prod monitoring** (Grafana/Prometheus stack) | `130.245.136.120` | `ubuntu` |
+| **Staging app** | `136.114.103.71` | `ssperrottet` |
+| **Staging DB** | `34.122.64.224` | `ssperrottet` |
+
+CI uses GitHub-hosted `ubuntu-latest` runners. **Production** is **multi-VM**: nginx on VM1, Node workers on VM1–VM3 (16 workers total in the default layout — see inventory). **Redis** in prod is **managed** on a private VLAN (`REDIS_URL` on app hosts), not loopback on the API VM. **Staging** is typically **fewer workers** than prod (often dual-worker); exact `CHATAPP_INSTANCES` comes from `/opt/chatapp/shared/.env` on that host.
 
 ---
 
@@ -23,9 +27,9 @@ CI uses GitHub-hosted `ubuntu-latest` runners (no self-hosted). Prod app runs **
 
 - **Backend**: Node.js (CommonJS + TypeScript), Express, `ws` WebSockets — `backend/src/`
 - **Frontend**: Vite + React + Zustand — `frontend/src/`
-- **DB**: PostgreSQL (remote VM), connection-pooled through **PgBouncer** (transaction mode, port 6432 on app VM)
-- **Cache/Pubsub**: Redis (on app VM, loopback)
-- **Reverse proxy**: Nginx (on app VM)
+- **DB**: PostgreSQL (dedicated VM in prod/staging), connection-pooled through **PgBouncer** (transaction mode, port 6432 on app hosts where deployed)
+- **Cache/Pubsub**: Redis (**managed** in prod; local/docker in dev — see `REDIS_URL` / inventory)
+- **Reverse proxy**: Nginx (**prod VM1** entry; staging topology in inventory)
 - **Process manager**: systemd `chatapp@PORT.service` (template at `deploy/chatapp-template.service`)
 
 ---
@@ -42,9 +46,9 @@ POST /api/v1/messages
 ```
 
 **Key delivery files:**
-- `backend/src/messages/router.ts` — POST /messages, PATCH, DELETE, PUT /read (1517 lines)
+- `backend/src/messages/router.ts` — POST /messages, PATCH, DELETE, PUT /read
 - `backend/src/messages/conversationFanoutTargets.ts` — Redis-cached DM participant lookup
-- `backend/src/websocket/server.ts` — WS server, `deliverUserFeedMessage`, `deliverPubsubMessage` (1690 lines)
+- `backend/src/websocket/server.ts` — WS server, `deliverUserFeedMessage`, `deliverPubsubMessage`
 - `backend/src/websocket/fanout.ts` — `fanout.publish()` sends to Redis
 - `backend/src/messages/reconnectReplay.ts` — replays missed messages on WS reconnect
 
@@ -54,15 +58,11 @@ POST /api/v1/messages
 
 ---
 
-## Connection pool architecture (as of commit `a39ed84`)
+## Connection pool architecture
 
-```
-4 Node workers × PG_POOL_MAX=80 = 320 virtual PgBouncer clients
-PgBouncer default_pool_size=400 real PG connections
-Oversubscription ratio: 0.8× (was 2.3× before fix — root cause of 17:51 storm)
-```
+Each **`chatapp@`** worker holds a **virtual** pool to PgBouncer; **total** virtual clients = workers × `PG_POOL_MAX` **across all app hosts**. Deploy scripts recompute `PG_POOL_MAX`, `POOL_CIRCUIT_BREAKER_QUEUE`, and PgBouncer `default_pool_size` from live `nproc` and inventory (see `deploy/deploy-prod-remote-sizing.sh`).
 
-**Pool circuit breaker:** `POOL_CIRCUIT_BREAKER_QUEUE=100` — throws `PoolCircuitBreakerError` (503) when `pool.waitingCount >= 100`. With 80 slots at 6ms avg queries this only fires under genuine DB catastrophe.
+**Pool circuit breaker:** `POOL_CIRCUIT_BREAKER_QUEUE` (commonly **100** in required env) throws `PoolCircuitBreakerError` (**503**) when `pool.waitingCount` exceeds the threshold — see `backend/src/db/pool.ts` and alerts around **`ChatAppPgPoolPressure`** / **`ChatAppPgPoolSevereSaturation`** in `infrastructure/monitoring/alerts.yml`.
 
 **PgBouncer config** (`deploy/pgbouncer-setup.py`):
 - `min_pool_size=20` — warm floor, prevents cold-start burst cost
@@ -90,21 +90,22 @@ ssh ubuntu@130.245.136.44 'for p in 4000 4001 4002 4003; do curl -fsS http://127
 
 ## Deployment
 
-**Manual deploy to prod:**
+**Manual deploy to prod (typical multi-VM):**
 ```bash
+./deploy/deploy-prod-multi.sh <SHA>
+# Single-host / legacy path:
 ./deploy/deploy-prod.sh <SHA>
 # or via GitHub Actions: .github/workflows/deploy-manual.yml → environment: prod
 ```
 
-**What deploy-prod.sh does on each run:** re-computes `PG_POOL_MAX`, `POOL_CIRCUIT_BREAKER_QUEUE`, `_PGB_SIZE` from live `nproc`; re-runs `pgbouncer-setup.py`; runs migrations; blue-green cutover with nginx pin; health-checks 15×.
+**What the prod scripts do (high level):** merge required env, recompute pool sizing where applicable, run migrations, rolling worker/nginx steps — see [`deploy/README.md`](../deploy/README.md).
 
 **Check current prod SHA:**
 ```bash
 ssh ubuntu@130.245.136.44 'cat /opt/chatapp/current/.deploy-sha 2>/dev/null || readlink /opt/chatapp/current'
 ```
 
-**Pool sizing formula** (8 vCPU, 4 workers):
-- `_PGB_SIZE = min(80, 70 + ncpu×20) = 80` → PgBouncer `default_pool_size=80` per worker → 400 real PG backends total? No: `_PGB_SIZE = 400`, `PG_POOL_MAX = min(80, ...) = 80`
+**Pool sizing:** computed per host from `nproc` and merged env in `deploy/deploy-prod-remote-sizing.sh` (not a single fixed “4 workers × 80” story across the whole cluster).
 
 ---
 
@@ -120,7 +121,8 @@ New migration: create `migrations/0NN_description.sql`. The runner is `backend/s
 
 **Prod health snapshot:**
 ```bash
-ssh ubuntu@130.245.136.44 'uptime && sudo systemctl is-active chatapp@4000 chatapp@4001 chatapp@4002 chatapp@4003 nginx pgbouncer redis'
+ssh ubuntu@130.245.136.44 'uptime && sudo systemctl is-active chatapp@4000 chatapp@4001 chatapp@4002 chatapp@4003 nginx pgbouncer'
+# Redis in prod is usually managed off-box — check `REDIS_URL` / inventory, not necessarily a local `redis` systemd unit.
 ```
 
 **Recent errors (last 10 min):**
@@ -159,45 +161,20 @@ tail -f artifacts/rollout-monitoring/grader-watch-events.jsonl
 
 ## Key environment variables (prod `/opt/chatapp/shared/.env`)
 
-| Variable | Prod value | Purpose |
-|----------|-----------|---------|
-| `PG_POOL_MAX` | 80 | Node→PgBouncer virtual connections per worker |
-| `POOL_CIRCUIT_BREAKER_QUEUE` | 100 | Queue depth before 503 |
-| `CHATAPP_INSTANCES` | 4 | Number of workers |
-| `FANOUT_QUEUE_CONCURRENCY` | 5 | Parallel fanout workers |
-| `DISABLE_RATE_LIMITS` | true | Grader environment — no rate limiting |
-| `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | true | Await all logical user-feed publishes before 201 (avoids deferred fanout missing the ~15s delivery window) |
-| `WS_AUTO_SUBSCRIBE_MODE` | messages | Auto-sub channel+conversation+user on connect |
-| `WS_APP_KEEPALIVE_INTERVAL_MS` | 10000 | App-level WS keepalive (grader path churn) |
-| `USER_FEED_SHARD_COUNT` | 4 | Redis pubsub shards for user feed on grader hosts |
-| `CHANNEL_MESSAGE_USER_FANOUT_MODE` | recent_connect | Inline only very recent reconnect bridge recipients |
-| `WS_RECENT_CONNECT_TTL_SECONDS` | 300 | Recent-connect bridge window on grader hosts |
-| `AUTH_PASSWORD_STORAGE_MODE` | plain | Throughput-first (grader env) |
-| `OVERLOAD_HTTP_SHED_ENABLED` | false | Keep false — 503 = grader delivery miss |
-| `CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS` | 180 | DM participant cache TTL |
+**Source of truth:** merged **`deploy/env/prod.required.env`** into shared `.env` on every deploy, full catalog in [`docs/env.md`](../docs/env.md). Do **not** treat old “grader-only” snippets as current prod — e.g. prod **`DISABLE_RATE_LIMITS=false`**, **`USER_FEED_SHARD_COUNT=64`**, **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`**, **`WS_AUTO_SUBSCRIBE_MODE=user_only`**, **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`** (503s are still bad for grading when they occur for other reasons).
 
 ---
 
-## Recent significant commits
+## Git history
 
-| SHA | What |
-|-----|------|
-| `a39ed84` | Pool oversubscription fix: PG_POOL_MAX 230→80, CBQ 300→100, PgBouncer min_pool_size+reserve_pool_timeout+stats_users+query_timeout |
-| `b89face` | Migration 018 CI fix (DROP CONCURRENTLY → DROP IF EXISTS); DM delivery tracing logs |
-| `1a79193` | Drop dead indexes (018), DB disk alerts, Discord staging notifications |
-| `ddd2f94` | Migration 017 CI fix (same CONCURRENTLY issue) |
-| `d62f284` | WS fanout optimization, presence Redis round-trips, auth hot paths |
-
-**Current prod SHA: `6bb5778`** (as of 2026-04-17). All prior fixes (`b89face`, `a39ed84`, `89525b3`, `6bb5778`) are deployed.
+Use `git log` for incident-linked SHAs; avoid pinning “current prod SHA” in this file (it goes stale immediately).
 
 ---
 
 ## Known issues / watch list
 
-1. **Pool oversubscription storm** (root cause confirmed): At 17:51 UTC 2026-04-17, PgBouncer `wait` time spiked to 5s (2.3× oversubscription, 920 virtual / 400 real). Fixed in `a39ed84`, not yet on prod.
-2. **DM delivery misses** at 5:56 PM and 7:27 PM on 2026-04-17 — root cause was the 17:51 circuit breaker event. Tracing logs added in `b89face`.
-3. **`DROP INDEX CONCURRENTLY` in migrations** — always use plain `DROP INDEX IF EXISTS` in `.sql` migration files.
-4. **PgBouncer admin console was inaccessible** — fixed by adding `stats_users=chatapp` in `a39ed84`.
+1. **`DROP INDEX CONCURRENTLY` in migrations** — migrations run in a transaction wrapper; use plain `DROP INDEX IF EXISTS` (see migration comments in-repo).
+2. **Pool / PgBouncer / replica** — triage with [`docs/RUNBOOKS.md`](../docs/RUNBOOKS.md) and Prometheus alerts in `infrastructure/monitoring/alerts.yml`.
 
 ---
 

@@ -26,7 +26,7 @@ Keep **`ansible/inventory/hosts.yml`** aligned with repo variables **`STAGING_HO
 
 **Releases:** Scripts download from **`GITHUB_REPO`**. CI passes the current repository; for local Ansible against another org, set `group_vars/all.yml` or `-e github_repo=owner/repo`.
 
-**CI validation:** `ci-deploy.yml` runs `ansible-playbook --syntax-check` on all playbooks in the **`deploy-scripts`** job (installs **`ansible-core`** via **`apt-get`** on the self-hosted runner if `ansible-playbook` is missing).
+**CI validation:** `ci-deploy.yml` runs `ansible-playbook --syntax-check` on all playbooks in the **`deploy-scripts`** job (installs **`ansible-core`** via **`apt-get`** on the GitHub-hosted `ubuntu-latest` runner if `ansible-playbook` is missing).
 
 **`script_path` workflow input:** Deprecated and ignored; kept so existing `workflow_call` sites do not break.
 

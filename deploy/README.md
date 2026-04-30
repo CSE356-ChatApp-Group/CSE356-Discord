@@ -4,11 +4,11 @@ This document describes the staged deployment pipeline for ChatApp:
 
 - **Dev**: Local + CI containers
 - **Staging**: Google Cloud Compute Engine VM
-- **Production**: temporary VM at `ubuntu@130.245.136.44`
+- **Production**: multi-VM Linode cluster (nginx + workers on **VM1** `ubuntu@130.245.136.44`, plus VM2/VM3 app hosts, DB, monitoring — see [docs/infrastructure-inventory.md](../docs/infrastructure-inventory.md)).
 
-> Public endpoints currently map as:
-> - Staging: `http://136.114.103.71`
-> - Production: `http://130.245.136.44`
+> Public entry points (IPs drift with inventory; verify there):
+> - Staging app: `http://136.114.103.71`
+> - Production (VM1 / default nginx): `http://130.245.136.44` — course Grafana may use HTTPS on a hostname (e.g. README “Remote browser access”); not every path is TLS on the raw IP.
 
 **Environment variables:** see [docs/env.md](../docs/env.md) for every API tunable and a **production shared `.env` audit** checklist (`/opt/chatapp/shared/.env` on the host).
 
@@ -33,9 +33,9 @@ This document describes the staged deployment pipeline for ChatApp:
           │                                 │
           ▼                                 ▼
     ┌──────────────┐               ┌──────────────┐
-   │  Staging VM  │               │ Production   │
-   │ (Google      │   (Manual)    │ (130.245.136.44) │
-    │  Cloud)      │ ──approval──► │              │
+    │  Staging VM  │               │ Production   │
+    │ (Google      │   (Manual)    │ multi-VM     │
+    │  Cloud)      │ ──approval──► │ (VM1–3+DB)   │
     │              │               │              │
     │ Verify       │               │ Validate +   │
     │ behavior +   │               │ cutover      │
@@ -46,27 +46,16 @@ This document describes the staged deployment pipeline for ChatApp:
 ## CI Pipeline
 
 ### Trigger
-Every push to `main` runs full CI.
+Pushes and pull requests targeting `main` run **deploy-scripts**, **backend**, and **frontend** jobs. **Packaging**, **GitHub Releases**, and **auto staging deploy** run only on **pushes** to `main` (see `if:` on `package-release` / `deploy-staging` in `ci-deploy.yml`).
 
 **Staging Playwright on `main` pushes:** off by default. After auto-deploy to staging, CI still runs the lightweight **API contract** job; the slow **Playwright `@staging` shards** run only when repository variable **`RUN_STAGING_E2E_ON_PUSH`** is set to **`true`** (Settings → Secrets and variables → Actions → Variables). Nightly and manual Playwright coverage uses the **Staging E2E** workflow (`.github/workflows/staging-e2e-nightly.yml`).
 
-### Steps
-1. Install dependencies (from `package-lock.json`)
-2. TypeScript check
-3. Linting
-4. Unit and integration tests
-5. Build backend (`npm run build` → `backend/dist/`)
-6. Build frontend (`npm run build` → `frontend/dist/`)
-7. Package artifact:
-   - `tar.gz` containing:
-     - `backend/dist/`
-     - `backend/package*.json`
-     - `frontend/dist/`
-     - `migrations/`
-     - Root `package*.json`
-     - `.env.example`
-   - Tagged with commit SHA
-8. Upload to GitHub Releases
+### Steps (see `.github/workflows/ci-deploy.yml`)
+1. **deploy-scripts:** `bash -n` / `shellcheck` on deploy scripts, `promtool check rules` on `infrastructure/monitoring/alerts.yml`, Grafana dashboard JSON validation, Ansible syntax-check on `ansible/playbooks/*.yml`, plus small `node --check` / `py_compile` gates.
+2. **backend** job: `npm ci`, `npm run typecheck --workspace=backend`, `npm run test --workspace=backend`, `npm run build --workspace=backend`.
+3. **frontend** job: `npm ci`, `npm run typecheck --workspace=frontend`, `npm run test --workspace=frontend`, `npm run build --workspace=frontend`.
+4. **package-release** (only `push` to `main`, not PRs): build `releases/chatapp-<sha>.tar.gz` with `backend/dist/`, `backend/scripts/run-migrations.cjs`, `backend/package*.json`, `backend/tsconfig.json`, `frontend/dist/`, `frontend/package*.json`, `migrations/`, root `package*.json`, `.env.example`, `deploy/env/prod.required.env`, `deploy/env/staging.required.env`, `deploy/apply-env-profile.py`.
+5. Upload workflow artifact `release-<sha>` and create/update GitHub Release tag **`release-<sha>`** with that tarball.
 
 ### Artifact
 Each release is immutable and tagged by commit SHA. The **same artifact** is deployed to both staging and production.
