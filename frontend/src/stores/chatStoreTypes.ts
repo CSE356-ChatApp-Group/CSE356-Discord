@@ -24,6 +24,12 @@ export type SearchFilters = {
   before: string;
 };
 
+export const DEFAULT_SEARCH_FILTERS: SearchFilters = {
+  author: '',
+  after: '',
+  before: '',
+};
+
 export type MessagePaginationState = {
   hasOlder: boolean;
   hasNewer: boolean;
