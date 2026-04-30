@@ -22,12 +22,20 @@ import { removeCommunityState } from './chatStoreCommunityRemoval';
 import { loadedHistoryIncludesLatest, shouldFetchLatestMessages } from './chatStorePagination';
 import {
   countUnreadChannels,
+  entityAlreadyReadAtOrBeyond,
   isChannelUnreadForUser,
   isVisibleConversation,
   normalizeConversationUnreadMetadata,
   patchChannelRowById,
   patchConversationRowById,
 } from './chatStoreUnreadModel';
+import {
+  bindReadReceiptMessageLookup,
+  flushAllPendingReadCoalesce,
+  flushPendingReadForTarget,
+  queueMarkMessageRead,
+  resetReadReceiptState,
+} from './chatStoreReadReceipts';
 export const PRESENCE_STATUSES = ['online', 'idle', 'away', 'offline'] as const;
 export type PresenceStatus = (typeof PRESENCE_STATUSES)[number];
 const VALID_PRESENCE_STATUSES = new Set<string>(PRESENCE_STATUSES);
@@ -137,26 +145,8 @@ let communitiesInFlight: Promise<Entity[]> | null = null;
 const channelsInFlightByCommunity = new Map<string, Promise<Entity[]>>();
 let channelsFetchTokenCounter = 0;
 const latestChannelsFetchTokenByCommunity = new Map<string, number>();
-const readMarkInFlight = new Set<string>();
 const presenceFreshness = new Map<string, number>();
 let presenceFreshnessSeq = 0;
-
-type PendingReadMark = {
-  messageId: string;
-  createdAtMs: number;
-};
-
-/** Coalesce live-tail read updates into one PUT per target per interval. */
-const READ_COALESCE_MS = (() => {
-  const raw = Number(import.meta.env.VITE_READ_COALESCE_MS);
-  if (!Number.isFinite(raw) || raw <= 0) return 750;
-  return Math.min(1000, Math.max(500, Math.floor(raw)));
-})();
-
-const pendingReadByTarget = new Map<string, PendingReadMark>();
-const readCoalesceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const lastSentReadByTarget = new Map<string, PendingReadMark & { sentAt: number }>();
-let readFlushVisibilityHooked = false;
 
 let wsUserSubscriptionId: string | null = null;
 
@@ -221,180 +211,6 @@ async function fetchUnreadCountsSnapshot(force = false): Promise<UnreadCountsSna
   return unreadCountsInFlight;
 }
 
-function hookReadFlushOnVisibilityHidden() {
-  if (readFlushVisibilityHooked || typeof document === 'undefined') return;
-  readFlushVisibilityHooked = true;
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') {
-      flushAllPendingReadCoalesce();
-    }
-  });
-}
-
-function readTargetFromOptions(opts: { channelId?: string | null; conversationId?: string | null }) {
-  if (opts.channelId != null && opts.channelId !== '') return `ch:${opts.channelId}`;
-  if (opts.conversationId != null && opts.conversationId !== '') return `dm:${opts.conversationId}`;
-  return null;
-}
-
-function readTargetId(target: string) {
-  const idx = target.indexOf(':');
-  return idx === -1 ? target : target.slice(idx + 1);
-}
-
-function parseMessageCreatedAtMs(value: unknown) {
-  if (!value) return 0;
-  const ms = new Date(String(value)).getTime();
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function messageCreatedAtMs(message?: Entity | null) {
-  return parseMessageCreatedAtMs(message?.created_at || message?.createdAt);
-}
-
-function findMessageInTarget(target: string, messageId: string) {
-  const messages = useChatStore.getState().messages[readTargetId(target)] || [];
-  return messages.find((message) => message?.id === messageId) || null;
-}
-
-function readMarkCandidate(
-  target: string,
-  messageId: string,
-  opts?: { messageCreatedAt?: string | Date | null },
-): PendingReadMark {
-  return {
-    messageId,
-    createdAtMs:
-      parseMessageCreatedAtMs(opts?.messageCreatedAt)
-      || messageCreatedAtMs(findMessageInTarget(target, messageId)),
-  };
-}
-
-function isReadMarkAdvance(next: PendingReadMark, prev?: PendingReadMark | null) {
-  if (!prev) return true;
-  if (next.messageId === prev.messageId) return false;
-  if (next.createdAtMs > 0 && prev.createdAtMs > 0) {
-    return next.createdAtMs > prev.createdAtMs;
-  }
-  return true;
-}
-
-function latestReadMark(a: PendingReadMark | undefined, b: PendingReadMark) {
-  if (!a) return b;
-  return isReadMarkAdvance(b, a) ? b : a;
-}
-
-function entityLastReadMessageId(entity?: Entity | null) {
-  return entity?.my_last_read_message_id || entity?.myLastReadMessageId || null;
-}
-
-function entityAlreadyReadAtOrBeyond(
-  entity: Entity | undefined | null,
-  messages: Entity[] | undefined,
-  candidateMessageId: string,
-) {
-  const lastReadId = entityLastReadMessageId(entity);
-  if (!lastReadId) return false;
-  if (lastReadId === candidateMessageId) return true;
-
-  const list = messages || [];
-  const readIdx = list.findIndex((message) => message?.id === lastReadId);
-  const candidateIdx = list.findIndex((message) => message?.id === candidateMessageId);
-  return readIdx !== -1 && candidateIdx !== -1 && readIdx >= candidateIdx;
-}
-
-function pruneLastSentReadMarks() {
-  if (lastSentReadByTarget.size <= 500) return;
-  const cutoff = Date.now() - 60_000;
-  for (const [target, entry] of lastSentReadByTarget) {
-    if (entry.sentAt < cutoff) lastSentReadByTarget.delete(target);
-  }
-}
-
-function flushPendingReadForTarget(target: string) {
-  const existingTimer = readCoalesceTimers.get(target);
-  if (existingTimer) {
-    clearTimeout(existingTimer);
-    readCoalesceTimers.delete(target);
-  }
-  const readMark = pendingReadByTarget.get(target);
-  if (!readMark) return;
-  pendingReadByTarget.delete(target);
-  emitMessageReadNow(target, readMark);
-}
-
-function flushAllPendingReadCoalesce() {
-  const targets = new Set([...pendingReadByTarget.keys(), ...readCoalesceTimers.keys()]);
-  for (const target of targets) {
-    flushPendingReadForTarget(target);
-  }
-}
-
-/**
- * @param coalesce When true, batch rapid updates (live message stream). When false, flush immediately (navigation).
- */
-function queueMarkMessageRead(
-  messageId: string | undefined | null,
-  opts: {
-    channelId?: string | null;
-    conversationId?: string | null;
-    coalesce?: boolean;
-    messageCreatedAt?: string | Date | null;
-  },
-) {
-  hookReadFlushOnVisibilityHidden();
-  if (!messageId) return;
-  const target = readTargetFromOptions(opts);
-  if (!target) return;
-
-  const candidate = readMarkCandidate(target, messageId, opts);
-  if (!isReadMarkAdvance(candidate, lastSentReadByTarget.get(target))) return;
-  const pending = pendingReadByTarget.get(target);
-  if (pending && !isReadMarkAdvance(candidate, pending)) return;
-
-  pendingReadByTarget.set(target, latestReadMark(pending, candidate));
-
-  const existingTimer = readCoalesceTimers.get(target);
-  if (existingTimer) clearTimeout(existingTimer);
-
-  if (opts.coalesce) {
-    readCoalesceTimers.set(
-      target,
-      setTimeout(() => flushPendingReadForTarget(target), READ_COALESCE_MS),
-    );
-  } else {
-    flushPendingReadForTarget(target);
-  }
-}
-
-function emitMessageReadNow(target: string, readMark?: PendingReadMark | null) {
-  if (!readMark?.messageId) return;
-  if (!isReadMarkAdvance(readMark, lastSentReadByTarget.get(target))) return;
-
-  if (readMarkInFlight.has(target)) {
-    pendingReadByTarget.set(target, latestReadMark(pendingReadByTarget.get(target), readMark));
-    if (!readCoalesceTimers.has(target)) {
-      readCoalesceTimers.set(
-        target,
-        setTimeout(() => flushPendingReadForTarget(target), READ_COALESCE_MS),
-      );
-    }
-    return;
-  }
-
-  readMarkInFlight.add(target);
-  lastSentReadByTarget.set(target, { ...readMark, sentAt: Date.now() });
-  api.put(`/messages/${readMark.messageId}/read`)
-    .catch(() => {})
-    .finally(() => {
-      readMarkInFlight.delete(target);
-      pruneLastSentReadMarks();
-      if (pendingReadByTarget.has(target)) {
-        flushPendingReadForTarget(target);
-      }
-    });
-}
-
 function upsertConversation(conversations: Entity[], conversation: Entity) {
   const existing = conversations.find((conv) => conv.id === conversation.id);
   if (!existing) return [conversation, ...conversations];
@@ -447,15 +263,9 @@ export function resetChatStore() {
   // Cancel any in-flight community fetch so the next user starts fresh.
   communitiesInFlight = null;
   channelsInFlightByCommunity.clear();
-  readMarkInFlight.clear();
-  lastSentReadByTarget.clear();
+  resetReadReceiptState();
   presenceFreshness.clear();
   presenceFreshnessSeq = 0;
-  for (const t of readCoalesceTimers.values()) {
-    clearTimeout(t);
-  }
-  readCoalesceTimers.clear();
-  pendingReadByTarget.clear();
   wsUserSubscriptionId = null;
   skipMessageRefetchOnNextWsOpen = true;
   lastWsServerReadyRefetchAt = 0;
@@ -2295,6 +2105,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 }));
+
+bindReadReceiptMessageLookup((threadId) => useChatStore.getState().messages[threadId]);
 
 wsManager.onOpen(() => {
   if (skipMessageRefetchOnNextWsOpen) {

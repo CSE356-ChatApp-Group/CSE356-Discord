@@ -115,3 +115,22 @@ export function isVisibleConversation(conv: Entity, currentUserId?: string) {
   const participants = Array.isArray(conv.participants) ? conv.participants : [];
   return participants.some((participant: Entity) => participant?.id && participant.id !== currentUserId);
 }
+
+export function entityLastReadMessageId(entity?: Entity | null) {
+  return entity?.my_last_read_message_id || entity?.myLastReadMessageId || null;
+}
+
+export function entityAlreadyReadAtOrBeyond(
+  entity: Entity | undefined | null,
+  messages: Entity[] | undefined,
+  candidateMessageId: string,
+) {
+  const lastReadId = entityLastReadMessageId(entity);
+  if (!lastReadId) return false;
+  if (lastReadId === candidateMessageId) return true;
+
+  const list = messages || [];
+  const readIdx = list.findIndex((message) => message?.id === lastReadId);
+  const candidateIdx = list.findIndex((message) => message?.id === candidateMessageId);
+  return readIdx !== -1 && candidateIdx !== -1 && readIdx >= candidateIdx;
+}
