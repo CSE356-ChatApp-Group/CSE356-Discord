@@ -9,29 +9,6 @@ const _origFetch = globalThis.fetch;
   return _origFetch(input, { ...init, headers: h });
 };
 
-/** Pulls `code` / `requestId` from JSON error bodies (e.g. POST /messages 503) for clearer grader logs. */
-function formatFailedResponse(status: number, bodyText: string): string {
-  const raw = (bodyText || '').trim();
-  if (!raw) return String(status);
-  try {
-    const j = JSON.parse(raw) as {
-      code?: string;
-      requestId?: string;
-      waitedMs?: number;
-      lockWaiters?: number;
-    };
-    const tags: string[] = [];
-    if (j.code) tags.push(`code=${j.code}`);
-    if (j.requestId) tags.push(`requestId=${j.requestId}`);
-    if (typeof j.waitedMs === 'number') tags.push(`waitedMs=${j.waitedMs}`);
-    if (typeof j.lockWaiters === 'number') tags.push(`lockWaiters=${j.lockWaiters}`);
-    if (tags.length === 0) return `${status} ${raw}`;
-    return `${status} [${tags.join(' ')}] ${raw}`;
-  } catch {
-    return `${status} ${raw}`;
-  }
-}
-
 // ─── Type Definitions ───
 
 export interface UserInfo {
@@ -48,6 +25,8 @@ export interface ChannelInfo {
   type?: string;
   isPrivate?: boolean;
   communityId?: string;
+  canAccess?: boolean;
+  unreadCount?: number;
 }
 
 export interface DMInfo {
@@ -56,13 +35,26 @@ export interface DMInfo {
   type?: string;
 }
 
+export interface AttachmentInfo {
+  id?: string;
+  messageId?: string;
+  filename?: string;
+  contentType?: string;
+  sizeBytes?: number;
+  storageKey?: string;
+  width?: number;
+  height?: number;
+  url?: string;
+}
+
 export interface MessageInfo {
   id: string;
-  conversationId: string;
+  channelId?: string;
+  conversationId?: string;
   content: string;
   authorId: string;
   timestamp?: string;
-  attachments?: string[];
+  attachments?: AttachmentInfo[];
   edited?: boolean;
 }
 
@@ -70,6 +62,30 @@ export interface CommunityInfo {
   id: string;
   name: string;
   ownerId: string;
+}
+
+export interface SearchHit {
+  id: string;
+  content: string;
+  authorId: string;
+  authorDisplayName?: string;
+  channelId?: string;
+  conversationId?: string;
+  communityId?: string;
+  channelName?: string;
+  createdAt?: string;
+  _formatted?: {
+    content?: string;
+  };
+}
+
+export interface SearchResponse {
+  hits: SearchHit[];
+  offset: number;
+  limit: number;
+  estimatedTotalHits: number;
+  processingTimeMs: number;
+  query: string;
 }
 
 export interface SearchResult {
@@ -84,6 +100,7 @@ export class GeneratedClient {
   private baseUrl: string;
   private jar: CookieJar;
   private accessToken: string | null = null;
+  private currentUserId: string | null = null;
   private rt: RealtimeManager;
 
   private messageHandlers: ((msg: MessageInfo) => void)[] = [];
@@ -91,9 +108,8 @@ export class GeneratedClient {
   private messageDeleteHandlers: ((evt: { conversationId: string; messageId: string }) => void)[] = [];
   private presenceHandlers: ((evt: { userId: string; presence: string }) => void)[] = [];
   private inviteHandlers: ((evt: { type: 'community' | 'dm'; id: string }) => void)[] = [];
-  private readReceiptHandlers: ((evt: { conversationId: string; userId: string; messageId: string }) => void)[] = [];
-  private realtimeReady = false;
-  private realtimeReadyWaiters: Array<() => void> = [];
+  private readReceiptHandlers: ((evt: { channelId?: string; conversationId?: string; userId: string; messageId: string }) => void)[] = [];
+  private wsReady = false;
 
   private static keycloakCookieCache: Map<string, Map<string, string>> = new Map();
 
@@ -112,6 +128,7 @@ export class GeneratedClient {
         return cookie ? { cookie } : {};
       },
       onMessage: (msg: any) => this.handleWsMessage(msg),
+      onOpen: () => { this.wsReady = false; },
     });
   }
 
@@ -120,6 +137,18 @@ export class GeneratedClient {
   }
 
   // ─── Internal Helpers ───
+
+  private extractUserIdFromToken(): string {
+    if (!this.accessToken) return '';
+    try {
+      const parts = this.accessToken.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+        return payload.id || payload.userId || payload.sub || '';
+      }
+    } catch {}
+    return '';
+  }
 
   private async doRefreshToken(): Promise<void> {
     try {
@@ -131,6 +160,10 @@ export class GeneratedClient {
         if (data.accessToken) this.accessToken = data.accessToken;
       }
     } catch {}
+    // Always update userId from token
+    if (!this.currentUserId) {
+      this.currentUserId = this.extractUserIdFromToken();
+    }
   }
 
   private async authedFetch(url: string, init: RequestInit = {}): Promise<Response> {
@@ -159,16 +192,32 @@ export class GeneratedClient {
   }
 
   private mapMessage(m: any): MessageInfo {
-    const convId = m.channel_id || m.conversation_id || m.channelId || m.conversationId || '';
+    // conversationId is the canonical channel/conversation identifier — must always be
+    // populated. The server's WS payload for channel messages uses channel_id/channelId;
+    // alias it into conversationId so consumers (loadgen delivery tracker) see one field.
+    const conversationId =
+      m.conversationId || m.conversation_id ||
+      m.channelId      || m.channel_id      || '';
     return {
       id: String(m.id || m._id || ''),
-      conversationId: String(convId),
+      conversationId: String(conversationId),
       content: m.content || '',
       authorId: String(m.author_id || m.authorId || m.author?.id || ''),
       timestamp: m.created_at || m.timestamp || m.createdAt || undefined,
-      attachments: (m.attachments || []).map((a: any) =>
-        typeof a === 'string' ? a : (a.url || a.file_url || a.attachment_url || '')
-      ).filter((s: string) => s),
+      attachments: (m.attachments || []).map((a: any) => {
+        if (typeof a === 'string') return { url: a } as AttachmentInfo;
+        return {
+          id: a.id || undefined,
+          messageId: a.messageId || a.message_id || undefined,
+          filename: a.filename || undefined,
+          contentType: a.contentType || a.content_type || undefined,
+          sizeBytes: a.sizeBytes || a.size_bytes || a.size || undefined,
+          storageKey: a.storageKey || a.storage_key || undefined,
+          width: a.width || undefined,
+          height: a.height || undefined,
+          url: a.url || a.file_url || a.attachment_url || undefined,
+        } as AttachmentInfo;
+      }),
       edited: !!(m.edited_at || m.edited || m.isEdited),
     };
   }
@@ -180,6 +229,8 @@ export class GeneratedClient {
       type: c.type || (c.is_private ? 'private' : 'public'),
       isPrivate: !!(c.is_private || c.isPrivate),
       communityId: String(c.community_id || c.communityId || ''),
+      canAccess: c.canAccess ?? c.can_access ?? undefined,
+      unreadCount: c.unreadCount ?? c.unread_count ?? undefined,
     };
   }
 
@@ -228,25 +279,6 @@ export class GeneratedClient {
         if (name && val) jar.set(name, val);
       }
     }
-  }
-
-  private markRealtimeReady(): void {
-    this.realtimeReady = true;
-    const waiters = this.realtimeReadyWaiters.splice(0);
-    for (const resolve of waiters) {
-      try {
-        resolve();
-      } catch {
-        // ignore waiter failures
-      }
-    }
-  }
-
-  private waitForRealtimeReady(): Promise<void> {
-    if (this.realtimeReady) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      this.realtimeReadyWaiters.push(resolve);
-    });
   }
 
   // ─── Authentication ───
@@ -300,7 +332,9 @@ export class GeneratedClient {
     }
     const data = await res.json() as any;
     this.accessToken = data.accessToken;
-    return this.mapUser(data.user || {});
+    const user = this.mapUser(data.user || {});
+    this.currentUserId = user.id || this.extractUserIdFromToken();
+    return user;
   }
 
   async loginSSO(username: string, password: string): Promise<any> {
@@ -725,59 +759,35 @@ export class GeneratedClient {
 
   // ─── Messaging ───
 
-  async sendMessage(conversationId: string, content: string, attachments?: Buffer[]): Promise<MessageInfo> {
-    let res: Response;
+  async sendMessage(channelId: string, content: string, attachments?: Buffer[]): Promise<MessageInfo> {
     if (attachments && attachments.length > 0) {
-      const form = new FormData();
-      form.append('content', content);
-      form.append('channelId', conversationId);
-      for (const buf of attachments) {
-        form.append('attachments', buf, { filename: 'image.png', contentType: 'image/png' });
-      }
-      res = await this.authedFetch(`${this.baseUrl}/api/v1/messages`, {
-        method: 'POST',
-        body: form as any,
-        headers: form.getHeaders(),
-      });
-    } else {
-      res = await this.authedFetch(`${this.baseUrl}/api/v1/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channelId: conversationId, content }),
-      });
+      throw new Error('Raw attachment upload not implemented; backend requires presign upload flow via POST /api/v1/attachments/presign');
     }
+    const res = await this.authedFetch(`${this.baseUrl}/api/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelId, content }),
+    });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      throw new Error(`sendMessage failed: ${formatFailedResponse(res.status, err)}`);
+      throw new Error(`sendMessage failed: ${res.status} ${err}`);
     }
     const d = await res.json() as any;
     return this.mapMessage(d.message || d);
   }
 
   async sendDM(conversationId: string, content: string, attachments?: Buffer[]): Promise<MessageInfo> {
-    let res: Response;
     if (attachments && attachments.length > 0) {
-      const form = new FormData();
-      form.append('content', content);
-      form.append('conversationId', conversationId);
-      for (const buf of attachments) {
-        form.append('attachments', buf, { filename: 'image.png', contentType: 'image/png' });
-      }
-      res = await this.authedFetch(`${this.baseUrl}/api/v1/messages`, {
-        method: 'POST',
-        body: form as any,
-        headers: form.getHeaders(),
-      });
-    } else {
-      res = await this.authedFetch(`${this.baseUrl}/api/v1/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversationId, content }),
-      });
+      throw new Error('Raw attachment upload not implemented; backend requires presign upload flow via POST /api/v1/attachments/presign');
     }
+    const res = await this.authedFetch(`${this.baseUrl}/api/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId, content }),
+    });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      throw new Error(`sendDM failed: ${formatFailedResponse(res.status, err)}`);
+      throw new Error(`sendDM failed: ${res.status} ${err}`);
     }
     const d = await res.json() as any;
     return this.mapMessage(d.message || d);
@@ -789,7 +799,10 @@ export class GeneratedClient {
     if (options?.before) params += `&before=${encodeURIComponent(options.before)}`;
 
     const res = await this.authedFetch(`${this.baseUrl}/api/v1/messages?${params}&channelId=${channelId}`);
-    if (!res.ok) return [];
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`getMessages failed: ${res.status} ${err}`);
+    }
     const d = await res.json() as any;
     return (d.messages || d.data || []).map((m: any) => this.mapMessage(m));
   }
@@ -800,7 +813,10 @@ export class GeneratedClient {
     if (options?.before) params += `&before=${encodeURIComponent(options.before)}`;
 
     const res = await this.authedFetch(`${this.baseUrl}/api/v1/messages?${params}&conversationId=${conversationId}`);
-    if (!res.ok) return [];
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`getMessagesDM failed: ${res.status} ${err}`);
+    }
     const d = await res.json() as any;
     return (d.messages || d.data || []).map((m: any) => this.mapMessage(m));
   }
@@ -832,13 +848,32 @@ export class GeneratedClient {
   // ─── Real-time ───
 
   private handleWsMessage(msg: any): void {
+    // Handle __wsInternal subscribe_channels events (invite notifications)
+    if (msg.__wsInternal && msg.__wsInternal.kind === 'subscribe_channels' && this.wsReady) {
+      const channels: string[] = msg.__wsInternal.channels || [];
+      for (let i = 0; i < channels.length; i++) {
+        const ch = channels[i];
+        if (ch.startsWith('conversation:')) {
+          const id = ch.substring('conversation:'.length);
+          if (id) this.inviteHandlers.forEach(h => h({ type: 'dm', id }));
+        } else if (ch.startsWith('community:')) {
+          const id = ch.substring('community:'.length);
+          if (id) this.inviteHandlers.forEach(h => h({ type: 'community', id }));
+        }
+      }
+      return;
+    }
+
     const event = msg.event || msg.type;
     const data = msg.data || msg;
-    switch (event) {
-      case 'ready':
-        this.markRealtimeReady();
-        break;
 
+    // Track ready state to distinguish initial subscriptions from invites
+    if (event === 'ready') {
+      this.wsReady = true;
+      return;
+    }
+
+    switch (event) {
       case 'message:created':
       case 'new_message':
         this.messageHandlers.forEach(h => h(this.mapMessage(data)));
@@ -901,17 +936,20 @@ export class GeneratedClient {
       case 'message:read':
       case 'read:receipt':
       case 'read_receipt': {
-        const conversationId = String(
-          data.conversationId || data.conversation_id ||
-          data.channelId || data.channel_id || ''
-        );
+        const channelId = data.channelId || data.channel_id || undefined;
+        const conversationId = data.conversationId || data.conversation_id || undefined;
         const userId = String(data.userId || data.user_id || '');
         const messageId = String(
           data.lastReadMessageId || data.messageId ||
           data.message_id || data.last_read_message_id || ''
         );
-        if (conversationId && userId) {
-          this.readReceiptHandlers.forEach(h => h({ conversationId, userId, messageId }));
+        if ((channelId || conversationId) && userId) {
+          this.readReceiptHandlers.forEach(h => h({
+            channelId: channelId ? String(channelId) : undefined,
+            conversationId: conversationId ? String(conversationId) : (channelId ? undefined : undefined),
+            userId,
+            messageId,
+          }));
         }
         break;
       }
@@ -936,9 +974,7 @@ export class GeneratedClient {
 
   async enableRealtime(): Promise<void> {
     try {
-      this.realtimeReady = false;
       await this.rt.enable();
-      await this.waitForRealtimeReady();
     } catch {
       // WS connection failed or was destroyed — not critical
     }
@@ -970,10 +1006,19 @@ export class GeneratedClient {
   }
 
   async getUnreadCounts(): Promise<{ conversationId: string; count: number }[]> {
-    return [];
+    const res = await this.authedFetch(`${this.baseUrl}/api/v1/unread-counts`);
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`getUnreadCounts failed: ${res.status} ${err}`);
+    }
+    const d = await res.json() as any;
+    return (d.counts || d.data || []).map((c: any) => ({
+      conversationId: String(c.conversationId || c.conversation_id || c.channelId || c.channel_id || c.id || ''),
+      count: c.count || c.unreadCount || c.unread_count || c.unread_message_count || 0,
+    }));
   }
 
-  onReadReceipt(callback: (event: { conversationId: string; userId: string; messageId: string }) => void): void {
+  onReadReceipt(callback: (event: { channelId?: string; conversationId?: string; userId: string; messageId: string }) => void): void {
     this.readReceiptHandlers.push(callback);
   }
 
@@ -986,37 +1031,49 @@ export class GeneratedClient {
     before?: string;
     after?: string;
   }): Promise<SearchResult[]> {
+    // Backend requires exactly one of communityId or conversationId
+    const hasCommunity = !!(options?.communityId);
+    const hasConversation = !!(options?.conversationId);
+    if (!hasCommunity && !hasConversation) {
+      throw new Error('searchMessages requires exactly one of communityId or conversationId');
+    }
+    if (hasCommunity && hasConversation) {
+      throw new Error('searchMessages requires exactly one of communityId or conversationId, not both');
+    }
+
     let url = `${this.baseUrl}/api/v1/search?q=${encodeURIComponent(query)}&limit=30`;
     if (options?.conversationId) url += `&conversationId=${options.conversationId}`;
-    else if (options?.communityId) url += `&communityId=${options.communityId}`;
+    if (options?.communityId) url += `&communityId=${options.communityId}`;
     if (options?.authorId) url += `&authorId=${options.authorId}`;
     if (options?.before) url += `&before=${encodeURIComponent(options.before)}`;
     if (options?.after) url += `&after=${encodeURIComponent(options.after)}`;
 
-    try {
-      const res = await this.authedFetch(url);
-      if (!res.ok) return [];
-      const d = await res.json() as any;
-      const hits = d.hits || d.results || d.messages || d.data || [];
-      return hits.map((r: any) => {
-        const convId = r.channelId || r.conversationId || r.channel_id || r.conversation_id || '';
-        const msg: MessageInfo = {
-          id: String(r.id || r._id || ''),
-          conversationId: String(convId),
-          content: r.content || '',
-          authorId: String(r.authorId || r.author_id || ''),
-          timestamp: r.createdAt || r.created_at || undefined,
-          attachments: [],
-          edited: false,
-        };
-        return {
-          message: msg,
-          conversationId: String(convId),
-          communityId: String(r.communityId || r.community_id || ''),
-        };
-      });
-    } catch {
-      return [];
+    const res = await this.authedFetch(url);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`searchMessages failed: ${res.status} ${body.slice(0, 200)}`);
     }
+    const d = await res.json() as any;
+    // Backend returns SearchResponse shape with hits array
+    const hits: any[] = d.hits || d.results || d.messages || d.data || [];
+    return hits.map((r: any) => {
+      const hitChannelId = r.channelId || r.channel_id || undefined;
+      const hitConversationId = r.conversationId || r.conversation_id || undefined;
+      const msg: MessageInfo = {
+        id: String(r.id || r._id || ''),
+        content: r.content || '',
+        authorId: String(r.authorId || r.author_id || ''),
+        timestamp: r.createdAt || r.created_at || undefined,
+        attachments: [],
+        edited: false,
+      };
+      if (hitChannelId) msg.channelId = String(hitChannelId);
+      if (hitConversationId) msg.conversationId = String(hitConversationId);
+      return {
+        message: msg,
+        conversationId: String(hitConversationId || hitChannelId || ''),
+        communityId: String(r.communityId || r.community_id || ''),
+      };
+    });
   }
 }
