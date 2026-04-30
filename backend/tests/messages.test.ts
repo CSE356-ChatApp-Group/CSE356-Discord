@@ -1,5 +1,9 @@
 /**
  * Messages & overload-protection integration tests.
+ *
+ * Covers HTTP behavior implemented under `backend/src/messages/routes/`:
+ * `post.ts` (create), `get.ts` (history/context), `patch.ts` (edit),
+ * `delete.ts` (hard delete), `read.ts` (read receipt).
  */
 
 import { randomUUID } from 'crypto';
