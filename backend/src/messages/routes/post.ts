@@ -270,6 +270,146 @@ async function rollbackInsertedChannelMessage(
     .catch(() => {});
 }
 
+async function configureMessageInsertTransaction(
+  client: any,
+  statementTimeoutMs: number,
+) {
+  await client.query(
+    `SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`,
+  );
+  await client.query(`SET LOCAL synchronous_commit = off`);
+}
+
+async function runChannelInsertTransaction({
+  client,
+  channelId,
+  userId,
+  normalizedContent,
+  threadId,
+  txPhases,
+}: {
+  client: any;
+  channelId: string;
+  userId: string;
+  normalizedContent: string;
+  threadId: string | null;
+  txPhases: { t0: number; t_access: number; t_insert: number; t_later: number };
+}) {
+  txPhases.t0 = Date.now();
+  await configureMessageInsertTransaction(
+    client,
+    MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS,
+  );
+
+  txPhases.t_access = Date.now();
+  const insertRes = await client.query(MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL, [
+    channelId,
+    userId,
+    normalizedContent || null,
+    threadId || null,
+  ]);
+  txPhases.t_insert = Date.now();
+
+  if (!insertRes.rows.length) {
+    const accessRes = await client.query(
+      MESSAGE_POST_CHANNEL_ACCESS_DIAGNOSTIC_SQL,
+      [channelId, userId],
+    );
+    txPhases.t_later = Date.now();
+    const accessRow = accessRes.rows[0];
+    if (accessRow && accessRow.author_exists === false) {
+      throw buildMessagePostError(
+        "Session no longer valid",
+        401,
+        "author_missing",
+      );
+    }
+    throw buildMessagePostError("Access denied", 403, "channel_access");
+  }
+
+  const row = insertRes.rows[0];
+  const communityId = row.post_insert_community_id ?? null;
+  delete row.post_insert_community_id;
+  txPhases.t_later = Date.now();
+  return { row, communityId };
+}
+
+async function runConversationInsertTransaction({
+  client,
+  conversationId,
+  userId,
+  normalizedContent,
+  threadId,
+  attachments,
+  txPhases,
+}: {
+  client: any;
+  conversationId: string;
+  userId: string;
+  normalizedContent: string;
+  threadId: string | null;
+  attachments: any[];
+  txPhases: { t0: number; t_access: number; t_insert: number; t_later: number };
+}) {
+  txPhases.t0 = Date.now();
+  await configureMessageInsertTransaction(
+    client,
+    MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS,
+  );
+
+  const accessRes = await client.query(
+    `SELECT
+       EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
+       COUNT(*)::int                             AS has_access
+     FROM conversation_participants
+     WHERE conversation_id = $1
+       AND user_id = $2
+       AND left_at IS NULL`,
+    [conversationId, userId],
+  );
+  txPhases.t_access = Date.now();
+  const accessRow = accessRes.rows[0];
+  if (accessRow && accessRow.author_exists === false) {
+    throw buildMessagePostError(
+      "Session no longer valid",
+      401,
+      "author_missing",
+    );
+  }
+  if (!accessRow?.has_access) {
+    throw buildMessagePostError(
+      "Not a participant",
+      403,
+      "conversation_participant",
+    );
+  }
+
+  const insertRes = await client.query(
+    `INSERT INTO messages AS m (conversation_id, author_id, content, thread_id)
+   VALUES ($1, $2, $3, $4)
+   RETURNING ${MESSAGE_INSERT_RETURNING_AUTHOR},
+     '[]'::json AS attachments`,
+    [
+      conversationId,
+      userId,
+      normalizedContent || null,
+      threadId || null,
+    ],
+  );
+  txPhases.t_insert = Date.now();
+  const row = insertRes.rows[0];
+
+  await insertMessageAttachments(
+    client,
+    row.id,
+    userId,
+    attachments,
+  );
+
+  txPhases.t_later = Date.now();
+  return row;
+}
+
 module.exports = function registerPostRoutes(router: import("express").IRouter) {
   router.post(
     "/",
@@ -308,6 +448,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         // --- POST /messages: idempotency lease (Redis) ---
         postWallStart = Date.now();
         const { content } = authReq.body;
+        const userId = authReq.user.id;
         const normalizedContent =
           typeof content === "string" ? content.trim() : "";
         channelId = authReq.body.channelId ?? null;
@@ -403,105 +544,30 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
 
         const runChannelMessageRowUnderInsertLock = () =>
           withTransaction(async (client) => {
-            txPhases.t0 = Date.now();
-            await client.query(
-              `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
-            );
-            await client.query(`SET LOCAL synchronous_commit = off`);
-
-            txPhases.t_access = Date.now();
-            const insertRes = await client.query(MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL, [
-              channelId,
-              authReq.user.id,
-              normalizedContent || null,
-              threadId || null,
-            ]);
-            txPhases.t_insert = Date.now();
-
-            if (!insertRes.rows.length) {
-              const accessRes = await client.query(
-                MESSAGE_POST_CHANNEL_ACCESS_DIAGNOSTIC_SQL,
-                [channelId, authReq.user.id],
-              );
-              txPhases.t_later = Date.now();
-              const accessRow = accessRes.rows[0];
-              if (accessRow && accessRow.author_exists === false) {
-                throw buildMessagePostError(
-                  "Session no longer valid",
-                  401,
-                  "author_missing",
-                );
-              }
-              throw buildMessagePostError("Access denied", 403, "channel_access");
-            }
-
-            const row = insertRes.rows[0];
-            communityId = row.post_insert_community_id ?? null;
-            delete row.post_insert_community_id;
-            txPhases.t_later = Date.now();
+            const { row, communityId: nextCommunityId } =
+              await runChannelInsertTransaction({
+                client,
+                channelId,
+                userId,
+                normalizedContent,
+                threadId,
+                txPhases,
+              });
+            communityId = nextCommunityId;
             return row;
           });
 
         const runDmMessageInsertTransaction = () =>
           withTransaction(async (client) => {
-            txPhases.t0 = Date.now();
-            await client.query(
-              `SET LOCAL statement_timeout = '${MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
-            );
-            await client.query(`SET LOCAL synchronous_commit = off`);
-            let row: any;
-
-            const accessRes = await client.query(
-              `SELECT
-               EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
-               COUNT(*)::int                             AS has_access
-             FROM conversation_participants
-             WHERE conversation_id = $1
-               AND user_id = $2
-               AND left_at IS NULL`,
-              [conversationId, authReq.user.id],
-            );
-            txPhases.t_access = Date.now();
-            const accessRow = accessRes.rows[0];
-            if (accessRow && accessRow.author_exists === false) {
-              throw buildMessagePostError(
-                "Session no longer valid",
-                401,
-                "author_missing",
-              );
-            }
-            if (!accessRow?.has_access) {
-              throw buildMessagePostError(
-                "Not a participant",
-                403,
-                "conversation_participant",
-              );
-            }
-
-            const insertRes = await client.query(
-              `INSERT INTO messages AS m (conversation_id, author_id, content, thread_id)
-             VALUES ($1, $2, $3, $4)
-             RETURNING ${MESSAGE_INSERT_RETURNING_AUTHOR},
-               '[]'::json AS attachments`,
-              [
-                conversationId,
-                authReq.user.id,
-                normalizedContent || null,
-                threadId || null,
-              ],
-            );
-            txPhases.t_insert = Date.now();
-            row = insertRes.rows[0];
-
-            await insertMessageAttachments(
+            return runConversationInsertTransaction({
               client,
-              row.id,
-              authReq.user.id,
+              conversationId: conversationId!,
+              userId,
+              normalizedContent,
+              threadId,
               attachments,
-            );
-
-            txPhases.t_later = Date.now();
-            return row;
+              txPhases,
+            });
           });
 
         if (channelId) {
@@ -530,7 +596,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
                 await insertMessageAttachments(
                   client,
                   baseMessage.id,
-                  authReq.user.id,
+                  userId,
                   attachments,
                 );
               });
@@ -538,7 +604,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
               await rollbackInsertedChannelMessage(
                 baseMessage.id,
                 channelId,
-                authReq.user.id,
+                userId,
               );
               throw attachErr;
             }
