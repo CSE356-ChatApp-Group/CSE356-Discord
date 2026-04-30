@@ -2,7 +2,7 @@
  * Communities API router — mounts route modules under /api/v1/communities.
  *
  * Shared logic: `communityShared.ts` (join path guard runs before `authenticate`).
- * Route map (`routes/`):
+ * Route map (`routes/`, shared requires in `_deps.ts`):
  * - `list.ts`    — GET `/`
  * - `create.ts` — POST `/`
  * - `getOne.ts` — GET `/:id`
