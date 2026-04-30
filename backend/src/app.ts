@@ -160,6 +160,10 @@ app.use((req, res, next) => {
   if (isQuietPath(pathOnly)) return next();
   const store = createRequestDbStore();
   const wallStart = process.hrtime.bigint();
+  // pino-http's customLogLevel receives (req, res, err) only — it does not set `res.responseTime`
+  // before calling customLogLevel (duration lives in a local `Date.now() - res[startTime]`).
+  // Expose the same wall clock origin as `slow_http_request_trace` so slow completions can log.
+  req._chatappHttpWallStartNs = wallStart;
   runDbContext(store, () => {
     let observed = false;
     const observePgQueries = () => {
@@ -236,8 +240,11 @@ app.use(pinoHttp({
   customLogLevel(req, res, err) {
     if (err || res.statusCode >= 500) return 'error';
     if (res.statusCode >= 400) return 'warn';
-    const responseTime = Number(res.responseTime || 0);
-    if (responseTime >= 1000) return 'warn';
+    const wallMs =
+      typeof req._chatappHttpWallStartNs === 'bigint'
+        ? Number(process.hrtime.bigint() - req._chatappHttpWallStartNs) / 1e6
+        : Number(res.responseTime || 0);
+    if (wallMs >= 1000) return 'warn';
     return process.env.NODE_ENV === 'production' ? 'silent' : 'info';
   },
   customProps(req, res) {
@@ -249,7 +256,11 @@ app.use(pinoHttp({
     };
   },
   customSuccessMessage(req, res) {
-    return Number(res.responseTime || 0) >= 1000 ? 'Slow request completed' : 'Request completed';
+    const wallMs =
+      typeof req._chatappHttpWallStartNs === 'bigint'
+        ? Number(process.hrtime.bigint() - req._chatappHttpWallStartNs) / 1e6
+        : Number(res.responseTime || 0);
+    return wallMs >= 1000 ? 'Slow request completed' : 'Request completed';
   },
   customErrorMessage(req, res, err) {
     return err ? 'Request errored' : 'Request completed with client error';
