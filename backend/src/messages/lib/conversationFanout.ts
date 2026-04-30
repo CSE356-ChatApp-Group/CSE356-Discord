@@ -115,17 +115,16 @@ async function publishConversationEventNow(
     if (!passthroughTargets.length)
       return { wallMs: 0, perTargetMs: [] as { target: string; ms: number }[] };
     const wall0 = process.hrtime.bigint();
-    const perTargetMs = await Promise.all(
-      passthroughTargets.map(async (target) => {
-        const t0 = process.hrtime.bigint();
-        await fanout.publish(target, payload);
-        return { target, ms: Number(process.hrtime.bigint() - t0) / 1e6 };
-      }),
+    await fanout.publishBatch(
+      passthroughTargets.map((target) => ({ channel: target, payload })),
     );
-    return {
-      wallMs: Number(process.hrtime.bigint() - wall0) / 1e6,
-      perTargetMs,
-    };
+    const wallMs = Number(process.hrtime.bigint() - wall0) / 1e6;
+    const n = passthroughTargets.length;
+    const perTargetMs = passthroughTargets.map((target) => ({
+      target,
+      ms: n > 0 ? wallMs / n : 0,
+    }));
+    return { wallMs, perTargetMs };
   }
 
   async function publishUserfeedWithTiming() {

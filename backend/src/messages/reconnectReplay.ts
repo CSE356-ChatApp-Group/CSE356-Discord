@@ -67,7 +67,9 @@ const WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED = Math.min(
   Math.max(1000, WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS),
 );
 
-const rawReplayDbMaxGlobal = Number(process.env.WS_REPLAY_DB_MAX_IN_FLIGHT || '2');
+const rawReplayDbMaxGlobal = Number(
+  (process.env.WS_REPLAY_DB_MAX_IN_FLIGHT ?? process.env.WS_MESSAGE_REPLAY_MAX_CONCURRENT) || '2',
+);
 const WS_REPLAY_DB_MAX_GLOBAL =
   Number.isFinite(rawReplayDbMaxGlobal) && rawReplayDbMaxGlobal >= 1
     ? Math.min(32, Math.floor(rawReplayDbMaxGlobal))
@@ -87,7 +89,7 @@ const WS_REPLAY_ERROR_LOG_SAMPLE_RATE =
     ? Math.min(1, Math.max(0, rawReplayErrorLogSampleRate))
     : 0.1;
 
-/** @deprecated use WS_REPLAY_DB_MAX_GLOBAL — kept for tests / metrics parity */
+/** Same value as `WS_REPLAY_DB_MAX_GLOBAL` (exposed for metrics; env uses `WS_REPLAY_DB_MAX_IN_FLIGHT` or legacy `WS_MESSAGE_REPLAY_MAX_CONCURRENT`). */
 const WS_MESSAGE_REPLAY_MAX_CONCURRENT = WS_REPLAY_DB_MAX_GLOBAL;
 
 let replayDbInFlight = 0;

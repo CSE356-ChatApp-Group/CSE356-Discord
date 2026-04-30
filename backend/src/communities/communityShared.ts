@@ -173,21 +173,16 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
     redis.del(membersCacheKey(communityId)).catch(() => {});
 
     const communityJoinPayload = { userId: req.user.id, communityId };
-    await fanout.publish(`community:${communityId}`, {
-      event: "community:member_joined",
-      data: communityJoinPayload,
-    });
-    await fanout.publish(`community:${communityId}`, {
-      event: "community:joined",
-      data: communityJoinPayload,
-    });
-    // GeneratedClient handleWsMessage matches community:invite | community:joined |
-    // community:member_added (not community:member_joined). Emit member_added so
-    // onInvite fires without relying on __wsInternal-only paths.
-    await fanout.publish(`community:${communityId}`, {
-      event: "community:member_added",
-      data: communityJoinPayload,
-    });
+    const communityChannel = `community:${communityId}`;
+    // One Redis pipeline round-trip instead of three sequential publishes.
+    await fanout.publishBatch([
+      { channel: communityChannel, payload: { event: "community:member_joined", data: communityJoinPayload } },
+      { channel: communityChannel, payload: { event: "community:joined", data: communityJoinPayload } },
+      // GeneratedClient handleWsMessage matches community:invite | community:joined |
+      // community:member_added (not community:member_joined). Emit member_added so
+      // onInvite fires without relying on __wsInternal-only paths.
+      { channel: communityChannel, payload: { event: "community:member_added", data: communityJoinPayload } },
+    ]);
 
     res.json({ success: true });
   } catch (err) {

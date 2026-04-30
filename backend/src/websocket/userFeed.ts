@@ -145,6 +145,7 @@ module.exports = {
   publishUserFeedTargets,
   runWithConcurrencyLimit,
   splitUserTargets,
+  userFeedEnvelope,
   userFeedRedisChannelForUserId,
   userIdFromTarget,
 };

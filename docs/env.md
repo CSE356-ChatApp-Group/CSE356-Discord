@@ -59,6 +59,8 @@ On the production host, inspect `/opt/chatapp/shared/.env` (used by systemd `cha
 
 All have defaults in code unless noted. Omit in `.env` for normal operation.
 
+**Scope:** Rows below match **`process.env` reads under `backend/src`** (periodic audit). Deploy-time-only variables (shell exports in `deploy/*.sh`, GitHub Actions, bench scripts) are documented in the intro sections above, not duplicated here unless the app also reads them.
+
 | Variable | Purpose |
 |----------|---------|
 | **Core** | |
@@ -90,6 +92,10 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `COMMUNITY_JOIN_PER_IP_MAX`, `COMMUNITY_JOIN_PER_IP_WINDOW_MS` | Redis-backed cap for `POST /communities/:id/join` per client IP (deploy default: `300` per `60000` ms; skipped for internal IPs, `DISABLE_RATE_LIMITS`, and tests) |
 | `COMMUNITY_JOIN_PER_USER_MAX`, `COMMUNITY_JOIN_PER_USER_WINDOW_MS` | Redis-backed cap for `POST /communities/:id/join` per authenticated user (deploy default: `120` per `60000` ms; skipped for internal IPs, `DISABLE_RATE_LIMITS`, and tests) |
 | `OAUTH_PENDING_SECRET`, `OAUTH_LINK_SECRET` | OAuth state tokens (fallback: JWT secrets) |
+| `ENABLE_CLIENT_RUM` | When **`true`**, mounts browser RUM routes under `/api/v1` (`app.ts`). The SPA must be built with **`VITE_ENABLE_RUM=true`** to send reports. |
+| `TRUST_NGINX_CLIENT_IP_HEADERS` | Set **`false`** to ignore **`X-Forwarded-For`** / **`X-Real-IP`** and use the TCP peer only (local tests without nginx). When unset, reverse-proxy headers are trusted per `trustedClientIp.js`. |
+| `ABUSE_LIMIT_TIGHTEN_FACTOR` | When subnet blocking is active, tightens auto-IP-ban strike thresholds (default **0.5**, clamp **0–1**). See `backend/src/utils/abuseKillSwitch.js`. |
+| `BLOCK_SUBNETS` | Optional comma-separated subnet patterns for the abuse kill switch (same module). |
 | `BCRYPT_MAX_CONCURRENT`, `BCRYPT_MAX_WAITERS`, `BCRYPT_QUEUE_WAIT_TIMEOUT_MS` | Password hashing queue; watch `auth_bcrypt_active`, `auth_bcrypt_waiters`, and `auth_bcrypt_queue_rejects_total` |
 | `BCRYPT_ROUNDS` | bcrypt cost (default **1**; bcrypt raises configured costs **1–3** to **4** in the stored hash) |
 | `AUTH_PASSWORD_STORAGE_MODE` | `bcrypt` (default) or `plain` (throughput-first, insecure). In `plain`, new/updated passwords are stored as a non-bcrypt prefixed value while existing bcrypt hashes still validate normally. |
@@ -100,6 +106,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **Postgres pool** | |
 | `PG_POOL_MAX`, `POOL_CIRCUIT_BREAKER_QUEUE` | Pool size and circuit-breaker queue |
 | `PG_SLOW_QUERY_MS`, `PG_CONNECTION_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS` | Pool behavior |
+| `PG_QUERY_GATE_MAX_CONCURRENT`, `PG_QUERY_GATE_MAX_WAITERS`, `PG_QUERY_GATE_WAIT_TIMEOUT_MS` | Optional global gate on concurrent `pool.query` calls (**default `PG_QUERY_GATE_MAX_CONCURRENT=0` = off**). When enabled, saturated waiters fail with **503** (`PG_QUERY_GATE_SATURATED`). See `backend/src/db/pool.ts`. |
 | `READ_RECEIPT_DEFER_POOL_WAITING` | Soft-defer `PUT /messages/:id/read` when pool waiters reach this threshold (default 8) to protect message-post and read/list latency under burst |
 | `MESSAGE_INSERT_LOCK_PRESSURE_WINDOW_MS` | Rolling window (ms) for in-process channel insert lock wait samples and timeout markers used for read-receipt shedding (default **30000**, clamped **5000–120000**) |
 | `MESSAGE_INSERT_LOCK_MODE` | `serialized` (default): Redis + in-process queue serialize channel `POST /messages` inserts per `channel_id` to reduce hot btree/GIN page contention. `optimistic` (aliases **`off`**, **`false`**, **`none`**): skip that lock entirely; inserts run concurrently. Counted in `message_channel_insert_lock_total{result="optimistic_bypass"}`. Per-path breakdown: `message_channel_insert_path_total` / `message_channel_insert_path_precall_ms` (see `docs/operations-monitoring.md`). |
@@ -112,6 +119,8 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_WINDOW_MS` | Window (ms) for “recent insert-lock timeout” backoff on hot channels (default **2000**, clamped **250–10000**). |
 | `MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS` / `MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MAX_MS` | Jittered backoff bounds (ms) after a recent timeout in that window (defaults **200** / **500**). |
 | `MESSAGE_INSERT_LOCK_MAX_WAITERS_PER_CHANNEL` | Per-process cap for concurrent waiters on a single channel insert lock (default **32**, clamped **1–1000**). Requests beyond this cap fail fast with `503` to avoid unbounded queueing. |
+| `MESSAGE_INSERT_LOCK_POLL_MIN_MS`, `MESSAGE_INSERT_LOCK_POLL_MAX_MS` | Jittered exponential backoff between Redis lock acquire attempts (defaults **15** / **120** ms; poll min clamped **5–250** ms, poll max clamped between poll min and **1000** ms). |
+| `MESSAGE_INSERT_LOCK_HOLDER_LOG_SAMPLE_RATE`, `MESSAGE_INSERT_LOCK_HOLDER_LOG_MIN_MS` | Sample rate (**0–1**, default **0.02**) and minimum lock hold time (ms, default **250**) for `message_channel_insert_lock_holder` logs. |
 | `READ_SHED_MESSAGE_INSERT_LOCK_WAIT_P95_MS` | When successful insert-lock waits in the window reach this **p95** (ms), soft-defer `PUT /messages/:id/read` (default **320**, clamped **200–500**). Also defers if **any** lock timeout occurred in the window, or **≥4** samples include any wait **≥380ms** |
 | `READ_SHED_MESSAGE_INSERT_LOCK_MIN_SAMPLES_FOR_P95` | Minimum acquire samples in the window before the p95 rule can trigger (default **6**, max **100**); timeout-in-window always triggers alone |
 | **Overload / degradation** | |
@@ -125,22 +134,31 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `MSG_IDEM_PENDING_TTL_SECS`, `MSG_IDEM_SUCCESS_TTL_SECS` | POST /messages idempotency TTLs |
 | `MSG_IDEM_POLL_DEADLINE_MS` | Max wall-clock wait when a second POST shares `Idempotency-Key` while the first holds the Redis lease (default **5000**, clamped 500–30000). Replaces legacy fixed **100ms × 50** polling. |
 | `MSG_IDEM_POLL_MAX_SLEEP_MS` | Exponential backoff cap between Redis polls in that wait loop (default **150**, clamped 5–500). |
+| `MESSAGE_POST_PER_USER_MAX`, `MESSAGE_POST_PER_USER_WINDOW_MS`, `MESSAGE_POST_PER_IP_MAX`, `MESSAGE_POST_PER_IP_WINDOW_MS` | Redis-backed rate limits on **`POST /api/v1/messages`** (defaults **90**/min per user, **300**/min per IP; skipped when **`DISABLE_RATE_LIMITS`** or **`NODE_ENV=test`**, and for RFC1918 client IPs). See `messages/lib/rateLimiters.ts`. |
 | `FANOUT_QUEUE_CONCURRENCY`, `FANOUT_CRITICAL_MAX_DEPTH` | Side-effect / fanout queue |
 | `FANOUT_QUEUE_YIELD_EVERY` | Fanout worker yields to the event loop after this many completed jobs when more work remains (default **6**; set **`0`** to disable). Reduces coordinated long turns under burst. |
 | **S3** | |
 | `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_INTERNAL_ENDPOINT` | Bucket and endpoints |
 | `S3_PRESIGN_SIGNING_ENDPOINT` | Presign signing host when public URL differs |
 | `S3_ACCESS_KEY`, `S3_SECRET_KEY` | Credentials |
+| **Attachments** | |
+| `ATTACHMENT_GET_CACHE_TTL_SECS` | In-process LRU-ish TTL (seconds) for attachment metadata on `GET /attachments/:id` (default **30**; **`≤0`** disables). |
 | **HTTP / caches** | |
-| `COMMUNITIES_LIST_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS`, `COMMUNITIES_VERSION_CACHE_TTL_SECS` | List route cache TTLs (deploy default list `300`; version-key TTL default **2592000** so `communities:list:user_version:*` / `communities:list:public_version` do not accumulate forever) |
+| `COMMUNITIES_LIST_CACHE_TTL_SECS`, `COMMUNITIES_PAGED_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS`, `COMMUNITIES_VERSION_CACHE_TTL_SECS` | List / paged list / channel list / version-key cache TTLs (paged communities default **60** s in code; list defaults **300** unless overridden; version-key TTL default **2592000** so version keys do not live forever) |
+| `MSG_TARGET_CACHE_TTL_SECS`, `CHANNEL_COMPAT_CACHE_TTL_SECS` | Short TTL caches for message access targets and channel compat checks (`accessCaches.ts`; defaults **30** / **60** s). |
+| `COMMUNITY_COUNT_RECONCILE_INTERVAL_MS`, `COMMUNITY_COUNT_RECONCILE_BATCH_SIZE`, `COMMUNITY_COUNT_RECONCILE_LOCK_TTL_MS`, `COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE` | Background reconcile of denormalized community member counts (`communityMemberCount.ts`; defaults **300000** ms interval, batch **100**, lock TTL tied to interval, pool-waiting guard **2**). |
 | `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS`, `COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT` | `GET /communities` unread-count hydration timeout plus concurrency cap before serving the normal base list with `unread_channel_count=0`; watch route p95 and `endpoint_list_cache_bypass_total{endpoint="communities",reason=~"pressure|timeout"}` |
 | `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST` | When `true` (default), `message:created` is published to `channel:<uuid>` before logical per-member user delivery |
-| `CHANNEL_MESSAGE_USER_FANOUT_MODE` | `all` (code default) duplicates channel `message:created` to every visible member for the most conservative delivery semantics. Staging/prod deploy profiles currently pin `recent_connect` as a throughput-first tradeoff on controlled grader hosts that can tolerate channel-only delivery after the reconnect bridge expires. |
+| `CHANNEL_MESSAGE_USER_FANOUT` | Master toggle for logical per-member duplicate fanout on channel posts (set **`0`/`false`/`off`** to disable). Distinct from mode below. |
+| `CHANNEL_MESSAGE_USER_FANOUT_MODE` | `all` (**code default**): duplicate `message:created` to every visible member. **`recent_connect`** limits duplicate fanout to members with a recent WebSocket session (throughput tradeoff; requires `CHANNEL_RECENT_ZSET_ENABLED`). **`deploy/env/staging.required.env`** and **`deploy/env/prod.required.env`** pin **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`** together with the other realtime flags in the repository audit paragraph above. |
 | `CHANNEL_MESSAGE_USER_FANOUT_MAX` | Max per-message logical user duplicate deliveries (default **10000**, cap **10000**). Members beyond this rely on **`channel:`** delivery only — intentional for mega-channels; clients must listen on `channel:` or accept missing user-scope delivery. |
 | `COMMUNITY_FEED_SHARD_COUNT` | Number of sharded Redis pub/sub channels used for server-side community membership delivery. Public channel messages are also published to the owning community feed so connected community members receive notifications without stale per-channel recipient caches. Default/prod **64**. |
 | `CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS` | Redis TTL for cached per-channel user fanout audiences used by channel message publishes (default `180`) |
+| `RECENT_CONNECT_TARGET_CACHE_MS` | In-process cache TTL (ms) for “recent connect” fanout target resolution (`channelRealtimeFanout.ts`; default **1500**). |
 | `CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS` | Redis TTL for cached conversation participant fanout audiences used by DM/group-DM realtime publishes (default `180`) |
+| `DM_FANOUT_TIMING_LOG`, `DM_FANOUT_TIMING_LOG_MIN_MS` | Optional structured timing logs for DM publish path (`conversationFanout.ts`; set log to **`1`/`true`/`all`**; min ms default **50**). |
 | `MESSAGE_USER_FANOUT_HTTP_BLOCKING` | When `true`, `POST /messages` awaits all logical user fanout Redis publishes before **201** (`realtimeUserFanoutDeferred: false`). When `false`, only recent-connect members are published inline; remaining members are deferred to `fanout:critical`, which can miss the grader **~15s** window under burst load. Staging/prod deploy profiles pin **`true`** for delivery reliability. |
+| `BG_WRITE_POOL_GUARD` | Soft guard on concurrent background Postgres writers after `POST /messages` returns **201** (default **5**). See `postConstants.ts`. |
 | `MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS` | Per-transaction `SET LOCAL statement_timeout` for the **POST /messages** insert CTE only (default **5000** ms, clamped **1000–60000**). Fails before PgBouncer/role caps so hot-channel lock waits return **503** + `Retry-After: 1` instead of holding a client for ~15–18s and surfacing as **500**. |
 | `MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS` | Optional channel-only override for POST `/messages` insert/attachment `SET LOCAL statement_timeout` (defaults to `MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS`, then **6500** ms; clamped **1000–60000**). Lets channel paths tolerate slightly longer lock contention without changing DM insert timeout behavior. |
 | `MESSAGE_POST_CACHE_BUST_TIMEOUT_MS` | Wall-clock cap (ms) for **post-commit message list cache bust** (`DEL` of list cache keys) on `POST /messages` only (default **350**, clamped **50–2000**). On timeout, **`delivery_timeout_total{phase="cache_bust"}`** increments and the handler still returns **201** — the message row is durable; clients should tolerate brief list-cache staleness or use read-your-writes / replay. |
@@ -159,16 +177,21 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `READ_RECEIPT_SCOPE_DEBOUNCE_MS` | Per `(user,channel|conversation)` burst debounce window for `PUT /messages/:id/read` (default **900ms**, clamp **250–2000**). Within the window, only the highest cursor message is processed; older duplicates return immediately. |
 | `READ_RECEIPT_FANOUT_ENABLED` | Enables `read:updated` fanout publishes from `PUT /messages/:id/read`. Default **`true`** so realtime read receipts work out of the box; set to `false` only if you intentionally want durable read-state updates without websocket fanout. |
 | `READ_RECEIPT_CHANNEL_FANOUT_ASYNC` | When **`true`** (default), **channel** `read:updated` fanout runs on **`fanout:critical`** (does not extend **`PUT /read`** wall time). **Conversation/DM** reads still publish inline. If the fanout queue refuses the job, publish runs on-thread as fallback. |
+| `USER_LAST_READ_COUNT_REDIS_TTL_SEC` | TTL (seconds) for Redis keys updated during channel read-receipt fanout (`read.ts`; default **604800** = 7d). |
 | `MESSAGE_INGEST_STREAM_KEY`, `MESSAGE_INGEST_STREAM_GROUP`, `MESSAGE_INGEST_STREAM_MAXLEN` | Stream name, consumer group, approximate max stream length |
 | `LAST_MESSAGE_PG_RECONCILE_ENABLED` | `true` to enable background DB reconcile of `channels.last_message_*` from Redis metadata **and** delete-time `repointChannelLastMessage` DB updates; default `false` keeps channel latest-message metadata Redis-first with DB as stale fallback |
 | `CHANNEL_LAST_MESSAGE_PG_RECONCILE_ENABLED` | Legacy alias for `LAST_MESSAGE_PG_RECONCILE_ENABLED` (either may be set; **`LAST_MESSAGE_*` wins** when both are present) |
 | `CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED` | `true` to enable background DB reconcile of `conversations.last_message_*` from Redis metadata **and** delete-time `repointConversationLastMessage` DB updates; default `false` keeps conversation latest-message metadata Redis-first with DB as stale fallback |
 | `LAST_MESSAGE_REDIS_TTL_SECS` | TTL for Redis metadata keys `ch:last_msg:*` / `conv:last_msg:*` (default **43200** s) so these recoverable caches do not remain immortal. |
+| `CHANNEL_LAST_MSG_FLUSH_INTERVAL_MS` | Interval (ms) for flushing dirty channel last-message pointers to Postgres (`repointLastMessage.ts`; default **10000**). |
 | `PG_READ_REPLICA_URL`, `PG_READ_POOL_MAX` | Optional read replica for `GET /api/v1/messages` list `SELECT`s ([`docs/db-scaling-messages.md`](db-scaling-messages.md)). Request **`X-ChatApp-Read-Consistency: primary`** on that GET to force the primary when you need read-your-writes after a POST. |
 | `PG_READ_FALLBACK_TO_PRIMARY` | When **`false`**, `queryRead()` fails fast on replica errors. Otherwise (default) **transport** failures and replica query timeouts retry the same SELECT on the primary so routes like **`PUT /messages/:id/read`** do not return **500** if the standby is down or wedged. |
 | `PG_READ_QUERY_TIMEOUT_MS` | Optional read-replica query timeout in milliseconds. When set above `0`, a slow replica SELECT times out and, if `PG_READ_FALLBACK_TO_PRIMARY` is enabled, retries on primary. Prod currently pins **`750`** during incident stabilization. |
 | `UNREAD_COUNTS_QUERY_TIMEOUT_MS` | Read-replica query timeout for `GET /api/v1/unread-counts` aggregate channel/DM unread counts. Default **750** ms; falls back through `queryRead()` if the replica times out and primary fallback is enabled. |
 | `PRESENCE_FANOUT_CACHE_TTL_SECONDS` | Presence fanout cache |
+| `PRESENCE_SWEEPER_MS` | Interval for presence sweeper ticks (`websocket/server.ts`; default **15000** ms). |
+| `PRESENCE_DB_CURSOR_TTL_SECS` | TTL for presence DB cursor keys (default **300** s). |
+| `AWAY_MESSAGE_REDIS_TTL_SECS` | TTL for away-message Redis payloads (default **2592000** s). |
 | **WebSocket** | |
 | `REALTIME_EVENT_ALIAS_FANOUT` | When **`1`/`true`/`yes`**, `fanout.publish` / `fanout.publishBatch` (including sharded userfeed batches) also publishes **alias** event names on the same Redis channel — for example `new_message` beside `message:created`, `message:edited` / `message_edited` beside `message:updated`, and read-receipt aliases beside `read:updated`. Default **off**. **Not required** for the in-repo grader `GeneratedClient` (see [`docs/websocket-generated-client-parity.md`](websocket-generated-client-parity.md)); enable only for third-party harnesses that insist on alternate names. When on, permissive clients may invoke handlers twice. **Canonical + alias tables and WS “reliable event” classification** live in [`backend/src/realtime/realtimeEventAliases.ts`](../backend/src/realtime/realtimeEventAliases.ts) (one file to edit when adding names). |
 | `WS_BACKPRESSURE_DROP_BYTES`, `WS_BACKPRESSURE_KILL_BYTES` | Backpressure thresholds |
@@ -176,34 +199,72 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `WS_REPLAY_OUTBOUND_YIELD_EVERY` | After enqueueing this many replay frames on one socket (pending queue + DB missed replay), **`setImmediate`** yield before continuing (default **48**, clamp **8–512**). |
 | `WS_OUTBOUND_MESSAGE_WAITERS_MAX` | When the primary queue is full, `message:*` frames wait in a FIFO (default **4096**); exceeding this closes the socket (`outbound_waiters_overflow`) |
 | `WS_HOT_LOG_SAMPLE_RATE` | Samples high-frequency websocket info logs (`connected`, `disconnected`, replay progress). `0` disables these info logs, `1` logs all (default `0`). Warnings/errors are unaffected. |
-| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_RECENT_CONNECT_TTL_SECONDS` | WS tuning (code default recent-connect bridge window `20`; staging/prod deploy profiles pin bootstrap TTL `180`, batch size `64`, and recent-connect bridge window `300`) |
+| `WS_ACL_CACHE_MAX_ENTRIES`, `WS_ACL_REDIS_TTL_SECS`, `WS_BOOTSTRAP_BATCH_SIZE`, `WS_BOOTSTRAP_CACHE_TTL_SECONDS`, `WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS`, `WS_BOOTSTRAP_DB_MAX_IN_FLIGHT`, `WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS`, `WS_RECENT_CONNECT_TTL_SECONDS`, `WS_RECENT_DISCONNECT_TTL_SECONDS` | WS ACL cache + bootstrap tuning (defaults: ACL Redis TTL derived from ACL cache window, bootstrap batch **96** in code vs **64** in deploy profiles, ingress jitter **200** ms, DB in-flight **50**, DB wait **300** ms, recent-connect **20** s in code / **300** s in deploy, disconnect marker TTL **3600** s). |
 | `WS_AUTO_SUBSCRIBE_MODE` | `messages` subscribes **`channel:`** + **`conversation:`** + **`user:<self>`** during connect; `user_only` keeps **`user:<self>`** plus sharded community-feed membership so public-channel notifications still arrive without per-channel subscriptions. Prod pins **`user_only`** to avoid stale per-channel websocket maps on grader reconnect churn. `full` also eager-subscribes accessible **`community:`** topics. |
 | `WS_APP_KEEPALIVE_INTERVAL_MS` | When `>=5000`, sends a tiny `{"event":"keepalive"}` data frame to otherwise-idle sockets on that cadence. Leave `0` to disable. Useful when intermediaries churn idle WebSocket upgrades despite normal control ping/pong. |
+| `WS_SHUTDOWN_CLOSE_GRACE_MS` | Grace period (ms) when shutting down sockets (default **2000**). |
+| `WS_REPLAY_USER_COOLDOWN_MS` | Minimum spacing between reconnect DB replay runs per user (default **3000** ms). |
 | `WS_HEARTBEAT_INTERVAL_MS` | Server `ws.ping()` cadence for liveness (default **20000** ms, minimum **5000**). Each interval marks sockets dead if no `pong` was processed since the last tick — under heavy CPU/event-loop lag, **too low** a value can cause **`heartbeat_timeout` (1006)** closes. Staging/prod profiles pin **30000** ms as a grading-oriented hedge. |
+| `DISABLE_WS_REPLAY` | When **`true`**, reconnect **database** replay is skipped (`abuseKillSwitch`); clients rely on live fanout + history refetch. Default **`false`**. |
+| `CHANNEL_RECENT_ZSET_ENABLED` | Unless set to **`false`**, channel realtime fanout uses per-channel ZSETs for recent-connect filtering (default **on**). |
 | `WS_REPLAY_DEDUP_TTL_SEC` | Redis key `ws:replay:recent:<userId>` TTL (**2–5** seconds, default **3**) suppressing a second identical reconnect-replay DB scan (same replay window fingerprint). Fail-open if Redis errors. |
 | `WS_REPLAY_PENDING_USER_MAX_ZSET` | Max cardinality for each `ws:pending:user:*` ZSET (default **400**, clamp **50–5000**). Enqueue trims oldest entries beyond the cap and refreshes TTL. |
+| `WS_REPLAY_PENDING_TTL_SECONDS`, `WS_REPLAY_PENDING_DRAIN_LIMIT` | Redis TTL for `ws:pending:user:*` keys (**60–300** s, default **180**). Max pointers drained per reconnect pending batch (**10–2000**, default **300**). |
 | `WS_REPLAY_PENDING_MEMORY_GUARD_ENABLED`, `WS_REPLAY_PENDING_MEMORY_GUARD_PCT` | Emergency guard for nonessential pending replay writes (defaults `true`, **85%**). When Redis memory usage exceeds threshold, enqueue skips `ws:pending:*` writes (DB durability/idempotency unaffected) and increments `ws_pending_replay_guard_total`. |
 | `WS_REPLAY_PENDING_ONLY_ACTIVE` | When **`true`** (default), `ws:pending:user:*` is written only for users with **`user:<id>:connections`** (active WS on any worker) or a short recent-session marker (`ws:recent_connect:*` / `ws:replay_pending_eligible:*`). Fully offline members are skipped (they still see history via Postgres + reconnect DB replay). Set **`false`** to enqueue pending pointers for every fanout target (legacy, higher Redis cardinality). |
 | `WS_REPLAY_PENDING_LEGACY_ALL` | When **`true`**, forces legacy behavior: enqueue pending for **all** fanout targets regardless of `WS_REPLAY_PENDING_ONLY_ACTIVE` (emergency rollback). Default **`false`**. |
 | `WS_PENDING_ELIGIBLE_LEGACY_FALLBACK` | When **`true`**, pending replay classification runs a **second** Redis pipeline (`EXISTS` on `ws:recent_connect:*` / `ws:replay_pending_eligible:*`) only for users who missed `ws:pending_eligible:*` in phase 1 with zero connections — use during rollout before every session has `ws:pending_eligible:*`. **Production profile pins `false`** after stabilization to maximize Redis savings. Code default remains **`true`** if unset (safe first boot). |
 | `WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK` | When **`true`** (default) and **`WS_PENDING_ELIGIBLE_LEGACY_FALLBACK=false`**, DM / other callers that **omit** `recentTargets` still get the second `EXISTS` pass on `ws:recent_connect:*` / `ws:replay_pending_eligible:*` for phase‑1 misses. Channel **`message:created`** passes `recentTargets` explicitly and avoids this extra Redis work at large N. Set **`false`** only when debugging classification cost on small DM traffic. **Metric:** `pending_replay_second_probe_recent_user_total{mode="conversation_marker"|"legacy_global"}` counts users rescued by that second probe. **Replay vs channel/DM:** use `ws_reliable_delivery_topic_total{path="replay",topic_prefix="conversation"|"channel"|"user"}` (existing series). |
 | `WS_REPLAY_RECENT_USER_WINDOW_SECONDS` | TTL for `ws:replay_pending_eligible:<userId>` refreshed on each WebSocket connect (**5–600**, default **30**). Set **`0`** to stop writing that key (recent branch then uses only `ws:recent_connect:*`). |
-| `WS_MESSAGE_REPLAY_LIMIT`, `WS_MESSAGE_REPLAY_MAX_WINDOW_MS`, `WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS` | Reconnect replay scan bounds (defaults **150** rows, **60000** ms window, **15000** ms grace before `disconnectedAt`). Set **`WS_MESSAGE_REPLAY_LIMIT=0`** to disable replay entirely (emergency relief on tiny hosts; clients rely on normal fanout + refetch). |
-| `WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS` | Per-replay transaction uses `SET LOCAL statement_timeout = '<N>ms'` (default **8000**; **clamped to 1000–8000ms**) so replay fails before a typical role **15s** timeout under load. |
-| `WS_MESSAGE_REPLAY_TIMEOUT_RETRY_MS` | After a replay statement timeout, delay this many ms before **one** retry (default **75**; set **0** to disable retry). |
-| `WS_MESSAGE_REPLAY_MAX_CONCURRENT` | Max replay DB transactions per Node process at once (default **6**, cap **32**). Additional reconnects skip replay (metric `ws_replay_query_total{result="skipped"}`) instead of stacking expensive queries. |
-| `USER_FEED_SHARD_COUNT` | Number of shared Redis **`userfeed:<n>`** channels backing logical user delivery (code default `64`, cap `256`). Higher values trade more Redis subscriptions for fewer recipients per shard publish; staging/prod deploy profiles currently pin `4` to minimize subscription fan-in on grader hosts. |
+| `WS_REPLAY_SEMAPHORE_MAX`, `WS_REPLAY_DEFER_MAX_ATTEMPTS`, `WS_REPLAY_DEFER_BASE_DELAY_MS`, `WS_REPLAY_DEFER_MAX_DELAY_MS`, `WS_REPLAY_POOL_WAITING_THRESHOLD` | Replay **admission** when many sockets reconnect at once: max in-flight reconnect replays per worker (default **2**, cap **32**), max defer attempts (default **8**, cap **20**), exponential backoff base/max (defaults **250** / **4000** ms; base floor **50** ms, max delay cap **30** s), optional outbound-pool wait gate (**0** = off, cap **128** waiting sockets). |
+| `WS_MESSAGE_REPLAY_LIMIT`, `WS_MESSAGE_REPLAY_MAX_WINDOW_MS`, `WS_MESSAGE_REPLAY_WINDOW_HARD_CAP_MS`, `WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS` | Reconnect **database** replay: max rows per scan (default **150**, cap **10000**; **`0`** disables replay for that path — prefer `DISABLE_WS_REPLAY` for a global kill switch), soft max gap since last client message (**3600000** ms = 1 h), per-gap hard cap (**300000** ms = 5 min), grace before `disconnectedAt` (**15000** ms). |
+| `WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS` | Per-replay transaction `SET LOCAL statement_timeout` (default **1250** ms; **clamped to 1000–1500** ms in code) so replay cannot hold a pool slot as long as normal queries. |
+| `WS_REPLAY_DB_MAX_IN_FLIGHT` | Max concurrent reconnect-replay **DB** transactions per Node process (default **2**, cap **32**). Additional reconnects defer or skip (`ws_replay_query_total{result="skipped"}`). Prefer this name; **`WS_MESSAGE_REPLAY_MAX_CONCURRENT`** is still read when `WS_REPLAY_DB_MAX_IN_FLIGHT` is unset (legacy deploy profiles). |
+| `WS_REPLAY_ERROR_LOG_SAMPLE_RATE` | Fraction of reconnect-replay errors logged at info detail (default **0.1**; set **`0`** to suppress those sampled info lines). |
+| `USER_FEED_SHARD_COUNT` | Number of shared Redis **`userfeed:<n>`** channels backing logical user delivery (code default **`64`**, cap **`256`**). **`deploy/env/staging.required.env`** / **`prod.required.env`** also pin **`64`** (same as code default). |
 | **Observability** | |
+| `MESSAGE_POST_E2E_TRACE_MIN_MS`, `MESSAGE_POST_E2E_TRACE_SAMPLE_RATE` | Emit structured **`post_messages_e2e_trace`** on successful `POST /messages` when wall time ≥ min ms (**default 0 = off**) and/or random sample hits rate (**0–1**, default **0**). See intro paragraph and `postDiagnostics.ts`. |
+| `CAPACITY_SNAPSHOT_INTERVAL_MS` | In **production**, `/health` capacity snapshots log on this cadence (default **60000** ms; **`0`** disables). Non-production default **0** unless set. |
+| `VM_NAME`, `HOSTNAME`, `WORKER_PORT` | Optional labels in search metrics (`search/helpers.ts`); **`WORKER_PORT`** falls back to **`PORT`**. |
 | `OTEL_ENABLED` | Set `true` to enable tracing |
 | `OTEL_TRACES_SAMPLE_RATIO` | Sample ratio when tracing is enabled (production default 0.1) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP endpoint |
 | **Startup** | |
 | `STARTUP_DEPENDENCY_MAX_WAIT_MS` | Max wait for dependencies on boot |
-| **Search** | |
-| `SEARCH_STATEMENT_TIMEOUT_MS` | Per-statement timeout (ms) for each search query; code default 8000. Deploy scripts currently set 5000 on staging/prod to cap pool hold-time under load. |
-| `SEARCH_MAX_LIMIT`, `SEARCH_MAX_OFFSET` | Cap `limit` (default 50) and `offset` (default 500) on `GET /search`. |
-| `SEARCH_TRIGRAM_MIN_LEN_SCOPED` | Minimum query length (default 2) before allowing the broader trigram `ILIKE` fallback for community-scoped searches. Channel- and conversation-scoped searches still keep the bounded newest-scope literal fallback so short explicit words like `be` remain searchable. |
-| `SEARCH_TRIGRAM_CANDIDATES_LIMIT` | Maximum rows (default 500) to scan in trigram fallback CTE for community-scoped queries. Caps expensive `ILIKE '%phrase%'` scans that can timeout on multi-word patterns. |
-| `SEARCH_TRIGRAM_SCOPED_CANDIDATES_LIMIT` | Maximum newest rows (default 2000) to inspect during channel- or conversation-scoped trigram fallback before applying the literal all-terms match. Uses the existing `(channel_id, created_at DESC)` / `(conversation_id, created_at DESC)` indexes to bound common-word fallback work. |
+| **Search (Postgres FTS)** | |
+| `SEARCH_STATEMENT_TIMEOUT_MS` | `SET LOCAL statement_timeout` (ms) for each search transaction. Parsed value is **clamped to 1500–2000 ms** in code (`search/client.ts`) regardless of higher env values. |
+| `SEARCH_MAX_LIMIT`, `SEARCH_MAX_OFFSET` | Cap `limit` (default **50**, max **100**) and `offset` (default **500**, max **2000**) on `GET /search` (`search/helpers.ts`). |
+| `SEARCH_USE_READ_REPLICA` | When **`true`**, search runs inside **`BEGIN READ ONLY`** on **`PG_READ_REPLICA_URL`** (same pool as `queryRead`). |
+| `SEARCH_FTS_RECENT_CANDIDATES_LIMIT` | Caps FTS candidate rows in the hot path (default **800**). |
+| `STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT`, `STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT` | Aliases for the bounded literal-rescue scan (default **1500**, clamp **1000–2000**). |
+| `STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT_DEEP`, `SEARCH_LITERAL_RECENT_CANDIDATES_LIMIT_DEEP` | Deeper literal scan cap (default **3000**, clamp **2000–4000**). |
+| **Search (Meilisearch)** | |
+| `SEARCH_BACKEND` | Set to **`meili`** (with **`MEILI_ENABLED=true`**) to use Meilisearch for search (`meiliClient.ts`). |
+| `MEILI_ENABLED`, `MEILI_HOST`, `MEILI_MASTER_KEY`, `MEILI_INDEX_MESSAGES` | Meilisearch toggle, base URL, API key, index name. |
+| `MEILI_CANDIDATE_LIMIT`, `MEILI_TIMEOUT_MS`, `MEILI_WRITE_BATCH_SIZE`, `MEILI_WRITE_FLUSH_MS` | Meili HTTP client tuning: candidate limit (default **200**, floor **50** in code), request timeout (default **2000** ms, clamp **500–5000**), write batch size (**64**), write flush interval (**50** ms). |
+
+## Frontend (Vite)
+
+Built into the SPA at compile time (`import.meta.env.*`). Typical local/dev: `VITE_API_BASE=/api/v1`, `VITE_WS_BASE=/ws` (see `frontend/vite.config.ts` + `docker-compose.yml`).
+
+| Variable | Purpose |
+|----------|---------|
+| `VITE_API_BASE` | REST prefix (default **`/api/v1`**) |
+| `VITE_WS_BASE` | WebSocket path or URL (default from vite config) |
+| `VITE_API_TIMEOUT_MS` | HTTP client timeout (default **25000** ms in `frontend/src/lib/api.ts`) |
+| `VITE_READ_COALESCE_MS` | Client read-receipt coalesce window (`chatStore.ts`) |
+| `VITE_ENABLE_RUM` | When **`true`**, enables browser RUM posting (requires **`ENABLE_CLIENT_RUM=true`** on the API) |
+
+## Scripts / CI (not read by the running API)
+
+These appear in **`backend/scripts/**`**, Playwright config, or the Jest runner child env — **not** in `backend/src` at runtime:
+
+| Variable | Where |
+|----------|-------|
+| `API_CONTRACT_BASE_URL`, `API_CONTRACT_WS_URL`, `API_CONTRACT_SSO_SKIP` | `backend/scripts/api-contract-harness.cjs` |
+| `DISABLE_SEARCH_INIT` | Passed by `backend/scripts/test-runner.cjs` into Jest workers only (no `backend/src` consumer today). |
+| `MIGRATIONS_DIR`, `PGDUMP_DATABASE_URL` | `run-migrations.cjs` / `meili-backfill.cjs` helpers |
+| `BASE_URL`, `TOKEN`, `CHANNEL_ID`, `CONCURRENCY`, `DURATION_SEC` | `bench-channel-hot-sustained.mjs` |
+| `E2E_BASE_URL`, `E2E_GLOBAL_TIMEOUT_MS`, `E2E_WORKERS`, `CI` | `frontend/playwright.config.ts` |
 
 Metrics: `auth_rate_limit_hits_total` (Prometheus) indicates auth limiter trips. `ws_bootstrap_wall_duration_ms` (histogram) and `message_cache_bust_failures_total` help correlate grading-style delivery issues with bootstrap time and Redis bust errors.
