@@ -211,6 +211,10 @@ if [[ -z "${PROD_HOST}" || -z "${PROD_DB_HOST}" ]]; then
   echo "ERROR: PROD_HOST and PROD_DB_HOST must be non-empty (see deploy/inventory-defaults.sh or set env)."
   exit 1
 fi
+if [[ "${SKIP_MONITORING_SYNC:-0}" != "1" && -z "${MONITORING_VM_HOST}" ]]; then
+  echo "ERROR: MONITORING_VM_HOST must be set when monitoring sync runs (set SKIP_MONITORING_SYNC=1 to skip)."
+  exit 1
+fi
 
 _DEPLOY_T0=$(date +%s)
 deploy_log_phase() {
@@ -332,8 +336,11 @@ done
 
 TARGET_PORTS_CSV=$(IFS=,; echo "${TARGET_PORTS[*]}")
 echo "Target app worker ports: ${TARGET_PORTS[*]}"
+# shellcheck disable=SC2034 # mutated by capture_previous_release_map; read in deploy-prod-rolling.sh / rollback
 PREV_RELEASE_MAP=()
+# shellcheck disable=SC2034
 PREV_ACTIVE_PORTS=()
+# shellcheck disable=SC2034
 PREV_ACTIVE_PORTS_CSV=""
 NGINX_CANDIDATE_PIN_ACTIVE=0
 ROLLBACK_ALREADY_ATTEMPTED=0
@@ -1684,12 +1691,18 @@ fi
 # 13. Cleanup older releases/backups to control disk usage on small VMs.
 echo "13. Pruning old releases/backups (keep releases=$KEEP_RELEASES backups=$KEEP_BACKUPS)..."
 if ssh_prod "
-  set -e
-  if [ -d '$RELEASE_DIR' ]; then
-    ls -1dt '$RELEASE_DIR'/* 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | xargs -r rm -rf
+  set -euo pipefail
+  if [ -d '${RELEASE_DIR}' ] && compgen -G '${RELEASE_DIR}/*' >/dev/null; then
+    ls -1dt '${RELEASE_DIR}'/* | tail -n +$((KEEP_RELEASES + 1)) | while IFS= read -r path; do
+      [ -n \"\${path}\" ] || continue
+      rm -rf \"\${path}\"
+    done
   fi
-  if [ -d /opt/chatapp/backups ]; then
-    ls -1dt /opt/chatapp/backups/* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -f
+  if [ -d /opt/chatapp/backups ] && compgen -G '/opt/chatapp/backups/*' >/dev/null; then
+    ls -1dt /opt/chatapp/backups/* | tail -n +$((KEEP_BACKUPS + 1)) | while IFS= read -r path; do
+      [ -n \"\${path}\" ] || continue
+      rm -f \"\${path}\"
+    done
   fi
 "; then
   echo "✓ Cleanup complete"
@@ -1702,9 +1715,9 @@ ssh_prod "sudo logger -t chatapp-deploy \"event=complete sha=${RELEASE_SHA} cand
 echo ""
 echo "=== Deployment Complete ==="
 echo "Release: $RELEASE_SHA"
-echo "Production: https://$(echo "${PROD_HOST}" | sed 's/.internal.*//')"
+echo "Production: https://${PROD_HOST//.internal*/}"
 echo ""
 echo "To rollback: re-run ./deploy/deploy-prod.sh <previous-sha>"
 echo ""
 echo "To stop the old version after confidence window (keep for ~10 min):"
-echo "  ssh $PROD_USER@$PROD_HOST 'systemctl stop chatapp@$OLD_PORT'"
+echo "  ssh ${PROD_USER}@${PROD_HOST} 'systemctl stop chatapp@${OLD_PORT}'"

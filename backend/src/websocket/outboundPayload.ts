@@ -6,6 +6,25 @@
 
 const WS_SOCKET_MESSAGE_DEDUPE_MAX = 512;
 
+function isMessageLikeFanoutEventName(ev: unknown) {
+  if (typeof ev !== "string") return false;
+  return (
+    ev.startsWith("message:")
+    || ev === "new_message"
+    || ev === "message_deleted"
+    || ev === "message:edited"
+    || ev === "message_edited"
+  );
+}
+
+function messageDedupeFamily(eventName: string) {
+  if (eventName === "new_message") return "message:created";
+  if (eventName === "message:edited" || eventName === "message_edited") return "message:updated";
+  if (eventName === "message_deleted") return "message:deleted";
+  if (eventName.startsWith("message:")) return eventName;
+  return null;
+}
+
 function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
   if (
     !(logicalChannel.startsWith("user:") || logicalChannel.startsWith("community:"))
@@ -17,7 +36,7 @@ function shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed) {
   }
 
   const ev = (parsed as { event?: unknown }).event;
-  if (typeof ev !== "string" || !ev.startsWith("message:")) return false;
+  if (!isMessageLikeFanoutEventName(ev)) return false;
 
   const data = (parsed as {
     data?: {
@@ -44,7 +63,11 @@ function socketMessageDedupeKey(parsed) {
   }
 
   const eventName = (parsed as { event?: unknown }).event;
-  if (typeof eventName !== "string" || !eventName.startsWith("message:")) {
+  if (typeof eventName !== "string") {
+    return null;
+  }
+  const family = messageDedupeFamily(eventName);
+  if (!family) {
     return null;
   }
 
@@ -60,7 +83,7 @@ function socketMessageDedupeKey(parsed) {
     return null;
   }
 
-  return `${eventName}:${messageId}`;
+  return `${family}:${messageId}`;
 }
 
 function wasSocketMessageRecentlyDelivered(ws, dedupeKey) {
@@ -108,9 +131,23 @@ function extractInternalUserFeedCommand(payload) {
 function isReliableRealtimeEvent(eventName) {
   if (typeof eventName !== "string" || !eventName) return false;
   if (eventName.startsWith("message:")) return true;
+  // Alias names (REALTIME_EVENT_ALIAS_FANOUT) share the same delivery semantics.
+  if (
+    eventName === "new_message"
+    || eventName === "message:edited"
+    || eventName === "message_edited"
+    || eventName === "message_deleted"
+  ) {
+    return true;
+  }
 
   return (
     eventName === "read:updated"
+    || eventName === "message:read"
+    || eventName === "read:receipt"
+    || eventName === "read_receipt"
+    || eventName === "presence_update"
+    || eventName === "user:status"
     || eventName === "conversation:invited"
     || eventName === "conversation:invite"
     || eventName === "conversation:created"

@@ -26,4 +26,19 @@ describe("websocket/outboundPayload", () => {
     expect(wsDeliveryTopicPrefixForMetrics("userfeed:3")).toBe("userfeed");
     expect(socketMessageDedupeKey({ event: "presence:updated" })).toBeNull();
   });
+
+  it("socketMessageDedupeKey maps alias message events to canonical message families", () => {
+    expect(
+      socketMessageDedupeKey({
+        event: "new_message",
+        data: { id: "mid", channel_id: "c1" },
+      }),
+    ).toBe("message:created:mid");
+    expect(
+      socketMessageDedupeKey({
+        event: "message_deleted",
+        data: { id: "mid2" },
+      }),
+    ).toBe("message:deleted:mid2");
+  });
 });

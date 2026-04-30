@@ -8,6 +8,9 @@
 const redis = require('../db/redis');
 const logger = require('../utils/logger');
 const { redisFanoutPublishFailuresTotal } = require('../utils/metrics');
+const {
+  expandFanoutBatchEntriesWithAliases,
+} = require('../realtime/realtimeEventAliases');
 const _fanoutRetryInfoSampleRate = Number(process.env.REDIS_FANOUT_RETRY_INFO_SAMPLE_RATE ?? '0');
 const REDIS_FANOUT_RETRY_INFO_SAMPLE_RATE =
   Number.isFinite(_fanoutRetryInfoSampleRate) && _fanoutRetryInfoSampleRate >= 0
@@ -126,12 +129,16 @@ async function publishWithRetries(serials, logContext) {
  * capped exponential backoff; tune via REDIS_FANOUT_PUBLISH_MAX_ATTEMPTS (default 4).
  */
 async function publish(channel, payload) {
+  const expanded = expandFanoutBatchEntriesWithAliases([{ channel, payload }]);
+  const serials = expanded.map((e) => ({
+    channel: e.channel,
+    body: JSON.stringify(e.payload),
+  }));
   const eventName = payloadEventName(payload);
-  const serializedPayload = JSON.stringify(payload);
-  await publishWithRetries([{ channel, body: serializedPayload }], {
+  await publishWithRetries(serials, {
     eventName,
     channel,
-    batchSize: 1,
+    batchSize: serials.length,
   });
 }
 
@@ -141,13 +148,17 @@ async function publish(channel, payload) {
  */
 async function publishBatch(entries) {
   if (!Array.isArray(entries) || !entries.length) return;
+  const filtered = entries.filter(
+    (ent) => ent && typeof ent.channel === 'string' && ent.channel,
+  );
+  if (!filtered.length) return;
+  const expanded = expandFanoutBatchEntriesWithAliases(filtered);
   const serials: Array<{ channel: string; body: string }> = [];
-  for (const ent of entries) {
-    if (!ent || typeof ent.channel !== 'string' || !ent.channel) continue;
+  for (const ent of expanded) {
     serials.push({ channel: ent.channel, body: JSON.stringify(ent.payload) });
   }
   if (!serials.length) return;
-  const eventName = payloadEventName(entries[0]?.payload);
+  const eventName = payloadEventName(filtered[0]?.payload);
   await publishWithRetries(serials, {
     eventName,
     channel: serials.length === 1 ? serials[0].channel : undefined,

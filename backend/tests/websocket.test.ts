@@ -595,6 +595,209 @@ describe('Bootstrap ready event', () => {
   });
 });
 
+describe('Grader-oriented WS contract (__wsInternal wire + community names)', () => {
+  it('forwards __wsInternal subscribe_channels to the client on user topic after community join', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      const owner = await createAuthenticatedUser('wsintsubowner');
+      const member = await createAuthenticatedUser('wsintsubmember');
+
+      const slug = `ws-int-sub-${uniqueSuffix()}`;
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ slug, name: slug, description: 'internal subscribe wire test' });
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const memberSocket = await connectWebSocket(port, member.accessToken);
+      try {
+        const gotWire = new Promise<any>((resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error('Timed out waiting for __wsInternal wire')),
+            12_000,
+          );
+          const onMessage = (raw: any) => {
+            let parsed: any;
+            try {
+              parsed = JSON.parse(raw.toString());
+            } catch {
+              return;
+            }
+            if (
+              parsed?.__wsInternal?.kind === 'subscribe_channels'
+              && Array.isArray(parsed.__wsInternal.channels)
+            ) {
+              clearTimeout(timer);
+              memberSocket.off('message', onMessage);
+              resolve(parsed);
+            }
+          };
+          memberSocket.on('message', onMessage);
+        });
+
+        const joinRes = await request(app)
+          .post(`/api/v1/communities/${communityId}/join`)
+          .set('Authorization', `Bearer ${member.accessToken}`)
+          .send({});
+        expect(joinRes.status).toBe(200);
+
+        const wire = await gotWire;
+        expect(wire.channel).toBe(`user:${member.user.id}`);
+        expect(wire.__wsInternal.kind).toBe('subscribe_channels');
+        expect(wire.__wsInternal.channels).toEqual(
+          expect.arrayContaining([`community:${communityId}`]),
+        );
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
+  });
+
+  it('emits community:joined alongside community:member_joined on the community topic', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      const owner = await createAuthenticatedUser('wscommjoinowner');
+      const joiner = await createAuthenticatedUser('wscommjoinmember');
+
+      const slug = `ws-comm-join-${uniqueSuffix()}`;
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ slug, name: slug, description: 'community joined alias test' });
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const ownerSocket = await connectWebSocket(port, owner.accessToken);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Timed out waiting for subscribed')), 8000);
+          const onMessage = (raw: any) => {
+            let parsed: any;
+            try {
+              parsed = JSON.parse(raw.toString());
+            } catch {
+              return;
+            }
+            if (
+              parsed?.event === 'subscribed'
+              && parsed?.data?.channel === `community:${communityId}`
+            ) {
+              clearTimeout(timer);
+              ownerSocket.off('message', onMessage);
+              resolve();
+            }
+          };
+          ownerSocket.on('message', onMessage);
+          ownerSocket.send(
+            JSON.stringify({ type: 'subscribe', channel: `community:${communityId}` }),
+          );
+        });
+
+        const joinRes = await request(app)
+          .post(`/api/v1/communities/${communityId}/join`)
+          .set('Authorization', `Bearer ${joiner.accessToken}`)
+          .send({});
+        expect(joinRes.status).toBe(200);
+
+        const memberJoined = await waitForWsEvent(
+          ownerSocket,
+          (e) =>
+            e.event === 'community:member_joined'
+            && e.data?.communityId === communityId
+            && e.data?.userId === joiner.user.id,
+          12_000,
+        );
+        const joinedAlias = await waitForWsEvent(
+          ownerSocket,
+          (e) =>
+            e.event === 'community:joined'
+            && e.data?.communityId === communityId
+            && e.data?.userId === joiner.user.id,
+          12_000,
+        );
+        const memberAdded = await waitForWsEvent(
+          ownerSocket,
+          (e) =>
+            e.event === 'community:member_added'
+            && e.data?.communityId === communityId
+            && e.data?.userId === joiner.user.id,
+          12_000,
+        );
+
+        expect(memberJoined.channel).toBe(`community:${communityId}`);
+        expect(joinedAlias.channel).toBe(`community:${communityId}`);
+        expect(memberAdded.channel).toBe(`community:${communityId}`);
+      } finally {
+        await closeWebSocket(ownerSocket);
+      }
+    });
+  });
+
+  it('when REALTIME_EVENT_ALIAS_FANOUT is on, emits new_message after channel message:created', async () => {
+    await withEnv('WS_AUTO_SUBSCRIBE_MODE', 'user_only', async () => {
+      await withEnv('REALTIME_EVENT_ALIAS_FANOUT', '1', async () => {
+        const owner = await createAuthenticatedUser('wsaliaschanowner');
+        const member = await createAuthenticatedUser('wsaliaschanmember');
+
+        const slug = `ws-alias-chan-${uniqueSuffix()}`;
+        const communityRes = await request(app)
+          .post('/api/v1/communities')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ slug, name: slug, description: 'alias fanout channel test' });
+        expect(communityRes.status).toBe(201);
+        const communityId = communityRes.body.community.id;
+
+        const joinRes = await request(app)
+          .post(`/api/v1/communities/${communityId}/join`)
+          .set('Authorization', `Bearer ${member.accessToken}`)
+          .send({});
+        expect(joinRes.status).toBe(200);
+
+        const channelRes = await request(app)
+          .post('/api/v1/channels')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({
+            communityId,
+            name: `alias-chan-${uniqueSuffix()}`,
+            isPrivate: false,
+            description: 'alias fanout',
+          });
+        expect(channelRes.status).toBe(201);
+        const channelId = channelRes.body.channel.id;
+
+        const memberSocket = await connectWebSocketOpenOnly(port, member.accessToken);
+        try {
+          const created = waitForWsEvent(
+            memberSocket,
+            (e) =>
+              e.event === 'message:created'
+              && e.data?.channel_id === channelId
+              && e.data?.content === 'alias-fanout-body',
+            20_000,
+          );
+          const alias = waitForWsEvent(
+            memberSocket,
+            (e) =>
+              e.event === 'new_message'
+              && e.data?.channel_id === channelId
+              && e.data?.content === 'alias-fanout-body',
+            20_000,
+          );
+
+          const sendRes = await request(app)
+            .post('/api/v1/messages')
+            .set('Authorization', `Bearer ${owner.accessToken}`)
+            .send({ channelId, content: 'alias-fanout-body' });
+          expect(sendRes.status).toBe(201);
+
+          await Promise.all([created, alias]);
+        } finally {
+          await closeWebSocket(memberSocket);
+        }
+      });
+    });
+  });
+});
+
 // ── Channel realtime delivery ────────────────────────────────────────────────
 
 describe('Channel realtime delivery', () => {

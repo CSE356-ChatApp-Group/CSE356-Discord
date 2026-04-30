@@ -6,6 +6,10 @@
 set -euo pipefail
 
 RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy/deploy-staging.sh <sha>}
+if ! [[ "${RELEASE_SHA}" =~ ^[A-Fa-f0-9]{7,40}$ ]]; then
+  echo "ERROR: RELEASE_SHA must be a 7-40 character hexadecimal commit id (got '${RELEASE_SHA}')."
+  exit 1
+fi
 STAGING_HOST="${STAGING_HOST:-136.114.103.71}"
 STAGING_DB_HOST="${STAGING_DB_HOST:-34.122.64.224}"
 STAGING_USER="${STAGING_USER:-$USER}"

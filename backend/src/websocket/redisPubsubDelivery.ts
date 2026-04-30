@@ -98,7 +98,7 @@ function createRedisPubsubDelivery(ctx) {
     }
   }
 
-  function deliverUserFeedMessage(channel, routed) {
+  async function deliverUserFeedMessage(channel, routed) {
     const payload = routed.payload;
     const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
     if (!userIds.length) return;
@@ -156,19 +156,27 @@ function createRedisPubsubDelivery(ctx) {
       for (const ws of clients) {
         if (internalSubscribeChannels) {
           if (!internalSubscribeChannels.length) continue;
-          Promise.allSettled(
+          const results = await Promise.allSettled(
             internalSubscribeChannels.map((targetChannel) => subscribeClient(ws, targetChannel)),
-          ).catch((err) => {
+          );
+          const failed = results.find((r) => r.status === "rejected");
+          if (failed && failed.status === "rejected") {
             logger.warn(
-              { err, userId, channelCount: internalSubscribeChannels.length },
+              { err: failed.reason, userId, channelCount: internalSubscribeChannels.length },
               "WS internal auto-subscribe command failed",
             );
-          });
+          }
+          if (ws.readyState === WebSocket.OPEN) {
+            sendPayloadToSocket(ws, logicalChannel, payload, null, { preparedPayload });
+          }
           continue;
         }
         if (internalSubscribeCommunities) {
           for (const communityId of internalSubscribeCommunities) {
             subscribeCommunityClient(ws, communityId);
+          }
+          if (ws.readyState === WebSocket.OPEN) {
+            sendPayloadToSocket(ws, logicalChannel, payload, null, { preparedPayload });
           }
           continue;
         }
@@ -206,7 +214,7 @@ function createRedisPubsubDelivery(ctx) {
         return;
       }
       if (isUserFeedEnvelope(routed)) {
-        deliverUserFeedMessage(channel, routed);
+        await deliverUserFeedMessage(channel, routed);
       }
       return;
     }

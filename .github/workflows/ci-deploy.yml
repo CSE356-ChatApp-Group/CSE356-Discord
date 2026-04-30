@@ -49,7 +49,8 @@ jobs:
             deploy/deploy-prod-rolling.sh \
             deploy/deploy-prod-nginx-patches.sh \
             deploy/deploy-common.sh \
-            deploy/rollback.sh
+            deploy/rollback.sh \
+            deploy/deploy-prod.sh
           bash -n scripts/ops/prod-observe.sh
           bash -n scripts/ops/prod-nginx-audit.sh
           bash -n scripts/ops/prod-observe-loop.sh
