@@ -346,12 +346,12 @@
       },
       "targets": [
         {
-          "expr": "rate(pgbouncer_stats_query_time_seconds{job=\"pgbouncer\",vm=~\"$vm\"}[1m])",
+          "expr": "rate(pgbouncer_stats_query_time_seconds{job=\"pgbouncer\",vm=~\"$vm\"}[$__rate_interval])",
           "legendFormat": "{{vm}}",
           "refId": "A"
         },
         {
-          "expr": "rate(pgbouncer_stats_wait_time_seconds{job=\"pgbouncer\",vm=~\"$vm\"}[1m])",
+          "expr": "rate(pgbouncer_stats_wait_time_seconds{job=\"pgbouncer\",vm=~\"$vm\"}[$__rate_interval])",
           "legendFormat": "{{vm}}",
           "refId": "B"
         }
@@ -437,12 +437,12 @@
       },
       "targets": [
         {
-          "expr": "rate(pgbouncer_stats_xact_count_total{job=\"pgbouncer\",vm=~\"$vm\"}[1m])",
+          "expr": "rate(pgbouncer_stats_xact_count_total{job=\"pgbouncer\",vm=~\"$vm\"}[$__rate_interval])",
           "legendFormat": "{{vm}}",
           "refId": "A"
         },
         {
-          "expr": "rate(pgbouncer_stats_query_count_total{job=\"pgbouncer\",vm=~\"$vm\"}[1m])",
+          "expr": "rate(pgbouncer_stats_query_count_total{job=\"pgbouncer\",vm=~\"$vm\"}[$__rate_interval])",
           "legendFormat": "{{vm}}",
           "refId": "B"
         }
