@@ -105,12 +105,14 @@ module.exports = function registerReadRoutes(router) {
         return res.json({ success: true });
       }
       const messageCreatedAt = target.created_at;
+      const messageTsMs = new Date(messageCreatedAt).getTime();
       if (
         shouldCoalesceScopeBurstRead({
           userId: uid,
           channelId: channel_id,
           conversationId: conversation_id,
           messageCreatedAt,
+          messageTsMs,
         })
       ) {
         return res.json({ success: true });
@@ -121,6 +123,7 @@ module.exports = function registerReadRoutes(router) {
           channelId: channel_id,
           conversationId: conversation_id,
           messageCreatedAt,
+          messageTsMs,
         })
       ) {
         // Strict fast path for burst duplicates: skip Redis/DB/metrics/fanout work.
@@ -133,6 +136,7 @@ module.exports = function registerReadRoutes(router) {
         conversationId: conversation_id,
         messageId,
         messageCreatedAt,
+        messageTsMs,
       });
       const readScope = conversation_id ? "conversation" : "channel";
       readReceiptScopeTotal.inc({ scope: readScope });
@@ -148,6 +152,7 @@ module.exports = function registerReadRoutes(router) {
           channelId: channel_id,
           conversationId: conversation_id,
           messageCreatedAt,
+          messageTsMs,
         });
         return res.json({ success: true });
       }
@@ -161,6 +166,7 @@ module.exports = function registerReadRoutes(router) {
         channelId: channel_id,
         conversationId: conversation_id,
         messageCreatedAt,
+        messageTsMs,
       });
 
       const shouldRunDebouncedSideEffects =

@@ -216,11 +216,13 @@ function readReceiptScopeCursorCacheSaysNoAdvance({
   channelId,
   conversationId,
   messageCreatedAt,
+  messageTsMs,
 }: {
   userId: string;
   channelId: string | null;
   conversationId: string | null;
   messageCreatedAt: string | Date;
+  messageTsMs?: number;
 }) {
   const now = Date.now();
   const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
@@ -239,8 +241,10 @@ function readReceiptScopeCursorCacheSaysNoAdvance({
     readReceiptCursorCacheHitTotal.inc({ result: "miss" });
     return false;
   }
-  const msgTsMs = new Date(messageCreatedAt).getTime();
-  const noAdvance = Number.isFinite(msgTsMs) && tsMs >= msgTsMs;
+  const normalizedMsgTsMs = Number.isFinite(messageTsMs)
+    ? Number(messageTsMs)
+    : new Date(messageCreatedAt).getTime();
+  const noAdvance = Number.isFinite(normalizedMsgTsMs) && tsMs >= normalizedMsgTsMs;
   readReceiptCursorCacheHitTotal.inc({ result: noAdvance ? "hit" : "miss" });
   return noAdvance;
 }
@@ -250,14 +254,18 @@ function rememberReadReceiptScopeCursor({
   channelId,
   conversationId,
   messageCreatedAt,
+  messageTsMs,
 }: {
   userId: string;
   channelId: string | null;
   conversationId: string | null;
   messageCreatedAt: string | Date;
+  messageTsMs?: number;
 }) {
   const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
-  const msgTsMs = new Date(messageCreatedAt).getTime();
+  const msgTsMs = Number.isFinite(messageTsMs)
+    ? Number(messageTsMs)
+    : new Date(messageCreatedAt).getTime();
   if (!Number.isFinite(msgTsMs)) return;
   const prev = readReceiptScopeCursorByTarget.get(key);
   const prevTsMs = Number(prev?.tsMs || 0);
@@ -287,15 +295,19 @@ function shouldCoalesceScopeBurstRead({
   channelId,
   conversationId,
   messageCreatedAt,
+  messageTsMs,
 }: {
   userId: string;
   channelId: string | null;
   conversationId: string | null;
   messageCreatedAt: string | Date;
+  messageTsMs?: number;
 }) {
   const key = readReceiptScopeCursorKey(userId, channelId, conversationId);
   const now = Date.now();
-  const msgTsMs = new Date(messageCreatedAt).getTime();
+  const msgTsMs = Number.isFinite(messageTsMs)
+    ? Number(messageTsMs)
+    : new Date(messageCreatedAt).getTime();
   if (!Number.isFinite(msgTsMs)) return false;
   const row = readReceiptScopeDebounceByTarget.get(key);
   if (
@@ -338,12 +350,14 @@ async function advanceReadStateCursor({
   conversationId,
   messageId,
   messageCreatedAt,
+  messageTsMs,
 }: {
   userId: string;
   channelId: string | null;
   conversationId: string | null;
   messageId: string;
   messageCreatedAt: string | Date;
+  messageTsMs?: number;
 }) {
   // Redis CAS gate: atomically advance the cursor timestamp in Redis only if
   // messageCreatedAt is strictly greater than the stored value. If Redis says
@@ -358,7 +372,10 @@ async function advanceReadStateCursor({
   //
   // Fail-open matches the previous behavior: if Redis fails, acknowledge the
   // read without blocking HTTP on a direct read_states write.
-  const newTs = String(new Date(messageCreatedAt).getTime());
+  const normalizedTsMs = Number.isFinite(messageTsMs)
+    ? Number(messageTsMs)
+    : new Date(messageCreatedAt).getTime();
+  const newTs = String(normalizedTsMs);
   const cursorKey = readCursorTsKey(userId, channelId, conversationId);
   const dbLockKey = readDbLockKey(userId, channelId, conversationId);
   const batchKeys = batchReadStateRedisKeys(userId, channelId, conversationId);

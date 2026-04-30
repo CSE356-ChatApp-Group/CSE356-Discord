@@ -48,6 +48,7 @@ const READ_STATE_FLUSH_RETRY_MAX = Math.min(
 );
 
 let localFlushInFlight = false;
+let readStateFlushScanCursor = '0';
 
 const READ_STATE_BATCH_UPSERT_SQL = `
   INSERT INTO read_states (
@@ -161,10 +162,12 @@ async function readDirtyKeysBatch(): Promise<string[]> {
   if (typeof redis.sscan === 'function') {
     const result = await redis.sscan(
       RS_DIRTY_SET,
-      '0',
+      readStateFlushScanCursor,
       'COUNT',
       READ_STATE_FLUSH_SCAN_COUNT,
     );
+    const nextCursor = Array.isArray(result) ? String(result[0] ?? '0') : '0';
+    readStateFlushScanCursor = nextCursor;
     const keys = Array.isArray(result) ? result[1] : [];
     return Array.isArray(keys) ? keys : [];
   }
@@ -246,8 +249,6 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
     }
 
     if (dirtyKeys.length === 0) return;
-
-    dirtyKeys.sort();
 
     // Do NOT srem from rs:dirty before reading rs:pending:* — if hgetall is empty or the
     // upsert is skipped, we would drop the dirty flag without persisting (flaky tests +
