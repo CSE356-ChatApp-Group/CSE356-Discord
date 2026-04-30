@@ -38,38 +38,33 @@ function createConnectionLifecycle({
   cleanup,
   replayStartupJitterMs,
 }) {
-  function parseCookieHeader(headerValue): Record<string, string> {
-    if (typeof headerValue !== "string" || !headerValue) return {};
-    const out: Record<string, string> = {};
-    for (const part of headerValue.split(";")) {
-      const trimmed = part.trim();
-      if (!trimmed) continue;
-      const eqIdx = trimmed.indexOf("=");
-      if (eqIdx <= 0) continue;
-      const name = trimmed.slice(0, eqIdx).trim();
-      const value = trimmed.slice(eqIdx + 1).trim();
-      if (name && value) {
-        try {
-          out[name] = decodeURIComponent(value);
-        } catch {
-          out[name] = value;
-        }
-      }
-    }
-    return out;
-  }
-
   function bearerTokenFromUpgradeHeaders(req) {
     const raw = req?.headers?.authorization;
     if (typeof raw !== "string") return null;
-    const match = raw.match(/^Bearer\s+(.+)$/i);
-    return match?.[1]?.trim() || null;
+    if (raw.length < 8 || raw.slice(0, 7).toLowerCase() !== "bearer ") return null;
+    const token = raw.slice(7).trim();
+    return token || null;
+  }
+
+  function refreshTokenFromCookieHeader(headerValue) {
+    if (typeof headerValue !== "string" || !headerValue) return null;
+    const parts = headerValue.split(";");
+    for (const part of parts) {
+      const trimmed = part.trim();
+      if (!trimmed || !trimmed.startsWith("refreshToken=")) continue;
+      const encoded = trimmed.slice("refreshToken=".length).trim();
+      if (!encoded) return null;
+      try {
+        return decodeURIComponent(encoded);
+      } catch {
+        return encoded;
+      }
+    }
+    return null;
   }
 
   async function userFromRefreshCookie(req) {
-    const cookieHeader = req?.headers?.cookie;
-    const cookies = parseCookieHeader(cookieHeader);
-    const refreshToken = cookies.refreshToken;
+    const refreshToken = refreshTokenFromCookieHeader(req?.headers?.cookie);
     if (!refreshToken) return null;
     const payload = verifyRefresh(refreshToken);
     const userId = String(payload?.id || "");
