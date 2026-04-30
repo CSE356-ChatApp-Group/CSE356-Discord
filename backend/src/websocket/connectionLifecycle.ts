@@ -3,6 +3,7 @@ function createConnectionLifecycle({
   randomUUID,
   URL,
   authenticateAccessToken,
+  verifyRefresh,
   isAuthBypassEnabled,
   getBypassAuthContext,
   wsConnectionResultTotal,
@@ -37,20 +38,78 @@ function createConnectionLifecycle({
   cleanup,
   replayStartupJitterMs,
 }) {
+  function parseCookieHeader(headerValue): Record<string, string> {
+    if (typeof headerValue !== "string" || !headerValue) return {};
+    const out: Record<string, string> = {};
+    for (const part of headerValue.split(";")) {
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx <= 0) continue;
+      const name = trimmed.slice(0, eqIdx).trim();
+      const value = trimmed.slice(eqIdx + 1).trim();
+      if (name && value) {
+        try {
+          out[name] = decodeURIComponent(value);
+        } catch {
+          out[name] = value;
+        }
+      }
+    }
+    return out;
+  }
+
+  function bearerTokenFromUpgradeHeaders(req) {
+    const raw = req?.headers?.authorization;
+    if (typeof raw !== "string") return null;
+    const match = raw.match(/^Bearer\s+(.+)$/i);
+    return match?.[1]?.trim() || null;
+  }
+
+  async function userFromRefreshCookie(req) {
+    const cookieHeader = req?.headers?.cookie;
+    const cookies = parseCookieHeader(cookieHeader);
+    const refreshToken = cookies.refreshToken;
+    if (!refreshToken) return null;
+    const payload = verifyRefresh(refreshToken);
+    const userId = String(payload?.id || "");
+    if (!userId) return null;
+    return { id: userId };
+  }
+
   async function handleConnection(ws, req) {
     // Authenticate
     let user;
+    let authFailureReason = "missing_credentials";
     try {
       const url = new URL(req.url, "ws://localhost");
-      const token = url.searchParams.get("token");
-      if (!token) {
+      const queryToken = url.searchParams.get("token");
+      const headerToken = bearerTokenFromUpgradeHeaders(req);
+      if (queryToken) {
+        user = await authenticateAccessToken(queryToken);
+      } else if (headerToken) {
+        user = await authenticateAccessToken(headerToken);
+      } else {
+        user = await userFromRefreshCookie(req);
+      }
+      if (!user) {
         if (!isAuthBypassEnabled()) throw new Error("No token");
         ({ user } = await getBypassAuthContext());
-      } else {
-        user = await authenticateAccessToken(token);
       }
-    } catch {
+    } catch (err) {
+      if (err?.name === "TokenExpiredError") {
+        authFailureReason = "token_expired";
+      } else if (err?.name === "JsonWebTokenError") {
+        authFailureReason = "token_invalid";
+      } else if (err?.message === "No token") {
+        authFailureReason = "missing_credentials";
+      } else if (err?.message === "jwt must be provided") {
+        authFailureReason = "missing_credentials";
+      } else {
+        authFailureReason = "auth_error";
+      }
       wsConnectionResultTotal.inc({ result: "unauthorized" });
+      wsConnectionResultTotal.inc({ result: `unauthorized_${authFailureReason}` });
       ws.close(4001, "Unauthorized");
       return;
     }

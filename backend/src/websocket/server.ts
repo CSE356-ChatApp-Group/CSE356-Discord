@@ -64,7 +64,7 @@
 
 const { randomUUID } = require("crypto");
 const { WebSocketServer, WebSocket } = require("ws");
-const { authenticateAccessToken } = require("../utils/jwt");
+const { authenticateAccessToken, verifyRefresh } = require("../utils/jwt");
 const redis = require("../db/redis");
 const { redisSub } = require("../db/redis");
 const {
@@ -610,6 +610,7 @@ const { handleConnection } = createConnectionLifecycle({
   randomUUID,
   URL,
   authenticateAccessToken,
+  verifyRefresh,
   isAuthBypassEnabled,
   getBypassAuthContext,
   wsConnectionResultTotal,
