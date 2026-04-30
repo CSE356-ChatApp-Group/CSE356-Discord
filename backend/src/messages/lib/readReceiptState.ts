@@ -175,6 +175,32 @@ function shouldCoalesceSameMessageRead(userId: string, messageId: string) {
   return false;
 }
 
+function hasConfirmedRecentMessageRead(userId: string, messageId: string) {
+  const now = Date.now();
+  const key = `${userId}:${messageId}`;
+  const prev = Number(readReceiptRecentByMessage.get(key) || 0);
+  if (prev > 0 && now - prev < READ_RECEIPT_SAME_MESSAGE_COALESCE_MS) {
+    return true;
+  }
+  return false;
+}
+
+function rememberConfirmedMessageRead(userId: string, messageId: string) {
+  const now = Date.now();
+  const key = `${userId}:${messageId}`;
+  readReceiptRecentByMessage.set(key, now);
+  if (readReceiptRecentByMessage.size > READ_RECEIPT_RECENT_MAX_KEYS) {
+    let pruned = 0;
+    for (const [k, ts] of readReceiptRecentByMessage) {
+      if (now - Number(ts || 0) > READ_RECEIPT_SAME_MESSAGE_COALESCE_MS * 10) {
+        readReceiptRecentByMessage.delete(k);
+        pruned += 1;
+      }
+      if (pruned >= 1000) break;
+    }
+  }
+}
+
 function readReceiptScopeCursorKey(
   userId: string,
   channelId: string | null,
@@ -402,6 +428,8 @@ module.exports = {
   READ_RECEIPT_FANOUT_ENABLED,
   READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
   RESET_UNREAD_WATERMARK_LUA,
+  hasConfirmedRecentMessageRead,
+  rememberConfirmedMessageRead,
   shouldRunCas1SideEffects,
   shouldCoalesceSameMessageRead,
   readReceiptScopeCursorCacheSaysNoAdvance,

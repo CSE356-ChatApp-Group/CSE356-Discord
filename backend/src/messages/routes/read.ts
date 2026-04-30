@@ -28,6 +28,8 @@ const {
   READ_RECEIPT_FANOUT_ENABLED,
   READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
   RESET_UNREAD_WATERMARK_LUA,
+  hasConfirmedRecentMessageRead,
+  rememberConfirmedMessageRead,
   shouldRunCas1SideEffects,
   shouldCoalesceSameMessageRead,
   readReceiptScopeCursorCacheSaysNoAdvance,
@@ -83,6 +85,11 @@ module.exports = function registerReadRoutes(router) {
       });
     }
     try {
+      if (hasConfirmedRecentMessageRead(req.user.id, req.params.id)) {
+        // Fast-path duplicate ACK for already-confirmed reads from the same user.
+        return res.json({ success: true });
+      }
+
       const target = await loadMessageTargetForUser(req.params.id, req.user.id, {
         preferCache: true,
       });
@@ -135,6 +142,7 @@ module.exports = function registerReadRoutes(router) {
       });
 
       if (!didAdvanceCursor) {
+        rememberConfirmedMessageRead(uid, messageId);
         rememberReadReceiptScopeCursor({
           userId: uid,
           channelId: channel_id,
@@ -158,6 +166,7 @@ module.exports = function registerReadRoutes(router) {
       const shouldRunDebouncedSideEffects =
         casResult !== 1 || shouldRunCas1SideEffects(uid, channel_id, conversation_id);
       if (!shouldRunDebouncedSideEffects) {
+        rememberConfirmedMessageRead(uid, messageId);
         readReceiptOptimizationTotal.inc({ reason: "cas1_side_effects_debounced" });
         return res.json({ success: true });
       }
@@ -237,6 +246,7 @@ module.exports = function registerReadRoutes(router) {
         );
       }
 
+      rememberConfirmedMessageRead(uid, messageId);
       res.json({ success: true });
     } catch (err) {
       next(err);
