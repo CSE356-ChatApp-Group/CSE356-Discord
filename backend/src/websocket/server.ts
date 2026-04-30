@@ -121,11 +121,40 @@ const {
   wsReliableDeliveryLatencyMs,
   wsReliableDeliveryTopicTotal,
 } = require("../utils/metrics");
+const {
+  IDLE_TTL_SECONDS,
+  CONNECTION_ALIVE_TTL_SECONDS,
+  PRESENCE_SWEEPER_MS,
+  WS_BACKPRESSURE_DROP_BYTES,
+  WS_BACKPRESSURE_KILL_BYTES,
+  WS_OUTBOUND_QUEUE_MAX_MESSAGE,
+  WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT,
+  WS_OUTBOUND_DRAIN_BATCH,
+  WS_REPLAY_OUTBOUND_YIELD_EVERY,
+  WS_OUTBOUND_MESSAGE_WAITERS_MAX,
+  PRESENCE_SWEEPER_DEBOUNCE_MS,
+  PRESENCE_DISCONNECT_DEBOUNCE_MS,
+  ACL_CACHE_TTL_MS,
+  WS_ACL_REDIS_TTL_SECS,
+  ACL_CACHE_MAX_ENTRIES,
+  WS_BOOTSTRAP_BATCH_SIZE,
+  WS_RECENT_DISCONNECT_TTL_SECONDS,
+  WS_HEARTBEAT_INTERVAL_MS,
+  WS_APP_KEEPALIVE_INTERVAL_MS,
+  WS_APP_KEEPALIVE_FRAME,
+  WS_SHUTDOWN_CLOSE_GRACE_MS,
+  WS_SERVICE_RESTART_CLOSE_CODE,
+  WS_SERVICE_RESTART_CLOSE_REASON,
+  WS_REPLAY_USER_COOLDOWN_MS,
+  WS_HOT_LOG_SAMPLE_RATE,
+  WS_BOOTSTRAP_CACHE_TTL_SECONDS,
+  WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
+  WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
+  WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
+  WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
+} = require("./serverConfig");
 
 const wss = new WebSocketServer({ noServer: true });
-const IDLE_TTL_SECONDS = 60;
-const CONNECTION_ALIVE_TTL_SECONDS = 120;
-const PRESENCE_SWEEPER_MS = parseInt(process.env.PRESENCE_SWEEPER_MS || '15000', 10);
 // Backpressure thresholds for slow WS consumers.
 // DROP: skip this frame if the client's write buffer exceeds 64 KB (except
 //   message:* fanout frames — those still send until KILL to avoid silent loss).
@@ -133,42 +162,14 @@ const PRESENCE_SWEEPER_MS = parseInt(process.env.PRESENCE_SWEEPER_MS || '15000',
 //   dropping one frame is better than growing the server-side buffer further.
 // KILL: terminate the connection at 2 MB. The client cannot keep up at all;
 //   holding 2 MB of queued frames wastes heap and blocks on TCP ACK.
-const WS_BACKPRESSURE_DROP_BYTES = parseInt(
-  process.env.WS_BACKPRESSURE_DROP_BYTES || String(64 * 1024), 10,
-);
-const WS_BACKPRESSURE_KILL_BYTES = parseInt(
-  process.env.WS_BACKPRESSURE_KILL_BYTES || String(2 * 1024 * 1024), 10,
-);
 /** Max queued `message:*` frames per socket (never dropped; enqueue waits with setImmediate). */
-const WS_OUTBOUND_QUEUE_MAX_MESSAGE = parseInt(
-  process.env.WS_OUTBOUND_QUEUE_MAX_MESSAGE || String(512),
-  10,
-);
 /** Max queued best-effort frames per socket (dropped at enqueue when full). */
-const WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT = parseInt(
-  process.env.WS_OUTBOUND_QUEUE_MAX_BEST_EFFORT || String(128),
-  10,
-);
 /** Max `ws.send` calls per setImmediate drain tick per socket. */
-const WS_OUTBOUND_DRAIN_BATCH = parseInt(process.env.WS_OUTBOUND_DRAIN_BATCH || String(32), 10);
 /** After enqueueing this many replay frames on one socket, yield so the event loop serves other sockets/work. */
-const WS_REPLAY_OUTBOUND_YIELD_EVERY = (() => {
-  const raw = parseInt(process.env.WS_REPLAY_OUTBOUND_YIELD_EVERY || String(48), 10);
-  if (!Number.isFinite(raw) || raw < 1) return 48;
-  return Math.min(512, Math.max(8, Math.floor(raw)));
-})();
 /** When primary queue is full, `message:*` jobs wait here (FIFO) until drain makes room. */
-const WS_OUTBOUND_MESSAGE_WAITERS_MAX = Math.max(
-  64,
-  Math.min(
-    65536,
-    parseInt(process.env.WS_OUTBOUND_MESSAGE_WAITERS_MAX || String(4096), 10) || 4096,
-  ),
-);
 // Skip the sweeper for users whose presence was just recomputed by a real
 // event (activity ping, status change, connect/disconnect).  5 s is well
 // below the 15 s sweep interval so we never miss an idle transition.
-const PRESENCE_SWEEPER_DEBOUNCE_MS = 5_000;
 // Tracks the last time recomputeUserPresence ran for each user so the
 // reconcile sweeper can skip recently-computed slots.
 const lastPresenceComputedAt: Map<string, number> = new Map();
@@ -176,7 +177,6 @@ const lastPresenceComputedAt: Map<string, number> = new Map();
 // recompute so that brief reconnects (e.g. grader 30ms cycles) don't cause
 // unnecessary offline→online churn. The timeout is cancelled when the user
 // reconnects within the debounce window.
-const PRESENCE_DISCONNECT_DEBOUNCE_MS = 1_000;
 const pendingPresenceRecompute = new Map<string, ReturnType<typeof setTimeout>>();
 function cancelPendingPresenceRecompute(userId: string) {
   const t = pendingPresenceRecompute.get(userId);
@@ -197,62 +197,11 @@ let shuttingDown = false;
 // warming this cache from the same list used for auto-bootstrap, and (2)
 // coalescing concurrent isAllowedChannel calls for the same key so only one
 // DB query runs per cache miss.
-const ACL_CACHE_TTL_MS = 30_000;
-const _aclRedisTtlSecs = Number(process.env.WS_ACL_REDIS_TTL_SECS || Math.ceil(ACL_CACHE_TTL_MS / 1000));
-const WS_ACL_REDIS_TTL_SECS =
-  Number.isFinite(_aclRedisTtlSecs) && _aclRedisTtlSecs > 0
-    ? Math.floor(_aclRedisTtlSecs)
-    : 30;
 const aclCache: Map<string, { allowed: boolean; expiresAt: number }> = new Map();
 /** In-flight ACL lookups — shared waiters get the same Promise (thundering herd guard). */
 const aclCheckInFlight: Map<string, Promise<boolean>> = new Map();
-const rawAclCacheMaxEntries = Number(process.env.WS_ACL_CACHE_MAX_ENTRIES || 20_000);
-const ACL_CACHE_MAX_ENTRIES =
-  Number.isFinite(rawAclCacheMaxEntries) && rawAclCacheMaxEntries > 0
-    ? Math.floor(rawAclCacheMaxEntries)
-    : 20_000;
-const rawBootstrapBatchSize = Number(process.env.WS_BOOTSTRAP_BATCH_SIZE || 96);
-const WS_BOOTSTRAP_BATCH_SIZE =
-  Number.isFinite(rawBootstrapBatchSize) && rawBootstrapBatchSize > 0
-    ? Math.floor(rawBootstrapBatchSize)
-    : 96;
-const rawRecentDisconnectTtlSeconds = Number(
-  process.env.WS_RECENT_DISCONNECT_TTL_SECONDS || 3600,
-);
-const WS_RECENT_DISCONNECT_TTL_SECONDS =
-  Number.isFinite(rawRecentDisconnectTtlSeconds) && rawRecentDisconnectTtlSeconds > 0
-    ? Math.floor(rawRecentDisconnectTtlSeconds)
-    : 3600;
-const rawHeartbeatIntervalMs = Number(process.env.WS_HEARTBEAT_INTERVAL_MS || 20_000);
-const WS_HEARTBEAT_INTERVAL_MS =
-  Number.isFinite(rawHeartbeatIntervalMs) && rawHeartbeatIntervalMs >= 5_000
-    ? Math.floor(rawHeartbeatIntervalMs)
-    : 20_000;
-const rawAppKeepaliveIntervalMs = Number(process.env.WS_APP_KEEPALIVE_INTERVAL_MS || 0);
-const WS_APP_KEEPALIVE_INTERVAL_MS =
-  Number.isFinite(rawAppKeepaliveIntervalMs) && rawAppKeepaliveIntervalMs >= 5_000
-    ? Math.floor(rawAppKeepaliveIntervalMs)
-    : 0;
-const WS_APP_KEEPALIVE_FRAME = JSON.stringify({ event: "keepalive" });
-const rawShutdownCloseGraceMs = Number(process.env.WS_SHUTDOWN_CLOSE_GRACE_MS || 2_000);
-const WS_SHUTDOWN_CLOSE_GRACE_MS =
-  Number.isFinite(rawShutdownCloseGraceMs) && rawShutdownCloseGraceMs >= 250
-    ? Math.min(10_000, Math.floor(rawShutdownCloseGraceMs))
-    : 2_000;
-const WS_SERVICE_RESTART_CLOSE_CODE = 1012;
-const WS_SERVICE_RESTART_CLOSE_REASON = "service_restart";
-const rawReplayUserCooldownMs = Number(process.env.WS_REPLAY_USER_COOLDOWN_MS || '3000');
-const WS_REPLAY_USER_COOLDOWN_MS =
-  Number.isFinite(rawReplayUserCooldownMs) && rawReplayUserCooldownMs >= 500
-    ? Math.min(10_000, Math.floor(rawReplayUserCooldownMs))
-    : 3000;
 const replayAdmissionConfig = parseReplayAdmissionConfig(process.env);
 wsReplaySemaphoreCapGauge.set(replayAdmissionConfig.replaySemaphoreMax);
-const _wsHotLogSampleRate = Number(process.env.WS_HOT_LOG_SAMPLE_RATE ?? "0");
-const WS_HOT_LOG_SAMPLE_RATE =
-  Number.isFinite(_wsHotLogSampleRate) && _wsHotLogSampleRate >= 0
-    ? Math.min(1, Math.max(0, _wsHotLogSampleRate))
-    : 0;
 
 function shouldSampleWsHotLog(rate = WS_HOT_LOG_SAMPLE_RATE) {
   if (!isRuntimeLogCategoryEnabled("ws_hot_info", rate > 0)) return false;
@@ -792,26 +741,6 @@ function maybeSendAppKeepaliveFrame(ws) {
   }
 }
 
-const WS_BOOTSTRAP_CACHE_TTL_SECONDS = parseInt(
-  process.env.WS_BOOTSTRAP_CACHE_TTL_SECONDS || '180',
-  10,
-);
-const WS_BOOTSTRAP_INGRESS_TTL_SECONDS = 3;
-const rawBootstrapIngressJitterMs = Number(process.env.WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS || 200);
-const WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS =
-  Number.isFinite(rawBootstrapIngressJitterMs) && rawBootstrapIngressJitterMs >= 0
-    ? Math.min(500, Math.floor(rawBootstrapIngressJitterMs))
-    : 200;
-const rawBootstrapDbConcurrencyCap = Number(process.env.WS_BOOTSTRAP_DB_MAX_IN_FLIGHT || 50);
-const WS_BOOTSTRAP_DB_MAX_IN_FLIGHT =
-  Number.isFinite(rawBootstrapDbConcurrencyCap) && rawBootstrapDbConcurrencyCap > 0
-    ? Math.min(200, Math.floor(rawBootstrapDbConcurrencyCap))
-    : 50;
-const rawBootstrapDbConcurrencyWaitMs = Number(process.env.WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS || 300);
-const WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS =
-  Number.isFinite(rawBootstrapDbConcurrencyWaitMs) && rawBootstrapDbConcurrencyWaitMs >= 0
-    ? Math.min(2000, Math.floor(rawBootstrapDbConcurrencyWaitMs))
-    : 300;
 const wsBootstrapListInFlight: Map<string, Promise<string[]>> = new Map();
 const wsBootstrapIngressInFlight: Map<string, Promise<string[]>> = new Map();
 let wsBootstrapDbInFlight = 0;
