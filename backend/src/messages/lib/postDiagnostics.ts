@@ -4,6 +4,7 @@
 
 
 const os = require("os");
+const { isRuntimeLogCategoryEnabled } = require("../../utils/runtimeLogControl");
 
 /** PgBouncer `query_timeout` or PG `statement_timeout` during insert (often row lock behind channels FK). */
 function isMessagePostInsertDbTimeout(err: unknown) {
@@ -228,6 +229,11 @@ const MESSAGE_POST_E2E_TRACE_SAMPLE_RATE = parseUnitIntervalOr(
 );
 
 function shouldEmitPostMessagesE2eTrace(totalWallMs: number) {
+  const runtimeEnabled = isRuntimeLogCategoryEnabled(
+    "post_messages_e2e_trace",
+    MESSAGE_POST_E2E_TRACE_MIN_MS > 0 || MESSAGE_POST_E2E_TRACE_SAMPLE_RATE > 0,
+  );
+  if (!runtimeEnabled) return false;
   if (MESSAGE_POST_E2E_TRACE_MIN_MS > 0 && totalWallMs >= MESSAGE_POST_E2E_TRACE_MIN_MS) {
     return true;
   }

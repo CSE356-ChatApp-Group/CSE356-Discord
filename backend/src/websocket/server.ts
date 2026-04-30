@@ -75,6 +75,7 @@ const {
 } = require("../utils/distributedSingleflight");
 const { query, poolStats } = require("../db/pool");
 const logger = require("../utils/logger");
+const { isRuntimeLogCategoryEnabled } = require("../utils/runtimeLogControl");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { loadReplayableMessagesForUser } = require("../messages/reconnectReplay");
@@ -253,6 +254,7 @@ const WS_HOT_LOG_SAMPLE_RATE =
     : 0;
 
 function shouldSampleWsHotLog(rate = WS_HOT_LOG_SAMPLE_RATE) {
+  if (!isRuntimeLogCategoryEnabled("ws_hot_info", rate > 0)) return false;
   if (rate >= 1) return true;
   if (rate <= 0) return false;
   return Math.random() < rate;

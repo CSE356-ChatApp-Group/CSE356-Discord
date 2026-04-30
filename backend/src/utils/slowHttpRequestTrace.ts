@@ -6,6 +6,7 @@
 
 const os = require('os');
 const logger = require('./logger');
+const { isRuntimeLogCategoryEnabled } = require('./runtimeLogControl');
 
 function parseMinMs() {
   const v = Number.parseInt(process.env.SLOW_HTTP_TRACE_MIN_MS || '', 10);
@@ -39,6 +40,11 @@ function pathShouldExclude(route, rawPath) {
  */
 function maybeLogSlowHttpRequestTrace(args) {
   const { req, res, store, durationMs, route } = args;
+  const runtimeEnabled = isRuntimeLogCategoryEnabled(
+    "slow_http_request_trace",
+    SLOW_HTTP_TRACE_MIN_MS > 0,
+  );
+  if (!runtimeEnabled) return;
   if (SLOW_HTTP_TRACE_MIN_MS <= 0) return;
   if (durationMs < SLOW_HTTP_TRACE_MIN_MS) return;
   const rawPath = String(req.originalUrl || req.url || '').split('?')[0] || '';
