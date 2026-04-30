@@ -849,6 +849,12 @@ function logPrimaryRetry(query: string, opts: Record<string, any>, reason: strin
   );
 }
 
+function createMeiliFallbackError(code: string) {
+  const err: any = new Error(code);
+  err.meiliUnavailable = true;
+  return err;
+}
+
 /**
  * search – main entry point. FTS-only.
  *
@@ -1075,9 +1081,7 @@ async function searchWithMeiliBackend(
       'search: meili candidate fetch failed, falling back to postgres',
     );
     // Throw a typed sentinel so the caller knows to use the Postgres path.
-    const fe: any = new Error('meili_unavailable');
-    fe.meiliUnavailable = true;
-    throw fe;
+    throw createMeiliFallbackError('meili_unavailable');
   }
   const meiliMs = Date.now() - tMeili;
   const { ids } = candidateResult;
@@ -1096,9 +1100,7 @@ async function searchWithMeiliBackend(
       },
       'search: meili returned zero candidates, falling back to postgres',
     );
-    const fe: any = new Error('meili_empty_candidates');
-    fe.meiliUnavailable = true;
-    throw fe;
+    throw createMeiliFallbackError('meili_empty_candidates');
   }
 
   // 2 – Postgres recheck (permission enforcement + freshness)
