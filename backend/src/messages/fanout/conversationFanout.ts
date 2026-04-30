@@ -10,12 +10,12 @@ const {
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
 } = require("../../utils/metrics");
-const { getConversationFanoutTargets } = require("../conversationFanoutTargets");
+const { getConversationFanoutTargets } = require("./conversationFanoutTargets");
 const {
   wrapFanoutPayload,
   fanoutPublishedAt,
 } = require("../realtimePayload");
-const { enqueuePendingMessageForUsers } = require("../realtimePending");
+const { enqueuePendingMessageForUsers } = require("../pending/realtimePending");
 const {
   publishUserFeedTargets,
   splitUserTargets,
@@ -26,7 +26,7 @@ const {
     DM_FANOUT_TIMING_LOG,
     DM_FANOUT_TIMING_LOG_MIN_MS,
   },
-} = require("../conversationFanoutConfig");
+} = require("../config/conversationFanoutConfig");
 
 async function publishConversationEventNow(
   conversationId: string,

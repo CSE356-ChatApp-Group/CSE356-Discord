@@ -47,10 +47,10 @@ POST /api/v1/messages
 
 **Key delivery files:**
 - `backend/src/messages/router.ts` — POST /messages, PATCH, DELETE, PUT /read
-- `backend/src/messages/conversationFanoutTargets.ts` — Redis-cached DM participant lookup
+- `backend/src/messages/fanout/conversationFanoutTargets.ts` — Redis-cached DM participant lookup
 - `backend/src/websocket/server.ts` — WS server, `deliverUserFeedMessage`, `deliverPubsubMessage`
 - `backend/src/websocket/fanout.ts` — `fanout.publish()` sends to Redis
-- `backend/src/messages/reconnectReplay.ts` — replays missed messages on WS reconnect
+- `backend/src/messages/pending/reconnectReplay.ts` — replays missed messages on WS reconnect
 
 **DM delivery specifically:** `getConversationFanoutTargets()` → Redis cache → `conversation_participants` table → Redis PUBLISH to `conversation:<id>` + `user:<id>` channels.
 
@@ -161,7 +161,7 @@ tail -f artifacts/rollout-monitoring/grader-watch-events.jsonl
 
 ## Key environment variables (prod `/opt/chatapp/shared/.env`)
 
-**Source of truth:** merged **`deploy/env/prod.required.env`** into shared `.env` on every deploy, full catalog in [`docs/env.md`](../docs/env.md). Do **not** treat old “grader-only” snippets as current prod — e.g. prod **`DISABLE_RATE_LIMITS=false`**, **`USER_FEED_SHARD_COUNT=64`**, **`CHANNEL_MESSAGE_USER_FANOUT_MODE=all`**, **`WS_AUTO_SUBSCRIBE_MODE=user_only`**, **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`** (503s are still bad for grading when they occur for other reasons).
+**Source of truth:** merged **`deploy/env/prod.required.env`** into shared `.env` on every deploy, full catalog in [`docs/env.md`](../docs/env.md). Do **not** treat old “grader-only” snippets as current prod — e.g. prod **`DISABLE_RATE_LIMITS=false`**, **`USER_FEED_SHARD_COUNT=64`**, **`WS_AUTO_SUBSCRIBE_MODE=messages`**, **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`** (with **`WS_PROFILE=generated-client`**), **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`**, **`OVERLOAD_HTTP_SHED_ENABLED=false`** (503s are still bad for grading when they occur for other reasons).
 
 ---
 

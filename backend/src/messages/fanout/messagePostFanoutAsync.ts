@@ -4,8 +4,8 @@
  */
 
 
-const redis = require("../db/redis");
-const logger = require("../utils/logger");
+const redis = require("../../db/redis");
+const logger = require("../../utils/logger");
 const {
   messagePostFanoutJobTotal,
   messagePostFanoutJobRetriesTotal,
@@ -13,7 +13,7 @@ const {
   fanoutJobLatencyMs,
   fanoutRetryTotal,
   messagePostRealtimePublishFailTotal,
-} = require("../utils/metrics");
+} = require("../../utils/metrics");
 
 const DONE_PREFIX = "fanout:v1:done:";
 const LOCK_PREFIX = "fanout:v1:lock:";

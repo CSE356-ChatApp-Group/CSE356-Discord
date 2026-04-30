@@ -1,15 +1,15 @@
 
-const { query } = require('../db/pool');
-const redis = require('../db/redis');
+const { query } = require('../../db/pool');
+const redis = require('../../db/redis');
 const {
   fanoutTargetCacheTotal,
   conversationFanoutTargetsCacheVersionRetryTotal,
-} = require('../utils/metrics');
+} = require('../../utils/metrics');
 const {
   conversationFanoutConfig: {
     CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS,
   },
-} = require('./conversationFanoutConfig');
+} = require('../config/conversationFanoutConfig');
 const {
   readVersionedCacheState,
   invalidateVersionedCache,

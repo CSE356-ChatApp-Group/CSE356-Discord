@@ -37,7 +37,7 @@ const {
   shouldCoalesceScopeBurstRead,
   advanceReadStateCursor,
 } = require("../lib/readReceiptState");
-const { publishConversationEventNow } = require("../lib/conversationFanout");
+const { publishConversationEventNow } = require("../fanout/conversationFanout");
 const { publishUserFeedTargets } = require("../../websocket/userFeed");
 const { loadMessageTargetForUser } = require("../accessCaches");
 

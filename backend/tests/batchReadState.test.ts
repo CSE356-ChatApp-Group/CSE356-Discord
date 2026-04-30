@@ -48,7 +48,7 @@ describe('batchReadState flush', () => {
   it('skips the flush when another worker already holds the distributed lock', async () => {
     redis.set.mockResolvedValueOnce(null);
 
-    const { flushDirtyReadStatesToDB } = require('../src/messages/batchReadState') as {
+    const { flushDirtyReadStatesToDB } = require('../src/messages/readState/batchReadState') as {
       flushDirtyReadStatesToDB: () => Promise<void>;
     };
 
@@ -72,7 +72,7 @@ describe('batchReadState flush', () => {
     query.mockRejectedValueOnce(deadlockErr);
     query.mockResolvedValueOnce({ rowCount: 3, rows: [] });
 
-    const { flushDirtyReadStatesToDB } = require('../src/messages/batchReadState') as {
+    const { flushDirtyReadStatesToDB } = require('../src/messages/readState/batchReadState') as {
       flushDirtyReadStatesToDB: () => Promise<void>;
     };
 
@@ -101,7 +101,7 @@ describe('batchReadState flush', () => {
       releaseQuery = () => resolve({ rowCount: 1, rows: [] });
     }));
 
-    const { flushDirtyReadStatesToDB } = require('../src/messages/batchReadState') as {
+    const { flushDirtyReadStatesToDB } = require('../src/messages/readState/batchReadState') as {
       flushDirtyReadStatesToDB: () => Promise<void>;
     };
 

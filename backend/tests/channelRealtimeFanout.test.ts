@@ -22,7 +22,7 @@ jest.mock('../src/messages/sideEffects', () => ({
   enqueueFanoutJob: jest.fn((_name: string, fn: () => Promise<void>) => fn()),
 }));
 
-jest.mock('../src/messages/realtimePending', () => ({
+jest.mock('../src/messages/pending/realtimePending', () => ({
   enqueuePendingMessageForUsers: jest.fn(),
 }));
 
@@ -64,7 +64,7 @@ const { userFeedRedisChannelForUserId } = require('../src/websocket/userFeed') a
   userFeedRedisChannelForUserId: (userId: string) => string;
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending') as {
+const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending') as {
   enqueuePendingMessageForUsers: jest.Mock;
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -74,7 +74,7 @@ const {
   getChannelUserFanoutTargetKeys,
   invalidateChannelUserFanoutTargetsCache,
   invalidateCommunityChannelUserFanoutTargetsCache,
-} = require('../src/messages/channelRealtimeFanout') as {
+} = require('../src/messages/fanout/channelRealtimeFanout') as {
   publishChannelMessageCreated: (channelId: string, envelope: Record<string, unknown>) => Promise<void>;
   publishChannelMessageRecentUserBridge: (channelId: string, envelope: Record<string, unknown>) => Promise<{ targetCount: number }>;
   getChannelUserFanoutTargetKeys: (channelId: string) => Promise<string[]>;

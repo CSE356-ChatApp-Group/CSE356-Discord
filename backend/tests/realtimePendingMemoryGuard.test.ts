@@ -83,7 +83,7 @@ describe("realtimePending enqueue safeguards", () => {
       [null, 3],    // zremrangebyrank (trimmed)
       [null, 100],  // zcard
     ]);
-    const { enqueuePendingMessageForUsers } = require("../src/messages/realtimePending");
+    const { enqueuePendingMessageForUsers } = require("../src/messages/pending/realtimePending");
     await enqueuePendingMessageForUsers(["user:u1"], {
       event: "message:created",
       data: { id: "m1", channel_id: "ch1" },
@@ -96,7 +96,7 @@ describe("realtimePending enqueue safeguards", () => {
 
   it("skips pending replay writes when memory guard is active", async () => {
     redisMock.info.mockResolvedValue("used_memory:910\nmaxmemory:1000\n");
-    const { enqueuePendingMessageForUsers } = require("../src/messages/realtimePending");
+    const { enqueuePendingMessageForUsers } = require("../src/messages/pending/realtimePending");
     await enqueuePendingMessageForUsers(["user:u1"], {
       event: "message:created",
       data: { id: "m2", channel_id: "ch2" },

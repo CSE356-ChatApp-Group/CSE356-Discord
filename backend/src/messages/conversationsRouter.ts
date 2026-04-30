@@ -22,7 +22,7 @@ const {
 const presenceService  = require('../presence/service');
 const { invalidateWsBootstrapCache, invalidateWsBootstrapCaches } = require('../websocket/server');
 const { bustConversationMessagesCache } = require('./messageCacheBust');
-const { invalidateConversationFanoutTargetsCache } = require('./conversationFanoutTargets');
+const { invalidateConversationFanoutTargetsCache } = require('./fanout/conversationFanoutTargets');
 const { wrapFanoutPayload } = require('./realtimePayload');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 const logger = require('../utils/logger');

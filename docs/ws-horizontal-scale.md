@@ -3,7 +3,7 @@
 ## Current shape
 
 - Each API process runs a WebSocket server and subscribes to Redis Pub/Sub channels needed by its local sockets ([`backend/src/websocket/server.ts`](../backend/src/websocket/server.ts)).
-- Channel `message:created` is published to Redis (`channel:<uuid>` and optionally `user:<uuid>` per member) from [`backend/src/messages/channelRealtimeFanout.ts`](../backend/src/messages/channelRealtimeFanout.ts).
+- Channel `message:created` is published to Redis (`channel:<uuid>` and optionally `user:<uuid>` per member) from [`backend/src/messages/fanout/channelRealtimeFanout.ts`](../backend/src/messages/fanout/channelRealtimeFanout.ts).
 
 ## Scaling out
 

@@ -1,15 +1,15 @@
-const redis = require('../db/redis');
+const redis = require('../../db/redis');
 const {
   wsRecentConnectKey,
   channelRecentConnectKey,
   channelRecentZsetEnabled,
   WS_RECENT_CONNECT_TTL_SECONDS,
-} = require('../websocket/recentConnect');
-const logger = require('../utils/logger');
+} = require('../../websocket/recentConnect');
+const logger = require('../../utils/logger');
 const {
   fanoutRecentConnectCacheTotal,
   fanoutRecentConnectZsetSize,
-} = require('../utils/metrics');
+} = require('../../utils/metrics');
 const {
   channelRealtimeConfig: {
     RECENT_CONNECT_TARGET_CACHE_MS,
@@ -17,7 +17,7 @@ const {
     CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK,
     CHANNEL_MESSAGE_RECENT_CONNECT_FALLBACK_PROBE_MAX,
   },
-} = require('./channelRealtimeConfig');
+} = require('../config/channelRealtimeConfig');
 
 const recentConnectTargetsCache: Map<string, { targets: string[]; cachedAt: number }> = new Map();
 

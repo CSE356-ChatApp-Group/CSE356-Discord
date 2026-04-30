@@ -1,6 +1,9 @@
 /**
  * Messages API router — mounts route modules under /api/v1/messages.
  *
+ * Realtime fanout code lives under `fanout/`, pending replay under `pending/`,
+ * read-state batching under `readState/`, and env defaults under `config/`.
+ *
  * Route map (implementation files in `routes/`):
  * - `get.ts`    — GET `/`, GET `/context/:messageId`
  * - `post.ts`   — POST `/`

@@ -37,7 +37,7 @@ const redis = require('../src/db/redis') as {
 const {
   getConversationFanoutTargets,
   invalidateConversationFanoutTargetsCache,
-} = require('../src/messages/conversationFanoutTargets') as {
+} = require('../src/messages/fanout/conversationFanoutTargets') as {
   getConversationFanoutTargets: (conversationId: string) => Promise<string[]>;
   invalidateConversationFanoutTargetsCache: (conversationId: string) => Promise<void>;
 };

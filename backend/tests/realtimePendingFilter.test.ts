@@ -97,7 +97,7 @@ describe('realtimePending recipient filter', () => {
     classifyExec
       .mockResolvedValueOnce([[null, 0], [null, 0]])
       .mockResolvedValueOnce([[null, 0], [null, 0]]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:ghost'], {
       event: 'message:created',
       data: { id: 'm-off', channel_id: 'c1' },
@@ -118,7 +118,7 @@ describe('realtimePending recipient filter', () => {
       [null, 0],
       [null, 1],
     ]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:live'], {
       event: 'message:created',
       data: { id: 'm-on', channel_id: 'c1' },
@@ -131,7 +131,7 @@ describe('realtimePending recipient filter', () => {
 
   it('skips second EXISTS probe when recentTargets is present but empty (channel-style)', async () => {
     classifyExec.mockResolvedValue([[null, 0], [null, 0]]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(
       ['user:ghost'],
       { event: 'message:created', data: { id: 'm-empty-hint', channel_id: 'c1' } },
@@ -145,7 +145,7 @@ describe('realtimePending recipient filter', () => {
   it('conversation path skips second probe when WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK=false', async () => {
     process.env.WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK = 'false';
     classifyExec.mockResolvedValue([[null, 0], [null, 0]]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:strict'], {
       event: 'message:created',
       data: { id: 'm-strict', channel_id: 'c1' },
@@ -166,7 +166,7 @@ describe('realtimePending recipient filter', () => {
       [null, 0],
       [null, 1],
     ]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:conv'], {
       event: 'message:created',
       data: { id: 'm-conv-rc', channel_id: 'c1' },
@@ -186,7 +186,7 @@ describe('realtimePending recipient filter', () => {
       [null, 0],
       [null, 1],
     ]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(
       ['user:hinted'],
       { event: 'message:created', data: { id: 'm-hint', channel_id: 'c1' } },
@@ -210,7 +210,7 @@ describe('realtimePending recipient filter', () => {
       [null, 0],
       [null, 1],
     ]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:legacy'], {
       event: 'message:created',
       data: { id: 'm-leg-rc', channel_id: 'c1' },
@@ -226,7 +226,7 @@ describe('realtimePending recipient filter', () => {
     classifyExec
       .mockResolvedValueOnce([[null, 0], [null, 0]])
       .mockResolvedValueOnce([[null, 0], [null, 0]]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:gone'], {
       event: 'message:created',
       data: { id: 'm-leg-off', channel_id: 'c1' },
@@ -245,7 +245,7 @@ describe('realtimePending recipient filter', () => {
       [null, 0],
       [null, 1],
     ]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:marked'], {
       event: 'message:created',
       data: { id: 'm-mark', channel_id: 'c1' },
@@ -264,7 +264,7 @@ describe('realtimePending recipient filter', () => {
       [null, 0],
       [null, 1],
     ]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:a', 'user:b'], {
       event: 'message:created',
       data: { id: 'm-leg', channel_id: 'c1' },
@@ -286,7 +286,7 @@ describe('realtimePending recipient filter', () => {
       [null, 0],
       [null, 1],
     ]);
-    const { enqueuePendingMessageForUsers } = require('../src/messages/realtimePending');
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:x'], {
       event: 'message:created',
       data: { id: 'm-old', channel_id: 'c1' },

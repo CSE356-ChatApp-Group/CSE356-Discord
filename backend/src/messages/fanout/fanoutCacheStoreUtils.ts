@@ -1,4 +1,4 @@
-const redis = require('../db/redis');
+const redis = require('../../db/redis');
 
 async function readVersionedCacheState(cacheKey: string, versionKey: string) {
   const mget = typeof redis.mget === 'function' ? redis.mget.bind(redis) : null;

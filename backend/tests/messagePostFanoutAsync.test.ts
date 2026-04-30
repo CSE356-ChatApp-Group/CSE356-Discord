@@ -67,7 +67,7 @@ describe("messagePostFanoutAsync", () => {
   });
 
   it("runs publish once and marks done (success)", async () => {
-    const { runPostMessageFanoutJob } = require("../src/messages/messagePostFanoutAsync");
+    const { runPostMessageFanoutJob } = require("../src/messages/fanout/messagePostFanoutAsync");
     const publish = jest.fn(async () => {});
     await runPostMessageFanoutJob("channel", "msg-1", publish);
     expect(publish).toHaveBeenCalledTimes(1);
@@ -88,7 +88,7 @@ describe("messagePostFanoutAsync", () => {
 
   it("skips publish when done marker already set (dedup)", async () => {
     redisStore.set("fanout:v1:done:msg-2", "1");
-    const { runPostMessageFanoutJob } = require("../src/messages/messagePostFanoutAsync");
+    const { runPostMessageFanoutJob } = require("../src/messages/fanout/messagePostFanoutAsync");
     const publish = jest.fn(async () => {});
     await runPostMessageFanoutJob("channel", "msg-2", publish);
     expect(publish).not.toHaveBeenCalled();
@@ -96,7 +96,7 @@ describe("messagePostFanoutAsync", () => {
   });
 
   it("retries publish then succeeds", async () => {
-    const { runPostMessageFanoutJob } = require("../src/messages/messagePostFanoutAsync");
+    const { runPostMessageFanoutJob } = require("../src/messages/fanout/messagePostFanoutAsync");
     const publish = jest
       .fn()
       .mockRejectedValueOnce(new Error("redis down"))
@@ -114,7 +114,7 @@ describe("messagePostFanoutAsync", () => {
   it("dead-letters after max attempts and increments realtime fail metric", async () => {
     process.env.MESSAGE_FANOUT_JOB_MAX_ATTEMPTS = "2";
     jest.resetModules();
-    const { runPostMessageFanoutJob } = require("../src/messages/messagePostFanoutAsync");
+    const { runPostMessageFanoutJob } = require("../src/messages/fanout/messagePostFanoutAsync");
     const publish = jest.fn(async () => {
       throw new Error("always fail");
     });
@@ -125,7 +125,7 @@ describe("messagePostFanoutAsync", () => {
   });
 
   it("second concurrent run dedup_skips while first holds lock (no double publish)", async () => {
-    const { runPostMessageFanoutJob } = require("../src/messages/messagePostFanoutAsync");
+    const { runPostMessageFanoutJob } = require("../src/messages/fanout/messagePostFanoutAsync");
     let release: (() => void) | undefined;
     const blocked = new Promise<void>((r) => {
       release = r;

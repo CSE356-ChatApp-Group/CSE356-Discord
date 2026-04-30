@@ -10,7 +10,7 @@ const { publishUserFeedTargets } = require('../../websocket/userFeed');
 const { invalidateWsAclCache, invalidateWsBootstrapCaches } = require('../../websocket/server');
 const { staleCacheKey } = require('../../utils/distributedSingleflight');
 const { raceChannelAccess } = require('../../messages/channelAccessCache');
-const { invalidateChannelUserFanoutTargetsCache } = require('../../messages/channelRealtimeFanout');
+const { invalidateChannelUserFanoutTargetsCache } = require('../../messages/fanout/channelRealtimeFanout');
 const S = require('../channelRouterShared');
 
 module.exports = function register(router) {

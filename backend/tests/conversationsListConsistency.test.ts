@@ -48,7 +48,7 @@ jest.mock('../src/messages/messageCacheBust', () => ({
   bustConversationMessagesCache: jest.fn(),
 }));
 
-jest.mock('../src/messages/conversationFanoutTargets', () => ({
+jest.mock('../src/messages/fanout/conversationFanoutTargets', () => ({
   invalidateConversationFanoutTargetsCache: jest.fn(),
 }));
 

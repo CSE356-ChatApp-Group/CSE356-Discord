@@ -16,14 +16,14 @@ const {
   publishConversationMessageCreatedPlan,
 } = require("../../realtime/publishPlan");
 const { wsDispatchFields } = require("../../realtime/deliveryLogFields");
-const { publishConversationEventNow } = require("../lib/conversationFanout");
+const { publishConversationEventNow } = require("../fanout/conversationFanout");
 const { messageFanoutEnvelope } = require("../realtimePayload");
 const {
   publishChannelMessageCreated,
   publishChannelMessageRecentUserBridge,
-} = require("../channelRealtimeFanout");
+} = require("../fanout/channelRealtimeFanout");
 const { loadHydratedMessageById } = require("../messageHydrate");
-const messagePostFanoutAsync = require("../messagePostFanoutAsync");
+const messagePostFanoutAsync = require("../fanout/messagePostFanoutAsync");
 const { incrementChannelMessageCount } = require("../channelMessageCounter");
 const { appendChannelMessageIngested } = require("../messageIngestLog");
 const {

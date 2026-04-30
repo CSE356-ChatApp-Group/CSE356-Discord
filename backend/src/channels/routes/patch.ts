@@ -8,7 +8,7 @@ const {
   invalidateWsBootstrapCaches,
   evictUnauthorizedChannelSubscribers,
 } = require('../../websocket/server');
-const { invalidateChannelUserFanoutTargetsCache } = require('../../messages/channelRealtimeFanout');
+const { invalidateChannelUserFanoutTargetsCache } = require('../../messages/fanout/channelRealtimeFanout');
 const S = require('../channelRouterShared');
 
 module.exports = function register(router) {

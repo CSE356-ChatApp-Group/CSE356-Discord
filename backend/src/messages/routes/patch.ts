@@ -11,9 +11,9 @@ const { query } = require("../../db/pool");
 const overload = require("../../utils/overload");
 const meiliClient = require("../../search/meiliClient");
 const { bustMessagesCacheSafe } = require("../lib/messageListCache");
-const { publishConversationEventNow } = require("../lib/conversationFanout");
+const { publishConversationEventNow } = require("../fanout/conversationFanout");
 const { messageFanoutEnvelope } = require("../realtimePayload");
-const { publishChannelMessageEvent } = require("../channelRealtimeFanout");
+const { publishChannelMessageEvent } = require("../fanout/channelRealtimeFanout");
 const {
   MESSAGE_RETURNING_FIELDS,
   MESSAGE_AUTHOR_JSON,

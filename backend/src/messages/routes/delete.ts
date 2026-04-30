@@ -13,9 +13,9 @@ const meiliClient = require("../../search/meiliClient");
 const logger = require("../../utils/logger");
 const sideEffects = require("../sideEffects");
 const { bustMessagesCacheSafe } = require("../lib/messageListCache");
-const { publishConversationEventNow } = require("../lib/conversationFanout");
+const { publishConversationEventNow } = require("../fanout/conversationFanout");
 const { messageFanoutEnvelope } = require("../realtimePayload");
-const { publishChannelMessageEvent } = require("../channelRealtimeFanout");
+const { publishChannelMessageEvent } = require("../fanout/channelRealtimeFanout");
 const {
   repointChannelLastMessage,
   repointConversationLastMessage,

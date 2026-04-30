@@ -75,7 +75,7 @@ const {
   resetReplayDedupeMemForTests,
   WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
   WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED,
-} = require('../src/messages/reconnectReplay') as {
+} = require('../src/messages/pending/reconnectReplay') as {
   loadReplayableMessagesForUser: (
     userId: string,
     disconnectedAtMs: number,

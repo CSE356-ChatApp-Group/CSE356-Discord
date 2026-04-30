@@ -1,4 +1,4 @@
-const { resolvedWsRuntimeConfig } = require('../websocket/profile');
+const { resolvedWsRuntimeConfig } = require('../../websocket/profile');
 
 function envBool(name: string, defaultValue: boolean): boolean {
   const raw = process.env[name];
@@ -49,15 +49,17 @@ const channelRealtimeConfig = Object.freeze({
     256,
     { min: 50, max: 1000 },
   ),
-  CHANNEL_MESSAGE_USER_FANOUT_ENABLED: envBool('CHANNEL_MESSAGE_USER_FANOUT', true),
   CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST: envBool('CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST', true),
   MESSAGE_USER_FANOUT_HTTP_BLOCKING: envBool('MESSAGE_USER_FANOUT_HTTP_BLOCKING', true),
   CHANNEL_MESSAGE_USER_FANOUT_MAX: envInt('CHANNEL_MESSAGE_USER_FANOUT_MAX', 10000, {
     min: 1,
     max: 10000,
   }),
-  CHANNEL_MESSAGE_USER_FANOUT_MODE: resolvedWsRuntimeConfig().channelUserFanoutMode,
 });
 
-module.exports = { channelRealtimeConfig };
+function channelMessageUserFanoutEnabled() {
+  return envBool('CHANNEL_MESSAGE_USER_FANOUT', true);
+}
+
+module.exports = { channelRealtimeConfig, channelMessageUserFanoutEnabled };
 

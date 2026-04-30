@@ -30,8 +30,8 @@ The message **id** and **author** fields must be present in one of the forms `ma
 
 | Target | Redis / logical topics | Implementation |
 |--------|------------------------|------------------|
-| **Channel** | `channel:<uuid>` first (unless `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST=false`), then logical **`user:<member>`** duplicates via sharded **`userfeed:<n>`** (and optional community feed for public channels) | [`channelRealtimeFanout.ts`](../backend/src/messages/channelRealtimeFanout.ts) |
-| **DM / group DM** | `conversation:<uuid>` and participant **`user:<id>`** via **`userfeed:<n>`** | [`publishConversationEventNow`](../backend/src/messages/router.ts) + [`conversationFanoutTargets.ts`](../backend/src/messages/conversationFanoutTargets.ts) |
+| **Channel** | `channel:<uuid>` first (unless `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST=false`), then logical **`user:<member>`** duplicates via sharded **`userfeed:<n>`** (and optional community feed for public channels) | [`channelRealtimeFanout.ts`](../backend/src/messages/fanout/channelRealtimeFanout.ts) |
+| **DM / group DM** | `conversation:<uuid>` and participant **`user:<id>`** via **`userfeed:<n>`** | [`publishConversationEventNow`](../backend/src/messages/fanout/conversationFanout.ts) + [`conversationFanoutTargets.ts`](../backend/src/messages/fanout/conversationFanoutTargets.ts) |
 
 Envelope for `message:*` includes **`publishedAt`** after Redis accepts the publish ([`realtimePayload.ts`](../backend/src/messages/realtimePayload.ts)). Do not publish raw `{ event, data }` for graded `message:*` paths without going through the same wrapper.
 

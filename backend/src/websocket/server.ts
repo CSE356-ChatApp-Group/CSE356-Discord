@@ -78,8 +78,8 @@ const logger = require("../utils/logger");
 const { isRuntimeLogCategoryEnabled } = require("../utils/runtimeLogControl");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
-const { loadReplayableMessagesForUser } = require("../messages/reconnectReplay");
-const { drainPendingMessagesForUser } = require("../messages/realtimePending");
+const { loadReplayableMessagesForUser } = require("../messages/pending/reconnectReplay");
+const { drainPendingMessagesForUser } = require("../messages/pending/realtimePending");
 const { markWsRecentConnect, markChannelRecentConnect } = require("./recentConnect");
 const {
   parseReplayAdmissionConfig,

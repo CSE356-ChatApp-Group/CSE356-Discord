@@ -1,13 +1,13 @@
-const { query } = require('../db/pool');
-const redis = require('../db/redis');
+const { query } = require('../../db/pool');
+const redis = require('../../db/redis');
 const {
   fanoutTargetCacheTotal,
-} = require('../utils/metrics');
+} = require('../../utils/metrics');
 const {
   channelRealtimeConfig: {
     CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS,
   },
-} = require('./channelRealtimeConfig');
+} = require('../config/channelRealtimeConfig');
 const {
   readVersionedCacheState,
   invalidateVersionedCache,

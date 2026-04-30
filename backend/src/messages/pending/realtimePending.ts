@@ -1,15 +1,15 @@
 
-const redis = require('../db/redis');
-const logger = require('../utils/logger');
-const { loadHydratedMessagesByIds } = require('./messageHydrate');
-const { wrapFanoutPayload } = require('./realtimePayload');
+const redis = require('../../db/redis');
+const logger = require('../../utils/logger');
+const { loadHydratedMessagesByIds } = require('../messageHydrate');
+const { wrapFanoutPayload } = require('../realtimePayload');
 const {
   wsPendingEligibleKey,
   wsRecentConnectKey,
   wsReplayPendingEligibilityKey,
   WS_REPLAY_RECENT_USER_WINDOW_SECONDS,
-} = require('../websocket/recentConnect');
-const { realtimePendingConfig } = require('./realtimePendingConfig');
+} = require('../../websocket/recentConnect');
+const { realtimePendingConfig } = require('../config/realtimePendingConfig');
 const {
   wsPendingReplayUserTrimmedTotal,
   wsPendingUserZsetSize,
@@ -18,7 +18,7 @@ const {
   pendingReplayEntriesPerMessage,
   pendingReplaySecondProbeRecentUserTotal,
   offlinePendingSkippedTotal,
-} = require('../utils/metrics');
+} = require('../../utils/metrics');
 
 const {
   WS_REPLAY_PENDING_TTL_SECONDS,

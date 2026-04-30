@@ -4,11 +4,15 @@
  */
 
 
-const redis = require('../db/redis');
-const fanout = require('../websocket/fanout');
-const { publishUserFeedTargets } = require('../websocket/userFeed');
-const { publishCommunityFeedMessage } = require('../websocket/communityFeed');
-const { channelRealtimeConfig } = require('./channelRealtimeConfig');
+const redis = require('../../db/redis');
+const fanout = require('../../websocket/fanout');
+const { publishUserFeedTargets } = require('../../websocket/userFeed');
+const { publishCommunityFeedMessage } = require('../../websocket/communityFeed');
+const {
+  channelRealtimeConfig,
+  channelMessageUserFanoutEnabled,
+} = require('../config/channelRealtimeConfig');
+const { resolveChannelUserFanoutMode } = require('../../websocket/profile');
 const {
   getChannelUserFanoutTargetKeys,
   getChannelUserFanoutTargetKeysWithMeta,
@@ -17,15 +21,15 @@ const {
   invalidateChannelUserFanoutTargetsCache,
   invalidateCommunityChannelUserFanoutTargetsCache,
 } = require('./channelFanoutTargetsStore');
-const sideEffects = require('./sideEffects');
-const { enqueuePendingMessageForUsers } = require('./realtimePending');
+const sideEffects = require('../sideEffects');
+const { enqueuePendingMessageForUsers } = require('../pending/realtimePending');
 const {
   channelRecentConnectKey,
   channelRecentZsetEnabled,
   WS_RECENT_CONNECT_TTL_SECONDS,
-} = require('../websocket/recentConnect');
+} = require('../../websocket/recentConnect');
 const { resolveRecentConnectTargets } = require('./channelRecentConnectTargets');
-const logger = require('../utils/logger');
+const logger = require('../../utils/logger');
 const {
   fanoutRecipientsHistogram,
   fanoutPublishDurationMs,
@@ -33,15 +37,13 @@ const {
   fanoutTargetCandidatesHistogram,
   channelMessageFanoutRecipientTotal,
   realtimeMissAttributionTotal,
-} = require('../utils/metrics');
+} = require('../../utils/metrics');
 
 const {
   CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
-  CHANNEL_MESSAGE_USER_FANOUT_ENABLED,
   CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST,
   MESSAGE_USER_FANOUT_HTTP_BLOCKING,
   CHANNEL_MESSAGE_USER_FANOUT_MAX,
-  CHANNEL_MESSAGE_USER_FANOUT_MODE,
 } = channelRealtimeConfig;
 
 async function publishUserTopicTargets(
@@ -61,7 +63,7 @@ async function publishUserTopicTargets(
 }
 
 async function resolveUserTopicTargets(channelId: string) {
-  if (!CHANNEL_MESSAGE_USER_FANOUT_ENABLED) {
+  if (!channelMessageUserFanoutEnabled()) {
     return {
       allTargets: [],
       recentTargets: [],
@@ -71,7 +73,7 @@ async function resolveUserTopicTargets(channelId: string) {
     };
   }
 
-  const mode = CHANNEL_MESSAGE_USER_FANOUT_MODE;
+  const mode = resolveChannelUserFanoutMode();
   const candidateMetricPath =
     mode === 'all'
       ? 'channel_message_user_topics'
@@ -150,7 +152,7 @@ async function publishChannelMessageRecentUserBridge(
   if (envelope?.event !== 'message:created') {
     return { targetCount: 0 };
   }
-  if (!CHANNEL_MESSAGE_USER_FANOUT_ENABLED || !channelRecentZsetEnabled()) {
+  if (!channelMessageUserFanoutEnabled() || !channelRecentZsetEnabled()) {
     return { targetCount: 0 };
   }
 
@@ -198,7 +200,7 @@ async function publishChannelMessageEvent(
   const chKey = `channel:${channelId}`;
   const firstChannel = CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST;
   const startedAt = process.hrtime.bigint();
-  const mode = CHANNEL_MESSAGE_USER_FANOUT_MODE;
+  const mode = resolveChannelUserFanoutMode();
   // Start resolving the logical user audience immediately, but don't make the
   // explicit `channel:` publish wait for that lookup when channel-first mode is
   // enabled. This preserves the existing payload contract while reducing
@@ -274,7 +276,7 @@ async function publishChannelMessageEvent(
       ? allTargets.filter((target) => !recentTargetSet.has(target))
       : [];
 
-  if (CHANNEL_MESSAGE_USER_FANOUT_ENABLED && envelope?.event === 'message:created') {
+  if (channelMessageUserFanoutEnabled() && envelope?.event === 'message:created') {
     channelMessageFanoutRecipientTotal.inc({ segment: 'candidate' }, candidateCount);
     channelMessageFanoutRecipientTotal.inc({ segment: 'inline_user_topic' }, inlineTargets.length);
     channelMessageFanoutRecipientTotal.inc({ segment: 'deferred_user_topic' }, deferredTargets.length);

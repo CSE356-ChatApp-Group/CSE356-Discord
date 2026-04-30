@@ -5,7 +5,7 @@
 
 const redis = require("../../db/redis");
 const { readReceiptCursorCacheHitTotal } = require("../../utils/metrics");
-const { batchReadStateRedisKeys } = require("../batchReadState");
+const { batchReadStateRedisKeys } = require("../readState/batchReadState");
 
 // When unset, keep historical default (defer only under heavy pool wait).
 // `0` disables the pool-wait defer branch entirely (see PUT /messages/:id/read).

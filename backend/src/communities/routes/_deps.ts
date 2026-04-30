@@ -15,7 +15,7 @@ const {
 const {
   invalidateCommunityChannelUserFanoutTargetsCache,
   getCommunityChannelIds,
-} = require('../../messages/channelRealtimeFanout');
+} = require('../../messages/fanout/channelRealtimeFanout');
 const {
   warmChannelAccessCacheForUser,
   evictChannelAccessCacheForUser,

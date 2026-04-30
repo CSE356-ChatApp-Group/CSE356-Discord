@@ -45,7 +45,7 @@ jest.mock('../src/websocket/server', () => ({
   invalidateWsBootstrapCache: jest.fn(),
   invalidateWsAclCache: jest.fn(),
 }));
-jest.mock('../src/messages/channelRealtimeFanout', () => ({
+jest.mock('../src/messages/fanout/channelRealtimeFanout', () => ({
   invalidateCommunityChannelUserFanoutTargetsCache: jest.fn(),
 }));
 jest.mock('../src/utils/endpointCacheMetrics', () => ({

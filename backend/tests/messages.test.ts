@@ -10,7 +10,7 @@ import { randomUUID } from 'crypto';
 import { request, app, pool, redis } from './runtime';
 
 import { uniqueSuffix, createAuthenticatedUser } from './helpers';
-const { flushDirtyReadStatesToDB, enqueueBatchReadStateUpdate } = require('../src/messages/batchReadState');
+const { flushDirtyReadStatesToDB, enqueueBatchReadStateUpdate } = require('../src/messages/readState/batchReadState');
 const {
   flushDirtyLastMessagePointers,
 } = require('../src/messages/repointLastMessage');
