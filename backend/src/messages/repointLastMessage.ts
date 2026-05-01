@@ -1,6 +1,15 @@
 /**
- * Keep channels.conversations last_message_* in sync after hard-deletes.
- * Concurrent deletes can cause FK 23503 on repoint; we clear and retry.
+ * Channel/conversation `last_message_*` columns and Redis overlays.
+ *
+ * **Post path:** pointer updates go to Redis first; a background job drains pending
+ * rows and an interval batch-flushes dirty IDs to Postgres when reconcile env flags
+ * allow — avoiding `UPDATE channels` on the HTTP critical path.
+ *
+ * **Hard-delete:** repoint pointers to the latest non-deleted message; FK `23503`
+ * races clear pointers and retry.
+ *
+ * **List routes:** prefer Redis hashes (`ch:last_msg:*` / `conv:last_msg:*`), fall
+ * back to DB columns when missing.
  */
 
 
@@ -176,11 +185,35 @@ const CONVERSATION_REPOINT_SQL = `WITH lm AS (
 
 type LastMessagePayload = { messageId: string; authorId: string | null; createdAt: string | Date };
 
-const pendingChannelLastMessageUpdates = new Map<string, LastMessagePayload>();
-const queuedChannelLastMessageUpdates = new Set<string>();
+type DeferredPointerCtx = {
+  kind: 'channel' | 'conversation';
+  keyPrefix: string;
+  dirtySet: string;
+  pending: Map<string, LastMessagePayload>;
+  queued: Set<string>;
+  jobName: string;
+  logLabel: string;
+};
 
-const pendingConversationLastMessageUpdates = new Map<string, LastMessagePayload>();
-const queuedConversationLastMessageUpdates = new Set<string>();
+const channelDeferredCtx: DeferredPointerCtx = {
+  kind: 'channel',
+  keyPrefix: CH_LAST_MSG_KEY_PREFIX,
+  dirtySet: CH_LAST_MSG_DIRTY_SET,
+  pending: new Map(),
+  queued: new Set(),
+  jobName: 'last_message.channel_pointer',
+  logLabel: 'channel',
+};
+
+const conversationDeferredCtx: DeferredPointerCtx = {
+  kind: 'conversation',
+  keyPrefix: CONV_LAST_MSG_KEY_PREFIX,
+  dirtySet: CONV_LAST_MSG_DIRTY_SET,
+  pending: new Map(),
+  queued: new Set(),
+  jobName: 'last_message.conversation_pointer',
+  logLabel: 'conversation',
+};
 
 function lastMessagePointerSortValue(createdAt: string | Date) {
   const millis = new Date(createdAt).getTime();
@@ -233,51 +266,26 @@ async function flushLastMessageToRedis(
   }
 }
 
-async function flushChannelLastMessageUpdate(channelId: string) {
-  // Write to Redis (loopback, sub-ms) instead of the DB.
-  // A background interval batch-flushes all dirty channels to DB every
-  // CHANNEL_FLUSH_INTERVAL_MS ms, eliminating hot-row contention on channels.
+/** Drain coalesced pending payload(s) for one channel or conversation into Redis. */
+async function flushDeferredPointerToRedis(ctx: DeferredPointerCtx, targetId: string) {
   while (true) {
-    const pending = pendingChannelLastMessageUpdates.get(channelId);
+    const pending = ctx.pending.get(targetId);
     if (!pending) return;
-    pendingChannelLastMessageUpdates.delete(channelId);
+    ctx.pending.delete(targetId);
 
     const ok = await flushLastMessageToRedis(
-      CH_LAST_MSG_KEY_PREFIX,
-      CH_LAST_MSG_DIRTY_SET,
-      channelId,
+      ctx.keyPrefix,
+      ctx.dirtySet,
+      targetId,
       pending,
-      'channel',
+      ctx.logLabel,
     );
     if (!ok) {
-      channelLastMessageUpdateFailedTotal.inc({ target: 'channel' });
+      channelLastMessageUpdateFailedTotal.inc({ target: ctx.kind });
       return;
     }
 
-    // Loop back if another update arrived while we were writing
-    if (!pendingChannelLastMessageUpdates.has(channelId)) return;
-  }
-}
-
-async function flushConversationLastMessageUpdate(conversationId: string) {
-  while (true) {
-    const pending = pendingConversationLastMessageUpdates.get(conversationId);
-    if (!pending) return;
-    pendingConversationLastMessageUpdates.delete(conversationId);
-
-    const ok = await flushLastMessageToRedis(
-      CONV_LAST_MSG_KEY_PREFIX,
-      CONV_LAST_MSG_DIRTY_SET,
-      conversationId,
-      pending,
-      'conversation',
-    );
-    if (!ok) {
-      channelLastMessageUpdateFailedTotal.inc({ target: 'conversation' });
-      return;
-    }
-
-    if (!pendingConversationLastMessageUpdates.has(conversationId)) return;
+    if (!ctx.pending.has(targetId)) return;
   }
 }
 
@@ -396,66 +404,47 @@ function startChannelLastMessageFlushInterval() {
   }, CHANNEL_FLUSH_INTERVAL_MS).unref();
 }
 
+function scheduleDeferredPointerUpdate(
+  ctx: DeferredPointerCtx,
+  targetId: string,
+  payload: LastMessagePayload,
+) {
+  const current = ctx.pending.get(targetId);
+  if (!shouldReplaceLastMessageUpdate(current, payload)) {
+    return true;
+  }
+  ctx.pending.set(targetId, payload);
+  channelLastMessageUpdateDeferredTotal.inc({ target: ctx.kind });
+
+  if (ctx.queued.has(targetId)) {
+    return true;
+  }
+  ctx.queued.add(targetId);
+
+  return sideEffects.enqueueFanoutJob(ctx.jobName, async () => {
+    try {
+      await flushDeferredPointerToRedis(ctx, targetId);
+    } finally {
+      ctx.queued.delete(targetId);
+      if (ctx.pending.has(targetId)) {
+        scheduleDeferredPointerUpdate(ctx, targetId, ctx.pending.get(targetId)!);
+      }
+    }
+  });
+}
+
 function scheduleChannelLastMessagePointerUpdate(
   channelId: string,
   payload: { messageId: string; authorId: string; createdAt: string | Date },
 ) {
-  const current = pendingChannelLastMessageUpdates.get(channelId);
-  if (!shouldReplaceLastMessageUpdate(current, payload)) {
-    return true;
-  }
-  pendingChannelLastMessageUpdates.set(channelId, payload);
-  channelLastMessageUpdateDeferredTotal.inc({ target: 'channel' });
-
-  if (queuedChannelLastMessageUpdates.has(channelId)) {
-    return true;
-  }
-  queuedChannelLastMessageUpdates.add(channelId);
-
-  return sideEffects.enqueueFanoutJob('last_message.channel_pointer', async () => {
-    try {
-      await flushChannelLastMessageUpdate(channelId);
-    } finally {
-      queuedChannelLastMessageUpdates.delete(channelId);
-      if (pendingChannelLastMessageUpdates.has(channelId)) {
-        scheduleChannelLastMessagePointerUpdate(
-          channelId,
-          pendingChannelLastMessageUpdates.get(channelId)!,
-        );
-      }
-    }
-  });
+  return scheduleDeferredPointerUpdate(channelDeferredCtx, channelId, payload);
 }
 
 function scheduleConversationLastMessagePointerUpdate(
   conversationId: string,
   payload: { messageId: string; authorId: string | null; createdAt: string | Date },
 ) {
-  const current = pendingConversationLastMessageUpdates.get(conversationId);
-  if (!shouldReplaceLastMessageUpdate(current, payload)) {
-    return true;
-  }
-  pendingConversationLastMessageUpdates.set(conversationId, payload);
-  channelLastMessageUpdateDeferredTotal.inc({ target: 'conversation' });
-
-  if (queuedConversationLastMessageUpdates.has(conversationId)) {
-    return true;
-  }
-  queuedConversationLastMessageUpdates.add(conversationId);
-
-  return sideEffects.enqueueFanoutJob('last_message.conversation_pointer', async () => {
-    try {
-      await flushConversationLastMessageUpdate(conversationId);
-    } finally {
-      queuedConversationLastMessageUpdates.delete(conversationId);
-      if (pendingConversationLastMessageUpdates.has(conversationId)) {
-        scheduleConversationLastMessagePointerUpdate(
-          conversationId,
-          pendingConversationLastMessageUpdates.get(conversationId)!,
-        );
-      }
-    }
-  });
+  return scheduleDeferredPointerUpdate(conversationDeferredCtx, conversationId, payload);
 }
 
 async function repointChannelLastMessage(channelId: string) {
@@ -545,59 +534,47 @@ type LastMessageMeta = {
   at?: string;
 };
 
-async function getChannelLastMessageMetaMapFromRedis(
-  channelIds: string[],
-  target: 'channel' | 'community_channel' = 'channel',
+type LastMessageMetaMetricTarget = 'channel' | 'community_channel' | 'conversation';
+
+async function getLastMessageMetaMapFromRedis(
+  entityIds: string[],
+  keyPrefix: string,
+  metricTarget: LastMessageMetaMetricTarget,
 ) {
   const out = new Map<string, LastMessageMeta>();
-  if (!Array.isArray(channelIds) || channelIds.length === 0) return out;
-  const ids = [...new Set(channelIds.filter((id) => typeof id === 'string' && id))];
+  if (!Array.isArray(entityIds) || entityIds.length === 0) return out;
+  const ids = [...new Set(entityIds.filter((id) => typeof id === 'string' && id))];
   if (ids.length === 0) return out;
   try {
     const pipeline = redis.pipeline();
-    for (const id of ids) pipeline.hgetall(`${CH_LAST_MSG_KEY_PREFIX}${id}`);
+    for (const id of ids) pipeline.hgetall(`${keyPrefix}${id}`);
     const results = await pipeline.exec();
     for (let i = 0; i < ids.length; i += 1) {
       const [err, data] = results[i] || [];
       if (err || !data || !data.msg_id) {
-        lastMessageCacheTotal.inc({ target, result: err ? 'error' : 'miss' });
+        lastMessageCacheTotal.inc({ target: metricTarget, result: err ? 'error' : 'miss' });
         continue;
       }
       out.set(ids[i], data as LastMessageMeta);
-      lastMessageCacheTotal.inc({ target, result: 'hit' });
+      lastMessageCacheTotal.inc({ target: metricTarget, result: 'hit' });
     }
   } catch {
     for (const _id of ids) {
-      lastMessageCacheTotal.inc({ target, result: 'error' });
+      lastMessageCacheTotal.inc({ target: metricTarget, result: 'error' });
     }
   }
   return out;
 }
 
+async function getChannelLastMessageMetaMapFromRedis(
+  channelIds: string[],
+  target: 'channel' | 'community_channel' = 'channel',
+) {
+  return getLastMessageMetaMapFromRedis(channelIds, CH_LAST_MSG_KEY_PREFIX, target);
+}
+
 async function getConversationLastMessageMetaMapFromRedis(conversationIds: string[]) {
-  const out = new Map<string, LastMessageMeta>();
-  if (!Array.isArray(conversationIds) || conversationIds.length === 0) return out;
-  const ids = [...new Set(conversationIds.filter((id) => typeof id === 'string' && id))];
-  if (ids.length === 0) return out;
-  try {
-    const pipeline = redis.pipeline();
-    for (const id of ids) pipeline.hgetall(`${CONV_LAST_MSG_KEY_PREFIX}${id}`);
-    const results = await pipeline.exec();
-    for (let i = 0; i < ids.length; i += 1) {
-      const [err, data] = results[i] || [];
-      if (err || !data || !data.msg_id) {
-        lastMessageCacheTotal.inc({ target: 'conversation', result: err ? 'error' : 'miss' });
-        continue;
-      }
-      out.set(ids[i], data as LastMessageMeta);
-      lastMessageCacheTotal.inc({ target: 'conversation', result: 'hit' });
-    }
-  } catch {
-    for (const _id of ids) {
-      lastMessageCacheTotal.inc({ target: 'conversation', result: 'error' });
-    }
-  }
-  return out;
+  return getLastMessageMetaMapFromRedis(conversationIds, CONV_LAST_MSG_KEY_PREFIX, 'conversation');
 }
 
 module.exports = {

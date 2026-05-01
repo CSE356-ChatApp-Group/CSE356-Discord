@@ -65,6 +65,11 @@ queries=(
   'sum by (vm, status_code) (rate(message_post_response_total{job="chatapp-api"}[5m]))'
   'sum by (vm, status_class) (rate(http_server_requests_total{job="chatapp-api",method="PUT",route="/api/v1/messages/:id/read"}[5m]))'
   'sum by (vm, result) (rate(message_channel_insert_lock_total{job="chatapp-api"}[5m]))'
+  # Last-message Redis→Postgres reconcile (correlate with LAST_MESSAGE_PG_RECONCILE_* env on hosts)
+  'sum by (target) (rate(channel_last_message_update_deferred_total{job="chatapp-api"}[5m]))'
+  'sum by (target) (rate(channel_last_message_update_flushed_total{job="chatapp-api"}[5m]))'
+  'sum by (target, result) (rate(last_message_pg_reconcile_total{job="chatapp-api"}[5m]))'
+  'sum by (reason) (rate(last_message_pg_reconcile_skipped_total{job="chatapp-api"}[5m]))'
   'histogram_quantile(0.95, sum by (le, vm) (rate(message_channel_insert_lock_wait_ms_bucket{job="chatapp-api",result="acquired"}[5m])))'
   'histogram_quantile(0.99, sum by (le, vm) (rate(message_channel_insert_lock_wait_ms_bucket{job="chatapp-api",result="acquired"}[5m])))'
   'histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))'

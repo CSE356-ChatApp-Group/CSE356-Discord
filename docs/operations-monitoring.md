@@ -69,6 +69,17 @@ Read-state drift verification (same canary window):
 - Capture before/after with `./scripts/postgres/pg-stat-read-state-flush-fingerprints.sh`.
 - Expect near-zero **new** calls on legacy read-state queryids; modern queryid should carry almost all delta calls.
 
+**Read-state SQL:** the canonical batch upsert is defined only in [`backend/src/messages/readState/batchReadState.ts`](../backend/src/messages/readState/batchReadState.ts). Cumulative `pg_stat_statements` may still list older shapes until stats reset or those queryids age out.
+
+#### Last-message Redis overlay vs Postgres (`channels.last_message_*`)
+
+`POST /messages` does **not** run `UPDATE channels` inline; it enqueues Redis metadata and optionally mirrors to Postgres when **`LAST_MESSAGE_PG_RECONCILE_ENABLED`** / **`CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED`** are **`true`**. Git-tracked profiles pin **`false`** in [`deploy/env/prod.required.env`](../deploy/env/prod.required.env) and [`deploy/env/staging.required.env`](../deploy/env/staging.required.env) so periodic PG flush stays off unless you change the profile.
+
+Correlate env with metrics (also emitted by [`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh)):
+
+- **`channel_last_message_update_deferred_total`** — Redis writes from POST (nonzero under load even when PG reconcile is off).
+- **`channel_last_message_update_flushed_total`** / **`last_message_pg_reconcile_total`** — DB commits from background flush / repoint; should stay ~**0** rate when reconcile is **`false`** and **`last_message_pg_reconcile_skipped_total{reason="channel_disabled"}`** (or `conversation_disabled`) accounts for skips.
+
 **MinIO:** Prometheus on the DB VM does **not** scrape MinIO health (S3 API is **127.0.0.1** on the app VM). Use **`curl -sS http://127.0.0.1:9000/minio/health/live`** on the app host or app-level errors for object storage.
 
 ## Giving the agent usable telemetry
@@ -80,6 +91,12 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    ```bash
    # Example: tunnel Prometheus on a host that listens on 127.0.0.1:9090
    # ssh -L 9090:127.0.0.1:9090 user@monitoring-host -N
+   #
+   # If bind fails ("Address already in use"), another process owns that local port—often a
+   # dev Prometheus or an old tunnel. Pick a free local port and match PROMETHEUS_URL:
+   #   ssh -L 29090:127.0.0.1:9090 user@monitoring-host -N
+   #   curl -sS 'http://127.0.0.1:29090/api/v1/status/config' | head   # sanity: expect prod scrape config
+   # Wrong tunnel → queries hit local/other Prometheus (misleading series).
 
    PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics/metrics-snapshot.sh
    PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics/metrics-snapshot.sh --write var/metrics-snapshot.txt
