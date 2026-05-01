@@ -156,7 +156,7 @@ describe('accessCaches version-aware invalidation', () => {
 
     const result = await loadMessageTargetForUser('m-2', 'user-2');
 
-    expect(redis.del).toHaveBeenCalledWith('msg_target:m-2:user-2');
+    expect(redis.del).toHaveBeenCalledWith('msg_target:full:m-2:user-2');
     expect(queryRead).toHaveBeenCalledTimes(1);
     expect(result.has_access).toBe(false);
   });
