@@ -137,7 +137,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PG_POOL_MAX`, `POOL_CIRCUIT_BREAKER_QUEUE` | Pool size and circuit-breaker queue |
 | `PG_SLOW_QUERY_MS`, `PG_CONNECTION_TIMEOUT_MS`, `PG_IDLE_TIMEOUT_MS` | Pool behavior |
 | `PG_QUERY_GATE_MAX_CONCURRENT`, `PG_QUERY_GATE_MAX_WAITERS`, `PG_QUERY_GATE_WAIT_TIMEOUT_MS` | Optional global gate on concurrent `pool.query` calls (**default `PG_QUERY_GATE_MAX_CONCURRENT=0` = off**). When enabled, saturated waiters fail with **503** (`PG_QUERY_GATE_SATURATED`). See `backend/src/db/pool.ts`. |
-| `READ_RECEIPT_DEFER_POOL_WAITING` | Soft-defer `PUT /messages/:id/read` when pool waiters reach this threshold (default 8) to protect message-post and read/list latency under burst |
+| `READ_RECEIPT_DEFER_POOL_WAITING` | Soft-defer `PUT /messages/:id/read` when pool waiters reach this threshold (default **4**, clamp **0–64**) to protect message-post and read/list latency under burst. `0` disables this guard. |
 | `READ_RECEIPT_BATCH_MAX` | Max UUID `messageId` entries per **`PUT /api/v1/messages/batch-read`** request (default **50**, clamp **1–100**). Same per-message semantics as **`PUT /messages/:id/read`**; one preflight (insert-lock / pool-wait / overload) applies to the whole batch. |
 | `MESSAGE_INSERT_LOCK_PRESSURE_WINDOW_MS` | Rolling window (ms) for in-process channel insert lock wait samples and timeout markers used for read-receipt shedding (default **30000**, clamped **5000–120000**) |
 | `MESSAGE_INSERT_LOCK_MODE` | `serialized` (default): Redis + in-process queue serialize channel `POST /messages` inserts per `channel_id` to reduce hot btree/GIN page contention. `optimistic` (aliases **`off`**, **`false`**, **`none`**): skip that lock entirely; inserts run concurrently. Counted in `message_channel_insert_lock_total{result="optimistic_bypass"}`. Per-path breakdown: `message_channel_insert_path_total` / `message_channel_insert_path_precall_ms` (see `docs/operations-monitoring.md`). |
@@ -154,6 +154,8 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `MESSAGE_INSERT_LOCK_HOLDER_LOG_SAMPLE_RATE`, `MESSAGE_INSERT_LOCK_HOLDER_LOG_MIN_MS` | Sample rate (**0–1**, default **0.02**) and minimum lock hold time (ms, default **250**) for `message_channel_insert_lock_holder` logs. |
 | `READ_SHED_MESSAGE_INSERT_LOCK_WAIT_P95_MS` | When successful insert-lock waits in the window reach this **p95** (ms), soft-defer `PUT /messages/:id/read` (default **320**, clamped **200–500**). Also defers if **any** lock timeout occurred in the window, or **≥4** samples include any wait **≥380ms** |
 | `READ_SHED_MESSAGE_INSERT_LOCK_MIN_SAMPLES_FOR_P95` | Minimum acquire samples in the window before the p95 rule can trigger (default **6**, max **100**); timeout-in-window always triggers alone |
+| `READ_SHED_MESSAGE_INSERT_LOCK_COOLDOWN_MS` | Keep read-shed active briefly after lock pressure triggers to avoid threshold flapping (default **3000**, clamp **500–15000**) |
+| `READ_SHED_MESSAGE_INSERT_LOCK_RECOVER_P95_MS` | Optional p95 threshold used for early cool-down clear when samples look healthy (default `READ_SHED_MESSAGE_INSERT_LOCK_WAIT_P95_MS - 80`, clamped **80..trigger**) |
 | **Overload / degradation** | |
 | `OVERLOAD_RSS_WARN_MB`, `OVERLOAD_RSS_HIGH_MB`, `OVERLOAD_RSS_CRITICAL_MB` | RSS thresholds (MB) |
 | `OVERLOAD_LAG_WARN_MS`, `OVERLOAD_LAG_HIGH_MS`, `OVERLOAD_LAG_CRITICAL_MS` | Event-loop p99 lag (ms) |

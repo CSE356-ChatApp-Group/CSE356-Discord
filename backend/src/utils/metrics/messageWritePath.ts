@@ -218,6 +218,21 @@ const readReceiptRequestsTotal = new client.Counter({
   labelNames: ['result'],
 });
 
+/** Read-receipt preflight branch chosen before route work (shed/pass). */
+const readReceiptPreflightTotal = new client.Counter({
+  name: 'read_receipt_preflight_total',
+  help: 'Read receipt preflight decisions by result',
+  labelNames: ['result'],
+});
+
+/** Pool waiters seen at read preflight (helps tune READ_RECEIPT_DEFER_POOL_WAITING). */
+const readReceiptPreflightPoolWaiting = new client.Histogram({
+  name: 'read_receipt_preflight_pool_waiting',
+  help: 'Pool waiting count sampled at read-receipt preflight',
+  labelNames: ['result'],
+  buckets: [0, 1, 2, 4, 8, 12, 16, 24, 32, 48, 64],
+});
+
 /** Redis CAS cursor script result codes by scope. */
 const readReceiptCursorCasTotal = new client.Counter({
   name: 'read_receipt_cursor_cas_total',
@@ -323,6 +338,8 @@ module.exports = {
   messageInsertLockHolderDurationMs,
   readReceiptShedTotal,
   readReceiptRequestsTotal,
+  readReceiptPreflightTotal,
+  readReceiptPreflightPoolWaiting,
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,

@@ -14,6 +14,7 @@ type AcquireSample = { t: number; waitMs: number };
 
 const acquireSamples: AcquireSample[] = [];
 const timeoutTimestamps: number[] = [];
+let readShedActiveUntilMs = 0;
 
 const MAX_SAMPLES = 512;
 const MAX_TIMEOUT_MARKERS = 128;
@@ -44,6 +45,26 @@ function parseMinSamplesForP95(): number {
   );
   if (!Number.isFinite(v)) return 6;
   return Math.min(100, Math.max(1, v));
+}
+
+/** Keep read-shed active briefly after trigger to avoid threshold flapping. */
+function parseReadShedCooldownMs(): number {
+  const v = Number.parseInt(
+    process.env.READ_SHED_MESSAGE_INSERT_LOCK_COOLDOWN_MS || '',
+    10,
+  );
+  if (!Number.isFinite(v)) return 3000;
+  return Math.min(15000, Math.max(500, v));
+}
+
+/** Optional lower p95 bound used to clear active cool-down early when healthy. */
+function parseReadShedRecoverP95Ms(triggerP95: number): number {
+  const v = Number.parseInt(
+    process.env.READ_SHED_MESSAGE_INSERT_LOCK_RECOVER_P95_MS || '',
+    10,
+  );
+  if (!Number.isFinite(v)) return Math.max(120, triggerP95 - 80);
+  return Math.min(triggerP95, Math.max(80, v));
 }
 
 function prune(nowMs: number) {
@@ -94,20 +115,43 @@ function getShouldDeferReadReceiptForInsertLockPressure(): boolean {
   const waits = acquireSamples.map((s) => s.waitMs);
   const p95 = percentile95(waits);
   const recentTimeoutCount = timeoutTimestamps.length;
+  const triggerP95 = parseP95ThresholdMs();
+  const clearP95 = parseReadShedRecoverP95Ms(triggerP95);
+  const minS = parseMinSamplesForP95();
+  const cooldownMs = parseReadShedCooldownMs();
   messageChannelInsertLockPressureWaitP95MsGauge?.set?.(p95);
   messageChannelInsertLockPressureRecentTimeoutsGauge?.set?.(recentTimeoutCount);
 
-  if (recentTimeoutCount >= 1) return true;
-  const minS = parseMinSamplesForP95();
-  if (waits.length >= minS && p95 > parseP95ThresholdMs()) return true;
+  const hasTimeoutPressure = recentTimeoutCount >= 1;
+  const hasP95Pressure = waits.length >= minS && p95 > triggerP95;
   // Any sustained tail wait in-window implies contention even before p95 crosses.
-  if (waits.length >= 4 && waits.some((w) => w >= 380)) return true;
+  const hasTailPressure = waits.length >= 4 && waits.some((w) => w >= 380);
+  const shouldTrigger = hasTimeoutPressure || hasP95Pressure || hasTailPressure;
+  if (shouldTrigger) {
+    readShedActiveUntilMs = Math.max(readShedActiveUntilMs, t + cooldownMs);
+    return true;
+  }
+
+  if (t < readShedActiveUntilMs) {
+    // Allow early clear only when the window has enough healthy samples.
+    const hasHealthyWindow =
+      waits.length >= Math.max(4, minS) &&
+      recentTimeoutCount === 0 &&
+      p95 <= clearP95 &&
+      !waits.some((w) => w >= 340);
+    if (hasHealthyWindow) {
+      readShedActiveUntilMs = 0;
+      return false;
+    }
+    return true;
+  }
   return false;
 }
 
 function resetMessageChannelInsertLockPressureForTests() {
   acquireSamples.length = 0;
   timeoutTimestamps.length = 0;
+  readShedActiveUntilMs = 0;
 }
 
 /** Alias: same signal used to shed read receipts, WS replay, search, etc. */

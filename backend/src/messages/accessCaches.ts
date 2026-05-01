@@ -94,13 +94,7 @@ async function channelIdIfOnlyConversationQueryParam(uuid, userId) {
   return result;
 }
 
-const MESSAGE_TARGET_SQL = `SELECT m.id,
-        m.author_id,
-        m.channel_id,
-        m.conversation_id,
-        m.created_at,
-        ch.community_id,
-        CASE
+const MESSAGE_TARGET_ACCESS_EXPR = `CASE
           WHEN m.conversation_id IS NOT NULL THEN EXISTS (
             SELECT 1
             FROM conversation_participants cp
@@ -128,29 +122,58 @@ const MESSAGE_TARGET_SQL = `SELECT m.id,
               )
           )
           ELSE FALSE
-        END AS has_access
+        END AS has_access`;
+
+const MESSAGE_TARGET_SQL_LITE = `SELECT m.id,
+        m.author_id,
+        m.channel_id,
+        m.conversation_id,
+        m.created_at,
+        ${MESSAGE_TARGET_ACCESS_EXPR}
+ FROM messages m
+ WHERE m.id = $1
+   AND m.deleted_at IS NULL`;
+
+const MESSAGE_TARGET_SQL_FULL = `SELECT m.id,
+        m.author_id,
+        m.channel_id,
+        m.conversation_id,
+        m.created_at,
+        ch.community_id,
+        ${MESSAGE_TARGET_ACCESS_EXPR}
  FROM messages m
  LEFT JOIN channels ch ON ch.id = m.channel_id
  WHERE m.id = $1
    AND m.deleted_at IS NULL`;
 
-async function loadMessageTargetFromPrimary(messageId, userId) {
-  const { rows } = await query(MESSAGE_TARGET_SQL, [messageId, userId]);
+function messageTargetSql(includeCommunityId: boolean) {
+  return includeCommunityId ? MESSAGE_TARGET_SQL_FULL : MESSAGE_TARGET_SQL_LITE;
+}
+
+async function loadMessageTargetFromPrimary(messageId, userId, includeCommunityId = true) {
+  const { rows } = await query(messageTargetSql(includeCommunityId), [messageId, userId]);
   return rows[0] || null;
 }
 
-async function loadMessageTargetFromReplicaThenPrimary(messageId, userId) {
-  const { rows } = await queryRead(MESSAGE_TARGET_SQL, [messageId, userId]);
+async function loadMessageTargetFromReplicaThenPrimary(
+  messageId,
+  userId,
+  includeCommunityId = true,
+) {
+  const { rows } = await queryRead(messageTargetSql(includeCommunityId), [messageId, userId]);
   const replicaRow = rows[0] || null;
   if (replicaRow) return replicaRow;
   
-  return loadMessageTargetFromPrimary(messageId, userId);
+  return loadMessageTargetFromPrimary(messageId, userId, includeCommunityId);
 }
 
 async function loadMessageTargetForUser(messageId, userId, options: {
   preferCache?: boolean;
+  includeCommunityId?: boolean;
 } = {}) {
-  const cacheKey = `msg_target:${messageId}:${userId}`;
+  const includeCommunityId = options.includeCommunityId !== false;
+  const cacheShape = includeCommunityId ? 'full' : 'lite';
+  const cacheKey = `msg_target:${cacheShape}:${messageId}:${userId}`;
   const preferCache = options.preferCache === true;
 
   const cachedPromise = MSG_TARGET_CACHE_TTL_SECS > 0
@@ -167,7 +190,11 @@ async function loadMessageTargetForUser(messageId, userId, options: {
       return cached.data;
     }
 
-    const row = await loadMessageTargetFromReplicaThenPrimary(messageId, userId);
+    const row = await loadMessageTargetFromReplicaThenPrimary(
+      messageId,
+      userId,
+      includeCommunityId,
+    );
     if (row && row.has_access && MSG_TARGET_CACHE_TTL_SECS > 0) {
       const scope = rowAccessScope(row);
       if (scope) {
@@ -183,7 +210,11 @@ async function loadMessageTargetForUser(messageId, userId, options: {
     return row;
   }
 
-  const dbPromise = loadMessageTargetFromReplicaThenPrimary(messageId, userId);
+  const dbPromise = loadMessageTargetFromReplicaThenPrimary(
+    messageId,
+    userId,
+    includeCommunityId,
+  );
 
   // Concurrent race: resolve as soon as either gives us a definitive "yes" (with access).
   // If either returns null or has_access=false, wait for the other.

@@ -160,6 +160,8 @@ const {
   messageInsertLockHolderDurationMs,
   readReceiptShedTotal,
   readReceiptRequestsTotal,
+  readReceiptPreflightTotal,
+  readReceiptPreflightPoolWaiting,
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
@@ -327,6 +329,14 @@ const overloadStageGauge = new client.Gauge({
       0,
     );
     readReceiptRequestsTotal.inc({ result: 'deferred_overload_stage_high' }, 0);
+    readReceiptPreflightTotal.inc({ result: 'deferred_message_channel_insert_lock_pressure' }, 0);
+    readReceiptPreflightTotal.inc({ result: 'deferred_pool_waiting' }, 0);
+    readReceiptPreflightTotal.inc({ result: 'deferred_overload_stage_high' }, 0);
+    readReceiptPreflightTotal.inc({ result: 'pass' }, 0);
+    readReceiptPreflightPoolWaiting.observe({ result: 'deferred_message_channel_insert_lock_pressure' }, 0);
+    readReceiptPreflightPoolWaiting.observe({ result: 'deferred_pool_waiting' }, 0);
+    readReceiptPreflightPoolWaiting.observe({ result: 'deferred_overload_stage_high' }, 0);
+    readReceiptPreflightPoolWaiting.observe({ result: 'pass' }, 0);
     readReceiptCursorCasTotal.inc({ scope: 'channel', cas_result: '0' }, 0);
     readReceiptCursorCasTotal.inc({ scope: 'channel', cas_result: '1' }, 0);
     readReceiptCursorCasTotal.inc({ scope: 'channel', cas_result: '2' }, 0);
@@ -337,8 +347,11 @@ const overloadStageGauge = new client.Gauge({
     readReceiptScopeTotal.inc({ scope: 'conversation' }, 0);
     readReceiptOptimizationTotal.inc({ reason: 'cas1_side_effects_debounced' }, 0);
     readReceiptOptimizationTotal.inc({ reason: 'conversation_read_direct_user_fanout' }, 0);
+    readReceiptOptimizationTotal.inc({ reason: 'channel_read_fanout_inline_fallback' }, 0);
     readReceiptNoopSkipTotal.inc({ reason: 'cursor_not_advanced' }, 0);
     readReceiptNoopSkipTotal.inc({ reason: 'same_message_coalesced' }, 0);
+    readReceiptNoopSkipTotal.inc({ reason: 'same_message_recent_confirmed' }, 0);
+    readReceiptNoopSkipTotal.inc({ reason: 'scope_burst_debounced' }, 0);
     unreadCountsShedTotal.inc({ reason: 'pool_waiting' }, 0);
     unreadCountsShedTotal.inc({ reason: 'inflight_cap' }, 0);
     unreadCountsCoalescedTotal.inc(0);
@@ -561,6 +574,8 @@ module.exports = {
   messageInsertLockHolderDurationMs,
   readReceiptShedTotal,
   readReceiptRequestsTotal,
+  readReceiptPreflightTotal,
+  readReceiptPreflightPoolWaiting,
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,

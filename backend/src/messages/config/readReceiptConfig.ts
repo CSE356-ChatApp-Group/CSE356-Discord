@@ -1,8 +1,10 @@
-const _readReceiptDeferWaiting = parseInt(process.env.READ_RECEIPT_DEFER_POOL_WAITING || '8', 10);
+const _readReceiptDeferWaiting = parseInt(process.env.READ_RECEIPT_DEFER_POOL_WAITING || '4', 10);
 const READ_RECEIPT_DEFER_POOL_WAITING =
-  Number.isFinite(_readReceiptDeferWaiting) && _readReceiptDeferWaiting >= 0
+  Number.isFinite(_readReceiptDeferWaiting)
+    && _readReceiptDeferWaiting >= 0
+    && _readReceiptDeferWaiting <= 64
     ? _readReceiptDeferWaiting
-    : 8;
+    : 4;
 
 const READ_CURSOR_TS_TTL_SECS = parseInt(process.env.READ_CURSOR_TS_TTL_SECS || '600', 10);
 const READ_DB_LOCK_TTL_MS = parseInt(process.env.READ_DB_LOCK_TTL_MS || '500', 10);

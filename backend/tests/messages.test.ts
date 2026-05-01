@@ -25,6 +25,7 @@ const {
   channelLastMessageUpdateFlushedTotal,
   channelLastMessageUpdateFailedTotal,
   lastMessagePgReconcileSkippedTotal,
+  readReceiptPreflightTotal,
 } = require('../src/utils/metrics');
 const {
   recordMessageChannelInsertLockAcquireWait,
@@ -45,6 +46,16 @@ function messagesRouteSqlHistogramSnapshot() {
     }
   }
   return { count, sum };
+}
+
+function counterValueByLabels(counter: any, labels: Record<string, string>) {
+  const rows = counter?.hashMap ? Object.values(counter.hashMap as Record<string, any>) : [];
+  for (const row of rows as any[]) {
+    const rowLabels = row?.labels || {};
+    const matches = Object.entries(labels).every(([k, v]) => String(rowLabels[k]) === String(v));
+    if (matches) return Number(row?.value || 0);
+  }
+  return 0;
 }
 
 async function getMessagesWithAccessRetry({
@@ -360,6 +371,75 @@ describe('Read receipt insert lock pressure shedding', () => {
       .set('Authorization', `Bearer ${owner.accessToken}`);
     expect(readRes.status).toBe(200);
     expect(readRes.body.reason).toBe('message_channel_insert_lock_pressure');
+  });
+
+  it('keeps read shedding active briefly after pressure clears (cool-down hysteresis)', async () => {
+    resetMessageChannelInsertLockPressureForTests();
+    const prevCooldown = process.env.READ_SHED_MESSAGE_INSERT_LOCK_COOLDOWN_MS;
+    const prevRecover = process.env.READ_SHED_MESSAGE_INSERT_LOCK_RECOVER_P95_MS;
+    process.env.READ_SHED_MESSAGE_INSERT_LOCK_COOLDOWN_MS = '1200';
+    process.env.READ_SHED_MESSAGE_INSERT_LOCK_RECOVER_P95_MS = '220';
+    try {
+      for (let i = 0; i < 8; i += 1) {
+        recordMessageChannelInsertLockAcquireWait(450);
+      }
+      expect(getShouldDeferReadReceiptForInsertLockPressure()).toBe(true);
+
+      // Fresh healthy samples appear, but cool-down should keep shedding for a short period.
+      for (let i = 0; i < 8; i += 1) {
+        recordMessageChannelInsertLockAcquireWait(20);
+      }
+      expect(getShouldDeferReadReceiptForInsertLockPressure()).toBe(true);
+    } finally {
+      if (prevCooldown === undefined) delete process.env.READ_SHED_MESSAGE_INSERT_LOCK_COOLDOWN_MS;
+      else process.env.READ_SHED_MESSAGE_INSERT_LOCK_COOLDOWN_MS = prevCooldown;
+      if (prevRecover === undefined) delete process.env.READ_SHED_MESSAGE_INSERT_LOCK_RECOVER_P95_MS;
+      else process.env.READ_SHED_MESSAGE_INSERT_LOCK_RECOVER_P95_MS = prevRecover;
+      resetMessageChannelInsertLockPressureForTests();
+    }
+  });
+
+  it('records read preflight pass and defer decisions for observability', async () => {
+    resetMessageChannelInsertLockPressureForTests();
+    const owner = await createAuthenticatedUser('readprefmetric');
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'readprefmetric',
+      channelPrefix: 'rpm-ch',
+      description: 'read preflight metrics',
+    });
+    const msgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'metric target' });
+    expect(msgRes.status).toBe(201);
+    const messageId = msgRes.body.message.id;
+
+    const passBefore = counterValueByLabels(readReceiptPreflightTotal, { result: 'pass' });
+    const deferBefore = counterValueByLabels(readReceiptPreflightTotal, {
+      result: 'deferred_message_channel_insert_lock_pressure',
+    });
+
+    const passRes = await request(app)
+      .put(`/api/v1/messages/${messageId}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(passRes.status).toBe(200);
+    expect(passRes.body.deferred).not.toBe(true);
+
+    for (let i = 0; i < 8; i += 1) {
+      recordMessageChannelInsertLockAcquireWait(450);
+    }
+    const deferRes = await request(app)
+      .put(`/api/v1/messages/${messageId}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(deferRes.status).toBe(200);
+    expect(deferRes.body.reason).toBe('message_channel_insert_lock_pressure');
+
+    const passAfter = counterValueByLabels(readReceiptPreflightTotal, { result: 'pass' });
+    const deferAfter = counterValueByLabels(readReceiptPreflightTotal, {
+      result: 'deferred_message_channel_insert_lock_pressure',
+    });
+    expect(passAfter).toBeGreaterThan(passBefore);
+    expect(deferAfter).toBeGreaterThan(deferBefore);
   });
 
   it('does not advance read cursor when PUT /read is deferred for insert lock pressure', async () => {

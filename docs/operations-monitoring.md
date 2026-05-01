@@ -18,6 +18,7 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
 | Grafana dashboards (repo JSON) | **Overview:** [`chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) — **Redis / cache:** [`redis-cache-store.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/redis-cache-store.json) (`job=redis` + app-side Redis-adjacent counters). Overview top links jump to Failure modes, Latency RCA, Redis, Overload, API routes. |
 | Instant Prometheus triage | [`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh) |
+| Read-route strain canary gates | [`scripts/metrics/read-receipt-strain-gates.sh`](../scripts/metrics/read-receipt-strain-gates.sh) |
 | Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/postgres/pg-stat-statements-snapshot.sh`](../scripts/postgres/pg-stat-statements-snapshot.sh) |
 | `read_states` flush SQL fingerprints (version-skew check) | [`scripts/postgres/pg-stat-read-state-flush-fingerprints.sh`](../scripts/postgres/pg-stat-read-state-flush-fingerprints.sh) |
 | **Primary DB + read replica (Prometheus)** | Alert group **`chatapp-database`** in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml): `ChatAppDbPostgresExporterDown`, replication slot **`replica_155_nvme`** inactive / WAL retain size, **`ChatAppDbReplicaNodeExporterDown`**, replica **`/mnt/replica-data`** disk. Scrape targets: [`deploy/prometheus-db-file-sd.py`](../deploy/prometheus-db-file-sd.py) writes **`file_sd/db-node.json`** (primary `:9100` + replica `:9100` when **`PG_READ_REPLICA_URL`** host differs) and **`db-postgres.json`** (primary `:9187` only). Replica **`postgres_exporter`** is optional (needs its own DSN on that host). |
@@ -119,6 +120,21 @@ PROD_DB_SSH=ubuntu@130.245.136.21 ./scripts/postgres/pg-stat-read-state-flush-fi
 ```
 
 Expect **one dominant row** over time. **`SELECT pg_stat_statements_reset()`** clears all fingerprints (coordinate with ops; you lose cumulative history). Safer: roll the full fleet to one build and re-check **`calls`** growth on a single `queryid` over 24h.
+
+### Read-route strain canary gates
+
+When tuning `PUT /messages/:id/read` shed thresholds or hot-path costs, compare canary VM(s) vs baseline:
+
+```bash
+PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics/read-receipt-strain-gates.sh
+METRICS_SNAPSHOT_RANGE=10m PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metrics/read-receipt-strain-gates.sh
+```
+
+Primary gate metrics:
+- `read_receipt_shed_total`, `read_receipt_requests_total`, `read_receipt_preflight_total`
+- read-route p95/p99: `http_server_request_duration_ms{method="PUT",route="/api/v1/messages/:id/read"}`
+- pool safety: `pg_pool_waiting`, `pg_pool_circuit_breaker_rejects_total`
+- write-path guardrail: `message_post_response_total` (201 vs 503/5xx)
 
 ## POST `/messages` end-to-end trace (`post_messages_e2e_trace`)
 

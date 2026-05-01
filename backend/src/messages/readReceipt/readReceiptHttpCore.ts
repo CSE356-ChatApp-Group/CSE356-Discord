@@ -8,9 +8,12 @@ const { poolStats, query } = require("../../db/pool");
 const {
   readReceiptShedTotal,
   readReceiptRequestsTotal,
+  readReceiptPreflightTotal,
+  readReceiptPreflightPoolWaiting,
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
+  readReceiptNoopSkipTotal,
   readReceiptDbUpsertTotal,
 } = require("../../utils/metrics");
 const {
@@ -58,6 +61,14 @@ function isUuidString(value: unknown): boolean {
   return typeof value === "string" && UUID_RE.test(value);
 }
 
+function observeReadPreflight(result: string, poolWaiting: number) {
+  readReceiptPreflightTotal.inc({ result });
+  readReceiptPreflightPoolWaiting.observe(
+    { result },
+    Number.isFinite(poolWaiting) ? Math.max(0, poolWaiting) : 0,
+  );
+}
+
 /**
  * Shared early exits (insert-lock shed, pool-wait defer, overload stage ≥3).
  */
@@ -67,7 +78,9 @@ function readReceiptPreflightResponse(): {
   body: Record<string, unknown>;
   dropReadReceiptFanout?: boolean;
 } | { respond: false; dropReadReceiptFanout: boolean } {
+  const poolWaiting = Number(poolStats()?.waiting || 0);
   if (getShouldDeferReadReceiptForInsertLockPressure()) {
+    observeReadPreflight('deferred_message_channel_insert_lock_pressure', poolWaiting);
     readReceiptShedTotal.inc({
       reason: "message_channel_insert_lock_pressure",
     });
@@ -84,11 +97,11 @@ function readReceiptPreflightResponse(): {
       },
     };
   }
-  const pool = poolStats();
   if (
     READ_RECEIPT_DEFER_POOL_WAITING > 0 &&
-    pool.waiting >= READ_RECEIPT_DEFER_POOL_WAITING
+    poolWaiting >= READ_RECEIPT_DEFER_POOL_WAITING
   ) {
+    observeReadPreflight('deferred_pool_waiting', poolWaiting);
     return {
       respond: true,
       status: 200,
@@ -98,6 +111,7 @@ function readReceiptPreflightResponse(): {
   const overloadStage = overload.getStage();
   const dropReadReceiptFanout = overloadStage === 2;
   if (overloadStage >= 3) {
+    observeReadPreflight('deferred_overload_stage_high', poolWaiting);
     readReceiptShedTotal.inc({ reason: "overload_stage_high" });
     readReceiptRequestsTotal.inc({ result: "deferred_overload_stage_high" });
     return {
@@ -110,6 +124,7 @@ function readReceiptPreflightResponse(): {
       },
     };
   }
+  observeReadPreflight('pass', poolWaiting);
   return { respond: false, dropReadReceiptFanout };
 }
 
@@ -122,11 +137,17 @@ async function executeReadReceiptMark(
   dropReadReceiptFanout: boolean,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   if (hasConfirmedRecentMessageRead(userId, messageId)) {
+    readReceiptNoopSkipTotal.inc({ reason: "same_message_recent_confirmed" });
     return { status: 200, body: { success: true } };
   }
 
+  const needsCommunityId =
+    READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
+    READ_RECEIPT_FANOUT_ENABLED &&
+    !dropReadReceiptFanout;
   const target = await loadMessageTargetForUser(messageId, userId, {
     preferCache: true,
+    includeCommunityId: needsCommunityId,
   });
   if (!target) return { status: 404, body: { error: "Message not found" } };
   if (!target.has_access) {
@@ -136,6 +157,7 @@ async function executeReadReceiptMark(
   const { channel_id, conversation_id } = target;
   const uid = userId;
   if (shouldCoalesceSameMessageRead(uid, messageId)) {
+    readReceiptNoopSkipTotal.inc({ reason: "same_message_coalesced" });
     return { status: 200, body: { success: true } };
   }
   const messageCreatedAt = target.created_at;
@@ -149,6 +171,7 @@ async function executeReadReceiptMark(
       messageTsMs,
     })
   ) {
+    readReceiptNoopSkipTotal.inc({ reason: "scope_burst_debounced" });
     return { status: 200, body: { success: true } };
   }
   if (
@@ -160,6 +183,7 @@ async function executeReadReceiptMark(
       messageTsMs,
     })
   ) {
+    readReceiptNoopSkipTotal.inc({ reason: "scope_cursor_cache" });
     return { status: 200, body: { success: true } };
   }
 
@@ -180,6 +204,7 @@ async function executeReadReceiptMark(
   });
 
   if (!didAdvanceCursor) {
+    readReceiptNoopSkipTotal.inc({ reason: "cursor_not_advanced" });
     rememberConfirmedMessageRead(uid, messageId);
     if (casResult === 0) {
       await rememberReadReceiptScopeCursorMergedWithRedis({
@@ -300,6 +325,7 @@ async function executeReadReceiptMark(
     } else if (READ_RECEIPT_CHANNEL_FANOUT_ASYNC) {
       const enqueued = sideEffects.enqueueFanoutJob("fanout.read_receipt", publishReadUpdated);
       if (!enqueued) {
+        readReceiptOptimizationTotal.inc({ reason: "channel_read_fanout_inline_fallback" });
         await publishReadUpdated();
       }
     } else {
