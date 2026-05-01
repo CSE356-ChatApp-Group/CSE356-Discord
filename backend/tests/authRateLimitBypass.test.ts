@@ -56,6 +56,11 @@ function buildIsolatedAuthApp(envOverrides: Record<string, string> = {}) {
 
 describe('auth rate limit trusted internal bypass', () => {
   const closers: Array<() => Promise<unknown>> = [];
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalRegisterGlobalPerIpMax = process.env.AUTH_REGISTER_GLOBAL_PER_IP_MAX;
+  const originalRegisterGlobalPerIpWindowMs = process.env.AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS;
+  const originalDisableRateLimits = process.env.DISABLE_RATE_LIMITS;
+  const originalTrustNginxClientIpHeaders = process.env.TRUST_NGINX_CLIENT_IP_HEADERS;
 
   afterEach(async () => {
     while (closers.length > 0) {
@@ -63,6 +68,17 @@ describe('auth rate limit trusted internal bypass', () => {
       if (!close) continue;
       await close().catch(() => {});
     }
+
+    jest.resetModules();
+    process.env.NODE_ENV = originalNodeEnv;
+    if (originalRegisterGlobalPerIpMax === undefined) delete process.env.AUTH_REGISTER_GLOBAL_PER_IP_MAX;
+    else process.env.AUTH_REGISTER_GLOBAL_PER_IP_MAX = originalRegisterGlobalPerIpMax;
+    if (originalRegisterGlobalPerIpWindowMs === undefined) delete process.env.AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS;
+    else process.env.AUTH_REGISTER_GLOBAL_PER_IP_WINDOW_MS = originalRegisterGlobalPerIpWindowMs;
+    if (originalDisableRateLimits === undefined) delete process.env.DISABLE_RATE_LIMITS;
+    else process.env.DISABLE_RATE_LIMITS = originalDisableRateLimits;
+    if (originalTrustNginxClientIpHeaders === undefined) delete process.env.TRUST_NGINX_CLIENT_IP_HEADERS;
+    else process.env.TRUST_NGINX_CLIENT_IP_HEADERS = originalTrustNginxClientIpHeaders;
   });
 
   it('does not rate-limit internal 10.x register traffic', async () => {
