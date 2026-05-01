@@ -110,6 +110,8 @@ function resetMessageInsertHealthForTests(): void {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  // Integration tests share one Redis; remove fleet key so later suites are not stuck deferring reads.
+  void redis.del(MESSAGE_INSERT_UNHEALTHY_REDIS_KEY).catch(() => {});
 }
 
 module.exports = {

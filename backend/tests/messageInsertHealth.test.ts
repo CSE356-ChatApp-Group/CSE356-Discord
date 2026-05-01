@@ -5,6 +5,7 @@
 jest.mock("../src/db/redis", () => ({
   get: jest.fn().mockResolvedValue(null),
   set: jest.fn().mockResolvedValue("OK"),
+  del: jest.fn().mockResolvedValue(0),
 }));
 
 const redis = require("../src/db/redis");
