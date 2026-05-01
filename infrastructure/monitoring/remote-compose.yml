@@ -22,6 +22,8 @@ services:
 
   promtail:
     image: grafana/promtail:3.1.0
+    environment:
+      - HOSTNAME_MACHINE=${HOSTNAME_MACHINE}
     restart: unless-stopped
     network_mode: host
     command: ["-config.file=/etc/promtail/config.yml"]

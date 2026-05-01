@@ -66,8 +66,8 @@ deploy_monitoring_remote_compose_up_cmd() {
   local compose_file="${1:?compose file required}"
   local enable_edge="${2:-0}"
   if [ "${enable_edge}" = "1" ]; then
-    echo "sudo docker compose -f ${compose_file} --profile edge up -d --remove-orphans node-exporter promtail nginx-exporter"
+    echo "sudo HOSTNAME_MACHINE=$(hostname) docker compose -f ${compose_file} --profile edge up -d --remove-orphans node-exporter promtail nginx-exporter"
   else
-    echo "sudo docker compose -f ${compose_file} up -d --remove-orphans node-exporter promtail"
+    echo "sudo HOSTNAME_MACHINE=$(hostname) docker compose -f ${compose_file} up -d --remove-orphans node-exporter promtail"
   fi
 }

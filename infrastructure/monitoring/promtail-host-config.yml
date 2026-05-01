@@ -8,17 +8,17 @@ positions:
 clients:
   - url: http://10.0.1.102:3100/loki/api/v1/push
     external_labels:
-      host: vm1
+      host: ${HOSTNAME_MACHINE:-vm}
 
 scrape_configs:
   - job_name: chatapp-app-logs
     static_configs:
-      - targets: ['localhost']
+      - targets: ["localhost"]
         labels:
           job: chatapp
           source: app
           __path__: /var/log/chatapp*.log
-      - targets: ['localhost']
+      - targets: ["localhost"]
         labels:
           job: chatapp
           source: shared-logs
@@ -26,12 +26,12 @@ scrape_configs:
 
   - job_name: nginx-logs
     static_configs:
-      - targets: ['localhost']
+      - targets: ["localhost"]
         labels:
           job: nginx
           source: access
           __path__: /var/log/nginx/access.log
-      - targets: ['localhost']
+      - targets: ["localhost"]
         labels:
           job: nginx
           source: error
