@@ -136,6 +136,36 @@ describe('POST /api/v1/auth/login', () => {
   });
 });
 
+describe('GET /api/v1/auth/session', () => {
+  it('restores a normal session from the refresh cookie', async () => {
+    const login = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email: 'test@example.com', password: 'Password1!' });
+
+    expect(login.status).toBe(200);
+    const cookies = login.headers['set-cookie'];
+    expect(cookies).toBeDefined();
+
+    const res = await request(app)
+      .get('/api/v1/auth/session')
+      .set('Cookie', cookies);
+
+    expect(res.status).toBe(200);
+    expect(res.body.authBypass).toBe(false);
+    expect(res.body.accessToken).toBeDefined();
+    expect(res.body.user.username).toBe('testuser');
+  });
+
+  it('returns null session payload when no auth cookies or tokens are present', async () => {
+    const res = await request(app).get('/api/v1/auth/session');
+
+    expect(res.status).toBe(200);
+    expect(res.body.authBypass).toBe(false);
+    expect(res.body.accessToken).toBeNull();
+    expect(res.body.user).toBeNull();
+  });
+});
+
 // ── /users/me ───────────────────────────────────────────────────────────────────────────
 
 describe('GET /api/v1/users/me', () => {

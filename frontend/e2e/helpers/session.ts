@@ -74,6 +74,9 @@ export function buildUser(prefix: string): TestUser {
 }
 
 export async function registerOrLogin(request: APIRequestContext, user: TestUser) {
+  const restoredToken = await restoreReusableAuthSession(request, user);
+  if (restoredToken) return restoredToken;
+
   let lastStatus = 0;
   let lastHint = '';
   for (let attempt = 1; attempt <= AUTH_RETRY_ATTEMPTS; attempt += 1) {
@@ -131,6 +134,71 @@ export async function registerOrLogin(request: APIRequestContext, user: TestUser
 
 export async function ensureUserExists(request: APIRequestContext, user: TestUser) {
   return await registerOrLogin(request, user);
+}
+
+function matchesExpectedUser(candidate: any, user: TestUser): boolean {
+  const username = String(candidate?.username || '').toLowerCase();
+  const email = String(candidate?.email || '').toLowerCase();
+  return username === user.username.toLowerCase() || email === user.email.toLowerCase();
+}
+
+async function logoutReusableSession(
+  request: APIRequestContext,
+  accessToken: string,
+): Promise<void> {
+  await apiPostJson(
+    request,
+    '/api/v1/auth/logout',
+    {},
+    { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10_000 },
+  ).catch(() => null);
+}
+
+async function restoreReusableAuthSession(
+  request: APIRequestContext,
+  user: TestUser,
+): Promise<string | null> {
+  try {
+    const sessionRes = await request.get('/api/v1/auth/session', { timeout: 10_000 });
+    if (sessionRes.ok()) {
+      const sessionJson = await sessionRes.json().catch(() => ({} as any));
+      const sessionToken = typeof sessionJson?.accessToken === 'string' ? sessionJson.accessToken : '';
+      if (sessionJson?.user && matchesExpectedUser(sessionJson.user, user) && sessionToken) {
+        return sessionToken;
+      }
+      if (sessionJson?.user && sessionToken) {
+        await logoutReusableSession(request, sessionToken);
+      }
+    }
+  } catch {
+    // fall through to refresh reuse
+  }
+
+  try {
+    await waitForAuthSlot();
+    const refreshRes = await apiPostJson(request, '/api/v1/auth/refresh', {}, { timeout: 10_000 });
+    if (refreshRes.ok()) {
+      const refreshJson = await refreshRes.json().catch(() => ({} as any));
+      const refreshedToken = typeof refreshJson?.accessToken === 'string' ? refreshJson.accessToken : '';
+      if (refreshedToken) {
+        const meRes = await request.get('/api/v1/users/me', {
+          timeout: 10_000,
+          headers: { Authorization: `Bearer ${refreshedToken}` },
+        });
+        if (meRes.ok()) {
+          const meJson = await meRes.json().catch(() => ({} as any));
+          if (matchesExpectedUser(meJson?.user, user)) {
+            return refreshedToken;
+          }
+        }
+        await logoutReusableSession(request, refreshedToken);
+      }
+    }
+  } catch {
+    // No reusable session in this request context.
+  }
+
+  return null;
 }
 
 export async function findExistingUsername(

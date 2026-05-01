@@ -10,13 +10,14 @@ const passport = require('passport');
 const { query, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const { signAccess, signRefresh } = require('../utils/jwt');
-const { authRateLimitHitsTotal } = require('../utils/metrics');
+const { authRateLimitHitsTotal, authSessionFlowTotal } = require('../utils/metrics');
 const logger = require('../utils/logger');
 const { signOAuthPending, signOAuthLinkIntent, verifyOAuthLinkIntent } = require('./oauthTokens');
 const { getTrustedClientIp, isPrivateOrInternalNetwork } = require('../utils/trustedClientIp');
 const { recordAbuseStrikeFromRequest } = require('../utils/autoIpBan');
 
 const REFRESH_COOKIE = 'refreshToken';
+const RECENT_REFRESH_FAILURE_COOKIE = 'authRefreshFailed';
 const AUTH_USER_SELECT = 'id, username, email, display_name, avatar_url, updated_at';
 const AUTH_USER_SELECT_WITH_PASSWORD = `${AUTH_USER_SELECT}, password_hash`;
 
@@ -54,6 +55,13 @@ function getRefreshCookieOptions() {
   };
 }
 
+function getShortLivedAuthCookieOptions(maxAgeMs) {
+  return {
+    ...getRefreshCookieOptions(),
+    maxAge: maxAgeMs,
+  };
+}
+
 function getRefreshCookieClearOptions() {
   const { maxAge, ...clearOptions } = getRefreshCookieOptions();
   return clearOptions;
@@ -68,6 +76,26 @@ function serializeAuthUser(user) {
     avatarUrl: user.avatar_url ?? user.avatarUrl ?? null,
     updatedAt: user.updated_at ?? user.updatedAt ?? null,
   };
+}
+
+function recordAuthSessionFlow(path, mode, result) {
+  authSessionFlowTotal.inc({ path, mode, result });
+}
+
+function markRecentRefreshFailure(res, maxAgeMs = 60_000) {
+  res.cookie(
+    RECENT_REFRESH_FAILURE_COOKIE,
+    '1',
+    getShortLivedAuthCookieOptions(maxAgeMs),
+  );
+}
+
+function clearRecentRefreshFailure(res) {
+  res.clearCookie(RECENT_REFRESH_FAILURE_COOKIE, getRefreshCookieClearOptions());
+}
+
+function hadRecentRefreshFailure(req) {
+  return Boolean(req?.cookies?.[RECENT_REFRESH_FAILURE_COOKIE]);
 }
 
 function issueTokens(res, user) {
@@ -430,13 +458,21 @@ module.exports = {
   REFRESH_COOKIE,
   AUTH_USER_SELECT,
   AUTH_USER_SELECT_WITH_PASSWORD,
+  RECENT_REFRESH_FAILURE_COOKIE,
   registerLimiter,
   loginLimiter,
   loginGlobalIpLimiter,
   registerGlobalIpLimiter,
   passwordConnectLimiter,
   issueTokens,
+  serializeAuthUser,
+  getRefreshCookieOptions,
   getRefreshCookieClearOptions,
+  getShortLivedAuthCookieOptions,
+  recordAuthSessionFlow,
+  markRecentRefreshFailure,
+  clearRecentRefreshFailure,
+  hadRecentRefreshFailure,
   buildFrontendUrl,
   startOAuth,
   oauthCallback,

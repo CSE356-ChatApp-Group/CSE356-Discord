@@ -180,6 +180,49 @@ describe('DM participant resolution', () => {
       ]),
     );
   });
+
+  it('reuses exactly one active 1:1 DM under concurrent create-or-get requests', async () => {
+    const owner = await createAuthenticatedUser('dmraceowner');
+    const other = await createAuthenticatedUser('dmraceother');
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        request(app)
+          .post('/api/v1/conversations')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ participantIds: [other.user.id] }),
+      ),
+    );
+
+    const ids = new Set(results.map((res) => res.body?.conversation?.id).filter(Boolean));
+    expect(ids.size).toBe(1);
+    expect(results.some((res) => res.status === 201 && res.body?.created === true)).toBe(true);
+    expect(results.some((res) => res.status === 200 && res.body?.created === false)).toBe(true);
+
+    const pairCount = await pool.query(
+      `SELECT COUNT(*)::int AS count
+         FROM dm_conversation_pairs
+        WHERE user_low = LEAST($1::uuid, $2::uuid)
+          AND user_high = GREATEST($1::uuid, $2::uuid)`,
+      [owner.user.id, other.user.id],
+    );
+    expect(pairCount.rows[0].count).toBe(1);
+
+    const activeConversationCount = await pool.query(
+      `SELECT COUNT(*)::int AS count
+         FROM conversations c
+         JOIN conversation_participants cp
+           ON cp.conversation_id = c.id
+          AND cp.left_at IS NULL
+        WHERE c.is_group = FALSE
+          AND c.name IS NULL
+          AND cp.user_id IN ($1::uuid, $2::uuid)
+        GROUP BY c.id
+        HAVING COUNT(*) = 2`,
+      [owner.user.id, other.user.id],
+    );
+    expect(activeConversationCount.rows).toHaveLength(1);
+  });
 });
 
 // ── Leave / guard rails ───────────────────────────────────────────────────────

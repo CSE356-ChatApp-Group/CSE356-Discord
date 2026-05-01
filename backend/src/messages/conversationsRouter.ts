@@ -46,6 +46,11 @@ const {
   createSystemMessage,
   createSystemMessagesBatch,
   isGroupConversation,
+  sortDirectPairUserIds,
+  lockDirectConversationPair,
+  getDirectConversationPairConversationId,
+  findLegacyDirectConversationId,
+  upsertDirectConversationPair,
 } = require('./conversationsRouterRepo');
 const {
   CONVERSATIONS_CACHE_TTL_SECS,
@@ -209,6 +214,8 @@ router.post('/',
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     let client;
+    let directPairIds = null;
+    let directPairMemberIds = null;
     try {
       client = await getClient();
       await client.query('BEGIN');
@@ -231,21 +238,21 @@ router.post('/',
       // For 1:1, check if conversation already exists
       if (!isGroup) {
         const otherId = allIds.find(id => id !== req.user.id);
-        const { rows } = await client.query(
-          `SELECT ${CONVERSATION_FIELDS} FROM conversations c
-           JOIN conversation_participants cp1 ON cp1.conversation_id = c.id AND cp1.user_id = $1
-           JOIN conversation_participants cp2 ON cp2.conversation_id = c.id AND cp2.user_id = $2
-           WHERE c.name IS NULL
-             AND c.is_group = FALSE
-             AND cp1.left_at IS NULL
-             AND cp2.left_at IS NULL
-             AND (SELECT COUNT(*) FROM conversation_participants
-                  WHERE conversation_id = c.id AND left_at IS NULL) = 2
-           LIMIT 1`,
-          [req.user.id, otherId]
-        );
-        if (rows.length) {
-          const existingId = rows[0].id;
+        const [userLow, userHigh] = sortDirectPairUserIds(req.user.id, otherId);
+        directPairIds = { userLow, userHigh };
+        directPairMemberIds = [req.user.id, otherId].filter(Boolean);
+        await lockDirectConversationPair(client, userLow, userHigh);
+
+        let existingId = await getDirectConversationPairConversationId(client, userLow, userHigh);
+        if (!existingId) {
+          const legacyConversationId = await findLegacyDirectConversationId(client, req.user.id, otherId);
+          if (legacyConversationId) {
+            await upsertDirectConversationPair(client, legacyConversationId, userLow, userHigh);
+            existingId = legacyConversationId;
+          }
+        }
+
+        if (existingId) {
           const existing = await loadConversationWithParticipants(client, existingId);
           await client.query('COMMIT');
           // Same realtime hints as a newly created DM: grader harnesses often hit
@@ -253,7 +260,7 @@ router.post('/',
           // an existing thread can miss message:created on conversation:<id> until reconnect.
           const pairIds = [req.user.id, otherId].filter(Boolean);
           await runExistingDmSideEffects({ existingId, pairIds });
-          return res.json({ conversation: existing || rows[0], created: false });
+          return res.json({ conversation: existing, created: false });
         }
       }
 
@@ -265,6 +272,11 @@ router.post('/',
       );
 
       await insertConversationParticipantsBatch(client, conv.id, allIds);
+      if (!isGroup) {
+        const otherId = allIds.find(id => id !== req.user.id);
+        const [userLow, userHigh] = sortDirectPairUserIds(req.user.id, otherId);
+        await upsertDirectConversationPair(client, conv.id, userLow, userHigh);
+      }
 
       const conversation = await loadConversationWithParticipants(client, conv.id);
       const invitedUserIds = allIds.filter(id => id !== req.user.id);
@@ -279,7 +291,37 @@ router.post('/',
 
       res.status(201).json({ conversation: conversation || conv, created: true });
     } catch (err) {
-      await client?.query('ROLLBACK');
+      await client?.query('ROLLBACK').catch(() => {});
+      const isDirectPairConflict =
+        err?.code === '23505'
+        && err?.constraint === 'dm_conversation_pairs_user_pair_unique';
+      if (isDirectPairConflict && directPairIds && directPairMemberIds?.length === 2) {
+        try {
+          const recoveryClient = await getClient();
+          try {
+            const existingId =
+              await getDirectConversationPairConversationId(
+                recoveryClient,
+                directPairIds.userLow,
+                directPairIds.userHigh,
+              )
+              || await findLegacyDirectConversationId(
+                recoveryClient,
+                directPairMemberIds[0],
+                directPairMemberIds[1],
+              );
+            if (existingId) {
+              const existing = await loadConversationWithParticipants(recoveryClient, existingId);
+              await runExistingDmSideEffects({ existingId, pairIds: directPairMemberIds });
+              return res.json({ conversation: existing, created: false });
+            }
+          } finally {
+            recoveryClient.release();
+          }
+        } catch (recoveryErr) {
+          logger.warn({ err: recoveryErr }, 'failed to recover direct DM pair conflict');
+        }
+      }
       next(err);
     } finally { client?.release(); }
   }

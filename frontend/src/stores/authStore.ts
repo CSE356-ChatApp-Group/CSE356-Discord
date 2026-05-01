@@ -93,10 +93,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     if (!isAuthRoute(currentPath)) {
       try {
         const data = await api.get('/auth/session');
-        if (data?.authBypass && data.user) {
+        if (data?.user) {
           setToken(data.accessToken || null);
-          set({ user: normalizeAuthUser(data.user), authBypass: true, loading: false });
-          wsManager.connect({ allowAnonymous: true });
+          set({
+            user: normalizeAuthUser(data.user),
+            authBypass: Boolean(data.authBypass),
+            loading: false,
+          });
+          if (data.authBypass) {
+            wsManager.connect({ allowAnonymous: true });
+          } else {
+            wsManager.connect();
+          }
           return;
         }
       } catch {

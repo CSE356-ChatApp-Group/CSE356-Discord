@@ -29,6 +29,7 @@ const {
   authBcryptWaiters,
   authBcryptQueueRejectsTotal,
   authRateLimitHitsTotal,
+  authSessionFlowTotal,
 } = require('./metrics/sideEffectAndAuth');
 const {
   searchReplicaRetryTotal,
@@ -86,6 +87,7 @@ const {
   wsOutboundQueueDroppedBestEffortTotal,
   wsOutboundDrainBatchesTotal,
   wsDisconnectsTotal,
+  wsDisconnectReasonTotal,
   wsConnectionLifetimeMs,
   wsReconnectsTotal,
   wsReconnectGapMs,
@@ -203,6 +205,11 @@ const overloadStageGauge = new client.Gauge({
     wsOutboundDrainBatchesTotal.inc(0);
     wsDisconnectsTotal.inc({ code: '1000', clean: 'true', bootstrap_ready: 'true' }, 0);
     wsDisconnectsTotal.inc({ code: '1006', clean: 'false', bootstrap_ready: 'false' }, 0);
+    wsDisconnectReasonTotal.inc({ reason: 'heartbeat_timeout' }, 0);
+    wsDisconnectReasonTotal.inc({ reason: 'upstream_terminate' }, 0);
+    wsDisconnectReasonTotal.inc({ reason: 'client_close' }, 0);
+    wsDisconnectReasonTotal.inc({ reason: 'auth_revoke' }, 0);
+    wsDisconnectReasonTotal.inc({ reason: 'network_abnormal' }, 0);
     wsConnectionLifetimeMs.observe({ close_code: '1000', bootstrap_ready: 'true' }, 0);
     wsReconnectsTotal.inc({ window: 'le_5s' }, 0);
     wsReconnectsTotal.inc({ window: 'le_30s' }, 0);
@@ -238,6 +245,10 @@ const overloadStageGauge = new client.Gauge({
     channelLastMessageUpdateFlushedTotal.inc({ target: 'conversation' }, 0);
     channelLastMessageUpdateFailedTotal.inc({ target: 'channel' }, 0);
     channelLastMessageUpdateFailedTotal.inc({ target: 'conversation' }, 0);
+    authSessionFlowTotal.inc({ path: 'login', mode: 'fresh', result: 'success' }, 0);
+    authSessionFlowTotal.inc({ path: 'login', mode: 'after_refresh_failure', result: 'success' }, 0);
+    authSessionFlowTotal.inc({ path: 'refresh', mode: 'cookie', result: 'success' }, 0);
+    authSessionFlowTotal.inc({ path: 'session', mode: 'refresh_cookie', result: 'success' }, 0);
     lastMessageRedisUpdateTotal.inc({ target: 'channel', result: 'ok' }, 0);
     lastMessageRedisUpdateTotal.inc({ target: 'channel', result: 'error' }, 0);
     lastMessageRedisUpdateTotal.inc({ target: 'conversation', result: 'ok' }, 0);
@@ -612,6 +623,7 @@ module.exports = {
   wsOutboundQueueDroppedBestEffortTotal,
   wsOutboundDrainBatchesTotal,
   wsDisconnectsTotal,
+  wsDisconnectReasonTotal,
   wsConnectionLifetimeMs,
   wsReconnectsTotal,
   wsReconnectGapMs,

@@ -46,6 +46,8 @@ const ctx = {
   searchToken: `ctsrch${suffix}`,
 };
 
+let cookieJar = '';
+
 function cookiesFromResponse(res) {
   const raw = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
   if (raw.length) return raw.map((c) => c.split(';')[0]).join('; ');
@@ -57,6 +59,9 @@ function cookiesFromResponse(res) {
 async function fetchJson(method, path, token, body, extraHeaders = {}) {
   const headers = { ...extraHeaders };
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (cookieJar && !headers.Cookie && !headers.cookie) {
+    headers.Cookie = cookieJar;
+  }
   if (body !== undefined && body !== null && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
   }
@@ -65,6 +70,10 @@ async function fetchJson(method, path, token, body, extraHeaders = {}) {
     headers,
     body: body !== undefined && body !== null ? JSON.stringify(body) : undefined,
   });
+  const responseCookies = cookiesFromResponse(res);
+  if (responseCookies) {
+    cookieJar = responseCookies;
+  }
   const text = await res.text();
   let json = null;
   try {
@@ -73,6 +82,38 @@ async function fetchJson(method, path, token, body, extraHeaders = {}) {
     json = { _raw: text };
   }
   return { res, json };
+}
+
+function authUserMatches(user, expectedEmail, expectedUsername) {
+  if (!user) return false;
+  return user.email === expectedEmail || user.username === expectedUsername;
+}
+
+async function logoutWithToken(token) {
+  if (!token) return;
+  await fetchJson('POST', '/auth/logout', token, {}).catch(() => null);
+}
+
+async function restoreAuthSession(expectedEmail, expectedUsername) {
+  const session = await fetchJson('GET', '/auth/session', null, null);
+  if (session.res.ok && session.json?.user && session.json?.accessToken) {
+    if (authUserMatches(session.json.user, expectedEmail, expectedUsername)) {
+      return session.json.accessToken;
+    }
+    await logoutWithToken(session.json.accessToken);
+  }
+
+  const refreshed = await fetchJson('POST', '/auth/refresh', null, {});
+  if (refreshed.res.ok && refreshed.json?.accessToken) {
+    const token = refreshed.json.accessToken;
+    const me = await fetchJson('GET', '/users/me', token, null);
+    if (me.res.ok && authUserMatches(me.json?.user, expectedEmail, expectedUsername)) {
+      return token;
+    }
+    await logoutWithToken(token);
+  }
+
+  return null;
 }
 
 function assert(cond, msg) {
@@ -135,6 +176,14 @@ add('registerUser already exists (acceptable)', async () => {
 });
 
 add('login', async () => {
+  const reusedToken = await restoreAuthSession(ctx.A.email, ctx.A.username);
+  if (reusedToken) {
+    ctx.A.token = reusedToken;
+    const { res: meRes, json: meJson } = await fetchJson('GET', '/users/me', reusedToken, null);
+    assert(meRes.status === 200, `reuse session /users/me ${meRes.status}`);
+    ctx.A.id = meJson.user?.id;
+    return;
+  }
   const { res, json } = await fetchJson('POST', '/auth/login', null, {
     email: ctx.A.email,
     password: ctx.A.password,
@@ -176,6 +225,14 @@ add('loginSSO (2nd account)', async () => {
 // contract runner without a usable Bearer. Re-establish password session before authed routes.
 add('reauth after SSO probes', async () => {
   if (SKIP_SSO) return;
+  const reusedToken = await restoreAuthSession(ctx.A.email, ctx.A.username);
+  if (reusedToken) {
+    ctx.A.token = reusedToken;
+    const { res: meRes, json: meJson } = await fetchJson('GET', '/users/me', reusedToken, null);
+    assert(meRes.status === 200, `reuse after SSO /users/me ${meRes.status}`);
+    if (meJson.user?.id) ctx.A.id = meJson.user.id;
+    return;
+  }
   const { res, json } = await fetchJson('POST', '/auth/login', null, {
     email: ctx.A.email,
     password: ctx.A.password,

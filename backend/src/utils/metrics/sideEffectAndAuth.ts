@@ -65,6 +65,12 @@ const authRateLimitHitsTotal = new client.Counter({
   labelNames: ['route'],
 });
 
+const authSessionFlowTotal = new client.Counter({
+  name: 'auth_session_flow_total',
+  help: 'Auth/session lifecycle outcomes split by request path, mode, and result',
+  labelNames: ['path', 'mode', 'result'],
+});
+
 module.exports = {
   sideEffectQueueDepth,
   sideEffectQueueActiveWorkers,
@@ -76,4 +82,5 @@ module.exports = {
   authBcryptWaiters,
   authBcryptQueueRejectsTotal,
   authRateLimitHitsTotal,
+  authSessionFlowTotal,
 };

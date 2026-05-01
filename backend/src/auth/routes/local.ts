@@ -4,7 +4,7 @@
 const { body, validationResult } = require('express-validator');
 const passport = require('passport');
 const { query } = require('../../db/pool');
-const { signAccess, verifyRefresh, denyToken } = require('../../utils/jwt');
+const { signAccess, verifyRefresh, denyToken, authenticateAccessToken } = require('../../utils/jwt');
 const { authenticate } = require('../../middleware/authenticate');
 const { hashPassword, comparePassword } = require('../passwords');
 const { isAuthBypassEnabled, getBypassAuthContext } = require('../bypass');
@@ -50,9 +50,18 @@ router.post('/register',
 
 // ── Local Login ────────────────────────────────────────────────────────────────
 router.post('/login', S.loginGlobalIpLimiter, S.loginLimiter, (req, res, next) => {
+  const loginMode = S.hadRecentRefreshFailure(req) ? 'after_refresh_failure' : 'fresh';
   passport.authenticate('local', { session: false }, (err, user, info) => {
-    if (err)   return next(err);
-    if (!user) return res.status(401).json({ error: info?.message || 'Invalid credentials' });
+    if (err) {
+      S.recordAuthSessionFlow('login', loginMode, 'error');
+      return next(err);
+    }
+    if (!user) {
+      S.recordAuthSessionFlow('login', loginMode, 'invalid_credentials');
+      return res.status(401).json({ error: info?.message || 'Invalid credentials' });
+    }
+    S.clearRecentRefreshFailure(res);
+    S.recordAuthSessionFlow('login', loginMode, 'success');
     res.json(S.issueTokens(res, user));
   })(req, res, next);
 });
@@ -60,12 +69,19 @@ router.post('/login', S.loginGlobalIpLimiter, S.loginLimiter, (req, res, next) =
 // ── Refresh ────────────────────────────────────────────────────────────────────
 router.post('/refresh', (req, res) => {
   const token = req.cookies[S.REFRESH_COOKIE];
-  if (!token) return res.status(401).json({ error: 'No refresh token' });
+  if (!token) {
+    S.recordAuthSessionFlow('refresh', 'cookie', 'missing_token');
+    return res.status(401).json({ error: 'No refresh token' });
+  }
   try {
     const payload = verifyRefresh(token);
     const accessToken = signAccess({ id: payload.id, username: payload.username, email: payload.email });
+    S.clearRecentRefreshFailure(res);
+    S.recordAuthSessionFlow('refresh', 'cookie', 'success');
     res.json({ accessToken });
   } catch {
+    S.markRecentRefreshFailure(res);
+    S.recordAuthSessionFlow('refresh', 'cookie', 'invalid');
     res.status(401).json({ error: 'Invalid or expired refresh token' });
   }
 });
@@ -88,21 +104,80 @@ router.post('/logout', authenticate, async (req, res, next) => {
   }
 });
 
-router.get('/session', async (_req, res, next) => {
+router.get('/session', async (req, res, next) => {
   try {
-    if (!isAuthBypassEnabled()) {
+    const authHeader = typeof req.headers.authorization === 'string'
+      ? req.headers.authorization
+      : '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const refreshToken = req.cookies[S.REFRESH_COOKIE];
+
+    if (isAuthBypassEnabled() && !bearerToken && !refreshToken) {
+      const { user } = await getBypassAuthContext();
+      S.recordAuthSessionFlow('session', 'bypass', 'success');
+      return res.json({
+        accessToken: null,
+        authBypass: true,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+        },
+      });
+    }
+
+    let payload = null;
+    let accessToken = null;
+    let sessionMode = 'none';
+
+    if (bearerToken) {
+      try {
+        payload = await authenticateAccessToken(bearerToken);
+        accessToken = bearerToken;
+        sessionMode = 'access_token';
+      } catch {
+        S.recordAuthSessionFlow('session', 'access_token', 'failure');
+      }
+    }
+
+    if (!payload && refreshToken) {
+      try {
+        const refreshPayload = verifyRefresh(refreshToken);
+        accessToken = signAccess({
+          id: refreshPayload.id,
+          username: refreshPayload.username,
+          email: refreshPayload.email,
+        });
+        payload = refreshPayload;
+        sessionMode = 'refresh_cookie';
+        S.clearRecentRefreshFailure(res);
+      } catch {
+        S.recordAuthSessionFlow('session', 'refresh_cookie', 'failure');
+      }
+    }
+
+    if (!payload?.id) {
+      S.recordAuthSessionFlow('session', sessionMode, 'miss');
       return res.json({ authBypass: false, accessToken: null, user: null });
     }
 
-    const { user } = await getBypassAuthContext();
+    const { rows } = await query(
+      `SELECT ${S.AUTH_USER_SELECT}
+         FROM users
+        WHERE id = $1
+          AND is_active = TRUE`,
+      [payload.id],
+    );
+    if (!rows.length) {
+      S.recordAuthSessionFlow('session', sessionMode, 'miss');
+      return res.json({ authBypass: false, accessToken: null, user: null });
+    }
+
+    S.recordAuthSessionFlow('session', sessionMode, 'success');
     res.json({
-      accessToken: null,
-      authBypass: true,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-      },
+      accessToken,
+      authBypass: false,
+      user: S.serializeAuthUser(rows[0]),
     });
   } catch (err) {
     next(err);

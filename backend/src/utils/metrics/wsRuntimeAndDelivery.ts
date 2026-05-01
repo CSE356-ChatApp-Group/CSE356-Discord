@@ -112,6 +112,12 @@ const wsDisconnectsTotal = new client.Counter({
   labelNames: ['code', 'clean', 'bootstrap_ready'],
 });
 
+const wsDisconnectReasonTotal = new client.Counter({
+  name: 'ws_disconnect_reason_total',
+  help: 'WebSocket disconnects grouped by classified reason',
+  labelNames: ['reason'],
+});
+
 /** WebSocket connection lifetime before close. */
 const wsConnectionLifetimeMs = new client.Histogram({
   name: 'ws_connection_lifetime_ms',
@@ -438,6 +444,7 @@ module.exports = {
   wsOutboundQueueDroppedBestEffortTotal,
   wsOutboundDrainBatchesTotal,
   wsDisconnectsTotal,
+  wsDisconnectReasonTotal,
   wsConnectionLifetimeMs,
   wsReconnectsTotal,
   wsReconnectGapMs,

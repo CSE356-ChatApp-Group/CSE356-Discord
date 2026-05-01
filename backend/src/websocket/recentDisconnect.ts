@@ -25,7 +25,7 @@ function createRecentDisconnectHelpers({
     return {
       disconnectedAt: Date.now(),
       closeCode,
-      closeReason: closeReason || null,
+      closeReason: closeReason || ws?._disconnectReasonHint || null,
       bootstrapReady: ws?._bootstrapReady === true,
       lifetimeMs: Math.max(0, Date.now() - Number(ws?._connectedAt || Date.now())),
       sawError: ws?._sawError === true,
@@ -36,6 +36,9 @@ function createRecentDisconnectHelpers({
   function noteRecentDisconnectForSocket(ws, closeCode = 1005, closeReason = "") {
     const userId = typeof ws?._userId === "string" ? ws._userId : null;
     if (!userId) return;
+    if (closeReason) {
+      ws._disconnectReasonHint = closeReason;
+    }
     if (ws._recentDisconnectRecorded === true) return;
     ws._recentDisconnectRecorded = true;
     recordRecentDisconnect(

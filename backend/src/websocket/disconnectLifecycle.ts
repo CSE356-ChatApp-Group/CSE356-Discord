@@ -1,7 +1,47 @@
+function classifyDisconnectReason({
+  closeCode = 1005,
+  closeReason = "",
+  clean = false,
+  sawError = false,
+  shuttingDown = false,
+}) {
+  const normalizedReason = String(closeReason || "").trim().toLowerCase();
+
+  if (normalizedReason === "heartbeat_timeout") {
+    return "heartbeat_timeout";
+  }
+  if (closeCode === 4001 || normalizedReason === "unauthorized" || normalizedReason === "token_revoked") {
+    return "auth_revoke";
+  }
+  if (
+    shuttingDown
+    || normalizedReason === "service_restart"
+    || normalizedReason === "keepalive_send_failed"
+    || normalizedReason === "backpressure_kill"
+    || normalizedReason === "send_failed"
+    || normalizedReason === "outbound_waiters_overflow"
+    || normalizedReason === "user_subscribe_failed"
+    || normalizedReason === "subscription failed"
+  ) {
+    return "upstream_terminate";
+  }
+  if (clean || closeCode === 1000 || closeCode === 1001) {
+    return "client_close";
+  }
+  if (closeCode === 1006 && !normalizedReason && !sawError) {
+    return "network_abnormal";
+  }
+  if (closeCode === 1011 || sawError) {
+    return "upstream_terminate";
+  }
+  return "network_abnormal";
+}
+
 function createDisconnectLifecycle({
   WebSocket,
   clearOutboundQueue,
   wsDisconnectsTotal,
+  wsDisconnectReasonTotal,
   wsConnectionLifetimeMs,
   unsubscribeClient,
   unsubscribeCommunityClient,
@@ -23,12 +63,21 @@ function createDisconnectLifecycle({
     const clean = closeCode !== 1006;
     const subscriptionCount = subscriptions.length;
     const closeCodeLabel = String(closeCode || 1005);
+    const effectiveCloseReason = closeReason || ws._disconnectReasonHint || "";
+    const disconnectReason = classifyDisconnectReason({
+      closeCode,
+      closeReason: effectiveCloseReason,
+      clean,
+      sawError: ws._sawError === true,
+      shuttingDown: isShuttingDown(),
+    });
 
     wsDisconnectsTotal.inc({
       code: closeCodeLabel,
       clean: clean ? "true" : "false",
       bootstrap_ready: bootstrapReady ? "true" : "false",
     });
+    wsDisconnectReasonTotal.inc({ reason: disconnectReason });
     wsConnectionLifetimeMs.observe(
       {
         close_code: closeCodeLabel,
@@ -44,14 +93,15 @@ function createDisconnectLifecycle({
       unsubscribeCommunityClient(ws, communityId);
     }
 
-    noteRecentDisconnectForSocket(ws, closeCode, closeReason);
+    noteRecentDisconnectForSocket(ws, closeCode, effectiveCloseReason);
 
     const logPayload = {
       event: "ws.disconnected",
       userId,
       connectionId: ws._connectionId,
       closeCode,
-      closeReason: closeReason || null,
+      closeReason: effectiveCloseReason || null,
+      disconnectReason,
       clean,
       bootstrapReady,
       lifetimeMs,
@@ -105,4 +155,5 @@ function createDisconnectLifecycle({
 
 module.exports = {
   createDisconnectLifecycle,
+  classifyDisconnectReason,
 };

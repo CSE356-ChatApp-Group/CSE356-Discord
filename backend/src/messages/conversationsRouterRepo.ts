@@ -236,6 +236,72 @@ async function isGroupConversation(client, conversationId) {
   return Boolean(rows[0].is_group);
 }
 
+function sortDirectPairUserIds(userAId, userBId) {
+  return String(userAId) < String(userBId)
+    ? [String(userAId), String(userBId)]
+    : [String(userBId), String(userAId)];
+}
+
+async function lockDirectConversationPair(client, userLow, userHigh) {
+  await client.query(
+    `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
+    [`${userLow}:${userHigh}`],
+  );
+}
+
+async function getDirectConversationPairConversationId(client, userLow, userHigh) {
+  const { rows } = await client.query(
+    `SELECT conversation_id::text AS conversation_id
+       FROM dm_conversation_pairs
+      WHERE user_low = $1::uuid
+        AND user_high = $2::uuid`,
+    [userLow, userHigh],
+  );
+  return rows[0]?.conversation_id || null;
+}
+
+async function findLegacyDirectConversationId(client, userAId, userBId) {
+  const { rows } = await client.query(
+    `SELECT c.id::text AS id
+       FROM conversations c
+       JOIN conversation_participants cp1
+         ON cp1.conversation_id = c.id
+        AND cp1.user_id = $1
+        AND cp1.left_at IS NULL
+       JOIN conversation_participants cp2
+         ON cp2.conversation_id = c.id
+        AND cp2.user_id = $2
+        AND cp2.left_at IS NULL
+      WHERE c.name IS NULL
+        AND c.is_group = FALSE
+        AND (
+          SELECT COUNT(*)
+          FROM conversation_participants
+          WHERE conversation_id = c.id
+            AND left_at IS NULL
+        ) = 2
+      ORDER BY COALESCE(c.last_message_at, c.updated_at, c.created_at) DESC,
+               c.created_at DESC,
+               c.id DESC
+      LIMIT 1`,
+    [userAId, userBId],
+  );
+  return rows[0]?.id || null;
+}
+
+async function upsertDirectConversationPair(client, conversationId, userLow, userHigh) {
+  await client.query(
+    `INSERT INTO dm_conversation_pairs (conversation_id, user_low, user_high, updated_at)
+     VALUES ($1::uuid, $2::uuid, $3::uuid, NOW())
+     ON CONFLICT (conversation_id)
+     DO UPDATE
+       SET user_low = EXCLUDED.user_low,
+           user_high = EXCLUDED.user_high,
+           updated_at = NOW()`,
+    [conversationId, userLow, userHigh],
+  );
+}
+
 module.exports = {
   CONVERSATION_FIELDS,
   CONVERSATION_LIST_FIELDS,
@@ -251,4 +317,9 @@ module.exports = {
   createSystemMessage,
   createSystemMessagesBatch,
   isGroupConversation,
+  sortDirectPairUserIds,
+  lockDirectConversationPair,
+  getDirectConversationPairConversationId,
+  findLegacyDirectConversationId,
+  upsertDirectConversationPair,
 };
