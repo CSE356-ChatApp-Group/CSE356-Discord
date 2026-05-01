@@ -62,6 +62,7 @@ queries=(
   'histogram_quantile(0.95, sum by (le, outcome) (rate(message_post_idempotency_poll_wait_ms_bucket{job="chatapp-api"}[5m])))'
   # Read-receipt insert-lock shedding + POST/read SLO helpers (canary gates)
   'sum by (vm) (rate(read_receipt_shed_total{job="chatapp-api",reason="message_channel_insert_lock_pressure"}[5m]))'
+  'sum by (vm) (rate(read_receipt_shed_total{job="chatapp-api",reason="message_insert_unhealthy"}[5m]))'
   'sum by (vm, status_code) (rate(message_post_response_total{job="chatapp-api"}[5m]))'
   'sum by (vm, status_class) (rate(http_server_requests_total{job="chatapp-api",method="PUT",route="/api/v1/messages/:id/read"}[5m]))'
   'sum by (vm, result) (rate(message_channel_insert_lock_total{job="chatapp-api"}[5m]))'

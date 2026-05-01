@@ -26,6 +26,7 @@ const {
   channelLastMessageUpdateFailedTotal,
   lastMessagePgReconcileSkippedTotal,
   readReceiptPreflightTotal,
+  readReceiptShedTotal,
 } = require('../src/utils/metrics');
 const {
   recordMessageChannelInsertLockAcquireWait,
@@ -33,6 +34,10 @@ const {
   resetMessageChannelInsertLockPressureForTests,
   getShouldDeferReadReceiptForInsertLockPressure,
 } = require('../src/messages/messageInsertLockPressure');
+const {
+  markMessageInsertUnhealthyForReadShedding,
+  resetMessageInsertHealthForTests,
+} = require('../src/messages/messageInsertHealth');
 const { pgBusinessSqlQueriesPerRequestHistogram } = require('../src/utils/metrics');
 
 function messagesRouteSqlHistogramSnapshot() {
@@ -445,6 +450,48 @@ describe('Read receipt insert lock pressure shedding', () => {
     });
     expect(passAfter).toBeGreaterThan(passBefore);
     expect(deferAfter).toBeGreaterThan(deferBefore);
+  });
+
+  it('defers PUT /read with message_insert_unhealthy after markMessageInsertUnhealthyForReadShedding', async () => {
+    resetMessageChannelInsertLockPressureForTests();
+    resetMessageInsertHealthForTests();
+    const owner = await createAuthenticatedUser('inserthealthread');
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'inserthealthread',
+      channelPrefix: 'ihr-ch',
+      description: 'insert health read shed',
+    });
+    const msgRes = await request(app)
+      .post('/api/v1/messages')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ channelId, content: 'seed for read shed' });
+    expect(msgRes.status).toBe(201);
+    const messageId = msgRes.body.message.id;
+
+    markMessageInsertUnhealthyForReadShedding();
+    const shedBefore = counterValueByLabels(readReceiptShedTotal, {
+      reason: 'message_insert_unhealthy',
+    });
+
+    const deferRes = await request(app)
+      .put(`/api/v1/messages/${messageId}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(deferRes.status).toBe(200);
+    expect(deferRes.body.success).toBe(true);
+    expect(deferRes.body.deferred).toBe(true);
+    expect(deferRes.body.reason).toBe('message_insert_unhealthy');
+
+    const shedAfter = counterValueByLabels(readReceiptShedTotal, {
+      reason: 'message_insert_unhealthy',
+    });
+    expect(shedAfter).toBeGreaterThan(shedBefore);
+
+    resetMessageInsertHealthForTests();
+    const passRes = await request(app)
+      .put(`/api/v1/messages/${messageId}/read`)
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+    expect(passRes.status).toBe(200);
+    expect(passRes.body.deferred).not.toBe(true);
   });
 
   it('does not advance read cursor when PUT /read is deferred for insert lock pressure', async () => {

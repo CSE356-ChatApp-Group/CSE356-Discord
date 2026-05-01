@@ -21,6 +21,9 @@ const {
 const {
   getShouldDeferReadReceiptForInsertLockPressure,
 } = require("../messageInsertLockPressure");
+const {
+  getShouldDeferReadReceiptForMessageInsertUnhealthy,
+} = require("../messageInsertHealth");
 const overload = require("../../utils/overload");
 const redis = require("../../db/redis");
 const { ensureRedisLuaSha, REDIS_LUA_IDS } = require("../../db/redisLua");
@@ -137,7 +140,7 @@ async function observeReadPhase(phase, fn) {
 }
 
 /**
- * Shared early exits (insert-lock shed, pool-wait defer, overload stage ≥3).
+ * Shared early exits (insert-lock shed, insert-timeout pressure, pool-wait defer, overload stage ≥3).
  */
 function readReceiptPreflightResponse(): {
   respond: true;
@@ -159,6 +162,22 @@ function readReceiptPreflightResponse(): {
         success: true,
         deferred: true,
         reason: "message_channel_insert_lock_pressure",
+      },
+    };
+  }
+  if (getShouldDeferReadReceiptForMessageInsertUnhealthy()) {
+    observeReadPreflight('deferred_message_insert_unhealthy', poolWaiting);
+    readReceiptShedTotal.inc({
+      reason: "message_insert_unhealthy",
+    });
+    observeReadReceiptRequest("deferred_message_insert_unhealthy");
+    return {
+      respond: true,
+      status: 200,
+      body: {
+        success: true,
+        deferred: true,
+        reason: "message_insert_unhealthy",
       },
     };
   }

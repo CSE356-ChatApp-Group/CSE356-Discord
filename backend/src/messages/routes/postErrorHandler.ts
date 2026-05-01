@@ -10,9 +10,13 @@ const {
 const logger = require("../../utils/logger");
 const {
   isMessagePostInsertDbTimeout,
+  shouldMarkReadShedFromPostInsertDbTimeout,
   messagePostBusy503Body,
   buildMessagePostTimeoutPhaseLog,
 } = require("../lib/postDiagnostics");
+const {
+  markMessageInsertUnhealthyForReadShedding,
+} = require("../messageInsertHealth");
 const {
   isChannelInsertLockTimeoutError,
   isChannelInsertLockQueueRejectError,
@@ -82,6 +86,9 @@ function handlePostMessageError({
       }),
       "POST /messages: insert hit statement/query timeout (likely lock contention on hot channel)",
     );
+    if (shouldMarkReadShedFromPostInsertDbTimeout(err, txPhases)) {
+      markMessageInsertUnhealthyForReadShedding();
+    }
     return res
       .status(503)
       .set("Retry-After", "1")

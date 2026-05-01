@@ -20,6 +20,42 @@ function isMessagePostInsertDbTimeout(err: unknown) {
   return false;
 }
 
+type MessagePostTimeoutPhase = "access-check" | "insert" | "later-step" | "commit";
+
+/**
+ * Which phase the POST /messages transaction had reached when sampled — same branching as
+ * `buildMessagePostTimeoutPhaseLog` / log field `timeoutPhase` (durations are computed separately).
+ *
+ * Note: log field `tx_insert_ms` can be multi-second while `txPhases.t_insert` is still `0`
+ * (INSERT still running or failed before the line that sets `t_insert` after the query returns).
+ */
+function getMessagePostTimeoutPhase(txPhases: {
+  t_access: number;
+  t_insert: number;
+  t_later: number;
+}): MessagePostTimeoutPhase {
+  const reachedAccess = txPhases.t_access > 0;
+  const reachedInsert = txPhases.t_insert > 0;
+  const reachedLater = txPhases.t_later > 0;
+  if (!reachedAccess) return "access-check";
+  if (!reachedInsert) return "insert";
+  if (!reachedLater) return "later-step";
+  return "commit";
+}
+
+/**
+ * True when the timeout is classified as DB statement/query timeout **and** `timeoutPhase === "insert"`
+ * (matches production JSON `post_messages_tx_timeout_phases` for merged INSERT / DM INSERT failures
+ * before `t_insert` is recorded).
+ */
+function shouldMarkReadShedFromPostInsertDbTimeout(
+  err: unknown,
+  txPhases: { t_access: number; t_insert: number; t_later: number },
+): boolean {
+  if (!isMessagePostInsertDbTimeout(err)) return false;
+  return getMessagePostTimeoutPhase(txPhases) === "insert";
+}
+
 const MESSAGE_POST_BUSY_USER_MESSAGE =
   "Messaging is briefly busy saving your message; please retry.";
 
@@ -380,6 +416,8 @@ function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
 
 module.exports = {
   isMessagePostInsertDbTimeout,
+  getMessagePostTimeoutPhase,
+  shouldMarkReadShedFromPostInsertDbTimeout,
   messagePostBusy503Body,
   buildMessagePostTimeoutPhaseLog,
   buildMessagePostSuccessPhaseLog,
