@@ -69,6 +69,10 @@ function observeReadPreflight(result: string, poolWaiting: number) {
   );
 }
 
+function observeReadReceiptRequest(result: string) {
+  readReceiptRequestsTotal.inc({ result });
+}
+
 /**
  * Shared early exits (insert-lock shed, pool-wait defer, overload stage ≥3).
  */
@@ -84,9 +88,7 @@ function readReceiptPreflightResponse(): {
     readReceiptShedTotal.inc({
       reason: "message_channel_insert_lock_pressure",
     });
-    readReceiptRequestsTotal.inc({
-      result: "deferred_message_channel_insert_lock_pressure",
-    });
+    observeReadReceiptRequest("deferred_message_channel_insert_lock_pressure");
     return {
       respond: true,
       status: 200,
@@ -102,6 +104,7 @@ function readReceiptPreflightResponse(): {
     poolWaiting >= READ_RECEIPT_DEFER_POOL_WAITING
   ) {
     observeReadPreflight('deferred_pool_waiting', poolWaiting);
+    observeReadReceiptRequest("deferred_pool_waiting");
     return {
       respond: true,
       status: 200,
@@ -113,7 +116,7 @@ function readReceiptPreflightResponse(): {
   if (overloadStage >= 3) {
     observeReadPreflight('deferred_overload_stage_high', poolWaiting);
     readReceiptShedTotal.inc({ reason: "overload_stage_high" });
-    readReceiptRequestsTotal.inc({ result: "deferred_overload_stage_high" });
+    observeReadReceiptRequest("deferred_overload_stage_high");
     return {
       respond: true,
       status: 200,
@@ -149,8 +152,12 @@ async function executeReadReceiptMark(
     preferCache: true,
     includeCommunityId: needsCommunityId,
   });
-  if (!target) return { status: 404, body: { error: "Message not found" } };
+  if (!target) {
+    observeReadReceiptRequest("not_found");
+    return { status: 404, body: { error: "Message not found" } };
+  }
   if (!target.has_access) {
+    observeReadReceiptRequest("access_denied");
     return { status: 403, body: { error: "Access denied" } };
   }
 
@@ -289,6 +296,11 @@ async function executeReadReceiptMark(
   }
 
   if (dropReadReceiptFanout || !READ_RECEIPT_FANOUT_ENABLED) {
+    observeReadReceiptRequest(
+      dropReadReceiptFanout
+        ? "deferred_overload_fanout_only"
+        : "deferred_fanout_disabled",
+    );
     return {
       status: 200,
       body: {
@@ -339,6 +351,7 @@ async function executeReadReceiptMark(
   }
 
   rememberConfirmedMessageRead(uid, messageId);
+  observeReadReceiptRequest("success");
   return { status: 200, body: { success: true } };
 }
 
