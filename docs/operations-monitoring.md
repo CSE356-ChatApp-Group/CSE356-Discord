@@ -8,6 +8,24 @@ This document exists so operators (and the coding agent) can **ground decisions 
 
 **Documentation hub** (single sources of truth, update checklist): [`README.md`](README.md).
 
+### Canonical HTTP metric names (avoid drift)
+
+The app registers completed HTTP traffic as **`http_server_requests_total`**, **`http_server_request_duration_ms`**, and **`http_server_requests_aborted_total`** (source: [`backend/src/utils/metrics/httpPresence.ts`](../backend/src/utils/metrics/httpPresence.ts)). **Do not** document or search for **`chatapp_http_requests_total`** or **`chatapp_http_request_duration_ms`** — those names are not exported by this codebase.
+
+### Reuse existing metrics before new instrumentation
+
+Confirm the question is not already answered by the series in this document and in [`backend/src/utils/metrics.ts`](../backend/src/utils/metrics.ts) (HTTP, pool, fanout, WS, read receipts, caches, POST traces, overload). Adding parallel counters with different names increases operator and dashboard confusion.
+
+### Capacity triage priority (snapshots and incidents)
+
+When ranking likely throughput limits **without** changing architecture, check in this order unless a dashboard already implicates another layer:
+
+1. **Postgres pool saturation** — `pg_pool_waiting`, `pg_pool_circuit_breaker_rejects_total`, `pg_pool_operation_errors_total` (and route p95 on `http_server_request_duration_ms` for 503 / “pool busy” patterns).
+2. **Per-channel message insert serialization** (Redis insert lock / waiters) — `message_channel_insert_lock_*`, `message_insert_lock_*`, and when enabled, **`post_messages_e2e_trace`** / insert-lock fields on **`slow_http_request_trace`**. This is usually a **higher-priority** suspect than fanout for a **single hot channel** posting fast.
+3. **Realtime fanout, WS delivery, bootstrap/replay** — see [Core metric families](#core-metric-families) and [Realtime delivery miss triage](#realtime-delivery-miss-triage-grader-mean-vs-p95).
+
+**Internal WS `subscribe_channels` / `subscribe_communities`** (see `backend/src/websocket/redisPubsubDelivery.ts`): server-issued commands that **await many `subscribeClient` calls** are used for **membership / join / DM routing** flows. They are **burst-shaped** (e.g. after a user joins), **not** a per-**`message:created`** steady-state path. Do not treat them as the default explanation for chat send rate unless traffic is dominated by joins.
+
 ## Refactor / optimization PR comparison (Prometheus)
 
 Use this when a PR touches **hot paths** (see [`backend-hotspots.md`](backend-hotspots.md)): search, GET/POST messages, WebSocket delivery, pool, or fanout.
@@ -286,7 +304,7 @@ Optional fields: **`waitedMs`**, **`lockWaiters`**. Correlate with **`requestId`
 
 **Insert path (channel posts):** `message_channel_insert_path_total{path,reason_detail}` counts each decision (`optimistic_bypass`, `acquired_immediate`, `acquired_after_wait`, `redis_fallback_null_lease`) with **`reason_detail`** explaining bypass (`env_optimistic`, `env_mode_off`, `env_lock_disabled`) or serialized fallback (`none`, `redis_set_error`). `message_channel_insert_path_precall_ms_bucket` is precall queue+Redis spin by **`path`** (0 for bypass). Structured logs: **`message_channel_insert_path`** when `MESSAGE_INSERT_LOCK_PATH_LOG` or `MESSAGE_INSERT_LOCK_PATH_LOG_SAMPLE_RATE` is set (`docs/env.md`). Sampled **`post_messages_e2e_trace`** includes **`channel_insert_lock_path`** and **`channel_insert_lock_reason_detail`** when present.
 
-## Core metric families (labels often include `job="chatapp-api"`)
+## Core metric families (labels often include `job="chatapp-api"`) {#core-metric-families}
 
 | Area | Metrics | Interpretation |
 |------|---------|------------------|

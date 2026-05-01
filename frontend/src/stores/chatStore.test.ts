@@ -477,7 +477,80 @@ describe('chatStore quick actions', () => {
     }
   });
 
-  it('refreshes channels when a private-channel membership update arrives for the active community', () => {
+  it('read:updated for self on a channel applies unread state without invalidating the channels list cache', () => {
+    invalidateApiCache.mockClear();
+    useAuthStore.setState({
+      user: {
+        id: 'user-1',
+        username: 'sam',
+        displayName: 'Sam',
+        email: 'sam@example.com',
+      },
+    } as any);
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      communities: [
+        {
+          id: 'comm-1',
+          unread_channel_count: 2,
+          unreadChannelCount: 2,
+          has_unread_channels: true,
+          hasUnreadChannels: true,
+        },
+      ],
+      channels: [
+        {
+          id: 'ch-1',
+          community_id: 'comm-1',
+          name: 'general',
+          unread_message_count: 3,
+        },
+      ],
+      fetchChannels: vi.fn(),
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'read:updated',
+      data: {
+        channelId: 'ch-1',
+        userId: 'user-1',
+        lastReadMessageId: 'm-9',
+        lastReadAt: new Date().toISOString(),
+      },
+    });
+
+    const ch = useChatStore.getState().channels.find((c) => c.id === 'ch-1');
+    expect(ch?.unread_message_count).toBe(0);
+    expect(invalidateApiCache).not.toHaveBeenCalledWith('/channels?communityId=comm-1');
+  });
+
+  it('coalesces debounced channel list refetches for the same community', async () => {
+    vi.useFakeTimers();
+    const fetchChannels = vi.fn().mockResolvedValue([]);
+    useChatStore.setState({
+      activeCommunity: { id: 'comm-1', name: 'One' },
+      channels: [
+        { id: 'ch-1', community_id: 'comm-1', name: 'a', is_private: false },
+      ],
+      fetchChannels,
+    } as any);
+
+    useChatStore.getState()._handleWsEvent({
+      event: 'channel:updated',
+      data: { id: 'ch-1', community_id: 'comm-1', name: 'b', is_private: false },
+    });
+    useChatStore.getState()._handleWsEvent({
+      event: 'channel:updated',
+      data: { id: 'ch-1', community_id: 'comm-1', name: 'c', is_private: false },
+    });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(fetchChannels).toHaveBeenCalledTimes(1);
+    expect(fetchChannels).toHaveBeenCalledWith('comm-1');
+    vi.useRealTimers();
+  });
+
+  it('refreshes channels when a private-channel membership update arrives for the active community', async () => {
+    vi.useFakeTimers();
     const fetchChannels = vi.fn().mockResolvedValue([]);
     const subscribeSpy = vi.spyOn(wsManager, 'subscribe').mockReturnValue(() => false);
     useChatStore.setState({
@@ -491,8 +564,11 @@ describe('chatStore quick actions', () => {
     });
 
     expect(subscribeSpy).toHaveBeenCalledWith('channel:ch-1', expect.any(Function));
+    expect(fetchChannels).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(400);
     expect(fetchChannels).toHaveBeenCalledWith('comm-1');
     subscribeSpy.mockRestore();
+    vi.useRealTimers();
   });
 
   it('subscribes to channel WS on membership update even when that community is not active', () => {
@@ -537,7 +613,8 @@ describe('chatStore quick actions', () => {
     expect(state.messages['ch-2']).toBeDefined();
   });
 
-  it('applies channel:updated immediately and refetches the active community channel list', () => {
+  it('applies channel:updated immediately and debounces channel list refetch when access metadata is unchanged', async () => {
+    vi.useFakeTimers();
     const fetchChannels = vi.fn().mockResolvedValue([]);
 
     useChatStore.setState({
@@ -557,8 +634,11 @@ describe('chatStore quick actions', () => {
     const state = useChatStore.getState();
     expect(state.channels.find((channel) => channel.id === 'ch-1')?.is_private).toBe(true);
     expect(state.activeChannel?.is_private).toBe(true);
-    expect(invalidateApiCache).toHaveBeenCalledWith('/channels?communityId=comm-1');
+    expect(fetchChannels).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(fetchChannels).toHaveBeenCalledTimes(1);
     expect(fetchChannels).toHaveBeenCalledWith('comm-1');
+    vi.useRealTimers();
   });
 
   it('clears the active channel immediately when channel:updated says access was lost', () => {

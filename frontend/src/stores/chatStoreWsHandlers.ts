@@ -3,9 +3,12 @@
  */
 
 import { invalidateApiCache } from "../lib/api";
+import {
+  runImmediateCommunityChannelsRefetch,
+  scheduleDebouncedCommunityChannelsRefetch,
+} from "./chatStoreSidebarSync";
 import { wsManager } from "../lib/ws";
 import { useAuthStore } from "./authStore";
-import { channelCommunityId } from "./chatStoreChannelHelpers";
 import { removeCommunityState } from "./chatStoreCommunityRemoval";
 import { loadedHistoryIncludesLatest } from "./chatStorePagination";
 import {
@@ -334,11 +337,6 @@ function dispatchChatStoreWsEvent(
       if (!userId || (!conversationId && !channelId)) break;
       const me = useAuthStore.getState().user;
       if (channelId && me?.id === userId) {
-        const pre = get().channels.find((c) => c.id === channelId);
-        const preCommunityId = channelCommunityId(pre || {});
-        if (preCommunityId) {
-          invalidateApiCache(`/channels?communityId=${preCommunityId}`);
-        }
         set((s) => {
           const rowPatch = {
             my_last_read_message_id: lastReadMessageId,
@@ -496,12 +494,9 @@ function dispatchChatStoreWsEvent(
             _localCreatedAt: channel._localCreatedAt || Date.now(),
           }),
         }));
-        setTimeout(() => {
-          invalidateApiCache(`/channels?communityId=${communityId}`);
-          get()
-            .fetchChannels(communityId)
-            .catch(() => {});
-        }, 400);
+        scheduleDebouncedCommunityChannelsRefetch(communityId, (id) =>
+          get().fetchChannels(id),
+        );
       }
       break;
     }
@@ -511,16 +506,20 @@ function dispatchChatStoreWsEvent(
       const channelId = channel.id;
       if (!communityId || !channelId) break;
       const explicitAccess = channel.can_access ?? channel.canAccess;
+      const previousChannel = get().channels.find(
+        (existing) => existing.id === channelId,
+      );
+      const previousAccess =
+        previousChannel?.can_access ??
+        previousChannel?.canAccess ??
+        !previousChannel?.is_private;
+      const accessChanged =
+        explicitAccess !== undefined && previousAccess !== explicitAccess;
+
       set((s) => {
-        const previousChannel = s.channels.find(
+        const previousForUpsert = s.channels.find(
           (existing) => existing.id === channelId,
         );
-        const previousAccess =
-          previousChannel?.can_access ??
-          previousChannel?.canAccess ??
-          !previousChannel?.is_private;
-        const accessChanged =
-          explicitAccess !== undefined && previousAccess !== explicitAccess;
 
         let nextMessages = s.messages;
         let nextPagination = s.messagePagination;
@@ -534,7 +533,7 @@ function dispatchChatStoreWsEvent(
 
         return {
           channels: upsertChannel(s.channels, {
-            ...(previousChannel || {}),
+            ...(previousForUpsert || {}),
             ...channel,
           }),
           activeChannel:
@@ -551,10 +550,15 @@ function dispatchChatStoreWsEvent(
         };
       });
       if (get().activeCommunity?.id === communityId) {
-        invalidateApiCache(`/channels?communityId=${communityId}`);
-        get()
-          .fetchChannels(communityId)
-          .catch(() => {});
+        if (accessChanged) {
+          runImmediateCommunityChannelsRefetch(communityId, (id) =>
+            get().fetchChannels(id),
+          );
+        } else {
+          scheduleDebouncedCommunityChannelsRefetch(communityId, (id) =>
+            get().fetchChannels(id),
+          );
+        }
       }
       break;
     }
@@ -575,10 +579,9 @@ function dispatchChatStoreWsEvent(
         };
       });
       if (communityId && get().activeCommunity?.id === communityId) {
-        invalidateApiCache(`/channels?communityId=${communityId}`);
-        get()
-          .fetchChannels(communityId)
-          .catch(() => {});
+        scheduleDebouncedCommunityChannelsRefetch(communityId, (id) =>
+          get().fetchChannels(id),
+        );
       }
       break;
     }
@@ -588,10 +591,9 @@ function dispatchChatStoreWsEvent(
         wsManager.subscribe(`channel:${channelId}`, selfRef);
       }
       if (communityId && get().activeCommunity?.id === communityId) {
-        invalidateApiCache(`/channels?communityId=${communityId}`);
-        get()
-          .fetchChannels(communityId)
-          .catch(() => {});
+        scheduleDebouncedCommunityChannelsRefetch(communityId, (id) =>
+          get().fetchChannels(id),
+        );
       }
       break;
     }

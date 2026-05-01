@@ -8,6 +8,8 @@ Ranked roughly by **frequency on hot paths** × **branching / shared mutable sta
 
 **Related:** refactor checklist [`refactor-acceptance-gates.md`](refactor-acceptance-gates.md), metrics [`operations-monitoring.md`](operations-monitoring.md), tunables [`env.md`](env.md).
 
+**Metrics / capacity triage:** Use canonical HTTP series **`http_server_requests_total`**, **`http_server_request_duration_ms`**, **`http_server_requests_aborted_total`** (not `chatapp_http_*`). Reuse existing Prometheus names from [`operations-monitoring.md`](operations-monitoring.md) before inventing new ones. For throughput incidents, prioritize **Postgres pool pressure** and **per-channel insert lock** signals over internal WS **`subscribe_*`** command bursts (join-shaped, not every message).
+
 | Priority | Area | Representative files | Why it matters |
 |----------|------|---------------------|----------------|
 | 1 | Search execution | [`backend/src/search/client.ts`](../backend/src/search/client.ts), [`backend/src/search/meiliClient.ts`](../backend/src/search/meiliClient.ts), [`backend/src/search/searchExecution.ts`](../backend/src/search/searchExecution.ts), [`backend/src/search/searchQueryEnv.ts`](../backend/src/search/searchQueryEnv.ts) | Replica vs primary retry, overload stages, scoped SQL — wrong branch → empty results or extra DB load. |
