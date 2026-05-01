@@ -180,6 +180,58 @@ function readReceiptScopeCursorCacheSaysNoAdvance({
   return noAdvance;
 }
 
+async function readReceiptScopeCursorHintSaysNoAdvance({
+  userId,
+  channelId,
+  conversationId,
+  messageCreatedAt,
+  messageTsMs,
+}: {
+  userId: string;
+  channelId: string | null;
+  conversationId: string | null;
+  messageCreatedAt: string | Date;
+  messageTsMs?: number;
+}) {
+  if (
+    readReceiptScopeCursorCacheSaysNoAdvance({
+      userId,
+      channelId,
+      conversationId,
+      messageCreatedAt,
+      messageTsMs,
+    })
+  ) {
+    return true;
+  }
+
+  const normalizedMsgTsMs = Number.isFinite(messageTsMs)
+    ? Number(messageTsMs)
+    : new Date(messageCreatedAt).getTime();
+  if (!Number.isFinite(normalizedMsgTsMs)) {
+    return false;
+  }
+
+  try {
+    const raw = await redis.get(readCursorTsKey(userId, channelId, conversationId));
+    if (raw == null) return false;
+    const redisCursorTsMs = Number(raw);
+    if (!Number.isFinite(redisCursorTsMs) || redisCursorTsMs < normalizedMsgTsMs) {
+      return false;
+    }
+    rememberReadReceiptScopeCursor({
+      userId,
+      channelId,
+      conversationId,
+      messageCreatedAt: new Date(redisCursorTsMs).toISOString(),
+      messageTsMs: redisCursorTsMs,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function rememberReadReceiptScopeCursor({
   userId,
   channelId,
@@ -459,6 +511,7 @@ module.exports = {
   shouldRunCas1SideEffects,
   shouldCoalesceSameMessageRead,
   readReceiptScopeCursorCacheSaysNoAdvance,
+  readReceiptScopeCursorHintSaysNoAdvance,
   rememberReadReceiptScopeCursor,
   shouldCoalesceScopeBurstRead,
   advanceReadStateCursor,

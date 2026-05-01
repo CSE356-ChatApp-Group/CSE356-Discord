@@ -675,7 +675,10 @@ describe('chatStore read mark suppression', () => {
     await vi.advanceTimersByTimeAsync(750);
 
     expect(apiPut).toHaveBeenCalledTimes(1);
-    expect(apiPut).toHaveBeenCalledWith('/messages/m-3/read');
+    expect(apiPut).toHaveBeenCalledWith('/messages/m-3/read', {
+      channelId: 'ch-1',
+      messageCreatedAt: '2026-01-01T00:00:03.000Z',
+    });
   });
 
   it('sends a read update on channel-open when the latest message is ahead of the last read cursor', async () => {
@@ -699,7 +702,10 @@ describe('chatStore read mark suppression', () => {
 
     await useChatStore.getState().selectChannel(channel as any);
 
-    expect(apiPut).toHaveBeenCalledWith('/messages/m-new/read');
+    expect(apiPut).toHaveBeenCalledWith('/messages/m-new/read', {
+      channelId: 'ch-1',
+      messageCreatedAt: '2026-01-01T00:00:02.000Z',
+    });
   });
 
   it('does not send a channel-open read update when the latest loaded message is already read', async () => {
@@ -758,9 +764,30 @@ describe('read receipt multi-target batch flush', () => {
 
     expect(apiPut).toHaveBeenCalledTimes(1);
     expect(apiPut.mock.calls[0][0]).toBe('/messages/batch-read');
-    const body = apiPut.mock.calls[0][1] as { reads: string[] };
+    const body = apiPut.mock.calls[0][1] as {
+      reads: Array<{
+        messageId: string;
+        channelId?: string;
+        conversationId?: string;
+        messageCreatedAt?: string;
+      }>;
+    };
     expect(body.reads).toHaveLength(2);
-    expect(new Set(body.reads)).toEqual(new Set(['m-ch', 'm-dm']));
+    expect(new Set(body.reads.map((read) => read.messageId))).toEqual(new Set(['m-ch', 'm-dm']));
+    expect(body.reads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          messageId: 'm-ch',
+          channelId: 'ch-1',
+          messageCreatedAt: '2026-01-01T00:00:01.000Z',
+        }),
+        expect.objectContaining({
+          messageId: 'm-dm',
+          conversationId: 'conv-1',
+          messageCreatedAt: '2026-01-01T00:00:02.000Z',
+        }),
+      ]),
+    );
   });
 });
 

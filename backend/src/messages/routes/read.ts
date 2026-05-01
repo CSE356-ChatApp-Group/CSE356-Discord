@@ -13,7 +13,7 @@ const {
   readReceiptPreflightResponse,
   executeReadReceiptMark,
   sortMessageIdsByCreatedAtDesc,
-  normalizeBatchMessageIds,
+  normalizeBatchReads,
   orderBatchReadResultsByClientIndex,
 } = require("../readReceipt/readReceiptHttpCore");
 
@@ -24,7 +24,7 @@ module.exports = function registerReadRoutes(router) {
     body("reads").isArray({ min: 1 }),
     async (req, res, next) => {
       if (!validate(req, res)) return;
-      const parsed = normalizeBatchMessageIds(req.body.reads);
+      const parsed = normalizeBatchReads(req.body.reads);
       if ("error" in parsed) {
         return res.status(400).json({ error: parsed.error });
       }
@@ -35,15 +35,22 @@ module.exports = function registerReadRoutes(router) {
           batch: true,
         });
       }
-      const { messageIds } = parsed;
+      const { messageIds, reads } = parsed;
+      const readByMessageId = new Map<string, { messageId: string; hint: unknown }>(
+        reads.map((entry) => [entry.messageId, entry]),
+      );
       try {
         const sortedIds = await sortMessageIdsByCreatedAtDesc(messageIds);
         const results = [];
         for (const messageId of sortedIds) {
+          const readEntry = readByMessageId.get(messageId) as
+            | { messageId: string; hint: unknown }
+            | undefined;
           const out = await executeReadReceiptMark(
             req.user.id,
             messageId,
             pre.dropReadReceiptFanout,
+            { hint: readEntry?.hint },
           );
           results.push({
             messageId,
@@ -71,6 +78,7 @@ module.exports = function registerReadRoutes(router) {
         req.user.id,
         req.params.id,
         pre.dropReadReceiptFanout,
+        { hint: req.body },
       );
       return res.status(out.status).json(out.body);
     } catch (err) {

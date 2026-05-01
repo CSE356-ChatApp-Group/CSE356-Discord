@@ -219,12 +219,17 @@ describe('Read state writes', () => {
     expect(m2.status).toBe(201);
     const id1 = m1.body.message.id as string;
     const id2 = m2.body.message.id as string;
+    const createdAt1 = m1.body.message.created_at as string;
+    const createdAt2 = m2.body.message.created_at as string;
 
     const batchRes = await request(app)
       .put('/api/v1/messages/batch-read')
       .set('Authorization', `Bearer ${owner.accessToken}`)
       .send({
-        reads: [{ messageId: id1 }, id2],
+        reads: [
+          { messageId: id1, channelId, messageCreatedAt: createdAt1 },
+          { messageId: id2, channelId, messageCreatedAt: createdAt2 },
+        ],
       });
     expect(batchRes.status).toBe(200);
     expect(batchRes.body.success).toBe(true);

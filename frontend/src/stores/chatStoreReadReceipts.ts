@@ -110,6 +110,22 @@ function hookReadFlushOnVisibilityHidden() {
 
 type FlushItem = { target: string; readMark: PendingReadMark };
 
+function readRequestBody(target: string, readMark: PendingReadMark) {
+  const targetId = readTargetId(target);
+  const messageCreatedAt =
+    readMark.createdAtMs > 0 ? new Date(readMark.createdAtMs).toISOString() : undefined;
+  if (target.startsWith('ch:')) {
+    return {
+      channelId: targetId,
+      ...(messageCreatedAt ? { messageCreatedAt } : {}),
+    };
+  }
+  return {
+    conversationId: targetId,
+    ...(messageCreatedAt ? { messageCreatedAt } : {}),
+  };
+}
+
 function clearReadCoalesceTimer(target: string) {
   const existingTimer = readCoalesceTimers.get(target);
   if (existingTimer) {
@@ -168,7 +184,10 @@ async function emitBatchedReadPutsSequential(chunks: FlushItem[][]) {
     }
     try {
       await api.put('/messages/batch-read', {
-        reads: chunk.map((c) => c.readMark.messageId),
+        reads: chunk.map((c) => ({
+          messageId: c.readMark.messageId,
+          ...readRequestBody(c.target, c.readMark),
+        })),
       });
     } catch {
       // Match legacy single-read fire-and-forget behavior on failure
@@ -187,7 +206,7 @@ async function emitBatchedReadPutsSequential(chunks: FlushItem[][]) {
 function emitSingleReadPut({ target, readMark }: FlushItem) {
   readMarkInFlight.add(target);
   lastSentReadByTarget.set(target, { ...readMark, sentAt: Date.now() });
-  api.put(`/messages/${readMark.messageId}/read`)
+  api.put(`/messages/${readMark.messageId}/read`, readRequestBody(target, readMark))
     .catch(() => {})
     .finally(() => {
       readMarkInFlight.delete(target);

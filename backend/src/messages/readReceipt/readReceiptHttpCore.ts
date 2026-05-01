@@ -14,6 +14,7 @@ const {
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
   readReceiptNoopSkipTotal,
+  readReceiptCoalescedTotal,
   readReceiptDbUpsertTotal,
   readReceiptPhaseDurationMs,
 } = require("../../utils/metrics");
@@ -35,6 +36,7 @@ const {
   shouldRunCas1SideEffects,
   shouldCoalesceSameMessageRead,
   readReceiptScopeCursorCacheSaysNoAdvance,
+  readReceiptScopeCursorHintSaysNoAdvance,
   rememberReadReceiptScopeCursor,
   rememberReadReceiptScopeCursorMergedWithRedis,
   shouldCoalesceScopeBurstRead,
@@ -60,6 +62,46 @@ const UUID_RE =
 
 function isUuidString(value: unknown): boolean {
   return typeof value === "string" && UUID_RE.test(value);
+}
+
+function normalizeReadHint(rawHint: unknown) {
+  if (!rawHint || typeof rawHint !== "object") return null;
+  const hint = rawHint as {
+    channelId?: unknown;
+    channel_id?: unknown;
+    conversationId?: unknown;
+    conversation_id?: unknown;
+    messageCreatedAt?: unknown;
+    message_created_at?: unknown;
+  };
+  const channelId = isUuidString(hint.channelId)
+    ? String(hint.channelId)
+    : isUuidString(hint.channel_id)
+      ? String(hint.channel_id)
+      : null;
+  const conversationId = isUuidString(hint.conversationId)
+    ? String(hint.conversationId)
+    : isUuidString(hint.conversation_id)
+      ? String(hint.conversation_id)
+      : null;
+  if ((channelId && conversationId) || (!channelId && !conversationId)) {
+    return null;
+  }
+  const rawMessageCreatedAt =
+    typeof hint.messageCreatedAt === "string"
+      ? hint.messageCreatedAt
+      : typeof hint.message_created_at === "string"
+        ? hint.message_created_at
+        : null;
+  if (!rawMessageCreatedAt) return null;
+  const messageTsMs = new Date(rawMessageCreatedAt).getTime();
+  if (!Number.isFinite(messageTsMs)) return null;
+  return {
+    channelId,
+    conversationId,
+    messageCreatedAt: rawMessageCreatedAt,
+    messageTsMs,
+  };
 }
 
 function observeReadPreflight(result: string, poolWaiting: number) {
@@ -159,9 +201,29 @@ async function executeReadReceiptMark(
   userId: string,
   messageId: string,
   dropReadReceiptFanout: boolean,
+  options: {
+    hint?: unknown;
+  } = {},
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   if (hasConfirmedRecentMessageRead(userId, messageId)) {
     readReceiptNoopSkipTotal.inc({ reason: "same_message_recent_confirmed" });
+    readReceiptCoalescedTotal.inc({ reason: "same_message" });
+    return { status: 200, body: { success: true } };
+  }
+
+  const readHint = normalizeReadHint(options.hint);
+  if (
+    readHint &&
+    await readReceiptScopeCursorHintSaysNoAdvance({
+      userId,
+      channelId: readHint.channelId,
+      conversationId: readHint.conversationId,
+      messageCreatedAt: readHint.messageCreatedAt,
+      messageTsMs: readHint.messageTsMs,
+    })
+  ) {
+    readReceiptNoopSkipTotal.inc({ reason: "scope_cursor_cache" });
+    readReceiptCoalescedTotal.inc({ reason: "scope_cursor" });
     return { status: 200, body: { success: true } };
   }
 
@@ -188,6 +250,7 @@ async function executeReadReceiptMark(
   const uid = userId;
   if (shouldCoalesceSameMessageRead(uid, messageId)) {
     readReceiptNoopSkipTotal.inc({ reason: "same_message_coalesced" });
+    readReceiptCoalescedTotal.inc({ reason: "same_message" });
     return { status: 200, body: { success: true } };
   }
   const messageCreatedAt = target.created_at;
@@ -214,6 +277,7 @@ async function executeReadReceiptMark(
     })
   ) {
     readReceiptNoopSkipTotal.inc({ reason: "scope_cursor_cache" });
+    readReceiptCoalescedTotal.inc({ reason: "scope_cursor" });
     return { status: 200, body: { success: true } };
   }
 
@@ -407,13 +471,14 @@ async function sortMessageIdsByCreatedAtDesc(messageIds: string[]): Promise<stri
   );
 }
 
-function normalizeBatchMessageIds(
+function normalizeBatchReads(
   rawReads: unknown,
-): { messageIds: string[] } | { error: string } {
+): { messageIds: string[]; reads: Array<{ messageId: string; hint: unknown }> } | { error: string } {
   if (!Array.isArray(rawReads)) {
     return { error: "reads must be a non-empty array" };
   }
   const out: string[] = [];
+  const reads: Array<{ messageId: string; hint: unknown }> = [];
   const seen = new Set<string>();
   for (const entry of rawReads) {
     const id =
@@ -427,6 +492,10 @@ function normalizeBatchMessageIds(
     if (seen.has(id)) continue;
     seen.add(id);
     out.push(id);
+    reads.push({
+      messageId: id,
+      hint: entry && typeof entry === "object" ? entry : null,
+    });
   }
   if (!out.length) {
     return { error: "reads must contain at least one valid UUID messageId" };
@@ -434,7 +503,7 @@ function normalizeBatchMessageIds(
   if (out.length > READ_RECEIPT_BATCH_MAX) {
     return { error: `reads exceeds max of ${READ_RECEIPT_BATCH_MAX}` };
   }
-  return { messageIds: out };
+  return { messageIds: out, reads };
 }
 
 /** Mutates `results` into the same order as `messageIds` (client request order). O(n log n) sort, O(n) map build. */
@@ -456,6 +525,6 @@ module.exports = {
   readReceiptPreflightResponse,
   executeReadReceiptMark,
   sortMessageIdsByCreatedAtDesc,
-  normalizeBatchMessageIds,
+  normalizeBatchReads,
   orderBatchReadResultsByClientIndex,
 };
