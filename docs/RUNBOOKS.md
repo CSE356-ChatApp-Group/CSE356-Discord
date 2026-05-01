@@ -43,6 +43,17 @@ Tune or silence this alert if your normal traffic pattern routinely drops >80% i
 4. Verify Postgres and Redis reachable from the app (connection strings, PgBouncer).
 5. If deploy just finished, confirm rollout order: DB migrate → API → nginx reload.
 
+## Production deploy preflight: DB SSH KEX resets
+
+If prod deploys fail in Phase -1 with `kex_exchange_identification` / exit `255` while probing the DB host, check DB `sshd` throttling before assuming bad keys:
+
+1. On DB host: `sudo sshd -T | grep -i maxstartups`
+2. Check recent auth logs: `sudo journalctl -u ssh --since '30 min ago' | grep -Ei 'MaxStartups|drop connection|kex_exchange_identification'`
+3. If logs show `drop connection ... past MaxStartups`, raise headroom (for example `MaxStartups 50:30:200`), then `sudo sshd -t && sudo systemctl reload ssh`.
+4. Re-run quick probes from deploy source (`for i in {1..20}; do ssh ... true || echo fail; done`) and then re-run deploy.
+
+This failure mode is orthogonal to host keys: `SSH_KNOWN_HOSTS` still must include DB host fingerprints.
+
 ## ChatAppProcessRestartFlapping
 
 1. `journalctl -u 'chatapp@*' --since '30 min ago'` for OOM, uncaught exceptions, or DB errors.
