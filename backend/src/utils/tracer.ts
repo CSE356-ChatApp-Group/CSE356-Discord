@@ -1,4 +1,3 @@
-
 /**
  * OpenTelemetry SDK bootstrap.
  *
@@ -8,29 +7,38 @@
  * Traces are sent to Grafana Tempo via OTLP/HTTP.
  */
 
-const { trace, context } = require('@opentelemetry/api');
+const { trace, context } = require("@opentelemetry/api");
 
-const enabled = String(process.env.OTEL_ENABLED || '').trim().toLowerCase() === 'true';
-const isProduction = process.env.NODE_ENV === 'production';
-const parsedRatio = Number(process.env.OTEL_TRACES_SAMPLE_RATIO || (isProduction ? '0.05' : '1'));
+const enabled =
+  String(process.env.OTEL_ENABLED || "")
+    .trim()
+    .toLowerCase() === "true";
+const isProduction = process.env.NODE_ENV === "production";
+const parsedRatio = Number(
+  process.env.OTEL_TRACES_SAMPLE_RATIO || (isProduction ? "0.05" : "1"),
+);
 const traceSampleRatio = Number.isFinite(parsedRatio)
   ? Math.max(0, Math.min(1, parsedRatio))
-  : (isProduction ? 0.05 : 1);
+  : isProduction
+    ? 0.05
+    : 1;
 
 if (enabled) {
-  const { NodeTracerProvider } = require('@opentelemetry/sdk-trace-node');
+  const { NodeTracerProvider } = require("@opentelemetry/sdk-trace-node");
   const {
     BatchSpanProcessor,
     ParentBasedSampler,
     TraceIdRatioBasedSampler,
-  } = require('@opentelemetry/sdk-trace-base');
-  const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-http');
-  const { resourceFromAttributes } = require('@opentelemetry/resources');
-  const { ATTR_SERVICE_NAME } = require('@opentelemetry/semantic-conventions');
+  } = require("@opentelemetry/sdk-trace-base");
+  const {
+    OTLPTraceExporter,
+  } = require("@opentelemetry/exporter-trace-otlp-http");
+  const { resourceFromAttributes } = require("@opentelemetry/resources");
+  const { ATTR_SERVICE_NAME } = require("@opentelemetry/semantic-conventions");
 
   const provider = new NodeTracerProvider({
     resource: resourceFromAttributes({
-      [ATTR_SERVICE_NAME]: process.env.LOG_SERVICE_NAME || 'chatapp-api',
+      [ATTR_SERVICE_NAME]: process.env.LOG_SERVICE_NAME || "chatapp-api",
     }),
     sampler: new ParentBasedSampler({
       root: new TraceIdRatioBasedSampler(traceSampleRatio),
@@ -38,7 +46,9 @@ if (enabled) {
     spanProcessors: [
       new BatchSpanProcessor(
         new OTLPTraceExporter({
-          url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://tempo:4318/v1/traces',
+          url:
+            process.env.OTEL_EXPORTER_OTLP_ENDPOINT ||
+            "http://tempo:4318/v1/traces",
         }),
       ),
     ],
@@ -46,18 +56,37 @@ if (enabled) {
 
   provider.register();
 
-  const { registerInstrumentations } = require('@opentelemetry/instrumentation');
-  const { HttpInstrumentation } = require('@opentelemetry/instrumentation-http');
-  const { ExpressInstrumentation } = require('@opentelemetry/instrumentation-express');
+  const {
+    registerInstrumentations,
+  } = require("@opentelemetry/instrumentation");
+  const {
+    HttpInstrumentation,
+  } = require("@opentelemetry/instrumentation-http");
+  const {
+    ExpressInstrumentation,
+  } = require("@opentelemetry/instrumentation-express");
   registerInstrumentations({
     tracerProvider: provider,
     instrumentations: [
-      new HttpInstrumentation(),
+      new HttpInstrumentation({
+        ignoreIncomingPaths: [
+          // Matches /api/v1/messages/any-id/read
+          /\/api\/v1\/messages\/[^/]+\/read$/,
+          "/health",
+          "/metrics",
+        ],
+      }),
       new ExpressInstrumentation(),
     ],
   });
 }
 
-const tracer = trace.getTracer('chatapp-api');
+const tracer = trace.getTracer("chatapp-api");
 
-module.exports = { tracer, context, trace, otelEnabled: enabled, traceSampleRatio };
+module.exports = {
+  tracer,
+  context,
+  trace,
+  otelEnabled: enabled,
+  traceSampleRatio,
+};
