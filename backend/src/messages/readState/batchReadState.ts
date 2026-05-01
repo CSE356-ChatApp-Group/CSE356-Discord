@@ -14,6 +14,12 @@
 
 const redis = require('../../db/redis');
 const logger = require('../../utils/logger');
+const {
+  readStateDirtyKeysGauge,
+  readStateFlushRows,
+  readStateFlushDurationMs,
+  readStateFlushErrorsTotal,
+} = require('../../utils/metrics');
 const { batchReadStateConfig } = require('../config/batchReadStateConfig');
 const {
   acquireFlushLock,
@@ -126,112 +132,129 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
   localFlushInFlight = true;
 
   let flushLockToken: string | null = null;
-  let dirtyKeys: string[];
   try {
     flushLockToken = await acquireFlushLock();
     if (!flushLockToken) return;
 
+    const lockedStart = process.hrtime.bigint();
     try {
-      dirtyKeys = await readDirtyKeysBatch();
-    } catch {
-      return;
-    }
-
-    if (dirtyKeys.length === 0) return;
-
-    // Do NOT srem from rs:dirty before reading rs:pending:* — if hgetall is empty or the
-    // upsert is skipped, we would drop the dirty flag without persisting (flaky tests +
-    // lost read cursors). Remove keys only after a successful batch upsert, or when a
-    // dirty entry has no pending payload (stale pointer — clear to avoid spinning).
-
-    for (let i = 0; i < dirtyKeys.length; i += READ_STATE_FLUSH_BATCH_SIZE) {
-      const batch = dirtyKeys.slice(i, i + READ_STATE_FLUSH_BATCH_SIZE);
-
-      const pipeline = redis.pipeline();
-      for (const dirtyKey of batch) {
-        const [userId, targetId] = dirtyKey.split('|');
-        pipeline.hgetall(`${RS_PENDING_KEY_PREFIX}${userId}:${targetId}`);
-      }
-
-      let results: [Error | null, Record<string, string> | null][];
       try {
-        results = await pipeline.exec();
+        const sc = await redis.scard(RS_DIRTY_SET);
+        readStateDirtyKeysGauge.set(Number.isFinite(Number(sc)) ? Number(sc) : 0);
       } catch {
-        continue;
+        readStateFlushErrorsTotal.inc({ stage: 'scard' });
       }
 
-      const dirtyKeysStale: string[] = [];
-      const newestRowsByDirtyKey = new Map<string, {
-        dirtyKey: string;
-        userId: string;
-        channelId: string | null;
-        conversationId: string | null;
-        messageId: string;
-        messageCreatedAt: string;
-      }>();
-
-      for (let j = 0; j < batch.length; j++) {
-        const dirtyKey = batch[j];
-        const [pipeErr, data] = results[j];
-        if (pipeErr || !data || !data.msg_id || !data.msg_created_at) {
-          dirtyKeysStale.push(dirtyKey);
-          continue;
-        }
-
-        const [userId] = dirtyKey.split('|');
-        const nextRow = {
-          dirtyKey,
-          userId,
-          channelId: data.channel_id || null,
-          conversationId: data.conversation_id || null,
-          messageId: data.msg_id,
-          messageCreatedAt: data.msg_created_at,
-        };
-        const prevRow = newestRowsByDirtyKey.get(dirtyKey);
-        if (!prevRow || nextRow.messageCreatedAt >= prevRow.messageCreatedAt) {
-          newestRowsByDirtyKey.set(dirtyKey, nextRow);
-        }
+      let dirtyKeys: string[];
+      try {
+        dirtyKeys = await readDirtyKeysBatch();
+      } catch {
+        readStateFlushErrorsTotal.inc({ stage: 'dirty_keys' });
+        return;
       }
 
-      const orderedRows = Array.from(newestRowsByDirtyKey.values()).sort((a, b) => {
-        const aTarget = a.channelId || a.conversationId || '';
-        const bTarget = b.channelId || b.conversationId || '';
-        return a.userId.localeCompare(b.userId) || aTarget.localeCompare(bTarget);
-      });
+      if (dirtyKeys.length === 0) return;
 
-      if (orderedRows.length > 0) {
+      // Do NOT srem from rs:dirty before reading rs:pending:* — if hgetall is empty or the
+      // upsert is skipped, we would drop the dirty flag without persisting (flaky tests +
+      // lost read cursors). Remove keys only after a successful batch upsert, or when a
+      // dirty entry has no pending payload (stale pointer — clear to avoid spinning).
+
+      for (let i = 0; i < dirtyKeys.length; i += READ_STATE_FLUSH_BATCH_SIZE) {
+        const batch = dirtyKeys.slice(i, i + READ_STATE_FLUSH_BATCH_SIZE);
+
+        const pipeline = redis.pipeline();
+        for (const dirtyKey of batch) {
+          const [userId, targetId] = dirtyKey.split('|');
+          pipeline.hgetall(`${RS_PENDING_KEY_PREFIX}${userId}:${targetId}`);
+        }
+
+        let results: [Error | null, Record<string, string> | null][];
         try {
-          await runReadStateBatchUpsert(
-            READ_STATE_BATCH_UPSERT_SQL,
-            [
-            orderedRows.map((row) => row.userId),
-            orderedRows.map((row) => row.channelId),
-            orderedRows.map((row) => row.conversationId),
-            orderedRows.map((row) => row.messageId),
-            orderedRows.map((row) => row.messageCreatedAt),
-            ],
-          );
-        } catch (err: any) {
-          logger.warn({ err, batchSize: orderedRows.length }, 'read_state batch flush query failed');
+          results = await pipeline.exec();
+        } catch {
+          readStateFlushErrorsTotal.inc({ stage: 'pending_pipeline' });
           continue;
         }
-      }
 
-      const toClear = [
-        ...orderedRows.map((row) => row.dirtyKey),
-        ...dirtyKeysStale,
-      ];
-      if (toClear.length === 0) continue;
+        const dirtyKeysStale: string[] = [];
+        const newestRowsByDirtyKey = new Map<string, {
+          dirtyKey: string;
+          userId: string;
+          channelId: string | null;
+          conversationId: string | null;
+          messageId: string;
+          messageCreatedAt: string;
+        }>();
 
-      try {
-        if (toClear.length === 1) {
-          await redis.srem(RS_DIRTY_SET, toClear[0]);
-        } else {
-          await redis.srem(RS_DIRTY_SET, ...toClear);
+        for (let j = 0; j < batch.length; j++) {
+          const dirtyKey = batch[j];
+          const [pipeErr, data] = results[j];
+          if (pipeErr || !data || !data.msg_id || !data.msg_created_at) {
+            dirtyKeysStale.push(dirtyKey);
+            continue;
+          }
+
+          const [userId] = dirtyKey.split('|');
+          const nextRow = {
+            dirtyKey,
+            userId,
+            channelId: data.channel_id || null,
+            conversationId: data.conversation_id || null,
+            messageId: data.msg_id,
+            messageCreatedAt: data.msg_created_at,
+          };
+          const prevRow = newestRowsByDirtyKey.get(dirtyKey);
+          if (!prevRow || nextRow.messageCreatedAt >= prevRow.messageCreatedAt) {
+            newestRowsByDirtyKey.set(dirtyKey, nextRow);
+          }
         }
-      } catch {
-        // ignore
+
+        const orderedRows = Array.from(newestRowsByDirtyKey.values()).sort((a, b) => {
+          const aTarget = a.channelId || a.conversationId || '';
+          const bTarget = b.channelId || b.conversationId || '';
+          return a.userId.localeCompare(b.userId) || aTarget.localeCompare(bTarget);
+        });
+
+        if (orderedRows.length > 0) {
+          try {
+            await runReadStateBatchUpsert(
+              READ_STATE_BATCH_UPSERT_SQL,
+              [
+              orderedRows.map((row) => row.userId),
+              orderedRows.map((row) => row.channelId),
+              orderedRows.map((row) => row.conversationId),
+              orderedRows.map((row) => row.messageId),
+              orderedRows.map((row) => row.messageCreatedAt),
+              ],
+            );
+            readStateFlushRows.observe(orderedRows.length);
+          } catch (err: any) {
+            readStateFlushErrorsTotal.inc({ stage: 'upsert' });
+            logger.warn({ err, batchSize: orderedRows.length }, 'read_state batch flush query failed');
+            continue;
+          }
+        }
+
+        const toClear = [
+          ...orderedRows.map((row) => row.dirtyKey),
+          ...dirtyKeysStale,
+        ];
+        if (toClear.length === 0) continue;
+
+        try {
+          if (toClear.length === 1) {
+            await redis.srem(RS_DIRTY_SET, toClear[0]);
+          } else {
+            await redis.srem(RS_DIRTY_SET, ...toClear);
+          }
+        } catch {
+          readStateFlushErrorsTotal.inc({ stage: 'clear_dirty' });
+        }
       }
+    } finally {
+      const elapsedMs = Number(process.hrtime.bigint() - lockedStart) / 1e6;
+      readStateFlushDurationMs.observe(Math.max(0, elapsedMs));
     }
   } finally {
     if (flushLockToken) {

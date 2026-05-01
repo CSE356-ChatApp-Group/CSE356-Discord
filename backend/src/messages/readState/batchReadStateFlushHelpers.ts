@@ -1,5 +1,6 @@
 const { query } = require('../../db/pool');
 const redis = require('../../db/redis');
+const { readStateFlushRetriesTotal } = require('../../utils/metrics');
 const {
   REDIS_LUA_IDS,
   registerRedisLuaScript,
@@ -77,6 +78,7 @@ async function runReadStateBatchUpsert(
       if (attempt >= READ_STATE_FLUSH_RETRY_MAX || !isRetryableFlushError(err)) {
         throw err;
       }
+      readStateFlushRetriesTotal.inc();
       logger.warn(
         { err, attempt: attempt + 1, retryMax: READ_STATE_FLUSH_RETRY_MAX },
         'read_state batch flush retryable query failure',

@@ -309,6 +309,37 @@ const messageChannelInsertLockPressureWaitP95MsGauge = new client.Gauge({
   help: 'Rolling-window p95 wait for successful channel insert lock acquires (read shed signal)',
 });
 
+/** Redis `rs:dirty` backlog (SCARD) sampled at start of a flush that holds the distributed lock. */
+const readStateDirtyKeysGauge = new client.Gauge({
+  name: 'read_state_dirty_keys',
+  help: 'Approximate count of pending read_state flush keys in Redis (SCARD rs:dirty) when flush lock acquired',
+});
+
+/** Rows passed to a single read_states batch upsert (after per-target newest merge). */
+const readStateFlushRows = new client.Histogram({
+  name: 'read_state_flush_rows',
+  help: 'read_states batch upsert row count per flush batch',
+  buckets: [1, 2, 5, 10, 25, 50, 75, 100, 150, 200, 300, 400],
+});
+
+/** Wall time while holding the read_state flush distributed lock (Redis read + PG upsert + srem). */
+const readStateFlushDurationMs = new client.Histogram({
+  name: 'read_state_flush_duration_ms',
+  help: 'Duration of read_states background flush while flush lock is held',
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 10000],
+});
+
+const readStateFlushErrorsTotal = new client.Counter({
+  name: 'read_state_flush_errors_total',
+  help: 'read_states background flush errors by stage (low-cardinality)',
+  labelNames: ['stage'],
+});
+
+const readStateFlushRetriesTotal = new client.Counter({
+  name: 'read_state_flush_retries_total',
+  help: 'read_states batch upsert retry attempts after retryable errors',
+});
+
 /** Count of insert-lock timeouts in the rolling pressure window on this worker. */
 const messageChannelInsertLockPressureRecentTimeoutsGauge = new client.Gauge({
   name: 'message_channel_insert_lock_pressure_recent_timeout_count',
@@ -360,4 +391,9 @@ module.exports = {
   readReceiptPhaseDurationMs,
   messageChannelInsertLockPressureWaitP95MsGauge,
   messageChannelInsertLockPressureRecentTimeoutsGauge,
+  readStateDirtyKeysGauge,
+  readStateFlushRows,
+  readStateFlushDurationMs,
+  readStateFlushErrorsTotal,
+  readStateFlushRetriesTotal,
 };

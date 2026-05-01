@@ -250,6 +250,7 @@ METRICS_SNAPSHOT_RANGE=10m PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metr
 Primary gate metrics:
 - `read_receipt_shed_total`, `read_receipt_requests_total`, `read_receipt_preflight_total`
 - `read_receipt_phase_duration_ms{phase=~"target_lookup|cursor_advance|watermark_cache|fanout_publish"}`
+- **`read_states` batch flush (redis → Postgres WAL):** `read_state_dirty_keys` (Redis `rs:dirty` backlog when flush runs), `read_state_flush_duration_ms`, `read_state_flush_rows`, `read_state_flush_errors_total{stage=...}`, `read_state_flush_retries_total` — PromQL examples in [`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh) header comment. Series populate only after workers run at least one flush (histogram buckets appear on first observe); idle deployments may show no `_bucket` lines until traffic generates dirty keys.
 - read-route p95/p99: `http_server_request_duration_ms{method="PUT",route="/api/v1/messages/:id/read"}`
 - pool safety: `pg_pool_waiting`, `pg_pool_circuit_breaker_rejects_total`
 - write-path guardrail: `message_post_response_total` (201 vs 503/5xx)

@@ -8,6 +8,29 @@
 #
 # Range window for rate()/histogram_quantile (default 5m; use 10m for stability audits):
 #   METRICS_SNAPSHOT_RANGE=10m PROMETHEUS_URL=... ./scripts/metrics/metrics-snapshot.sh
+#
+# --- Read receipts / read_states batch flush (PromQL reference; job label chatapp-api on workers) ---
+# Dirty backlog (gauge sampled when a flush acquires the lock; sum workers for fleet view):
+#   sum(read_state_dirty_keys{job="chatapp-api"})
+# Flush duration p95 (seconds):
+#   histogram_quantile(0.95, sum by (le) (rate(read_state_flush_duration_ms_bucket{job="chatapp-api"}[5m]))) / 1000
+# Batch upsert size p95 (rows per batch):
+#   histogram_quantile(0.95, sum by (le) (rate(read_state_flush_rows_bucket{job="chatapp-api"}[5m])))
+# Flush errors by stage (low-cardinality stage= label):
+#   sum by (stage) (rate(read_state_flush_errors_total{job="chatapp-api"}[5m]))
+# Flush upsert retries (after deadlock/timeout):
+#   sum(rate(read_state_flush_retries_total{job="chatapp-api"}[5m]))
+# Read receipt shed by reason:
+#   sum by (reason) (rate(read_receipt_shed_total{job="chatapp-api"}[5m]))
+# Redis CAS result (0=cursor already advanced, 1=rate-limited in Lua, 2=enqueued):
+#   sum by (scope, cas_result) (rate(read_receipt_cursor_cas_total{job="chatapp-api"}[5m]))
+# Read-receipt optimization paths (reason=):
+#   sum by (reason) (rate(read_receipt_optimization_total{job="chatapp-api"}[5m]))
+# No-op / coalesce skips (reason=):
+#   sum by (reason) (rate(read_receipt_noop_skip_total{job="chatapp-api"}[5m]))
+#   sum by (reason) (rate(read_receipt_coalesced_total{job="chatapp-api"}[5m]))
+# pg_stat_statements: read_states batch upsert (if postgres_exporter available; pick your job/instance):
+#   topk(3, sum by (query) (rate(pg_stat_statements_total_time_seconds{...}[1h])))  # or use queryid from your PG dashboard
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/repo-root.sh"
@@ -63,6 +86,17 @@ queries=(
   # Read-receipt insert-lock shedding + POST/read SLO helpers (canary gates)
   'sum by (vm) (rate(read_receipt_shed_total{job="chatapp-api",reason="message_channel_insert_lock_pressure"}[5m]))'
   'sum by (vm) (rate(read_receipt_shed_total{job="chatapp-api",reason="message_insert_unhealthy"}[5m]))'
+  # read_states Redis batch flush (WAL/throughput triage; see header comment for PromQL)
+  'sum(read_state_dirty_keys{job="chatapp-api"})'
+  'histogram_quantile(0.95, sum by (le) (rate(read_state_flush_duration_ms_bucket{job="chatapp-api"}[5m])))'
+  'histogram_quantile(0.95, sum by (le) (rate(read_state_flush_rows_bucket{job="chatapp-api"}[5m])))'
+  'sum by (stage) (rate(read_state_flush_errors_total{job="chatapp-api"}[5m]))'
+  'sum(rate(read_state_flush_retries_total{job="chatapp-api"}[5m]))'
+  'sum by (reason) (rate(read_receipt_shed_total{job="chatapp-api"}[5m]))'
+  'sum by (scope, cas_result) (rate(read_receipt_cursor_cas_total{job="chatapp-api"}[5m]))'
+  'sum by (reason) (rate(read_receipt_optimization_total{job="chatapp-api"}[5m]))'
+  'sum by (reason) (rate(read_receipt_noop_skip_total{job="chatapp-api"}[5m]))'
+  'sum by (reason) (rate(read_receipt_coalesced_total{job="chatapp-api"}[5m]))'
   'sum by (vm, status_code) (rate(message_post_response_total{job="chatapp-api"}[5m]))'
   'sum by (vm, status_class) (rate(http_server_requests_total{job="chatapp-api",method="PUT",route="/api/v1/messages/:id/read"}[5m]))'
   'sum by (vm, result) (rate(message_channel_insert_lock_total{job="chatapp-api"}[5m]))'

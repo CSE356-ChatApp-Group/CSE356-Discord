@@ -5,6 +5,7 @@ jest.mock('../src/db/pool', () => ({
 jest.mock('../src/db/redis', () => ({
   set: jest.fn(),
   smembers: jest.fn(),
+  scard: jest.fn(),
   pipeline: jest.fn(),
   srem: jest.fn(),
   eval: jest.fn(),
@@ -22,6 +23,7 @@ const { query } = require('../src/db/pool') as { query: jest.Mock };
 const redis = require('../src/db/redis') as {
   set: jest.Mock;
   smembers: jest.Mock;
+  scard: jest.Mock;
   pipeline: jest.Mock;
   srem: jest.Mock;
   eval: jest.Mock;
@@ -42,6 +44,7 @@ describe('batchReadState flush', () => {
     redis.set.mockResolvedValue('OK');
     redis.eval.mockResolvedValue(1);
     redis.smembers.mockResolvedValue([]);
+    redis.scard.mockResolvedValue(0);
     redis.srem.mockResolvedValue(1);
   });
 

@@ -176,6 +176,11 @@ const {
   readReceiptPhaseDurationMs,
   messageChannelInsertLockPressureWaitP95MsGauge,
   messageChannelInsertLockPressureRecentTimeoutsGauge,
+  readStateDirtyKeysGauge,
+  readStateFlushRows,
+  readStateFlushDurationMs,
+  readStateFlushErrorsTotal,
+  readStateFlushRetriesTotal,
 } = require('./metrics/messageWritePath');
 
 // ── Overload stage ───────────────────────────────────────────────────────────
@@ -369,6 +374,7 @@ const overloadStageGauge = new client.Gauge({
     readReceiptScopeTotal.inc({ scope: 'conversation' }, 0);
     readReceiptOptimizationTotal.inc({ reason: 'cas1_side_effects_debounced' }, 0);
     readReceiptOptimizationTotal.inc({ reason: 'conversation_read_direct_user_fanout' }, 0);
+    readReceiptOptimizationTotal.inc({ reason: 'conversation_read_reliable_fanout' }, 0);
     readReceiptOptimizationTotal.inc({ reason: 'channel_read_fanout_inline_fallback' }, 0);
     readReceiptNoopSkipTotal.inc({ reason: 'cursor_not_advanced' }, 0);
     readReceiptNoopSkipTotal.inc({ reason: 'same_message_coalesced' }, 0);
@@ -395,6 +401,15 @@ const overloadStageGauge = new client.Gauge({
     readReceiptPhaseDurationMs.observe({ phase: 'fanout_publish', result: 'error' }, 0);
     messageChannelInsertLockPressureWaitP95MsGauge.set(0);
     messageChannelInsertLockPressureRecentTimeoutsGauge.set(0);
+    readStateDirtyKeysGauge.set(0);
+    readStateFlushRows.observe(1);
+    readStateFlushDurationMs.observe(0);
+    readStateFlushErrorsTotal.inc({ stage: 'scard' }, 0);
+    readStateFlushErrorsTotal.inc({ stage: 'dirty_keys' }, 0);
+    readStateFlushErrorsTotal.inc({ stage: 'pending_pipeline' }, 0);
+    readStateFlushErrorsTotal.inc({ stage: 'upsert' }, 0);
+    readStateFlushErrorsTotal.inc({ stage: 'clear_dirty' }, 0);
+    readStateFlushRetriesTotal.inc(0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
     messageIngestStreamAppendedTotal.inc({ result: 'error' }, 0);
     messageIngestStreamConsumedTotal.inc({ result: 'ack' }, 0);
@@ -619,6 +634,11 @@ module.exports = {
   readReceiptPhaseDurationMs,
   messageChannelInsertLockPressureWaitP95MsGauge,
   messageChannelInsertLockPressureRecentTimeoutsGauge,
+  readStateDirtyKeysGauge,
+  readStateFlushRows,
+  readStateFlushDurationMs,
+  readStateFlushErrorsTotal,
+  readStateFlushRetriesTotal,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
   channelAccessCacheTotal,
