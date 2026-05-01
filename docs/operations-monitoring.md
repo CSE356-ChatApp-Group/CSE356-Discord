@@ -8,6 +8,25 @@ This document exists so operators (and the coding agent) can **ground decisions 
 
 **Documentation hub** (single sources of truth, update checklist): [`README.md`](README.md).
 
+## Refactor / optimization PR comparison (Prometheus)
+
+Use this when a PR touches **hot paths** (see [`backend-hotspots.md`](backend-hotspots.md)): search, GET/POST messages, WebSocket delivery, pool, or fanout.
+
+1. **Baseline** — on a host that can reach Prometheus, run [`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh) (optional `--write var/metrics-snapshot.txt`) **before** merge/deploy of the change; keep the output for the PR.
+2. **Deploy** — ship to **staging** first when behavior could affect latency or errors.
+3. **Compare** — after deploy, run the snapshot again **at similar traffic** (time-of-day aware). Compare at minimum:
+
+| Question | Series (see also [Alert families](#alert-families-operator-map)) |
+|----------|-------------------------------------------------------------------|
+| API tail latency worsened? | `http_server_request_duration_ms_bucket` — filter `route` for routes you touched (confirm label values with `label_values(http_server_request_duration_ms, route)`). |
+| Pool pressure | `pg_pool_waiting`, `pg_pool_circuit_breaker_rejects_total`, `pg_pool_operation_errors_total` |
+| Fanout / realtime | `fanout_job_latency_ms`, `fanout_queue_depth`, publish failure counters; WS delivery counters in snapshot script output |
+| Overload shedding | `chatapp_overload_stage`, `http_overload_shed_total` |
+
+4. **Interpretation** — a refactor **without** intentional throughput change should show **no sustained regression** in p95/p99 for touched routes and no increase in pool waits or fanout error counters. If intentionally tuning a knob (TTL, batch size, pool queue), document expected direction and rollback (env revert).
+
+**Metric names:** [`backend/src/utils/metrics.ts`](../backend/src/utils/metrics.ts). Full triage patterns: sections below and [`runbooks.md`](runbooks.md).
+
 ## Quick links
 
 | Resource | Location |

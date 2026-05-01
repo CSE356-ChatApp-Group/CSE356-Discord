@@ -1,3 +1,5 @@
+const { parseChannelKey } = require('./channelKeyParse');
+
 function createChannelAclHelpers({
   query,
   aclCache,
@@ -6,15 +8,6 @@ function createChannelAclHelpers({
   readAclSharedCacheEntry,
   setAclDecision,
 }) {
-  function parseChannelKey(channel) {
-    if (typeof channel !== "string") return null;
-    const match = channel.match(
-      /^(channel|conversation|community|user):([\w-]+)$/,
-    );
-    if (!match) return null;
-    return { type: match[1], id: match[2] };
-  }
-
   async function isAllowedChannelDb(user, channel) {
     const parsed = parseChannelKey(channel);
     if (!parsed) return false;

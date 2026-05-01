@@ -18,6 +18,10 @@ const {
   prepareSocketPayload,
   extractInternalUserFeedCommand,
 } = require("./outboundPayload");
+const {
+  normalizeCommunityTopic,
+  isDuplicateSuppressionOnly,
+} = require("./redisPubsubTopicUtils");
 
 /**
  * @param ctx - Closed-over server wiring (maps, subscribe helpers, sendPayloadToSocket).
@@ -46,13 +50,6 @@ function createRedisPubsubDelivery(ctx) {
     return channelClients.get(channel) || null;
   }
 
-  function normalizeCommunityTopic(value) {
-    if (typeof value !== "string") return null;
-    const parsed = parseChannelKey(value.startsWith("community:") ? value : `community:${value}`);
-    if (!parsed || parsed.type !== "community") return null;
-    return parsed.id;
-  }
-
   function pruneNonOpenSocketsFromLocalTopicSubscribers(topicChannel, clients) {
     if (!clients || clients.size === 0) return [];
     const recoveredUserIds = [];
@@ -73,14 +70,6 @@ function createRedisPubsubDelivery(ctx) {
       if (ws.readyState === WebSocket.OPEN) continue;
       unsubscribeCommunityClient(ws, communityId);
     }
-  }
-
-  function isDuplicateSuppressionOnly(reasonCounts) {
-    if (!reasonCounts || typeof reasonCounts !== 'object') return false;
-    const entries = Object.entries(reasonCounts)
-      .filter(([, count]) => Number(count) > 0);
-    if (entries.length === 0) return false;
-    return entries.every(([reason]) => reason === 'dedupe_recent_delivery');
   }
 
   async function userfeedRecoveryAfterStaleTopicMap(channel, parsed, userIds) {
