@@ -346,6 +346,26 @@ const messageChannelInsertLockPressureRecentTimeoutsGauge = new client.Gauge({
   help: 'Channel insert lock timeouts in the rolling MESSAGE_INSERT_LOCK_PRESSURE_WINDOW_MS window',
 });
 
+/** Fleet-visible POST insert-timeout SET outcomes (health:message_insert_unhealthy). */
+const messageInsertUnhealthyRedisMarkTotal = new client.Counter({
+  name: 'message_insert_unhealthy_redis_mark_total',
+  help: 'Redis SET outcomes when marking global insert-unhealthy for read-receipt shedding',
+  labelNames: ['result'],
+});
+
+/** Background poll of global insert-unhealthy key (no per-request Redis GET). */
+const readReceiptInsertUnhealthyPollTotal = new client.Counter({
+  name: 'read_receipt_insert_unhealthy_poll_total',
+  help: 'Poll outcomes for health:message_insert_unhealthy on read workers',
+  labelNames: ['result'],
+});
+
+/** Worker-local mirror of polled global insert-unhealthy (0/1). */
+const readReceiptInsertUnhealthyGlobalCache = new client.Gauge({
+  name: 'read_receipt_insert_unhealthy_global_cache',
+  help: 'Cached global insert-unhealthy signal after last poll (1 = defer reads)',
+});
+
 module.exports = {
   messagePostAccessDeniedTotal,
   messageIngestStreamAppendedTotal,
@@ -396,4 +416,7 @@ module.exports = {
   readStateFlushDurationMs,
   readStateFlushErrorsTotal,
   readStateFlushRetriesTotal,
+  messageInsertUnhealthyRedisMarkTotal,
+  readReceiptInsertUnhealthyPollTotal,
+  readReceiptInsertUnhealthyGlobalCache,
 };

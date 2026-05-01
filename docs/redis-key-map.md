@@ -88,6 +88,7 @@ Per-connection activity/alive keys are built in [`backend/src/websocket/presence
 
 | Pattern | Purpose |
 |---------|---------|
+| `health:message_insert_unhealthy` | Fleet-visible insert-timeout pressure flag (`SET`/`GET` with **`PX`** from **`READ_RECEIPT_MESSAGE_INSERT_UNHEALTHY_TTL_MS`**). Writers **`SET`** on qualifying **`POST /messages`** timeouts; readers poll on a background interval (`READ_RECEIPT_GLOBAL_INSERT_UNHEALTHY_POLL_MS`), not per request — [`backend/src/messages/messageInsertHealth.ts`](../backend/src/messages/messageInsertHealth.ts). |
 | `read_cursor_ts:<userId>:ch:<channelId>` | Redis CAS cursor timestamp (channel read) |
 | `read_cursor_ts:<userId>:cv:<conversationId>` | CAS cursor (DM read) |
 | `read_db_lock:<userId>:ch:<channelId>` | Async PG flush coordination |

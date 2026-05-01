@@ -86,6 +86,9 @@ queries=(
   # Read-receipt insert-lock shedding + POST/read SLO helpers (canary gates)
   'sum by (vm) (rate(read_receipt_shed_total{job="chatapp-api",reason="message_channel_insert_lock_pressure"}[5m]))'
   'sum by (vm) (rate(read_receipt_shed_total{job="chatapp-api",reason="message_insert_unhealthy"}[5m]))'
+  'sum by (result) (rate(message_insert_unhealthy_redis_mark_total{job="chatapp-api"}[5m]))'
+  'sum by (result) (rate(read_receipt_insert_unhealthy_poll_total{job="chatapp-api"}[5m]))'
+  'max by (vm, instance) (read_receipt_insert_unhealthy_global_cache{job="chatapp-api"})'
   # read_states Redis batch flush (WAL/throughput triage; see header comment for PromQL)
   'sum(read_state_dirty_keys{job="chatapp-api"})'
   'histogram_quantile(0.95, sum by (le) (rate(read_state_flush_duration_ms_bucket{job="chatapp-api"}[5m])))'

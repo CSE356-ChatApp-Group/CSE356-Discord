@@ -181,6 +181,9 @@ const {
   readStateFlushDurationMs,
   readStateFlushErrorsTotal,
   readStateFlushRetriesTotal,
+  messageInsertUnhealthyRedisMarkTotal,
+  readReceiptInsertUnhealthyPollTotal,
+  readReceiptInsertUnhealthyGlobalCache,
 } = require('./metrics/messageWritePath');
 
 // ── Overload stage ───────────────────────────────────────────────────────────
@@ -397,6 +400,12 @@ const overloadStageGauge = new client.Gauge({
     readReceiptPhaseDurationMs.observe({ phase: 'cursor_advance', result: 'error' }, 0);
     readReceiptPhaseDurationMs.observe({ phase: 'watermark_cache', result: 'ok' }, 0);
     readReceiptPhaseDurationMs.observe({ phase: 'watermark_cache', result: 'error' }, 0);
+    messageInsertUnhealthyRedisMarkTotal.inc({ result: 'ok' }, 0);
+    messageInsertUnhealthyRedisMarkTotal.inc({ result: 'error' }, 0);
+    readReceiptInsertUnhealthyPollTotal.inc({ result: 'hit' }, 0);
+    readReceiptInsertUnhealthyPollTotal.inc({ result: 'miss' }, 0);
+    readReceiptInsertUnhealthyPollTotal.inc({ result: 'error' }, 0);
+    readReceiptInsertUnhealthyGlobalCache.set(0);
     readReceiptPhaseDurationMs.observe({ phase: 'fanout_publish', result: 'ok' }, 0);
     readReceiptPhaseDurationMs.observe({ phase: 'fanout_publish', result: 'error' }, 0);
     messageChannelInsertLockPressureWaitP95MsGauge.set(0);
@@ -639,6 +648,9 @@ module.exports = {
   readStateFlushDurationMs,
   readStateFlushErrorsTotal,
   readStateFlushRetriesTotal,
+  messageInsertUnhealthyRedisMarkTotal,
+  readReceiptInsertUnhealthyPollTotal,
+  readReceiptInsertUnhealthyGlobalCache,
   wsConnectionResultTotal,
   wsBackpressureEventsTotal,
   channelAccessCacheTotal,
