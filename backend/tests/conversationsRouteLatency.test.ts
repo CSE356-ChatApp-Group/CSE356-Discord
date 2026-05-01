@@ -92,7 +92,11 @@ jest.mock('../src/messages/conversationsRouterRepo', () => ({
     { id: 'msg-a', conversation_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', content: 'Invited User joined the group.' },
     { id: 'msg-b', conversation_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', content: 'Invited User joined the group.' },
   ])),
-  isGroupConversation: jest.fn(async () => true),
+  sortDirectPairUserIds: jest.fn((a: string, b: string) => [a, b].sort()),
+  lockDirectConversationPair: jest.fn(async () => undefined),
+  getDirectConversationPairConversationId: jest.fn(async () => null),
+  findLegacyDirectConversationId: jest.fn(async () => null),
+  upsertDirectConversationPair: jest.fn(async () => undefined),
 }));
 
 const { getClient } = require('../src/db/pool') as {
@@ -145,7 +149,6 @@ describe('conversations route side-effect latency', () => {
       query: jest
         .fn()
         .mockResolvedValueOnce(undefined) // BEGIN
-        .mockResolvedValueOnce({ rows: [] }) // no existing 1:1
         .mockResolvedValueOnce({
           rows: [{
             id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
