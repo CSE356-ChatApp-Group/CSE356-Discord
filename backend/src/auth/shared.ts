@@ -79,7 +79,11 @@ function serializeAuthUser(user) {
 }
 
 function recordAuthSessionFlow(path, mode, result) {
-  authSessionFlowTotal.inc({ path, mode, result });
+  try {
+    authSessionFlowTotal?.inc({ path, mode, result });
+  } catch (err) {
+    logger.warn({ err, path, mode, result }, 'auth session telemetry emit failed');
+  }
 }
 
 function markRecentRefreshFailure(res, maxAgeMs = 60_000) {

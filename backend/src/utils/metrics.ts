@@ -570,6 +570,7 @@ module.exports = {
   authBcryptWaiters,
   authBcryptQueueRejectsTotal,
   authRateLimitHitsTotal,
+  authSessionFlowTotal,
   messagePostAccessDeniedTotal,
   messageIngestStreamAppendedTotal,
   messageIngestStreamConsumedTotal,
