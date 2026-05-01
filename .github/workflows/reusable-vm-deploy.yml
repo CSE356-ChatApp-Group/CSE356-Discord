@@ -250,6 +250,24 @@ jobs:
               ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
                 "${DEPLOY_USER}@${vm}" "echo vm-ok:${vm} && hostname"
             done
+            DB_HOST="${{ vars.PROD_DB_HOST || '130.245.136.21' }}"
+            echo "Checking SSH reachability to DB host ${DB_HOST} (Phase -1 preflight uses this)..."
+            db_ok=0
+            delay=3
+            for attempt in 1 2 3 4 5 6; do
+              if ssh -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new \
+                "${DEPLOY_USER}@${DB_HOST}" "echo db-ssh-ok && hostname"; then
+                db_ok=1
+                break
+              fi
+              echo "WARN: DB SSH probe attempt ${attempt}/6 failed; sleeping ${delay}s"
+              sleep "${delay}"
+              if [[ "${delay}" -lt 30 ]]; then
+                delay=$(( delay * 2 ))
+                [[ "${delay}" -gt 30 ]] && delay=30
+              fi
+            done
+            [[ "${db_ok}" == "1" ]] || { echo "ERROR: could not SSH to DB ${DB_HOST} after retries"; exit 1; }
           fi
 
       # Rollback deploys check out an old SHA whose prod-nginx-audit.sh may still

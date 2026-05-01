@@ -20,6 +20,9 @@
 # Canary: set DEPLOY_STOP_AFTER_VM3=1 to run Phase -1 + Phase 0 + Phase 0.5 only, then exit
 # (deploy VM3 workers, pause rollout, observe before VM2/VM1). Unset for a normal full rollout.
 #
+# Phase -1 (PostgreSQL max_connections) SSH to PROD_DB_HOST retries on transient failures
+# (DB_SSH_PREFLIGHT_ATTEMPTS, DB_SSH_PREFLIGHT_INITIAL_SLEEP). Set SKIP_DB_SSH_PREFLIGHT=1 to bypass.
+#
 # Deploy without GitHub: ./scripts/release/package-release-artifact.sh then
 #   LOCAL_ARTIFACT_PATH=$PWD/releases/chatapp-<sha>.tar.gz DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>
 # SSH: PROD_USER defaults to ubuntu (DB + app hosts); override only if your hosts use another login.
@@ -458,16 +461,37 @@ run_preflight_db_check() {
   echo "=== Phase -1: Pre-flight PostgreSQL check ==="
   echo "Verifying PostgreSQL max_connections is set for per-VM PgBouncer architecture..."
   PROD_DB_HOST="${PROD_DB_HOST:-130.245.136.21}"
-  set +e
-  # shellcheck disable=SC2086
-  CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ${DEPLOY_SSH_EXTRA_OPTS} "${PROD_USER}@${PROD_DB_HOST}" \
-    "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null")
-  SSH_EXIT=$?
-  set -e
+  # GitHub runners sometimes see sshd close during KEX (MaxStartups / brief overload). Retry before failing the deploy.
+  DB_SSH_PREFLIGHT_ATTEMPTS="${DB_SSH_PREFLIGHT_ATTEMPTS:-8}"
+  DB_SSH_PREFLIGHT_INITIAL_SLEEP="${DB_SSH_PREFLIGHT_INITIAL_SLEEP:-2}"
+  CURRENT_MAX=""
+  SSH_EXIT=1
+  delay="${DB_SSH_PREFLIGHT_INITIAL_SLEEP}"
+  for attempt in $(seq 1 "${DB_SSH_PREFLIGHT_ATTEMPTS}"); do
+    set +e
+    # shellcheck disable=SC2086
+    CURRENT_MAX=$(ssh -o BatchMode=yes -o ConnectTimeout=20 -o ConnectionAttempts=1 \
+      ${DEPLOY_SSH_EXTRA_OPTS} "${PROD_USER}@${PROD_DB_HOST}" \
+      "sudo -u postgres psql -qAt -c 'SHOW max_connections;' 2>/dev/null")
+    SSH_EXIT=$?
+    set -e
+    if [ "${SSH_EXIT}" -eq 0 ]; then
+      break
+    fi
+    if [ "${attempt}" -lt "${DB_SSH_PREFLIGHT_ATTEMPTS}" ]; then
+      echo "WARN: SSH to DB ${PROD_DB_HOST} failed (exit ${SSH_EXIT}), attempt ${attempt}/${DB_SSH_PREFLIGHT_ATTEMPTS}; retrying in ${delay}s..."
+      sleep "${delay}"
+      # capped exponential backoff
+      if [ "${delay}" -lt 30 ]; then
+        delay=$(( delay * 2 ))
+        [ "${delay}" -gt 30 ] && delay=30
+      fi
+    fi
+  done
   if [ "${SSH_EXIT}" -ne 0 ]; then
-    echo "ERROR: SSH connection to DB host ${PROD_DB_HOST} failed (exit code ${SSH_EXIT})."
-    echo "This usually means host key verification failed or SSH is not properly configured."
-    echo "Check that ${PROD_DB_HOST} is in known_hosts and the SSH key can access the host."
+    echo "ERROR: SSH connection to DB host ${PROD_DB_HOST} failed after ${DB_SSH_PREFLIGHT_ATTEMPTS} attempts (last exit code ${SSH_EXIT})."
+    echo "Common causes: sshd rate limits (MaxStartups), fail2ban, transient load, or network flap from the runner."
+    echo "Also verify ${PROD_DB_HOST} is reachable on port 22, DEPLOY_SSH_KEY is authorized, and SSH_KNOWN_HOSTS matches this host (see deploy/README.md)."
     exit 1
   fi
   if [ -z "${CURRENT_MAX}" ]; then

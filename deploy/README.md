@@ -137,6 +137,8 @@ One-shot helper (scans host keys, then uploads):
 
 Use `--env repo` for repository-level secrets only, or `--env all` to push the same key and known_hosts to both environments. `--dry-run` prints the `gh` invocations without calling GitHub or `ssh-keyscan`.
 
+**Prod DB SSH from Actions:** `deploy-prod-multi.sh` Phase -1 SSHs to `PROD_DB_HOST` (default in inventory). GitHub-hosted runners occasionally see `kex_exchange_identification: Connection closed by remote host` when `sshd` is briefly overloaded or rate-limited; the workflow and script retry with backoff. Override with `DB_SSH_PREFLIGHT_ATTEMPTS` / `DB_SSH_PREFLIGHT_INITIAL_SLEEP`, or set `SKIP_DB_SSH_PREFLIGHT=1` only for emergencies.
+
 Equivalent manual commands:
 
 ```bash
