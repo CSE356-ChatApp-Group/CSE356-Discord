@@ -28,7 +28,10 @@ const {
   channelRecentZsetEnabled,
   WS_RECENT_CONNECT_TTL_SECONDS,
 } = require('../../websocket/recentConnect');
-const { resolveRecentConnectTargets } = require('./channelRecentConnectTargets');
+const {
+  resolveRecentConnectTargets,
+  invalidateRecentConnectTargetsCache,
+} = require('./channelRecentConnectTargets');
 const logger = require('../../utils/logger');
 const {
   fanoutRecipientsHistogram,
@@ -337,5 +340,6 @@ module.exports = {
   getChannelUserFanoutTargetKeys,
   invalidateChannelUserFanoutTargetsCache,
   invalidateCommunityChannelUserFanoutTargetsCache,
+  invalidateRecentConnectTargetsCache,
   getCommunityChannelIds,
 };

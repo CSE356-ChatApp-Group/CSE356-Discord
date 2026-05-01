@@ -50,6 +50,11 @@ function writeRecentConnectTargetsCache(channelId: string, targets: string[]) {
   });
 }
 
+function invalidateRecentConnectTargetsCache(channelId: string) {
+  if (typeof channelId !== 'string' || !channelId) return;
+  recentConnectTargetsCache.delete(recentConnectTargetsCacheKey(channelId));
+}
+
 /** Sequential MGET batches — avoids firing dozens of MGETs at once (Redis single-thread + ioredis). */
 async function mgetKeyBatches(keys: string[], batchSize: number): Promise<(string | null)[]> {
   if (!keys.length) return [];
@@ -172,5 +177,7 @@ async function resolveRecentConnectTargets(channelId: string, targets: string[])
   }
 }
 
-module.exports = { resolveRecentConnectTargets };
-
+module.exports = {
+  resolveRecentConnectTargets,
+  invalidateRecentConnectTargetsCache,
+};

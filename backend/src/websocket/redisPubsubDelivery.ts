@@ -75,6 +75,14 @@ function createRedisPubsubDelivery(ctx) {
     }
   }
 
+  function isDuplicateSuppressionOnly(reasonCounts) {
+    if (!reasonCounts || typeof reasonCounts !== 'object') return false;
+    const entries = Object.entries(reasonCounts)
+      .filter(([, count]) => Number(count) > 0);
+    if (entries.length === 0) return false;
+    return entries.every(([reason]) => reason === 'dedupe_recent_delivery');
+  }
+
   async function userfeedRecoveryAfterStaleTopicMap(channel, parsed, userIds) {
     if (!userIds.length || parsed === null || typeof parsed !== "object") return false;
     const ev = parsed.event;
@@ -311,6 +319,30 @@ function createRedisPubsubDelivery(ctx) {
       && parsedEvent.startsWith("message:")
       && (channelType === "channel" || channelType === "conversation");
     if (isReliableChannelMsg) {
+      if (deliveredCount === 0 && isDuplicateSuppressionOnly(reasonCounts)) {
+        if (logger.isLevelEnabled("debug")) {
+          const messageId =
+            parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+              ? parsed.data
+              : null;
+          const resolvedMessageId = messageId?.id || messageId?.messageId || messageId?.message_id || null;
+          logger.debug(
+            {
+              event: "ws.realtime_delivery_deduped",
+              channel,
+              channelType,
+              parsedEvent,
+              messageId: typeof resolvedMessageId === "string" ? resolvedMessageId : null,
+              recipientCount,
+              reasonCounts,
+              delivery_target_kind: channelType,
+              delivery_path: "live_pubsub",
+            },
+            "Reliable realtime message delivery skipped because another path already sent the same payload",
+          );
+        }
+        return;
+      }
       let recovered = false;
       if (deliveredCount === 0 && staleTopicRecoveryUserIds.length > 0 && parsed !== null) {
         recovered = await userfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);

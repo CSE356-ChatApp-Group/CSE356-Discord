@@ -7,6 +7,7 @@ function createSubscriptionManager({
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
   markChannelRecentConnect,
+  invalidateRecentConnectTargetsCache,
 }) {
   function subscribeCommunityClient(ws, communityId) {
     if (typeof communityId !== "string" || !communityId) return;
@@ -64,7 +65,10 @@ function createSubscriptionManager({
       ws._explicitChannelUnsub?.delete(redisChannel);
       const uid = ws._userId;
       if (uid) {
-        markChannelRecentConnect(uid, redisChannel.slice("channel:".length)).catch(() => {});
+        const channelId = redisChannel.slice("channel:".length);
+        markChannelRecentConnect(uid, channelId)
+          .then(() => invalidateRecentConnectTargetsCache?.(channelId))
+          .catch(() => {});
       }
     }
   }

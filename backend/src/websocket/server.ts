@@ -310,6 +310,9 @@ const { createRecentDisconnectHelpers } = require("./recentDisconnect");
 const { createPresenceActivityHelpers } = require("./presenceActivity");
 const { createChannelAclHelpers } = require("./channelAcl");
 const { createBootstrapSubscriptionsHelpers } = require("./bootstrapSubscriptions");
+const {
+  invalidateRecentConnectTargetsCache,
+} = require("../messages/fanout/channelRealtimeFanout");
 
 const {
   recordRecentDisconnect,
@@ -372,6 +375,7 @@ const {
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
   markChannelRecentConnect,
+  invalidateRecentConnectTargetsCache,
 });
 const { parseChannelKey, isAllowedChannel } = createChannelAclHelpers({
   query,
@@ -525,6 +529,7 @@ const {
   resolvedWsRuntimeConfig,
   warmWsAclCacheFromChannelList,
   markChannelRecentConnect,
+  invalidateRecentConnectTargetsCache,
   subscribeClient,
   subscribeCommunityClient,
   parseChannelKey,

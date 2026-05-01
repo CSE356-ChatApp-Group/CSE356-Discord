@@ -74,12 +74,14 @@ const {
   getChannelUserFanoutTargetKeys,
   invalidateChannelUserFanoutTargetsCache,
   invalidateCommunityChannelUserFanoutTargetsCache,
+  invalidateRecentConnectTargetsCache,
 } = require('../src/messages/fanout/channelRealtimeFanout') as {
   publishChannelMessageCreated: (channelId: string, envelope: Record<string, unknown>) => Promise<void>;
   publishChannelMessageRecentUserBridge: (channelId: string, envelope: Record<string, unknown>) => Promise<{ targetCount: number }>;
   getChannelUserFanoutTargetKeys: (channelId: string) => Promise<string[]>;
   invalidateChannelUserFanoutTargetsCache: (channelId: string) => Promise<void>;
   invalidateCommunityChannelUserFanoutTargetsCache: (communityId: string) => Promise<void>;
+  invalidateRecentConnectTargetsCache: (channelId: string) => void;
 };
 
 describe('channelRealtimeFanout', () => {
@@ -321,6 +323,44 @@ describe('channelRealtimeFanout', () => {
         recentTargets: ['user:active-user'],
       });
       expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+    }
+  });
+
+  it('publishChannelMessageCreated recent_connect invalidation refreshes stale target cache after a new channel recent-connect mark', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-recent-cache-refresh';
+    try {
+      redis.mget
+        .mockResolvedValueOnce([null, null])
+        .mockResolvedValueOnce([null])
+        .mockResolvedValueOnce([JSON.stringify({ v: 2, u: ['a', 'b'] }), '0']);
+      redis.zrangebyscore
+        .mockResolvedValueOnce(['a'])
+        .mockResolvedValueOnce(['a', 'b']);
+      query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
+
+      await publishChannelMessageCreated(ch, { event: 'message:created', data: { id: 'm1' } });
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+      ].sort());
+
+      fanout.publish.mockClear();
+      enqueuePendingMessageForUsers.mockClear();
+      invalidateRecentConnectTargetsCache(ch);
+
+      await publishChannelMessageCreated(ch, { event: 'message:created', data: { id: 'm2' } });
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+        userFeedRedisChannelForUserId('b'),
+      ].sort());
+      expect(redis.zrangebyscore).toHaveBeenCalledTimes(2);
     } finally {
       if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
       else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;

@@ -13,6 +13,7 @@ function createBootstrapSubscriptionsHelpers({
   resolvedWsRuntimeConfig,
   warmWsAclCacheFromChannelList,
   markChannelRecentConnect,
+  invalidateRecentConnectTargetsCache,
   subscribeClient,
   subscribeCommunityClient,
   parseChannelKey,
@@ -244,7 +245,9 @@ function createBootstrapSubscriptionsHelpers({
     const channelTopics = channels.filter((ch) => ch.startsWith("channel:"));
     if (channelTopics.length > 0) {
       const zaddPromises = channelTopics.map((channel) =>
-        markChannelRecentConnect(userId, channel.slice("channel:".length)).catch(() => {}));
+        markChannelRecentConnect(userId, channel.slice("channel:".length))
+          .then(() => invalidateRecentConnectTargetsCache?.(channel.slice("channel:".length)))
+          .catch(() => {}));
       await Promise.allSettled(zaddPromises);
     }
 
