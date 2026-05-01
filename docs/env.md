@@ -2,7 +2,7 @@
 
 Status: operational
 Owner: platform-operations
-Last reviewed: 2026-04-30
+Last reviewed: 2026-05-01
 
 **Maintainers:** When you add or change a tunable, update [`.env.example`](../.env.example), this file, and (if staging/prod must pin it) [`deploy/env/`](../deploy/env/). See **[`docs/README.md`](README.md)** for the full maintenance checklist and single sources of truth.
 
@@ -179,6 +179,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `ATTACHMENT_GET_CACHE_TTL_SECS` | In-process LRU-ish TTL (seconds) for attachment metadata on `GET /attachments/:id` (default **30**; **`≤0`** disables). |
 | **HTTP / caches** | |
 | `COMMUNITIES_LIST_CACHE_TTL_SECS`, `COMMUNITIES_PAGED_CACHE_TTL_SECS`, `CHANNELS_LIST_CACHE_TTL_SECS`, `COMMUNITIES_VERSION_CACHE_TTL_SECS` | List / paged list / channel list / version-key cache TTLs (paged communities default **60** s in code; list defaults **300** unless overridden; version-key TTL default **2592000** so version keys do not live forever) |
+| `CONVERSATIONS_LIST_CACHE_TTL_SECS` | Redis JSON cache for **`GET /api/v1/conversations`** (`conversations:list:{userId}` + `stale:` companion). Default **60** s (`conversationsRouterListCache.ts`). DM **`message:*`** fanout deletes fresh **and** stale keys via `invalidateConversationsListCaches` so ordering/metadata stays coherent without pinning an ultra-short TTL. Lower (e.g. **15**) only if you must minimize REST staleness for clients that ignore realtime updates. |
 | `MSG_TARGET_CACHE_TTL_SECS`, `CHANNEL_COMPAT_CACHE_TTL_SECS` | Short TTL caches for message access targets and channel compat checks (`accessCaches.ts`; defaults **30** / **60** s). |
 | `COMMUNITY_COUNT_RECONCILE_INTERVAL_MS`, `COMMUNITY_COUNT_RECONCILE_BATCH_SIZE`, `COMMUNITY_COUNT_RECONCILE_LOCK_TTL_MS`, `COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE` | Background reconcile of denormalized community member counts (`communityMemberCount.ts`; defaults **300000** ms interval, batch **100**, lock TTL tied to interval, pool-waiting guard **2**). |
 | `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS`, `COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT` | `GET /communities` unread-count hydration timeout plus concurrency cap before serving the normal base list with `unread_channel_count=0`; watch route p95 and `endpoint_list_cache_bypass_total{endpoint="communities",reason=~"pressure|timeout"}` |

@@ -5,7 +5,10 @@
 const redis = require('../db/redis');
 const { staleCacheKey } = require('../utils/distributedSingleflight');
 
-const CONVERSATIONS_CACHE_TTL_SECS = 15;
+// Aligns with CHANNELS_LIST_CACHE_TTL_SECS pattern (channelRouterShared.ts). Fanout invalidates on DM activity.
+const _convListTtl = parseInt(process.env.CONVERSATIONS_LIST_CACHE_TTL_SECS || '60', 10);
+const CONVERSATIONS_CACHE_TTL_SECS =
+  Number.isFinite(_convListTtl) && _convListTtl > 0 ? _convListTtl : 60;
 
 function conversationsCacheKey(userId: string) {
   return `conversations:list:${userId}`;

@@ -17,6 +17,7 @@ const {
   wrapFanoutPayload,
   fanoutPublishedAt,
 } = require("../realtimePayload");
+const { invalidateConversationsListCaches } = require("../conversationsRouterListCache");
 const { enqueuePendingMessageForUsers } = require("../pending/realtimePending");
 const {
   publishUserFeedTargets,
@@ -241,9 +242,9 @@ async function publishConversationEventNow(
   if (event === "read:updated") return undefined;
 
   if (userIds.length > 0) {
-    redis
-      .del(...userIds.map((uid) => `conversations:list:${uid}`))
-      .catch(() => {});
+    // Bust fresh + stale singleflight keys (not just conversations:list — see conversationsRouterListCache).
+    // Best-effort: never block WebSocket delivery on list-cache Redis.
+    void invalidateConversationsListCaches(userIds).catch(() => {});
   }
 
   return fanoutPublishedAt(payload);

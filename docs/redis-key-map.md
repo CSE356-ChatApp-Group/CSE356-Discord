@@ -48,6 +48,17 @@ Channel list TTL: **`CHANNELS_LIST_CACHE_TTL_SECS`** (`channelRouterShared.ts`, 
 
 ---
 
+## Conversations list cache
+
+| Pattern | Purpose |
+|---------|---------|
+| `conversations:list:<userId>` | `GET /api/v1/conversations` JSON (`conversationsRouterListCache.ts`) |
+| `stale:conversations:list:<userId>` | Stale-while-revalidate companion (`distributedSingleflight.ts`) |
+
+TTL: **`CONVERSATIONS_LIST_CACHE_TTL_SECS`** (default **60** s). Invalidation: `invalidateConversationsListCaches` on membership changes; DM **`message:*`** fanout calls the same helper (not a raw `DEL` of the fresh key only).
+
+---
+
 ## Unread acceleration (channel counters)
 
 | Pattern | Purpose |
