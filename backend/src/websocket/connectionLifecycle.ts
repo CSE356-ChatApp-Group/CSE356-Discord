@@ -31,6 +31,8 @@ function createConnectionLifecycle({
   handleClientMessage,
   refreshConnectionTtls,
   upsertConnectionState,
+  getConnectionCount,
+  publishUserConnectionState,
   cancelPendingPresenceRecompute,
   recomputeUserPresence,
   WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
@@ -293,6 +295,7 @@ function createConnectionLifecycle({
         cancelPendingPresenceRecompute(user.id);
         await refreshConnectionTtls(user.id, ws._connectionId, { active: false });
         await recomputeUserPresence(user.id);
+        await publishUserConnectionState(user.id);
       })
       .catch((err) =>
         logger.warn({ err, userId: user.id }, "WS presence setup failed"),
@@ -325,8 +328,15 @@ function createConnectionLifecycle({
           .catch((err) => {
             logger.warn({ err, userId: user.id }, "WS ready guard: user-channel resubscribe failed");
           })
-          .then(() => {
+          .then(async () => {
             if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) return;
+            await Promise.resolve(ws._presenceInitPromise).catch(() => {});
+            let connectionCount = 1;
+            try {
+              connectionCount = await getConnectionCount(user.id);
+            } catch (err) {
+              logger.warn({ err, userId: user.id }, "WS ready connection count lookup failed");
+            }
             ws._lastDataFrameAt = Date.now();
             ws.send(
               JSON.stringify({
@@ -334,6 +344,8 @@ function createConnectionLifecycle({
                 data: {
                   bootstrapComplete: true,
                   subscriptionsHydrated: true,
+                  connectionCount,
+                  hasOtherConnections: connectionCount > 1,
                   connectedAt: ws._connectedAt,
                   readyAt: ws._lastDataFrameAt,
                 },

@@ -2,21 +2,21 @@
  * WebSocket event dispatch for the chat store (extracted from chatStore.ts).
  */
 
-import { invalidateApiCache } from '../lib/api';
-import { wsManager } from '../lib/ws';
-import { useAuthStore } from './authStore';
-import { channelCommunityId } from './chatStoreChannelHelpers';
-import { removeCommunityState } from './chatStoreCommunityRemoval';
-import { loadedHistoryIncludesLatest } from './chatStorePagination';
+import { invalidateApiCache } from "../lib/api";
+import { wsManager } from "../lib/ws";
+import { useAuthStore } from "./authStore";
+import { channelCommunityId } from "./chatStoreChannelHelpers";
+import { removeCommunityState } from "./chatStoreCommunityRemoval";
+import { loadedHistoryIncludesLatest } from "./chatStorePagination";
 import {
   countUnreadChannels,
   patchChannelRowById,
-} from './chatStoreUnreadModel';
-import { queueMarkMessageRead } from './chatStoreReadReceipts';
-import { upsertMessageChronologically } from './chatStoreMessageList';
-import { upsertChannel } from './chatStoreChannelHelpers';
-import { hydrateAuthorFromSession } from './chatStoreHydrate';
-import type { ChatStoreGet, ChatStoreSet, Entity } from './chatStoreTypes';
+} from "./chatStoreUnreadModel";
+import { queueMarkMessageRead } from "./chatStoreReadReceipts";
+import { upsertMessageChronologically } from "./chatStoreMessageList";
+import { upsertChannel } from "./chatStoreChannelHelpers";
+import { hydrateAuthorFromSession } from "./chatStoreHydrate";
+import type { ChatStoreGet, ChatStoreSet, Entity } from "./chatStoreTypes";
 
 /** Runtime WS payloads vary by `event`; keep loose `data` and narrow inside cases. */
 type WsEventPayload = { event: string; data?: any };
@@ -41,7 +41,7 @@ function dispatchChatStoreWsEvent(
 ): void {
   const ev = event as WsEventPayload;
   switch (ev.event) {
-    case 'message:created': {
+    case "message:created": {
       const msg = hydrateAuthorFromSession(ev.data);
       const me = useAuthStore.getState().user;
       const key = msg.channel_id || msg.conversation_id;
@@ -76,13 +76,16 @@ function dispatchChatStoreWsEvent(
               lastMessageId: msg.id,
               last_message_author_id: msg.author_id,
               lastMessageAuthorId: msg.author_id,
-              last_message_at: msg.created_at || msg.createdAt || channel.last_message_at,
-              lastMessageAt: msg.created_at || msg.createdAt || channel.lastMessageAt,
+              last_message_at:
+                msg.created_at || msg.createdAt || channel.last_message_at,
+              lastMessageAt:
+                msg.created_at || msg.createdAt || channel.lastMessageAt,
               has_new_activity: !isActive,
               hasNewActivity: !isActive,
-              unread_message_count: atLiveTail && isActive
-                ? 0
-                : (channel.unread_message_count ?? 0) + 1,
+              unread_message_count:
+                atLiveTail && isActive
+                  ? 0
+                  : (channel.unread_message_count ?? 0) + 1,
             };
             if (!markReadInSamePass) return row;
             return {
@@ -98,14 +101,26 @@ function dispatchChatStoreWsEvent(
             msg.channel_id && s.activeChannel?.id === msg.channel_id
               ? {
                   ...s.activeChannel,
-                  updated_at: msg.created_at || msg.createdAt || s.activeChannel.updated_at,
-                  updatedAt: msg.created_at || msg.createdAt || s.activeChannel.updatedAt,
+                  updated_at:
+                    msg.created_at ||
+                    msg.createdAt ||
+                    s.activeChannel.updated_at,
+                  updatedAt:
+                    msg.created_at ||
+                    msg.createdAt ||
+                    s.activeChannel.updatedAt,
                   last_message_id: msg.id,
                   lastMessageId: msg.id,
                   last_message_author_id: msg.author_id,
                   lastMessageAuthorId: msg.author_id,
-                  last_message_at: msg.created_at || msg.createdAt || s.activeChannel.last_message_at,
-                  lastMessageAt: msg.created_at || msg.createdAt || s.activeChannel.lastMessageAt,
+                  last_message_at:
+                    msg.created_at ||
+                    msg.createdAt ||
+                    s.activeChannel.last_message_at,
+                  lastMessageAt:
+                    msg.created_at ||
+                    msg.createdAt ||
+                    s.activeChannel.lastMessageAt,
                   ...(markReadInSamePass && msg.id
                     ? {
                         my_last_read_message_id: msg.id,
@@ -120,7 +135,11 @@ function dispatchChatStoreWsEvent(
           const targetCh = nextChannels.find((c) => c.id === msg.channel_id);
           const communityId = targetCh?.community_id || targetCh?.communityId;
           if (communityId) {
-            const unreadCount = countUnreadChannels(nextChannels, me?.id, s.activeChannel?.id);
+            const unreadCount = countUnreadChannels(
+              nextChannels,
+              me?.id,
+              s.activeChannel?.id,
+            );
             nextCommunities = s.communities.map((community) =>
               community.id === communityId
                 ? {
@@ -132,7 +151,7 @@ function dispatchChatStoreWsEvent(
                     has_new_activity: s.activeCommunity?.id !== communityId,
                     hasNewActivity: s.activeCommunity?.id !== communityId,
                   }
-                : community
+                : community,
             );
             if (s.activeCommunity?.id === communityId) {
               nextActiveCommunity = {
@@ -155,9 +174,12 @@ function dispatchChatStoreWsEvent(
           const next = [...s.conversations];
           const idx = next.findIndex((c) => c.id === msg.conversation_id);
           const viewingDm = s.activeConv?.id === msg.conversation_id;
-          const dmAtLiveTail = Boolean(viewingDm && msg.id && !paginationState?.hasNewer);
+          const dmAtLiveTail = Boolean(
+            viewingDm && msg.id && !paginationState?.hasNewer,
+          );
           if (idx !== -1) {
-            const updatedAt = msg.created_at || msg.createdAt || new Date().toISOString();
+            const updatedAt =
+              msg.created_at || msg.createdAt || new Date().toISOString();
             const updated = {
               ...next[idx],
               updated_at: updatedAt,
@@ -170,9 +192,10 @@ function dispatchChatStoreWsEvent(
               lastMessageAt: updatedAt,
               has_new_activity: !viewingDm,
               hasNewActivity: !viewingDm,
-              unread_message_count: dmAtLiveTail && viewingDm
-                ? 0
-                : (next[idx].unread_message_count ?? 0) + 1,
+              unread_message_count:
+                dmAtLiveTail && viewingDm
+                  ? 0
+                  : (next[idx].unread_message_count ?? 0) + 1,
               ...(dmAtLiveTail
                 ? {
                     my_last_read_message_id: msg.id,
@@ -190,19 +213,28 @@ function dispatchChatStoreWsEvent(
             msg.conversation_id && s.activeConv?.id === msg.conversation_id
               ? {
                   ...s.activeConv,
-                  updated_at: msg.created_at || msg.createdAt || s.activeConv.updated_at,
-                  updatedAt: msg.created_at || msg.createdAt || s.activeConv.updatedAt,
+                  updated_at:
+                    msg.created_at || msg.createdAt || s.activeConv.updated_at,
+                  updatedAt:
+                    msg.created_at || msg.createdAt || s.activeConv.updatedAt,
                   last_message_id: msg.id,
                   lastMessageId: msg.id,
                   last_message_author_id: msg.author_id,
                   lastMessageAuthorId: msg.author_id,
-                  last_message_at: msg.created_at || msg.createdAt || s.activeConv.last_message_at,
-                  lastMessageAt: msg.created_at || msg.createdAt || s.activeConv.lastMessageAt,
+                  last_message_at:
+                    msg.created_at ||
+                    msg.createdAt ||
+                    s.activeConv.last_message_at,
+                  lastMessageAt:
+                    msg.created_at ||
+                    msg.createdAt ||
+                    s.activeConv.lastMessageAt,
                   has_new_activity: !viewingDm,
                   hasNewActivity: !viewingDm,
-                  unread_message_count: dmAtLiveTail && viewingDm
-                    ? 0
-                    : (s.activeConv.unread_message_count ?? 0) + 1,
+                  unread_message_count:
+                    dmAtLiveTail && viewingDm
+                      ? 0
+                      : (s.activeConv.unread_message_count ?? 0) + 1,
                   ...(dmAtLiveTail
                     ? {
                         my_last_read_message_id: msg.id,
@@ -228,10 +260,10 @@ function dispatchChatStoreWsEvent(
 
       const st = get();
       if (
-        msg.channel_id
-        && st.activeChannel?.id === msg.channel_id
-        && msg.id
-        && loadedHistoryIncludesLatest(st, msg.channel_id)
+        msg.channel_id &&
+        st.activeChannel?.id === msg.channel_id &&
+        msg.id &&
+        loadedHistoryIncludesLatest(st, msg.channel_id)
       ) {
         queueMarkMessageRead(msg.id, {
           channelId: msg.channel_id,
@@ -240,10 +272,10 @@ function dispatchChatStoreWsEvent(
         });
       }
       if (
-        msg.conversation_id
-        && st.activeConv?.id === msg.conversation_id
-        && msg.id
-        && loadedHistoryIncludesLatest(st, msg.conversation_id)
+        msg.conversation_id &&
+        st.activeConv?.id === msg.conversation_id &&
+        msg.id &&
+        loadedHistoryIncludesLatest(st, msg.conversation_id)
       ) {
         queueMarkMessageRead(msg.id, {
           conversationId: msg.conversation_id,
@@ -253,21 +285,23 @@ function dispatchChatStoreWsEvent(
       }
       break;
     }
-    case 'message:updated': {
+    case "message:updated": {
       const msg = hydrateAuthorFromSession(ev.data);
       const key = msg.channel_id || msg.conversation_id;
-      set(s => ({
+      set((s) => ({
         messages: {
           ...s.messages,
-          [key]: (s.messages[key] || []).map(m => m.id === msg.id ? msg : m),
+          [key]: (s.messages[key] || []).map((m) =>
+            m.id === msg.id ? msg : m,
+          ),
         },
       }));
       break;
     }
-    case 'message:deleted': {
+    case "message:deleted": {
       // Remove from all lists (we don't know which key without the full msg)
       const { id } = ev.data;
-      set(s => {
+      set((s) => {
         const messages = {};
         for (const [k, msgs] of Object.entries(s.messages)) {
           messages[k] = (msgs as Entity[]).filter((m) => m.id !== id);
@@ -276,7 +310,7 @@ function dispatchChatStoreWsEvent(
       });
       break;
     }
-    case 'presence:updated': {
+    case "presence:updated": {
       const { userId, status, awayMessage } = ev.data;
       get().setPresence(userId, status, awayMessage ?? null);
       const auth = useAuthStore.getState();
@@ -284,15 +318,22 @@ function dispatchChatStoreWsEvent(
         auth.setUser({
           ...auth.user,
           status,
-          awayMessage: status === 'away' ? (awayMessage ?? null) : null,
+          awayMessage: status === "away" ? (awayMessage ?? null) : null,
         });
       }
       break;
     }
-    case 'read:updated': {
-      const { channelId, conversationId, userId, lastReadMessageId, lastReadAt } = ev.data || {};
+    case "read:updated": {
+      const {
+        channelId,
+        conversationId,
+        userId,
+        lastReadMessageId,
+        lastReadAt,
+      } = ev.data || {};
       if (!userId || (!conversationId && !channelId)) break;
       const me = useAuthStore.getState().user;
+      console.log("received read");
       if (channelId && me?.id === userId) {
         const pre = get().channels.find((c) => c.id === channelId);
         const preCommunityId = channelCommunityId(pre || {});
@@ -309,12 +350,20 @@ function dispatchChatStoreWsEvent(
           };
           const idx = s.channels.findIndex((c) => c.id === channelId);
           const nextChannels =
-            idx === -1 ? s.channels : patchChannelRowById(s.channels, channelId, rowPatch);
+            idx === -1
+              ? s.channels
+              : patchChannelRowById(s.channels, channelId, rowPatch);
           const communityId =
             idx === -1
               ? (s.activeCommunity?.id ?? null)
-              : (s.channels[idx].community_id || s.channels[idx].communityId || s.activeCommunity?.id);
-          const unreadCount = countUnreadChannels(nextChannels, me?.id, s.activeChannel?.id);
+              : s.channels[idx].community_id ||
+                s.channels[idx].communityId ||
+                s.activeCommunity?.id;
+          const unreadCount = countUnreadChannels(
+            nextChannels,
+            me?.id,
+            s.activeChannel?.id,
+          );
           return {
             channels: nextChannels,
             activeChannel:
@@ -334,7 +383,7 @@ function dispatchChatStoreWsEvent(
                         has_unread_channels: unreadCount > 0,
                         hasUnreadChannels: unreadCount > 0,
                       }
-                    : community
+                    : community,
                 )
               : s.communities,
             activeCommunity:
@@ -384,56 +433,60 @@ function dispatchChatStoreWsEvent(
           conversations: next,
           activeConv:
             s.activeConv?.id === conversationId
-              ? (me?.id === userId
-                  ? {
-                      ...s.activeConv,
-                      my_last_read_message_id: lastReadMessageId,
-                      myLastReadMessageId: lastReadMessageId,
-                      my_last_read_at: lastReadAt,
-                      myLastReadAt: lastReadAt,
-                      unread_message_count: 0,
-                      has_new_activity: false,
-                      hasNewActivity: false,
-                    }
-                  : {
-                      ...s.activeConv,
-                      other_last_read_message_id: lastReadMessageId,
-                      otherLastReadMessageId: lastReadMessageId,
-                      other_last_read_at: lastReadAt,
-                      otherLastReadAt: lastReadAt,
-                    })
+              ? me?.id === userId
+                ? {
+                    ...s.activeConv,
+                    my_last_read_message_id: lastReadMessageId,
+                    myLastReadMessageId: lastReadMessageId,
+                    my_last_read_at: lastReadAt,
+                    myLastReadAt: lastReadAt,
+                    unread_message_count: 0,
+                    has_new_activity: false,
+                    hasNewActivity: false,
+                  }
+                : {
+                    ...s.activeConv,
+                    other_last_read_message_id: lastReadMessageId,
+                    otherLastReadMessageId: lastReadMessageId,
+                    other_last_read_at: lastReadAt,
+                    otherLastReadAt: lastReadAt,
+                  }
               : s.activeConv,
         };
       });
       break;
     }
-    case 'community:role_updated': {
+    case "community:role_updated": {
       const { communityId, userId } = ev.data || {};
       if (!communityId || !userId) break;
       if (get().activeCommunity?.id === communityId) {
-        get().fetchMembers(communityId).catch(() => {});
+        get()
+          .fetchMembers(communityId)
+          .catch(() => {});
       }
       if (useAuthStore.getState().user?.id === userId) {
-        invalidateApiCache('/communities');
-        get().fetchCommunities().catch(() => {});
+        invalidateApiCache("/communities");
+        get()
+          .fetchCommunities()
+          .catch(() => {});
       }
       break;
     }
-    case 'community:member_joined':
-    case 'community:member_left': {
+    case "community:member_joined":
+    case "community:member_left": {
       const { communityId } = ev.data;
       if (get().activeCommunity?.id === communityId) {
         get().fetchMembers(communityId);
       }
       break;
     }
-    case 'community:deleted': {
+    case "community:deleted": {
       const { communityId } = ev.data || {};
       if (!communityId) break;
       set((s) => removeCommunityState(s, communityId));
       break;
     }
-    case 'channel:created': {
+    case "channel:created": {
       const channel = ev.data;
       if (!channel?.community_id && !channel?.communityId) break;
       const communityId = channel.community_id || channel.communityId;
@@ -446,30 +499,36 @@ function dispatchChatStoreWsEvent(
         }));
         setTimeout(() => {
           invalidateApiCache(`/channels?communityId=${communityId}`);
-          get().fetchChannels(communityId).catch(() => {});
+          get()
+            .fetchChannels(communityId)
+            .catch(() => {});
         }, 400);
       }
       break;
     }
-    case 'channel:updated': {
+    case "channel:updated": {
       const channel = ev.data || {};
       const communityId = channel.community_id || channel.communityId;
       const channelId = channel.id;
       if (!communityId || !channelId) break;
       const explicitAccess = channel.can_access ?? channel.canAccess;
       set((s) => {
-        const previousChannel = s.channels.find((existing) => existing.id === channelId);
+        const previousChannel = s.channels.find(
+          (existing) => existing.id === channelId,
+        );
         const previousAccess =
-          previousChannel?.can_access
-          ?? previousChannel?.canAccess
-          ?? (!previousChannel?.is_private);
-        const accessChanged = explicitAccess !== undefined && previousAccess !== explicitAccess;
+          previousChannel?.can_access ??
+          previousChannel?.canAccess ??
+          !previousChannel?.is_private;
+        const accessChanged =
+          explicitAccess !== undefined && previousAccess !== explicitAccess;
 
         let nextMessages = s.messages;
         let nextPagination = s.messagePagination;
         if (accessChanged) {
           const { [channelId]: _removedMessages, ...restMessages } = s.messages;
-          const { [channelId]: _removedPagination, ...restPagination } = s.messagePagination;
+          const { [channelId]: _removedPagination, ...restPagination } =
+            s.messagePagination;
           nextMessages = restMessages;
           nextPagination = restPagination;
         }
@@ -481,12 +540,12 @@ function dispatchChatStoreWsEvent(
           }),
           activeChannel:
             s.activeChannel?.id === channelId
-              ? (explicitAccess === false
-                  ? null
-                  : {
-                      ...s.activeChannel,
-                      ...channel,
-                    })
+              ? explicitAccess === false
+                ? null
+                : {
+                    ...s.activeChannel,
+                    ...channel,
+                  }
               : s.activeChannel,
           messages: nextMessages,
           messagePagination: nextPagination,
@@ -494,42 +553,50 @@ function dispatchChatStoreWsEvent(
       });
       if (get().activeCommunity?.id === communityId) {
         invalidateApiCache(`/channels?communityId=${communityId}`);
-        get().fetchChannels(communityId).catch(() => {});
+        get()
+          .fetchChannels(communityId)
+          .catch(() => {});
       }
       break;
     }
-    case 'channel:deleted': {
+    case "channel:deleted": {
       const channelId = ev.data?.id;
       const communityId = ev.data?.community_id || ev.data?.communityId;
       if (!channelId) break;
       set((s) => {
         const { [channelId]: _removed, ...nextMessages } = s.messages;
-        const { [channelId]: _removedPagination, ...nextPagination } = s.messagePagination;
+        const { [channelId]: _removedPagination, ...nextPagination } =
+          s.messagePagination;
         return {
           channels: s.channels.filter((channel) => channel.id !== channelId),
-          activeChannel: s.activeChannel?.id === channelId ? null : s.activeChannel,
+          activeChannel:
+            s.activeChannel?.id === channelId ? null : s.activeChannel,
           messages: nextMessages,
           messagePagination: nextPagination,
         };
       });
       if (communityId && get().activeCommunity?.id === communityId) {
         invalidateApiCache(`/channels?communityId=${communityId}`);
-        get().fetchChannels(communityId).catch(() => {});
+        get()
+          .fetchChannels(communityId)
+          .catch(() => {});
       }
       break;
     }
-    case 'channel:membership_updated': {
+    case "channel:membership_updated": {
       const { communityId, channelId } = ev.data || {};
       if (channelId) {
         wsManager.subscribe(`channel:${channelId}`, selfRef);
       }
       if (communityId && get().activeCommunity?.id === communityId) {
         invalidateApiCache(`/channels?communityId=${communityId}`);
-        get().fetchChannels(communityId).catch(() => {});
+        get()
+          .fetchChannels(communityId)
+          .catch(() => {});
       }
       break;
     }
-    case 'community:channel_message': {
+    case "community:channel_message": {
       const { communityId, channelId } = ev.data || {};
       if (!communityId || !channelId) break;
 
@@ -559,11 +626,15 @@ function dispatchChatStoreWsEvent(
                   has_unread_channels: true,
                   hasUnreadChannels: true,
                   unread_channel_count: Math.max(
-                    Number(prev.unread_channel_count ?? prev.unreadChannelCount ?? 0),
+                    Number(
+                      prev.unread_channel_count ?? prev.unreadChannelCount ?? 0,
+                    ),
                     1,
                   ),
                   unreadChannelCount: Math.max(
-                    Number(prev.unread_channel_count ?? prev.unreadChannelCount ?? 0),
+                    Number(
+                      prev.unread_channel_count ?? prev.unreadChannelCount ?? 0,
+                    ),
                     1,
                   ),
                   has_new_activity: s.activeCommunity?.id !== communityId,
@@ -582,13 +653,17 @@ function dispatchChatStoreWsEvent(
                   hasUnreadChannels: true,
                   unread_channel_count: Math.max(
                     Number(
-                      s.activeCommunity.unread_channel_count ?? s.activeCommunity.unreadChannelCount ?? 0,
+                      s.activeCommunity.unread_channel_count ??
+                        s.activeCommunity.unreadChannelCount ??
+                        0,
                     ),
                     1,
                   ),
                   unreadChannelCount: Math.max(
                     Number(
-                      s.activeCommunity.unread_channel_count ?? s.activeCommunity.unreadChannelCount ?? 0,
+                      s.activeCommunity.unread_channel_count ??
+                        s.activeCommunity.unreadChannelCount ??
+                        0,
                     ),
                     1,
                   ),
@@ -601,7 +676,7 @@ function dispatchChatStoreWsEvent(
 
       break;
     }
-    case 'conversation:invited': {
+    case "conversation:invited": {
       const conversation = ev.data?.conversation;
       const conversationId = ev.data?.conversationId || conversation?.id;
       if (!conversationId) break;
@@ -609,12 +684,16 @@ function dispatchChatStoreWsEvent(
       wsManager.subscribe(`conversation:${conversationId}`, selfRef);
 
       if (!conversation) {
-        get().fetchConversations().catch(() => {});
+        get()
+          .fetchConversations()
+          .catch(() => {});
         break;
       }
 
       set((s) => {
-        const existing = s.conversations.find((conv) => conv.id === conversationId);
+        const existing = s.conversations.find(
+          (conv) => conv.id === conversationId,
+        );
 
         const updated = existing
           ? {
@@ -625,7 +704,9 @@ function dispatchChatStoreWsEvent(
           : conversation;
 
         const conversations = existing
-          ? s.conversations.map((conv) => (conv.id === conversationId ? updated : conv))
+          ? s.conversations.map((conv) =>
+              conv.id === conversationId ? updated : conv,
+            )
           : [updated, ...s.conversations];
 
         return {
@@ -635,14 +716,15 @@ function dispatchChatStoreWsEvent(
               ? {
                   ...s.activeConv,
                   ...updated,
-                  participants: updated.participants || s.activeConv.participants,
-              }
+                  participants:
+                    updated.participants || s.activeConv.participants,
+                }
               : s.activeConv,
         };
       });
       break;
     }
-    case 'conversation:participant_added': {
+    case "conversation:participant_added": {
       const conversation = ev.data?.conversation;
       const conversationId = ev.data?.conversationId || conversation?.id;
       if (!conversationId) break;
@@ -650,12 +732,16 @@ function dispatchChatStoreWsEvent(
       wsManager.subscribe(`conversation:${conversationId}`, selfRef);
 
       if (!conversation) {
-        get().fetchConversations().catch(() => {});
+        get()
+          .fetchConversations()
+          .catch(() => {});
         break;
       }
 
       set((s) => {
-        const existing = s.conversations.find((conv) => conv.id === conversationId);
+        const existing = s.conversations.find(
+          (conv) => conv.id === conversationId,
+        );
 
         const updated = existing
           ? {
@@ -666,7 +752,9 @@ function dispatchChatStoreWsEvent(
           : conversation;
 
         const conversations = existing
-          ? s.conversations.map((conv) => (conv.id === conversationId ? updated : conv))
+          ? s.conversations.map((conv) =>
+              conv.id === conversationId ? updated : conv,
+            )
           : [updated, ...s.conversations];
 
         return {
@@ -676,20 +764,21 @@ function dispatchChatStoreWsEvent(
               ? {
                   ...s.activeConv,
                   ...updated,
-                  participants: updated.participants || s.activeConv.participants,
-              }
+                  participants:
+                    updated.participants || s.activeConv.participants,
+                }
               : s.activeConv,
         };
       });
       break;
     }
-    case 'conversation:updated': {
+    case "conversation:updated": {
       const conversation = ev.data?.conversation;
       const conversationId = ev.data?.conversationId || conversation?.id;
       if (!conversationId || !conversation) break;
       set((s) => ({
         conversations: s.conversations.map((c) =>
-          c.id === conversationId ? { ...c, name: conversation.name } : c
+          c.id === conversationId ? { ...c, name: conversation.name } : c,
         ),
         activeConv:
           s.activeConv?.id === conversationId
@@ -698,7 +787,7 @@ function dispatchChatStoreWsEvent(
       }));
       break;
     }
-    case 'conversation:participant_left': {
+    case "conversation:participant_left": {
       const conversationId = ev.data?.conversationId;
       const leftUserId = ev.data?.leftUserId || ev.data?.userId;
       const me = useAuthStore.getState().user;
@@ -706,24 +795,37 @@ function dispatchChatStoreWsEvent(
 
       if (me?.id === leftUserId) {
         set((s) => ({
-          conversations: s.conversations.filter((conv) => conv.id !== conversationId),
+          conversations: s.conversations.filter(
+            (conv) => conv.id !== conversationId,
+          ),
           activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
-          activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
+          activeChannel:
+            s.activeConv?.id === conversationId ? null : s.activeChannel,
         }));
         break;
       }
 
       set((s) => {
         const updatedParticipants = (
-          s.conversations.find((conv) => conv.id === conversationId)?.participants || []
+          s.conversations.find((conv) => conv.id === conversationId)
+            ?.participants || []
         ).filter((participant) => participant.id !== leftUserId);
 
-        const otherParticipants = updatedParticipants.filter((p) => p.id !== me?.id);
-        if (otherParticipants.length === 0 && !s.conversations.find((conv) => conv.id === conversationId)?.is_group) {
+        const otherParticipants = updatedParticipants.filter(
+          (p) => p.id !== me?.id,
+        );
+        if (
+          otherParticipants.length === 0 &&
+          !s.conversations.find((conv) => conv.id === conversationId)?.is_group
+        ) {
           return {
-            conversations: s.conversations.filter((conv) => conv.id !== conversationId),
-            activeConv: s.activeConv?.id === conversationId ? null : s.activeConv,
-            activeChannel: s.activeConv?.id === conversationId ? null : s.activeChannel,
+            conversations: s.conversations.filter(
+              (conv) => conv.id !== conversationId,
+            ),
+            activeConv:
+              s.activeConv?.id === conversationId ? null : s.activeConv,
+            activeChannel:
+              s.activeConv?.id === conversationId ? null : s.activeChannel,
           };
         }
 
@@ -731,7 +833,7 @@ function dispatchChatStoreWsEvent(
           conversations: s.conversations.map((conv) =>
             conv.id === conversationId
               ? { ...conv, participants: updatedParticipants }
-              : conv
+              : conv,
           ),
           activeConv:
             s.activeConv?.id === conversationId

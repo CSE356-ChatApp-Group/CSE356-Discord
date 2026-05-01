@@ -38,6 +38,8 @@ class WsManager {
   private _reconnectAttempt: number;
   /** Frames queued while readyState === CONNECTING (subscribe must not be dropped). */
   private _pendingOutbound: string[];
+  /** Unknown defaults to true so startup/reconnect races preserve legacy read PUT behavior. */
+  private _hasOtherUserConnections: boolean;
 
   constructor() {
     this._ws         = null;
@@ -49,6 +51,7 @@ class WsManager {
     this._intentionalClose = false;
     this._reconnectAttempt = 0;
     this._pendingOutbound = [];
+    this._hasOtherUserConnections = true;
   }
 
   /** Re-send subscribe frames for every channel that still has listeners (idempotent server-side). */
@@ -89,6 +92,7 @@ class WsManager {
         // Server finished Redis bootstrap for this socket — resubscribe so we never
         // sit on a half-warmed subscription set during the first burst of messages.
         if (event?.event === 'ready') {
+          this._applyConnectionState(event.data);
           this._resendWatchedSubscriptions();
           this._serverReadyListeners.forEach((fn) => {
             try {
@@ -97,6 +101,9 @@ class WsManager {
               /* ignore subscriber errors */
             }
           });
+        }
+        if (event?.event === 'connections:updated') {
+          this._applyConnectionState(event.data);
         }
         // Notify global listeners
         this._globalListeners.forEach(fn => fn(event));
@@ -134,6 +141,7 @@ class WsManager {
     this._intentionalClose = true;
     this._pendingOutbound = [];
     this._reconnectAttempt = 0;
+    this._hasOtherUserConnections = true;
     clearTimeout(this._reconnectTimer);
     this._reconnectTimer = null;
     this._ws?.close();
@@ -161,6 +169,22 @@ class WsManager {
       }
       this._pendingOutbound.push(payload);
     }
+  }
+
+  private _applyConnectionState(data: any) {
+    if (!data || typeof data !== 'object') return;
+    if (typeof data.hasOtherConnections === 'boolean') {
+      this._hasOtherUserConnections = data.hasOtherConnections;
+      return;
+    }
+    const connectionCount = Number(data.connectionCount);
+    if (Number.isFinite(connectionCount)) {
+      this._hasOtherUserConnections = connectionCount > 1;
+    }
+  }
+
+  hasOtherUserConnections() {
+    return this._hasOtherUserConnections;
   }
 
   /** Subscribe to events for a specific Redis channel key */

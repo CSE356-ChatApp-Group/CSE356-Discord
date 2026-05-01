@@ -433,8 +433,78 @@ describe('Bootstrap ready event', () => {
       });
 
       expect(readyEvent.event).toBe('ready');
+      expect(readyEvent.data).toEqual(
+        expect.objectContaining({
+          connectionCount: expect.any(Number),
+          hasOtherConnections: expect.any(Boolean),
+        }),
+      );
+      expect(readyEvent.data.connectionCount).toBeGreaterThanOrEqual(1);
     } finally {
       await closeWebSocket(ws);
+    }
+  });
+
+  it('publishes same-user connection state as additional sockets connect and disconnect', async () => {
+    const user = await createAuthenticatedUser('wsconnectionstate');
+    const first = await connectWebSocket(port, user.accessToken);
+    let second: any;
+
+    try {
+      const firstSeesSecond = waitForWsEvent(
+        first,
+        (event) =>
+          event?.event === 'connections:updated'
+          && event?.data?.userId === user.user.id
+          && event?.data?.hasOtherConnections === true
+          && Number(event?.data?.connectionCount) >= 2,
+        5000,
+      );
+
+      const { WebSocket } = require('ws');
+      second = await new Promise<any>((resolve, reject) => {
+        const sock = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(user.accessToken)}`);
+        const timer = setTimeout(() => {
+          sock.terminate();
+          reject(new Error('Timed out waiting for second websocket ready event'));
+        }, 5000);
+        sock.on('message', (raw: any) => {
+          let parsed: any;
+          try { parsed = JSON.parse(raw.toString()); } catch { return; }
+          if (parsed?.event !== 'ready') return;
+          clearTimeout(timer);
+          expect(parsed.data).toEqual(
+            expect.objectContaining({
+              connectionCount: expect.any(Number),
+              hasOtherConnections: true,
+            }),
+          );
+          expect(parsed.data.connectionCount).toBeGreaterThanOrEqual(2);
+          resolve(sock);
+        });
+        sock.once('error', (err: Error) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+
+      await firstSeesSecond;
+
+      const firstSeesSingle = waitForWsEvent(
+        first,
+        (event) =>
+          event?.event === 'connections:updated'
+          && event?.data?.userId === user.user.id
+          && event?.data?.connectionCount === 1
+          && event?.data?.hasOtherConnections === false,
+        5000,
+      );
+      await closeWebSocket(second);
+      second = null;
+      await firstSeesSingle;
+    } finally {
+      if (second) await closeWebSocket(second);
+      await closeWebSocket(first);
     }
   });
 

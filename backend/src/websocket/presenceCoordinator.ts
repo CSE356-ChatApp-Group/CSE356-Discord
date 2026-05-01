@@ -58,6 +58,10 @@ function createPresenceCoordinator({
       .exec();
   }
 
+  async function getConnectionCount(userId) {
+    return redis.scard(connectionSetKey(userId));
+  }
+
   async function recomputeUserPresence(userId) {
     lastPresenceComputedAt.set(userId, Date.now());
     const connIds = await redis.smembers(connectionSetKey(userId));
@@ -169,6 +173,7 @@ function createPresenceCoordinator({
     scheduleDebouncedPresenceRecompute,
     upsertConnectionState,
     removeConnection,
+    getConnectionCount,
     recomputeUserPresence,
     reconcileAllConnectedUsers,
   };

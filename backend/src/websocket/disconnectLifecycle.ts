@@ -49,6 +49,7 @@ function createDisconnectLifecycle({
   isRedisOperational,
   redis,
   removeConnection,
+  publishUserConnectionState = async (_userId?: string) => {},
   recomputeUserPresence,
   scheduleDebouncedPresenceRecompute,
   logWsHotInfo,
@@ -127,6 +128,7 @@ function createDisconnectLifecycle({
 
     removeConnection(userId, ws._connectionId)
       .then(() => {
+        publishUserConnectionState(userId).catch(() => {});
         if (abnormalClose) {
           return recomputeUserPresence(userId);
         }
