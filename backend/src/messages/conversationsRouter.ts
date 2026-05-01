@@ -36,7 +36,6 @@ const {
   CONVERSATION_LIST_FIELDS,
   getParticipantInputs,
   getActiveParticipantIds,
-  requireActiveConversationParticipant,
   loadConversationWithParticipants,
   resolveParticipantIds,
   getUserDisplayName,
@@ -45,7 +44,6 @@ const {
   upsertConversationParticipantsBatch,
   createSystemMessage,
   createSystemMessagesBatch,
-  isGroupConversation,
   sortDirectPairUserIds,
   lockDirectConversationPair,
   getDirectConversationPairConversationId,
@@ -187,21 +185,22 @@ async function runCreatedConversationSideEffects({
   ]);
 
   if (!conversation) return;
-  await publishConversationSubscribeChannels(
-    allIds,
-    conversationId,
-    'subscribe_channels push failed (new DM)',
-  );
-  await publishConversationInviteNotifications(
-    invitedUserIds.map((userId) => `user:${userId}`),
-    {
-      conversation,
-      conversationId: conversation.id,
-      invitedBy,
-      participantIds: invitedUserIds,
-    },
-    { strict: true },
-  );
+  const invitedTargets = invitedUserIds.map((userId) => `user:${userId}`);
+  const invitePayload = {
+    conversation,
+    conversationId: conversation.id,
+    invitedBy,
+    participantIds: invitedUserIds,
+  };
+  // Keep strict invite delivery, but avoid serial wall-time between subscribe + invite fanout.
+  await Promise.all([
+    publishConversationSubscribeChannels(
+      allIds,
+      conversationId,
+      'subscribe_channels push failed (new DM)',
+    ),
+    publishConversationInviteNotifications(invitedTargets, invitePayload, { strict: true }),
+  ]);
 }
 
 // ── Create or get existing 1:1 ─────────────────────────────────────────────────
@@ -435,13 +434,15 @@ async function publishGroupDmJoinMessagesIfAny({
     `conversation:${conversationId}`,
     ...activeParticipantIds.map((uid) => `user:${uid}`),
   ];
-  for (const joinedGroupMessage of joinedGroupMessages) {
-    await publishConversationEvents(targets, 'message:created', {
+  await Promise.all(
+    joinedGroupMessages.map((joinedGroupMessage) =>
+      publishConversationEvents(targets, 'message:created', {
       ...joinedGroupMessage,
       author: null,
       attachments: [],
-    });
-  }
+      }),
+    ),
+  );
 }
 
 async function publishGroupDmInviteSideEffects({
@@ -467,25 +468,25 @@ async function publishGroupDmInviteSideEffects({
 
   // Push subscribe_channels to newly added participants so active WS sessions
   // subscribe to the conversation channel without waiting for a reconnect.
-  try {
-    await publishUserFeedTargets(participantIdsToAdd, {
-      __wsInternal: {
-        kind: 'subscribe_channels',
-        channels: [`conversation:${conversationId}`],
-      },
-    });
-  } catch (err) {
+  const subscribePromise = publishUserFeedTargets(participantIdsToAdd, {
+    __wsInternal: {
+      kind: 'subscribe_channels',
+      channels: [`conversation:${conversationId}`],
+    },
+  }).catch((err) => {
     logger.warn(
       { err, conversationId, participantCount: participantIdsToAdd.length },
       'subscribe_channels push failed (group DM invite)',
     );
-  }
+  });
 
-  await publishConversationInviteNotifications(
+  const invitePromise = publishConversationInviteNotifications(
     invitedUserTargets,
     sharedEventData,
     { strict: true },
   );
+
+  await Promise.all([subscribePromise, invitePromise]);
   scheduleGroupDmInviteRetry(
     participantUpdateTargets,
     invitedUserTargets,
@@ -507,16 +508,23 @@ async function addParticipantsHandler(req, res, next) {
     client = await getClient();
     await client.query('BEGIN');
 
-    const conversationExists = await client.query(
-      'SELECT id FROM conversations WHERE id = $1',
-      [req.params.id]
+    const { rows: [conversationState] } = await client.query(
+      `SELECT c.is_group,
+              EXISTS (
+                SELECT 1
+                FROM conversation_participants cp
+                WHERE cp.conversation_id = c.id
+                  AND cp.user_id = $2
+                  AND cp.left_at IS NULL
+              ) AS is_participant
+       FROM conversations c
+       WHERE c.id = $1`,
+      [req.params.id, req.user.id],
     );
-    if (!conversationExists.rows.length) {
+    if (!conversationState) {
       return rollbackAndRespond(client, res, 404, { error: 'Conversation not found' });
     }
-
-    const isParticipant = await requireActiveConversationParticipant(client, req.params.id, req.user.id);
-    if (!isParticipant) {
+    if (!conversationState.is_participant) {
       return rollbackAndRespond(client, res, 403, { error: 'Not a participant' });
     }
 
@@ -531,19 +539,14 @@ async function addParticipantsHandler(req, res, next) {
       (participantId) => participantId !== req.user.id && !currentParticipantSet.has(participantId)
     );
 
-    const { rows: [convMeta] } = await client.query(
-      'SELECT is_group FROM conversations WHERE id = $1',
-      [req.params.id]
-    );
-
-    if (!convMeta.is_group && participantIdsToAdd.length > 0) {
+    if (!conversationState.is_group && participantIdsToAdd.length > 0) {
       return rollbackAndRespond(client, res, 403, { error: 'Cannot invite users to a 1-to-1 DM' });
     }
 
     await upsertConversationParticipantsBatch(client, req.params.id, participantIdsToAdd);
 
     let joinedGroupMessages = [];
-    if (convMeta.is_group && participantIdsToAdd.length > 0) {
+    if (conversationState.is_group && participantIdsToAdd.length > 0) {
       const nameMap = await getUserDisplayNamesMap(client, participantIdsToAdd);
       const contents = participantIdsToAdd.map(
         (pid) => `${nameMap.get(pid) || 'User'} joined the group.`,
@@ -609,22 +612,28 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
     client = await getClient();
     await client.query('BEGIN');
 
-    const membership = await client.query(
-      `SELECT 1
-       FROM conversation_participants
-       WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL`,
-      [req.params.id, req.user.id]
+    const { rows: [leaveState] } = await client.query(
+      `SELECT c.is_group,
+              EXISTS (
+                SELECT 1
+                FROM conversation_participants cp
+                WHERE cp.conversation_id = c.id
+                  AND cp.user_id = $2
+                  AND cp.left_at IS NULL
+              ) AS is_participant
+       FROM conversations c
+       WHERE c.id = $1`,
+      [req.params.id, req.user.id],
     );
-    if (!membership.rows.length) {
-      const existingConversation = await client.query('SELECT 1 FROM conversations WHERE id = $1', [req.params.id]);
+    if (!leaveState) {
       await client.query('ROLLBACK');
-      return res.status(existingConversation.rows.length ? 403 : 404).json({
-        error: existingConversation.rows.length ? 'Not a participant' : 'Conversation not found',
-      });
+      return res.status(404).json({ error: 'Conversation not found' });
     }
-
-    const isGroup = await isGroupConversation(client, req.params.id);
-    if (!isGroup) {
+    if (!leaveState.is_participant) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Not a participant' });
+    }
+    if (!leaveState.is_group) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'Cannot leave a 1-to-1 DM' });
     }
