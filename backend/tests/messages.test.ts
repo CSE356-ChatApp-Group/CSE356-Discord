@@ -3,7 +3,7 @@
  *
  * Covers HTTP behavior implemented under `backend/src/messages/routes/`:
  * `post.ts` (create), `get.ts` (history/context), `patch.ts` (edit),
- * `delete.ts` (hard delete), `read.ts` (read receipt).
+ * `delete.ts` (hard delete), `read.ts` + `readReceipt/readReceiptHttpCore.ts` (read receipt / batch-read).
  */
 
 import { randomUUID } from 'crypto';

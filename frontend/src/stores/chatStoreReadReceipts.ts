@@ -1,6 +1,7 @@
 /**
  * Coalesced client read-receipt PUTs (live tail batches rapid marks; navigation flushes).
  * Message list access is injected via bindReadReceiptMessageLookup to avoid importing the store.
+ * Multi-target flushes (e.g. tab hidden) coalesce into PUT /messages/batch-read when more than one mark ships together.
  */
 
 import { api } from '../lib/api';
@@ -15,6 +16,13 @@ const READ_COALESCE_MS = (() => {
   const raw = Number(import.meta.env.VITE_READ_COALESCE_MS);
   if (!Number.isFinite(raw) || raw <= 0) return 750;
   return Math.min(1000, Math.max(500, Math.floor(raw)));
+})();
+
+/** Align chunk size with API `READ_RECEIPT_BATCH_MAX` (default 50, max 100). */
+const READ_RECEIPT_BATCH_MAX = (() => {
+  const raw = Number(import.meta.env.VITE_READ_RECEIPT_BATCH_MAX);
+  if (!Number.isFinite(raw) || raw < 1) return 50;
+  return Math.min(100, Math.max(1, Math.floor(raw)));
 })();
 
 let getMessagesForThread: (threadId: string) => Entity[] | undefined = () => undefined;
@@ -100,33 +108,83 @@ function hookReadFlushOnVisibilityHidden() {
   });
 }
 
-function flushPendingReadForTarget(target: string) {
+type FlushItem = { target: string; readMark: PendingReadMark };
+
+function clearReadCoalesceTimer(target: string) {
   const existingTimer = readCoalesceTimers.get(target);
   if (existingTimer) {
     clearTimeout(existingTimer);
     readCoalesceTimers.delete(target);
   }
+}
+
+function flushPendingReadForTarget(target: string) {
+  clearReadCoalesceTimer(target);
   const readMark = pendingReadByTarget.get(target);
   if (!readMark) return;
   pendingReadByTarget.delete(target);
-  emitMessageReadNow(target, readMark);
+  emitReadsAfterFlush([{ target, readMark }]);
 }
 
-function emitMessageReadNow(target: string, readMark?: PendingReadMark | null) {
-  if (!readMark?.messageId) return;
-  if (!isReadMarkAdvance(readMark, lastSentReadByTarget.get(target))) return;
-
-  if (readMarkInFlight.has(target)) {
-    pendingReadByTarget.set(target, latestReadMark(pendingReadByTarget.get(target), readMark));
-    if (!readCoalesceTimers.has(target)) {
-      readCoalesceTimers.set(
-        target,
-        setTimeout(() => flushPendingReadForTarget(target), READ_COALESCE_MS),
-      );
+/**
+ * After collecting pending marks, either one PUT /messages/:id/read or fewer PUT /messages/batch-read calls.
+ */
+function emitReadsAfterFlush(items: FlushItem[]) {
+  const ready: FlushItem[] = [];
+  for (const { target, readMark } of items) {
+    if (!readMark?.messageId) continue;
+    if (!isReadMarkAdvance(readMark, lastSentReadByTarget.get(target))) continue;
+    if (readMarkInFlight.has(target)) {
+      pendingReadByTarget.set(target, latestReadMark(pendingReadByTarget.get(target), readMark));
+      if (!readCoalesceTimers.has(target)) {
+        readCoalesceTimers.set(
+          target,
+          setTimeout(() => flushPendingReadForTarget(target), READ_COALESCE_MS),
+        );
+      }
+      continue;
     }
+    ready.push({ target, readMark });
+  }
+  if (!ready.length) return;
+
+  if (ready.length === 1) {
+    emitSingleReadPut(ready[0]);
     return;
   }
 
+  const chunks: FlushItem[][] = [];
+  for (let i = 0; i < ready.length; i += READ_RECEIPT_BATCH_MAX) {
+    chunks.push(ready.slice(i, i + READ_RECEIPT_BATCH_MAX));
+  }
+  void emitBatchedReadPutsSequential(chunks);
+}
+
+async function emitBatchedReadPutsSequential(chunks: FlushItem[][]) {
+  for (const chunk of chunks) {
+    for (const { target } of chunk) readMarkInFlight.add(target);
+    for (const { target, readMark } of chunk) {
+      lastSentReadByTarget.set(target, { ...readMark, sentAt: Date.now() });
+    }
+    try {
+      await api.put('/messages/batch-read', {
+        reads: chunk.map((c) => c.readMark.messageId),
+      });
+    } catch {
+      // Match legacy single-read fire-and-forget behavior on failure
+    } finally {
+      for (const { target } of chunk) {
+        readMarkInFlight.delete(target);
+        pruneLastSentReadMarks();
+        if (pendingReadByTarget.has(target)) {
+          flushPendingReadForTarget(target);
+        }
+      }
+    }
+  }
+}
+
+function emitSingleReadPut({ target, readMark }: FlushItem) {
   readMarkInFlight.add(target);
   lastSentReadByTarget.set(target, { ...readMark, sentAt: Date.now() });
   api.put(`/messages/${readMark.messageId}/read`)
@@ -141,10 +199,16 @@ function emitMessageReadNow(target: string, readMark?: PendingReadMark | null) {
 }
 
 export function flushAllPendingReadCoalesce() {
+  const items: FlushItem[] = [];
   const targets = new Set([...pendingReadByTarget.keys(), ...readCoalesceTimers.keys()]);
   for (const target of targets) {
-    flushPendingReadForTarget(target);
+    clearReadCoalesceTimer(target);
+    const readMark = pendingReadByTarget.get(target);
+    if (!readMark) continue;
+    pendingReadByTarget.delete(target);
+    items.push({ target, readMark });
   }
+  emitReadsAfterFlush(items);
 }
 
 /**

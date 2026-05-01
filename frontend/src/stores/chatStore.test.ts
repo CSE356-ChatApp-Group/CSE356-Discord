@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { wsManager } from '../lib/ws';
 import { resetChatStore, useChatStore } from './chatStore';
+import { flushAllPendingReadCoalesce, queueMarkMessageRead } from './chatStoreReadReceipts';
 
 const { apiDelete, apiGet, apiPost, apiPut, invalidateApiCache } = vi.hoisted(() => ({
   apiDelete: vi.fn(),
@@ -725,6 +726,41 @@ describe('chatStore read mark suppression', () => {
     await useChatStore.getState().selectChannel(channel as any);
 
     expect(apiPut).not.toHaveBeenCalled();
+  });
+});
+
+describe('read receipt multi-target batch flush', () => {
+  it('flushAllPendingReadCoalesce sends one PUT /messages/batch-read for two distinct targets', () => {
+    apiPut.mockResolvedValue({ success: true, results: [] });
+    useAuthStore.setState({
+      user: { id: 'user-1', username: 'sam', displayName: 'Sam', email: 'sam@example.com' },
+    } as any);
+    useChatStore.setState({
+      messages: {
+        'ch-1': [
+          { id: 'm-ch', channel_id: 'ch-1', content: 'x', created_at: '2026-01-01T00:00:01.000Z' },
+        ],
+        'conv-1': [
+          {
+            id: 'm-dm',
+            channel_id: null,
+            conversation_id: 'conv-1',
+            content: 'y',
+            created_at: '2026-01-01T00:00:02.000Z',
+          },
+        ],
+      },
+    } as any);
+
+    queueMarkMessageRead('m-ch', { channelId: 'ch-1', coalesce: true });
+    queueMarkMessageRead('m-dm', { conversationId: 'conv-1', coalesce: true });
+    flushAllPendingReadCoalesce();
+
+    expect(apiPut).toHaveBeenCalledTimes(1);
+    expect(apiPut.mock.calls[0][0]).toBe('/messages/batch-read');
+    const body = apiPut.mock.calls[0][1] as { reads: string[] };
+    expect(body.reads).toHaveLength(2);
+    expect(new Set(body.reads)).toEqual(new Set(['m-ch', 'm-dm']));
   });
 });
 

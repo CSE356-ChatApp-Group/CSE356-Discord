@@ -212,7 +212,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `READ_RECEIPT_FANOUT_ENABLED` | Enables `read:updated` fanout publishes from `PUT /messages/:id/read`. Default **`true`** so realtime read receipts work out of the box; set to `false` only if you intentionally want durable read-state updates without websocket fanout. |
 | `READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE` | When **`1`/`true`/`yes`**, advancing channel read receipts delete the Redis key for **`GET /channels`** (`channels:list:{communityId}:{userId}`) so the next REST list reflects unread immediately. **Default (unset): off** — avoids wiping the channel list cache on every read (which made `endpoint_list_cache_total{endpoint="channels",result="hit"}` stay at zero under heavy `PUT /read` traffic). Unread in that response can lag up to **`CHANNELS_LIST_CACHE_TTL_SECS`** for REST-only clients; WS **`read:updated`** and the same route’s Redis watermark keys still drive live UI. |
 | `READ_RECEIPT_CHANNEL_FANOUT_ASYNC` | When **`true`** (default), **channel** `read:updated` fanout runs on **`fanout:critical`** (does not extend **`PUT /read`** wall time). **Conversation/DM** reads still publish inline. If the fanout queue refuses the job, publish runs on-thread as fallback. |
-| `USER_LAST_READ_COUNT_REDIS_TTL_SEC` | TTL (seconds) for Redis keys updated during channel read-receipt fanout (`read.ts`; default **604800** = 7d). |
+| `USER_LAST_READ_COUNT_REDIS_TTL_SEC` | TTL (seconds) for Redis keys updated during channel read-receipt fanout (`readReceipt/readReceiptHttpCore.ts`; default **604800** = 7d). |
 | `MESSAGE_INGEST_STREAM_KEY`, `MESSAGE_INGEST_STREAM_GROUP`, `MESSAGE_INGEST_STREAM_MAXLEN` | Stream name, consumer group, approximate max stream length |
 | `LAST_MESSAGE_PG_RECONCILE_ENABLED` | `true` to enable background DB reconcile of `channels.last_message_*` from Redis metadata **and** delete-time `repointChannelLastMessage` DB updates; default `false` keeps channel latest-message metadata Redis-first with DB as stale fallback |
 | `CHANNEL_LAST_MESSAGE_PG_RECONCILE_ENABLED` | Legacy alias for `LAST_MESSAGE_PG_RECONCILE_ENABLED` (either may be set; **`LAST_MESSAGE_*` wins** when both are present) |
@@ -294,7 +294,8 @@ Built into the SPA at compile time (`import.meta.env.*`). Typical local/dev: `VI
 | `VITE_API_BASE` | REST prefix (default **`/api/v1`**) |
 | `VITE_WS_BASE` | WebSocket path or URL (default from vite config) |
 | `VITE_API_TIMEOUT_MS` | HTTP client timeout (default **25000** ms in `frontend/src/lib/api.ts`) |
-| `VITE_READ_COALESCE_MS` | Client read-receipt coalesce window (`chatStore.ts`) |
+| `VITE_READ_COALESCE_MS` | Client read-receipt coalesce window (`frontend/src/stores/chatStoreReadReceipts.ts`) |
+| `VITE_READ_RECEIPT_BATCH_MAX` | Max message IDs per `PUT /messages/batch-read` when the client batches multi-target flushes (default **50**, clamp **1–100**; align with API `READ_RECEIPT_BATCH_MAX`) |
 | `VITE_ENABLE_RUM` | When **`true`**, enables browser RUM posting (requires **`ENABLE_CLIENT_RUM=true`** on the API) |
 
 ## Scripts / CI (not read by the running API)

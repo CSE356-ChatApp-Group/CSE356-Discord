@@ -10,7 +10,7 @@
  * - `post.ts`   — POST `/`
  * - `patch.ts`  — PATCH `/:id`
  * - `delete.ts` — DELETE `/:id`
- * - `read.ts`   — PUT `/:id/read`, PUT `/batch-read`
+ * - `read.ts`   — PUT `/:id/read`, PUT `/batch-read` (handlers in `../readReceipt/readReceiptHttpCore.ts`)
  */
 
 

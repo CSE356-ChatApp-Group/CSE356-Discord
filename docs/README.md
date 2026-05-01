@@ -25,7 +25,7 @@ Start here for **where to look** and **how to keep docs from going stale**.
 | **WebSocket / subscribe / presence** | `backend/src/websocket/server.ts`, `backend/src/websocket/profile.ts` |
 | **Channel message fanout** | `backend/src/messages/fanout/channelRealtimeFanout.ts`, `backend/src/messages/fanout/messagePostFanoutAsync.ts` |
 | **DM / conversation fanout** | `backend/src/messages/fanout/conversationFanout.ts` |
-| **Read state & receipts** | `backend/src/messages/lib/readReceiptState.ts`, `backend/src/messages/readState/batchReadState.ts`, `backend/src/messages/routes/read.ts` |
+| **Read state & receipts** | `backend/src/messages/lib/readReceiptState.ts`, `backend/src/messages/readState/batchReadState.ts` (Redis → PG flush), `backend/src/messages/readReceipt/readReceiptHttpCore.ts` (PUT read / batch-read), `backend/src/messages/routes/read.ts` (Express registration) |
 | **Search** | `backend/src/search/client.ts`, `backend/src/search/routes/get.ts` |
 | **Metrics & overload** | `backend/src/utils/metrics.ts`, `backend/src/utils/overload.ts` |
 
