@@ -18,10 +18,11 @@ import {
   MIN_MEMBER_LIST_WIDTH,
 } from './messagePaneMemberListLayout';
 import { MembersIcon, SearchIcon, SendIcon } from './MessagePaneIcons';
-
-const MAX_ATTACHMENTS = 4;
-const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
-const ACCEPTED_ATTACHMENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+import {
+  ACCEPTED_ATTACHMENT_TYPES,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
+} from './messagePaneConstants';
 
 type PendingAttachment = {
   file: File;
