@@ -201,7 +201,7 @@ INGRESS_CANARY_SECONDS="${INGRESS_CANARY_SECONDS:-45}"
 ALL_WORKER_HEALTH_PASSES="${ALL_WORKER_HEALTH_PASSES:-3}"
 # Seconds to wait after a worker restarts and passes health checks before rolling the next one.
 # Gives WebSocket clients time to reconnect + replay before the next worker is taken down.
-# 10s: matches WS_APP_KEEPALIVE_INTERVAL_MS so all clients reconnect within one keepalive cycle.
+# 8s: matches WS_APP_KEEPALIVE_INTERVAL_MS so all clients reconnect within one keepalive cycle.
 # (Was 15s — reduced to shave ~20s off a 5-worker rolling deploy.)
 WORKER_SETTLE_SECS="${WORKER_SETTLE_SECS:-10}"
 # PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual

@@ -41,7 +41,7 @@ For a **pure grader-only** host, operators historically pinned:
 2. **`AUTH_GLOBAL_PER_IP_RATE_LIMIT=false`** — avoids extra 429s for many bot users behind one source IP on **login**.
 3. **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`** and **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`** — keep reconnect-bridge user-topic delivery inline before **201** while avoiding all-member duplicate publish on every channel message.
 4. **`WS_AUTO_SUBSCRIBE_MODE=messages`**, **`USER_FEED_SHARD_COUNT=64`**, and **`WS_RECENT_CONNECT_TTL_SECONDS=300`** — generated clients that do not send explicit subscribe frames still receive `channel:`/`conversation:` delivery directly after connect.
-5. **`WS_APP_KEEPALIVE_INTERVAL_MS=10000`** — sends a tiny app-level keepalive frame on otherwise-idle sockets every 10s. This is a conservative hedge for grader/network paths that appear to churn idle WebSocket upgrades on ~30s boundaries even when control ping/pong is enabled.
+5. **`WS_APP_KEEPALIVE_INTERVAL_MS=8000`** — sends a tiny app-level keepalive frame on otherwise-idle sockets every 8s. This is a conservative hedge for grader/network paths that appear to churn idle WebSocket upgrades on ~30s boundaries even when control ping/pong is enabled.
 
 Those settings prioritize grader throughput on trusted bot traffic while still preserving the reconnect bridge. If you later run the same deploy scripts against a public-facing host, override them deliberately.
 
