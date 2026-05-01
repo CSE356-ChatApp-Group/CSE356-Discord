@@ -109,8 +109,17 @@ async function scheduleCountReconcile(channelId: string) {
 
 async function incrementChannelMessageCount(channelId: string) {
   const key = countKeyForChannel(channelId);
-  const count = await redis.incr(key);
-  await redis.expire(key, MSG_COUNT_REDIS_TTL_SECS).catch(() => {});
+  let count = 0;
+  try {
+    const p = redis.pipeline();
+    p.incr(key);
+    p.expire(key, MSG_COUNT_REDIS_TTL_SECS);
+    const results = await p.exec();
+    count = Number(results?.[0]?.[1] || 0);
+  } catch {
+    count = Number(await redis.incr(key));
+    await redis.expire(key, MSG_COUNT_REDIS_TTL_SECS).catch(() => {});
+  }
   if (count <= 1) {
     scheduleCountReconcile(channelId).catch(() => {});
   }
@@ -118,8 +127,17 @@ async function incrementChannelMessageCount(channelId: string) {
 
 async function decrementChannelMessageCount(channelId: string) {
   const key = countKeyForChannel(channelId);
-  const count = await redis.decr(key);
-  await redis.expire(key, MSG_COUNT_REDIS_TTL_SECS).catch(() => {});
+  let count = 0;
+  try {
+    const p = redis.pipeline();
+    p.decr(key);
+    p.expire(key, MSG_COUNT_REDIS_TTL_SECS);
+    const results = await p.exec();
+    count = Number(results?.[0]?.[1] || 0);
+  } catch {
+    count = Number(await redis.decr(key));
+    await redis.expire(key, MSG_COUNT_REDIS_TTL_SECS).catch(() => {});
+  }
   if (count < 0) {
     await redis.set(key, '0', 'EX', MSG_COUNT_REDIS_TTL_SECS);
     scheduleCountReconcile(channelId).catch(() => {});

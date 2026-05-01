@@ -12,7 +12,9 @@ const isCiEnvironment = process.env.CI === 'true' || process.env.GITHUB_ACTIONS 
  * same self-hosted runner do not docker rm -f each other's test DB.
  */
 function testContainerSuffix() {
-  if (!isCiEnvironment) return '';
+  // Always isolate test containers by process so overlapping local runs
+  // (multiple terminals/agents) never remove each other's databases.
+  if (!isCiEnvironment) return `-${process.pid}`;
   const runId = process.env.GITHUB_RUN_ID;
   const attempt = process.env.GITHUB_RUN_ATTEMPT || '1';
   if (runId) return `-${runId}-${attempt}`;
@@ -144,7 +146,9 @@ function startContainers() {
   const envRedis = process.env.TEST_REDIS_PORT;
   // GitHub-hosted runners sometimes have fixed ports (55432/56379) still bound from a
   // leaked process or overlapping job — publish random ports via -P and read mappings.
-  const useDynamicHostPorts = isCiEnvironment && !envPg && !envRedis;
+  // Prefer Docker-assigned host ports whenever explicit ports are not forced.
+  // This avoids collisions with other local/CI test runs.
+  const useDynamicHostPorts = !envPg && !envRedis;
   // Self-hosted CI runners can accumulate overlay-disk pressure from concurrent jobs.
   // Keep ephemeral test DB state in tmpfs so Postgres initdb does not fail with
   // "No space left on device" while bootstrapping.

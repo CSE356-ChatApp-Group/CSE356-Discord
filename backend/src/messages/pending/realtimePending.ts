@@ -149,20 +149,25 @@ async function filterUsersEligibleForPendingReplay(
   for (let offset = 0; offset < userIds.length; offset += REDIS_PENDING_CLASSIFY_BATCH) {
     const slice = userIds.slice(offset, offset + REDIS_PENDING_CLASSIFY_BATCH);
     const pendingProbeUids = slice.filter((uid) => !knownRecent.has(uid));
-    let pendingRaw: Array<[Error | null, unknown] | null> = [];
-    if (pendingProbeUids.length) {
-      const pendingPipe = redis.pipeline();
-      for (const uid of pendingProbeUids) {
-        pendingPipe.exists(wsPendingEligibleKey(uid));
-      }
-      pendingRaw = (await pendingPipe.exec()) as Array<[Error | null, unknown] | null>;
-    }
+    const pendingProbePromise: Promise<Array<[Error | null, unknown] | null>> =
+      pendingProbeUids.length
+        ? (() => {
+            const pendingPipe = redis.pipeline();
+            for (const uid of pendingProbeUids) {
+              pendingPipe.exists(wsPendingEligibleKey(uid));
+            }
+            return pendingPipe.exec() as Promise<Array<[Error | null, unknown] | null>>;
+          })()
+        : Promise.resolve([]);
+    const hasConnFlagsPromise = batchUsersAppearGloballyConnected(slice);
+    const [pendingRaw, hasConnFlags] = await Promise.all([
+      pendingProbePromise,
+      hasConnFlagsPromise,
+    ]);
     const pendingByUid = new Map<string, boolean>();
     pendingProbeUids.forEach((uid, i) => {
       pendingByUid.set(uid, Number(pendingRaw[i]?.[1] || 0) === 1);
     });
-
-    const hasConnFlags = await batchUsersAppearGloballyConnected(slice);
 
     const phase1: Array<{
       uid: string;

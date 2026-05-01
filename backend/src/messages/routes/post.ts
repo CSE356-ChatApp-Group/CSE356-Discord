@@ -318,28 +318,31 @@ async function processPostMessageIdempotency(
   try {
     idemRedisKey = `msg:idem:${userId}:${crypto.createHash("sha256").update(trimmed, "utf8").digest("hex")}`;
     try {
-      const existing = await redis.get(idemRedisKey);
-      if (existing) {
-        let parsed: any;
-        try {
-          parsed = JSON.parse(existing);
-        } catch {
-          parsed = null;
+      // Acquire lease first to avoid an extra GET round-trip on the common non-duplicate path.
+      const gotLease = await redis.set(
+        idemRedisKey,
+        JSON.stringify({ pending: true }),
+        "EX",
+        MSG_IDEM_PENDING_TTL_SECS,
+        "NX",
+      );
+      if (gotLease === "OK") {
+        idemLease = true;
+      } else {
+        const existing = await redis.get(idemRedisKey);
+        if (existing) {
+          let parsed: any;
+          try {
+            parsed = JSON.parse(existing);
+          } catch {
+            parsed = null;
+          }
+          const replay = await hydrateIdemReplayBody(parsed);
+          if (replay) {
+            replayBody = replay;
+          }
         }
-        const replay = await hydrateIdemReplayBody(parsed);
-        if (replay) {
-          replayBody = replay;
-        }
-      }
-      if (!replayBody) {
-        const gotLease = await redis.set(
-          idemRedisKey,
-          JSON.stringify({ pending: true }),
-          "EX",
-          MSG_IDEM_PENDING_TTL_SECS,
-          "NX",
-        );
-        if (gotLease !== "OK") {
+        if (!replayBody) {
           const waited =
             await awaitIdempotentPostAfterLeaseContention(idemRedisKey);
           if (waited.ok) {
@@ -348,7 +351,6 @@ async function processPostMessageIdempotency(
             duplicateInFlight = true;
           }
         }
-        if (!replayBody && !duplicateInFlight) idemLease = true;
       }
     } catch {
       idemRedisKey = null;
@@ -366,9 +368,8 @@ async function configureMessageInsertTransaction(
   statementTimeoutMs: number,
 ) {
   await client.query(
-    `SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`,
+    `SET LOCAL statement_timeout = '${statementTimeoutMs}ms'; SET LOCAL synchronous_commit = off`,
   );
-  await client.query(`SET LOCAL synchronous_commit = off`);
 }
 
 async function runChannelInsertTransaction({
@@ -802,7 +803,8 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         const hydrateWallMs = Math.max(0, tAfterHydrateMark - tHydrateStart);
 
         // --- POST /messages: list cache bust (bounded) ---
-        const cacheBustRun = await tracer.startActiveSpan('cache.bust', async (span: any) => {
+        // Start cache bust as soon as hydration is ready and overlap it with realtime fanout.
+        const cacheBustPromise = tracer.startActiveSpan('cache.bust', async (span: any) => {
           try {
             return await withBoundedPostInsertTimeout(
               "cache_bust",
@@ -817,20 +819,6 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
             span.end();
           }
         });
-        if (!cacheBustRun.ok && cacheBustRun.timedOut) {
-          deliveryTimeoutTotal.inc({ phase: "cache_bust" });
-          logger.warn(
-            {
-              requestId: authReq.id,
-              channelId: channelId ?? undefined,
-              conversationId: conversationId ?? undefined,
-              timeoutMs: MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
-              gradingNote: "post_insert_delivery_timeout_not_http_failure",
-            },
-            "POST /messages: cache_bust wall budget exceeded (201 still returned after commit)",
-          );
-        }
-        t_after_cache_bust = Date.now();
 
         // --- POST /messages: realtime fanout (see postFanout.ts) ---
         let realtimePublishedAtForHttp: string | undefined;
@@ -859,6 +847,21 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           realtimeConversationFanoutComplete = cv.realtimeConversationFanoutComplete;
         }
         t_after_fanout = Date.now();
+        const cacheBustRun = await cacheBustPromise;
+        if (!cacheBustRun.ok && cacheBustRun.timedOut) {
+          deliveryTimeoutTotal.inc({ phase: "cache_bust" });
+          logger.warn(
+            {
+              requestId: authReq.id,
+              channelId: channelId ?? undefined,
+              conversationId: conversationId ?? undefined,
+              timeoutMs: MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
+              gradingNote: "post_insert_delivery_timeout_not_http_failure",
+            },
+            "POST /messages: cache_bust wall budget exceeded (201 still returned after commit)",
+          );
+        }
+        t_after_cache_bust = Date.now();
 
         // --- POST /messages: 201 + idempotency + traces + Meili (see postFinish.ts) ---
         runPostSuccessFollowup({

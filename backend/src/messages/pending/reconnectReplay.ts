@@ -505,8 +505,10 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
     }
     wsReplayQueryTotal.inc({ result: 'ok' });
     wsReplayQueryDurationMs.observe({ result: 'ok' }, Date.now() - startedAt);
-    await writeReplayDedupe(userId, fingerprint);
-    await writeReplayResultCache(userId, cursor, rows);
+    await Promise.allSettled([
+      writeReplayDedupe(userId, fingerprint),
+      writeReplayResultCache(userId, cursor, rows),
+    ]);
     return rows;
   } finally {
     replayDbInFlight -= 1;

@@ -29,8 +29,10 @@ async function invalidateVersionedCache(cacheKey: string, versionKey: string) {
     p.incr(versionKey);
     await p.exec();
   } catch {
-    await redis.del(cacheKey).catch(() => {});
-    await redis.incr(versionKey).catch(() => {});
+    await Promise.allSettled([
+      redis.del(cacheKey),
+      redis.incr(versionKey),
+    ]);
   }
 }
 
