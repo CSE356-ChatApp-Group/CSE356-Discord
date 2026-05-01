@@ -10,6 +10,7 @@ Start here for **where to look** and **how to keep docs from going stale**.
 | **All tunables (semantics, defaults)** | [`docs/env.md`](env.md) + [`.env.example`](../.env.example) | Copy-paste full variable lists into multiple files |
 | **Host topology, SSH users, IP intent** | [`docs/infrastructure-inventory.md`](infrastructure-inventory.md) | IP lists in slides, one-off runbooks (link to inventory; update inventory when facts change) |
 | **Metric names, PromQL, incident workflow** | [`docs/operations-monitoring.md`](operations-monitoring.md) + [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml) | Ad-hoc metric names in issues without checking `backend/src/utils/metrics.ts` |
+| **Redis key / Pub/Sub topic patterns (operators’ map)** | [`docs/redis-key-map.md`](redis-key-map.md) | Duplicating key lists in runbooks — **link** this doc and mention only deltas |
 | **Alert / on-call playbooks** | [`docs/runbooks.md`](runbooks.md) | — |
 | **Agent diagnosis + profiling workflow** | [`docs/agent-operations-playbook.md`](agent-operations-playbook.md) | Ad-hoc debugging checklists scattered across unrelated docs |
 | **Deploy pipeline & CI gates** | [`deploy/README.md`](../deploy/README.md) | — |
@@ -118,6 +119,7 @@ Use this lightweight header to prevent stale docs without adding heavy process.
 | [`env.md`](env.md) | Operational — env catalog |
 | [`infrastructure-inventory.md`](infrastructure-inventory.md) | Operational — topology (update with infra changes) |
 | [`operations-monitoring.md`](operations-monitoring.md) | Operational — metrics & queries |
+| [`redis-key-map.md`](redis-key-map.md) | Operational — Redis keys & fanout topics (reference) |
 | [`runbooks.md`](runbooks.md) | Operational — incident response |
 | [`agent-operations-playbook.md`](agent-operations-playbook.md) | Operational — agent diagnosis/profiling workflow |
 | [`architecture/grading-delivery-semantics.md`](architecture/grading-delivery-semantics.md) | Operational / course |
@@ -150,6 +152,7 @@ Use this lightweight header to prevent stale docs without adding heavy process.
 3. **Behavioral contract (realtime, reads, search)** — Update [`architecture/realtime-delivery-contract.md`](architecture/realtime-delivery-contract.md) or tests-first; link from [`runbooks.md`](runbooks.md) only if on-call needs it.
 4. **Infra (VM, IP, provider)** — Update [`infrastructure-inventory.md`](infrastructure-inventory.md) in the **same** change set.
 5. **Doc consistency guardrail** — Run `npm run docs:check` before opening a PR that modifies docs.
+6. **Large refactor / file splits** — Follow [`refactor-acceptance-gates.md`](refactor-acceptance-gates.md) (tests, deploy guards, observability parity).
 
 ---
 
