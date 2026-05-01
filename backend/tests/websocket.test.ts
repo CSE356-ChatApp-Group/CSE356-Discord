@@ -435,76 +435,12 @@ describe('Bootstrap ready event', () => {
       expect(readyEvent.event).toBe('ready');
       expect(readyEvent.data).toEqual(
         expect.objectContaining({
-          connectionCount: expect.any(Number),
-          hasOtherConnections: expect.any(Boolean),
+          bootstrapComplete: true,
+          subscriptionsHydrated: true,
         }),
       );
-      expect(readyEvent.data.connectionCount).toBeGreaterThanOrEqual(1);
     } finally {
       await closeWebSocket(ws);
-    }
-  });
-
-  it('publishes same-user connection state as additional sockets connect and disconnect', async () => {
-    const user = await createAuthenticatedUser('wsconnectionstate');
-    const first = await connectWebSocket(port, user.accessToken);
-    let second: any;
-
-    try {
-      const firstSeesSecond = waitForWsEvent(
-        first,
-        (event) =>
-          event?.event === 'connections:updated'
-          && event?.data?.userId === user.user.id
-          && event?.data?.hasOtherConnections === true
-          && Number(event?.data?.connectionCount) >= 2,
-        5000,
-      );
-
-      const { WebSocket } = require('ws');
-      second = await new Promise<any>((resolve, reject) => {
-        const sock = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(user.accessToken)}`);
-        const timer = setTimeout(() => {
-          sock.terminate();
-          reject(new Error('Timed out waiting for second websocket ready event'));
-        }, 5000);
-        sock.on('message', (raw: any) => {
-          let parsed: any;
-          try { parsed = JSON.parse(raw.toString()); } catch { return; }
-          if (parsed?.event !== 'ready') return;
-          clearTimeout(timer);
-          expect(parsed.data).toEqual(
-            expect.objectContaining({
-              connectionCount: expect.any(Number),
-              hasOtherConnections: true,
-            }),
-          );
-          expect(parsed.data.connectionCount).toBeGreaterThanOrEqual(2);
-          resolve(sock);
-        });
-        sock.once('error', (err: Error) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-      });
-
-      await firstSeesSecond;
-
-      const firstSeesSingle = waitForWsEvent(
-        first,
-        (event) =>
-          event?.event === 'connections:updated'
-          && event?.data?.userId === user.user.id
-          && event?.data?.connectionCount === 1
-          && event?.data?.hasOtherConnections === false,
-        5000,
-      );
-      await closeWebSocket(second);
-      second = null;
-      await firstSeesSingle;
-    } finally {
-      if (second) await closeWebSocket(second);
-      await closeWebSocket(first);
     }
   });
 
@@ -1278,7 +1214,7 @@ describe('Channel realtime delivery', () => {
     });
   });
 
-  it('delivers channel read:updated to other channel members', async () => {
+  it('delivers channel read:updated only to the reading user sockets', async () => {
     const owner = await createAuthenticatedUser('wsreadprivowner');
     const member = await createAuthenticatedUser('wsreadprivmember');
 
@@ -1304,6 +1240,7 @@ describe('Channel realtime delivery', () => {
 
     const ownerSocket = await connectWebSocket(port, owner.accessToken);
     const memberSocket = await connectWebSocket(port, member.accessToken);
+    const memberMirrorSocket = await connectWebSocket(port, member.accessToken);
 
     try {
       const msgRes = await request(app)
@@ -1317,16 +1254,26 @@ describe('Channel realtime delivery', () => {
         memberSocket,
         (e) =>
           e.event === 'read:updated'
+          && e.data?.userId === member.user.id
           && e.data?.channelId === channelId
           && e.data?.lastReadMessageId === messageId,
       );
 
-      const ownerReadPromise = waitForWsEvent(
+      const memberMirrorReadPromise = waitForWsEvent(
+        memberMirrorSocket,
+        (e) =>
+          e.event === 'read:updated'
+          && e.data?.userId === member.user.id
+          && e.data?.channelId === channelId
+          && e.data?.lastReadMessageId === messageId,
+      );
+      const ownerNoReadPromise = waitForNoWsEvent(
         ownerSocket,
         (e) =>
           e.event === 'read:updated'
           && e.data?.channelId === channelId
           && e.data?.lastReadMessageId === messageId,
+        750,
       );
 
       const readRes = await request(app)
@@ -1334,11 +1281,15 @@ describe('Channel realtime delivery', () => {
         .set('Authorization', `Bearer ${member.accessToken}`);
 
       expect(readRes.status).toBe(200);
-      await memberReadPromise;
-      const ownerReadEvent = await ownerReadPromise;
-      expect(ownerReadEvent.data.userId).toBe(member.user.id);
-      expect(ownerReadEvent.data.channelId).toBe(channelId);
+      const [memberReadEvent, memberMirrorReadEvent] = await Promise.all([
+        memberReadPromise,
+        memberMirrorReadPromise,
+        ownerNoReadPromise,
+      ]);
+      expect(memberReadEvent.data.userId).toBe(member.user.id);
+      expect(memberMirrorReadEvent.data.userId).toBe(member.user.id);
     } finally {
+      await closeWebSocket(memberMirrorSocket);
       await closeWebSocket(ownerSocket);
       await closeWebSocket(memberSocket);
     }

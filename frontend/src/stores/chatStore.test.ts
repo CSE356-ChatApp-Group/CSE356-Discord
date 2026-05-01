@@ -737,23 +737,7 @@ describe('chatStore read mark suppression', () => {
 });
 
 describe('read receipt multi-target batch flush', () => {
-  it('skips channel read PUTs when this is the only active user connection', () => {
-    const connectionSpy = vi
-      .spyOn(wsManager, 'hasOtherUserConnections')
-      .mockReturnValue(false);
-    apiPut.mockResolvedValue({ success: true });
-
-    queueMarkMessageRead('m-ch', { channelId: 'ch-1', coalesce: true });
-    flushAllPendingReadCoalesce();
-
-    expect(apiPut).not.toHaveBeenCalled();
-    connectionSpy.mockRestore();
-  });
-
-  it('sends channel read PUTs when another user connection is active', () => {
-    const connectionSpy = vi
-      .spyOn(wsManager, 'hasOtherUserConnections')
-      .mockReturnValue(true);
+  it('sends channel read PUTs for server-side persistence', () => {
     apiPut.mockResolvedValue({ success: true });
 
     queueMarkMessageRead('m-ch', { channelId: 'ch-1', coalesce: true });
@@ -762,13 +746,9 @@ describe('read receipt multi-target batch flush', () => {
     expect(apiPut).toHaveBeenCalledTimes(1);
     expect(apiPut.mock.calls[0][0]).toBe('/messages/m-ch/read');
     expect(apiPut.mock.calls[0][1]).toEqual({ channelId: 'ch-1' });
-    connectionSpy.mockRestore();
   });
 
-  it('always sends DM read PUTs even when this is the only active user connection', () => {
-    const connectionSpy = vi
-      .spyOn(wsManager, 'hasOtherUserConnections')
-      .mockReturnValue(false);
+  it('sends DM read PUTs too', () => {
     apiPut.mockResolvedValue({ success: true });
 
     queueMarkMessageRead('m-dm', { conversationId: 'conv-1', coalesce: true });
@@ -777,13 +757,9 @@ describe('read receipt multi-target batch flush', () => {
     expect(apiPut).toHaveBeenCalledTimes(1);
     expect(apiPut.mock.calls[0][0]).toBe('/messages/m-dm/read');
     expect(apiPut.mock.calls[0][1]).toEqual({ conversationId: 'conv-1' });
-    connectionSpy.mockRestore();
   });
 
-  it('batches only eligible read targets', () => {
-    const connectionSpy = vi
-      .spyOn(wsManager, 'hasOtherUserConnections')
-      .mockReturnValue(false);
+  it('batches channel and DM targets together', () => {
     apiPut.mockResolvedValue({ success: true });
 
     queueMarkMessageRead('m-ch', { channelId: 'ch-1', coalesce: true });
@@ -791,15 +767,16 @@ describe('read receipt multi-target batch flush', () => {
     flushAllPendingReadCoalesce();
 
     expect(apiPut).toHaveBeenCalledTimes(1);
-    expect(apiPut.mock.calls[0][0]).toBe('/messages/m-dm/read');
-    expect(apiPut.mock.calls[0][1]).toEqual({ conversationId: 'conv-1' });
-    connectionSpy.mockRestore();
+    expect(apiPut.mock.calls[0][0]).toBe('/messages/batch-read');
+    expect(apiPut.mock.calls[0][1]).toEqual({
+      reads: expect.arrayContaining([
+        { messageId: 'm-ch', channelId: 'ch-1' },
+        { messageId: 'm-dm', conversationId: 'conv-1' },
+      ]),
+    });
   });
 
   it('flushAllPendingReadCoalesce sends one PUT /messages/batch-read for two distinct targets', () => {
-    const connectionSpy = vi
-      .spyOn(wsManager, 'hasOtherUserConnections')
-      .mockReturnValue(true);
     apiPut.mockResolvedValue({ success: true, results: [] });
     useAuthStore.setState({
       user: { id: 'user-1', username: 'sam', displayName: 'Sam', email: 'sam@example.com' },
@@ -851,7 +828,6 @@ describe('read receipt multi-target batch flush', () => {
         }),
       ]),
     );
-    connectionSpy.mockRestore();
   });
 });
 

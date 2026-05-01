@@ -5,7 +5,6 @@
  */
 
 import { api } from '../lib/api';
-import { wsManager } from '../lib/ws';
 import type { Entity } from './chatStoreTypes';
 
 export type PendingReadMark = {
@@ -47,10 +46,6 @@ function readTargetFromOptions(opts: { channelId?: string | null; conversationId
 function readTargetId(target: string) {
   const idx = target.indexOf(':');
   return idx === -1 ? target : target.slice(idx + 1);
-}
-
-function shouldEmitReadForTarget(target: string) {
-  return !target.startsWith('ch:') || wsManager.hasOtherUserConnections();
 }
 
 function findMessageInTarget(target: string, messageId: string) {
@@ -154,7 +149,6 @@ function emitReadsAfterFlush(items: FlushItem[]) {
   const ready: FlushItem[] = [];
   for (const { target, readMark } of items) {
     if (!readMark?.messageId) continue;
-    if (!shouldEmitReadForTarget(target)) continue;
     if (!isReadMarkAdvance(readMark, lastSentReadByTarget.get(target))) continue;
     if (readMarkInFlight.has(target)) {
       pendingReadByTarget.set(target, latestReadMark(pendingReadByTarget.get(target), readMark));

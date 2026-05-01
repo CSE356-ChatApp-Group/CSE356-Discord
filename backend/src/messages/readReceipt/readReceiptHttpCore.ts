@@ -43,7 +43,7 @@ const {
   advanceReadStateCursor,
 } = require("../lib/readReceiptState");
 const { publishConversationEventNow } = require("../fanout/conversationFanout");
-const fanout = require("../../websocket/fanout");
+const { publishUserFeedTargets } = require("../../websocket/userFeed");
 const { loadMessageTargetForUser } = require("../accessCaches");
 
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
@@ -418,7 +418,7 @@ async function executeReadReceiptMark(
       await publishConversationEventNow(conversation_id, "read:updated", payload);
       return;
     }
-    await fanout.publish(`channel:${channel_id}`, {
+    await publishUserFeedTargets([uid], {
       event: "read:updated",
       data: payload,
     });

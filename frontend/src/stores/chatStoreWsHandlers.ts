@@ -333,7 +333,6 @@ function dispatchChatStoreWsEvent(
       } = ev.data || {};
       if (!userId || (!conversationId && !channelId)) break;
       const me = useAuthStore.getState().user;
-      console.log("received read");
       if (channelId && me?.id === userId) {
         const pre = get().channels.find((c) => c.id === channelId);
         const preCommunityId = channelCommunityId(pre || {});

@@ -80,14 +80,12 @@ const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { loadReplayableMessagesForUser } = require("../messages/pending/reconnectReplay");
 const { drainPendingMessagesForUser } = require("../messages/pending/realtimePending");
-const fanout = require("./fanout");
 const { markWsRecentConnect, markChannelRecentConnect } = require("./recentConnect");
 const { isWsReplayDisabled } = require("../utils/abuseKillSwitch");
 const { clientIpFromReq } = require("../middleware/wsUpgradeLimiter");
 const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
 const {
   allUserFeedRedisChannels,
-  publishUserFeedTargets,
   userIdFromTarget,
 } = require("./userFeed");
 const { resolvedWsRuntimeConfig } = require("./profile");
@@ -350,7 +348,6 @@ const {
   scheduleDebouncedPresenceRecompute,
   upsertConnectionState,
   removeConnection,
-  getConnectionCount,
   recomputeUserPresence,
   reconcileAllConnectedUsers,
 } = createPresenceCoordinator({
@@ -365,21 +362,6 @@ const {
   presenceSweeperDebounceMs: PRESENCE_SWEEPER_DEBOUNCE_MS,
   presenceDisconnectDebounceMs: PRESENCE_DISCONNECT_DEBOUNCE_MS,
 });
-
-async function publishUserConnectionState(userId) {
-  const connectionCount = await getConnectionCount(userId);
-  const payload = {
-    event: "connections:updated",
-    data: {
-      userId,
-      connectionCount,
-      hasOtherConnections: connectionCount > 1,
-    },
-  };
-  // Logical `user:<id>` topics are delivered via shared `userfeed:<shard>` Redis
-  // channels; publishing to the literal `user:` Redis channel is not subscribed.
-  await publishUserFeedTargets([`user:${userId}`], payload);
-}
 
 const {
   subscribeCommunityClient,
@@ -625,10 +607,6 @@ const { cleanup } = createDisconnectLifecycle({
   isRedisOperational,
   redis,
   removeConnection,
-  publishUserConnectionState: (userId) =>
-    publishUserConnectionState(userId).catch((err) => {
-      logger.warn({ err, userId }, "WS connection-state publish failed");
-    }),
   recomputeUserPresence,
   scheduleDebouncedPresenceRecompute,
   logWsHotInfo,
@@ -668,11 +646,6 @@ const { handleConnection } = createConnectionLifecycle({
   handleClientMessage,
   refreshConnectionTtls,
   upsertConnectionState,
-  getConnectionCount,
-  publishUserConnectionState: (userId) =>
-    publishUserConnectionState(userId).catch((err) => {
-      logger.warn({ err, userId }, "WS connection-state publish failed");
-    }),
   cancelPendingPresenceRecompute,
   recomputeUserPresence,
   WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
