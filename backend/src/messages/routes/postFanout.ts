@@ -6,6 +6,7 @@
 
 const logger = require("../../utils/logger");
 const sideEffects = require("../sideEffects");
+const { tracer } = require("../../utils/tracer");
 const {
   deliveryTimeoutTotal,
   messagePostFanoutAsyncEnqueueTotal,
@@ -83,39 +84,45 @@ async function runChannelMessageCreatedFanout(opts: {
           );
         }
       }
-      const enqueued = sideEffects.enqueueFanoutJob(
-        "fanout.message_post.channel",
-        async () => {
-          await messagePostFanoutAsync.runPostMessageFanoutJob(
-            "channel",
-            String(baseMessage.id),
+      const enqueued = tracer.startActiveSpan('fanout.enqueue', (span: any) => {
+        try {
+          return sideEffects.enqueueFanoutJob(
+            "fanout.message_post.channel",
             async () => {
-              const msg = await loadHydratedMessageById(String(baseMessage.id));
-              if (!msg) {
-                logger.warn(
-                  { channelId, messageId: baseMessage.id },
-                  "POST /messages fanout job: message row missing",
-                );
-                return;
-              }
-              if (String(msg.channel_id) !== String(channelId)) {
-                logger.warn(
-                  { channelId, messageId: baseMessage.id },
-                  "POST /messages fanout job: channel mismatch",
-                );
-                return;
-              }
-              const envelope = messageFanoutEnvelope(
-                "message:created",
-                msg,
+              await messagePostFanoutAsync.runPostMessageFanoutJob(
+                "channel",
+                String(baseMessage.id),
+                async () => {
+                  const msg = await loadHydratedMessageById(String(baseMessage.id));
+                  if (!msg) {
+                    logger.warn(
+                      { channelId, messageId: baseMessage.id },
+                      "POST /messages fanout job: message row missing",
+                    );
+                    return;
+                  }
+                  if (String(msg.channel_id) !== String(channelId)) {
+                    logger.warn(
+                      { channelId, messageId: baseMessage.id },
+                      "POST /messages fanout job: channel mismatch",
+                    );
+                    return;
+                  }
+                  const envelope = messageFanoutEnvelope(
+                    "message:created",
+                    msg,
+                  );
+                  await publishChannelMessageCreated(channelId, envelope, {
+                    communityId,
+                  });
+                },
               );
-              await publishChannelMessageCreated(channelId, envelope, {
-                communityId,
-              });
             },
           );
-        },
-      );
+        } finally {
+          span.end();
+        }
+      });
       realtimeChannelFanoutComplete = false;
       if (enqueued) {
         messagePostFanoutAsyncEnqueueTotal.inc({
@@ -216,37 +223,43 @@ async function runConversationMessageCreatedFanout(opts: {
 
   try {
     if (messagePostAsyncFanoutEnabled()) {
-      const enqueued = sideEffects.enqueueFanoutJob(
-        "fanout.message_post.conversation",
-        async () => {
-          await messagePostFanoutAsync.runPostMessageFanoutJob(
-            "conversation",
-            String(baseMessage.id),
+      const enqueued = tracer.startActiveSpan('fanout.enqueue', (span: any) => {
+        try {
+          return sideEffects.enqueueFanoutJob(
+            "fanout.message_post.conversation",
             async () => {
-              const msg = await loadHydratedMessageById(String(baseMessage.id));
-              if (!msg) {
-                logger.warn(
-                  { conversationId, messageId: baseMessage.id },
-                  "POST /messages fanout job: message row missing",
-                );
-                return;
-              }
-              if (String(msg.conversation_id) !== String(conversationId)) {
-                logger.warn(
-                  { conversationId, messageId: baseMessage.id },
-                  "POST /messages fanout job: conversation mismatch",
-                );
-                return;
-              }
-              await publishConversationEventNow(
-                conversationId,
-                "message:created",
-                msg,
+              await messagePostFanoutAsync.runPostMessageFanoutJob(
+                "conversation",
+                String(baseMessage.id),
+                async () => {
+                  const msg = await loadHydratedMessageById(String(baseMessage.id));
+                  if (!msg) {
+                    logger.warn(
+                      { conversationId, messageId: baseMessage.id },
+                      "POST /messages fanout job: message row missing",
+                    );
+                    return;
+                  }
+                  if (String(msg.conversation_id) !== String(conversationId)) {
+                    logger.warn(
+                      { conversationId, messageId: baseMessage.id },
+                      "POST /messages fanout job: conversation mismatch",
+                    );
+                    return;
+                  }
+                  await publishConversationEventNow(
+                    conversationId,
+                    "message:created",
+                    msg,
+                  );
+                },
               );
             },
           );
-        },
-      );
+        } finally {
+          span.end();
+        }
+      });
       realtimePublishedAtForHttp = new Date().toISOString();
       realtimeConversationFanoutComplete = false;
       if (enqueued) {

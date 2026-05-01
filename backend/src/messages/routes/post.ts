@@ -8,6 +8,8 @@
 
 const crypto = require("crypto");
 const { body } = require("express-validator");
+const { tracer, trace } = require("../../utils/tracer");
+const { SpanStatusCode } = require("@opentelemetry/api");
 const {
   withTransaction,
   poolStats,
@@ -526,6 +528,8 @@ async function runPostInsertPhase({
 }) {
   let communityId: string | null = null;
 
+  trace.getActiveSpan()?.setAttribute('message.insert_path', channelId ? 'channel_merged' : 'dm_sequential');
+
   const runChannelMessageRowUnderInsertLock = () =>
     withTransaction(async (client) => {
       const { row, communityId: nextCommunityId } =
@@ -556,44 +560,69 @@ async function runPostInsertPhase({
 
   let baseMessage: any;
   if (channelId) {
-    baseMessage = await runChannelMessageInsertSerialized(
-      channelId,
-      runChannelMessageRowUnderInsertLock,
-      {
-        requestId: authReq.id,
-        onInsertLock: ({
-          waitMs,
-          lockPath,
-          bypassReasonDetail,
-        }) => {
-          setChannelInsertLockMeta({ waitMs, lockPath, bypassReasonDetail });
-        },
-      },
-    );
-    if (attachments.length > 0) {
+    baseMessage = await tracer.startActiveSpan('db.channel_insert', async (span: any) => {
       try {
-        await withTransaction(async (client) => {
-          await client.query(
-            `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
-          );
-          await insertMessageAttachments(
-            client,
-            baseMessage.id,
-            userId,
-            attachments,
-          );
-        });
-      } catch (attachErr) {
-        await rollbackInsertedChannelMessage(
-          baseMessage.id,
+        const row = await runChannelMessageInsertSerialized(
           channelId,
-          userId,
+          runChannelMessageRowUnderInsertLock,
+          {
+            requestId: authReq.id,
+            onInsertLock: ({ waitMs, lockPath, bypassReasonDetail, leaseHeld }) => {
+              setChannelInsertLockMeta({ waitMs, lockPath, bypassReasonDetail });
+              span.setAttribute('lock.path', lockPath);
+              span.setAttribute('lock.wait_ms', waitMs);
+              span.setAttribute('lock.held', leaseHeld);
+            },
+          },
         );
-        throw attachErr;
+        span.setAttribute('tx.config_ms', Math.max(0, txPhases.t_access - txPhases.t0));
+        span.setAttribute('tx.merged_sql_ms', Math.max(0, txPhases.t_insert - txPhases.t_access));
+        if (attachments.length > 0) {
+          span.setAttribute('attachment_count', attachments.length);
+          try {
+            await withTransaction(async (client) => {
+              await client.query(
+                `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+              );
+              await insertMessageAttachments(client, row.id, userId, attachments);
+            });
+          } catch (attachErr) {
+            await rollbackInsertedChannelMessage(row.id, channelId, userId);
+            throw attachErr;
+          }
+        }
+        return row;
+      } catch (err: any) {
+        const isExpected4xx = err.statusCode && err.statusCode >= 400 && err.statusCode < 500;
+        if (!isExpected4xx) {
+          span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+          span.recordException(err);
+        }
+        throw err;
+      } finally {
+        span.end();
       }
-    }
+    });
   } else {
-    baseMessage = await runDmMessageInsertTransaction();
+    baseMessage = await tracer.startActiveSpan('db.dm_insert', async (span: any) => {
+      try {
+        const row = await runDmMessageInsertTransaction();
+        span.setAttribute('tx.config_ms', Math.max(0, txPhases.t_access - txPhases.t0));
+        span.setAttribute('tx.access_sql_ms', Math.max(0, txPhases.t_insert - txPhases.t_access));
+        span.setAttribute('tx.insert_sql_ms', Math.max(0, txPhases.t_later - txPhases.t_insert));
+        if (attachments.length > 0) span.setAttribute('attachment_count', attachments.length);
+        return row;
+      } catch (err: any) {
+        const isExpected4xx = err.statusCode && err.statusCode >= 400 && err.statusCode < 500;
+        if (!isExpected4xx) {
+          span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+          span.recordException(err);
+        }
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   }
 
   return { baseMessage, communityId };
@@ -647,6 +676,16 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           ? authReq.body.attachments
           : [];
 
+        const rootSpan = trace.getActiveSpan();
+        if (rootSpan) {
+          rootSpan.setAttribute('user.id', userId);
+          rootSpan.setAttribute('user.name', authReq.user.username);
+          rootSpan.setAttribute('message.content_length', normalizedContent.length);
+          rootSpan.setAttribute('message.type', channelId ? 'channel' : 'dm');
+          if (channelId) rootSpan.setAttribute('channel.id', channelId);
+          else if (conversationId) rootSpan.setAttribute('conversation.id', conversationId);
+        }
+
         const payloadValidationError = validatePostTargetAndPayload({
           channelId,
           conversationId,
@@ -680,22 +719,36 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         const {
           baseMessage,
           communityId,
-        } = await runPostInsertPhase({
-          authReq,
-          channelId,
-          conversationId,
-          userId,
-          normalizedContent,
-          threadId,
-          attachments,
-          txPhases,
-          setChannelInsertLockMeta: ({ waitMs, lockPath, bypassReasonDetail }) => {
-            channelInsertLockWaitMs = waitMs;
-            channelInsertLockPath = lockPath;
-            channelInsertLockReasonDetail = bypassReasonDetail;
-          },
+        } = await tracer.startActiveSpan('db.message_insert', async (span: any) => {
+          try {
+            return await runPostInsertPhase({
+              authReq,
+              channelId,
+              conversationId,
+              userId,
+              normalizedContent,
+              threadId,
+              attachments,
+              txPhases,
+              setChannelInsertLockMeta: ({ waitMs, lockPath, bypassReasonDetail }) => {
+                channelInsertLockWaitMs = waitMs;
+                channelInsertLockPath = lockPath;
+                channelInsertLockReasonDetail = bypassReasonDetail;
+              },
+            });
+          } catch (err: any) {
+            const isExpected4xx = err.statusCode && err.statusCode >= 400 && err.statusCode < 500;
+            if (!isExpected4xx) {
+              span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+              span.recordException(err);
+            }
+            throw err;
+          } finally {
+            span.end();
+          }
         });
 
+        trace.getActiveSpan()?.setAttribute('message.id', String(baseMessage.id));
         const t_tx_done = Date.now();
         let t_after_cache_bust = t_tx_done;
         let t_after_fanout = t_tx_done;
@@ -749,11 +802,21 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         const hydrateWallMs = Math.max(0, tAfterHydrateMark - tHydrateStart);
 
         // --- POST /messages: list cache bust (bounded) ---
-        const cacheBustRun = await withBoundedPostInsertTimeout(
-          "cache_bust",
-          bustMessagesCacheSafe({ channelId, conversationId }),
-          MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
-        );
+        const cacheBustRun = await tracer.startActiveSpan('cache.bust', async (span: any) => {
+          try {
+            return await withBoundedPostInsertTimeout(
+              "cache_bust",
+              bustMessagesCacheSafe({ channelId, conversationId }),
+              MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
+            );
+          } catch (err: any) {
+            span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+            span.recordException(err);
+            throw err;
+          } finally {
+            span.end();
+          }
+        });
         if (!cacheBustRun.ok && cacheBustRun.timedOut) {
           deliveryTimeoutTotal.inc({ phase: "cache_bust" });
           logger.warn(

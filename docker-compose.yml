@@ -93,6 +93,8 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: development
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo:4318/v1/traces"
       CHOKIDAR_USEPOLLING: "true"
       AUTH_BYPASS: ${AUTH_BYPASS:-false}
       PORT: 3000
@@ -159,7 +161,7 @@ services:
   migrate:
     image: node:20-alpine
     working_dir: /app
-    command: sh -c "npm ci || (rm -rf node_modules && npm ci) && npm run migrate"
+    command: sh -c "npm i || (rm -rf node_modules && npm ci) && npm run migrate"
     volumes:
       - ./backend:/app
       - backend_node_modules:/app/node_modules
@@ -253,7 +255,11 @@ services:
       - meili_data:/meili_data
     networks: [chatapp]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7700/health | grep -q available"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:7700/health | grep -q available",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -270,7 +276,11 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/-/healthy >/dev/null 2>&1 || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:9090/-/healthy >/dev/null 2>&1 || exit 1",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -298,7 +308,11 @@ services:
       DISCORD_WEBHOOK_URL_STAGING: ${DISCORD_WEBHOOK_URL_STAGING:-}
       DISCORD_WEBHOOK_URL_PROD: ${DISCORD_WEBHOOK_URL_PROD:-}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9093/-/ready >/dev/null 2>&1 || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:9093/-/ready >/dev/null 2>&1 || exit 1",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -356,7 +370,11 @@ services:
     ports:
       - "3001:3000"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q '\"database\":\"ok\"'"]
+      test:
+        [
+          "CMD-SHELL",
+          'wget -qO- http://127.0.0.1:3000/api/health | grep -q ''"database":"ok"''',
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -375,7 +393,11 @@ services:
       - "127.0.0.1:4317:4317"
       - "127.0.0.1:4318:4318"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/metrics >/dev/null 2>&1 || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:3200/metrics >/dev/null 2>&1 || exit 1",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -391,7 +413,11 @@ services:
     ports:
       - "127.0.0.1:3100:3100"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready >/dev/null 2>&1 || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:3100/ready >/dev/null 2>&1 || exit 1",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5

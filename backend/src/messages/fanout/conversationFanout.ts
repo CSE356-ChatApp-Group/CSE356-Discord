@@ -6,6 +6,8 @@
 const fanout = require("../../websocket/fanout");
 const redis = require("../../db/redis");
 const logger = require("../../utils/logger");
+const { tracer, trace } = require("../../utils/tracer");
+const { SpanStatusCode } = require("@opentelemetry/api");
 const {
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
@@ -36,7 +38,17 @@ async function publishConversationEventNow(
   const startedAt = process.hrtime.bigint();
   const isDmTimingEvent =
     typeof event === "string" && event.startsWith("message:");
-  const targets: string[] = await getConversationFanoutTargets(conversationId);
+  const targets: string[] = await tracer.startActiveSpan('fanout.target_lookup', async (span: any) => {
+    try {
+      return await getConversationFanoutTargets(conversationId);
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || '') });
+      span.recordException(err as Error);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
   const lookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
   fanoutPublishDurationMs.observe(
     { path: "conversation_event", stage: "target_lookup" },
@@ -77,11 +89,15 @@ async function publishConversationEventNow(
   const wrapStart = process.hrtime.bigint();
   const payload = wrapFanoutPayload(event, data);
   if (event === "message:created" && userIds.length > 0) {
-    enqueuePendingMessageForUsers(userIds, payload).catch((err: unknown) => {
-      logger.warn(
-        { err, conversationId, userCount: userIds.length },
-        "Failed to enqueue conversation message pending replay pointers",
-      );
+    tracer.startActiveSpan('fanout.pending_enqueue', (span: any) => {
+      enqueuePendingMessageForUsers(userIds, payload)
+        .catch((err: unknown) => {
+          logger.warn(
+            { err, conversationId, userCount: userIds.length },
+            "Failed to enqueue conversation message pending replay pointers",
+          );
+        })
+        .finally(() => span.end());
     });
   }
   const wrapPayloadMs = Number(process.hrtime.bigint() - wrapStart) / 1e6;
@@ -102,6 +118,12 @@ async function publishConversationEventNow(
     userIds.length > 0
       ? new Set(userIds.map((uid) => userFeedRedisChannelForUserId(uid))).size
       : 0;
+
+  const activeSpan = trace.getActiveSpan();
+  if (activeSpan) {
+    activeSpan.setAttribute('fanout.recipient_count', userIds.length + passthroughTargets.length);
+    activeSpan.setAttribute('fanout.shard_count', userfeedShardCount);
+  }
 
   async function publishPassthroughWithTimings() {
     if (!passthroughTargets.length)
@@ -127,8 +149,28 @@ async function publishConversationEventNow(
   }
 
   const [passthroughResult, userfeedResult] = await Promise.all([
-    publishPassthroughWithTimings(),
-    publishUserfeedWithTiming(),
+    tracer.startActiveSpan('fanout.publish_passthrough', async (span: any) => {
+      try {
+        return await publishPassthroughWithTimings();
+      } catch (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || '') });
+        span.recordException(err as Error);
+        throw err;
+      } finally {
+        span.end();
+      }
+    }),
+    tracer.startActiveSpan('fanout.publish_userfeed', async (span: any) => {
+      try {
+        return await publishUserfeedWithTiming();
+      } catch (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || '') });
+        span.recordException(err as Error);
+        throw err;
+      } finally {
+        span.end();
+      }
+    }),
   ]);
   const parallelPublishWallMs =
     Number(process.hrtime.bigint() - publishStartedAt) / 1e6;

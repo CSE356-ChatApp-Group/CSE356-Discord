@@ -2,6 +2,8 @@
 const fanout = require('../websocket/fanout');
 const { publishUserFeedTargets, userIdFromTarget } = require('../websocket/userFeed');
 const logger = require('../utils/logger');
+const { tracer, context: otelContext } = require('../utils/tracer');
+const { SpanStatusCode } = require('@opentelemetry/api');
 const redis = require('../db/redis');
 const {
   sideEffectQueueDepth,
@@ -12,7 +14,7 @@ const {
   fanoutQueueDepth,
 } = require('../utils/metrics');
 
-const queues: Record<string, Array<{ name: string; fn: () => Promise<void>; enqueuedAt: number; queueName: string }>> = {
+const queues: Record<string, Array<{ name: string; fn: () => Promise<void>; enqueuedAt: number; queueName: string; otelCtx: any }>> = {
   'fanout:critical': [],
   'fanout:background': [],
 };
@@ -97,7 +99,7 @@ function enqueue(name, fn) {
     return false;
   }
 
-  queue.push({ name, fn, enqueuedAt: Date.now(), queueName });
+  queue.push({ name, fn, enqueuedAt: Date.now(), queueName, otelCtx: otelContext.active() });
   refreshQueueMetrics(queueName);
   maybeStartWorkers(queueName);
   return true;
@@ -117,7 +119,23 @@ async function drainWorker(queueName) {
 
       const startedAt = process.hrtime.bigint();
       try {
-        await job.fn();
+        await otelContext.with(job.otelCtx, () =>
+          tracer.startActiveSpan(
+            'fanout.execute',
+            { attributes: { 'fanout.job': job.name, 'fanout.queue': job.queueName } },
+            async (span: any) => {
+              try {
+                await job.fn();
+              } catch (err) {
+                span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || err) });
+                span.recordException(err);
+                throw err;
+              } finally {
+                span.end();
+              }
+            },
+          )
+        );
         const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
         sideEffectJobDurationMs.observe(
           { queue: queueName, name: job.name, status: 'success' },

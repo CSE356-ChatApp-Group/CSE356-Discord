@@ -32,12 +32,13 @@ Supports real-time messaging, communities, channels, DMs, presence, search, and 
 ### Redis Pub/Sub Fanout
 
 When a message is created on any API node:
+
 1. The handler inserts the row into Postgres
 2. Calls `fanout.publish(channel, event)` → publishes to Redis
 3. All 3 API nodes receive it via their dedicated subscriber connection
 4. Each node delivers it to its locally-connected WebSocket clients
 
-This means *any* client connected to *any* node receives real-time events instantly.
+This means _any_ client connected to _any_ node receives real-time events instantly.
 
 **Course grading / throughput (“Failed deliveries”, outages):** see [`docs/architecture/grading-delivery-semantics.md`](docs/architecture/grading-delivery-semantics.md) for how the 15s-per-listener rule maps to HTTP 201, WebSocket `message:created`, and common false positives (403, harness scope).
 
@@ -158,14 +159,14 @@ To avoid slowing down a busy server:
 - successful, fast requests are mostly **suppressed in production**
 - **4xx**, **5xx**, and **slow requests** are still logged
 - sensitive fields like tokens, cookies, and passwords are **redacted**
-- tracing is **off by default**; when enabled, production sampling defaults to `OTEL_TRACES_SAMPLE_RATIO=0.1`
+- tracing is **off by default**; when enabled, production sampling defaults to `OTEL_TRACES_SAMPLE_RATIO=0.05`
 
 Useful env knobs:
 
 ```bash
 LOG_LEVEL=info
 OTEL_ENABLED=false
-OTEL_TRACES_SAMPLE_RATIO=0.1
+OTEL_TRACES_SAMPLE_RATIO=0.05
 ```
 
 ## Testing
@@ -218,12 +219,12 @@ npm run build
 
 ### Services after startup
 
-| Service       | URL                     | Notes                  |
-|---------------|-------------------------|------------------------|
-| API           | http://localhost/api/v1 | via Nginx              |
-| WebSocket     | ws://localhost/ws       | via Nginx              |
-| MinIO console | http://localhost:9001   | S3 object storage UI   |
-| Grafana       | http://localhost:3001   | admin / admin          |
+| Service       | URL                     | Notes                |
+| ------------- | ----------------------- | -------------------- |
+| API           | http://localhost/api/v1 | via Nginx            |
+| WebSocket     | ws://localhost/ws       | via Nginx            |
+| MinIO console | http://localhost:9001   | S3 object storage UI |
+| Grafana       | http://localhost:3001   | admin / admin        |
 
 ---
 
@@ -282,41 +283,42 @@ chatapp/
 
 ### Authentication
 
-| Method | Path                      | Auth | Description              |
-|--------|---------------------------|------|--------------------------|
-| POST   | /auth/register            | –    | Local registration        |
-| POST   | /auth/login               | –    | Local login               |
-| POST   | /auth/refresh             | –    | Refresh access token      |
-| POST   | /auth/logout              | ✓    | Revoke tokens             |
-| GET    | /auth/google              | –    | Start Google OAuth        |
-| GET    | /auth/github              | –    | Start GitHub OAuth        |
+| Method | Path           | Auth | Description          |
+| ------ | -------------- | ---- | -------------------- |
+| POST   | /auth/register | –    | Local registration   |
+| POST   | /auth/login    | –    | Local login          |
+| POST   | /auth/refresh  | –    | Refresh access token |
+| POST   | /auth/logout   | ✓    | Revoke tokens        |
+| GET    | /auth/google   | –    | Start Google OAuth   |
+| GET    | /auth/github   | –    | Start GitHub OAuth   |
 
 All protected endpoints require: `Authorization: Bearer <accessToken>`
 
 ### Messages
 
-| Method | Path                      | Description                        |
-|--------|---------------------------|------------------------------------|
-| GET    | /messages                 | Paginated history: `channelId` or `conversationId`; optional `before=<messageId>` (older page), **`after=<messageId>`** (newer page). Do not pass both `before` and `after`. Latest page is Redis-cached when neither cursor is set. |
-| GET    | /messages/context/:messageId | Message window around an id (search “jump”): optional `limit` (per side, 1–50, default 25). Response includes `hasOlder` / `hasNewer` and chronological `messages`. |
-| POST   | /messages                 | Send message                       |
-| PATCH  | /messages/:id             | Edit own message                   |
-| DELETE | /messages/:id             | Delete own message (hard delete)   |
-| PUT    | /messages/:id/read        | Update read cursor                 |
+| Method | Path                         | Description                                                                                                                                                                                                                          |
+| ------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| GET    | /messages                    | Paginated history: `channelId` or `conversationId`; optional `before=<messageId>` (older page), **`after=<messageId>`** (newer page). Do not pass both `before` and `after`. Latest page is Redis-cached when neither cursor is set. |
+| GET    | /messages/context/:messageId | Message window around an id (search “jump”): optional `limit` (per side, 1–50, default 25). Response includes `hasOlder` / `hasNewer` and chronological `messages`.                                                                  |
+| POST   | /messages                    | Send message                                                                                                                                                                                                                         |
+| PATCH  | /messages/:id                | Edit own message                                                                                                                                                                                                                     |
+| DELETE | /messages/:id                | Delete own message (hard delete)                                                                                                                                                                                                     |
+| PUT    | /messages/:id/read           | Update read cursor                                                                                                                                                                                                                   |
 
 **POST /messages — retries:** send header `Idempotency-Key: <opaque string>` (≤200 chars, same user). While the key is held in Redis, duplicate posts return the same created message with **201** instead of creating twice. Optional env: `MSG_IDEM_PENDING_TTL_SECS` (in-flight lease, default 120), `MSG_IDEM_SUCCESS_TTL_SECS` (stored result, default 86400), `MSG_IDEM_POLL_DEADLINE_MS` / `MSG_IDEM_POLL_MAX_SLEEP_MS` (duplicate-lease wait: exponential backoff, default deadline 5000ms). If Redis is unavailable, idempotency is skipped so messaging still works.
 
 ### Communities
 
-| Method | Path           | Description |
-|--------|----------------|-------------|
-| GET    | /communities   | All communities visible to the user (default). Optional paging: `?limit=1-100` and `?after=<communityId>` (keyset cursor from the previous page’s last row). |
+| Method | Path         | Description                                                                                                                                                  |
+| ------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| GET    | /communities | All communities visible to the user (default). Optional paging: `?limit=1-100` and `?after=<communityId>` (keyset cursor from the previous page’s last row). |
 
 ### WebSocket Events
 
 Connect: `ws://host/ws?token=<accessToken>`
 
 **Client → Server:**
+
 ```json
 { "type": "subscribe",   "channel": "channel:<uuid>" }
 { "type": "unsubscribe", "channel": "channel:<uuid>" }
@@ -326,6 +328,7 @@ Connect: `ws://host/ws?token=<accessToken>`
 ```
 
 **Server → Client:**
+
 ```json
 { "event": "message:created",    "data": { ...message } }
 { "event": "message:updated",    "data": { ...message } }
@@ -358,19 +361,23 @@ GET /search?q=hello&communityId=<uuid>&authorId=<uuid>&after=2024-01-01&limit=20
 ## Extending the MVP
 
 ### Adding voice channels
+
 The `channels` table has a `type` column with `voice_placeholder` enum ready.
 Integrate WebRTC signaling (e.g. mediasoup) and add a signal-relay route.
 
 ### Horizontal DB scaling
+
 The UUID primary keys and `created_at` cursors are compatible with Citus (Postgres sharding)
 or read-replica routing. Replace `pool.ts` with a read/write split pool when ready.
 
 ### Scaling search
+
 The FTS implementation in `search/client.ts` uses Postgres `tsvector` + `websearch_to_tsquery`.
 To switch to a dedicated search engine, implement the same `search(q, opts)` interface in `client.ts`.
 No other files need to change.
 
 ### Adding reactions, threads, polls
+
 All extend `messages` with junction tables. The existing WebSocket fanout and Redis Pub/Sub
 pattern handles their real-time delivery without structural changes.
 

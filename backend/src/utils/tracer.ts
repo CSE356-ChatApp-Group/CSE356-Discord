@@ -12,10 +12,10 @@ const { trace, context } = require('@opentelemetry/api');
 
 const enabled = String(process.env.OTEL_ENABLED || '').trim().toLowerCase() === 'true';
 const isProduction = process.env.NODE_ENV === 'production';
-const parsedRatio = Number(process.env.OTEL_TRACES_SAMPLE_RATIO || (isProduction ? '0.1' : '1'));
+const parsedRatio = Number(process.env.OTEL_TRACES_SAMPLE_RATIO || (isProduction ? '0.05' : '1'));
 const traceSampleRatio = Number.isFinite(parsedRatio)
   ? Math.max(0, Math.min(1, parsedRatio))
-  : (isProduction ? 0.1 : 1);
+  : (isProduction ? 0.05 : 1);
 
 if (enabled) {
   const { NodeTracerProvider } = require('@opentelemetry/sdk-trace-node');
@@ -45,6 +45,17 @@ if (enabled) {
   });
 
   provider.register();
+
+  const { registerInstrumentations } = require('@opentelemetry/instrumentation');
+  const { HttpInstrumentation } = require('@opentelemetry/instrumentation-http');
+  const { ExpressInstrumentation } = require('@opentelemetry/instrumentation-express');
+  registerInstrumentations({
+    tracerProvider: provider,
+    instrumentations: [
+      new HttpInstrumentation(),
+      new ExpressInstrumentation(),
+    ],
+  });
 }
 
 const tracer = trace.getTracer('chatapp-api');

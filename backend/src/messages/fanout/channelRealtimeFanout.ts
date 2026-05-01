@@ -6,6 +6,8 @@
 
 const redis = require('../../db/redis');
 const fanout = require('../../websocket/fanout');
+const { tracer, trace } = require('../../utils/tracer');
+const { SpanStatusCode } = require('@opentelemetry/api');
 const { publishUserFeedTargets } = require('../../websocket/userFeed');
 const { publishCommunityFeedMessage } = require('../../websocket/communityFeed');
 const {
@@ -55,14 +57,25 @@ async function publishUserTopicTargets(
   path: string,
 ) {
   if (!targets.length) return;
-  const publishStartedAt = process.hrtime.bigint();
-  fanoutPublishTargetsHistogram.observe({ path }, targets.length);
-  fanoutRecipientsHistogram.observe({ channel_type: 'user' }, targets.length);
-  await publishUserFeedTargets(targets, envelope);
-  fanoutPublishDurationMs.observe(
-    { path, stage: 'publish' },
-    Number(process.hrtime.bigint() - publishStartedAt) / 1e6,
-  );
+  return tracer.startActiveSpan('fanout.publish_userfeed', async (span: any) => {
+    span.setAttribute('fanout.recipient_count', targets.length);
+    try {
+      const publishStartedAt = process.hrtime.bigint();
+      fanoutPublishTargetsHistogram.observe({ path }, targets.length);
+      fanoutRecipientsHistogram.observe({ channel_type: 'user' }, targets.length);
+      await publishUserFeedTargets(targets, envelope);
+      fanoutPublishDurationMs.observe(
+        { path, stage: 'publish' },
+        Number(process.hrtime.bigint() - publishStartedAt) / 1e6,
+      );
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || '') });
+      span.recordException(err as Error);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 async function resolveUserTopicTargets(channelId: string) {
@@ -83,7 +96,17 @@ async function resolveUserTopicTargets(channelId: string) {
       : 'channel_message_recent_connect_user_topics';
   const startedAt = process.hrtime.bigint();
   const lookupStartedAt = startedAt;
-  const targetLookup = await getChannelUserFanoutTargetKeysWithMeta(channelId);
+  const targetLookup = await tracer.startActiveSpan('fanout.target_lookup', async (span: any) => {
+    try {
+      return await getChannelUserFanoutTargetKeysWithMeta(channelId);
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || '') });
+      span.recordException(err as Error);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
   const targets = targetLookup.targets;
   fanoutPublishDurationMs.observe(
     { path: 'channel_message_user_topics', stage: 'target_lookup' },
@@ -216,12 +239,22 @@ async function publishChannelMessageEvent(
   let cacheResult: 'hit' | 'miss' | 'coalesced' = 'miss';
 
   async function publishChannelTopicOnly() {
-    const channelPublishStartedAt = process.hrtime.bigint();
-    await fanout.publish(chKey, envelope);
-    fanoutPublishDurationMs.observe(
-      { path: 'channel_message', stage: 'channel_topic' },
-      Number(process.hrtime.bigint() - channelPublishStartedAt) / 1e6,
-    );
+    return tracer.startActiveSpan('fanout.publish_passthrough', async (span: any) => {
+      try {
+        const channelPublishStartedAt = process.hrtime.bigint();
+        await fanout.publish(chKey, envelope);
+        fanoutPublishDurationMs.observe(
+          { path: 'channel_message', stage: 'channel_topic' },
+          Number(process.hrtime.bigint() - channelPublishStartedAt) / 1e6,
+        );
+      } catch (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || '') });
+        span.recordException(err as Error);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   }
 
   async function publishCommunityFeedIfPublic() {
@@ -248,6 +281,7 @@ async function publishChannelMessageEvent(
     candidateCount,
     cacheResult,
   } = await userTargetsPromise);
+  trace.getActiveSpan()?.setAttribute('fanout.recipient_count', allTargets.length);
 
   await publishCommunityFeedIfPublic();
 
