@@ -39,6 +39,8 @@ jobs:
           bash -n deploy/deploy-prod-multi-emergency.sh
           bash -n deploy/deploy-prod-multi-fast-stabilize.sh
           bash -n deploy/deploy-common.sh
+          bash -n deploy/lib/deploy-guards.sh
+          bash -n deploy/lib/deploy-phase-common.sh
           bash -n deploy/rollback.sh
           if ! command -v shellcheck >/dev/null 2>&1; then
             sudo apt-get update -qq
@@ -51,6 +53,8 @@ jobs:
             deploy/deploy-prod-nginx-patches.sh \
             deploy/deploy-prod-monitoring-sync.sh \
             deploy/deploy-common.sh \
+            deploy/lib/deploy-guards.sh \
+            deploy/lib/deploy-phase-common.sh \
             deploy/rollback.sh \
             deploy/deploy-prod.sh \
             deploy/deploy-staging.sh \
@@ -71,6 +75,7 @@ jobs:
           bash -n scripts/ops/self-hosted-actions-runner-disk-cleanup.sh
           bash -n scripts/ops/gh-set-deploy-ssh-secrets.sh
           bash -n scripts/release/recommended-release-verify.sh
+          bash scripts/deploy/test-deploy-guards.sh
           bash -n scripts/ops/measure-fanout-baseline.sh
           python3 -m py_compile deploy/ensure-pgdump-env.py
           python3 -m py_compile deploy/apply-env-profile.py

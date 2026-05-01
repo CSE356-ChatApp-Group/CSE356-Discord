@@ -75,6 +75,10 @@ if [[ "${EMERGENCY_MODE}" == "true" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-phase-common.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/deploy-phase-common.sh"
+chatapp_validate_release_sha "${SHA}" || exit 1
 # shellcheck source=inventory-defaults.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/inventory-defaults.sh"

@@ -5,11 +5,13 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-phase-common.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/deploy-phase-common.sh"
+
 RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy/deploy-staging.sh <sha>}
-if ! [[ "${RELEASE_SHA}" =~ ^[A-Fa-f0-9]{7,40}$ ]]; then
-  echo "ERROR: RELEASE_SHA must be a 7-40 character hexadecimal commit id (got '${RELEASE_SHA}')."
-  exit 1
-fi
+chatapp_validate_release_sha "${RELEASE_SHA}" || exit 1
 STAGING_HOST="${STAGING_HOST:-136.114.103.71}"
 STAGING_DB_HOST="${STAGING_DB_HOST:-34.122.64.224}"
 STAGING_USER="${STAGING_USER:-$USER}"
@@ -19,7 +21,6 @@ RELEASE_DIR="/opt/chatapp/releases"
 CURRENT_LINK="/opt/chatapp/current"
 CANDIDATE_PORT=4001
 LIVE_PORT=4000
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUTOVER_COMPLETED=0
 NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-16384}"
 # Avoid scp to /tmp (root-owned files block the deploy user). See deploy-prod.sh.

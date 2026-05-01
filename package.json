@@ -54,7 +54,8 @@
     "api-contract": "npm --prefix backend run api-contract",
     "api-contract:local": "npm --prefix backend run api-contract:local",
     "verify:release": "bash scripts/release/recommended-release-verify.sh",
-    "docs:check": "bash scripts/docs/check-docs-consistency.sh"
+    "docs:check": "bash scripts/docs/check-docs-consistency.sh",
+    "test:deploy-guards": "bash scripts/deploy/test-deploy-guards.sh"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.23"

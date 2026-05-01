@@ -25,20 +25,20 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-phase-common.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/deploy-phase-common.sh"
+
 RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy-prod.sh <sha> [--rollback]}
 # Refuse odd SHAs early so they never reach unquoted remote snippets.
-if ! [[ "${RELEASE_SHA}" =~ ^[A-Fa-f0-9]{7,40}$ ]]; then
-  echo "ERROR: RELEASE_SHA must be a 7-40 character hexadecimal commit id (got '${RELEASE_SHA}')."
-  exit 1
-fi
+chatapp_validate_release_sha "${RELEASE_SHA}" || exit 1
 # --rollback flag: skip artifact download, backup, npm ci, migrations, pgbouncer setup,
 # and monitoring refresh — only do the rolling restart + health gates.
 FAST_ROLLBACK="${FAST_ROLLBACK:-false}"
 if [[ "${2:-}" == "--rollback" ]]; then
   FAST_ROLLBACK="true"
 fi
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=inventory-defaults.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/inventory-defaults.sh"
