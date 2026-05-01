@@ -15,6 +15,7 @@ const {
   readReceiptOptimizationTotal,
   readReceiptNoopSkipTotal,
   readReceiptDbUpsertTotal,
+  readReceiptPhaseDurationMs,
 } = require("../../utils/metrics");
 const {
   getShouldDeferReadReceiptForInsertLockPressure,
@@ -71,6 +72,26 @@ function observeReadPreflight(result: string, poolWaiting: number) {
 
 function observeReadReceiptRequest(result: string) {
   readReceiptRequestsTotal.inc({ result });
+}
+
+async function observeReadPhase(phase, fn) {
+  const start = process.hrtime.bigint();
+  try {
+    const result = await fn();
+    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+    readReceiptPhaseDurationMs.observe(
+      { phase, result: "ok" },
+      Math.max(0, elapsedMs),
+    );
+    return result;
+  } catch (err) {
+    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+    readReceiptPhaseDurationMs.observe(
+      { phase, result: "error" },
+      Math.max(0, elapsedMs),
+    );
+    throw err;
+  }
 }
 
 /**
@@ -148,10 +169,12 @@ async function executeReadReceiptMark(
     READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
     READ_RECEIPT_FANOUT_ENABLED &&
     !dropReadReceiptFanout;
-  const target = await loadMessageTargetForUser(messageId, userId, {
-    preferCache: true,
-    includeCommunityId: needsCommunityId,
-  });
+  const target = await observeReadPhase("target_lookup", () =>
+    loadMessageTargetForUser(messageId, userId, {
+      preferCache: true,
+      includeCommunityId: needsCommunityId,
+    }),
+  );
   if (!target) {
     observeReadReceiptRequest("not_found");
     return { status: 404, body: { error: "Message not found" } };
@@ -195,14 +218,16 @@ async function executeReadReceiptMark(
   }
 
   const { applied, didAdvanceCursor, casResult, redisCursorMsAtCas0 } =
-    await advanceReadStateCursor({
-      userId: uid,
-      channelId: channel_id,
-      conversationId: conversation_id,
-      messageId,
-      messageCreatedAt,
-      messageTsMs,
-    });
+    await observeReadPhase("cursor_advance", () =>
+      advanceReadStateCursor({
+        userId: uid,
+        channelId: channel_id,
+        conversationId: conversation_id,
+        messageId,
+        messageCreatedAt,
+        messageTsMs,
+      }),
+    );
   const readScope = conversation_id ? "conversation" : "channel";
   readReceiptScopeTotal.inc({ scope: readScope });
   readReceiptCursorCasTotal.inc({
@@ -256,43 +281,47 @@ async function executeReadReceiptMark(
 
   const communityIdForCache = target.community_id;
   if (channel_id) {
-    try {
-      const countKey = `channel:msg_count:${channel_id}`;
-      const readKey = `user:last_read_count:${channel_id}:${uid}`;
-      const wmSha = await ensureRedisLuaSha(
-        redis,
-        REDIS_LUA_IDS.READ_RECEIPT_RESET_UNREAD_WATERMARK,
-      );
-      const pipeline = redis.pipeline();
-      if (
-        READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
-        READ_RECEIPT_FANOUT_ENABLED &&
-        !dropReadReceiptFanout &&
-        communityIdForCache
-      ) {
-        pipeline.del(`channels:list:${communityIdForCache}:${uid}`);
+    await observeReadPhase("watermark_cache", async () => {
+      try {
+        const countKey = `channel:msg_count:${channel_id}`;
+        const readKey = `user:last_read_count:${channel_id}:${uid}`;
+        const wmSha = await ensureRedisLuaSha(
+          redis,
+          REDIS_LUA_IDS.READ_RECEIPT_RESET_UNREAD_WATERMARK,
+        );
+        const pipeline = redis.pipeline();
+        if (
+          READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
+          READ_RECEIPT_FANOUT_ENABLED &&
+          !dropReadReceiptFanout &&
+          communityIdForCache
+        ) {
+          pipeline.del(`channels:list:${communityIdForCache}:${uid}`);
+        }
+        pipeline.evalsha(
+          wmSha,
+          2,
+          countKey,
+          readKey,
+          String(USER_LAST_READ_COUNT_REDIS_TTL_SEC),
+        );
+        await pipeline.exec();
+      } catch (err) {
+        logger.warn(
+          { err, channel_id },
+          "Failed to update read watermark/cache in Redis",
+        );
       }
-      pipeline.evalsha(
-        wmSha,
-        2,
-        countKey,
-        readKey,
-        String(USER_LAST_READ_COUNT_REDIS_TTL_SEC),
-      );
-      await pipeline.exec();
-    } catch (err) {
-      logger.warn(
-        { err, channel_id },
-        "Failed to update read watermark/cache in Redis",
-      );
-    }
+    });
   } else if (
     READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
     READ_RECEIPT_FANOUT_ENABLED &&
     !dropReadReceiptFanout &&
     communityIdForCache
   ) {
-    redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
+    await observeReadPhase("watermark_cache", async () => {
+      await redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
+    });
   }
 
   if (dropReadReceiptFanout || !READ_RECEIPT_FANOUT_ENABLED) {
@@ -331,24 +360,26 @@ async function executeReadReceiptMark(
     });
   };
 
-  try {
-    if (conversation_id) {
-      await publishReadUpdated();
-    } else if (READ_RECEIPT_CHANNEL_FANOUT_ASYNC) {
-      const enqueued = sideEffects.enqueueFanoutJob("fanout.read_receipt", publishReadUpdated);
-      if (!enqueued) {
-        readReceiptOptimizationTotal.inc({ reason: "channel_read_fanout_inline_fallback" });
+  await observeReadPhase("fanout_publish", async () => {
+    try {
+      if (conversation_id) {
+        await publishReadUpdated();
+      } else if (READ_RECEIPT_CHANNEL_FANOUT_ASYNC) {
+        const enqueued = sideEffects.enqueueFanoutJob("fanout.read_receipt", publishReadUpdated);
+        if (!enqueued) {
+          readReceiptOptimizationTotal.inc({ reason: "channel_read_fanout_inline_fallback" });
+          await publishReadUpdated();
+        }
+      } else {
         await publishReadUpdated();
       }
-    } else {
-      await publishReadUpdated();
+    } catch (err) {
+      logger.warn(
+        { err, channel_id, conversation_id, messageId },
+        "read receipt fanout failed",
+      );
     }
-  } catch (err) {
-    logger.warn(
-      { err, channel_id, conversation_id, messageId },
-      "read receipt fanout failed",
-    );
-  }
+  });
 
   rememberConfirmedMessageRead(uid, messageId);
   observeReadReceiptRequest("success");

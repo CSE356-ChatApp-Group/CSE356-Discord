@@ -155,6 +155,7 @@ METRICS_SNAPSHOT_RANGE=10m PROMETHEUS_URL='http://127.0.0.1:9090' ./scripts/metr
 
 Primary gate metrics:
 - `read_receipt_shed_total`, `read_receipt_requests_total`, `read_receipt_preflight_total`
+- `read_receipt_phase_duration_ms{phase=~"target_lookup|cursor_advance|watermark_cache|fanout_publish"}`
 - read-route p95/p99: `http_server_request_duration_ms{method="PUT",route="/api/v1/messages/:id/read"}`
 - pool safety: `pg_pool_waiting`, `pg_pool_circuit_breaker_rejects_total`
 - write-path guardrail: `message_post_response_total` (201 vs 503/5xx)
@@ -178,7 +179,7 @@ Each line includes **`requestId`**, **`worker_id`** (`hostname:PORT` from the sy
 
 ## Slow non-`POST /messages` HTTP trace (`slow_http_request_trace`)
 
-When **`SLOW_HTTP_TRACE_MIN_MS`** is set (for example **`2000`**), successful and errored requests that exceed that wall time emit **`event=slow_http_request_trace`** unless the route matches **`SLOW_HTTP_TRACE_EXCLUDE_PREFIXES`** (default excludes **`/api/v1/messages`**, **`/health`**, **`/metrics`**). Each line includes **`route`**, **`requestId`**, **`worker_id`**, **`total_wall_ms`**, **`db_query_count`**, **`db_business_sql_count`**, **`db_sum_ms`** (sum of round-trip times for every `query()` / wrapped `client.query()`), **`db_max_single_ms`**, **`db_query_samples`** (up to 30 truncated statements with **`pool`** `primary` or `read`), and **`app_wall_ms_estimated`** when DB work was roughly sequential (**`db_wall_parallel_overlap_hint`** when summed DB time exceeds total wall — overlapping `await` / `Promise.all`).
+When **`SLOW_HTTP_TRACE_MIN_MS`** is set (for example **`2000`**), successful and errored requests that exceed that wall time emit **`event=slow_http_request_trace`** unless the route matches **`SLOW_HTTP_TRACE_EXCLUDE_PREFIXES`** (default excludes **`/api/v1/messages`**, **`/health`**, **`/metrics`**). For targeted canaries, set **`SLOW_HTTP_TRACE_INCLUDE_ROUTES`** (comma-separated exact route/raw path values such as **`/api/v1/messages/:id/read`**) to bypass excludes only for those routes. Each line includes **`route`**, **`requestId`**, **`worker_id`**, **`total_wall_ms`**, **`db_query_count`**, **`db_business_sql_count`**, **`db_sum_ms`** (sum of round-trip times for every `query()` / wrapped `client.query()`), **`db_max_single_ms`**, **`db_query_samples`** (up to 30 truncated statements with **`pool`** `primary` or `read`), and **`app_wall_ms_estimated`** when DB work was roughly sequential (**`db_wall_parallel_overlap_hint`** when summed DB time exceeds total wall — overlapping `await` / `Promise.all`).
 
 **Rank slow routes by impact** — in logs or Grafana: **`sum by (route) (count)`** or request volume × p95 from Prometheus **`http_server_request_duration_ms`** for the same window; join with **`slow_http_request_trace`** counts on **`route`**.
 

@@ -295,6 +295,14 @@ const readReceiptCursorCacheHitTotal = new client.Counter({
   labelNames: ['result'],
 });
 
+/** Read receipt phase wall time to pinpoint where route spikes occur. */
+const readReceiptPhaseDurationMs = new client.Histogram({
+  name: 'read_receipt_phase_duration_ms',
+  help: 'Read receipt phase duration in milliseconds',
+  labelNames: ['phase', 'result'],
+  buckets: [0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+});
+
 /** Rolling-window p95 insert-lock wait (ms) on this worker; updated when evaluating read shed. */
 const messageChannelInsertLockPressureWaitP95MsGauge = new client.Gauge({
   name: 'message_channel_insert_lock_pressure_wait_p95_ms',
@@ -349,6 +357,7 @@ module.exports = {
   unreadCountsCoalescedTotal,
   readReceiptDbUpsertTotal,
   readReceiptCursorCacheHitTotal,
+  readReceiptPhaseDurationMs,
   messageChannelInsertLockPressureWaitP95MsGauge,
   messageChannelInsertLockPressureRecentTimeoutsGauge,
 };

@@ -23,10 +23,22 @@ function parseExcludePrefixes() {
     .filter(Boolean);
 }
 
+function parseIncludeRoutes() {
+  const raw = process.env.SLOW_HTTP_TRACE_INCLUDE_ROUTES || '';
+  return new Set(
+    raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
 const SLOW_HTTP_TRACE_MIN_MS = parseMinMs();
 const EXCLUDE_PREFIXES = parseExcludePrefixes();
+const INCLUDE_ROUTES = parseIncludeRoutes();
 
 function pathShouldExclude(route, rawPath) {
+  if (INCLUDE_ROUTES.has(route) || INCLUDE_ROUTES.has(rawPath)) return false;
   for (const p of EXCLUDE_PREFIXES) {
     if (!p) continue;
     if (route.startsWith(p) || rawPath.startsWith(p)) return true;

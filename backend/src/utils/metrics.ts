@@ -171,6 +171,7 @@ const {
   unreadCountsCoalescedTotal,
   readReceiptDbUpsertTotal,
   readReceiptCursorCacheHitTotal,
+  readReceiptPhaseDurationMs,
   messageChannelInsertLockPressureWaitP95MsGauge,
   messageChannelInsertLockPressureRecentTimeoutsGauge,
 } = require('./metrics/messageWritePath');
@@ -369,6 +370,14 @@ const overloadStageGauge = new client.Gauge({
     readReceiptDbUpsertTotal.inc({ result: 'noop' }, 0);
     readReceiptCursorCacheHitTotal.inc({ result: 'hit' }, 0);
     readReceiptCursorCacheHitTotal.inc({ result: 'miss' }, 0);
+    readReceiptPhaseDurationMs.observe({ phase: 'target_lookup', result: 'ok' }, 0);
+    readReceiptPhaseDurationMs.observe({ phase: 'target_lookup', result: 'error' }, 0);
+    readReceiptPhaseDurationMs.observe({ phase: 'cursor_advance', result: 'ok' }, 0);
+    readReceiptPhaseDurationMs.observe({ phase: 'cursor_advance', result: 'error' }, 0);
+    readReceiptPhaseDurationMs.observe({ phase: 'watermark_cache', result: 'ok' }, 0);
+    readReceiptPhaseDurationMs.observe({ phase: 'watermark_cache', result: 'error' }, 0);
+    readReceiptPhaseDurationMs.observe({ phase: 'fanout_publish', result: 'ok' }, 0);
+    readReceiptPhaseDurationMs.observe({ phase: 'fanout_publish', result: 'error' }, 0);
     messageChannelInsertLockPressureWaitP95MsGauge.set(0);
     messageChannelInsertLockPressureRecentTimeoutsGauge.set(0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
@@ -591,6 +600,7 @@ module.exports = {
   unreadCountsCoalescedTotal,
   readReceiptDbUpsertTotal,
   readReceiptCursorCacheHitTotal,
+  readReceiptPhaseDurationMs,
   messageChannelInsertLockPressureWaitP95MsGauge,
   messageChannelInsertLockPressureRecentTimeoutsGauge,
   wsConnectionResultTotal,
