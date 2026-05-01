@@ -6,6 +6,7 @@ Use this folder as the operational entrypoint. Canonical files remain at `docs/`
 
 - [`../runbooks.md`](../runbooks.md) - Incident response and operational playbooks
 - [`../operations-monitoring.md`](../operations-monitoring.md) - Metrics, PromQL, and dashboards
+- [`../redis-key-map.md`](../redis-key-map.md) - Redis keys and Pub/Sub topic patterns (reference)
 - [`../infrastructure-inventory.md`](../infrastructure-inventory.md) - Hosts, SSH users, and topology
 - [`../env.md`](../env.md) - Environment variable semantics and defaults
 - [`../agent-operations-playbook.md`](../agent-operations-playbook.md) - End-to-end troubleshooting workflow

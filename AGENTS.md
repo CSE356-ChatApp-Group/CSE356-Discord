@@ -9,6 +9,7 @@ Use this file as the **front door** before duplicating env profiles, IPs, or top
 | **Variable semantics and defaults** | [`docs/env.md`](docs/env.md), [`.env.example`](.env.example) |
 | **Hosts, SSH users, sizing** | [`docs/infrastructure-inventory.md`](docs/infrastructure-inventory.md) (canonical; update when infra changes) |
 | **Metrics, PromQL, snapshots** | [`docs/operations-monitoring.md`](docs/operations-monitoring.md) — names also in `backend/src/utils/metrics.ts` |
+| **Redis keys / fanout topic patterns** | [`docs/redis-key-map.md`](docs/redis-key-map.md) |
 | **Incidents and alerts** | [`docs/runbooks.md`](docs/runbooks.md), [`infrastructure/monitoring/alerts.yml`](infrastructure/monitoring/alerts.yml) |
 | **End-to-end diagnosis + improvement loop** | [`docs/agent-operations-playbook.md`](docs/agent-operations-playbook.md) |
 | **Cursor / workspace rules** | [`.cursor/rules/`](.cursor/rules/) |

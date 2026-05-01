@@ -2,7 +2,7 @@
 
 Status: operational
 Owner: platform-operations
-Last reviewed: 2026-04-30
+Last reviewed: 2026-05-01
 
 This document exists so operators (and the coding agent) can **ground decisions in the same metric names and queries** the app exposes. Source of truth for names is [`backend/src/utils/metrics.ts`](../backend/src/utils/metrics.ts).
 
@@ -18,6 +18,7 @@ This document exists so operators (and the coding agent) can **ground decisions 
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
 | Grafana dashboards (repo JSON) | **Overview:** [`chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) — **Redis / cache:** [`redis-cache-store.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/redis-cache-store.json) (`job=redis` + app-side Redis-adjacent counters). Overview top links jump to Failure modes, Latency RCA, Redis, Overload, API routes. |
 | Instant Prometheus triage | [`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh) |
+| Redis key families (operators’ reference) | [`redis-key-map.md`](redis-key-map.md) |
 | Read-route strain canary gates | [`scripts/metrics/read-receipt-strain-gates.sh`](../scripts/metrics/read-receipt-strain-gates.sh) |
 | Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/postgres/pg-stat-statements-snapshot.sh`](../scripts/postgres/pg-stat-statements-snapshot.sh) |
 | `read_states` flush SQL fingerprints (version-skew check) | [`scripts/postgres/pg-stat-read-state-flush-fingerprints.sh`](../scripts/postgres/pg-stat-read-state-flush-fingerprints.sh) |
@@ -37,6 +38,45 @@ Use this map to jump from a page/Discord alert to the right triage section quick
 | DB observability/replication | `ChatAppDbPostgresExporterDown`, `ChatAppDbReplication*`, `ChatAppDbReplica*` | `up{job="db-postgres"}`, replication slot metrics, replica disk series | [`runbooks.md`](runbooks.md#chatappdbpostgresexporterdown) |
 | Realtime/delivery | `ChatAppCriticalFanout*`, `ChatAppMessagePostFanout*`, `ChatAppRealtimeFanoutSlow`, `ChatAppDeliveryFails*`, `ChatAppWs*` | `fanout_queue_depth`, `fanout_job_latency_ms`, `ws_reliable_delivery_total`, publish failure counters | [`runbooks.md`](runbooks.md#chatapprealtimedeliveryfailures-family) |
 | Redis | `ChatAppRedis*` | `redis_up`, `redis_memory_used_bytes`, `redis_evicted_keys_total`, `redis_rejected_connections_total` | [`runbooks.md`](runbooks.md#chatappredis-health-family) |
+
+## Redis list-cache tuning (evidence before TTL changes)
+
+Use this when evaluating **message list** or **channels list** cache TTL changes (`MESSAGES_CACHE_TTL_SECS` in [`backend/src/messages/lib/messageListCache.ts`](../backend/src/messages/lib/messageListCache.ts); `CHANNELS_LIST_CACHE_TTL_SECS` via env in [`backend/src/channels/channelRouterShared.ts`](../backend/src/channels/channelRouterShared.ts) — see [`env.md`](env.md)). Ground decisions in snapshots from [`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh), not invented ratios.
+
+### Metrics to compare
+
+| Question | Series (labels) |
+|----------|-------------------|
+| List endpoints hitting Redis vs loading DB | `endpoint_list_cache_total{endpoint=~"channels|messages_channel|messages_conversation|communities|conversations",result=~"hit|miss|coalesced"}` |
+| Message list Redis write skipped (epoch bumped during load) | `message_list_cache_store_skipped_total` |
+| Cache busts from writes / membership | `endpoint_list_cache_invalidations_total` |
+| GET /messages channel access shortcut | `messages_list_access_cache_hit_total` |
+| Postgres round-trips on heavy reads | `pg_queries_per_http_request_bucket`, `pg_business_sql_queries_per_http_request_bucket` (filter `route="/api/v1/messages"` or your canonical route label) |
+| HTTP latency | `http_server_request_duration_ms_bucket` — confirm **`route`** label values with `label_values(http_server_request_duration_ms, route)` on your Prometheus |
+
+### Example PromQL
+
+Hit ratio for community channel list (adjust `job` to match your scrape):
+
+```promql
+sum(rate(endpoint_list_cache_total{job="chatapp-api",endpoint="channels",result="hit"}[5m]))
+/
+sum(rate(endpoint_list_cache_total{job="chatapp-api",endpoint="channels"}[5m]))
+```
+
+GET route p95 — substitute `route` after inspecting labels:
+
+```promql
+histogram_quantile(0.95,
+  sum by (le, route) (
+    rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="GET"}[5m])
+  )
+)
+```
+
+**Interpretation:** raising TTL only makes sense if **hit ratio** or **primary DB load** warrants it and **p95/p99 latency**, **`endpoint_list_cache_invalidations_total`**, and **`pg_pool_waiting`** do not worsen. Dashboard: [`redis-cache-store.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/redis-cache-store.json).
+
+Canonical key patterns: [`redis-key-map.md`](redis-key-map.md).
 
 ## Where latency comes from (split app + DB VMs)
 
