@@ -87,6 +87,7 @@ const { clientIpFromReq } = require("../middleware/wsUpgradeLimiter");
 const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
 const {
   allUserFeedRedisChannels,
+  publishUserFeedTargets,
   userIdFromTarget,
 } = require("./userFeed");
 const { resolvedWsRuntimeConfig } = require("./profile");
@@ -367,14 +368,17 @@ const {
 
 async function publishUserConnectionState(userId) {
   const connectionCount = await getConnectionCount(userId);
-  await fanout.publish(`user:${userId}`, {
+  const payload = {
     event: "connections:updated",
     data: {
       userId,
       connectionCount,
       hasOtherConnections: connectionCount > 1,
     },
-  });
+  };
+  // Logical `user:<id>` topics are delivered via shared `userfeed:<shard>` Redis
+  // channels; publishing to the literal `user:` Redis channel is not subscribed.
+  await publishUserFeedTargets([`user:${userId}`], payload);
 }
 
 const {
