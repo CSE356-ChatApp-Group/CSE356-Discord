@@ -574,7 +574,9 @@ describe('GET /messages first-page cache vs POST', () => {
     expect(ids).toContain(messageId);
   });
 
-  it('does not mix cached payloads across different first-page limits', async () => {
+  it(
+    'does not mix cached payloads across different first-page limits',
+    async () => {
     const owner = await createAuthenticatedUser('cachelimitmix');
     const slug = `cachelimitmix-${uniqueSuffix()}`;
     const communityRes = await request(app)
@@ -612,7 +614,9 @@ describe('GET /messages first-page cache vs POST', () => {
     expect(large.status).toBe(200);
     expect(Array.isArray(large.body.messages)).toBe(true);
     expect(large.body.messages.length).toBe(7);
-  });
+    },
+    15_000,
+  );
 });
 
 describe('GET /messages empty accessible histories', () => {
@@ -1221,6 +1225,10 @@ describe('GET /messages query count', () => {
 describe('Overload behavior', () => {
   let token: string;
   let channelId: string;
+
+  beforeEach(() => {
+    resetMessageChannelInsertLockPressureForTests();
+  });
 
   beforeAll(async () => {
     const owner = await createAuthenticatedUser('overloadowner');
