@@ -162,6 +162,7 @@ const {
   WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
   WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
 } = require("./serverConfig");
+const { createAppKeepaliveSender } = require("./wsAppKeepalive");
 
 const wss = new WebSocketServer({ noServer: true });
 // Backpressure thresholds for slow WS consumers.
@@ -448,63 +449,14 @@ async function replayPendingMessagesToSocket(ws, userId) {
   );
 }
 
-function maybeSendAppKeepaliveFrame(ws) {
-  if (WS_APP_KEEPALIVE_INTERVAL_MS <= 0) return false;
-  if (ws.readyState !== WebSocket.OPEN) return false;
-
-  const now = Date.now();
-  const lastFrameAt = Number(ws._lastDataFrameAt || ws._connectedAt || 0);
-  if (!Number.isFinite(lastFrameAt) || now - lastFrameAt < WS_APP_KEEPALIVE_INTERVAL_MS) {
-    return false;
-  }
-
-  const buffered = (ws as any).bufferedAmount ?? 0;
-  if (buffered >= WS_BACKPRESSURE_DROP_BYTES) {
-    return false;
-  }
-
-  ws._lastDataFrameAt = now;
-  try {
-    ws.send(WS_APP_KEEPALIVE_FRAME, (err) => {
-      if (!err) return;
-      ws._sawError = true;
-      logger.warn(
-        {
-          err,
-          event: "ws.keepalive_send_failed",
-          userId: (ws as any)._userId,
-          gradingNote: "correlate_with_failed_deliveries",
-        },
-        "WS keepalive send failed; terminating socket",
-      );
-      try {
-        noteRecentDisconnectForSocket(ws, 1006, "keepalive_send_failed");
-        ws.terminate();
-      } catch {
-        // Ignore termination failures after send errors.
-      }
-    });
-    return true;
-  } catch (err) {
-    ws._sawError = true;
-    logger.warn(
-      {
-        err,
-        event: "ws.keepalive_send_failed",
-        userId: (ws as any)._userId,
-        gradingNote: "correlate_with_failed_deliveries",
-      },
-      "WS keepalive send failed; terminating socket",
-    );
-    try {
-      noteRecentDisconnectForSocket(ws, 1006, "keepalive_send_failed");
-      ws.terminate();
-    } catch {
-      // Ignore termination failures after send errors.
-    }
-    return false;
-  }
-}
+const maybeSendAppKeepaliveFrame = createAppKeepaliveSender({
+  WebSocket,
+  logger,
+  noteRecentDisconnectForSocket,
+  wsAppKeepaliveIntervalMs: WS_APP_KEEPALIVE_INTERVAL_MS,
+  wsAppKeepaliveFrame: WS_APP_KEEPALIVE_FRAME,
+  wsBackpressureDropBytes: WS_BACKPRESSURE_DROP_BYTES,
+});
 
 const {
   wsBootstrapIngressKey,
