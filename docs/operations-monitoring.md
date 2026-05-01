@@ -46,6 +46,29 @@ Under load, **PostgreSQL is usually the limiting factor**, not nginx or Node in 
 2. **Redis** — publish lag affects **deferred** `POST /messages` fanout (`fanout_job_latency_ms`, `fanout_queue_depth`, `fanout_retry_total`) and WS delivery; the HTTP **201** path is decoupled. **`delivery_timeout_total`** counts only **cache-bust** wall-clock overruns (informational). PromQL SLO examples: `histogram_quantile(0.99, sum by (le,path) (rate(fanout_job_latency_ms_bucket{result="success"}[5m])))`; alerts **`ChatAppMessagePostFanoutJobLatencyP99High`** / **`ChatAppMessagePostFanoutJobLatencyP999High`** in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml).
 3. **App CPU** — bcrypt login stampedes and WS fanout can spike CPU; check **`route=/api/v1/auth/login`** and event-loop lag before attributing everything to Postgres.
 
+### Focused stabilization plan (2026-05)
+
+Current evidence from production snapshots + Loki e2e traces:
+- **POST `/api/v1/messages/`**: route p95 remains elevated under load, and `post_messages_e2e_trace` is dominated by `dominant_component=fanout_wall_ms` / `dominant_bucket=redis` (multi-second tail, occasional >20s outliers).
+- **Search tail**: `GET /api/v1/search/` shows low RPS but high p95 tail and higher DB-queries-per-request p95.
+- **Read-state fingerprints**: modern queryid dominates by calls, but legacy `INSERT INTO read_states` shapes remain visible in cumulative `pg_stat_statements`.
+
+Measured rollout plan (use a VM3-only canary first):
+1. **Enable async POST fanout path in prod config** (`MESSAGE_POST_SYNC_FANOUT=false`).
+2. Soak 15-30 minutes, then compare canary vs control with:
+   - `histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))`
+   - `sum by (vm, result) (rate(message_post_fanout_async_enqueue_total{job="chatapp-api"}[5m]))`
+   - `histogram_quantile(0.99, sum by (le, path) (rate(fanout_job_latency_ms_bucket{job="chatapp-api",result="success"}[5m])))`
+   - `sum(increase(redis_fanout_publish_failures_total{job="chatapp-api"}[15m]))`
+3. Pass criteria:
+   - POST `/messages/` p95 improves by >=30% on canary VM.
+   - `message_post_fanout_async_enqueue_total{result="queued"}` rises; `result="sync"` drops toward zero.
+   - No meaningful increase in replay/fallback distress: `fanout_job_latency_ms` p99 and dead-letter/redis publish failures stay within baseline envelope.
+
+Read-state drift verification (same canary window):
+- Capture before/after with `./scripts/postgres/pg-stat-read-state-flush-fingerprints.sh`.
+- Expect near-zero **new** calls on legacy read-state queryids; modern queryid should carry almost all delta calls.
+
 **MinIO:** Prometheus on the DB VM does **not** scrape MinIO health (S3 API is **127.0.0.1** on the app VM). Use **`curl -sS http://127.0.0.1:9000/minio/health/live`** on the app host or app-level errors for object storage.
 
 ## Giving the agent usable telemetry
