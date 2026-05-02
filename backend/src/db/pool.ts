@@ -66,6 +66,8 @@ type ReadDiagnostics = Record<string, string | number | boolean>;
 
 type QueryOpts = {
   readDiagnostics?: ReadDiagnostics;
+  /** Invoked when read replica fails in a way that triggers transparent primary retry (no throw). */
+  onReadReplicaFallback?: (info: { durationMs: number }) => void;
 };
 
 function readDiagnosticsForLog(d: ReadDiagnostics | undefined): ReadDiagnostics {
@@ -386,7 +388,21 @@ async function queryRead(sql: unknown, params?: unknown, opts?: QueryOpts) {
     const reason = classifyPgQueryError(err);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason });
     if (readFallbackEnabled && shouldFallbackReadReplicaToPrimary(err)) {
-      const baseWarn = { err, durationMs, sql: truncateSql(sql), pool: 'read', pgErrorReason: reason };
+      const baseWarn = {
+        err,
+        durationMs,
+        replicaLegDurationMs: durationMs,
+        sql: truncateSql(sql),
+        pool: 'read',
+        pgErrorReason: reason,
+      };
+      if (typeof opts?.onReadReplicaFallback === 'function') {
+        try {
+          opts.onReadReplicaFallback({ durationMs });
+        } catch {
+          // Metrics / caller hooks must not affect fallback.
+        }
+      }
       logger.warn(
         Object.keys(diag).length ? { ...baseWarn, readPoolLeg: 'replica', ...diag } : baseWarn,
         'pg: read replica unavailable; falling back to primary for this SELECT',

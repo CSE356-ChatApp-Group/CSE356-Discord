@@ -187,6 +187,11 @@ const {
   readReceiptInsertUnhealthyPollTotal,
   readReceiptInsertUnhealthyGlobalCache,
 } = require('./metrics/messageWritePath');
+const {
+  msgTargetCacheTotal,
+  msgTargetLookupSourceTotal,
+  msgTargetLookupDurationMs,
+} = require('./metrics/msgTargetAccess');
 
 // ── Overload stage ───────────────────────────────────────────────────────────
 
@@ -571,6 +576,30 @@ const overloadStageGauge = new client.Gauge({
     communityCountPgReconcileSkippedTotal.inc({ reason: 'empty' }, 0);
     communityCountCacheTotal.inc({ result: 'hit' }, 0);
     communityCountCacheTotal.inc({ result: 'miss' }, 0);
+    for (const caller of ['read_receipt', 'other'] as const) {
+      for (const shape of ['lite', 'full'] as const) {
+        for (const result of [
+          'hit',
+          'miss',
+          'stale_version',
+          'parse_error',
+          'redis_error',
+          'disabled',
+        ] as const) {
+          msgTargetCacheTotal.inc({ caller, shape, result }, 0);
+        }
+        for (const source of [
+          'cache',
+          'replica',
+          'primary_fallback',
+          'primary_direct',
+          'error',
+        ] as const) {
+          msgTargetLookupSourceTotal.inc({ caller, shape, source }, 0);
+          msgTargetLookupDurationMs.observe({ caller, shape, source }, 0);
+        }
+      }
+    }
     for (const script_id of [
       'read_receipt_cursor_advance',
       'read_receipt_reset_unread_watermark',
@@ -753,4 +782,7 @@ module.exports = {
   communityCountPgReconcileTotal,
   communityCountPgReconcileSkippedTotal,
   communityCountCacheTotal,
+  msgTargetCacheTotal,
+  msgTargetLookupSourceTotal,
+  msgTargetLookupDurationMs,
 };

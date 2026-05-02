@@ -1,5 +1,5 @@
 
-const { query, queryRead } = require('../db/pool');
+const { query, queryRead, readPool } = require('../db/pool');
 const {
   READ_RECEIPT_TARGET_LOOKUP_CALLER,
   readReceiptTargetLookupReadDiagnosticFields,
@@ -10,13 +10,18 @@ const {
   toAccessVersion,
   rowAccessScope,
   readAccessVersion,
+  scopeVersionKey,
 } = require('../utils/accessVersionCache');
 const {
   isCompatCachePayload,
   isMessageTargetCachePayload,
-  readScopedVersionedJsonCache,
   writeScopedVersionedJsonCache,
 } = require('../utils/versionedAccessCache');
+const {
+  msgTargetCacheTotal,
+  msgTargetLookupSourceTotal,
+  msgTargetLookupDurationMs,
+} = require('../utils/metrics/msgTargetAccess');
 
 // Message target cache: stores the full result of loadMessageTargetForUser (including
 // has_access) keyed by messageId+userId. TTL remains a backstop; membership/version
@@ -168,30 +173,109 @@ async function loadMessageTargetFromPrimary(
   return rows[0] || null;
 }
 
-async function loadMessageTargetFromReplicaThenPrimary(
+function msgTargetMetricsCallerLabel(options) {
+  return options && options.msgTargetMetricsCaller === 'read_receipt' ? 'read_receipt' : 'other';
+}
+
+function observeMsgTargetLookup(caller, shape, source, t0) {
+  msgTargetLookupSourceTotal.inc({ caller, shape, source });
+  msgTargetLookupDurationMs.observe({ caller, shape, source }, Math.max(0, Date.now() - t0));
+}
+
+async function readMsgTargetCacheOutcome(cacheKey) {
+  if (MSG_TARGET_CACHE_TTL_SECS <= 0) {
+    return { outcome: 'disabled', parsed: null };
+  }
+  let raw;
+  try {
+    raw = await redis.get(cacheKey);
+  } catch {
+    return { outcome: 'redis_error', parsed: null };
+  }
+  if (!raw) return { outcome: 'miss', parsed: null };
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    try {
+      await redis.del(cacheKey);
+    } catch {
+      /* ignore */
+    }
+    return { outcome: 'parse_error', parsed: null };
+  }
+  if (parsed === null) {
+    return { outcome: 'miss', parsed: null };
+  }
+  if (typeof parsed !== 'object' || !isMessageTargetCachePayload(parsed)) {
+    try {
+      await redis.del(cacheKey);
+    } catch {
+      /* ignore */
+    }
+    return { outcome: 'parse_error', parsed: null };
+  }
+  let currentVersion;
+  try {
+    currentVersion = await readAccessVersion(redis, scopeVersionKey(parsed.scope));
+  } catch {
+    return { outcome: 'redis_error', parsed: null };
+  }
+  if (toAccessVersion(parsed.version) !== currentVersion) {
+    try {
+      await redis.del(cacheKey);
+    } catch {
+      /* ignore */
+    }
+    return { outcome: 'stale_version', parsed: null };
+  }
+  return { outcome: 'hit', parsed };
+}
+
+function trackMsgTargetCacheRead(cacheKey, caller, cacheShape) {
+  return readMsgTargetCacheOutcome(cacheKey).then((out) => {
+    msgTargetCacheTotal.inc({ caller, shape: cacheShape, result: out.outcome });
+    return out;
+  });
+}
+
+async function loadMessageTargetRowWithSource(
   messageId,
   userId,
-  includeCommunityId = true,
-  targetLookupReadDiagnostics = undefined,
+  includeCommunityId,
+  targetLookupReadDiagnostics,
 ) {
-  const readOpts =
+  const readOptsBase =
     targetLookupReadDiagnostics && Object.keys(targetLookupReadDiagnostics).length
       ? { readDiagnostics: targetLookupReadDiagnostics }
-      : undefined;
+      : {};
+  const readOpts: Record<string, unknown> = { ...readOptsBase };
+  let usedFallback = false;
+  if (readPool) {
+    readOpts.onReadReplicaFallback = () => {
+      usedFallback = true;
+    };
+  }
   const { rows } = await queryRead(
     messageTargetSql(includeCommunityId),
     [messageId, userId],
     readOpts,
   );
-  const replicaRow = rows[0] || null;
-  if (replicaRow) return replicaRow;
-
-  return loadMessageTargetFromPrimary(
+  const row = rows[0] || null;
+  if (row) {
+    if (!readPool) return { row, source: 'primary_direct' };
+    return { row, source: usedFallback ? 'primary_fallback' : 'replica' };
+  }
+  if (!readPool) {
+    return { row: null, source: 'primary_direct' };
+  }
+  const primaryRow = await loadMessageTargetFromPrimary(
     messageId,
     userId,
     includeCommunityId,
     targetLookupReadDiagnostics,
   );
+  return { row: primaryRow, source: 'primary_direct' };
 }
 
 function buildMessageTargetLookupReadDiagnostics(messageId, userId, options) {
@@ -211,7 +295,10 @@ async function loadMessageTargetForUser(messageId, userId, options: {
   preferCache?: boolean;
   includeCommunityId?: boolean;
   targetLookupLogContext?: { kind: string; requestId?: string };
+  msgTargetMetricsCaller?: 'read_receipt' | 'other';
 } = {}) {
+  const t0 = Date.now();
+  const caller = msgTargetMetricsCallerLabel(options);
   const includeCommunityId = options.includeCommunityId !== false;
   const cacheShape = includeCommunityId ? 'full' : 'lite';
   const cacheKey = `msg_target:${cacheShape}:${messageId}:${userId}`;
@@ -222,100 +309,118 @@ async function loadMessageTargetForUser(messageId, userId, options: {
     options,
   );
 
-  const cachedPromise = MSG_TARGET_CACHE_TTL_SECS > 0
-    ? readScopedVersionedJsonCache({
-        redis,
-        cacheKey,
-        isPayload: isMessageTargetCachePayload,
-      })
-    : Promise.resolve(null);
+  try {
+    if (preferCache) {
+      const cacheOut = await trackMsgTargetCacheRead(cacheKey, caller, cacheShape);
+      if (cacheOut.parsed?.data?.has_access) {
+        observeMsgTargetLookup(caller, cacheShape, 'cache', t0);
+        return cacheOut.parsed.data;
+      }
 
-  if (preferCache) {
-    const cached = await cachedPromise;
-    if (cached?.data?.has_access) {
-      return cached.data;
+      const { row, source } = await loadMessageTargetRowWithSource(
+        messageId,
+        userId,
+        includeCommunityId,
+        targetLookupReadDiagnostics,
+      );
+      observeMsgTargetLookup(caller, cacheShape, source, t0);
+      if (row && row.has_access && MSG_TARGET_CACHE_TTL_SECS > 0) {
+        const scope = rowAccessScope(row);
+        if (scope) {
+          writeScopedVersionedJsonCache({
+            redis,
+            cacheKey,
+            scope,
+            ttlSeconds: MSG_TARGET_CACHE_TTL_SECS,
+            payloadWithoutVersion: { data: row },
+          }).catch(() => {});
+        }
+      }
+      return row;
     }
 
-    const row = await loadMessageTargetFromReplicaThenPrimary(
+    const cacheReadP = trackMsgTargetCacheRead(cacheKey, caller, cacheShape);
+    const dbReadP = loadMessageTargetRowWithSource(
       messageId,
       userId,
       includeCommunityId,
       targetLookupReadDiagnostics,
     );
-    if (row && row.has_access && MSG_TARGET_CACHE_TTL_SECS > 0) {
-      const scope = rowAccessScope(row);
+
+    let lookupFinalized = false;
+    function finalizeLookupSource(source) {
+      if (lookupFinalized) return;
+      lookupFinalized = true;
+      observeMsgTargetLookup(caller, cacheShape, source, t0);
+    }
+
+    const result = await new Promise<any>((resolve, reject) => {
+      let pending = 2;
+      let dbResult: any = null;
+      let dbSource = 'replica';
+      let cachedPayload: any = null;
+      let dbFailed = false;
+
+      function checkDone() {
+        if (--pending !== 0) return;
+        const final = dbResult || (cachedPayload ? cachedPayload.data : null);
+        if (!lookupFinalized) {
+          let lookupSource = 'replica';
+          if (dbFailed && !final) lookupSource = 'error';
+          else if (dbResult != null) lookupSource = dbSource;
+          else if (cachedPayload && cachedPayload.data != null) lookupSource = 'cache';
+          else lookupSource = dbSource;
+          finalizeLookupSource(lookupSource);
+        }
+        resolve(final);
+      }
+
+      cacheReadP.then((cacheOut) => {
+        cachedPayload = cacheOut.parsed;
+        if (cacheOut.parsed?.data?.has_access) {
+          finalizeLookupSource('cache');
+          resolve(cacheOut.parsed.data);
+          return;
+        }
+        checkDone();
+      }).catch(() => {
+        checkDone();
+      });
+
+      dbReadP.then(({ row, source }) => {
+        dbSource = source;
+        if (row && row.has_access) {
+          finalizeLookupSource(source);
+          resolve(row);
+          return;
+        }
+        dbResult = row;
+        checkDone();
+      }).catch(() => {
+        dbFailed = true;
+        dbResult = null;
+        checkDone();
+      });
+    });
+
+    if (result && result.has_access && MSG_TARGET_CACHE_TTL_SECS > 0) {
+      const scope = rowAccessScope(result);
       if (scope) {
         writeScopedVersionedJsonCache({
           redis,
           cacheKey,
           scope,
           ttlSeconds: MSG_TARGET_CACHE_TTL_SECS,
-          payloadWithoutVersion: { data: row },
+          payloadWithoutVersion: { data: result },
         }).catch(() => {});
       }
     }
-    return row;
+
+    return result;
+  } catch (err) {
+    observeMsgTargetLookup(caller, cacheShape, 'error', t0);
+    throw err;
   }
-
-  const dbPromise = loadMessageTargetFromReplicaThenPrimary(
-    messageId,
-    userId,
-    includeCommunityId,
-    targetLookupReadDiagnostics,
-  );
-
-  // Concurrent race: resolve as soon as either gives us a definitive "yes" (with access).
-  // If either returns null or has_access=false, wait for the other.
-  const result = await new Promise<any>((resolve, reject) => {
-    let pending = 2;
-    let dbResult: any = null;
-    let cachedResult: any = null;
-
-    function checkDone() {
-      if (--pending === 0) {
-        // Both finished. Prefer DB result for freshness if both returned something,
-        // but either one is better than nothing.
-        resolve(dbResult || (cachedResult ? cachedResult.data : null));
-      }
-    }
-
-    cachedPromise.then((cached) => {
-      if (cached && cached.data && cached.data.has_access) {
-        resolve(cached.data);
-      } else {
-        cachedResult = cached;
-        checkDone();
-      }
-    }).catch(checkDone);
-
-    dbPromise.then((row) => {
-      if (row && row.has_access) {
-        resolve(row);
-      } else {
-        dbResult = row;
-        checkDone();
-      }
-    }).catch((err) => {
-      // DB error: still allow Redis to win if it hits.
-      checkDone();
-    });
-  });
-
-  // Background: if DB load succeeded and we don't have a fresh cache entry, write it.
-  if (result && result.has_access && MSG_TARGET_CACHE_TTL_SECS > 0) {
-    const scope = rowAccessScope(result);
-    if (scope) {
-      writeScopedVersionedJsonCache({
-        redis,
-        cacheKey,
-        scope,
-        ttlSeconds: MSG_TARGET_CACHE_TTL_SECS,
-        payloadWithoutVersion: { data: result },
-      }).catch(() => {});
-    }
-  }
-
-  return result;
 }
 
 module.exports = {

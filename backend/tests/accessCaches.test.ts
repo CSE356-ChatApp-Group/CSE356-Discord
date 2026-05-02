@@ -1,6 +1,13 @@
+jest.mock('../src/utils/metrics/msgTargetAccess', () => ({
+  msgTargetCacheTotal: { inc: jest.fn() },
+  msgTargetLookupSourceTotal: { inc: jest.fn() },
+  msgTargetLookupDurationMs: { observe: jest.fn() },
+}));
+
 jest.mock('../src/db/pool', () => ({
   query: jest.fn(() => new Promise(() => {})),
   queryRead: jest.fn(() => new Promise(() => {})),
+  readPool: {},
 }));
 
 jest.mock('../src/db/redis', () => ({
@@ -30,17 +37,28 @@ const {
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
+  msgTargetCacheTotal,
+  msgTargetLookupSourceTotal,
+  msgTargetLookupDurationMs,
+} = require('../src/utils/metrics/msgTargetAccess') as {
+  msgTargetCacheTotal: { inc: jest.Mock };
+  msgTargetLookupSourceTotal: { inc: jest.Mock };
+  msgTargetLookupDurationMs: { observe: jest.Mock };
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const {
   channelIdIfOnlyConversationQueryParam,
   loadMessageTargetForUser,
 } = require('../src/messages/accessCaches') as {
   channelIdIfOnlyConversationQueryParam: (uuid: string, userId: string) => Promise<string | null>;
-  loadMessageTargetForUser: (
+    loadMessageTargetForUser: (
     messageId: string,
     userId: string,
     options?: {
       preferCache?: boolean;
       includeCommunityId?: boolean;
       targetLookupLogContext?: { kind: string; requestId?: string };
+      msgTargetMetricsCaller?: 'read_receipt' | 'other';
     },
   ) => Promise<any>;
 };
@@ -48,6 +66,7 @@ const {
 describe('accessCaches version-aware invalidation', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    redis.get.mockReset();
     redis.del.mockResolvedValue(1);
     redis.set.mockResolvedValue('OK');
   });
@@ -111,6 +130,8 @@ describe('accessCaches version-aware invalidation', () => {
 
     const result = await loadMessageTargetForUser('m-hot', 'user-hot', {
       preferCache: true,
+      msgTargetMetricsCaller: 'read_receipt',
+      includeCommunityId: false,
     });
 
     expect(result).toEqual({
@@ -120,6 +141,16 @@ describe('accessCaches version-aware invalidation', () => {
     });
     expect(queryRead).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
+    expect(msgTargetCacheTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'lite',
+      result: 'hit',
+    });
+    expect(msgTargetLookupSourceTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'lite',
+      source: 'cache',
+    });
   });
 
   it('falls back to primary when the read replica misses a fresh message target', async () => {
@@ -164,11 +195,23 @@ describe('accessCaches version-aware invalidation', () => {
       }],
     });
 
-    const result = await loadMessageTargetForUser('m-2', 'user-2');
+    const result = await loadMessageTargetForUser('m-2', 'user-2', {
+      msgTargetMetricsCaller: 'read_receipt',
+    });
 
     expect(redis.del).toHaveBeenCalledWith('msg_target:full:m-2:user-2');
     expect(queryRead).toHaveBeenCalledTimes(1);
     expect(result.has_access).toBe(false);
+    expect(msgTargetCacheTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'full',
+      result: 'stale_version',
+    });
+    expect(msgTargetLookupSourceTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'full',
+      source: 'replica',
+    });
   });
 
   it('passes read receipt target lookup diagnostics to queryRead on preferCache path', async () => {
@@ -182,6 +225,7 @@ describe('accessCaches version-aware invalidation', () => {
           kind: READ_RECEIPT_TARGET_LOOKUP_CALLER,
           requestId: 'req-correlation-1',
         },
+        msgTargetMetricsCaller: 'read_receipt',
       }),
     ).rejects.toThrow('Query read timeout');
     expect(queryRead).toHaveBeenCalledWith(
@@ -199,5 +243,101 @@ describe('accessCaches version-aware invalidation', () => {
         }),
       }),
     );
+    expect(msgTargetCacheTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'full',
+      result: 'miss',
+    });
+    expect(msgTargetLookupSourceTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'full',
+      source: 'error',
+    });
+    expect(msgTargetLookupDurationMs.observe).toHaveBeenCalledWith(
+      { caller: 'read_receipt', shape: 'full', source: 'error' },
+      expect.any(Number),
+    );
+  });
+
+  it('records miss + replica success for read_receipt preferCache', async () => {
+    redis.get.mockResolvedValue(null);
+    queryRead.mockResolvedValueOnce({
+      rows: [{ id: 'm1', has_access: true, channel_id: 'c1' }],
+    });
+
+    await loadMessageTargetForUser('m1', 'u1', {
+      preferCache: true,
+      includeCommunityId: false,
+      msgTargetMetricsCaller: 'read_receipt',
+    });
+
+    expect(msgTargetCacheTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'lite',
+      result: 'miss',
+    });
+    expect(msgTargetLookupSourceTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'lite',
+      source: 'replica',
+    });
+  });
+
+  it('records primary_fallback when read pool invokes fallback hook', async () => {
+    redis.get.mockResolvedValue(null);
+    queryRead.mockImplementation(async (_sql: unknown, _params: unknown, opts: any) => {
+      opts?.onReadReplicaFallback?.({ durationMs: 750 });
+      return { rows: [{ id: 'mfb', has_access: true, channel_id: 'c1' }] };
+    });
+
+    await loadMessageTargetForUser('mfb', 'ufb', {
+      preferCache: true,
+      includeCommunityId: false,
+      msgTargetMetricsCaller: 'read_receipt',
+    });
+
+    expect(msgTargetLookupSourceTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'lite',
+      source: 'primary_fallback',
+    });
+  });
+
+  it('records parse_error when Redis payload is invalid JSON', async () => {
+    redis.get.mockResolvedValueOnce('{not-json');
+    queryRead.mockResolvedValueOnce({
+      rows: [{ id: 'mp', has_access: true, channel_id: 'c1' }],
+    });
+
+    await loadMessageTargetForUser('mp', 'up', {
+      preferCache: true,
+      includeCommunityId: false,
+      msgTargetMetricsCaller: 'read_receipt',
+    });
+
+    expect(msgTargetCacheTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'lite',
+      result: 'parse_error',
+    });
+  });
+
+  it('records redis_error when redis.get throws', async () => {
+    redis.get.mockRejectedValueOnce(new Error('redis down'));
+    queryRead.mockResolvedValueOnce({
+      rows: [{ id: 'mr', has_access: true, channel_id: 'c1' }],
+    });
+
+    await loadMessageTargetForUser('mr', 'ur', {
+      preferCache: true,
+      includeCommunityId: false,
+      msgTargetMetricsCaller: 'read_receipt',
+    });
+
+    expect(msgTargetCacheTotal.inc).toHaveBeenCalledWith({
+      caller: 'read_receipt',
+      shape: 'lite',
+      result: 'redis_error',
+    });
   });
 });

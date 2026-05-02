@@ -264,6 +264,7 @@ async function executeReadReceiptMark(
     loadMessageTargetForUser(messageId, userId, {
       preferCache: true,
       includeCommunityId: needsCommunityId,
+      msgTargetMetricsCaller: 'read_receipt',
       targetLookupLogContext: {
         kind: READ_RECEIPT_TARGET_LOOKUP_CALLER,
         requestId: options.requestId,
