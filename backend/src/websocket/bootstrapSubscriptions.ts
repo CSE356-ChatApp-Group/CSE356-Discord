@@ -12,6 +12,8 @@ function createBootstrapSubscriptionsHelpers({
   writeWsBootstrapIngressCacheBase,
   resolvedWsRuntimeConfig,
   warmWsAclCacheFromChannelList,
+  markChannelRecentConnect,
+  invalidateRecentConnectTargetsCache,
   subscribeClient,
   subscribeCommunityClient,
   parseChannelKey,
@@ -192,6 +194,39 @@ function createBootstrapSubscriptionsHelpers({
     });
   }
 
+  function clearBootstrapRecentConnectPrimed(ws) {
+    if (ws && ws._bootstrapRecentConnectChannelIds) {
+      delete ws._bootstrapRecentConnectChannelIds;
+    }
+  }
+
+  /**
+   * Early ZADD into channel:recent_connect:* so recent_connect fanout sees the user before
+   * batched subscribeClient completes. Records primed channel IDs so subscribeClient can
+   * skip duplicate mark + target-cache invalidation for those channels.
+   */
+  async function primeBootstrapChannelRecentConnect(ws, userId, channels) {
+    const channelTopics = (channels || []).filter(
+      (ch) => typeof ch === "string" && ch.startsWith("channel:"),
+    );
+    if (!channelTopics.length) return;
+    ws._bootstrapRecentConnectChannelIds = new Set();
+    const settled = await Promise.allSettled(
+      channelTopics.map(async (ch) => {
+        const channelId = ch.slice("channel:".length);
+        await markChannelRecentConnect(userId, channelId);
+        await invalidateRecentConnectTargetsCache?.(channelId);
+        return channelId;
+      }),
+    );
+    for (let i = 0; i < settled.length; i += 1) {
+      const r = settled[i];
+      if (r.status === "fulfilled" && ws._bootstrapRecentConnectChannelIds) {
+        ws._bootstrapRecentConnectChannelIds.add(r.value);
+      }
+    }
+  }
+
   async function subscribeBootstrapChannel(ws, channel) {
     if (typeof channel === "string" && channel.startsWith("community:")) {
       const parsed = parseChannelKey(channel);
@@ -208,6 +243,7 @@ function createBootstrapSubscriptionsHelpers({
     if (Array.isArray(ingressCached)) {
       wsBootstrapCachedTotal.inc({ source: "ttl" });
       warmWsAclCacheFromChannelList(userId, ingressCached);
+      await primeBootstrapChannelRecentConnect(ws, userId, ingressCached);
       for (let i = 0; i < ingressCached.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
         const batch = ingressCached.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
         await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
@@ -220,6 +256,7 @@ function createBootstrapSubscriptionsHelpers({
       wsBootstrapCachedTotal.inc({ source: "inflight" });
       const channels = await wsBootstrapIngressInFlight.get(userId);
       warmWsAclCacheFromChannelList(userId, channels);
+      await primeBootstrapChannelRecentConnect(ws, userId, channels);
       for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
         const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
         await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
@@ -239,10 +276,7 @@ function createBootstrapSubscriptionsHelpers({
     const channels = await loadPromise;
     await writeWsBootstrapIngressCache(userId, channels, ingressScope);
     warmWsAclCacheFromChannelList(userId, channels);
-
-    // Recent-connect ZADD + target-cache invalidation for `channel:*` topics run inside
-    // subscribeClient (subscriptionManager) after a successful local subscribe — not here —
-    // to avoid duplicating O(channels) Redis work before the same batched subscribeClient calls.
+    await primeBootstrapChannelRecentConnect(ws, userId, channels);
 
     for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
       const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
@@ -272,6 +306,8 @@ function createBootstrapSubscriptionsHelpers({
         return bootstrapWithRetry(ws, userId, attempt + 1);
       }
       throw err;
+    } finally {
+      clearBootstrapRecentConnectPrimed(ws);
     }
   }
 

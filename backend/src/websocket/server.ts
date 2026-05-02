@@ -482,6 +482,8 @@ const {
   writeWsBootstrapIngressCacheBase,
   resolvedWsRuntimeConfig,
   warmWsAclCacheFromChannelList,
+  markChannelRecentConnect,
+  invalidateRecentConnectTargetsCache,
   subscribeClient,
   subscribeCommunityClient,
   parseChannelKey,

@@ -1,6 +1,7 @@
 /**
- * WS bootstrap must not duplicate recent-connect Redis work: channel topics are marked
- * in subscribeClient (subscriptionManager) only after a successful local subscribe.
+ * WS bootstrap recent-connect hybrid:
+ * - Bulk prime ZSET + invalidate before batched subscribeClient (recent_connect timing).
+ * - subscribeClient skips duplicate mark/invalidate when channel id is in ws._bootstrapRecentConnectChannelIds.
  */
 
 jest.mock('../src/utils/distributedSingleflight', () => {
@@ -19,13 +20,15 @@ const { parseChannelKey } = require('../src/websocket/channelKeyParse');
 const { createBootstrapSubscriptionsHelpers } = require('../src/websocket/bootstrapSubscriptions');
 const { createSubscriptionManager } = require('../src/websocket/subscriptionManager');
 
-describe('WS bootstrap recent-connect marking', () => {
+describe('WS bootstrap recent-connect hybrid', () => {
   function metricStub() {
     return { inc: jest.fn(), observe: jest.fn() };
   }
 
-  function buildBootstrapHarness(opts: {
-    subscribeClientImpl: (ws: any, ch: string) => Promise<void>;
+  function buildHarnessWithRealSubscribe(opts: {
+    markChannelRecentConnect: jest.Mock;
+    invalidateRecentConnectTargetsCache: jest.Mock;
+    ensureRedisChannelSubscribed?: jest.Mock;
   }) {
     const redis = {
       set: jest.fn().mockResolvedValue('OK'),
@@ -41,9 +44,22 @@ describe('WS bootstrap recent-connect marking', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'good1' }, { id: 'bad2' }] });
-    const subscribeClient = jest.fn(opts.subscribeClientImpl) as jest.MockedFunction<
-      (ws: any, ch: string) => Promise<void>
-    >;
+    const ensureRedisChannelSubscribed =
+      opts.ensureRedisChannelSubscribed ||
+      jest.fn().mockImplementation(async (ch: string) => {
+        if (ch === 'channel:bad2') throw new Error('subscribe failed');
+      });
+    const { subscribeClient } = createSubscriptionManager({
+      localUserClients: new Map(),
+      channelClients: new Map(),
+      communityClients: new Map(),
+      userIdFromTarget: (ch: string) => (ch.startsWith('user:') ? ch.slice('user:'.length) : null),
+      ready: jest.fn().mockResolvedValue(undefined),
+      ensureRedisChannelSubscribed,
+      releaseRedisChannelSubscription: jest.fn(),
+      markChannelRecentConnect: opts.markChannelRecentConnect,
+      invalidateRecentConnectTargetsCache: opts.invalidateRecentConnectTargetsCache,
+    });
     const { bootstrapWithRetry, subscribeBootstrapChannel } = createBootstrapSubscriptionsHelpers({
       redis,
       isRedisOperational: () => true,
@@ -59,6 +75,8 @@ describe('WS bootstrap recent-connect marking', () => {
       writeWsBootstrapIngressCacheBase: jest.fn().mockResolvedValue(undefined),
       resolvedWsRuntimeConfig: () => ({ autoSubscribeMode: 'full' }),
       warmWsAclCacheFromChannelList: jest.fn(),
+      markChannelRecentConnect: opts.markChannelRecentConnect,
+      invalidateRecentConnectTargetsCache: opts.invalidateRecentConnectTargetsCache,
       subscribeClient,
       subscribeCommunityClient: jest.fn(),
       parseChannelKey,
@@ -77,48 +95,68 @@ describe('WS bootstrap recent-connect marking', () => {
     return { redis, query, subscribeClient, bootstrapWithRetry, subscribeBootstrapChannel };
   }
 
-  it('subscribeClient marks each successful channel once (no separate bootstrap prefetch)', async () => {
-    const subscribePathMark = jest.fn().mockResolvedValue(undefined);
-    const subscribePathInvalidate = jest.fn().mockResolvedValue(undefined);
-
-    const { subscribeClient, bootstrapWithRetry } = buildBootstrapHarness({
-      subscribeClientImpl: async (ws: { _subscriptions: Set<string>; _userId: string }, ch: string) => {
-        if (ws._subscriptions.has(ch)) return;
-        if (ch === 'channel:bad2') throw new Error('subscribe failed');
-        ws._subscriptions.add(ch);
-        if (ch.startsWith('channel:')) {
-          const id = ch.slice('channel:'.length);
-          await subscribePathMark(ws._userId, id);
-          await subscribePathInvalidate(id);
-        }
-      },
+  it('bulk primes both channels before subscribe; subscribeClient skips duplicate mark/invalidate for primed good1', async () => {
+    const markRecent = jest.fn().mockResolvedValue(undefined);
+    const invalidateRecent = jest.fn().mockResolvedValue(undefined);
+    const { bootstrapWithRetry } = buildHarnessWithRealSubscribe({
+      markChannelRecentConnect: markRecent,
+      invalidateRecentConnectTargetsCache: invalidateRecent,
     });
-
-    const ws = { readyState: 1, _subscriptions: new Set<string>(), _userId: 'user-1' };
+    const ws = { readyState: 1, _subscriptions: new Set<string>(), _userId: 'user-1' } as any;
     await bootstrapWithRetry(ws, 'user-1');
-
-    expect(subscribePathMark).toHaveBeenCalledTimes(1);
-    expect(subscribePathMark).toHaveBeenCalledWith('user-1', 'good1');
-    expect(subscribeClient).toHaveBeenCalled();
+    expect(markRecent).toHaveBeenCalledTimes(2);
+    expect(markRecent).toHaveBeenCalledWith('user-1', 'good1');
+    expect(markRecent).toHaveBeenCalledWith('user-1', 'bad2');
+    expect(invalidateRecent).toHaveBeenCalledTimes(2);
+    expect(ws._bootstrapRecentConnectChannelIds).toBeUndefined();
   });
 
-  it('subscribeBootstrapChannel + subscribeClient still covers client-driven subscribe path', async () => {
-    const subscribePathMark = jest.fn().mockResolvedValue(undefined);
-    const subscribePathInvalidate = jest.fn().mockResolvedValue(undefined);
-    const { subscribeBootstrapChannel } = buildBootstrapHarness({
-      subscribeClientImpl: async (ws: { _subscriptions: Set<string>; _userId: string }, ch: string) => {
-        if (ws._subscriptions.has(ch)) return;
-        ws._subscriptions.add(ch);
-        if (ch.startsWith('channel:')) {
-          const id = ch.slice('channel:'.length);
-          await subscribePathMark(ws._userId, id);
-          await subscribePathInvalidate(id);
-        }
-      },
+  it('bulk prime still ZSET-marks a channel whose subscribeClient later fails (bad2)', async () => {
+    const markRecent = jest.fn().mockResolvedValue(undefined);
+    const invalidateRecent = jest.fn().mockResolvedValue(undefined);
+    const { bootstrapWithRetry } = buildHarnessWithRealSubscribe({
+      markChannelRecentConnect: markRecent,
+      invalidateRecentConnectTargetsCache: invalidateRecent,
     });
-    const ws = { readyState: 1, _subscriptions: new Set<string>(), _userId: 'user-2' };
+    const ws = { readyState: 1, _subscriptions: new Set<string>(), _userId: 'user-1' } as any;
+    await bootstrapWithRetry(ws, 'user-1');
+    expect(markRecent).toHaveBeenCalledWith('user-1', 'bad2');
+    expect(ws._subscriptions.has('channel:bad2')).toBe(false);
+  });
+
+  it('when bulk mark fails for a channel, subscribeClient still runs mark+invalidate on successful subscribe', async () => {
+    let bad2MarkCalls = 0;
+    const markRecent = jest.fn().mockImplementation(async (uid: string, id: string) => {
+      if (id === 'bad2') {
+        bad2MarkCalls += 1;
+        if (bad2MarkCalls === 1) throw new Error('bulk mark failed');
+      }
+    });
+    const invalidateRecent = jest.fn().mockResolvedValue(undefined);
+    const ensureRedis = jest.fn().mockResolvedValue(undefined);
+    const { bootstrapWithRetry } = buildHarnessWithRealSubscribe({
+      markChannelRecentConnect: markRecent,
+      invalidateRecentConnectTargetsCache: invalidateRecent,
+      ensureRedisChannelSubscribed: ensureRedis,
+    });
+    const ws = { readyState: 1, _subscriptions: new Set<string>(), _userId: 'user-1' } as any;
+    await bootstrapWithRetry(ws, 'user-1');
+    expect(markRecent).toHaveBeenCalledWith('user-1', 'good1');
+    expect(bad2MarkCalls).toBe(2);
+    expect(ws._subscriptions.has('channel:bad2')).toBe(true);
+  });
+  it('client subscribeBootstrapChannel without primed set still triggers mark+invalidate', async () => {
+    const markRecent = jest.fn().mockResolvedValue(undefined);
+    const invalidateRecent = jest.fn().mockResolvedValue(undefined);
+    const { subscribeBootstrapChannel } = buildHarnessWithRealSubscribe({
+      markChannelRecentConnect: markRecent,
+      invalidateRecentConnectTargetsCache: invalidateRecent,
+    });
+    const ws = { readyState: 1, _subscriptions: new Set<string>(), _userId: 'user-2' } as any;
     await subscribeBootstrapChannel(ws, 'channel:manual');
-    expect(subscribePathMark).toHaveBeenCalledWith('user-2', 'manual');
+    await new Promise<void>((r) => setImmediate(r));
+    expect(markRecent).toHaveBeenCalledWith('user-2', 'manual');
+    expect(invalidateRecent).toHaveBeenCalledWith('manual');
   });
 });
 
@@ -155,5 +193,32 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
     await subscribeClient(ws, 'channel:abc');
     await new Promise<void>((r) => setImmediate(r));
     expect(markChannelRecentConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips mark and invalidate when channel id is bootstrap-primed', async () => {
+    const markChannelRecentConnect = jest.fn().mockResolvedValue(undefined);
+    const invalidateRecentConnectTargetsCache = jest.fn().mockResolvedValue(undefined);
+    const { subscribeClient } = createSubscriptionManager({
+      localUserClients: new Map(),
+      channelClients: new Map(),
+      communityClients: new Map(),
+      userIdFromTarget: (ch: string) => (ch.startsWith('user:') ? ch.slice('user:'.length) : null),
+      ready: jest.fn().mockResolvedValue(undefined),
+      ensureRedisChannelSubscribed: jest.fn().mockResolvedValue(undefined),
+      releaseRedisChannelSubscription: jest.fn(),
+      markChannelRecentConnect,
+      invalidateRecentConnectTargetsCache,
+    });
+    const ws = {
+      readyState: 1,
+      _subscriptions: new Set<string>(),
+      _userId: 'u9',
+      _explicitChannelUnsub: new Set<string>(),
+      _bootstrapRecentConnectChannelIds: new Set<string>(['abc']),
+    };
+    await subscribeClient(ws, 'channel:abc');
+    await new Promise<void>((r) => setImmediate(r));
+    expect(markChannelRecentConnect).not.toHaveBeenCalled();
+    expect(invalidateRecentConnectTargetsCache).not.toHaveBeenCalled();
   });
 });

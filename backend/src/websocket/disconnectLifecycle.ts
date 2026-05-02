@@ -57,6 +57,9 @@ function createDisconnectLifecycle({
 }) {
   function cleanup(ws, userId, closeCode = 1005, closeReason = "") {
     clearOutboundQueue(ws);
+    if (ws._bootstrapRecentConnectChannelIds) {
+      delete ws._bootstrapRecentConnectChannelIds;
+    }
     const subscriptions = [...ws._subscriptions];
     const bootstrapReady = ws._bootstrapReady === true;
     const lifetimeMs = Math.max(0, Date.now() - Number(ws._connectedAt || Date.now()));

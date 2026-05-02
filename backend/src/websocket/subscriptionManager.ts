@@ -66,9 +66,12 @@ function createSubscriptionManager({
       const uid = ws._userId;
       if (uid) {
         const channelId = redisChannel.slice("channel:".length);
-        markChannelRecentConnect(uid, channelId)
-          .then(() => invalidateRecentConnectTargetsCache?.(channelId))
-          .catch(() => {});
+        const skipRecentConnectSideEffects = ws._bootstrapRecentConnectChannelIds?.has(channelId);
+        if (!skipRecentConnectSideEffects) {
+          markChannelRecentConnect(uid, channelId)
+            .then(() => invalidateRecentConnectTargetsCache?.(channelId))
+            .catch(() => {});
+        }
       }
     }
   }
