@@ -44,7 +44,13 @@ function runPostSuccessFollowup(opts: {
   tFanoutStart: number;
   cacheBustStartMs: number;
   cacheBustEndMs: number;
-  fanoutTimings: { recent_bridge_wall_ms: number; fanout_enqueue_wall_ms: number };
+  fanoutTimings: {
+    recent_bridge_wall_ms: number;
+    fanout_enqueue_wall_ms: number;
+    recent_bridge_ok: boolean | null;
+    recent_bridge_timed_out: boolean | null;
+    recent_bridge_timeout_ms: number | null;
+  };
   fanoutMeta: any;
 }) {
   const {
@@ -185,6 +191,9 @@ function runPostSuccessFollowup(opts: {
         hydrate_ms: hydrateWallMs,
         fanout_enqueue_wall_ms: fanoutTimings.fanout_enqueue_wall_ms,
         recent_bridge_wall_ms: fanoutTimings.recent_bridge_wall_ms,
+        recent_bridge_ok: fanoutTimings.recent_bridge_ok ?? null,
+        recent_bridge_timed_out: fanoutTimings.recent_bridge_timed_out ?? null,
+        recent_bridge_timeout_ms: fanoutTimings.recent_bridge_timeout_ms ?? null,
         fanout_wall_ms: fanoutWallMs,
         cache_bust_only_ms: cacheBustOnlyMs,
         post_hydrate_parallel_wall_ms: postHydrateParallelWallMs,
@@ -207,6 +216,9 @@ function runPostSuccessFollowup(opts: {
         fanout_wall_ms: fanoutWallMs,
         fanout_enqueue_wall_ms: fanoutTimings.fanout_enqueue_wall_ms,
         recent_bridge_wall_ms: fanoutTimings.recent_bridge_wall_ms,
+        recent_bridge_ok: fanoutTimings.recent_bridge_ok ?? null,
+        recent_bridge_timed_out: fanoutTimings.recent_bridge_timed_out ?? null,
+        recent_bridge_timeout_ms: fanoutTimings.recent_bridge_timeout_ms ?? null,
         side_effects_enqueue_ms: communityEnqueueMs,
         idempotency_cache_ms: idemSuccessRedisMs,
         response_build_ms: Math.max(

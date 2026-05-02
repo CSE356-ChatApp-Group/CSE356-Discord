@@ -39,6 +39,7 @@ const {
   channelAccessCacheTotal,
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,
+  messageCacheBustWallDurationMs,
 } = require('./metrics/searchPerformance');
 const {
   pgPoolTotal,
@@ -283,6 +284,8 @@ const overloadStageGauge = new client.Gauge({
     lastMessageCacheTotal.inc({ target: 'community_channel', result: 'error' }, 0);
     messageCacheBustFailuresTotal.inc({ target: 'channel' }, 0);
     messageCacheBustFailuresTotal.inc({ target: 'conversation' }, 0);
+    messageCacheBustWallDurationMs.observe({ scope: 'channel' }, 0);
+    messageCacheBustWallDurationMs.observe({ scope: 'conversation' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'channel_access' }, 0);
     messagePostAccessDeniedTotal.inc({ reason: 'conversation_participant' }, 0);
     messagePostRealtimePublishFailTotal.inc({ target: 'channel' }, 0);
@@ -713,6 +716,7 @@ module.exports = {
   wsBootstrapDbTotal,
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,
+  messageCacheBustWallDurationMs,
   searchReplicaRetryTotal,
   searchResultsReturnedHistogram,
   searchThrottledTotal,

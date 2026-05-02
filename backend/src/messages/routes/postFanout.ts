@@ -39,6 +39,10 @@ const {
 type PostFanoutTimingMs = {
   recent_bridge_wall_ms: number;
   fanout_enqueue_wall_ms: number;
+  /** null when immediate recent bridge did not run (disabled or conversation path). */
+  recent_bridge_ok: boolean | null;
+  recent_bridge_timed_out: boolean | null;
+  recent_bridge_timeout_ms: number | null;
 };
 
 async function runChannelMessageCreatedFanout(opts: {
@@ -55,6 +59,9 @@ async function runChannelMessageCreatedFanout(opts: {
   let timingsMs: PostFanoutTimingMs = {
     recent_bridge_wall_ms: 0,
     fanout_enqueue_wall_ms: 0,
+    recent_bridge_ok: null,
+    recent_bridge_timed_out: null,
+    recent_bridge_timeout_ms: null,
   };
 
   incrementChannelMessageCount(channelId).catch((err: unknown) => {
@@ -82,6 +89,9 @@ async function runChannelMessageCreatedFanout(opts: {
           MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
         );
         timingsMs.recent_bridge_wall_ms = Math.max(0, Date.now() - recentBridgeStart);
+        timingsMs.recent_bridge_ok = recentBridgeRun.ok;
+        timingsMs.recent_bridge_timed_out = !!recentBridgeRun.timedOut;
+        timingsMs.recent_bridge_timeout_ms = MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS;
         if (!recentBridgeRun.ok && recentBridgeRun.timedOut) {
           deliveryTimeoutTotal.inc({ phase: "recent_bridge" });
           logger.warn(
@@ -94,6 +104,10 @@ async function runChannelMessageCreatedFanout(opts: {
             "POST /messages: immediate recent-connect bridge exceeded wall budget",
           );
         }
+      } else {
+        timingsMs.recent_bridge_ok = null;
+        timingsMs.recent_bridge_timed_out = null;
+        timingsMs.recent_bridge_timeout_ms = null;
       }
       const enqueueStart = Date.now();
       const enqueued = tracer.startActiveSpan('fanout.enqueue', (span: any) => {
@@ -237,6 +251,9 @@ async function runConversationMessageCreatedFanout(opts: {
   const timingsMs: PostFanoutTimingMs = {
     recent_bridge_wall_ms: 0,
     fanout_enqueue_wall_ms: 0,
+    recent_bridge_ok: null,
+    recent_bridge_timed_out: null,
+    recent_bridge_timeout_ms: null,
   };
 
   try {

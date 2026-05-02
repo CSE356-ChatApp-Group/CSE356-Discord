@@ -326,6 +326,9 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         let fanoutTimings = {
           recent_bridge_wall_ms: 0,
           fanout_enqueue_wall_ms: 0,
+          recent_bridge_ok: null,
+          recent_bridge_timed_out: null,
+          recent_bridge_timeout_ms: null,
         };
         const tFanoutStart = Date.now();
         if (channelId) {

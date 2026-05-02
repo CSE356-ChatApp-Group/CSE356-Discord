@@ -55,6 +55,14 @@ const messageCacheBustFailuresTotal = new client.Counter({
   labelNames: ['target'],
 });
 
+/** Wall time for message list cache bust (DEL + epoch INCR), one observation per bust. */
+const messageCacheBustWallDurationMs = new client.Histogram({
+  name: 'message_cache_bust_wall_duration_ms',
+  help: 'Wall-clock duration of message list cache bust (pipeline or sequential)',
+  labelNames: ['scope'],
+  buckets: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
 module.exports = {
   searchReplicaRetryTotal,
   searchResultsReturnedHistogram,
@@ -63,4 +71,5 @@ module.exports = {
   channelAccessCacheTotal,
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,
+  messageCacheBustWallDurationMs,
 };

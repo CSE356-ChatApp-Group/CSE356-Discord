@@ -465,6 +465,9 @@ function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
     idem_success_redis_ms,
     serialization_ms,
     response_body_bytes,
+    recent_bridge_ok: recentBridgeOkIn = null,
+    recent_bridge_timed_out: recentBridgeTimedOutIn = null,
+    recent_bridge_timeout_ms: recentBridgeTimeoutMsIn = null,
   } = args;
   const txAccess = Math.max(0, Number(successLog.tx_access_check_ms || 0));
   const txInsert = Math.max(0, Number(successLog.tx_insert_ms || 0));
@@ -516,6 +519,9 @@ function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
     dominant_ms: rollup.dominant_ms,
     dominant_bucket: rollup.dominant_bucket,
     response_body_bytes,
+    recent_bridge_ok: recentBridgeOkIn,
+    recent_bridge_timed_out: recentBridgeTimedOutIn,
+    recent_bridge_timeout_ms: recentBridgeTimeoutMsIn,
     correlate_redis_slowlog:
       "REDIS_SLOWLOG_SSH=user@vm1 ./scripts/redis/redis-slowlog-snapshot.sh (see docs/operations-monitoring.md)",
     correlate_pg_stat_statements:
