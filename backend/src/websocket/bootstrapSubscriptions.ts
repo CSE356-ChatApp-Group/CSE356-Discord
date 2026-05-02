@@ -12,8 +12,6 @@ function createBootstrapSubscriptionsHelpers({
   writeWsBootstrapIngressCacheBase,
   resolvedWsRuntimeConfig,
   warmWsAclCacheFromChannelList,
-  markChannelRecentConnect,
-  invalidateRecentConnectTargetsCache,
   subscribeClient,
   subscribeCommunityClient,
   parseChannelKey,
@@ -242,14 +240,9 @@ function createBootstrapSubscriptionsHelpers({
     await writeWsBootstrapIngressCache(userId, channels, ingressScope);
     warmWsAclCacheFromChannelList(userId, channels);
 
-    const channelTopics = channels.filter((ch) => ch.startsWith("channel:"));
-    if (channelTopics.length > 0) {
-      const zaddPromises = channelTopics.map((channel) =>
-        markChannelRecentConnect(userId, channel.slice("channel:".length))
-          .then(() => invalidateRecentConnectTargetsCache?.(channel.slice("channel:".length)))
-          .catch(() => {}));
-      await Promise.allSettled(zaddPromises);
-    }
+    // Recent-connect ZADD + target-cache invalidation for `channel:*` topics run inside
+    // subscribeClient (subscriptionManager) after a successful local subscribe — not here —
+    // to avoid duplicating O(channels) Redis work before the same batched subscribeClient calls.
 
     for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
       const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
