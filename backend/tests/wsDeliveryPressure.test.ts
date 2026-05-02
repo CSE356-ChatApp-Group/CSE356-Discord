@@ -3,6 +3,7 @@ const {
   recordWsBootstrapWallMs,
   recordRealtimeMissAttribution,
   shouldDropReadReceiptFanoutForWsPressure,
+  shouldFullyDeferReadReceiptForWsPressure,
   getWsDeliveryPressureSnapshot,
   resetWsDeliveryPressureForTests,
 } = require('../src/websocket/wsDeliveryPressure');
@@ -13,6 +14,7 @@ describe('wsDeliveryPressure', () => {
   beforeEach(() => {
     for (const key of [
       'READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED',
+      'READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED',
       'READ_RECEIPT_WS_PRESSURE_TTL_MS',
       'READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS',
       'READ_RECEIPT_WS_PRESSURE_BOOTSTRAP_WALL_MS',
@@ -21,6 +23,7 @@ describe('wsDeliveryPressure', () => {
       prevEnv[key] = process.env[key];
     }
     process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = 'true';
+    process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED = 'false';
     process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS = '50';
     process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS = '1000';
     process.env.READ_RECEIPT_WS_PRESSURE_BOOTSTRAP_WALL_MS = '2000';
@@ -43,6 +46,7 @@ describe('wsDeliveryPressure', () => {
 
     recordWsReliableRealtimeLatencyMs(1000);
     expect(shouldDropReadReceiptFanoutForWsPressure()).toBe(true);
+    expect(shouldFullyDeferReadReceiptForWsPressure()).toBe(false);
     expect(getWsDeliveryPressureSnapshot().lastReason).toBe('realtime_latency');
 
     await new Promise((resolve) => setTimeout(resolve, 70));
@@ -71,9 +75,28 @@ describe('wsDeliveryPressure', () => {
 
   it('stays disabled when the feature flag is false', () => {
     process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = 'false';
+    process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED = 'false';
     recordWsReliableRealtimeLatencyMs(300000);
     recordWsBootstrapWallMs(300000);
     recordRealtimeMissAttribution('topic_message_partial_delivery', 10);
     expect(shouldDropReadReceiptFanoutForWsPressure()).toBe(false);
+    expect(shouldFullyDeferReadReceiptForWsPressure()).toBe(false);
+    expect(getWsDeliveryPressureSnapshot().active).toBe(false);
+  });
+
+  it('tracks pressure for full read deferral without enabling fanout degradation', () => {
+    process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = 'false';
+    process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED = 'true';
+
+    recordWsBootstrapWallMs(2000);
+
+    expect(shouldDropReadReceiptFanoutForWsPressure()).toBe(false);
+    expect(shouldFullyDeferReadReceiptForWsPressure()).toBe(true);
+    expect(getWsDeliveryPressureSnapshot()).toMatchObject({
+      active: true,
+      fanoutDegradeActive: false,
+      fullReadDeferActive: true,
+      lastReason: 'bootstrap_wall',
+    });
   });
 });

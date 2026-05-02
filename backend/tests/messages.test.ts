@@ -503,9 +503,11 @@ describe('Read receipt insert lock pressure shedding', () => {
   it('skips only read-receipt fanout under WS delivery pressure while advancing durable read state', async () => {
     resetWsDeliveryPressureForTests();
     const prevEnabled = process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED;
+    const prevFullDefer = process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED;
     const prevTtl = process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS;
     const prevLatency = process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS;
     process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = 'true';
+    process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED = 'false';
     process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS = '60';
     process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS = '1000';
 
@@ -613,6 +615,118 @@ describe('Read receipt insert lock pressure shedding', () => {
       resetWsDeliveryPressureForTests();
       if (prevEnabled === undefined) delete process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED;
       else process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = prevEnabled;
+      if (prevFullDefer === undefined) delete process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED;
+      else process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED = prevFullDefer;
+      if (prevTtl === undefined) delete process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS;
+      else process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS = prevTtl;
+      if (prevLatency === undefined) delete process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS;
+      else process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS = prevLatency;
+    }
+  });
+
+  it('fully defers PUT /read before target lookup and cursor work when WS delivery pressure is active', async () => {
+    resetWsDeliveryPressureForTests();
+    const prevFanoutEnabled = process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED;
+    const prevFullDefer = process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED;
+    const prevTtl = process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS;
+    const prevLatency = process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS;
+    process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = 'true';
+    process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED = 'true';
+    process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS = '120';
+    process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS = '1000';
+
+    try {
+      const owner = await createAuthenticatedUser('readfullpressure');
+      const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+        slugPrefix: 'readfullpressure',
+        channelPrefix: 'rfp-ch',
+        description: 'read full pressure',
+      });
+      const msg = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'full pressure read target' });
+      expect(msg.status).toBe(201);
+      const messageId = msg.body.message.id;
+
+      const preflightBefore = counterValueByLabels(readReceiptPreflightTotal, {
+        result: 'deferred_ws_delivery_pressure',
+      });
+      const requestsBefore = counterValueByLabels(readReceiptRequestsTotal, {
+        result: 'deferred_ws_delivery_pressure',
+      });
+      const shedBefore = counterValueByLabels(readReceiptShedTotal, {
+        reason: 'ws_delivery_pressure',
+      });
+      const fanoutOnlyBefore = counterValueByLabels(readReceiptRequestsTotal, {
+        result: 'deferred_ws_delivery_pressure_fanout_only',
+      });
+
+      recordWsReliableRealtimeLatencyMs(1000);
+      const pressureRead = await request(app)
+        .put(`/api/v1/messages/${messageId}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({});
+
+      expect(pressureRead.status).toBe(200);
+      expect(pressureRead.body).toEqual({
+        success: true,
+        deferred: true,
+        reason: 'ws_delivery_pressure',
+      });
+      expect(counterValueByLabels(readReceiptPreflightTotal, {
+        result: 'deferred_ws_delivery_pressure',
+      })).toBeGreaterThan(preflightBefore);
+      expect(counterValueByLabels(readReceiptRequestsTotal, {
+        result: 'deferred_ws_delivery_pressure',
+      })).toBeGreaterThan(requestsBefore);
+      expect(counterValueByLabels(readReceiptShedTotal, {
+        reason: 'ws_delivery_pressure',
+      })).toBeGreaterThan(shedBefore);
+      expect(counterValueByLabels(readReceiptRequestsTotal, {
+        result: 'deferred_ws_delivery_pressure_fanout_only',
+      })).toBe(fanoutOnlyBefore);
+
+      await flushDirtyReadStatesToDB();
+      const afterPressure = await pool.query(
+        `SELECT last_read_message_id::text AS id FROM read_states WHERE user_id = $1 AND channel_id = $2`,
+        [owner.user.id, channelId],
+      );
+      expect(afterPressure.rows).toHaveLength(0);
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const normalRead = await request(app)
+        .put(`/api/v1/messages/${messageId}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({});
+      expect(normalRead.status).toBe(200);
+      expect(normalRead.body.deferred).not.toBe(true);
+
+      await flushDirtyReadStatesToDB();
+      const afterNormalRead = await pool.query(
+        `SELECT last_read_message_id::text AS id FROM read_states WHERE user_id = $1 AND channel_id = $2`,
+        [owner.user.id, channelId],
+      );
+      expect(afterNormalRead.rows[0]?.id).toBe(messageId);
+
+      recordWsReliableRealtimeLatencyMs(1000);
+      const missingMessageId = randomUUID();
+      const missingRead = await request(app)
+        .put(`/api/v1/messages/${missingMessageId}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({});
+      expect(missingRead.status).toBe(200);
+      expect(missingRead.body).toEqual({
+        success: true,
+        deferred: true,
+        reason: 'ws_delivery_pressure',
+      });
+    } finally {
+      resetWsDeliveryPressureForTests();
+      if (prevFanoutEnabled === undefined) delete process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED;
+      else process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = prevFanoutEnabled;
+      if (prevFullDefer === undefined) delete process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED;
+      else process.env.READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED = prevFullDefer;
       if (prevTtl === undefined) delete process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS;
       else process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS = prevTtl;
       if (prevLatency === undefined) delete process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS;

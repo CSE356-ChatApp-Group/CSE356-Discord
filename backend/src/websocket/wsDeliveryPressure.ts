@@ -37,8 +37,16 @@ function parseIntEnv(name: string, fallback: number, min: number, max: number): 
   return Math.min(max, Math.max(min, raw));
 }
 
-function enabled(): boolean {
+function fanoutDegradeEnabled(): boolean {
   return parseBoolEnv('READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED', true);
+}
+
+function fullReadDeferEnabled(): boolean {
+  return parseBoolEnv('READ_RECEIPT_FULL_DEFER_ON_WS_PRESSURE_ENABLED', false);
+}
+
+function pressureTrackingEnabled(): boolean {
+  return fanoutDegradeEnabled() || fullReadDeferEnabled();
 }
 
 function ttlMs(): number {
@@ -59,7 +67,7 @@ function missThreshold(): number {
 }
 
 function activate(reason: WsPressureReason, nowMs = Date.now()): void {
-  if (!enabled()) return;
+  if (!pressureTrackingEnabled()) return;
   pressureUntilMs = Math.max(pressureUntilMs, nowMs + ttlMs());
   lastReason = reason;
 }
@@ -75,19 +83,19 @@ function pruneMissTimestamps(nowMs: number): void {
 }
 
 function recordWsReliableRealtimeLatencyMs(deltaMs: number): void {
-  if (!enabled()) return;
+  if (!pressureTrackingEnabled()) return;
   if (!Number.isFinite(deltaMs) || deltaMs < realtimeLatencyThresholdMs()) return;
   activate('realtime_latency');
 }
 
 function recordWsBootstrapWallMs(deltaMs: number): void {
-  if (!enabled()) return;
+  if (!pressureTrackingEnabled()) return;
   if (!Number.isFinite(deltaMs) || deltaMs < bootstrapWallThresholdMs()) return;
   activate('bootstrap_wall');
 }
 
 function recordRealtimeMissAttribution(reason: string, count = 1): void {
-  if (!enabled()) return;
+  if (!pressureTrackingEnabled()) return;
   if (!pressureMissReasons.has(reason)) return;
   const nowMs = Date.now();
   pruneMissTimestamps(nowMs);
@@ -100,13 +108,20 @@ function recordRealtimeMissAttribution(reason: string, count = 1): void {
 }
 
 function shouldDropReadReceiptFanoutForWsPressure(nowMs = Date.now()): boolean {
-  if (!enabled()) return false;
+  if (!fanoutDegradeEnabled()) return false;
+  return nowMs < pressureUntilMs;
+}
+
+function shouldFullyDeferReadReceiptForWsPressure(nowMs = Date.now()): boolean {
+  if (!fullReadDeferEnabled()) return false;
   return nowMs < pressureUntilMs;
 }
 
 function getWsDeliveryPressureSnapshot(nowMs = Date.now()) {
   return {
-    active: shouldDropReadReceiptFanoutForWsPressure(nowMs),
+    active: nowMs < pressureUntilMs,
+    fanoutDegradeActive: shouldDropReadReceiptFanoutForWsPressure(nowMs),
+    fullReadDeferActive: shouldFullyDeferReadReceiptForWsPressure(nowMs),
     untilMs: pressureUntilMs,
     lastReason,
     missWindowCount: (() => {
@@ -127,6 +142,7 @@ module.exports = {
   recordWsBootstrapWallMs,
   recordRealtimeMissAttribution,
   shouldDropReadReceiptFanoutForWsPressure,
+  shouldFullyDeferReadReceiptForWsPressure,
   getWsDeliveryPressureSnapshot,
   resetWsDeliveryPressureForTests,
 };

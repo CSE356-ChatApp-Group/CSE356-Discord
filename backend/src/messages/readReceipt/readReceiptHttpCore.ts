@@ -55,6 +55,7 @@ const {
 const { READ_RECEIPT_TARGET_LOOKUP_CALLER } = require("./readReceiptTargetLookupDiag");
 const {
   shouldDropReadReceiptFanoutForWsPressure,
+  shouldFullyDeferReadReceiptForWsPressure,
 } = require("../../websocket/wsDeliveryPressure");
 
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
@@ -157,6 +158,20 @@ function readReceiptPreflightResponse(): {
   dropReadReceiptFanout?: boolean;
 } | { respond: false; dropReadReceiptFanout: boolean } {
   const poolWaiting = Number(poolStats()?.waiting || 0);
+  if (shouldFullyDeferReadReceiptForWsPressure()) {
+    observeReadPreflight('deferred_ws_delivery_pressure', poolWaiting);
+    readReceiptShedTotal.inc({ reason: "ws_delivery_pressure" });
+    observeReadReceiptRequest("deferred_ws_delivery_pressure");
+    return {
+      respond: true,
+      status: 200,
+      body: {
+        success: true,
+        deferred: true,
+        reason: "ws_delivery_pressure",
+      },
+    };
+  }
   if (getShouldDeferReadReceiptForInsertLockPressure()) {
     observeReadPreflight('deferred_message_channel_insert_lock_pressure', poolWaiting);
     readReceiptShedTotal.inc({
