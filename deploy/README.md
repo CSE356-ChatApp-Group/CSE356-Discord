@@ -56,11 +56,11 @@ Pushes and pull requests targeting `main` run **deploy-scripts**, **backend**, a
 1. **deploy-scripts:** `bash -n` / `shellcheck` on deploy scripts, `promtool check rules` on `infrastructure/monitoring/alerts.yml`, Grafana dashboard JSON validation, Ansible syntax-check on `ansible/playbooks/*.yml`, plus small `node --check` / `py_compile` gates.
 2. **backend** job: `npm ci`, `npm run typecheck --workspace=backend`, `npm run test --workspace=backend`, `npm run build --workspace=backend`.
 3. **frontend** job: `npm ci`, `npm run typecheck --workspace=frontend`, `npm run test --workspace=frontend`, `npm run build --workspace=frontend`.
-4. **package-release** (only `push` to `main`, not PRs): build `releases/chatapp-<sha>.tar.gz` with `backend/dist/`, `backend/scripts/run-migrations.cjs`, `backend/package*.json`, `backend/tsconfig.json`, `frontend/dist/`, `frontend/package*.json`, `migrations/`, root `package*.json`, `.env.example`, `deploy/env/prod.required.env`, `deploy/env/staging.required.env`, `deploy/apply-env-profile.py`.
+4. **package-release** (only `push` to `main`, not PRs): after downloading `backend/dist` and `frontend/dist` artifacts, CI runs **`scripts/release/verify-backend-dist-release-sha.sh`** (must match `github.sha`), then builds `releases/chatapp-<sha>.tar.gz` with `backend/dist/` (including **`.build-sha`** written at compile time), `backend/scripts/run-migrations.cjs`, `backend/package*.json`, `backend/tsconfig.json`, `frontend/dist/`, `frontend/package*.json`, `migrations/`, root `package*.json`, `.env.example`, `deploy/env/prod.required.env`, `deploy/env/staging.required.env`, `deploy/apply-env-profile.py`.
 5. Upload workflow artifact `release-<sha>` and create/update GitHub Release tag **`release-<sha>`** with that tarball.
 
 ### Artifact
-Each release is immutable and tagged by commit SHA. The **same artifact** is deployed to both staging and production.
+Each release is immutable and tagged by commit SHA. The **same artifact** is deployed to both staging and production. **`backend/dist/.build-sha`** records the **git commit that produced `backend/dist`**; packaging fails if that file is missing or does not match the tarball’s release SHA (prevents **`SKIP_BUILD=1`** from silently shipping stale compiled output).
 
 ## Deploy without GitHub (recommended for canaries)
 
@@ -80,7 +80,7 @@ DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh "$SHA"
 ./deploy/deploy-prod-multi.sh "$SHA"
 ```
 
-Optional: **`SKIP_BUILD=1`** if `backend/dist` and `frontend/dist` are already fresh.
+Optional: **`SKIP_BUILD=1`** only when **`backend/dist/.build-sha`** already equals the release SHA you are packaging (for example you just ran **`npm run build --workspace=backend`** on that same commit). Otherwise run **`./scripts/release/package-release-artifact.sh`** with a normal build (default) or use the **CI** `release-<sha>` artifact. If verification fails, **rebuild without `SKIP_BUILD=1`** so `tsc` and **`write-dist-build-metadata.cjs`** refresh `dist/` and `.build-sha`.
 
 **Also useful:** keep last *N* tarballs on VM1 (or object storage) and `scp` between hosts (**option 2**). **`GITHUB_TOKEN`** / `gh auth login` still helps CI and ad-hoc `gh` use (**option 3**). **`deploy-prod.sh`** retries `gh release download` up to **five times** with **30s** backoff before failing.
 

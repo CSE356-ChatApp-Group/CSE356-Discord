@@ -75,6 +75,7 @@ jobs:
           bash -n scripts/ops/self-hosted-actions-runner-disk-cleanup.sh
           bash -n scripts/ops/gh-set-deploy-ssh-secrets.sh
           bash -n scripts/release/recommended-release-verify.sh
+          bash -n scripts/release/verify-backend-dist-release-sha.sh
           bash scripts/deploy/test-deploy-guards.sh
           bash -n scripts/ops/measure-fanout-baseline.sh
           python3 -m py_compile deploy/ensure-pgdump-env.py
@@ -82,6 +83,7 @@ jobs:
           python3 -m py_compile deploy/prometheus-db-file-sd.py
           python3 deploy/fail2ban/verify_filter.py
           node --check backend/scripts/api-contract-harness.cjs
+          node --check backend/scripts/write-dist-build-metadata.cjs
 
       - name: Validate Prometheus alert rules
         run: |
@@ -143,6 +145,9 @@ jobs:
 
       - name: Build backend
         run: npm run build --workspace=backend
+
+      - name: Verify backend dist build metadata
+        run: bash scripts/release/verify-backend-dist-release-sha.sh "${{ github.sha }}"
 
       - name: Upload backend dist
         uses: actions/upload-artifact@v7
@@ -218,6 +223,9 @@ jobs:
         with:
           name: frontend-dist-${{ github.sha }}
           path: frontend/dist
+
+      - name: Verify backend dist matches commit
+        run: bash scripts/release/verify-backend-dist-release-sha.sh "${{ github.sha }}"
 
       - name: Package release artifact
         run: |

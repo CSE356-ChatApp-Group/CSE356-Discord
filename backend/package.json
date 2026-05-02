@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "nodemon --watch src --ext ts --exec tsx src/index.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/write-dist-build-metadata.cjs",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "migrate": "node scripts/run-migrations.cjs",

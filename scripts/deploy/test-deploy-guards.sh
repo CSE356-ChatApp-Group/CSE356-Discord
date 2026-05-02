@@ -24,3 +24,6 @@ if chatapp_validate_release_sha "abcdef" 2>/dev/null; then
 fi
 
 echo "OK deploy-guards"
+
+bash "${ROOT}/scripts/release/verify-backend-dist-release-sha.sh" --self-test
+echo "OK verify-backend-dist-release-sha"

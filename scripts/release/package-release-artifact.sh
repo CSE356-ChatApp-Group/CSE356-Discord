@@ -5,7 +5,8 @@
 #   LOCAL_ARTIFACT_PATH="$PWD/releases/chatapp-$(git rev-parse HEAD).tar.gz" \
 #     DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh "$(git rev-parse HEAD)"
 #
-# Set SKIP_BUILD=1 to package only (dist/ must already exist).
+# Set SKIP_BUILD=1 to package only when backend/dist/.build-sha matches the
+# release SHA (see scripts/release/verify-backend-dist-release-sha.sh).
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/repo-root.sh"
@@ -20,8 +21,10 @@ if [[ "${SKIP_BUILD:-}" != "1" ]]; then
   npm run build --workspace=backend
   npm run build --workspace=frontend
 else
-  echo "SKIP_BUILD=1 — assuming backend/dist and frontend/dist exist"
+  echo "SKIP_BUILD=1 — verifying backend/dist/.build-sha matches ${SHA} before tarring"
 fi
+
+bash "${ROOT}/scripts/release/verify-backend-dist-release-sha.sh" "${SHA}"
 
 tar --exclude=node_modules --exclude=.git --exclude=.env \
   -czf "$OUT" \
