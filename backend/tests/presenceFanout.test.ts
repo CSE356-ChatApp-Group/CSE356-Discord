@@ -3,6 +3,7 @@ jest.mock('../src/db/redis', () => ({
   mget: jest.fn(),
   set: jest.fn(),
   del: jest.fn(),
+  unlink: jest.fn(),
   eval: jest.fn(),
   pipeline: jest.fn(() => {
     const chain = {
@@ -38,6 +39,9 @@ jest.mock('../src/utils/metrics', () => ({
   presenceFanoutTotal: {
     inc: jest.fn(),
   },
+  presenceFanoutTargetsInvalidationTotal: { inc: jest.fn() },
+  presenceFanoutTargetsInvalidationKeysTotal: { inc: jest.fn() },
+  presenceFanoutTargetsInvalidationDurationMs: { observe: jest.fn() },
 }));
 
 const redis = require('../src/db/redis') as {
@@ -45,6 +49,7 @@ const redis = require('../src/db/redis') as {
   mget: jest.Mock;
   set: jest.Mock;
   del: jest.Mock;
+  unlink: jest.Mock;
   eval: jest.Mock;
   pipeline: jest.Mock;
 };
@@ -66,6 +71,7 @@ describe('presence fanout', () => {
     redis.get.mockResolvedValue(null);
     redis.set.mockResolvedValue('OK');
     redis.del.mockResolvedValue(1);
+    redis.unlink.mockResolvedValue(1);
     redis.eval.mockResolvedValue(1);
   });
 

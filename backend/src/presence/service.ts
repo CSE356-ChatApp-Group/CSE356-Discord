@@ -22,7 +22,12 @@ const { publishUserFeedTargets } = require("../websocket/userFeed");
 const { query, withTransaction } = require("../db/pool");
 const overload = require("../utils/overload");
 const logger = require("../utils/logger");
-const { presenceFanoutTotal } = require("../utils/metrics");
+const {
+  presenceFanoutTotal,
+  presenceFanoutTargetsInvalidationTotal,
+  presenceFanoutTargetsInvalidationKeysTotal,
+  presenceFanoutTargetsInvalidationDurationMs,
+} = require("../utils/metrics");
 const {
   getShouldDeferReadReceiptForInsertLockPressure,
 } = require("../messages/messageInsertLockPressure");
@@ -69,8 +74,45 @@ function fanoutTargetsKey(userId) {
 
 const PRESENCE_FANOUT_RECIPIENTS_CACHE_VERSION = 2;
 
+/** Cap keys per Redis UNLINK/DEL to avoid multi-thousand-argument commands (main-thread stalls). */
+const PRESENCE_FANOUT_TARGETS_UNLINK_CHUNK = 512;
+
+function redisSupportsUnlink(redisClient) {
+  return typeof redisClient.unlink === 'function';
+}
+
+/**
+ * @param {'single' | 'bulk'} mode single = one logical invalidation (one or few keys); bulk = member-wide sweep
+ */
+async function unlinkOrDelPresenceFanoutTargetKeys(redisClient, keys, mode) {
+  if (!keys.length) return;
+  const startedAt = process.hrtime.bigint();
+  if (mode === 'bulk') {
+    presenceFanoutTargetsInvalidationKeysTotal.inc({ mode: 'bulk' }, keys.length);
+  }
+  const useUnlink = redisSupportsUnlink(redisClient);
+  const commandLabel = useUnlink ? 'unlink' : 'del_fallback';
+  const chunkSize = mode === 'bulk' ? PRESENCE_FANOUT_TARGETS_UNLINK_CHUNK : keys.length;
+
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    const chunk = keys.slice(i, i + chunkSize);
+    if (!chunk.length) continue;
+    if (useUnlink) {
+      await redisClient.unlink(...chunk);
+    } else {
+      await redisClient.del(...chunk);
+    }
+    presenceFanoutTargetsInvalidationTotal.inc({ mode, command: commandLabel }, 1);
+  }
+
+  presenceFanoutTargetsInvalidationDurationMs.observe(
+    { mode },
+    Number(process.hrtime.bigint() - startedAt) / 1e6,
+  );
+}
+
 async function invalidatePresenceFanoutTargets(userId) {
-  await redis.del(fanoutTargetsKey(userId));
+  await unlinkOrDelPresenceFanoutTargetKeys(redis, [fanoutTargetsKey(userId)], 'single');
 }
 
 async function invalidatePresenceFanoutTargetsBulk(userIds) {
@@ -80,7 +122,7 @@ async function invalidatePresenceFanoutTargetsBulk(userIds) {
       .map((userId) => fanoutTargetsKey(userId))
   )];
   if (!keys.length) return;
-  await redis.del(...keys);
+  await unlinkOrDelPresenceFanoutTargetKeys(redis, keys, 'bulk');
 }
 
 function parsePresenceFanoutRecipientsCached(cached) {
@@ -114,7 +156,7 @@ async function getPresenceFanoutRecipientUserIds(userId) {
   if (cached) {
     const parsed = parsePresenceFanoutRecipientsCached(cached);
     if (parsed) return parsed;
-    await redis.del(cacheKey);
+    await unlinkOrDelPresenceFanoutTargetKeys(redis, [cacheKey], 'single');
   }
 
   const { rows } = await query(

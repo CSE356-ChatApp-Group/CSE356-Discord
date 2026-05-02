@@ -17,6 +17,11 @@ const {
   presenceFanoutTotal,
   fanoutRecipientsHistogram,
 } = require('./metrics/httpPresence');
+const {
+  presenceFanoutTargetsInvalidationTotal,
+  presenceFanoutTargetsInvalidationKeysTotal,
+  presenceFanoutTargetsInvalidationDurationMs,
+} = require('./metrics/presenceFanoutTargetsInvalidation');
 
 const {
   sideEffectQueueDepth,
@@ -600,6 +605,14 @@ const overloadStageGauge = new client.Gauge({
         }
       }
     }
+    for (const mode of ['single', 'bulk'] as const) {
+      for (const command of ['unlink', 'del_fallback'] as const) {
+        presenceFanoutTargetsInvalidationTotal.inc({ mode, command }, 0);
+      }
+    }
+    presenceFanoutTargetsInvalidationKeysTotal.inc({ mode: 'bulk' }, 0);
+    presenceFanoutTargetsInvalidationDurationMs.observe({ mode: 'single' }, 0);
+    presenceFanoutTargetsInvalidationDurationMs.observe({ mode: 'bulk' }, 0);
     for (const script_id of [
       'read_receipt_cursor_advance',
       'read_receipt_reset_unread_watermark',
@@ -626,6 +639,9 @@ module.exports = {
   httpRequestsAbortedTotal,
   httpOverloadShedTotal,
   presenceFanoutTotal,
+  presenceFanoutTargetsInvalidationTotal,
+  presenceFanoutTargetsInvalidationKeysTotal,
+  presenceFanoutTargetsInvalidationDurationMs,
   fanoutRecipientsHistogram,
   sideEffectQueueDepth,
   sideEffectQueueActiveWorkers,
