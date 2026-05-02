@@ -48,6 +48,10 @@ const {
 const { publishConversationEventNow } = require("../fanout/conversationFanout");
 const { publishUserFeedTargets } = require("../../websocket/userFeed");
 const { loadMessageTargetForUser } = require("../accessCaches");
+const {
+  tryHitReadReceiptMessageAckCache,
+  recordReadReceiptMessageAckAfterSuccess,
+} = require("./readReceiptMessageAckCache");
 
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
   process.env.USER_LAST_READ_COUNT_REDIS_TTL_SEC || "604800",
@@ -246,6 +250,10 @@ async function executeReadReceiptMark(
     return { status: 200, body: { success: true } };
   }
 
+  if (await tryHitReadReceiptMessageAckCache(userId, messageId)) {
+    return { status: 200, body: { success: true } };
+  }
+
   const needsCommunityId =
     READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
     READ_RECEIPT_FANOUT_ENABLED &&
@@ -270,6 +278,7 @@ async function executeReadReceiptMark(
   if (shouldCoalesceSameMessageRead(uid, messageId)) {
     readReceiptNoopSkipTotal.inc({ reason: "same_message_coalesced" });
     readReceiptCoalescedTotal.inc({ reason: "same_message" });
+    await recordReadReceiptMessageAckAfterSuccess(uid, messageId);
     return { status: 200, body: { success: true } };
   }
   const messageCreatedAt = target.created_at;
@@ -284,6 +293,7 @@ async function executeReadReceiptMark(
     })
   ) {
     readReceiptNoopSkipTotal.inc({ reason: "scope_burst_debounced" });
+    await recordReadReceiptMessageAckAfterSuccess(uid, messageId);
     return { status: 200, body: { success: true } };
   }
   if (
@@ -297,6 +307,7 @@ async function executeReadReceiptMark(
   ) {
     readReceiptNoopSkipTotal.inc({ reason: "scope_cursor_cache" });
     readReceiptCoalescedTotal.inc({ reason: "scope_cursor" });
+    await recordReadReceiptMessageAckAfterSuccess(uid, messageId);
     return { status: 200, body: { success: true } };
   }
 
@@ -339,6 +350,7 @@ async function executeReadReceiptMark(
         messageTsMs,
       });
     }
+    await recordReadReceiptMessageAckAfterSuccess(uid, messageId);
     return { status: 200, body: { success: true } };
   }
   if (casResult === 2) {
@@ -359,6 +371,7 @@ async function executeReadReceiptMark(
   if (!shouldRunDebouncedSideEffects) {
     rememberConfirmedMessageRead(uid, messageId);
     readReceiptOptimizationTotal.inc({ reason: "cas1_side_effects_debounced" });
+    await recordReadReceiptMessageAckAfterSuccess(uid, messageId);
     return { status: 200, body: { success: true } };
   }
 
@@ -413,6 +426,7 @@ async function executeReadReceiptMark(
         ? "deferred_overload_fanout_only"
         : "deferred_fanout_disabled",
     );
+    await recordReadReceiptMessageAckAfterSuccess(uid, messageId);
     return {
       status: 200,
       body: {
@@ -466,6 +480,7 @@ async function executeReadReceiptMark(
 
   rememberConfirmedMessageRead(uid, messageId);
   observeReadReceiptRequest("success");
+  await recordReadReceiptMessageAckAfterSuccess(uid, messageId);
   return { status: 200, body: { success: true } };
 }
 

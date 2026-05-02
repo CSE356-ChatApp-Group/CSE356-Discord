@@ -254,6 +254,13 @@ const readReceiptOptimizationTotal = new client.Counter({
   labelNames: ['reason'],
 });
 
+/** Redis read-receipt message ack cache (GET/SET outcomes; low cardinality). */
+const readReceiptMessageAckCacheTotal = new client.Counter({
+  name: 'read_receipt_message_ack_cache_total',
+  help: 'Redis duplicate read-receipt ack cache operations by coarse result',
+  labelNames: ['result'],
+});
+
 /** Read receipt request no-op skips after cheap cursor checks. */
 const readReceiptNoopSkipTotal = new client.Counter({
   name: 'read_receipt_noop_skip_total',
@@ -402,6 +409,7 @@ module.exports = {
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
+  readReceiptMessageAckCacheTotal,
   readReceiptNoopSkipTotal,
   readReceiptCoalescedTotal,
   unreadCountsShedTotal,

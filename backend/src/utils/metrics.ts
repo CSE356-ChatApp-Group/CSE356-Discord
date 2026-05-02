@@ -167,6 +167,7 @@ const {
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
+  readReceiptMessageAckCacheTotal,
   readReceiptNoopSkipTotal,
   readReceiptCoalescedTotal,
   unreadCountsShedTotal,
@@ -387,6 +388,12 @@ const overloadStageGauge = new client.Gauge({
     unreadCountsShedTotal.inc({ reason: 'inflight_cap' }, 0);
     unreadCountsCoalescedTotal.inc(0);
     readReceiptNoopSkipTotal.inc({ reason: 'scope_cursor_cache' }, 0);
+    readReceiptNoopSkipTotal.inc({ reason: 'redis_message_ack_cache' }, 0);
+    readReceiptMessageAckCacheTotal.inc({ result: 'hit' }, 0);
+    readReceiptMessageAckCacheTotal.inc({ result: 'miss' }, 0);
+    readReceiptMessageAckCacheTotal.inc({ result: 'get_error' }, 0);
+    readReceiptMessageAckCacheTotal.inc({ result: 'set_ok' }, 0);
+    readReceiptMessageAckCacheTotal.inc({ result: 'set_error' }, 0);
     readReceiptCoalescedTotal.inc({ reason: 'same_message' }, 0);
     readReceiptCoalescedTotal.inc({ reason: 'scope_cursor' }, 0);
     readReceiptDbUpsertTotal.inc({ result: 'enqueued' }, 0);
@@ -634,6 +641,7 @@ module.exports = {
   readReceiptCursorCasTotal,
   readReceiptScopeTotal,
   readReceiptOptimizationTotal,
+  readReceiptMessageAckCacheTotal,
   readReceiptNoopSkipTotal,
   readReceiptCoalescedTotal,
   unreadCountsShedTotal,

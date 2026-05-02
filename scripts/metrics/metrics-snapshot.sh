@@ -28,6 +28,7 @@
 #   sum by (reason) (rate(read_receipt_optimization_total{job="chatapp-api"}[5m]))
 # No-op / coalesce skips (reason=):
 #   sum by (reason) (rate(read_receipt_noop_skip_total{job="chatapp-api"}[5m]))
+#   sum by (result) (rate(read_receipt_message_ack_cache_total{job="chatapp-api"}[5m]))
 #   sum by (reason) (rate(read_receipt_coalesced_total{job="chatapp-api"}[5m]))
 # pg_stat_statements: read_states batch upsert (if postgres_exporter available; pick your job/instance):
 #   topk(3, sum by (query) (rate(pg_stat_statements_total_time_seconds{...}[1h])))  # or use queryid from your PG dashboard
@@ -99,6 +100,7 @@ queries=(
   'sum by (scope, cas_result) (rate(read_receipt_cursor_cas_total{job="chatapp-api"}[5m]))'
   'sum by (reason) (rate(read_receipt_optimization_total{job="chatapp-api"}[5m]))'
   'sum by (reason) (rate(read_receipt_noop_skip_total{job="chatapp-api"}[5m]))'
+  'sum by (result) (rate(read_receipt_message_ack_cache_total{job="chatapp-api"}[5m]))'
   'sum by (reason) (rate(read_receipt_coalesced_total{job="chatapp-api"}[5m]))'
   'sum by (vm, status_code) (rate(message_post_response_total{job="chatapp-api"}[5m]))'
   'sum by (vm, status_class) (rate(http_server_requests_total{job="chatapp-api",method="PUT",route="/api/v1/messages/:id/read"}[5m]))'
