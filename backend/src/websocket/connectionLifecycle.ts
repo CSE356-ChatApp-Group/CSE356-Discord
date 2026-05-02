@@ -35,9 +35,21 @@ function createConnectionLifecycle({
   recomputeUserPresence,
   WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
   bootstrapWithRetry,
+  prepareBootstrapWithRetry,
+  hydrateBootstrapWithMetrics,
+  clearBootstrapPriming,
+  wsReadyWallDurationMs,
+  wsBootstrapProgressiveTotal,
   cleanup,
   replayStartupJitterMs,
 }) {
+  function wsBootstrapProgressiveReadyEnabled() {
+    const raw = process.env.WS_BOOTSTRAP_PROGRESSIVE_READY;
+    if (raw === undefined || raw === "") return false;
+    const normalized = String(raw).trim().toLowerCase();
+    return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+  }
+
   function bearerTokenFromUpgradeHeaders(req) {
     const raw = req?.headers?.authorization;
     if (typeof raw !== "string") return null;
@@ -122,6 +134,7 @@ function createConnectionLifecycle({
     ws._connectedAt = Date.now();
     ws._lastDataFrameAt = ws._connectedAt;
     ws._bootstrapReady = false;
+    ws._subscriptionsHydrated = false;
     ws._presenceStatus = "idle";
     ws._lastActivityAt = 0;
     ws._awayMessage = null;
@@ -298,11 +311,15 @@ function createConnectionLifecycle({
         logger.warn({ err, userId: user.id }, "WS presence setup failed"),
       );
 
+    const progressiveReady = wsBootstrapProgressiveReadyEnabled();
     const bootstrapSubscriptionsPromise = (async () => {
       if (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS > 0) {
         await new Promise((resolve) =>
           setTimeout(resolve, Math.floor(Math.random() * (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS + 1))),
         );
+      }
+      if (progressiveReady) {
+        return prepareBootstrapWithRetry(ws, user.id);
       }
       return bootstrapWithRetry(ws, user.id);
     })();
@@ -313,7 +330,7 @@ function createConnectionLifecycle({
       });
 
     Promise.all([ws._bootstrapPromise, bootstrapSubscriptionsPromise])
-      .then(() => {
+      .then(([, preparedChannels]) => {
         if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) {
           return;
         }
@@ -329,20 +346,56 @@ function createConnectionLifecycle({
             if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) return;
             await Promise.resolve(ws._presenceInitPromise).catch(() => {});
             ws._lastDataFrameAt = Date.now();
+            const readyMode = progressiveReady ? "progressive" : "strict";
+            const readyWallMs = ws._lastDataFrameAt - (ws._connectedAt || ws._lastDataFrameAt);
+            wsReadyWallDurationMs?.observe?.({ mode: readyMode }, Math.max(0, readyWallMs));
             ws.send(
               JSON.stringify({
                 event: "ready",
                 data: {
-                  bootstrapComplete: true,
-                  subscriptionsHydrated: true,
+                  bootstrapComplete: !progressiveReady,
+                  subscriptionsHydrated: !progressiveReady,
+                  progressiveHydration: progressiveReady,
                   connectedAt: ws._connectedAt,
                   readyAt: ws._lastDataFrameAt,
                 },
               }),
             );
+            if (!progressiveReady) {
+              ws._subscriptionsHydrated = true;
+              return;
+            }
+            wsBootstrapProgressiveTotal?.inc?.({ result: "ready_sent" });
+            const channels = Array.isArray(preparedChannels) ? preparedChannels : [];
+            ws._progressiveHydrationPromise = hydrateBootstrapWithMetrics(ws, user.id, channels)
+              .then(() => {
+                if (ws.readyState !== WebSocket.OPEN) return;
+                ws._subscriptionsHydrated = true;
+                wsBootstrapProgressiveTotal?.inc?.({ result: "hydration_complete" });
+                ws.send(
+                  JSON.stringify({
+                    event: "bootstrap:complete",
+                    type: "bootstrap:complete",
+                    data: {
+                      bootstrapComplete: true,
+                      subscriptionsHydrated: true,
+                      progressiveHydration: true,
+                      connectedAt: ws._connectedAt,
+                      completedAt: Date.now(),
+                    },
+                  }),
+                );
+              })
+              .catch((err) => {
+                wsBootstrapProgressiveTotal?.inc?.({ result: "hydration_failed" });
+                logger.warn({ err, userId: user.id }, "WS progressive bootstrap hydration failed");
+              });
           });
       })
       .catch(() => {
+        if (progressiveReady) {
+          clearBootstrapPriming?.(ws);
+        }
       });
   }
 

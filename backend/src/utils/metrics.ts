@@ -125,6 +125,8 @@ const {
   lastMessagePgReconcileSkippedTotal,
   lastMessageCacheTotal,
   wsBootstrapWallDurationMs,
+  wsReadyWallDurationMs,
+  wsBootstrapProgressiveTotal,
   fanoutTargetCacheTotal,
   conversationFanoutTargetsCacheVersionRetryTotal,
   fanoutPublishDurationMs,
@@ -515,6 +517,11 @@ const overloadStageGauge = new client.Gauge({
     wsBootstrapCachedTotal.inc({ source: 'inflight' }, 0);
     wsBootstrapDbTotal.inc(0);
     wsBootstrapChannelsHistogram.observe(0);
+    wsReadyWallDurationMs.observe({ mode: 'strict' }, 0);
+    wsReadyWallDurationMs.observe({ mode: 'progressive' }, 0);
+    wsBootstrapProgressiveTotal.inc({ result: 'ready_sent' }, 0);
+    wsBootstrapProgressiveTotal.inc({ result: 'hydration_complete' }, 0);
+    wsBootstrapProgressiveTotal.inc({ result: 'hydration_failed' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
     pgBusinessSqlQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
@@ -749,6 +756,8 @@ module.exports = {
   lastMessagePgReconcileSkippedTotal,
   lastMessageCacheTotal,
   wsBootstrapWallDurationMs,
+  wsReadyWallDurationMs,
+  wsBootstrapProgressiveTotal,
   fanoutTargetCacheTotal,
   conversationFanoutTargetsCacheVersionRetryTotal,
   fanoutPublishDurationMs,

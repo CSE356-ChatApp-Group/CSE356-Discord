@@ -344,6 +344,21 @@ const wsBootstrapWallDurationMs = new client.Histogram({
   buckets: [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 30000],
 });
 
+/** Wall-clock time from WS connection start until the server emits the ready event. */
+const wsReadyWallDurationMs = new client.Histogram({
+  name: 'ws_ready_wall_duration_ms',
+  help: 'Milliseconds from WS connection start until the ready event is sent',
+  labelNames: ['mode'],
+  buckets: [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 30000],
+});
+
+/** Progressive-bootstrap background hydration outcomes. */
+const wsBootstrapProgressiveTotal = new client.Counter({
+  name: 'ws_bootstrap_progressive_total',
+  help: 'Progressive WS bootstrap outcomes after early ready',
+  labelNames: ['result'],
+});
+
 /** Cache outcomes for Redis-backed realtime fanout target lists. */
 const fanoutTargetCacheTotal = new client.Counter({
   name: 'fanout_target_cache_total',
@@ -476,6 +491,8 @@ module.exports = {
   lastMessagePgReconcileSkippedTotal,
   lastMessageCacheTotal,
   wsBootstrapWallDurationMs,
+  wsReadyWallDurationMs,
+  wsBootstrapProgressiveTotal,
   fanoutTargetCacheTotal,
   conversationFanoutTargetsCacheVersionRetryTotal,
   fanoutPublishDurationMs,

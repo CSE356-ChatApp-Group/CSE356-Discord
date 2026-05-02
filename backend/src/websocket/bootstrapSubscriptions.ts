@@ -240,7 +240,7 @@ function createBootstrapSubscriptionsHelpers({
     await subscribeClient(ws, channel);
   }
 
-  async function bootstrapUserSubscriptions(ws, userId) {
+  async function prepareBootstrapSubscriptions(ws, userId) {
     const mode = wsAutoSubscribeMode();
     const ingressScope = mode === "full" ? "full" : (mode === "user_only" ? "user_only" : "messages");
     const ingressCached = await readWsBootstrapIngressCache(userId, ingressScope);
@@ -248,12 +248,7 @@ function createBootstrapSubscriptionsHelpers({
       wsBootstrapCachedTotal.inc({ source: "ttl" });
       warmWsAclCacheFromChannelList(userId, ingressCached);
       await primeBootstrapChannelRecentConnect(ws, userId, ingressCached);
-      for (let i = 0; i < ingressCached.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-        const batch = ingressCached.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-        await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
-        if (ws.readyState !== 1) return;
-      }
-      return;
+      return ingressCached;
     }
 
     if (wsBootstrapIngressInFlight.has(userId)) {
@@ -261,12 +256,7 @@ function createBootstrapSubscriptionsHelpers({
       const channels = await wsBootstrapIngressInFlight.get(userId);
       warmWsAclCacheFromChannelList(userId, channels);
       await primeBootstrapChannelRecentConnect(ws, userId, channels);
-      for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-        const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-        await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
-        if (ws.readyState !== 1) return;
-      }
-      return;
+      return channels;
     }
 
     await tryAcquireBootstrapDbSlot();
@@ -281,11 +271,31 @@ function createBootstrapSubscriptionsHelpers({
     await writeWsBootstrapIngressCache(userId, channels, ingressScope);
     warmWsAclCacheFromChannelList(userId, channels);
     await primeBootstrapChannelRecentConnect(ws, userId, channels);
+    return channels;
+  }
 
+  async function hydrateBootstrapSubscriptions(ws, channels) {
+    if (!Array.isArray(channels)) return;
     for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
       const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
       await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
       if (ws.readyState !== 1) return;
+    }
+  }
+
+  async function bootstrapUserSubscriptions(ws, userId) {
+    const channels = await prepareBootstrapSubscriptions(ws, userId);
+    await hydrateBootstrapSubscriptions(ws, channels);
+    return channels;
+  }
+
+  function observeBootstrapWall(ws, userId) {
+    const wallStart = ws._bootstrapWallStart || Date.now();
+    const bootstrapWallMs = Date.now() - wallStart;
+    wsBootstrapWallDurationMs.observe(bootstrapWallMs);
+    recordWsBootstrapWallMs(bootstrapWallMs);
+    if (bootstrapWallMs > 5000) {
+      logger.warn({ userId, bootstrapWallMs }, "WS auto-subscribe bootstrap slow");
     }
   }
 
@@ -296,13 +306,7 @@ function createBootstrapSubscriptionsHelpers({
     }
     try {
       await bootstrapUserSubscriptions(ws, userId);
-      const wallStart = ws._bootstrapWallStart || Date.now();
-      const bootstrapWallMs = Date.now() - wallStart;
-      wsBootstrapWallDurationMs.observe(bootstrapWallMs);
-      recordWsBootstrapWallMs(bootstrapWallMs);
-      if (bootstrapWallMs > 5000) {
-        logger.warn({ userId, bootstrapWallMs }, "WS auto-subscribe bootstrap slow");
-      }
+      observeBootstrapWall(ws, userId);
     } catch (err) {
       const isCircuitOpen = err && err.code === "POOL_CIRCUIT_OPEN";
       if (isCircuitOpen && attempt < 3) {
@@ -316,11 +320,42 @@ function createBootstrapSubscriptionsHelpers({
     }
   }
 
+  async function prepareBootstrapWithRetry(ws, userId, attempt = 0) {
+    if (ws.readyState !== 1) return [];
+    if (attempt === 0) {
+      ws._bootstrapWallStart = Date.now();
+    }
+    try {
+      return await prepareBootstrapSubscriptions(ws, userId);
+    } catch (err) {
+      const isCircuitOpen = err && err.code === "POOL_CIRCUIT_OPEN";
+      if (isCircuitOpen && attempt < 3) {
+        const delayMs = (attempt + 1) * 600;
+        await new Promise((r) => setTimeout(r, delayMs));
+        return prepareBootstrapWithRetry(ws, userId, attempt + 1);
+      }
+      clearBootstrapRecentConnectPrimed(ws);
+      throw err;
+    }
+  }
+
+  async function hydrateBootstrapWithMetrics(ws, userId, channels) {
+    try {
+      await hydrateBootstrapSubscriptions(ws, channels);
+      observeBootstrapWall(ws, userId);
+    } finally {
+      clearBootstrapRecentConnectPrimed(ws);
+    }
+  }
+
   return {
     invalidateWsBootstrapCache,
     invalidateWsBootstrapCaches,
     subscribeBootstrapChannel,
     bootstrapWithRetry,
+    prepareBootstrapWithRetry,
+    hydrateBootstrapWithMetrics,
+    clearBootstrapPriming: clearBootstrapRecentConnectPrimed,
   };
 }
 
