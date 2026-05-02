@@ -461,6 +461,131 @@ const wsBootstrapDbTotal = new client.Counter({
   help: 'WebSocket bootstrap DB list loads started',
 });
 
+// ── Storm protection metrics (Patch A/B/C) ────────────────────────────────────
+
+/** Current depth of the bootstrap hydration scheduler queue. */
+const wsBootstrapHydrationQueueDepth = new client.Gauge({
+  name: 'ws_bootstrap_hydration_queue_depth',
+  help: 'Current number of pending bootstrap hydration jobs in the scheduler queue',
+});
+
+/** Delay in ms from enqueue to start of hydration. */
+const wsBootstrapHydrationDelayMs = new client.Histogram({
+  name: 'ws_bootstrap_hydration_delay_ms',
+  help: 'Milliseconds from hydration enqueue to actual start',
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+/** Current number of active bootstrap hydrations. */
+const wsBootstrapHydrationActive = new client.Gauge({
+  name: 'ws_bootstrap_hydration_active',
+  help: 'Current number of concurrently running bootstrap hydration jobs',
+});
+
+/** Hydration deferred to background scheduler. */
+const wsBootstrapHydrationDeferredTotal = new client.Counter({
+  name: 'ws_bootstrap_hydration_deferred_total',
+  help: 'Bootstrap hydration jobs deferred to background scheduler',
+  labelNames: ['reason'],
+});
+
+/** Bootstrap hydration skipped by cooldown/coalescing controls. */
+const wsBootstrapHydrationSkippedTotal = new client.Counter({
+  name: 'ws_bootstrap_hydration_skipped_total',
+  help: 'Bootstrap hydration jobs skipped by reconnect storm protection',
+  labelNames: ['reason'],
+});
+
+/** Number of users currently in the per-worker bootstrap hydration cooldown window. */
+const wsBootstrapHydrationCooldownActive = new client.Gauge({
+  name: 'ws_bootstrap_hydration_cooldown_active',
+  help: 'Users with a recent successful bootstrap hydration eligible for cooldown coalescing',
+});
+
+/** Bootstrap work coalesced (skipped due to recent hydration for same user). */
+const wsBootstrapCoalescedTotal = new client.Counter({
+  name: 'ws_bootstrap_coalesced_total',
+  help: 'Bootstrap hydration coalesced (skipped duplicate work for same user)',
+  labelNames: ['reason'],
+});
+
+/** Bootstrap channel list cache outcomes (augmented for Patch B). */
+const wsBootstrapChannelListCacheTotal = new client.Counter({
+  name: 'ws_bootstrap_channel_list_cache_total',
+  help: 'Bootstrap channel list cache outcomes including coalesced lookups',
+  labelNames: ['result'],
+});
+
+/** Live fanout starvation guard triggered. */
+const wsLiveFanoutStarvationGuardTotal = new client.Counter({
+  name: 'ws_live_fanout_starvation_guard_total',
+  help: 'Number of times live fanout signaled bootstrap hydration to yield',
+});
+
+/** Bootstrap hydration paused because live fanout was active. */
+const wsBootstrapPausedForLiveFanoutTotal = new client.Counter({
+  name: 'ws_bootstrap_paused_for_live_fanout_total',
+  help: 'Bootstrap hydration yielded because live fanout work was pending',
+});
+
+// ── Fanout recipient dedupe metrics (Patch D) ─────────────────────────────────
+
+/** Unique recipient-message pairs seen by the dedupe layer. */
+const wsRecipientDedupeTotal = new client.Counter({
+  name: 'ws_recipient_dedupe_total',
+  help: 'Unique message-recipient pairs tracked by the fanout dedupe layer',
+  labelNames: ['path'],
+});
+
+/** Duplicate recipient candidates caught by the dedupe layer. */
+const wsRecipientDuplicateCandidatesTotal = new client.Counter({
+  name: 'ws_recipient_duplicate_candidates_total',
+  help: 'Duplicate message-recipient pairs prevented by the fanout dedupe layer',
+  labelNames: ['path'],
+});
+
+/** Histogram of fanout candidate counts per path. */
+const wsFanoutCandidateCountBucket = new client.Histogram({
+  name: 'ws_fanout_candidate_count_bucket',
+  help: 'Number of candidate recipients per fanout path',
+  labelNames: ['path'],
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+// ── Partial delivery root cause metrics (Patch E) ─────────────────────────────
+
+/** Reason why a recipient was missing from a partial delivery. */
+const wsPartialDeliveryMissingReasonTotal = new client.Counter({
+  name: 'ws_partial_delivery_missing_reason_total',
+  help: 'Reason a recipient was missing during partial delivery of a reliable message',
+  labelNames: ['reason'],
+});
+
+// Seed the new metrics with zero-value labels so they appear in Prometheus immediately.
+(() => {
+  wsBootstrapHydrationDeferredTotal.inc({ reason: 'queue_full' }, 0);
+  wsBootstrapHydrationDeferredTotal.inc({ reason: 'scheduled' }, 0);
+  wsBootstrapHydrationSkippedTotal.inc({ reason: 'recent_hydration' }, 0);
+  wsBootstrapHydrationSkippedTotal.inc({ reason: 'closed_socket' }, 0);
+  wsBootstrapHydrationSkippedTotal.inc({ reason: 'duplicate_inflight' }, 0);
+  wsBootstrapCoalescedTotal.inc({ reason: 'recent_hydration' }, 0);
+  wsBootstrapCoalescedTotal.inc({ reason: 'duplicate_inflight' }, 0);
+  wsRecipientDedupeTotal.inc({ path: 'channel_topic' }, 0);
+  wsRecipientDedupeTotal.inc({ path: 'user_topic' }, 0);
+  wsRecipientDedupeTotal.inc({ path: 'recent_connect_bridge' }, 0);
+  wsRecipientDedupeTotal.inc({ path: 'stale_map_recovery' }, 0);
+  wsRecipientDuplicateCandidatesTotal.inc({ path: 'channel_topic' }, 0);
+  wsRecipientDuplicateCandidatesTotal.inc({ path: 'user_topic' }, 0);
+  wsRecipientDuplicateCandidatesTotal.inc({ path: 'recent_connect_bridge' }, 0);
+  wsRecipientDuplicateCandidatesTotal.inc({ path: 'stale_map_recovery' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'not_subscribed' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'backpressure_drop' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'dedupe_skip' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'socket_not_open' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'reconnecting' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'unknown' }, 0);
+})();
+
 module.exports = {
   wsConnectionResultTotal,
   wsUpgradeSeenTotal,
@@ -527,4 +652,18 @@ module.exports = {
   wsBootstrapBlockedTotal,
   wsBootstrapCachedTotal,
   wsBootstrapDbTotal,
+  wsBootstrapHydrationQueueDepth,
+  wsBootstrapHydrationDelayMs,
+  wsBootstrapHydrationActive,
+  wsBootstrapHydrationDeferredTotal,
+  wsBootstrapHydrationSkippedTotal,
+  wsBootstrapHydrationCooldownActive,
+  wsBootstrapCoalescedTotal,
+  wsBootstrapChannelListCacheTotal,
+  wsLiveFanoutStarvationGuardTotal,
+  wsBootstrapPausedForLiveFanoutTotal,
+  wsRecipientDedupeTotal,
+  wsRecipientDuplicateCandidatesTotal,
+  wsFanoutCandidateCountBucket,
+  wsPartialDeliveryMissingReasonTotal,
 };

@@ -125,12 +125,24 @@ const {
   wsBootstrapBlockedTotal,
   wsBootstrapCachedTotal,
   wsBootstrapDbTotal,
+  wsBootstrapHydrationQueueDepth,
+  wsBootstrapHydrationDelayMs,
+  wsBootstrapHydrationActive,
+  wsBootstrapHydrationDeferredTotal,
+  wsBootstrapHydrationSkippedTotal,
+  wsBootstrapHydrationCooldownActive,
+  wsBootstrapCoalescedTotal,
+  wsLiveFanoutStarvationGuardTotal,
+  wsBootstrapPausedForLiveFanoutTotal,
   wsReplayFailOpenTotal,
   wsReplayConcurrentGauge,
   wsReplaySemaphoreCapGauge,
   wsReliableDeliveryTotal,
   wsReliableDeliveryLatencyMs,
   wsReliableDeliveryTopicTotal,
+  wsRecipientDedupeTotal,
+  wsRecipientDuplicateCandidatesTotal,
+  wsPartialDeliveryMissingReasonTotal,
 } = require("../utils/metrics");
 const {
   IDLE_TTL_SECONDS,
@@ -465,6 +477,23 @@ const {
   readWsBootstrapIngressCache: readWsBootstrapIngressCacheBase,
   writeWsBootstrapIngressCache: writeWsBootstrapIngressCacheBase,
 } = require("./bootstrapIngressCache");
+const { createBootstrapHydrationScheduler } = require("./bootstrapHydrationScheduler");
+const { createFanoutRecipientDedupe } = require("./fanoutRecipientDedupe");
+const bootstrapHydrationScheduler = createBootstrapHydrationScheduler({
+  wsBootstrapHydrationQueueDepth,
+  wsBootstrapHydrationDelayMs,
+  wsBootstrapHydrationActive,
+  wsBootstrapHydrationDeferredTotal,
+  wsBootstrapHydrationSkippedTotal,
+  wsBootstrapHydrationCooldownActive,
+  wsBootstrapCoalescedTotal,
+  wsLiveFanoutStarvationGuardTotal,
+  wsBootstrapPausedForLiveFanoutTotal,
+});
+const fanoutRecipientDedupe = createFanoutRecipientDedupe({
+  wsRecipientDedupeTotal,
+  wsRecipientDuplicateCandidatesTotal,
+});
 const {
   invalidateWsBootstrapCache,
   invalidateWsBootstrapCaches,
@@ -498,6 +527,7 @@ const {
   wsBootstrapCachedTotal,
   wsBootstrapDbTotal,
   wsBootstrapWallDurationMs,
+  bootstrapHydrationScheduler,
   WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
   WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
   WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
@@ -650,6 +680,10 @@ const { deliverPubsubMessage } = createRedisPubsubDelivery({
   unsubscribeCommunityClient,
   parseChannelKey,
   sendPayloadToSocket,
+  fanoutRecipientDedupe,
+  wsPartialDeliveryMissingReasonTotal,
+  signalLiveFanoutPending: bootstrapHydrationScheduler.signalLiveFanoutPending,
+  releaseLiveFanoutPending: bootstrapHydrationScheduler.releaseLiveFanoutPending,
 });
 
 bindRedisSubscriber({

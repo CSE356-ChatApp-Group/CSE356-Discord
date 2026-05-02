@@ -368,18 +368,23 @@ function createConnectionLifecycle({
             wsBootstrapProgressiveTotal?.inc?.({ result: "ready_sent" });
             const channels = Array.isArray(preparedChannels) ? preparedChannels : [];
             ws._progressiveHydrationPromise = hydrateBootstrapWithMetrics(ws, user.id, channels)
-              .then(() => {
+              .then((result) => {
                 if (ws.readyState !== WebSocket.OPEN) return;
-                ws._subscriptionsHydrated = true;
-                wsBootstrapProgressiveTotal?.inc?.({ result: "hydration_complete" });
+                const hydrationSkipped = result?.status === "skipped";
+                ws._subscriptionsHydrated = !hydrationSkipped;
+                wsBootstrapProgressiveTotal?.inc?.({
+                  result: hydrationSkipped ? "hydration_skipped" : "hydration_complete",
+                });
                 ws.send(
                   JSON.stringify({
                     event: "bootstrap:complete",
                     type: "bootstrap:complete",
                     data: {
-                      bootstrapComplete: true,
-                      subscriptionsHydrated: true,
+                      bootstrapComplete: !hydrationSkipped,
+                      subscriptionsHydrated: !hydrationSkipped,
                       progressiveHydration: true,
+                      hydrationSkipped,
+                      hydrationSkipReason: hydrationSkipped ? result.reason : undefined,
                       connectedAt: ws._connectedAt,
                       completedAt: Date.now(),
                     },
