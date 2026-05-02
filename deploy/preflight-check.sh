@@ -15,6 +15,9 @@ _PREFLIGHT_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy-common.sh
 # shellcheck disable=SC1091
 source "${_PREFLIGHT_SCRIPT_DIR}/deploy-common.sh"
+# shellcheck source=lib/deploy-guards.sh
+# shellcheck disable=SC1091
+source "${_PREFLIGHT_SCRIPT_DIR}/lib/deploy-guards.sh"
 
 if [[ "$ENVIRONMENT" != "staging" && "$ENVIRONMENT" != "prod" ]]; then
   echo "ERROR: environment must be 'staging' or 'prod'"
@@ -40,6 +43,11 @@ if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
   echo "Using local artifact: ${LOCAL_ARTIFACT_PATH}"
   if [[ ! -f "$LOCAL_ARTIFACT_PATH" ]]; then
     echo "ERROR: Local artifact not found at ${LOCAL_ARTIFACT_PATH}"
+    exit 1
+  fi
+  CHATAPP_REPO_ROOT="${CHATAPP_REPO_ROOT:-$(cd "${_PREFLIGHT_SCRIPT_DIR}/.." && pwd)}"
+  echo "Verifying local tarball backend/dist/.build-sha matches ${RELEASE_SHA}..."
+  if ! chatapp_verify_release_tarball_build_sha "$LOCAL_ARTIFACT_PATH" "$RELEASE_SHA" "$CHATAPP_REPO_ROOT"; then
     exit 1
   fi
 else

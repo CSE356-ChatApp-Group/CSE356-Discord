@@ -390,6 +390,15 @@ else
   gh release download "release-${RELEASE_SHA}" -R "${GITHUB_REPO}" -p "${ARTIFACT}" -O "${DOWNLOADED_ARTIFACT}"
 fi
 
+CHATAPP_REPO_ROOT="${CHATAPP_REPO_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+echo "1a) Verifying tarball backend/dist/.build-sha matches deploy SHA ${RELEASE_SHA}..."
+if ! chatapp_verify_release_tarball_build_sha "${SOURCE_ARTIFACT}" "${RELEASE_SHA}" "$CHATAPP_REPO_ROOT"; then
+  if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
+    rm -f "${DOWNLOADED_ARTIFACT}" 2>/dev/null || true
+  fi
+  exit 1
+fi
+
 STAGING_ARTIFACT_SHA256=$(openssl dgst -sha256 "${SOURCE_ARTIFACT}" | awk '{print $2}')
 echo "Artifact SHA256 (local): ${STAGING_ARTIFACT_SHA256}"
 

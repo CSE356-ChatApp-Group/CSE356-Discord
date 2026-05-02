@@ -80,11 +80,13 @@ DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh "$SHA"
 ./deploy/deploy-prod-multi.sh "$SHA"
 ```
 
+**Never point `LOCAL_ARTIFACT_PATH` at a stale `releases/chatapp-*.tar.gz` for a different commit.** The deploy scripts **fail closed** before `scp`: they read **`backend/dist/.build-sha`** from the tarball and require it to match the requested deploy SHA (resolved with `git rev-parse` when run from this repo). A tarball whose **filename** matches `<sha>` but whose embedded dist was built from another commit (for example after **`SKIP_BUILD=1`** without a matching rebuild) is rejected. Prefer the **GitHub `release-<sha>`** asset (`gh release download …`) or a tarball you just produced with **`package-release-artifact.sh`** for that SHA.
+
 Optional: **`SKIP_BUILD=1`** only when **`backend/dist/.build-sha`** already equals the release SHA you are packaging (for example you just ran **`npm run build --workspace=backend`** on that same commit). Otherwise run **`./scripts/release/package-release-artifact.sh`** with a normal build (default) or use the **CI** `release-<sha>` artifact. If verification fails, **rebuild without `SKIP_BUILD=1`** so `tsc` and **`write-dist-build-metadata.cjs`** refresh `dist/` and `.build-sha`.
 
 **Also useful:** keep last *N* tarballs on VM1 (or object storage) and `scp` between hosts (**option 2**). **`GITHUB_TOKEN`** / `gh auth login` still helps CI and ad-hoc `gh` use (**option 3**). **`deploy-prod.sh`** retries `gh release download` up to **five times** with **30s** backoff before failing.
 
-**Integrity:** `deploy-prod.sh` and `deploy-staging.sh` compute **SHA-256** (`openssl dgst`) of the tarball **before** `scp` and **re-check on the remote** immediately before `tar` extract, so a partial copy fails fast. `package-release-artifact.sh` also writes **`releases/chatapp-<sha>.tar.gz.sha256`** for manual `shasum -a 256 -c` / `sha256sum -c` checks.
+**Integrity:** `deploy-prod.sh` and `deploy-staging.sh` compute **SHA-256** (`openssl dgst`) of the tarball **before** `scp` and **re-check on the remote** immediately before `tar` extract, so a partial copy fails fast. `package-release-artifact.sh` also writes **`releases/chatapp-<sha>.tar.gz.sha256`** for manual `shasum -a 256 -c` / `sha256sum -c` checks. **Build SHA:** before any remote copy, both scripts run **`chatapp_verify_release_tarball_build_sha`** (see **`deploy/lib/deploy-guards.sh`**) so the bytes inside the tarball match the requested git release.
 
 ## GitHub Button Deploys
 

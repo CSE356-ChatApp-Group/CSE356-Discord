@@ -698,6 +698,16 @@ else
     exit 1
   fi
 fi
+
+# 3a. Fail closed before scp: tarball must embed backend/dist/.build-sha matching RELEASE_SHA
+# (prevents stale LOCAL_ARTIFACT_PATH or mis-tagged tarballs from shipping wrong compiled output).
+CHATAPP_REPO_ROOT="${CHATAPP_REPO_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+echo "3a) Verifying tarball backend/dist/.build-sha matches deploy SHA ${RELEASE_SHA}..."
+if ! chatapp_verify_release_tarball_build_sha "$DOWNLOAD_PATH" "$RELEASE_SHA" "$CHATAPP_REPO_ROOT"; then
+  rm -f "$DOWNLOAD_PATH" 2>/dev/null || true
+  exit 1
+fi
+
 echo "✓ Artifact ready locally"
 
 # 3b. SHA-256 of bytes we are about to ship (detect local corruption / truncates before scp).
