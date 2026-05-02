@@ -36,6 +36,7 @@ describe('WS bootstrap recent-connect hybrid', () => {
       unlink: jest.fn().mockResolvedValue(0),
       pipeline: () => ({
         unlink: jest.fn().mockReturnThis(),
+        zscore: jest.fn(),
         exec: jest.fn().mockResolvedValue([]),
       }),
     };
@@ -220,5 +221,170 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
     await new Promise<void>((r) => setImmediate(r));
     expect(markChannelRecentConnect).not.toHaveBeenCalled();
     expect(invalidateRecentConnectTargetsCache).not.toHaveBeenCalled();
+  });
+});
+
+describe('primeBootstrapChannelRecentConnect ZSCORE precheck', () => {
+  const NOW = Date.now();
+  const RECENT_SCORE = String(NOW);
+  const STALE_SCORE = String(NOW - 30_000);
+
+  function metricStub() {
+    return { inc: jest.fn(), observe: jest.fn() };
+  }
+
+  function buildPrecheckHarness(opts: {
+    channels: string[];
+    channelScores?: Record<string, string | null>;
+    pipelineError?: boolean;
+    markChannelRecentConnect?: jest.Mock;
+    invalidateRecentConnectTargetsCache?: jest.Mock;
+  }) {
+    const markRecent = opts.markChannelRecentConnect ?? jest.fn().mockResolvedValue(undefined);
+    const invalidateRecent =
+      opts.invalidateRecentConnectTargetsCache ?? jest.fn().mockResolvedValue(undefined);
+
+    const pipelineFactory = () => {
+      const queued: Array<{ key: string }> = [];
+      return {
+        zscore: jest.fn().mockImplementation((key: string) => {
+          queued.push({ key });
+        }),
+        unlink: jest.fn().mockReturnThis(),
+        exec: jest.fn().mockImplementation(async () => {
+          if (opts.pipelineError) throw new Error('Redis pipeline error');
+          return queued.map(({ key }) => {
+            const channelId = key.replace('channel:recent_connect:', '');
+            const score = opts.channelScores?.[channelId] ?? null;
+            return [null, score];
+          });
+        }),
+      };
+    };
+
+    const redis = {
+      set: jest.fn().mockResolvedValue('OK'),
+      get: jest.fn().mockResolvedValue(null),
+      unlink: jest.fn().mockResolvedValue(0),
+      pipeline: jest.fn().mockImplementation(pipelineFactory),
+    };
+
+    const { parseChannelKey } = require('../src/websocket/channelKeyParse');
+    const { prepareBootstrapWithRetry } =
+      require('../src/websocket/bootstrapSubscriptions').createBootstrapSubscriptionsHelpers({
+        redis,
+        isRedisOperational: () => true,
+        query: jest.fn(),
+        logger: { warn: jest.fn() },
+        staleCacheKey: (k: string) => `stale:${k}`,
+        getJsonCache: jest.fn().mockResolvedValue(opts.channels),
+        setJsonCacheWithStale: jest.fn().mockResolvedValue(undefined),
+        withDistributedSingleflight: jest.fn(
+          async ({ load }: { load: () => Promise<unknown> }) => load(),
+        ),
+        wsBootstrapIngressKey: (uid: string, scope: string) => `ingress:${uid}:${scope}`,
+        readWsBootstrapIngressCacheBase: jest.fn().mockResolvedValue(null),
+        writeWsBootstrapIngressCacheBase: jest.fn().mockResolvedValue(undefined),
+        resolvedWsRuntimeConfig: () => ({ autoSubscribeMode: 'full' }),
+        warmWsAclCacheFromChannelList: jest.fn(),
+        markChannelRecentConnect: markRecent,
+        invalidateRecentConnectTargetsCache: invalidateRecent,
+        subscribeClient: jest.fn().mockResolvedValue(undefined),
+        subscribeCommunityClient: jest.fn(),
+        parseChannelKey,
+        wsBootstrapListCacheTotal: metricStub(),
+        wsBootstrapChannelsHistogram: metricStub(),
+        wsBootstrapBlockedTotal: metricStub(),
+        wsBootstrapCachedTotal: metricStub(),
+        wsBootstrapDbTotal: metricStub(),
+        wsBootstrapWallDurationMs: metricStub(),
+        WS_BOOTSTRAP_INGRESS_TTL_SECONDS: 60,
+        WS_BOOTSTRAP_DB_MAX_IN_FLIGHT: 8,
+        WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS: 20,
+        WS_BOOTSTRAP_CACHE_TTL_SECONDS: 60,
+        WS_BOOTSTRAP_BATCH_SIZE: 96,
+      });
+
+    return { markRecent, invalidateRecent, prepareBootstrapWithRetry };
+  }
+
+  it('fresh connect: marks and invalidates all channels when no ZSCORE exists', async () => {
+    const { markRecent, invalidateRecent, prepareBootstrapWithRetry } = buildPrecheckHarness({
+      channels: ['channel:ch1', 'channel:ch2'],
+      channelScores: {},
+    });
+    const ws = { readyState: 1 } as any;
+    await prepareBootstrapWithRetry(ws, 'u1');
+    expect(markRecent).toHaveBeenCalledTimes(2);
+    expect(markRecent).toHaveBeenCalledWith('u1', 'ch1');
+    expect(markRecent).toHaveBeenCalledWith('u1', 'ch2');
+    expect(invalidateRecent).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconnect: skips mark and invalidation when all scores are within TTL', async () => {
+    const { markRecent, invalidateRecent, prepareBootstrapWithRetry } = buildPrecheckHarness({
+      channels: ['channel:ch1', 'channel:ch2'],
+      channelScores: { ch1: RECENT_SCORE, ch2: RECENT_SCORE },
+    });
+    const ws = { readyState: 1 } as any;
+    await prepareBootstrapWithRetry(ws, 'u1');
+    expect(markRecent).not.toHaveBeenCalled();
+    expect(invalidateRecent).not.toHaveBeenCalled();
+  });
+
+  it('partial reconnect: only marks and invalidates channels with missing or stale scores', async () => {
+    const { markRecent, invalidateRecent, prepareBootstrapWithRetry } = buildPrecheckHarness({
+      channels: ['channel:ch1', 'channel:ch2', 'channel:ch3'],
+      channelScores: { ch1: RECENT_SCORE, ch2: RECENT_SCORE },
+    });
+    const ws = { readyState: 1 } as any;
+    await prepareBootstrapWithRetry(ws, 'u1');
+    expect(markRecent).toHaveBeenCalledTimes(1);
+    expect(markRecent).toHaveBeenCalledWith('u1', 'ch3');
+    expect(markRecent).not.toHaveBeenCalledWith('u1', 'ch1');
+    expect(markRecent).not.toHaveBeenCalledWith('u1', 'ch2');
+    expect(invalidateRecent).toHaveBeenCalledTimes(1);
+    expect(invalidateRecent).toHaveBeenCalledWith('ch3');
+  });
+
+  it('pipeline failure: falls back to marking all channels', async () => {
+    const { markRecent, invalidateRecent, prepareBootstrapWithRetry } = buildPrecheckHarness({
+      channels: ['channel:ch1', 'channel:ch2'],
+      channelScores: { ch1: RECENT_SCORE, ch2: RECENT_SCORE },
+      pipelineError: true,
+    });
+    const ws = { readyState: 1 } as any;
+    await prepareBootstrapWithRetry(ws, 'u1');
+    expect(markRecent).toHaveBeenCalledTimes(2);
+    expect(invalidateRecent).toHaveBeenCalledTimes(2);
+  });
+
+  it('stale score outside TTL window is treated as missing and gets marked', async () => {
+    const { markRecent, invalidateRecent, prepareBootstrapWithRetry } = buildPrecheckHarness({
+      channels: ['channel:ch1'],
+      channelScores: { ch1: STALE_SCORE },
+    });
+    const ws = { readyState: 1 } as any;
+    await prepareBootstrapWithRetry(ws, 'u1');
+    expect(markRecent).toHaveBeenCalledTimes(1);
+    expect(markRecent).toHaveBeenCalledWith('u1', 'ch1');
+    expect(invalidateRecent).toHaveBeenCalledTimes(1);
+  });
+
+  it('progressive-ready safety: new channel with no score is primed and recorded in primed set', async () => {
+    // User was recently subscribed to ch1/ch2 (scores within TTL) but has since
+    // joined ch3 (no score). ch3 must be marked before hydration begins so
+    // channel fanout can route to the user during the progressive-ready bridge window.
+    const { markRecent, prepareBootstrapWithRetry } = buildPrecheckHarness({
+      channels: ['channel:ch1', 'channel:ch2', 'channel:ch3'],
+      channelScores: { ch1: RECENT_SCORE, ch2: RECENT_SCORE },
+    });
+    const ws = { readyState: 1 } as any;
+    await prepareBootstrapWithRetry(ws, 'u1');
+    expect(markRecent).toHaveBeenCalledTimes(1);
+    expect(markRecent).toHaveBeenCalledWith('u1', 'ch3');
+    expect(ws._bootstrapRecentConnectChannelIds?.has('ch1')).toBe(true);
+    expect(ws._bootstrapRecentConnectChannelIds?.has('ch2')).toBe(true);
+    expect(ws._bootstrapRecentConnectChannelIds?.has('ch3')).toBe(true);
   });
 });

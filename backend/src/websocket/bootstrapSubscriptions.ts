@@ -33,6 +33,12 @@ function createBootstrapSubscriptionsHelpers({
     recordWsBootstrapWallMs,
   } = require("./wsDeliveryPressure");
 
+  const {
+    channelRecentConnectKey,
+    channelRecentZsetEnabled,
+    WS_RECENT_CONNECT_TTL_SECONDS: RECENT_CONNECT_TTL_SEC,
+  } = require("./recentConnect");
+
   const wsBootstrapListInFlight = new Map();
   const wsBootstrapIngressInFlight = new Map();
   let wsBootstrapDbInFlight = 0;
@@ -215,11 +221,41 @@ function createBootstrapSubscriptionsHelpers({
     );
     if (!channelTopics.length) return;
     ws._bootstrapRecentConnectChannelIds = new Set();
+
+    const channelIds = channelTopics.map((ch) => ch.slice("channel:".length));
+
+    // Per-channel precheck: pipeline ZSCORE for each channel to find which ones
+    // already have a recent-enough score for this user. Channels where the score
+    // is present and within the TTL window skip the ZADD and cache invalidation,
+    // keeping the fanout target cache warm. Channels that are new, stale, or
+    // whose lookup errored are still fully marked. Falls back to full mark on any
+    // pipeline-level failure.
+    let needsMark = channelIds.map(() => true);
+    if (channelRecentZsetEnabled()) {
+      try {
+        const cutoff = Date.now() - RECENT_CONNECT_TTL_SEC * 1000;
+        const pipeline = redis.pipeline();
+        for (const channelId of channelIds) {
+          pipeline.zscore(channelRecentConnectKey(channelId), userId);
+        }
+        const results = await pipeline.exec();
+        needsMark = channelIds.map((_channelId, idx) => {
+          const [err, score] = results[idx] ?? [null, null];
+          if (err) return true;
+          const n = score != null ? Number(score) : NaN;
+          return !Number.isFinite(n) || n < cutoff;
+        });
+      } catch (_err) {
+        // Pipeline failed entirely — fall back to marking all channels.
+      }
+    }
+
     const settled = await Promise.allSettled(
-      channelTopics.map(async (ch) => {
-        const channelId = ch.slice("channel:".length);
-        await markChannelRecentConnect(userId, channelId);
-        await invalidateRecentConnectTargetsCache?.(channelId);
+      channelIds.map(async (channelId, idx) => {
+        if (needsMark[idx]) {
+          await markChannelRecentConnect(userId, channelId);
+          await invalidateRecentConnectTargetsCache?.(channelId);
+        }
         return channelId;
       }),
     );
