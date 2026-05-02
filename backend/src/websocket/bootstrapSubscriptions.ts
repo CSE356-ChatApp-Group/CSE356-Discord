@@ -29,6 +29,10 @@ function createBootstrapSubscriptionsHelpers({
   WS_BOOTSTRAP_CACHE_TTL_SECONDS,
   WS_BOOTSTRAP_BATCH_SIZE,
 }) {
+  const {
+    recordWsBootstrapWallMs,
+  } = require("./wsDeliveryPressure");
+
   const wsBootstrapListInFlight = new Map();
   const wsBootstrapIngressInFlight = new Map();
   let wsBootstrapDbInFlight = 0;
@@ -295,6 +299,7 @@ function createBootstrapSubscriptionsHelpers({
       const wallStart = ws._bootstrapWallStart || Date.now();
       const bootstrapWallMs = Date.now() - wallStart;
       wsBootstrapWallDurationMs.observe(bootstrapWallMs);
+      recordWsBootstrapWallMs(bootstrapWallMs);
       if (bootstrapWallMs > 5000) {
         logger.warn({ userId, bootstrapWallMs }, "WS auto-subscribe bootstrap slow");
       }

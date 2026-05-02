@@ -25,6 +25,10 @@ function createOutboundQueueHelpers({
   WS_OUTBOUND_DRAIN_BATCH,
   WS_OUTBOUND_MESSAGE_WAITERS_MAX,
 }) {
+  const {
+    recordWsReliableRealtimeLatencyMs,
+  } = require("./wsDeliveryPressure");
+
   function ensureOutboundQueue(ws) {
     if (!ws._outboundQueue) {
       ws._outboundQueue = [];
@@ -145,6 +149,9 @@ function createOutboundQueueHelpers({
             const deltaMs = Date.now() - refMs;
             if (deltaMs >= 0 && Number.isFinite(deltaMs)) {
               wsReliableDeliveryLatencyMs.observe({ path: pathKind }, deltaMs);
+              if (pathKind === "realtime") {
+                recordWsReliableRealtimeLatencyMs(deltaMs);
+              }
             }
           }
         }

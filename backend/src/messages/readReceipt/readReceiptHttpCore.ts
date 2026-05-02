@@ -53,6 +53,9 @@ const {
   recordReadReceiptMessageAckAfterSuccess,
 } = require("./readReceiptMessageAckCache");
 const { READ_RECEIPT_TARGET_LOOKUP_CALLER } = require("./readReceiptTargetLookupDiag");
+const {
+  shouldDropReadReceiptFanoutForWsPressure,
+} = require("../../websocket/wsDeliveryPressure");
 
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
   process.env.USER_LAST_READ_COUNT_REDIS_TTL_SEC || "604800",
@@ -425,6 +428,26 @@ async function executeReadReceiptMark(
     await observeReadPhase("watermark_cache", async () => {
       await redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
     });
+  }
+
+  const dropReadReceiptFanoutForWsPressure =
+    !dropReadReceiptFanout &&
+    READ_RECEIPT_FANOUT_ENABLED &&
+    shouldDropReadReceiptFanoutForWsPressure();
+
+  if (dropReadReceiptFanoutForWsPressure) {
+    readReceiptOptimizationTotal.inc({ reason: "ws_delivery_pressure_fanout_skipped" });
+    observeReadReceiptRequest("deferred_ws_delivery_pressure_fanout_only");
+    rememberConfirmedMessageRead(uid, messageId);
+    await recordReadReceiptMessageAckAfterSuccess(uid, messageId);
+    return {
+      status: 200,
+      body: {
+        success: true,
+        deferred: true,
+        reason: "ws_delivery_pressure",
+      },
+    };
   }
 
   if (dropReadReceiptFanout || !READ_RECEIPT_FANOUT_ENABLED) {

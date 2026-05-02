@@ -13,6 +13,9 @@ const {
   isUserFeedEnvelope,
   userIdFromTarget,
 } = require("./userFeed");
+const {
+  recordRealtimeMissAttribution,
+} = require("./wsDeliveryPressure");
 const { isCommunityFeedEnvelope } = require("./communityFeed");
 const {
   prepareSocketPayload,
@@ -83,6 +86,10 @@ function createRedisPubsubDelivery(ctx) {
       );
       realtimeMissAttributionTotal.inc(
         { reason: "channel_topic_stale_map_userfeed_recovery" },
+        userIds.length,
+      );
+      recordRealtimeMissAttribution(
+        "channel_topic_stale_map_userfeed_recovery",
         userIds.length,
       );
       return true;
@@ -338,6 +345,7 @@ function createRedisPubsubDelivery(ctx) {
       }
       if (deliveredCount === 0 && !recovered) {
         realtimeMissAttributionTotal.inc({ reason: "topic_message_send_blocked" });
+        recordRealtimeMissAttribution("topic_message_send_blocked");
         const messageId =
           parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
             ? parsed.data
@@ -361,6 +369,7 @@ function createRedisPubsubDelivery(ctx) {
         );
       } else if (deliveredCount < openRecipientSlots) {
         realtimeMissAttributionTotal.inc({ reason: "topic_message_partial_delivery" });
+        recordRealtimeMissAttribution("topic_message_partial_delivery");
       }
     }
   }

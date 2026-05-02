@@ -27,6 +27,8 @@ const {
   lastMessagePgReconcileSkippedTotal,
   readReceiptPreflightTotal,
   readReceiptShedTotal,
+  readReceiptRequestsTotal,
+  readReceiptOptimizationTotal,
 } = require('../src/utils/metrics');
 const {
   recordMessageChannelInsertLockAcquireWait,
@@ -38,6 +40,10 @@ const {
   markMessageInsertUnhealthyForReadShedding,
   resetMessageInsertHealthForTests,
 } = require('../src/messages/messageInsertHealth');
+const {
+  recordWsReliableRealtimeLatencyMs,
+  resetWsDeliveryPressureForTests,
+} = require('../src/websocket/wsDeliveryPressure');
 const { pgBusinessSqlQueriesPerRequestHistogram } = require('../src/utils/metrics');
 
 function messagesRouteSqlHistogramSnapshot() {
@@ -492,6 +498,126 @@ describe('Read receipt insert lock pressure shedding', () => {
       .set('Authorization', `Bearer ${owner.accessToken}`);
     expect(passRes.status).toBe(200);
     expect(passRes.body.deferred).not.toBe(true);
+  });
+
+  it('skips only read-receipt fanout under WS delivery pressure while advancing durable read state', async () => {
+    resetWsDeliveryPressureForTests();
+    const prevEnabled = process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED;
+    const prevTtl = process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS;
+    const prevLatency = process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS;
+    process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = 'true';
+    process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS = '60';
+    process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS = '1000';
+
+    try {
+      const owner = await createAuthenticatedUser('readwspress');
+      const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+        slugPrefix: 'readwspress',
+        channelPrefix: 'rwp-ch',
+        description: 'read ws pressure',
+      });
+      const m1 = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'pressure read target' });
+      expect(m1.status).toBe(201);
+      const messageId1 = m1.body.message.id;
+
+      const deferredBefore = counterValueByLabels(readReceiptRequestsTotal, {
+        result: 'deferred_ws_delivery_pressure_fanout_only',
+      });
+      const optBefore = counterValueByLabels(readReceiptOptimizationTotal, {
+        reason: 'ws_delivery_pressure_fanout_skipped',
+      });
+      const shedBefore = counterValueByLabels(readReceiptShedTotal, {
+        reason: 'ws_delivery_pressure',
+      });
+
+      recordWsReliableRealtimeLatencyMs(1000);
+      const pressureRead = await request(app)
+        .put(`/api/v1/messages/${messageId1}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({});
+
+      expect(pressureRead.status).toBe(200);
+      expect(pressureRead.body).toEqual({
+        success: true,
+        deferred: true,
+        reason: 'ws_delivery_pressure',
+      });
+      expect(counterValueByLabels(readReceiptRequestsTotal, {
+        result: 'deferred_ws_delivery_pressure_fanout_only',
+      })).toBeGreaterThan(deferredBefore);
+      expect(counterValueByLabels(readReceiptOptimizationTotal, {
+        reason: 'ws_delivery_pressure_fanout_skipped',
+      })).toBeGreaterThan(optBefore);
+      expect(counterValueByLabels(readReceiptShedTotal, {
+        reason: 'ws_delivery_pressure',
+      })).toBe(shedBefore);
+
+      await flushDirtyReadStatesToDB();
+      const afterPressure = await pool.query(
+        `SELECT last_read_message_id::text AS id FROM read_states WHERE user_id = $1 AND channel_id = $2`,
+        [owner.user.id, channelId],
+      );
+      expect(afterPressure.rows[0]?.id).toBe(messageId1);
+
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      const m2 = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ channelId, content: 'post pressure read target' });
+      expect(m2.status).toBe(201);
+      const messageId2 = m2.body.message.id;
+
+      const normalRead = await request(app)
+        .put(`/api/v1/messages/${messageId2}/read`)
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({});
+      expect(normalRead.status).toBe(200);
+      expect(normalRead.body.deferred).not.toBe(true);
+
+      const participant = await createAuthenticatedUser('readwspressdm');
+      const dmRes = await request(app)
+        .post('/api/v1/conversations')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ participantIds: [participant.user.id] });
+      expect(dmRes.status).toBe(201);
+      const conversationId = dmRes.body.conversation.id;
+
+      const dmMessage = await request(app)
+        .post('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ conversationId, content: 'dm pressure read target' });
+      expect(dmMessage.status).toBe(201);
+
+      recordWsReliableRealtimeLatencyMs(1000);
+      const dmPressureRead = await request(app)
+        .put(`/api/v1/messages/${dmMessage.body.message.id}/read`)
+        .set('Authorization', `Bearer ${participant.accessToken}`)
+        .send({ conversationId });
+      expect(dmPressureRead.status).toBe(200);
+      expect(dmPressureRead.body).toEqual({
+        success: true,
+        deferred: true,
+        reason: 'ws_delivery_pressure',
+      });
+
+      await flushDirtyReadStatesToDB();
+      const afterDmPressure = await pool.query(
+        `SELECT last_read_message_id::text AS id FROM read_states WHERE user_id = $1 AND conversation_id = $2`,
+        [participant.user.id, conversationId],
+      );
+      expect(afterDmPressure.rows[0]?.id).toBe(dmMessage.body.message.id);
+    } finally {
+      resetWsDeliveryPressureForTests();
+      if (prevEnabled === undefined) delete process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED;
+      else process.env.READ_RECEIPT_DROP_FANOUT_ON_WS_PRESSURE_ENABLED = prevEnabled;
+      if (prevTtl === undefined) delete process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS;
+      else process.env.READ_RECEIPT_WS_PRESSURE_TTL_MS = prevTtl;
+      if (prevLatency === undefined) delete process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS;
+      else process.env.READ_RECEIPT_WS_PRESSURE_REALTIME_LATENCY_MS = prevLatency;
+    }
   });
 
   it('does not advance read cursor when PUT /read is deferred for insert lock pressure', async () => {
