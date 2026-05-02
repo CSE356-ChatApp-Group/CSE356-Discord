@@ -86,9 +86,27 @@ jobs:
         run: |
           set -euo pipefail
           ARTIFACT="chatapp-${TARGET_SHA}.tar.gz"
-          echo "Waiting for release-${TARGET_SHA} from ${{ github.repository }}..."
+          TAG="release-${TARGET_SHA}"
+
+          # If the release tag doesn't exist yet, only poll when a CI run is actively
+          # packaging it (i.e. the SHA was pushed to main and CI is still in-flight).
+          # For non-main SHAs no package-release job ever runs, so fail fast and let
+          # the fallback build path handle it rather than waiting 7.5 minutes.
+          if ! gh release view "${TAG}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            ACTIVE=$(gh run list -R "${{ github.repository }}" \
+              --workflow=ci-deploy.yml \
+              --json headSha,status \
+              --jq "[.[] | select(.headSha == \"${TARGET_SHA}\" and (.status == \"in_progress\" or .status == \"queued\" or .status == \"waiting\"))] | length")
+            if [[ "${ACTIVE}" == "0" ]]; then
+              echo "Release tag ${TAG} does not exist and no active CI run found for this SHA — skipping poll."
+              exit 1
+            fi
+            echo "Release tag ${TAG} not yet published; CI run is active — will poll..."
+          fi
+
+          echo "Waiting for ${TAG} from ${{ github.repository }}..."
           for attempt in $(seq 1 15); do
-            if gh release download "release-${TARGET_SHA}" -R "${{ github.repository }}" -p "${ARTIFACT}" -D . 2>/dev/null; then
+            if gh release download "${TAG}" -R "${{ github.repository }}" -p "${ARTIFACT}" -D . 2>/dev/null; then
               echo "Downloaded on attempt ${attempt}"
               break
             fi
@@ -106,8 +124,8 @@ jobs:
         if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
         uses: actions/setup-node@v5
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
 
       - name: Install dependencies for fallback build
         if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
