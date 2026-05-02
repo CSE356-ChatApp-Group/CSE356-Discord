@@ -154,6 +154,8 @@ jobs:
         with:
           name: backend-dist-${{ github.sha }}
           path: backend/dist
+          # backend/dist/.build-sha is required by package-release verification (hidden by default in v4.4+).
+          include-hidden-files: true
           retention-days: 7
 
   frontend:

@@ -14,6 +14,7 @@ Use this file as the **front door** before duplicating env profiles, IPs, or top
 | **End-to-end diagnosis + improvement loop** | [`docs/agent-operations-playbook.md`](docs/agent-operations-playbook.md) |
 | **Cursor / workspace rules** | [`.cursor/rules/`](.cursor/rules/) |
 | **Copilot / short AI context** | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
+| **Running tests** | From **repo root**: `npm test` — runs backend Jest (`backend` workspace) then frontend Vitest. Backend only: `npm test --workspace=backend`. Raw Jest (no test-runner wrapper): `cd backend && npm run test:raw -- <jest-args>`. Postgres/Redis integration suites: prefer `npm run test:docker --workspace=backend` or `TEST_FORCE_PROVISION=1` with `env -u DATABASE_URL` per suite headers in `backend/tests/`. |
 
 ## Agent traversal protocol (fast path)
 
