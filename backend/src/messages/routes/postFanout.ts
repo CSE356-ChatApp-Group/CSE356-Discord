@@ -36,6 +36,11 @@ const {
   messagePostAsyncFanoutEnabled,
 } = require("./postConstants");
 
+type PostFanoutTimingMs = {
+  recent_bridge_wall_ms: number;
+  fanout_enqueue_wall_ms: number;
+};
+
 async function runChannelMessageCreatedFanout(opts: {
   req: { id?: string };
   channelId: string;
@@ -47,6 +52,10 @@ async function runChannelMessageCreatedFanout(opts: {
   let realtimePublishedAtForHttp: string | undefined;
   let realtimeChannelFanoutComplete = false;
   let fanoutMeta: any = null;
+  let timingsMs: PostFanoutTimingMs = {
+    recent_bridge_wall_ms: 0,
+    fanout_enqueue_wall_ms: 0,
+  };
 
   incrementChannelMessageCount(channelId).catch((err: unknown) => {
     logger.warn(
@@ -63,6 +72,7 @@ async function runChannelMessageCreatedFanout(opts: {
       );
       realtimePublishedAtForHttp = createdEnvelope.publishedAt;
       if (MESSAGE_POST_IMMEDIATE_RECENT_BRIDGE_ENABLED) {
+        const recentBridgeStart = Date.now();
         const recentBridgeRun = await withBoundedPostInsertTimeout(
           "recent_bridge",
           publishChannelMessageRecentUserBridge(
@@ -71,6 +81,7 @@ async function runChannelMessageCreatedFanout(opts: {
           ),
           MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
         );
+        timingsMs.recent_bridge_wall_ms = Math.max(0, Date.now() - recentBridgeStart);
         if (!recentBridgeRun.ok && recentBridgeRun.timedOut) {
           deliveryTimeoutTotal.inc({ phase: "recent_bridge" });
           logger.warn(
@@ -84,6 +95,7 @@ async function runChannelMessageCreatedFanout(opts: {
           );
         }
       }
+      const enqueueStart = Date.now();
       const enqueued = tracer.startActiveSpan('fanout.enqueue', (span: any) => {
         try {
           return sideEffects.enqueueFanoutJob(
@@ -123,6 +135,7 @@ async function runChannelMessageCreatedFanout(opts: {
           span.end();
         }
       });
+      timingsMs.fanout_enqueue_wall_ms = Math.max(0, Date.now() - enqueueStart);
       realtimeChannelFanoutComplete = false;
       if (enqueued) {
         messagePostFanoutAsyncEnqueueTotal.inc({
@@ -208,6 +221,7 @@ async function runChannelMessageCreatedFanout(opts: {
     realtimePublishedAtForHttp,
     realtimeChannelFanoutComplete,
     fanoutMeta,
+    timings_ms: timingsMs,
   };
 }
 
@@ -220,9 +234,14 @@ async function runConversationMessageCreatedFanout(opts: {
   const { req, conversationId, message, baseMessage } = opts;
   let realtimePublishedAtForHttp: string | undefined;
   let realtimeConversationFanoutComplete = false;
+  const timingsMs: PostFanoutTimingMs = {
+    recent_bridge_wall_ms: 0,
+    fanout_enqueue_wall_ms: 0,
+  };
 
   try {
     if (messagePostAsyncFanoutEnabled()) {
+      const enqueueStart = Date.now();
       const enqueued = tracer.startActiveSpan('fanout.enqueue', (span: any) => {
         try {
           return sideEffects.enqueueFanoutJob(
@@ -260,6 +279,7 @@ async function runConversationMessageCreatedFanout(opts: {
           span.end();
         }
       });
+      timingsMs.fanout_enqueue_wall_ms = Math.max(0, Date.now() - enqueueStart);
       realtimePublishedAtForHttp = new Date().toISOString();
       realtimeConversationFanoutComplete = false;
       if (enqueued) {
@@ -351,7 +371,11 @@ async function runConversationMessageCreatedFanout(opts: {
     realtimePublishedAtForHttp = new Date().toISOString();
   }
 
-  return { realtimePublishedAtForHttp, realtimeConversationFanoutComplete };
+  return {
+    realtimePublishedAtForHttp,
+    realtimeConversationFanoutComplete,
+    timings_ms: timingsMs,
+  };
 }
 
 module.exports = {

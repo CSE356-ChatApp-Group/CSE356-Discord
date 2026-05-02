@@ -282,6 +282,165 @@ function shouldEmitPostMessagesE2eTrace(totalWallMs: number) {
   return false;
 }
 
+type E2eRollupNumeric = {
+  total_wall_ms: number;
+  idem_redis_ms: number;
+  channel_insert_lock_wait_ms: number;
+  pre_db_other_ms: number;
+  tx_access_check_ms: number;
+  tx_insert_ms: number;
+  tx_later_step_ms: number;
+  tx_commit_ms: number;
+  hydrate_ms: number;
+  fanout_enqueue_wall_ms: number;
+  recent_bridge_wall_ms: number;
+  fanout_wall_ms: number;
+  cache_bust_only_ms: number;
+  post_hydrate_parallel_wall_ms: number;
+  community_enqueue_ms: number;
+  idem_success_redis_ms: number;
+  serialization_ms: number;
+};
+
+/**
+ * Pure rollup for POST /messages e2e trace: avoids double-counting overlapped fanout vs list-cache bust,
+ * and maps dominant_component → dominant_bucket without treating cache bust as generic "redis".
+ */
+function computePostMessagesE2eRollup(o: E2eRollupNumeric) {
+  const {
+    total_wall_ms,
+    idem_redis_ms,
+    channel_insert_lock_wait_ms,
+    pre_db_other_ms,
+    tx_access_check_ms,
+    tx_insert_ms,
+    tx_later_step_ms,
+    tx_commit_ms,
+    hydrate_ms,
+    fanout_enqueue_wall_ms,
+    recent_bridge_wall_ms,
+    fanout_wall_ms,
+    cache_bust_only_ms,
+    post_hydrate_parallel_wall_ms,
+    community_enqueue_ms,
+    idem_success_redis_ms,
+    serialization_ms,
+  } = o;
+
+  const hydrateDbMs = hydrate_ms;
+  /** Legacy name: wall clock for hydrate-end → cache-bust-await-done (overlapped fanout + bust). */
+  const cache_bust_ms_legacy_parallel = post_hydrate_parallel_wall_ms;
+
+  const breakdown = {
+    idem_redis_ms,
+    channel_insert_lock_wait_ms,
+    pre_db_other_ms,
+    tx_access_check_ms,
+    tx_insert_ms,
+    tx_later_step_ms,
+    tx_commit_ms,
+    hydrate_ms,
+    hydrate_db_ms: hydrateDbMs,
+    fanout_enqueue_wall_ms,
+    recent_bridge_wall_ms,
+    fanout_wall_ms,
+    cache_bust_only_ms,
+    post_hydrate_parallel_wall_ms,
+    /** @deprecated Log dashboards: same as post_hydrate_parallel_wall_ms (was misread as Redis bust-only). */
+    cache_bust_ms: cache_bust_ms_legacy_parallel,
+    community_enqueue_ms,
+    idem_success_redis_ms,
+    serialization_ms,
+  };
+
+  const accounted =
+    idem_redis_ms +
+    channel_insert_lock_wait_ms +
+    pre_db_other_ms +
+    tx_access_check_ms +
+    tx_insert_ms +
+    tx_later_step_ms +
+    tx_commit_ms +
+    hydrate_ms +
+    post_hydrate_parallel_wall_ms +
+    community_enqueue_ms +
+    idem_success_redis_ms +
+    serialization_ms;
+
+  const other_unaccounted_ms = Math.max(0, total_wall_ms - accounted);
+
+  /** Keys excluded from dominant_component: sub-phases of fanout_wall_ms or duplicate/aggregate fields. */
+  const dominantExcluded = new Set([
+    "fanout_enqueue_wall_ms",
+    "recent_bridge_wall_ms",
+    "post_hydrate_parallel_wall_ms",
+    "cache_bust_ms",
+    "hydrate_db_ms",
+  ]);
+
+  const allCandidates: Array<[string, number]> = [
+    ["idem_redis_ms", idem_redis_ms],
+    ["channel_insert_lock_wait_ms", channel_insert_lock_wait_ms],
+    ["pre_db_other_ms", pre_db_other_ms],
+    ["tx_access_check_ms", tx_access_check_ms],
+    ["tx_insert_ms", tx_insert_ms],
+    ["tx_later_step_ms", tx_later_step_ms],
+    ["tx_commit_ms", tx_commit_ms],
+    ["hydrate_ms", hydrate_ms],
+    ["fanout_wall_ms", fanout_wall_ms],
+    ["cache_bust_only_ms", cache_bust_only_ms],
+    ["community_enqueue_ms", community_enqueue_ms],
+    ["idem_success_redis_ms", idem_success_redis_ms],
+    ["serialization_ms", serialization_ms],
+    ["other_unaccounted_ms", other_unaccounted_ms],
+  ];
+  const candidateEntries = allCandidates.filter(([k]) => !dominantExcluded.has(k));
+
+  let dominant_component = "other_unaccounted_ms";
+  let dominant_ms = other_unaccounted_ms;
+  for (const [k, v] of candidateEntries) {
+    const ms = typeof v === "number" ? v : 0;
+    if (ms > dominant_ms) {
+      dominant_ms = ms;
+      dominant_component = k;
+    }
+  }
+
+  const dominant_bucket = (() => {
+    const d = dominant_component;
+    if (
+      d === "tx_access_check_ms" ||
+      d === "tx_insert_ms" ||
+      d === "tx_later_step_ms" ||
+      d === "tx_commit_ms"
+    ) {
+      return "db";
+    }
+    if (d === "hydrate_ms") return "hydrate_db";
+    if (d === "cache_bust_only_ms") return "redis_cache_bust";
+    if (d === "fanout_wall_ms") return "fanout";
+    if (
+      d === "idem_redis_ms" ||
+      d === "channel_insert_lock_wait_ms" ||
+      d === "idem_success_redis_ms" ||
+      d === "community_enqueue_ms"
+    ) {
+      return "redis";
+    }
+    if (d === "serialization_ms") return "serialization";
+    return "other";
+  })();
+
+  return {
+    breakdown,
+    accounted,
+    other_unaccounted_ms,
+    dominant_component,
+    dominant_ms,
+    dominant_bucket,
+  };
+}
+
 function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
   const {
     req,
@@ -296,8 +455,11 @@ function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
     channel_insert_lock_reason_detail,
     successLog,
     hydrate_ms,
-    cache_bust_ms,
+    fanout_enqueue_wall_ms,
+    recent_bridge_wall_ms,
     fanout_wall_ms,
+    cache_bust_only_ms,
+    post_hydrate_parallel_wall_ms,
     fanout_mode,
     community_enqueue_ms,
     idem_success_redis_ms,
@@ -317,7 +479,9 @@ function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
     0,
     preDbHeadMs - idem_redis_ms - channel_insert_lock_wait_ms,
   );
-  const breakdown = {
+
+  const rollup = computePostMessagesE2eRollup({
+    total_wall_ms,
     idem_redis_ms,
     channel_insert_lock_wait_ms,
     pre_db_other_ms: preDbOtherMs,
@@ -326,65 +490,16 @@ function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
     tx_later_step_ms: txLater,
     tx_commit_ms: txCommit,
     hydrate_ms,
-    cache_bust_ms,
-    fanout_wall_ms,
+    fanout_enqueue_wall_ms: Number(fanout_enqueue_wall_ms) || 0,
+    recent_bridge_wall_ms: Number(recent_bridge_wall_ms) || 0,
+    fanout_wall_ms: Number(fanout_wall_ms) || 0,
+    cache_bust_only_ms: Number(cache_bust_only_ms) || 0,
+    post_hydrate_parallel_wall_ms: Number(post_hydrate_parallel_wall_ms) || 0,
     community_enqueue_ms,
     idem_success_redis_ms,
     serialization_ms,
-  };
-  const accounted =
-    idem_redis_ms +
-    channel_insert_lock_wait_ms +
-    preDbOtherMs +
-    txAccess +
-    txInsert +
-    txLater +
-    txCommit +
-    hydrate_ms +
-    cache_bust_ms +
-    fanout_wall_ms +
-    community_enqueue_ms +
-    idem_success_redis_ms +
-    serialization_ms;
-  const other_unaccounted_ms = Math.max(0, total_wall_ms - accounted);
-  const candidates = {
-    ...breakdown,
-    other_unaccounted_ms,
-  };
-  let dominant_component = "other_unaccounted_ms";
-  let dominant_ms = other_unaccounted_ms;
-  for (const [k, v] of Object.entries(candidates)) {
-    const ms = typeof v === "number" ? v : 0;
-    if (ms > dominant_ms) {
-      dominant_ms = ms;
-      dominant_component = k;
-    }
-  }
-  /** Map breakdown field to coarse bucket for rollups (DB vs Redis vs serialization vs other). */
-  const dominant_bucket = (() => {
-    const d = dominant_component;
-    if (
-      d === "tx_access_check_ms" ||
-      d === "tx_insert_ms" ||
-      d === "tx_later_step_ms" ||
-      d === "tx_commit_ms"
-    ) {
-      return "db";
-    }
-    if (
-      d === "idem_redis_ms" ||
-      d === "channel_insert_lock_wait_ms" ||
-      d === "cache_bust_ms" ||
-      d === "fanout_wall_ms" ||
-      d === "idem_success_redis_ms" ||
-      d === "community_enqueue_ms"
-    ) {
-      return "redis";
-    }
-    if (d === "serialization_ms") return "serialization";
-    if (d === "hydrate_ms") return "hydrate_db";
-    return "other";
-  })();
+  });
+
   return {
     event: "post_messages_e2e_trace",
     gradingNote: "rollup_dominant_component_and_dominant_bucket_in_log_pipeline",
@@ -396,10 +511,10 @@ function buildPostMessagesE2eTracePayload(args: Record<string, any>) {
     total_wall_ms,
     tx_total_ms: txTotal,
     fanout_mode,
-    breakdown_ms: { ...breakdown, other_unaccounted_ms },
-    dominant_component,
-    dominant_ms,
-    dominant_bucket,
+    breakdown_ms: { ...rollup.breakdown, other_unaccounted_ms: rollup.other_unaccounted_ms },
+    dominant_component: rollup.dominant_component,
+    dominant_ms: rollup.dominant_ms,
+    dominant_bucket: rollup.dominant_bucket,
     response_body_bytes,
     correlate_redis_slowlog:
       "REDIS_SLOWLOG_SSH=user@vm1 ./scripts/redis/redis-slowlog-snapshot.sh (see docs/operations-monitoring.md)",
@@ -423,5 +538,6 @@ module.exports = {
   buildMessagePostSuccessPhaseLog,
   buildMessagePostSlowHolderLog,
   shouldEmitPostMessagesE2eTrace,
+  computePostMessagesE2eRollup,
   buildPostMessagesE2eTracePayload,
 };

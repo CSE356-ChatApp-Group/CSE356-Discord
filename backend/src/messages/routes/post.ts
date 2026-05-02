@@ -298,7 +298,10 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
 
         // --- POST /messages: list cache bust (bounded) ---
         // Start cache bust as soon as hydration is ready and overlap it with realtime fanout.
+        let cacheBustStartMs = 0;
+        let cacheBustEndMs = 0;
         const cacheBustPromise = tracer.startActiveSpan('cache.bust', async (span: any) => {
+          cacheBustStartMs = Date.now();
           try {
             return await withBoundedPostInsertTimeout(
               "cache_bust",
@@ -310,6 +313,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
             span.recordException(err);
             throw err;
           } finally {
+            cacheBustEndMs = Date.now();
             span.end();
           }
         });
@@ -319,6 +323,11 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         let realtimeChannelFanoutComplete = false;
         let realtimeConversationFanoutComplete = false;
         let fanoutMeta: any = null;
+        let fanoutTimings = {
+          recent_bridge_wall_ms: 0,
+          fanout_enqueue_wall_ms: 0,
+        };
+        const tFanoutStart = Date.now();
         if (channelId) {
           const ch = await runChannelMessageCreatedFanout({
             req: authReq,
@@ -330,6 +339,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           realtimePublishedAtForHttp = ch.realtimePublishedAtForHttp;
           realtimeChannelFanoutComplete = ch.realtimeChannelFanoutComplete;
           fanoutMeta = ch.fanoutMeta;
+          fanoutTimings = ch.timings_ms || fanoutTimings;
         } else {
           const cv = await runConversationMessageCreatedFanout({
             req: authReq,
@@ -339,6 +349,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           });
           realtimePublishedAtForHttp = cv.realtimePublishedAtForHttp;
           realtimeConversationFanoutComplete = cv.realtimeConversationFanoutComplete;
+          fanoutTimings = cv.timings_ms || fanoutTimings;
         }
         t_after_fanout = Date.now();
         const cacheBustRun = await cacheBustPromise;
@@ -383,6 +394,10 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           tAfterHydrateMark,
           t_after_cache_bust,
           t_after_fanout,
+          tFanoutStart,
+          cacheBustStartMs,
+          cacheBustEndMs,
+          fanoutTimings,
           fanoutMeta,
         });
       } catch (err: any) {

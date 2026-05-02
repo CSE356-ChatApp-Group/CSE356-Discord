@@ -41,6 +41,10 @@ function runPostSuccessFollowup(opts: {
   tAfterHydrateMark: number;
   t_after_cache_bust: number;
   t_after_fanout: number;
+  tFanoutStart: number;
+  cacheBustStartMs: number;
+  cacheBustEndMs: number;
+  fanoutTimings: { recent_bridge_wall_ms: number; fanout_enqueue_wall_ms: number };
   fanoutMeta: any;
 }) {
   const {
@@ -68,6 +72,10 @@ function runPostSuccessFollowup(opts: {
     tAfterHydrateMark,
     t_after_cache_bust,
     t_after_fanout,
+    tFanoutStart,
+    cacheBustStartMs,
+    cacheBustEndMs,
+    fanoutTimings,
     fanoutMeta,
   } = opts;
 
@@ -145,12 +153,13 @@ function runPostSuccessFollowup(opts: {
     : messagePostAsyncFanoutEnabled()
       ? "conversation:async_enqueue"
       : "conversation:sync_await";
-  const cacheBustOnlyMs = Math.max(0, t_after_cache_bust - tAfterHydrateMark);
-  const fanoutWallMs = Math.max(0, t_after_fanout - t_after_cache_bust);
-  const communityEnqueueMs = Math.max(
-    0,
-    t_after_side_effects - t_after_fanout,
-  );
+  const fanoutWallMs = Math.max(0, t_after_fanout - tFanoutStart);
+  const cacheBustOnlyMs =
+    cacheBustStartMs > 0 && cacheBustEndMs >= cacheBustStartMs
+      ? Math.max(0, cacheBustEndMs - cacheBustStartMs)
+      : 0;
+  const postHydrateParallelWallMs = Math.max(0, t_after_cache_bust - tAfterHydrateMark);
+  const communityEnqueueMs = Math.max(0, t_after_side_effects - t_after_cache_bust);
   const idemSuccessRedisMs = Math.max(
     0,
     t_after_idem_cache - t_after_side_effects,
@@ -174,8 +183,11 @@ function runPostSuccessFollowup(opts: {
         channel_insert_lock_reason_detail: channelInsertLockReasonDetail,
         successLog: postMessagesTxPhaseLog,
         hydrate_ms: hydrateWallMs,
-        cache_bust_ms: cacheBustOnlyMs,
+        fanout_enqueue_wall_ms: fanoutTimings.fanout_enqueue_wall_ms,
+        recent_bridge_wall_ms: fanoutTimings.recent_bridge_wall_ms,
         fanout_wall_ms: fanoutWallMs,
+        cache_bust_only_ms: cacheBustOnlyMs,
+        post_hydrate_parallel_wall_ms: postHydrateParallelWallMs,
         fanout_mode: fanoutModeForE2e,
         community_enqueue_ms: communityEnqueueMs,
         idem_success_redis_ms: idemSuccessRedisMs,
@@ -190,8 +202,11 @@ function runPostSuccessFollowup(opts: {
     if (postMessagesTxPhaseLog && (postMessagesTxPhaseLog as any).tx_total_ms > 1000) {
       const postInsertBreakdown = {
         hydrate_ms: hydrateWallMs,
-        cache_bust_ms: cacheBustOnlyMs,
-        fanout_publish_ms: fanoutWallMs,
+        cache_bust_only_ms: cacheBustOnlyMs,
+        post_hydrate_parallel_wall_ms: postHydrateParallelWallMs,
+        fanout_wall_ms: fanoutWallMs,
+        fanout_enqueue_wall_ms: fanoutTimings.fanout_enqueue_wall_ms,
+        recent_bridge_wall_ms: fanoutTimings.recent_bridge_wall_ms,
         side_effects_enqueue_ms: communityEnqueueMs,
         idempotency_cache_ms: idemSuccessRedisMs,
         response_build_ms: Math.max(
