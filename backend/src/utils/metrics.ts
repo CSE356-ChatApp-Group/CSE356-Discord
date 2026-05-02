@@ -196,6 +196,8 @@ const {
   messageInsertUnhealthyRedisMarkTotal,
   readReceiptInsertUnhealthyPollTotal,
   readReceiptInsertUnhealthyGlobalCache,
+  readStateFlushDeferredTotal,
+  readStateFlushDeferredDirtyKeys,
 } = require('./metrics/messageWritePath');
 const {
   msgTargetCacheTotal,
@@ -450,6 +452,9 @@ const overloadStageGauge = new client.Gauge({
     readStateFlushErrorsTotal.inc({ stage: 'upsert' }, 0);
     readStateFlushErrorsTotal.inc({ stage: 'clear_dirty' }, 0);
     readStateFlushRetriesTotal.inc(0);
+    readStateFlushDeferredTotal.inc({ reason: 'insert_unhealthy' }, 0);
+    readStateFlushDeferredTotal.inc({ reason: 'flush_pressure' }, 0);
+    readStateFlushDeferredDirtyKeys.set(0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
     messageIngestStreamAppendedTotal.inc({ result: 'error' }, 0);
     messageIngestStreamConsumedTotal.inc({ result: 'ack' }, 0);
@@ -725,6 +730,8 @@ module.exports = {
   readStateFlushDurationMs,
   readStateFlushErrorsTotal,
   readStateFlushRetriesTotal,
+  readStateFlushDeferredTotal,
+  readStateFlushDeferredDirtyKeys,
   messageInsertUnhealthyRedisMarkTotal,
   readReceiptInsertUnhealthyPollTotal,
   readReceiptInsertUnhealthyGlobalCache,

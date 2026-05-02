@@ -373,6 +373,19 @@ const readReceiptInsertUnhealthyGlobalCache = new client.Gauge({
   help: 'Cached global insert-unhealthy signal after last poll (1 = defer reads)',
 });
 
+/** Read-state background flush deferrals due to DB write pressure. */
+const readStateFlushDeferredTotal = new client.Counter({
+  name: 'read_state_flush_deferred_total',
+  help: 'Background read-state flushes deferred because DB write pressure is active',
+  labelNames: ['reason'],
+});
+
+/** Approximate dirty key count recorded at the moment a flush was deferred. */
+const readStateFlushDeferredDirtyKeys = new client.Gauge({
+  name: 'read_state_flush_deferred_dirty_keys',
+  help: 'Approximate dirty key backlog (SCARD rs:dirty) sampled when a flush was deferred due to DB pressure',
+});
+
 module.exports = {
   messagePostAccessDeniedTotal,
   messageIngestStreamAppendedTotal,
@@ -427,4 +440,6 @@ module.exports = {
   messageInsertUnhealthyRedisMarkTotal,
   readReceiptInsertUnhealthyPollTotal,
   readReceiptInsertUnhealthyGlobalCache,
+  readStateFlushDeferredTotal,
+  readStateFlushDeferredDirtyKeys,
 };

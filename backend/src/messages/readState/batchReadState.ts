@@ -19,7 +19,10 @@ const {
   readStateFlushRows,
   readStateFlushDurationMs,
   readStateFlushErrorsTotal,
+  readStateFlushDeferredTotal,
+  readStateFlushDeferredDirtyKeys,
 } = require('../../utils/metrics');
+const { getShouldDeferReadReceiptForMessageInsertUnhealthy } = require('../messageInsertHealth');
 const { batchReadStateConfig } = require('../config/batchReadStateConfig');
 const {
   acquireFlushLock,
@@ -38,6 +41,43 @@ const {
   READ_STATE_FLUSH_LOCK_TTL_MS,
   READ_STATE_FLUSH_RETRY_MAX,
 } = batchReadStateConfig;
+
+const READ_STATE_FLUSH_DEFER_ON_DB_PRESSURE_ENABLED =
+  process.env.READ_STATE_FLUSH_DEFER_ON_DB_PRESSURE_ENABLED !== 'false';
+const READ_STATE_FLUSH_PRESSURE_MAX_DEFER_MS = Number(
+  process.env.READ_STATE_FLUSH_PRESSURE_MAX_DEFER_MS || '60000',
+);
+const READ_STATE_FLUSH_PRESSURE_TIMEOUT_WINDOW_MS = Number(
+  process.env.READ_STATE_FLUSH_PRESSURE_TIMEOUT_WINDOW_MS || '10000',
+);
+const READ_STATE_FLUSH_PRESSURE_TIMEOUT_THRESHOLD = Number(
+  process.env.READ_STATE_FLUSH_PRESSURE_TIMEOUT_THRESHOLD || '2',
+);
+
+let flushPressureUntilMs = 0;
+let flushPressureFirstDeferMs = 0;
+const recentFlushTimeouts: number[] = [];
+
+function isReadStateFlushUnderDbPressure(): boolean {
+  if (!READ_STATE_FLUSH_DEFER_ON_DB_PRESSURE_ENABLED) return false;
+  const now = Date.now();
+  if (now < flushPressureUntilMs) return true;
+  const cutoff = now - READ_STATE_FLUSH_PRESSURE_TIMEOUT_WINDOW_MS;
+  while (recentFlushTimeouts.length > 0 && recentFlushTimeouts[0] < cutoff) {
+    recentFlushTimeouts.shift();
+  }
+  return recentFlushTimeouts.length >= READ_STATE_FLUSH_PRESSURE_TIMEOUT_THRESHOLD;
+}
+
+function recordReadStateFlushUpsertTimeout(): void {
+  recentFlushTimeouts.push(Date.now());
+}
+
+function resetReadStateFlushPressureForTests(): void {
+  flushPressureUntilMs = 0;
+  flushPressureFirstDeferMs = 0;
+  recentFlushTimeouts.length = 0;
+}
 
 let localFlushInFlight = false;
 const READ_STATE_BATCH_UPSERT_SQL = `
@@ -128,6 +168,38 @@ function batchReadStateRedisKeys(
  * Background flush: reads all dirty entries from Redis and upserts to DB in one query.
  */
 async function flushDirtyReadStatesToDB(): Promise<void> {
+  const insertUnhealthy = READ_STATE_FLUSH_DEFER_ON_DB_PRESSURE_ENABLED
+    && getShouldDeferReadReceiptForMessageInsertUnhealthy();
+  const flushPressure = isReadStateFlushUnderDbPressure();
+
+  if (insertUnhealthy || flushPressure) {
+    const now = Date.now();
+    const reason = insertUnhealthy ? 'insert_unhealthy' : 'flush_pressure';
+
+    if (flushPressureFirstDeferMs === 0) {
+      flushPressureFirstDeferMs = now;
+    }
+
+    if (now - flushPressureFirstDeferMs < READ_STATE_FLUSH_PRESSURE_MAX_DEFER_MS) {
+      readStateFlushDeferredTotal.inc({ reason });
+      try {
+        const sc = await redis.scard(RS_DIRTY_SET);
+        readStateFlushDeferredDirtyKeys.set(Number.isFinite(Number(sc)) ? Number(sc) : 0);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    // Max deferral exceeded — fall through and flush regardless of pressure
+    flushPressureFirstDeferMs = 0;
+    flushPressureUntilMs = 0;
+    recentFlushTimeouts.length = 0;
+    logger.warn({ reason }, 'read_state flush max-deferral guard triggered — forcing flush');
+  } else {
+    flushPressureFirstDeferMs = 0;
+  }
+
   if (localFlushInFlight) return;
   localFlushInFlight = true;
 
@@ -231,6 +303,11 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
             readStateFlushRows.observe(orderedRows.length);
           } catch (err: any) {
             readStateFlushErrorsTotal.inc({ stage: 'upsert' });
+            const code = String(err?.code || '');
+            const msg = String(err?.message || '').toLowerCase();
+            if (code === '57014' || msg.includes('statement timeout')) {
+              recordReadStateFlushUpsertTimeout();
+            }
             logger.warn({ err, batchSize: orderedRows.length }, 'read_state batch flush query failed');
             continue;
           }
@@ -273,4 +350,5 @@ module.exports = {
   batchReadStateRedisKeys,
   flushDirtyReadStatesToDB,
   startReadStateFlushInterval,
+  resetReadStateFlushPressureForTests,
 };
