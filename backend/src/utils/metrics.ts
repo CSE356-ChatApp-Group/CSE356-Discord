@@ -362,11 +362,14 @@ const overloadStageGauge = new client.Gauge({
     readReceiptShedTotal.inc({ reason: 'message_channel_insert_lock_pressure' }, 0);
     readReceiptShedTotal.inc({ reason: 'message_insert_unhealthy' }, 0);
     readReceiptShedTotal.inc({ reason: 'overload_stage_high' }, 0);
+    readReceiptShedTotal.inc({ reason: 'ws_delivery_pressure' }, 0);
     readReceiptRequestsTotal.inc(
       { result: 'deferred_message_channel_insert_lock_pressure' },
       0,
     );
     readReceiptRequestsTotal.inc({ result: 'deferred_message_insert_unhealthy' }, 0);
+    readReceiptRequestsTotal.inc({ result: 'deferred_ws_delivery_pressure' }, 0);
+    readReceiptRequestsTotal.inc({ result: 'deferred_ws_delivery_pressure_fanout_only' }, 0);
     readReceiptRequestsTotal.inc({ result: 'deferred_pool_waiting' }, 0);
     readReceiptRequestsTotal.inc({ result: 'deferred_overload_stage_high' }, 0);
     readReceiptRequestsTotal.inc({ result: 'deferred_overload_fanout_only' }, 0);
@@ -376,11 +379,13 @@ const overloadStageGauge = new client.Gauge({
     readReceiptRequestsTotal.inc({ result: 'success' }, 0);
     readReceiptPreflightTotal.inc({ result: 'deferred_message_channel_insert_lock_pressure' }, 0);
     readReceiptPreflightTotal.inc({ result: 'deferred_message_insert_unhealthy' }, 0);
+    readReceiptPreflightTotal.inc({ result: 'deferred_ws_delivery_pressure' }, 0);
     readReceiptPreflightTotal.inc({ result: 'deferred_pool_waiting' }, 0);
     readReceiptPreflightTotal.inc({ result: 'deferred_overload_stage_high' }, 0);
     readReceiptPreflightTotal.inc({ result: 'pass' }, 0);
     readReceiptPreflightPoolWaiting.observe({ result: 'deferred_message_channel_insert_lock_pressure' }, 0);
     readReceiptPreflightPoolWaiting.observe({ result: 'deferred_message_insert_unhealthy' }, 0);
+    readReceiptPreflightPoolWaiting.observe({ result: 'deferred_ws_delivery_pressure' }, 0);
     readReceiptPreflightPoolWaiting.observe({ result: 'deferred_pool_waiting' }, 0);
     readReceiptPreflightPoolWaiting.observe({ result: 'deferred_overload_stage_high' }, 0);
     readReceiptPreflightPoolWaiting.observe({ result: 'pass' }, 0);
