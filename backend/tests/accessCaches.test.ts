@@ -24,6 +24,12 @@ const redis = require('../src/db/redis') as {
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
+  READ_RECEIPT_TARGET_LOOKUP_CALLER,
+} = require('../src/messages/readReceipt/readReceiptTargetLookupDiag') as {
+  READ_RECEIPT_TARGET_LOOKUP_CALLER: string;
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const {
   channelIdIfOnlyConversationQueryParam,
   loadMessageTargetForUser,
 } = require('../src/messages/accessCaches') as {
@@ -31,7 +37,11 @@ const {
   loadMessageTargetForUser: (
     messageId: string,
     userId: string,
-    options?: { preferCache?: boolean },
+    options?: {
+      preferCache?: boolean;
+      includeCommunityId?: boolean;
+      targetLookupLogContext?: { kind: string; requestId?: string };
+    },
   ) => Promise<any>;
 };
 
@@ -159,5 +169,35 @@ describe('accessCaches version-aware invalidation', () => {
     expect(redis.del).toHaveBeenCalledWith('msg_target:full:m-2:user-2');
     expect(queryRead).toHaveBeenCalledTimes(1);
     expect(result.has_access).toBe(false);
+  });
+
+  it('passes read receipt target lookup diagnostics to queryRead on preferCache path', async () => {
+    redis.get.mockResolvedValue(null);
+    const err = Object.assign(new Error('Query read timeout'), { code: '57014' });
+    queryRead.mockRejectedValueOnce(err);
+    await expect(
+      loadMessageTargetForUser('mid-timeout', 'uid-timeout', {
+        preferCache: true,
+        targetLookupLogContext: {
+          kind: READ_RECEIPT_TARGET_LOOKUP_CALLER,
+          requestId: 'req-correlation-1',
+        },
+      }),
+    ).rejects.toThrow('Query read timeout');
+    expect(queryRead).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        readDiagnostics: expect.objectContaining({
+          caller: READ_RECEIPT_TARGET_LOOKUP_CALLER,
+          messageId: 'mid-timeout',
+          userId: 'uid-timeout',
+          requestId: 'req-correlation-1',
+          preferCache: true,
+          includeCommunityId: true,
+          accessScope: 'unknown',
+        }),
+      }),
+    );
   });
 });

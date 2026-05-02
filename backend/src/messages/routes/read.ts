@@ -50,7 +50,7 @@ module.exports = function registerReadRoutes(router) {
             req.user.id,
             messageId,
             pre.dropReadReceiptFanout,
-            { hint: readEntry?.hint },
+            { hint: readEntry?.hint, requestId: req.id },
           );
           results.push({
             messageId,
@@ -78,7 +78,7 @@ module.exports = function registerReadRoutes(router) {
         req.user.id,
         req.params.id,
         pre.dropReadReceiptFanout,
-        { hint: req.body },
+        { hint: req.body, requestId: req.id },
       );
       return res.status(out.status).json(out.body);
     } catch (err) {

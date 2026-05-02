@@ -52,6 +52,7 @@ const {
   tryHitReadReceiptMessageAckCache,
   recordReadReceiptMessageAckAfterSuccess,
 } = require("./readReceiptMessageAckCache");
+const { READ_RECEIPT_TARGET_LOOKUP_CALLER } = require("./readReceiptTargetLookupDiag");
 
 const USER_LAST_READ_COUNT_REDIS_TTL_SEC = parseInt(
   process.env.USER_LAST_READ_COUNT_REDIS_TTL_SEC || "604800",
@@ -226,6 +227,7 @@ async function executeReadReceiptMark(
   dropReadReceiptFanout: boolean,
   options: {
     hint?: unknown;
+    requestId?: string;
   } = {},
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   if (hasConfirmedRecentMessageRead(userId, messageId)) {
@@ -262,6 +264,10 @@ async function executeReadReceiptMark(
     loadMessageTargetForUser(messageId, userId, {
       preferCache: true,
       includeCommunityId: needsCommunityId,
+      targetLookupLogContext: {
+        kind: READ_RECEIPT_TARGET_LOOKUP_CALLER,
+        requestId: options.requestId,
+      },
     }),
   );
   if (!target) {

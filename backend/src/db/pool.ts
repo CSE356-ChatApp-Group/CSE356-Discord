@@ -61,6 +61,22 @@ function isTransactionControlSql(queryArg) {
  * causing `incrementDbQuery` to fire N times after N checkouts of the same client object —
  * making `pg_business_sql_queries_per_http_request` grow linearly with pool client reuse.
  */
+/** Optional low-cardinality fields merged into slow / fallback / read-replica error logs only. */
+type ReadDiagnostics = Record<string, string | number | boolean>;
+
+type QueryOpts = {
+  readDiagnostics?: ReadDiagnostics;
+};
+
+function readDiagnosticsForLog(d: ReadDiagnostics | undefined): ReadDiagnostics {
+  if (!d || typeof d !== 'object') return {};
+  const out: ReadDiagnostics = {};
+  for (const [k, v] of Object.entries(d)) {
+    if (v !== undefined && v !== null) out[k] = v as string | number | boolean;
+  }
+  return out;
+}
+
 function wrapPoolClientForRequestMetrics(client) {
   if (client._reqMetricsWrapped) return client;
   client._reqMetricsWrapped = true;
@@ -346,18 +362,23 @@ function releaseQueryGate(): void {
  * `query()` on the primary so hot paths do not 500 when the standby is down.
  * Set `PG_READ_FALLBACK_TO_PRIMARY=false` to disable fallback (fail fast).
  */
-async function queryRead(sql, params) {
-  if (!readPool) return query(sql, params);
+async function queryRead(sql: unknown, params?: unknown, opts?: QueryOpts) {
+  if (!readPool) return query(sql, params, opts);
+  const diag = readDiagnosticsForLog(opts?.readDiagnostics);
   const readFallbackEnabled = process.env.PG_READ_FALLBACK_TO_PRIMARY !== 'false';
   const start = Date.now();
   try {
-    const result = await readPool.query(sql, params);
+    const result = await readPool.query(sql as any, params as any);
     const durationMs = Date.now() - start;
     recordDbQueryWall(durationMs, extractSqlText(sql), 'read');
     pgQueriesTotal.inc({ pool: 'read' });
     incrementDbQuery(isTransactionControlSql(sql) ? 'all' : 'business_sql');
     if (durationMs >= SLOW_QUERY_MS) {
-      logger.warn({ durationMs, sql: truncateSql(sql), pool: 'read' }, 'pg read replica: slow query');
+      const baseSlow = { durationMs, sql: truncateSql(sql), pool: 'read' };
+      logger.warn(
+        Object.keys(diag).length ? { ...baseSlow, readPoolLeg: 'replica', ...diag } : baseSlow,
+        'pg read replica: slow query',
+      );
     }
     return result;
   } catch (err) {
@@ -365,40 +386,60 @@ async function queryRead(sql, params) {
     const reason = classifyPgQueryError(err);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason });
     if (readFallbackEnabled && shouldFallbackReadReplicaToPrimary(err)) {
+      const baseWarn = { err, durationMs, sql: truncateSql(sql), pool: 'read', pgErrorReason: reason };
       logger.warn(
-        { err, durationMs, sql: truncateSql(sql), pool: 'read', pgErrorReason: reason },
+        Object.keys(diag).length ? { ...baseWarn, readPoolLeg: 'replica', ...diag } : baseWarn,
         'pg: read replica unavailable; falling back to primary for this SELECT',
       );
-      return query(sql, params);
+      const continuation: QueryOpts | undefined =
+        Object.keys(diag).length > 0
+          ? {
+              readDiagnostics: {
+                ...diag,
+                readPoolLeg: 'primary',
+                targetLookupReplicaFallback: true,
+                replicaLegDurationMs: durationMs,
+                replicaLegPgErrorReason: reason,
+              },
+            }
+          : undefined;
+      return query(sql, params, continuation);
     }
+    const baseErr = { err, durationMs, sql: truncateSql(sql), pool: 'read', pgErrorReason: reason };
     logger.error(
-      { err, durationMs, sql: truncateSql(sql), pool: 'read', pgErrorReason: reason },
+      Object.keys(diag).length ? { ...baseErr, readPoolLeg: 'replica', ...diag } : baseErr,
       'pg: read replica query error',
     );
     throw err;
   }
 }
 
-async function query(sql, params) {
+async function query(sql: unknown, params?: unknown, opts?: QueryOpts) {
+  const diag = readDiagnosticsForLog(opts?.readDiagnostics);
   checkCircuitBreaker('query');
   await acquireQueryGate();
   const start = Date.now();
   try {
-    const result = await pool.query(sql, params);
+    const result = await pool.query(sql as any, params as any);
     const durationMs = Date.now() - start;
     recordDbQueryWall(durationMs, extractSqlText(sql), 'primary');
     pgQueriesTotal.inc({ pool: 'primary' });
     incrementDbQuery(isTransactionControlSql(sql) ? 'all' : 'business_sql');
     if (durationMs >= SLOW_QUERY_MS) {
-      logger.warn({ durationMs, sql: truncateSql(sql), pool: poolStats() }, 'pg: slow query');
+      const baseSlow = { durationMs, sql: truncateSql(sql), pool: poolStats() };
+      logger.warn(
+        Object.keys(diag).length ? { ...baseSlow, ...diag } : baseSlow,
+        'pg: slow query',
+      );
     }
     return result;
   } catch (err) {
     const durationMs = Date.now() - start;
     const reason = classifyPgQueryError(err);
     pgPoolOperationErrorsTotal.inc({ operation: 'query', reason });
+    const baseErr = { err, durationMs, sql: truncateSql(sql), pool: poolStats(), pgErrorReason: reason };
     logger.error(
-      { err, durationMs, sql: truncateSql(sql), pool: poolStats(), pgErrorReason: reason },
+      Object.keys(diag).length ? { ...baseErr, ...diag } : baseErr,
       'pg: query error',
     );
     throw err;

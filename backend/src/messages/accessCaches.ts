@@ -1,5 +1,9 @@
 
 const { query, queryRead } = require('../db/pool');
+const {
+  READ_RECEIPT_TARGET_LOOKUP_CALLER,
+  readReceiptTargetLookupReadDiagnosticFields,
+} = require('./readReceipt/readReceiptTargetLookupDiag');
 const redis = require('../db/redis');
 const {
   channelAccessVersionKey,
@@ -150,8 +154,17 @@ function messageTargetSql(includeCommunityId: boolean) {
   return includeCommunityId ? MESSAGE_TARGET_SQL_FULL : MESSAGE_TARGET_SQL_LITE;
 }
 
-async function loadMessageTargetFromPrimary(messageId, userId, includeCommunityId = true) {
-  const { rows } = await query(messageTargetSql(includeCommunityId), [messageId, userId]);
+async function loadMessageTargetFromPrimary(
+  messageId,
+  userId,
+  includeCommunityId = true,
+  targetLookupReadDiagnostics = undefined,
+) {
+  const readOpts =
+    targetLookupReadDiagnostics && Object.keys(targetLookupReadDiagnostics).length
+      ? { readDiagnostics: targetLookupReadDiagnostics }
+      : undefined;
+  const { rows } = await query(messageTargetSql(includeCommunityId), [messageId, userId], readOpts);
   return rows[0] || null;
 }
 
@@ -159,22 +172,55 @@ async function loadMessageTargetFromReplicaThenPrimary(
   messageId,
   userId,
   includeCommunityId = true,
+  targetLookupReadDiagnostics = undefined,
 ) {
-  const { rows } = await queryRead(messageTargetSql(includeCommunityId), [messageId, userId]);
+  const readOpts =
+    targetLookupReadDiagnostics && Object.keys(targetLookupReadDiagnostics).length
+      ? { readDiagnostics: targetLookupReadDiagnostics }
+      : undefined;
+  const { rows } = await queryRead(
+    messageTargetSql(includeCommunityId),
+    [messageId, userId],
+    readOpts,
+  );
   const replicaRow = rows[0] || null;
   if (replicaRow) return replicaRow;
-  
-  return loadMessageTargetFromPrimary(messageId, userId, includeCommunityId);
+
+  return loadMessageTargetFromPrimary(
+    messageId,
+    userId,
+    includeCommunityId,
+    targetLookupReadDiagnostics,
+  );
+}
+
+function buildMessageTargetLookupReadDiagnostics(messageId, userId, options) {
+  const ctx = options && options.targetLookupLogContext;
+  if (!ctx || ctx.kind !== READ_RECEIPT_TARGET_LOOKUP_CALLER) return undefined;
+  return readReceiptTargetLookupReadDiagnosticFields({
+    messageId,
+    userId,
+    requestId: ctx.requestId,
+    includeCommunityId: options.includeCommunityId !== false,
+    preferCache: options.preferCache === true,
+    accessScope: 'unknown',
+  });
 }
 
 async function loadMessageTargetForUser(messageId, userId, options: {
   preferCache?: boolean;
   includeCommunityId?: boolean;
+  targetLookupLogContext?: { kind: string; requestId?: string };
 } = {}) {
   const includeCommunityId = options.includeCommunityId !== false;
   const cacheShape = includeCommunityId ? 'full' : 'lite';
   const cacheKey = `msg_target:${cacheShape}:${messageId}:${userId}`;
   const preferCache = options.preferCache === true;
+  const targetLookupReadDiagnostics = buildMessageTargetLookupReadDiagnostics(
+    messageId,
+    userId,
+    options,
+  );
 
   const cachedPromise = MSG_TARGET_CACHE_TTL_SECS > 0
     ? readScopedVersionedJsonCache({
@@ -194,6 +240,7 @@ async function loadMessageTargetForUser(messageId, userId, options: {
       messageId,
       userId,
       includeCommunityId,
+      targetLookupReadDiagnostics,
     );
     if (row && row.has_access && MSG_TARGET_CACHE_TTL_SECS > 0) {
       const scope = rowAccessScope(row);
@@ -214,6 +261,7 @@ async function loadMessageTargetForUser(messageId, userId, options: {
     messageId,
     userId,
     includeCommunityId,
+    targetLookupReadDiagnostics,
   );
 
   // Concurrent race: resolve as soon as either gives us a definitive "yes" (with access).
