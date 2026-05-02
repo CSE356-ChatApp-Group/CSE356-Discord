@@ -882,7 +882,7 @@ groups:
             clamp_min(sum(rate(message_post_response_total{job="chatapp-api"}[5m])), 0.01)
           ) > 0.05
           or sum(rate(side_effect_job_duration_ms_count{job="chatapp-api",queue="fanout:critical",status="error"}[5m])) > 1
-          or sum(rate(side_effect_queue_dropped_total{job="chatapp-api",queue=~"fanout:critical|fanout:background"}[5m])) > 0
+          or sum(rate(side_effect_queue_dropped_total{job="chatapp-api",queue=~"fanout:critical|fanout:background|fanout:read_receipt"}[5m])) > 0
         for: 10m
         labels:
           severity: warning

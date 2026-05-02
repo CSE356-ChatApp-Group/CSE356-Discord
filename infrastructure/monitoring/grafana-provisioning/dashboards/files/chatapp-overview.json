@@ -841,7 +841,7 @@
           "refId": "A"
         }
       ],
-      "title": "fanout:critical queue wait p95 (ms) \u2014 delayed read:updated WS",
+      "title": "fanout:critical queue wait p95 (ms) \u2014 message POST fanout / pointers (read receipt WS uses fanout:read_receipt)",
       "type": "timeseries"
     },
     {

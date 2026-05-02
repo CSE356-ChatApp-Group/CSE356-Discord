@@ -74,6 +74,9 @@ function buildCapacityCore(
     fanout_background_depth: sideEffects.background.depth,
     fanout_background_workers: sideEffects.background.active_workers,
     fanout_background_max_depth: sideEffects.background.max_depth,
+    fanout_read_receipt_depth: sideEffects.read_receipt.depth,
+    fanout_read_receipt_workers: sideEffects.read_receipt.active_workers,
+    fanout_read_receipt_max_depth: sideEffects.read_receipt.max_depth,
     redis_ping_ms: redisPingMs,
   };
 }

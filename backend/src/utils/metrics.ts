@@ -305,6 +305,7 @@ const overloadStageGauge = new client.Gauge({
     deliveryTimeoutTotal.inc({ phase: 'cache_bust' }, 0);
     fanoutQueueDepth.set({ queue: 'fanout:critical' }, 0);
     fanoutQueueDepth.set({ queue: 'fanout:background' }, 0);
+    fanoutQueueDepth.set({ queue: 'fanout:read_receipt' }, 0);
     fanoutQueueDepth.set({ queue: 'fanout:all' }, 0);
     messagePostIdempotencyPollTotal.inc({ outcome: 'replay_201' }, 0);
     messagePostIdempotencyPollTotal.inc({ outcome: 'exhausted_409' }, 0);

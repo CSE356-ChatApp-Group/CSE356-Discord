@@ -17,6 +17,8 @@ const {
 const queues: Record<string, Array<{ name: string; fn: () => Promise<void>; enqueuedAt: number; queueName: string; otelCtx: any }>> = {
   'fanout:critical': [],
   'fanout:background': [],
+  /** Channel read-receipt WS fanout only — lower priority than message:created (see queueNameForJob). */
+  'fanout:read_receipt': [],
 };
 const rawFanoutConcurrency = Number(process.env.FANOUT_QUEUE_CONCURRENCY || 4);
 const FANOUT_QUEUE_CONCURRENCY = Number.isFinite(rawFanoutConcurrency) && rawFanoutConcurrency > 0
@@ -30,6 +32,7 @@ const FANOUT_CRITICAL_MAX_DEPTH =
 const activeWorkers: Record<string, number> = {
   'fanout:critical': 0,
   'fanout:background': 0,
+  'fanout:read_receipt': 0,
 };
 
 let _fanoutYieldParsed = parseInt(String(process.env.FANOUT_QUEUE_YIELD_EVERY ?? '6'), 10);
@@ -38,20 +41,24 @@ const FANOUT_QUEUE_YIELD_EVERY =
   _fanoutYieldParsed <= 0 ? 0 : Math.min(256, Math.floor(_fanoutYieldParsed));
 
 function queueNameForJob(name: string): string {
-  // Background fanout jobs are explicitly tagged; everything else is critical.
+  // Background fanout jobs are explicitly tagged.
   if (name.startsWith('fanout:background.')) return 'fanout:background';
+  // Channel read receipt realtime fanout — must not compete with message:created on fanout:critical.
+  if (name === 'fanout.read_receipt') return 'fanout:read_receipt';
   return 'fanout:critical';
 }
 
 function queueConfig(queueName) {
-  if (queueName === 'fanout:background') {
+  if (queueName === 'fanout:background' || queueName === 'fanout:read_receipt') {
     return {
       concurrency: 2,
       maxDepth: 10_000,
       dropOnOverflow: true,
     };
   }
-  // fanout:critical — message and read-state delivery. Concurrency > 1 is safe
+  // fanout:critical — message POST fanout, last_message.* pointers, fanout.publish, etc.
+  // (Channel read receipt WS fanout uses fanout:read_receipt instead.)
+  // Concurrency > 1 is safe
   // because each publish is an independent Redis call; within-channel ordering
   // is best-effort across the cluster anyway (multiple API nodes publish
   // concurrently).  Higher concurrency reduces queue build-up under burst load.
@@ -67,9 +74,11 @@ function refreshQueueMetrics(queueName) {
   sideEffectQueueActiveWorkers.set({ queue: queueName }, activeWorkers[queueName]);
   const critDepth = queues['fanout:critical'].length;
   const bgDepth = queues['fanout:background'].length;
+  const rrDepth = queues['fanout:read_receipt'].length;
   fanoutQueueDepth.set({ queue: 'fanout:critical' }, critDepth);
   fanoutQueueDepth.set({ queue: 'fanout:background' }, bgDepth);
-  fanoutQueueDepth.set({ queue: 'fanout:all' }, critDepth + bgDepth);
+  fanoutQueueDepth.set({ queue: 'fanout:read_receipt' }, rrDepth);
+  fanoutQueueDepth.set({ queue: 'fanout:all' }, critDepth + bgDepth + rrDepth);
 }
 
 function maybeStartWorkers(queueName) {
@@ -94,7 +103,7 @@ function enqueue(name, fn) {
       { sideEffect: name, queue: queueName, queueDepth: queue.length, maxQueueDepth: maxDepth },
       queueName === 'fanout:critical'
         ? 'Dropping fanout:critical side-effect (WS delivery may be missed for this event)'
-        : 'Dropping async side-effect due to queue pressure'
+        : 'Dropping lower-priority side-effect due to queue pressure'
     );
     return false;
   }
@@ -169,6 +178,7 @@ async function drainWorker(queueName) {
 
 refreshQueueMetrics('fanout:critical');
 refreshQueueMetrics('fanout:background');
+refreshQueueMetrics('fanout:read_receipt');
 
 function publishMessageEvent(target, event, data) {
   enqueue('fanout.publish', async () => {
@@ -217,7 +227,11 @@ function deleteAttachmentObjects(storageKeys: string[]) {
 }
 
 function getQueueDepth() {
-  return queues['fanout:critical'].length + queues['fanout:background'].length;
+  return (
+    queues['fanout:critical'].length +
+    queues['fanout:background'].length +
+    queues['fanout:read_receipt'].length
+  );
 }
 
 function getQueueStats() {
@@ -233,6 +247,12 @@ function getQueueStats() {
       active_workers: activeWorkers['fanout:background'],
       concurrency: queueConfig('fanout:background').concurrency,
       max_depth: queueConfig('fanout:background').maxDepth,
+    },
+    read_receipt: {
+      depth: queues['fanout:read_receipt'].length,
+      active_workers: activeWorkers['fanout:read_receipt'],
+      concurrency: queueConfig('fanout:read_receipt').concurrency,
+      max_depth: queueConfig('fanout:read_receipt').maxDepth,
     },
   };
 }
@@ -270,4 +290,6 @@ module.exports = {
   getQueueStats,
   enqueueFanoutJob,
   drainAllQueuesForTests,
+  /** Which physical queue a job name maps to (tests + manual diagnostics). */
+  routeFanoutQueueForJobName: queueNameForJob,
 };
