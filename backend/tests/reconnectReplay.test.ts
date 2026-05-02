@@ -27,17 +27,23 @@ jest.mock('../src/db/redis', () => {
       }
       return row.val;
     }),
-    set: jest.fn(async (key: string, val: string, _mode: string, ttlSec: string | number) => {
-      const ttl = typeof ttlSec === 'string' ? parseInt(ttlSec, 10) : ttlSec;
-      store.set(key, { val, exp: Date.now() + Number(ttl) * 1000 });
+    set: jest.fn(async (key: string, val: string, mode: string, ttlRaw: string | number) => {
+      const ttl = typeof ttlRaw === 'string' ? parseInt(ttlRaw, 10) : ttlRaw;
+      const normalizedMode = String(mode || '').toUpperCase();
+      const ttlMs = normalizedMode === 'PX' ? Number(ttl) : Number(ttl) * 1000;
+      store.set(key, { val, exp: Date.now() + ttlMs });
       return 'OK';
+    }),
+    del: jest.fn(async (key: string) => {
+      store.delete(key);
+      return 1;
     }),
   };
   (globalThis as unknown as { __wsReplayRedisTestHarness: { store: typeof store; clear: () => void } }).__wsReplayRedisTestHarness = {
     store,
     clear: () => store.clear(),
   };
-  return { __esModule: true, default: api };
+  return { __esModule: true, default: api, ...api };
 });
 
 jest.mock('../src/utils/metrics', () => ({
@@ -49,6 +55,9 @@ jest.mock('../src/utils/metrics', () => ({
   wsReplayCachedTotal: { inc: jest.fn() },
   wsReplayDbQueryTotal: { inc: jest.fn() },
   wsReplayStartedTotal: { inc: jest.fn() },
+  wsReplayDegradedTotal: { inc: jest.fn() },
+  wsReplaySkippedTotal: { inc: jest.fn() },
+  wsReplayDbTimeoutTotal: { inc: jest.fn() },
   messageChannelInsertLockPressureWaitP95MsGauge: { set: jest.fn() },
   messageChannelInsertLockPressureRecentTimeoutsGauge: { set: jest.fn() },
 }));
@@ -60,10 +69,14 @@ const metrics = require('../src/utils/metrics') as {
   wsReplayQueryTotal: { inc: jest.Mock };
   wsReplayQueryDurationMs: { observe: jest.Mock };
   wsReplayErrorClassTotal: { inc: jest.Mock };
+  wsReplayFailOpenTotal: { inc: jest.Mock };
   wsReplayDedupedTotal: { inc: jest.Mock };
   wsReplayCachedTotal: { inc: jest.Mock };
   wsReplayDbQueryTotal: { inc: jest.Mock };
   wsReplayStartedTotal: { inc: jest.Mock };
+  wsReplayDegradedTotal: { inc: jest.Mock };
+  wsReplaySkippedTotal: { inc: jest.Mock };
+  wsReplayDbTimeoutTotal: { inc: jest.Mock };
 };
 
 function redisTestHarness() {
@@ -188,6 +201,56 @@ describe('reconnectReplay bounds', () => {
       }),
       'WS reconnect replay skipped after bounded DB failure',
     );
+  });
+
+  it('activates degraded mode after repeated replay DB timeouts and skips DB replay work', async () => {
+    withTransaction.mockRejectedValue(
+      Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }),
+    );
+
+    await loadReplayableMessagesForUser('user-a', 1000, 5000);
+    await loadReplayableMessagesForUser('user-b', 1000, 5000);
+    await loadReplayableMessagesForUser('user-c', 1000, 5000);
+    const txCallsBeforeSkip = withTransaction.mock.calls.length;
+    const rows = await loadReplayableMessagesForUser('user-d', 1000, 5000);
+
+    expect(rows).toEqual([]);
+    expect(withTransaction.mock.calls.length).toBe(txCallsBeforeSkip);
+    expect(metrics.wsReplayFailOpenTotal.inc).toHaveBeenCalledWith({ reason: 'db_pressure' });
+    expect(metrics.wsReplaySkippedTotal.inc).toHaveBeenCalledWith({ reason: 'db_pressure' });
+    expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'skipped' });
+    expect(metrics.wsReplayDegradedTotal.inc).toHaveBeenCalledWith({ reason: 'db_pressure' });
+    expect(metrics.wsReplayDbTimeoutTotal.inc).toHaveBeenCalled();
+  });
+
+  it('expires degraded mode and resumes replay DB query path', async () => {
+    withTransaction.mockRejectedValue(
+      Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }),
+    );
+    await loadReplayableMessagesForUser('resume-a', 1000, 5000);
+    await loadReplayableMessagesForUser('resume-b', 1000, 5000);
+    await loadReplayableMessagesForUser('resume-c', 1000, 5000);
+
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+    try {
+      jest.clearAllMocks();
+      withTransaction.mockImplementation(async (run: (client: { query: jest.Mock }) => Promise<any[]>) => {
+        const client = {
+          query: jest
+            .fn()
+            .mockResolvedValueOnce({})
+            .mockResolvedValueOnce({ rows: [{ id: 'after-expiry' }] }),
+        };
+        return run(client);
+      });
+
+      const rows = await loadReplayableMessagesForUser('resume-d', 1000, 5000);
+      expect(rows).toEqual([{ id: 'after-expiry' }]);
+      expect(withTransaction).toHaveBeenCalledTimes(1);
+      expect(metrics.wsReplayQueryTotal.inc).toHaveBeenCalledWith({ result: 'ok' });
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
 

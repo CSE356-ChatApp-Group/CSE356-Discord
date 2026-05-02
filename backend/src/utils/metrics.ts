@@ -81,6 +81,9 @@ const {
   wsUpgradeRateLimitedTotal,
   wsReplayFailOpenTotal,
   wsReplayStartedTotal,
+  wsReplayDegradedTotal,
+  wsReplaySkippedTotal,
+  wsReplayDbTimeoutTotal,
   wsReplayConcurrentGauge,
   wsReplaySemaphoreCapGauge,
   abuseBlockedSubnetTotal,
@@ -547,7 +550,12 @@ const overloadStageGauge = new client.Gauge({
     wsReplayFailOpenTotal.inc({ reason: 'per_socket' }, 0);
     wsReplayFailOpenTotal.inc({ reason: 'global_concurrency' }, 0);
     wsReplayFailOpenTotal.inc({ reason: 'insert_lock_pressure' }, 0);
+    wsReplayFailOpenTotal.inc({ reason: 'db_pressure' }, 0);
     wsReplayStartedTotal.inc(0);
+    wsReplayDegradedTotal.inc({ reason: 'db_pressure' }, 0);
+    wsReplaySkippedTotal.inc({ reason: 'db_pressure' }, 0);
+    wsReplaySkippedTotal.inc({ reason: 'global_concurrency' }, 0);
+    wsReplayDbTimeoutTotal.inc(0);
     wsReliableDeliveryTotal.inc({ path: 'realtime', source: 'live_pubsub' }, 0);
     wsReliableDeliveryTotal.inc({ path: 'replay', source: 'missed_db' }, 0);
     wsReliableDeliveryTotal.inc({ path: 'replay', source: 'pending_queue' }, 0);
@@ -800,6 +808,9 @@ module.exports = {
   wsUpgradeRateLimitedTotal,
   wsReplayFailOpenTotal,
   wsReplayStartedTotal,
+  wsReplayDegradedTotal,
+  wsReplaySkippedTotal,
+  wsReplayDbTimeoutTotal,
   wsReplayConcurrentGauge,
   wsReplaySemaphoreCapGauge,
   abuseBlockedSubnetTotal,

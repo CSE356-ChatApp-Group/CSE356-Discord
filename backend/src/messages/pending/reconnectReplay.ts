@@ -12,6 +12,9 @@ const {
   wsReplayDbQueryTotal,
   wsReplayStartedTotal,
   wsReplayErrorClassTotal,
+  wsReplayDegradedTotal,
+  wsReplaySkippedTotal,
+  wsReplayDbTimeoutTotal,
 } = require('../../utils/metrics');
 import { MESSAGE_SELECT_FIELDS, MESSAGE_AUTHOR_JSON } from '../sqlFragments';
 
@@ -75,6 +78,65 @@ const WS_REPLAY_DB_MAX_GLOBAL =
     ? Math.min(32, Math.floor(rawReplayDbMaxGlobal))
     : 2;
 
+function parseReplayDbPressureProtectionEnabled(): boolean {
+  const raw = process.env.WS_REPLAY_DB_PRESSURE_PROTECTION_ENABLED;
+  if (raw === undefined || raw === '') return true;
+  const normalized = String(raw).trim().toLowerCase();
+  return normalized !== '0' && normalized !== 'false' && normalized !== 'off' && normalized !== 'no';
+}
+
+const WS_REPLAY_DB_PRESSURE_PROTECTION_ENABLED = parseReplayDbPressureProtectionEnabled();
+
+const rawReplayDbPressureTtlMs = Number(process.env.WS_REPLAY_DB_PRESSURE_TTL_MS || '45000');
+const WS_REPLAY_DB_PRESSURE_TTL_MS =
+  Number.isFinite(rawReplayDbPressureTtlMs)
+    ? Math.min(60000, Math.max(30000, Math.floor(rawReplayDbPressureTtlMs)))
+    : 45000;
+
+const rawReplayDbPressurePollMs = Number(process.env.WS_REPLAY_DB_PRESSURE_POLL_MS || '500');
+const WS_REPLAY_DB_PRESSURE_POLL_MS =
+  Number.isFinite(rawReplayDbPressurePollMs)
+    ? Math.min(2000, Math.max(250, Math.floor(rawReplayDbPressurePollMs)))
+    : 500;
+
+const rawReplayDbTimeoutWindowMs = Number(process.env.WS_REPLAY_DB_TIMEOUT_WINDOW_MS || '10000');
+const WS_REPLAY_DB_TIMEOUT_WINDOW_MS =
+  Number.isFinite(rawReplayDbTimeoutWindowMs)
+    ? Math.min(60000, Math.max(2000, Math.floor(rawReplayDbTimeoutWindowMs)))
+    : 10000;
+
+const rawReplayDbTimeoutThreshold = Number(process.env.WS_REPLAY_DB_TIMEOUT_THRESHOLD || '3');
+const WS_REPLAY_DB_TIMEOUT_THRESHOLD =
+  Number.isFinite(rawReplayDbTimeoutThreshold)
+    ? Math.min(25, Math.max(1, Math.floor(rawReplayDbTimeoutThreshold)))
+    : 3;
+
+const rawReplayDbQueuePressureWindowMs = Number(
+  process.env.WS_REPLAY_DB_QUEUE_PRESSURE_WINDOW_MS || '5000',
+);
+const WS_REPLAY_DB_QUEUE_PRESSURE_WINDOW_MS =
+  Number.isFinite(rawReplayDbQueuePressureWindowMs)
+    ? Math.min(30000, Math.max(1000, Math.floor(rawReplayDbQueuePressureWindowMs)))
+    : 5000;
+
+const rawReplayDbQueuePressureThreshold = Number(
+  process.env.WS_REPLAY_DB_QUEUE_PRESSURE_THRESHOLD || '4',
+);
+const WS_REPLAY_DB_QUEUE_PRESSURE_THRESHOLD =
+  Number.isFinite(rawReplayDbQueuePressureThreshold)
+    ? Math.min(50, Math.max(1, Math.floor(rawReplayDbQueuePressureThreshold)))
+    : 4;
+
+const rawReplayDbDegradedMaxInFlight = Number(
+  process.env.WS_REPLAY_DB_DEGRADED_MAX_IN_FLIGHT || '1',
+);
+const WS_REPLAY_DB_DEGRADED_MAX_IN_FLIGHT =
+  Number.isFinite(rawReplayDbDegradedMaxInFlight) && rawReplayDbDegradedMaxInFlight >= 1
+    ? Math.min(WS_REPLAY_DB_MAX_GLOBAL, Math.floor(rawReplayDbDegradedMaxInFlight))
+    : 1;
+
+const REPLAY_DB_PRESSURE_REDIS_KEY = 'health:ws_replay_db_pressure';
+
 const rawReplayDedupTtlSec = Number(process.env.WS_REPLAY_DEDUP_TTL_SEC || '3');
 const WS_REPLAY_DEDUP_TTL_SEC =
   Number.isFinite(rawReplayDedupTtlSec) && rawReplayDedupTtlSec >= 2 && rawReplayDedupTtlSec <= 5
@@ -93,6 +155,11 @@ const WS_REPLAY_ERROR_LOG_SAMPLE_RATE =
 const WS_MESSAGE_REPLAY_MAX_CONCURRENT = WS_REPLAY_DB_MAX_GLOBAL;
 
 let replayDbInFlight = 0;
+let replayDbPressureUntilMs = 0;
+let replayDbPressureGlobalCached = false;
+let replayDbPressureLastPollMs = 0;
+const recentReplayDbTimeoutSignals = [];
+const recentReplayDbQueuePressureSignals = [];
 
 /** In-process fallback when Redis is unavailable (same worker only). */
 const replayDedupeMem = new Map();
@@ -206,6 +273,80 @@ async function writeReplayResultCache(userId, cursor, rows) {
 function resetReplayDedupeMemForTests() {
   replayDedupeMem.clear();
   replayResultMem.clear();
+  replayDbPressureUntilMs = 0;
+  replayDbPressureGlobalCached = false;
+  replayDbPressureLastPollMs = 0;
+  recentReplayDbTimeoutSignals.length = 0;
+  recentReplayDbQueuePressureSignals.length = 0;
+  void redis.del(REPLAY_DB_PRESSURE_REDIS_KEY).catch(() => {});
+}
+
+function trimWindowSignals(list, nowMs, windowMs) {
+  while (list.length && nowMs - list[0] > windowMs) list.shift();
+}
+
+function isReplayDbPressureDegradedLocal(nowMs = Date.now()) {
+  return nowMs < replayDbPressureUntilMs;
+}
+
+function isReplayDbPressureDegraded(nowMs = Date.now()) {
+  if (!WS_REPLAY_DB_PRESSURE_PROTECTION_ENABLED) return false;
+  if (isReplayDbPressureDegradedLocal(nowMs)) return true;
+  return replayDbPressureGlobalCached;
+}
+
+function markReplayDbPressureDegraded(reason = 'db_pressure') {
+  if (!WS_REPLAY_DB_PRESSURE_PROTECTION_ENABLED) return;
+  const now = Date.now();
+  const wasDegraded = isReplayDbPressureDegraded(now);
+  replayDbPressureUntilMs = Math.max(replayDbPressureUntilMs, now + WS_REPLAY_DB_PRESSURE_TTL_MS);
+  replayDbPressureGlobalCached = true;
+  if (!wasDegraded) {
+    wsReplayDegradedTotal.inc({ reason });
+  }
+  void redis.set(REPLAY_DB_PRESSURE_REDIS_KEY, '1', 'PX', WS_REPLAY_DB_PRESSURE_TTL_MS).catch(() => {
+    // fail open: pressure signal is best-effort
+  });
+}
+
+function recordReplayDbTimeoutSignal() {
+  if (!WS_REPLAY_DB_PRESSURE_PROTECTION_ENABLED) return;
+  const now = Date.now();
+  recentReplayDbTimeoutSignals.push(now);
+  trimWindowSignals(recentReplayDbTimeoutSignals, now, WS_REPLAY_DB_TIMEOUT_WINDOW_MS);
+  if (recentReplayDbTimeoutSignals.length >= WS_REPLAY_DB_TIMEOUT_THRESHOLD) {
+    markReplayDbPressureDegraded('db_pressure');
+  }
+}
+
+function recordReplayDbQueuePressureSignal() {
+  if (!WS_REPLAY_DB_PRESSURE_PROTECTION_ENABLED) return;
+  const now = Date.now();
+  recentReplayDbQueuePressureSignals.push(now);
+  trimWindowSignals(recentReplayDbQueuePressureSignals, now, WS_REPLAY_DB_QUEUE_PRESSURE_WINDOW_MS);
+  if (recentReplayDbQueuePressureSignals.length >= WS_REPLAY_DB_QUEUE_PRESSURE_THRESHOLD) {
+    markReplayDbPressureDegraded('db_pressure');
+  }
+}
+
+async function refreshReplayDbPressureGlobalCacheIfNeeded(force = false) {
+  if (!WS_REPLAY_DB_PRESSURE_PROTECTION_ENABLED) return;
+  const now = Date.now();
+  if (!force && now - replayDbPressureLastPollMs < WS_REPLAY_DB_PRESSURE_POLL_MS) return;
+  replayDbPressureLastPollMs = now;
+  try {
+    const v = await redis.get(REPLAY_DB_PRESSURE_REDIS_KEY);
+    replayDbPressureGlobalCached = v != null && v !== '';
+  } catch {
+    replayDbPressureGlobalCached = false;
+  }
+}
+
+function getEffectiveReplayDbMaxInFlight() {
+  if (isReplayDbPressureDegraded()) {
+    return Math.max(1, WS_REPLAY_DB_DEGRADED_MAX_IN_FLIGHT);
+  }
+  return WS_REPLAY_DB_MAX_GLOBAL;
 }
 
 function replayQueryProfile(gapMs, stage = overload.getStage(), closeCode?: number) {
@@ -305,12 +446,24 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
     return cachedRows;
   }
 
-  if (replayDbInFlight >= WS_REPLAY_DB_MAX_GLOBAL) {
+  await refreshReplayDbPressureGlobalCacheIfNeeded();
+  if (isReplayDbPressureDegraded()) {
+    wsReplayFailOpenTotal.inc({ reason: 'db_pressure' });
+    wsReplaySkippedTotal.inc({ reason: 'db_pressure' });
+    wsReplayQueryTotal.inc({ result: 'skipped' });
+    wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
+    return [];
+  }
+
+  const effectiveMaxInFlight = getEffectiveReplayDbMaxInFlight();
+  if (replayDbInFlight >= effectiveMaxInFlight) {
+    recordReplayDbQueuePressureSignal();
     wsReplayFailOpenTotal.inc({ reason: 'global_concurrency' });
+    wsReplaySkippedTotal.inc({ reason: 'global_concurrency' });
     wsReplayQueryTotal.inc({ result: 'skipped' });
     wsReplayQueryDurationMs.observe({ result: 'skipped' }, 0);
     logger.warn(
-      { userId, gapMs, inFlight: replayDbInFlight, max: WS_REPLAY_DB_MAX_GLOBAL },
+      { userId, gapMs, inFlight: replayDbInFlight, max: effectiveMaxInFlight },
       'WS reconnect replay skipped: global DB concurrency cap',
     );
     return [];
@@ -439,6 +592,10 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
       const kind = classifyReplayError(err);
       wsReplayErrorClassTotal.inc({ error_class: kind });
       if (kind === 'timeout' || kind === 'pool_busy') {
+        if (kind === 'timeout') {
+          wsReplayDbTimeoutTotal.inc();
+        }
+        recordReplayDbTimeoutSignal();
         wsReplayQueryTotal.inc({ result: kind });
         wsReplayQueryDurationMs.observe({ result: kind }, Date.now() - startedAt);
         if (shouldSampleReplayErrorLog()) {
@@ -520,6 +677,7 @@ module.exports = {
   replayQueryProfile,
   classifyReplayError,
   resetReplayDedupeMemForTests,
+  REPLAY_DB_PRESSURE_REDIS_KEY,
   WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
   WS_MESSAGE_REPLAY_LIMIT,
   WS_MESSAGE_REPLAY_MAX_WINDOW_MS,

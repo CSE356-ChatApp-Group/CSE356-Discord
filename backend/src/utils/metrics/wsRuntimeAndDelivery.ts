@@ -36,6 +36,26 @@ const wsReplayStartedTotal = new client.Counter({
   help: 'WS reconnect replay DB loads started',
 });
 
+/** Replay protection entered temporary degraded mode due to DB pressure. */
+const wsReplayDegradedTotal = new client.Counter({
+  name: 'ws_replay_degraded_total',
+  help: 'WS reconnect replay entered degraded mode due to DB pressure signals',
+  labelNames: ['reason'],
+});
+
+/** Replay skipped for pressure/control reasons before running DB query. */
+const wsReplaySkippedTotal = new client.Counter({
+  name: 'ws_replay_skipped_total',
+  help: 'WS reconnect replay skipped before DB query due to pressure controls',
+  labelNames: ['reason'],
+});
+
+/** Replay DB timeout signals observed (input for degraded-mode activation). */
+const wsReplayDbTimeoutTotal = new client.Counter({
+  name: 'ws_replay_db_timeout_total',
+  help: 'WS reconnect replay DB timeouts observed while loading missed messages',
+});
+
 /** Current reconnect replay DB loads in flight on this process. */
 const wsReplayConcurrentGauge = new client.Gauge({
   name: 'chatapp_ws_replay_inflight',
@@ -447,6 +467,9 @@ module.exports = {
   wsUpgradeRateLimitedTotal,
   wsReplayFailOpenTotal,
   wsReplayStartedTotal,
+  wsReplayDegradedTotal,
+  wsReplaySkippedTotal,
+  wsReplayDbTimeoutTotal,
   wsReplayConcurrentGauge,
   wsReplaySemaphoreCapGauge,
   abuseBlockedSubnetTotal,
