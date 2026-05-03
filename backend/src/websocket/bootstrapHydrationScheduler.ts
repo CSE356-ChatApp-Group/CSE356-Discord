@@ -42,6 +42,7 @@ const HYDRATION_BATCH_INTERVAL_MS = parseIntEnv('WS_BOOTSTRAP_HYDRATION_BATCH_IN
 const HYDRATION_JITTER_MAX_MS = parseIntEnv('WS_BOOTSTRAP_HYDRATION_JITTER_MAX_MS', 100, 0, 500);
 const COALESCE_WINDOW_MS = parseIntEnv('WS_BOOTSTRAP_COALESCE_WINDOW_MS', 5000, 1000, 30000);
 const LIVE_FANOUT_YIELD_MS = parseIntEnv('WS_BOOTSTRAP_LIVE_FANOUT_YIELD_MS', 20, 5, 200);
+const LIVE_FANOUT_MAX_YIELDS = parseIntEnv('WS_BOOTSTRAP_MAX_FANOUT_YIELDS', 10, 1, 200);
 const PROTECTION_ENABLED = parseBoolEnv('WS_BOOTSTRAP_STORM_PROTECTION_ENABLED', true);
 
 function createBootstrapHydrationScheduler(metrics: {
@@ -148,9 +149,11 @@ function createBootstrapHydrationScheduler(metrics: {
   }
 
   async function waitForLiveFanoutQuiet(): Promise<void> {
-    while (PROTECTION_ENABLED && isLiveFanoutActive()) {
+    let yields = 0;
+    while (PROTECTION_ENABLED && isLiveFanoutActive() && yields < LIVE_FANOUT_MAX_YIELDS) {
       metricInc(metrics.wsBootstrapPausedForLiveFanoutTotal);
       await sleep(LIVE_FANOUT_YIELD_MS);
+      yields++;
     }
   }
 
