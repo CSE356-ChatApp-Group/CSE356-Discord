@@ -1,10 +1,11 @@
 /**
  * Channel message fanout — publish to `channel:<id>` (primary path for scale),
- * then optionally duplicate to each visible member's `user:<id>` (grading / legacy).
+ * then optionally bridge only active/recent users to `user:<id>` during bootstrap.
  */
 
 
 const redis = require('../../db/redis');
+const { query } = require('../../db/pool');
 const fanout = require('../../websocket/fanout');
 const { tracer, trace } = require('../../utils/tracer');
 const { SpanStatusCode } = require('@opentelemetry/api');
@@ -30,6 +31,7 @@ const {
   channelRecentZsetEnabled,
   WS_RECENT_CONNECT_TTL_SECONDS,
 } = require('../../websocket/recentConnect');
+const { connectedUsersKey } = require('../../websocket/presenceKeys');
 const {
   resolveRecentConnectTargets,
   invalidateRecentConnectTargetsCache,
@@ -40,11 +42,21 @@ const {
   fanoutPublishDurationMs,
   fanoutPublishTargetsHistogram,
   fanoutTargetCandidatesHistogram,
+  wsActiveSubscriberTargetsBucket,
+  wsFanoutCandidateCountBucket,
+  wsFanoutActiveTargetHitTotal,
+  wsFanoutActiveTargetMissTotal,
+  wsFanoutRecoveryAsyncTotal,
+  wsRecipientDuplicateCandidatesTotal,
   channelMessageFanoutRecipientTotal,
   realtimeMissAttributionTotal,
+  wsTargetLookupDurationMs,
 } = require('../../utils/metrics');
+const { getWorkerLabels } = require('../../websocket/deliveryTrace');
 
 const {
+  CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK,
+  CHANNEL_MESSAGE_RECENT_CONNECT_FALLBACK_PROBE_MAX,
   CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
   CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST,
   MESSAGE_USER_FANOUT_HTTP_BLOCKING,
@@ -78,7 +90,152 @@ async function publishUserTopicTargets(
   });
 }
 
-async function resolveUserTopicTargets(channelId: string) {
+function isChannelMessageLiveEvent(envelope: Record<string, unknown>) {
+  return typeof envelope?.event === 'string' && envelope.event.startsWith('message:');
+}
+
+async function resolveRecentChannelUserTargets(channelId: string, cap: number) {
+  if (!channelRecentZsetEnabled()) {
+    return [];
+  }
+  const since = Date.now() - WS_RECENT_CONNECT_TTL_SECONDS * 1000;
+  const recentUserIds = await redis.zrangebyscore(
+    channelRecentConnectKey(channelId),
+    since,
+    '+inf',
+  );
+  return Array.from(
+    new Set(
+      (Array.isArray(recentUserIds) ? recentUserIds : [])
+        .filter((userId) => typeof userId === 'string' && userId.length > 0)
+        .slice(0, cap)
+        .map((userId) => `user:${userId}`),
+    ),
+  );
+}
+
+async function resolveActiveConnectedChannelUserTargets(
+  channelId: string,
+  alreadyTargeted: Set<string>,
+) {
+  if (!CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK) {
+    return [];
+  }
+
+  let connectedUserIds: string[] = [];
+  try {
+    const raw = await redis.smembers(connectedUsersKey());
+    connectedUserIds = (Array.isArray(raw) ? raw : [])
+      .filter((userId) => typeof userId === 'string' && userId.length > 0)
+      .filter((userId) => !alreadyTargeted.has(`user:${userId}`))
+      .slice(0, CHANNEL_MESSAGE_RECENT_CONNECT_FALLBACK_PROBE_MAX);
+  } catch (err) {
+    wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'active_connected_lookup_failed' });
+    logger.warn({ err, channelId }, 'Failed to load active connected users for channel message bridge');
+    return [];
+  }
+
+  if (!connectedUserIds.length) {
+    return [];
+  }
+
+  try {
+    const result = await query(
+      `
+        SELECT DISTINCT cm.user_id::text AS user_id
+        FROM channels c
+        JOIN community_members cm
+          ON cm.community_id = c.community_id
+        LEFT JOIN channel_members chm
+          ON chm.channel_id = c.id
+         AND chm.user_id = cm.user_id
+        WHERE c.id = $1
+          AND cm.user_id::text = ANY($2::text[])
+          AND (c.is_private = FALSE OR chm.user_id IS NOT NULL)
+      `,
+      [channelId, connectedUserIds],
+    );
+    return (result.rows || [])
+      .map((row) => row.user_id)
+      .filter((userId) => typeof userId === 'string' && userId.length > 0)
+      .map((userId) => `user:${userId}`);
+  } catch (err) {
+    wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'active_connected_membership_lookup_failed' });
+    logger.warn(
+      { err, channelId, connectedUserCount: connectedUserIds.length },
+      'Failed to filter active connected users by channel membership',
+    );
+    return [];
+  }
+}
+
+async function resolveActiveChannelMessageTargets(channelId: string) {
+  const startedAt = process.hrtime.bigint();
+  const recentTargets = await resolveRecentChannelUserTargets(
+    channelId,
+    CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
+  ).catch((err) => {
+    wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'recent_connect_lookup_failed' });
+    logger.warn({ err, channelId }, 'Failed to resolve recent channel message bridge targets');
+    return [];
+  });
+  const targetSet = new Set(recentTargets);
+  const activeConnectedTargets = await resolveActiveConnectedChannelUserTargets(channelId, targetSet);
+  for (const target of activeConnectedTargets) targetSet.add(target);
+  const activeTargets = [...targetSet];
+  const duplicateCandidateCount = recentTargets.length + activeConnectedTargets.length - activeTargets.length;
+  if (duplicateCandidateCount > 0) {
+    wsRecipientDuplicateCandidatesTotal?.inc?.(
+      { path: 'channel_message_active_subscribers' },
+      duplicateCandidateCount,
+    );
+  }
+
+  const activeTargetLookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  fanoutPublishDurationMs.observe(
+    { path: 'channel_message_active_subscribers', stage: 'target_lookup' },
+    activeTargetLookupMs,
+  );
+  const _wl = getWorkerLabels();
+  wsTargetLookupDurationMs?.observe?.(
+    { path: 'channel_message_active_subscribers', result: 'miss', vm: _wl.vm, worker: _wl.worker },
+    activeTargetLookupMs,
+  );
+  fanoutTargetCandidatesHistogram.observe(
+    { path: 'channel_message_active_subscribers' },
+    activeTargets.length + 1,
+  );
+  wsFanoutCandidateCountBucket?.observe?.(
+    { path: 'channel_message_active_subscribers' },
+    activeTargets.length + 1,
+  );
+  wsActiveSubscriberTargetsBucket?.observe?.(
+    { path: 'channel_message_active_subscribers' },
+    activeTargets.length,
+  );
+  if (activeTargets.length > 0) {
+    wsFanoutActiveTargetHitTotal?.inc?.(
+      { path: 'channel_message_active_subscribers' },
+      activeTargets.length,
+    );
+  } else {
+    wsFanoutActiveTargetMissTotal?.inc?.({ path: 'channel_message_active_subscribers' });
+  }
+  fanoutPublishDurationMs.observe(
+    { path: 'channel_message_user_topics', stage: 'total' },
+    Number(process.hrtime.bigint() - startedAt) / 1e6,
+  );
+
+  return {
+    allTargets: activeTargets,
+    recentTargets: activeTargets,
+    candidateCount: activeTargets.length + 1,
+    cacheResult: 'miss' as const,
+    pendingEnqueueTargets: activeTargets,
+  };
+}
+
+async function resolveUserTopicTargets(channelId: string, envelope: Record<string, unknown>) {
   if (!channelMessageUserFanoutEnabled()) {
     return {
       allTargets: [],
@@ -87,6 +244,10 @@ async function resolveUserTopicTargets(channelId: string) {
       cacheResult: 'miss' as const,
       pendingEnqueueTargets: [] as string[],
     };
+  }
+
+  if (isChannelMessageLiveEvent(envelope)) {
+    return resolveActiveChannelMessageTargets(channelId);
   }
 
   const mode = resolveChannelUserFanoutMode();
@@ -108,9 +269,15 @@ async function resolveUserTopicTargets(channelId: string) {
     }
   });
   const targets = targetLookup.targets;
+  const userTopicLookupMs = Number(process.hrtime.bigint() - lookupStartedAt) / 1e6;
   fanoutPublishDurationMs.observe(
     { path: 'channel_message_user_topics', stage: 'target_lookup' },
-    Number(process.hrtime.bigint() - lookupStartedAt) / 1e6,
+    userTopicLookupMs,
+  );
+  const _wl2 = getWorkerLabels();
+  wsTargetLookupDurationMs?.observe?.(
+    { path: 'channel_message_user_topics', result: targetLookup.cacheResult, vm: _wl2.vm, worker: _wl2.worker },
+    userTopicLookupMs,
   );
   const cap = CHANNEL_MESSAGE_USER_FANOUT_MAX;
   const capped = targets.slice(0, Math.min(cap, targets.length));
@@ -182,19 +349,9 @@ async function publishChannelMessageRecentUserBridge(
     return { targetCount: 0 };
   }
 
-  const since = Date.now() - WS_RECENT_CONNECT_TTL_SECONDS * 1000;
-  const recentUserIds = await redis.zrangebyscore(
-    channelRecentConnectKey(channelId),
-    since,
-    '+inf',
-  );
-  const targets = Array.from(
-    new Set(
-      (Array.isArray(recentUserIds) ? recentUserIds : [])
-        .filter((userId) => typeof userId === 'string' && userId.length > 0)
-        .slice(0, CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX)
-        .map((userId) => `user:${userId}`),
-    ),
+  const targets = await resolveRecentChannelUserTargets(
+    channelId,
+    CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
   );
   if (!targets.length) {
     return { targetCount: 0 };
@@ -231,7 +388,7 @@ async function publishChannelMessageEvent(
   // explicit `channel:` publish wait for that lookup when channel-first mode is
   // enabled. This preserves the existing payload contract while reducing
   // avoidable latency for rich clients already listening on `channel:<id>`.
-  const userTargetsPromise = resolveUserTopicTargets(channelId);
+  const userTargetsPromise = resolveUserTopicTargets(channelId, envelope);
   let allTargets: string[] = [];
   let pendingEnqueueTargets: string[] = [];
   let hintedRecentTargets: string[] = [];

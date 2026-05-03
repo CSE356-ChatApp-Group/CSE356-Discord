@@ -7,7 +7,13 @@ const logger = require("../utils/logger");
 const {
   fanoutRecipientsHistogram,
   realtimeMissAttributionTotal,
+  wsActiveSubscriberTargetsBucket,
+  wsFanoutRecoveryInlineTotal,
+  wsSocketSendTargetsBucket,
+  wsPubsubReceiveLagMs,
 } = require("../utils/metrics");
+const { parsePayloadReferenceTimeMs } = require("./outboundPayload");
+const { getWorkerLabels } = require("./deliveryTrace");
 const {
   publishUserFeedTargets,
   isUserFeedEnvelope,
@@ -194,6 +200,10 @@ function createRedisPubsubDelivery(ctx) {
         { reason: "channel_topic_stale_map_userfeed_recovery" },
         userIds.length,
       );
+      wsFanoutRecoveryInlineTotal?.inc?.(
+        { reason: "channel_topic_stale_map_userfeed_recovery" },
+        userIds.length,
+      );
       recordRealtimeMissAttribution(
         "channel_topic_stale_map_userfeed_recovery",
         userIds.length,
@@ -208,7 +218,7 @@ function createRedisPubsubDelivery(ctx) {
     }
   }
 
-  async function deliverUserFeedMessage(channel, routed) {
+  async function deliverUserFeedMessage(channel, routed, pubsubReceiveMs: number | null = null) {
     const payload = routed.payload;
     const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
     const dedupeBatchAllowSet = new Set();
@@ -219,6 +229,7 @@ function createRedisPubsubDelivery(ctx) {
       recipientCount += localUserClients.get(userId)?.size || 0;
     }
     fanoutRecipientsHistogram.observe({ channel_type: "user" }, recipientCount);
+    wsSocketSendTargetsBucket?.observe?.({ path: "userfeed" }, recipientCount);
 
     if (recipientCount === 0 && !logger.isLevelEnabled("debug")) return;
 
@@ -282,6 +293,7 @@ function createRedisPubsubDelivery(ctx) {
               preparedPayload,
               dedupePath: "user_topic",
               dedupeBatchAllowSet,
+              pubsubReceiveMs,
             });
           }
           continue;
@@ -295,6 +307,7 @@ function createRedisPubsubDelivery(ctx) {
               preparedPayload,
               dedupePath: "user_topic",
               dedupeBatchAllowSet,
+              pubsubReceiveMs,
             });
           }
           continue;
@@ -304,6 +317,7 @@ function createRedisPubsubDelivery(ctx) {
           preparedPayload,
           dedupePath: "user_topic",
           dedupeBatchAllowSet,
+          pubsubReceiveMs,
         });
       }
     }
@@ -315,6 +329,7 @@ function createRedisPubsubDelivery(ctx) {
     const clients = communityClients.get(communityId);
     const recipientCount = clients ? clients.size : 0;
     fanoutRecipientsHistogram.observe({ channel_type: "communityfeed" }, recipientCount);
+    wsSocketSendTargetsBucket?.observe?.({ path: "communityfeed" }, recipientCount);
     if (!clients || recipientCount === 0) return;
 
     pruneNonOpenFromCommunitySubscribers(communityId, clients);
@@ -334,6 +349,7 @@ function createRedisPubsubDelivery(ctx) {
 
   async function deliverPubsubMessage(channel, message) {
     signalLiveFanoutPending?.();
+    const pubsubReceiveMs = Date.now();
     try {
       if (USER_FEED_SHARD_CHANNEL_SET.has(channel)) {
         let routed = null;
@@ -343,7 +359,7 @@ function createRedisPubsubDelivery(ctx) {
           return;
         }
         if (isUserFeedEnvelope(routed)) {
-          await deliverUserFeedMessage(channel, routed);
+          await deliverUserFeedMessage(channel, routed, pubsubReceiveMs);
         }
         return;
       }
@@ -378,6 +394,18 @@ function createRedisPubsubDelivery(ctx) {
         parsed = JSON.parse(message);
       } catch {
         /* ignore */
+      }
+
+      // Observe pubsub receive lag (created_at → receive time) for message events.
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const refMs = parsePayloadReferenceTimeMs(parsed);
+        if (refMs != null) {
+          const lagMs = pubsubReceiveMs - refMs;
+          if (lagMs >= 0 && lagMs < 3_600_000) {
+            const wl = getWorkerLabels();
+            wsPubsubReceiveLagMs?.observe?.({ topic_prefix: channelType, vm: wl.vm, worker: wl.worker }, lagMs);
+          }
+        }
       }
 
     if (channelType === "conversation" && logger.isLevelEnabled("debug")) {
@@ -432,6 +460,7 @@ function createRedisPubsubDelivery(ctx) {
           debugReasonCounts: reasonCounts,
           dedupePath: dedupePathForChannelType(channelType),
           dedupeBatchAllowSet,
+          pubsubReceiveMs,
         })) {
           deliveredCount += 1;
         }

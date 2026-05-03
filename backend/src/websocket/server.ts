@@ -143,6 +143,10 @@ const {
   wsRecipientDedupeTotal,
   wsRecipientDuplicateCandidatesTotal,
   wsPartialDeliveryMissingReasonTotal,
+  wsDeliveryStageDurationMs,
+  wsDeliverySlowTraceTotal,
+  wsSocketQueueDepthHistogram,
+  wsSocketSendDurationMs,
 } = require("../utils/metrics");
 const {
   IDLE_TTL_SECONDS,
@@ -428,6 +432,11 @@ const {
   wsReliableDeliveryTotal,
   wsReliableDeliveryLatencyMs,
   wsReliableDeliveryTopicTotal,
+  wsRecipientDedupeTotal,
+  wsDeliveryStageDurationMs,
+  wsDeliverySlowTraceTotal,
+  wsSocketQueueDepthHistogram,
+  wsSocketSendDurationMs,
   WS_BACKPRESSURE_DROP_BYTES,
   WS_BACKPRESSURE_KILL_BYTES,
   WS_OUTBOUND_QUEUE_MAX_MESSAGE,

@@ -18,6 +18,12 @@ function createOutboundQueueHelpers({
   wsReliableDeliveryTotal,
   wsReliableDeliveryLatencyMs,
   wsReliableDeliveryTopicTotal,
+  wsRecipientDedupeTotal,
+  // optional new delivery-tracing metrics (null-safe throughout)
+  wsDeliveryStageDurationMs = null,
+  wsDeliverySlowTraceTotal = null,
+  wsSocketQueueDepthHistogram = null,
+  wsSocketSendDurationMs = null,
   WS_BACKPRESSURE_DROP_BYTES,
   WS_BACKPRESSURE_KILL_BYTES,
   WS_OUTBOUND_QUEUE_MAX_MESSAGE,
@@ -28,6 +34,7 @@ function createOutboundQueueHelpers({
   const {
     recordWsReliableRealtimeLatencyMs,
   } = require("./wsDeliveryPressure");
+  const { getWorkerLabels, emitSlowDeliveryTrace } = require("./deliveryTrace");
 
   function ensureOutboundQueue(ws) {
     if (!ws._outboundQueue) {
@@ -71,7 +78,10 @@ function createOutboundQueueHelpers({
       preparedPayload,
       deliveryPath = "realtime",
       deliverySource = "live_pubsub",
+      enqueueMs = null,
+      pubsubReceiveMs = null,
     } = job;
+    const flushStartMs = Date.now();
     const delivery_target_kind = wsDeliveryTopicPrefixForMetrics(logicalChannel);
     const delivery_path_kind = deliveryPath === "replay" ? "replay" : "realtime";
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -87,7 +97,10 @@ function createOutboundQueueHelpers({
       payloadEventName,
       skipDropForBackpressure,
     } = resolvedPrepared;
-    if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) return;
+    if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
+      wsRecipientDedupeTotal?.inc?.({ path: delivery_target_kind });
+      return;
+    }
 
     const buffered = ws.bufferedAmount ?? 0;
     if (buffered >= WS_BACKPRESSURE_KILL_BYTES) {
@@ -136,7 +149,22 @@ function createOutboundQueueHelpers({
         : "live_pubsub";
     const topicPrefix = wsDeliveryTopicPrefixForMetrics(logicalChannel);
     const refMs = isReliableEvent ? parsePayloadReferenceTimeMs(parsed) : null;
+
+    // Enqueue-to-flush delay (time frame waited in queue before ws.send())
+    const enqueueWaitMs = enqueueMs != null ? flushStartMs - enqueueMs : null;
+    if (enqueueWaitMs != null && isReliableEvent) {
+      const wl = getWorkerLabels();
+      wsDeliveryStageDurationMs?.observe?.({ stage: 'socket_enqueue_wait', path: pathKind, vm: wl.vm, worker: wl.worker }, enqueueWaitMs);
+    }
+
+    const sendStartMs = Date.now();
     ws.send(outbound, (err) => {
+      const sendDoneMs = Date.now();
+      const sendDurationMs = sendDoneMs - sendStartMs;
+      const wl = getWorkerLabels();
+      wsSocketSendDurationMs?.observe?.({ vm: wl.vm, worker: wl.worker }, sendDurationMs);
+      wsDeliveryStageDurationMs?.observe?.({ stage: 'socket_write', path: pathKind, vm: wl.vm, worker: wl.worker }, sendDurationMs);
+
       if (!err) {
         markSocketMessageDelivered(ws, dedupeKey);
         if (isReliableEvent) {
@@ -146,16 +174,55 @@ function createOutboundQueueHelpers({
             topic_prefix: topicPrefix,
           });
           if (refMs != null) {
-            const deltaMs = Date.now() - refMs;
+            const deltaMs = sendDoneMs - refMs;
             if (deltaMs >= 0 && Number.isFinite(deltaMs)) {
               wsReliableDeliveryLatencyMs.observe({ path: pathKind }, deltaMs);
               if (pathKind === "realtime") {
                 recordWsReliableRealtimeLatencyMs(deltaMs);
               }
+              // Slow delivery trace (realtime path only to avoid noisy replay logs)
+              if (pathKind === "realtime") {
+                const parsedData = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+                const msgId = parsedData?.data?.id ?? parsedData?.data?.messageId ?? null;
+                const channelId = parsedData?.data?.channel_id ?? parsedData?.data?.channelId ?? null;
+                const conversationId = parsedData?.data?.conversation_id ?? parsedData?.data?.conversationId ?? null;
+                const senderUserId = parsedData?.data?.author_id ?? parsedData?.data?.senderId ?? null;
+                const recipientUserId = ws._userId ?? null;
+                const pubsubLagMs = pubsubReceiveMs != null ? (pubsubReceiveMs - refMs) : null;
+                emitSlowDeliveryTrace({
+                  messageId: typeof msgId === 'string' ? msgId : null,
+                  channelId: typeof channelId === 'string' ? channelId : null,
+                  conversationId: typeof conversationId === 'string' ? conversationId : null,
+                  senderUserId: typeof senderUserId === 'string' ? senderUserId : null,
+                  recipientUserId: typeof recipientUserId === 'string' ? recipientUserId : null,
+                  eventType: typeof parsedData?.event === 'string' ? parsedData.event : null,
+                  topicType: topicPrefix,
+                  dest_vm: wl.vm,
+                  dest_worker: wl.worker,
+                  pubsub_receive_ms: pubsubReceiveMs,
+                  pubsub_receive_lag_ms: pubsubLagMs != null && pubsubLagMs >= 0 ? pubsubLagMs : null,
+                  socket_enqueue_ms: enqueueMs,
+                  socket_enqueue_delay_ms: enqueueWaitMs,
+                  socket_write_start_ms: sendStartMs,
+                  socket_write_done_ms: sendDoneMs,
+                  send_duration_ms: sendDurationMs,
+                  delivery_done_ms: sendDoneMs,
+                  total_delivery_ms: deltaMs,
+                });
+                if (deltaMs > 1000) {
+                  wsDeliverySlowTraceTotal?.inc?.({ stage: 'total', reason: 'high_latency', vm: wl.vm, worker: wl.worker });
+                }
+                if (enqueueWaitMs != null && enqueueWaitMs > 500) {
+                  wsDeliverySlowTraceTotal?.inc?.({ stage: 'socket_enqueue_wait', reason: 'slow_queue', vm: wl.vm, worker: wl.worker });
+                }
+                if (sendDurationMs > 500) {
+                  wsDeliverySlowTraceTotal?.inc?.({ stage: 'socket_write', reason: 'slow_send', vm: wl.vm, worker: wl.worker });
+                }
+              }
             }
           }
         }
-        ws._lastDataFrameAt = Date.now();
+        ws._lastDataFrameAt = sendDoneMs;
         return;
       }
       ws._sawError = true;
@@ -257,6 +324,7 @@ function createOutboundQueueHelpers({
       deliveryPath = "realtime",
       deliverySource = "live_pubsub",
       debugReasonCounts = null,
+      pubsubReceiveMs = null,
     } = {},
   ) {
     const bumpReason = (reason) => {
@@ -279,6 +347,7 @@ function createOutboundQueueHelpers({
 
     if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
       bumpReason("dedupe_recent_delivery");
+      wsRecipientDedupeTotal?.inc?.({ path: wsDeliveryTopicPrefixForMetrics(logicalChannel) });
       return false;
     }
 
@@ -324,6 +393,8 @@ function createOutboundQueueHelpers({
           preparedPayload: preparedPayload || prepared,
           deliveryPath,
           deliverySource,
+          enqueueMs: Date.now(),
+          pubsubReceiveMs,
         });
         wsOutboundQueueBlockWaitsTotal.inc();
         scheduleOutboundDrain(ws);
@@ -335,6 +406,7 @@ function createOutboundQueueHelpers({
       return false;
     }
 
+    const enqueueMs = Date.now();
     q.push({
       logicalChannel,
       parsed,
@@ -343,10 +415,14 @@ function createOutboundQueueHelpers({
       preparedPayload: preparedPayload || prepared,
       deliveryPath,
       deliverySource,
+      enqueueMs,
+      pubsubReceiveMs,
     });
     adjustWsOutboundGauge(1);
     const priority = skipDropForBackpressure ? "message" : "best_effort";
     wsOutboundQueueDepthHistogram.observe({ priority }, q.length);
+    const wl = getWorkerLabels();
+    wsSocketQueueDepthHistogram?.observe?.({ vm: wl.vm, worker: wl.worker }, q.length);
     scheduleOutboundDrain(ws);
     return true;
   }
