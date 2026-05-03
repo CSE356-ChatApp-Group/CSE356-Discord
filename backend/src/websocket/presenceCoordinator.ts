@@ -9,6 +9,7 @@ function createPresenceCoordinator({
   connectedUsersKey,
   presenceSweeperDebounceMs,
   presenceDisconnectDebounceMs,
+  connectionAliveKeyTtlSeconds,
 }) {
   // Tracks the last time recomputeUserPresence ran for each user so the
   // reconcile sweeper can skip recently-computed slots.
@@ -26,12 +27,18 @@ function createPresenceCoordinator({
   }
 
   async function upsertConnectionState(userId, connectionId, status) {
-    await redis
+    const multi = redis
       .multi()
       .sadd(connectionSetKey(userId), connectionId)
       .sadd(connectedUsersKey(), userId)
-      .hset(connectionStatusHashKey(userId), connectionId, status)
-      .exec();
+      .hset(connectionStatusHashKey(userId), connectionId, status);
+    // Set the alive key atomically so the presence sweeper never sees a
+    // newly-connected user without an alive key before refreshConnectionTtls
+    // has a chance to run.
+    if (connectionAliveKeyTtlSeconds) {
+      multi.set(connectionAliveKey(userId, connectionId), '1', 'EX', connectionAliveKeyTtlSeconds);
+    }
+    await multi.exec();
   }
 
   function resolveAggregateStatus(states) {

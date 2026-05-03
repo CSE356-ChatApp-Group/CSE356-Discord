@@ -381,6 +381,7 @@ const {
   connectedUsersKey,
   presenceSweeperDebounceMs: PRESENCE_SWEEPER_DEBOUNCE_MS,
   presenceDisconnectDebounceMs: PRESENCE_DISCONNECT_DEBOUNCE_MS,
+  connectionAliveKeyTtlSeconds: CONNECTION_ALIVE_TTL_SECONDS,
 });
 
 const {

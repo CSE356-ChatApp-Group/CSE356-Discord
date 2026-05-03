@@ -139,12 +139,14 @@ async function filterActiveConnectedUserTargets(targets: string[], path: string)
   } catch (err: any) {
     const message = String(err?.message || '');
     if (!/unknown command|wrong number of arguments|SMISMEMBER/i.test(message)) {
+      // Fail-open: return all targets so a transient Redis error does not
+      // silently drop recent-connect fanout targets and cause delivery misses.
       wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'active_recent_filter_failed' });
       logger.warn(
         { err, targetCount: targets.length },
         'Failed to filter recent channel fanout targets by active presence',
       );
-      return [];
+      return targets;
     }
   }
 
@@ -161,12 +163,14 @@ async function filterActiveConnectedUserTargets(targets: string[], path: string)
     }
     return activeTargets;
   } catch (err) {
+    // Fail-open: return all targets so a transient Redis error does not
+    // silently drop recent-connect fanout targets and cause delivery misses.
     wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'active_recent_filter_fallback_failed' });
     logger.warn(
       { err, targetCount: targets.length },
       'Failed to filter recent channel fanout targets with SISMEMBER fallback',
     );
-    return [];
+    return targets;
   }
 }
 
