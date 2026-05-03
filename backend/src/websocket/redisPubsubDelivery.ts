@@ -454,7 +454,13 @@ function createRedisPubsubDelivery(ctx) {
   }
 
   async function deliverPubsubMessage(channel, message) {
-    signalLiveFanoutPending?.();
+    let liveFanoutPendingMarked = false;
+    const markLiveFanoutPending = () => {
+      if (liveFanoutPendingMarked) return;
+      signalLiveFanoutPending?.();
+      liveFanoutPendingMarked = true;
+    };
+
     const pubsubReceiveMs = Date.now();
     try {
       if (USER_FEED_SHARD_CHANNEL_SET.has(channel)) {
@@ -465,6 +471,10 @@ function createRedisPubsubDelivery(ctx) {
           return;
         }
         if (isUserFeedEnvelope(routed)) {
+          const payloadEvent = routed?.payload?.event;
+          if (typeof payloadEvent === "string" && payloadEvent.startsWith("message:")) {
+            markLiveFanoutPending();
+          }
           await deliverUserFeedMessage(channel, routed, pubsubReceiveMs);
         }
         return;
@@ -502,6 +512,15 @@ function createRedisPubsubDelivery(ctx) {
         /* ignore */
       }
 
+      const parsedEvent =
+        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed.event
+          : null;
+      const isMessageEvent = typeof parsedEvent === "string" && parsedEvent.startsWith("message:");
+      if (recipientCount > 0 && isMessageEvent && (channelType === "channel" || channelType === "conversation" || channelType === "user")) {
+        markLiveFanoutPending();
+      }
+
       // Observe pubsub receive lag (created_at → receive time) for message events.
       if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
         const refMs = parsePayloadReferenceTimeMs(parsed);
@@ -515,8 +534,6 @@ function createRedisPubsubDelivery(ctx) {
       }
 
     if (channelType === "conversation" && logger.isLevelEnabled("debug")) {
-      const parsedEvent = parsed?.event;
-      const isMessageEvent = typeof parsedEvent === "string" && parsedEvent.startsWith("message:");
       if (isMessageEvent) {
         const messageId = parsed?.data?.id;
         logger.debug(
@@ -572,13 +589,8 @@ function createRedisPubsubDelivery(ctx) {
         }
       }
 
-      const parsedEvent =
-        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-          ? parsed.event
-          : null;
       const isReliableChannelMsg =
-        typeof parsedEvent === "string"
-        && parsedEvent.startsWith("message:")
+        isMessageEvent
         && (channelType === "channel" || channelType === "conversation");
       if (isReliableChannelMsg) {
         if (deliveredCount === 0 && isDuplicateSuppressionOnly(reasonCounts)) {
@@ -648,7 +660,9 @@ function createRedisPubsubDelivery(ctx) {
         }
       }
     } finally {
-      releaseLiveFanoutPending?.();
+      if (liveFanoutPendingMarked) {
+        releaseLiveFanoutPending?.();
+      }
     }
   }
 
