@@ -154,6 +154,13 @@ const {
   wsRecipientDedupeTotal,
   wsRecipientDuplicateCandidatesTotal,
   wsFanoutCandidateCountBucket,
+  wsActiveSubscriberTargetsBucket,
+  wsFanoutActiveTargetHitTotal,
+  wsFanoutActiveTargetMissTotal,
+  wsFanoutRecoveryInlineTotal,
+  wsFanoutRecoveryAsyncTotal,
+  redisExistsByPathTotal,
+  wsSocketSendTargetsBucket,
   wsPartialDeliveryMissingReasonTotal,
 } = require('./metrics/wsRuntimeAndDelivery');
 const {
@@ -861,5 +868,12 @@ module.exports = {
   wsRecipientDedupeTotal,
   wsRecipientDuplicateCandidatesTotal,
   wsFanoutCandidateCountBucket,
+  wsActiveSubscriberTargetsBucket,
+  wsFanoutActiveTargetHitTotal,
+  wsFanoutActiveTargetMissTotal,
+  wsFanoutRecoveryInlineTotal,
+  wsFanoutRecoveryAsyncTotal,
+  redisExistsByPathTotal,
+  wsSocketSendTargetsBucket,
   wsPartialDeliveryMissingReasonTotal,
 };

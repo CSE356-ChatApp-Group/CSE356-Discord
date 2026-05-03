@@ -42,6 +42,11 @@ const {
   fanoutTargetCandidatesHistogram,
   channelMessageFanoutRecipientTotal,
   realtimeMissAttributionTotal,
+  wsFanoutCandidateCountBucket,
+  wsActiveSubscriberTargetsBucket,
+  wsFanoutActiveTargetHitTotal,
+  wsFanoutActiveTargetMissTotal,
+  wsFanoutRecoveryAsyncTotal,
 } = require('../../utils/metrics');
 
 const {
@@ -78,7 +83,39 @@ async function publishUserTopicTargets(
   });
 }
 
-async function resolveUserTopicTargets(channelId: string) {
+function isChannelMessageLiveEvent(envelope: Record<string, unknown>) {
+  const event = envelope?.event;
+  return typeof event === 'string' && event.startsWith('message:');
+}
+
+async function resolveRecentChannelUserTargets(channelId: string, limit: number) {
+  if (!channelRecentZsetEnabled()) return [];
+  try {
+    const since = Date.now() - WS_RECENT_CONNECT_TTL_SECONDS * 1000;
+    const recentUserIds = await redis.zrangebyscore(
+      channelRecentConnectKey(channelId),
+      since,
+      '+inf',
+    );
+    return Array.from(
+      new Set(
+        (Array.isArray(recentUserIds) ? recentUserIds : [])
+          .filter((userId) => typeof userId === 'string' && userId.length > 0)
+          .slice(0, Math.max(0, limit))
+          .map((userId) => `user:${userId}`),
+      ),
+    );
+  } catch (err) {
+    wsFanoutRecoveryAsyncTotal.inc({ reason: 'recent_connect_bridge_lookup_failed' });
+    logger.warn(
+      { err, channelId },
+      'Recent-connect active subscriber lookup failed; relying on channel topic and replay',
+    );
+    return [];
+  }
+}
+
+async function resolveUserTopicTargets(channelId: string, envelope: Record<string, unknown>) {
   if (!channelMessageUserFanoutEnabled()) {
     return {
       allTargets: [],
@@ -90,6 +127,40 @@ async function resolveUserTopicTargets(channelId: string) {
   }
 
   const mode = resolveChannelUserFanoutMode();
+  if (isChannelMessageLiveEvent(envelope)) {
+    const bridgeLimit = Math.min(
+      CHANNEL_MESSAGE_USER_FANOUT_MAX,
+      CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
+    );
+    const recentTargets = envelope?.event === 'message:created'
+      ? await resolveRecentChannelUserTargets(channelId, bridgeLimit)
+      : [];
+    const candidateCount = 1 + recentTargets.length;
+    fanoutTargetCandidatesHistogram.observe(
+      { path: 'channel_message_active_subscribers' },
+      candidateCount,
+    );
+    wsFanoutCandidateCountBucket.observe(
+      { path: 'channel_message_active_subscribers' },
+      candidateCount,
+    );
+    wsActiveSubscriberTargetsBucket.observe(
+      { path: 'channel_message_recent_connect_bridge' },
+      recentTargets.length,
+    );
+    wsFanoutActiveTargetHitTotal.inc({ path: 'channel_message' });
+    if (!recentTargets.length) {
+      wsFanoutActiveTargetMissTotal.inc({ path: 'channel_message_recent_connect_bridge' });
+    }
+    return {
+      allTargets: recentTargets,
+      recentTargets,
+      candidateCount,
+      cacheResult: 'hit' as const,
+      pendingEnqueueTargets: recentTargets,
+    };
+  }
+
   const candidateMetricPath =
     mode === 'all'
       ? 'channel_message_user_topics'
@@ -182,19 +253,9 @@ async function publishChannelMessageRecentUserBridge(
     return { targetCount: 0 };
   }
 
-  const since = Date.now() - WS_RECENT_CONNECT_TTL_SECONDS * 1000;
-  const recentUserIds = await redis.zrangebyscore(
-    channelRecentConnectKey(channelId),
-    since,
-    '+inf',
-  );
-  const targets = Array.from(
-    new Set(
-      (Array.isArray(recentUserIds) ? recentUserIds : [])
-        .filter((userId) => typeof userId === 'string' && userId.length > 0)
-        .slice(0, CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX)
-        .map((userId) => `user:${userId}`),
-    ),
+  const targets = await resolveRecentChannelUserTargets(
+    channelId,
+    CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
   );
   if (!targets.length) {
     return { targetCount: 0 };
@@ -231,7 +292,7 @@ async function publishChannelMessageEvent(
   // explicit `channel:` publish wait for that lookup when channel-first mode is
   // enabled. This preserves the existing payload contract while reducing
   // avoidable latency for rich clients already listening on `channel:<id>`.
-  const userTargetsPromise = resolveUserTopicTargets(channelId);
+  const userTargetsPromise = resolveUserTopicTargets(channelId, envelope);
   let allTargets: string[] = [];
   let pendingEnqueueTargets: string[] = [];
   let hintedRecentTargets: string[] = [];

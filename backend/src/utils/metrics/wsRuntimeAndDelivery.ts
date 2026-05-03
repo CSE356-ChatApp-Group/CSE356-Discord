@@ -552,6 +552,57 @@ const wsFanoutCandidateCountBucket = new client.Histogram({
   buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 });
 
+/** Active subscriber targets found for direct live fanout. */
+const wsActiveSubscriberTargetsBucket = new client.Histogram({
+  name: 'ws_active_subscriber_targets_bucket',
+  help: 'Number of active subscriber targets used by direct live fanout',
+  labelNames: ['path'],
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Active-target strategy selected for live fanout. */
+const wsFanoutActiveTargetHitTotal = new client.Counter({
+  name: 'ws_fanout_active_target_hit_total',
+  help: 'Live fanout operations that used the active-subscriber target path',
+  labelNames: ['path'],
+});
+
+/** Active-target strategy had no active/recent subscriber targets to bridge. */
+const wsFanoutActiveTargetMissTotal = new client.Counter({
+  name: 'ws_fanout_active_target_miss_total',
+  help: 'Live fanout active-subscriber lookups that found no active/recent bridge targets',
+  labelNames: ['path'],
+});
+
+/** Inline recovery work performed on the live fanout path. */
+const wsFanoutRecoveryInlineTotal = new client.Counter({
+  name: 'ws_fanout_recovery_inline_total',
+  help: 'Inline recovery operations on the live fanout path',
+  labelNames: ['reason'],
+});
+
+/** Async recovery work scheduled off the live fanout path. */
+const wsFanoutRecoveryAsyncTotal = new client.Counter({
+  name: 'ws_fanout_recovery_async_total',
+  help: 'Async recovery operations scheduled off the live fanout path',
+  labelNames: ['reason'],
+});
+
+/** Redis EXISTS calls by logical path. */
+const redisExistsByPathTotal = new client.Counter({
+  name: 'redis_exists_by_path_total',
+  help: 'Redis EXISTS calls by logical path',
+  labelNames: ['path'],
+});
+
+/** Socket send target count per delivery path. */
+const wsSocketSendTargetsBucket = new client.Histogram({
+  name: 'ws_socket_send_targets_bucket',
+  help: 'Number of socket send targets considered by delivery path',
+  labelNames: ['path'],
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
 // ── Partial delivery root cause metrics (Patch E) ─────────────────────────────
 
 /** Reason why a recipient was missing from a partial delivery. */
@@ -578,6 +629,19 @@ const wsPartialDeliveryMissingReasonTotal = new client.Counter({
   wsRecipientDuplicateCandidatesTotal.inc({ path: 'user_topic' }, 0);
   wsRecipientDuplicateCandidatesTotal.inc({ path: 'recent_connect_bridge' }, 0);
   wsRecipientDuplicateCandidatesTotal.inc({ path: 'stale_map_recovery' }, 0);
+  wsActiveSubscriberTargetsBucket.observe({ path: 'channel_message' }, 0);
+  wsActiveSubscriberTargetsBucket.observe({ path: 'conversation_event' }, 0);
+  wsFanoutActiveTargetHitTotal.inc({ path: 'channel_message' }, 0);
+  wsFanoutActiveTargetHitTotal.inc({ path: 'conversation_event' }, 0);
+  wsFanoutActiveTargetMissTotal.inc({ path: 'channel_message_recent_connect_bridge' }, 0);
+  wsFanoutRecoveryInlineTotal.inc({ reason: 'channel_topic_stale_map_userfeed_recovery' }, 0);
+  wsFanoutRecoveryAsyncTotal.inc({ reason: 'recent_connect_bridge_lookup_failed' }, 0);
+  redisExistsByPathTotal.inc({ path: 'pending_replay_unified_marker' }, 0);
+  redisExistsByPathTotal.inc({ path: 'pending_replay_legacy_marker' }, 0);
+  redisExistsByPathTotal.inc({ path: 'pending_replay_connection_fallback' }, 0);
+  wsSocketSendTargetsBucket.observe({ path: 'channel_topic' }, 0);
+  wsSocketSendTargetsBucket.observe({ path: 'conversation_topic' }, 0);
+  wsSocketSendTargetsBucket.observe({ path: 'user_topic' }, 0);
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'not_subscribed' }, 0);
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'backpressure_drop' }, 0);
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'dedupe_skip' }, 0);
@@ -665,5 +729,12 @@ module.exports = {
   wsRecipientDedupeTotal,
   wsRecipientDuplicateCandidatesTotal,
   wsFanoutCandidateCountBucket,
+  wsActiveSubscriberTargetsBucket,
+  wsFanoutActiveTargetHitTotal,
+  wsFanoutActiveTargetMissTotal,
+  wsFanoutRecoveryInlineTotal,
+  wsFanoutRecoveryAsyncTotal,
+  redisExistsByPathTotal,
+  wsSocketSendTargetsBucket,
   wsPartialDeliveryMissingReasonTotal,
 };

@@ -19,6 +19,7 @@ const {
   pendingReplayEntriesPerMessage,
   pendingReplaySecondProbeRecentUserTotal,
   offlinePendingSkippedTotal,
+  redisExistsByPathTotal,
 } = require('../../utils/metrics');
 
 const {
@@ -76,6 +77,10 @@ async function batchUsersAppearGloballyConnected(userIds: string[]): Promise<boo
     for (const uid of userIds) {
       pipe.exists(userConnectionSetKey(uid));
     }
+    redisExistsByPathTotal?.inc?.(
+      { path: 'pending_replay_connection_fallback' },
+      userIds.length,
+    );
     const results = await pipe.exec();
     return results.map((row: [Error | null, unknown] | undefined) => Number(row?.[1] || 0) === 1);
   }
@@ -156,6 +161,10 @@ async function filterUsersEligibleForPendingReplay(
             for (const uid of pendingProbeUids) {
               pendingPipe.exists(wsPendingEligibleKey(uid));
             }
+            redisExistsByPathTotal?.inc?.(
+              { path: 'pending_replay_unified_marker' },
+              pendingProbeUids.length,
+            );
             return pendingPipe.exec() as Promise<Array<[Error | null, unknown] | null>>;
           })()
         : Promise.resolve([]);
@@ -213,6 +222,10 @@ async function filterUsersEligibleForPendingReplay(
         leg.exists(wsReplayPendingEligibilityKey(uid));
       }
     }
+    redisExistsByPathTotal?.inc?.(
+      { path: 'pending_replay_legacy_marker' },
+      needLegacyProbe.length * (useReplayKey ? 2 : 1),
+    );
     const legRes = await leg.exec();
     let lj = 0;
     for (const uid of needLegacyProbe) {

@@ -7,6 +7,9 @@ const logger = require("../utils/logger");
 const {
   fanoutRecipientsHistogram,
   realtimeMissAttributionTotal,
+  wsActiveSubscriberTargetsBucket,
+  wsFanoutRecoveryInlineTotal,
+  wsSocketSendTargetsBucket,
 } = require("../utils/metrics");
 const {
   publishUserFeedTargets,
@@ -198,6 +201,10 @@ function createRedisPubsubDelivery(ctx) {
         "channel_topic_stale_map_userfeed_recovery",
         userIds.length,
       );
+      wsFanoutRecoveryInlineTotal?.inc?.(
+        { reason: "channel_topic_stale_map_userfeed_recovery" },
+        userIds.length,
+      );
       return true;
     } catch (err) {
       logger.warn(
@@ -219,6 +226,7 @@ function createRedisPubsubDelivery(ctx) {
       recipientCount += localUserClients.get(userId)?.size || 0;
     }
     fanoutRecipientsHistogram.observe({ channel_type: "user" }, recipientCount);
+    wsSocketSendTargetsBucket?.observe?.({ path: "user_topic" }, recipientCount);
 
     if (recipientCount === 0 && !logger.isLevelEnabled("debug")) return;
 
@@ -368,6 +376,16 @@ function createRedisPubsubDelivery(ctx) {
         { channel_type: channelType },
         recipientCount,
       );
+      if (channelType === "channel" || channelType === "conversation") {
+        const metricPath = channelType === "channel" ? "channel_message" : "conversation_event";
+        wsActiveSubscriberTargetsBucket?.observe?.({ path: metricPath }, recipientCount);
+        wsSocketSendTargetsBucket?.observe?.(
+          { path: channelType === "channel" ? "channel_topic" : "conversation_topic" },
+          recipientCount,
+        );
+      } else if (channelType === "user") {
+        wsSocketSendTargetsBucket?.observe?.({ path: "user_topic" }, recipientCount);
+      }
 
       if (!clients || recipientCount === 0) {
         if (!logger.isLevelEnabled("debug")) return;
