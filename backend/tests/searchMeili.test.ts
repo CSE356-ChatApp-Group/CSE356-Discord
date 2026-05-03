@@ -475,6 +475,31 @@ describe('Search – Meili path: edited message uses fresh Postgres content', ()
     expect(hit).toBeDefined();
     expect(hit.content).toContain(updated);
   });
+
+  it('finds a freshly edited message by its new term even when Meili returns only stale other candidates', async () => {
+    const originalMarker = `meilistaleold${uniqueSuffix()}`;
+    const freshMarker = `meilistalenew${uniqueSuffix()}`;
+
+    const staleCandidate = await sendMessage(ownerToken, channelId, `${freshMarker} stale other hit`);
+    const edited = await sendMessage(ownerToken, channelId, `${originalMarker} original content`);
+
+    const patchRes = await request(app)
+      .patch(`/api/v1/messages/${edited.id}`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ content: `${freshMarker} edited latest content` });
+    expect(patchRes.status).toBe(200);
+
+    // Simulate stale Meili: it returns a different matching ID, but not the freshly edited one.
+    setMeiliMode([staleCandidate.id]);
+
+    const res = await request(app)
+      .get(`/api/v1/search?q=${freshMarker}&communityId=${communityId}`)
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    expect(res.status).toBe(200);
+    const ids = res.body.hits.map((h: any) => h.id);
+    expect(ids).toContain(edited.id);
+  });
 });
 
 describe('Search – Meili path: Meili error falls back to Postgres', () => {

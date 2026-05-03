@@ -305,6 +305,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `SEARCH_BACKEND` | Set to **`meili`** (with **`MEILI_ENABLED=true`**) to use Meilisearch for search (`meiliClient.ts`). |
 | `MEILI_ENABLED`, `MEILI_HOST`, `MEILI_MASTER_KEY`, `MEILI_INDEX_MESSAGES` | Meilisearch toggle, base URL, API key, index name. |
 | `MEILI_CANDIDATE_LIMIT`, `MEILI_TIMEOUT_MS`, `MEILI_WRITE_BATCH_SIZE`, `MEILI_WRITE_FLUSH_MS` | Meili HTTP client tuning: candidate limit (default **200**, floor **50** in code), request timeout (default **2000** ms, clamp **500–5000**), write batch size (**64**), write flush interval (**50** ms). |
+| `MEILI_FRESHNESS_WINDOW_MS`, `MEILI_FRESHNESS_CANDIDATE_LIMIT` | Bounds the primary-DB freshness supplement used to rescue recently edited/deleted messages when Meili is stale. Defaults: **600000 ms** lookback and **40** candidates; clamps to **60000–3600000 ms** and **10–200** candidates in code. |
 
 ## Frontend (Vite)
 

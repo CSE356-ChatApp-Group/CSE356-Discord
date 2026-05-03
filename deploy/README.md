@@ -450,6 +450,115 @@ Verifies:
 - Process listening
 - Database connected
 
+## Meilisearch Activation
+
+Meilisearch is already wired as an **optional candidate-generation layer** for search. It does **not** replace Postgres authorization or final result recheck. The safe rollout is **write-only warm-up first**, then **read cutover**.
+
+### Preconditions
+
+1. The dedicated host at **`10.0.0.146:7700`** is healthy and reachable from the app VMs.
+2. `MEILI_MASTER_KEY` is available in the target host's `/opt/chatapp/shared/.env`.
+3. The target release includes the existing backend scripts:
+   - `npm --prefix backend run meili:setup-index`
+   - `npm --prefix backend run meili:backfill`
+   - `npm --prefix backend run meili:health`
+
+### Phase 1: Provision or validate the Meili host
+
+If the dedicated VM is not already configured, bootstrap it once:
+
+```bash
+scp deploy/meilisearch-vm-setup.sh ubuntu@10.0.0.146:
+ssh ubuntu@10.0.0.146 "MEILI_MASTER_KEY=<secret> bash meilisearch-vm-setup.sh"
+```
+
+If it already exists, confirm health from an app host:
+
+```bash
+curl -fsS -H "Authorization: Bearer $MEILI_MASTER_KEY" http://10.0.0.146:7700/health
+```
+
+### Phase 2: Create the index and warm it before serving reads
+
+From a host with the release checked out and the target env values loaded:
+
+```bash
+MEILI_HOST=http://10.0.0.146:7700 \
+MEILI_MASTER_KEY=<secret> \
+npm --prefix backend run meili:setup-index
+
+MEILI_HOST=http://10.0.0.146:7700 \
+MEILI_MASTER_KEY=<secret> \
+npm --prefix backend run meili:health
+```
+
+Then enable **write-path indexing only** by setting this delta in `/opt/chatapp/shared/.env` on the target app hosts:
+
+```bash
+MEILI_ENABLED=true
+SEARCH_BACKEND=postgres
+```
+
+Deploy that config first. New message create/edit/delete operations will keep the index warm while search traffic still uses Postgres.
+
+Backfill historical rows after write-only mode is live:
+
+```bash
+MEILI_HOST=http://10.0.0.146:7700 \
+MEILI_MASTER_KEY=<secret> \
+DATABASE_URL=<direct-db-url> \
+npm --prefix backend run meili:backfill -- --dry-run
+
+MEILI_HOST=http://10.0.0.146:7700 \
+MEILI_MASTER_KEY=<secret> \
+DATABASE_URL=<direct-db-url> \
+npm --prefix backend run meili:backfill
+```
+
+### Phase 3: Cut search reads over in staging first
+
+After write-only mode and backfill are healthy, switch the staging app hosts to:
+
+```bash
+MEILI_ENABLED=true
+SEARCH_BACKEND=meili
+```
+
+Redeploy staging and verify:
+
+```bash
+MEILI_ENABLED=true SEARCH_BACKEND=meili \
+MEILI_HOST=http://10.0.0.146:7700 \
+MEILI_MASTER_KEY=<secret> \
+npm --prefix backend run meili:health -- --fail-if-disabled
+
+./deploy/smoke-test.sh <port>
+```
+
+Expected behavior on the read path:
+- Meili provides candidate IDs only.
+- Postgres still enforces community / DM access checks.
+- Deleted or stale docs are filtered out during Postgres recheck.
+- Any Meili timeout or query failure falls back to Postgres search.
+
+### Phase 4: Production rollout
+
+1. Deploy **write-only warm-up** to prod: `MEILI_ENABLED=true`, `SEARCH_BACKEND=postgres`.
+2. Confirm `npm --prefix backend run meili:health -- --json` passes on a prod app VM.
+3. Watch `meili_index_failures_total`, `meili_search_fallback_total`, and `meili_search_duration_ms` in Grafana/Prometheus.
+4. Only then switch prod to `SEARCH_BACKEND=meili` and run a normal prod deploy.
+
+### Rollback
+
+Rollback is config-only unless the Meili host itself is causing trouble:
+
+```bash
+MEILI_ENABLED=true
+SEARCH_BACKEND=postgres
+```
+
+This restores the default Postgres search path while preserving warm indexing. If the Meili service itself must be removed from the write path too, also set `MEILI_ENABLED=false` and redeploy.
+
 ## Migration Strategy
 
 ### Before Deploying

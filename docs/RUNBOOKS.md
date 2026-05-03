@@ -2,7 +2,7 @@
 
 Status: operational
 Owner: platform-operations
-Last reviewed: 2026-04-30
+Last reviewed: 2026-05-03
 
 Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastructure/monitoring/alerts.yml). Replace hostnames with your environment.
 
@@ -15,6 +15,28 @@ Short actions for alerts in [`infrastructure/monitoring/alerts.yml`](../infrastr
 **Production deploy baseline:** `deploy-prod.sh` / `deploy-prod-multi.sh` merge git-tracked [`deploy/env/prod.required.env`](../deploy/env/prod.required.env) into `/opt/chatapp/shared/.env` on every rollout. Deploying an **older SHA** or a fork that never merged `origin/main` can **revert** realtime/search/replay behavior (fanout mode, WS replay limits, search semantics). Prefer **prod from current `origin/main`** (or a release tag cut from it); after deploy, spot-check `readlink /opt/chatapp/current` and that required keys in the merged `.env` match the profile you expect.
 
 **Canary (read receipt shedding vs insert-lock pressure):** [`history/canary-read-receipt-insert-lock-shedding.md`](history/canary-read-receipt-insert-lock-shedding.md) — **prod VM3 first** (`PROD_USER=ubuntu DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>`), 10–15m soak, PromQL `vm3` vs `vm1|vm2`; POST **503** flat/down + correctness are the hard gates (zero read defers during low pressure is OK).
+
+## Meilisearch activation or rollback
+
+Use this when enabling Meilisearch-backed search or when search quality/latency regresses after cutover.
+
+1. Confirm app-host config first: `grep -E '^(MEILI_ENABLED|SEARCH_BACKEND|MEILI_HOST|MEILI_INDEX_MESSAGES)=' /opt/chatapp/shared/.env`.
+2. Verify Meili health from an app host:
+   `MEILI_HOST=http://10.0.0.146:7700 MEILI_MASTER_KEY=<secret> npm --prefix /opt/chatapp/current/backend run meili:health -- --json`
+3. If `SEARCH_BACKEND=meili` and health/index checks fail, revert immediately to `SEARCH_BACKEND=postgres` and redeploy. Search will continue on Postgres.
+4. If health is green but results look wrong, confirm the index is only a candidate source. Postgres still rechecks access and freshness, so suspect stale or incomplete indexing before touching SQL search.
+5. For a staged activation, use this order only:
+   - `MEILI_ENABLED=true`, `SEARCH_BACKEND=postgres`
+   - run `meili:setup-index`
+   - run `meili:backfill`
+   - validate staging reads with `SEARCH_BACKEND=meili`
+   - promote the same pattern to prod
+6. Watch these metrics during rollout or regression triage:
+   - `meili_search_duration_ms`
+   - `meili_search_fallback_total`
+   - `meili_index_failures_total`
+   - `meili_candidate_count`
+7. If search traffic is fine but message writes start logging Meili indexing warnings, keep `SEARCH_BACKEND=postgres` and decide separately whether to leave `MEILI_ENABLED=true` for warm indexing or disable it too.
 
 ## ChatAppSyntheticProbeFailed
 

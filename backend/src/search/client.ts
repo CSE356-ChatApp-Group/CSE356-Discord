@@ -49,6 +49,8 @@ const {
   SEARCH_USE_READ_REPLICA,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
+  meiliFreshnessWindowMs,
+  meiliFreshnessCandidateCap,
 } = require('./searchQueryEnv');
 const {
   runSearchQuery,
@@ -425,6 +427,130 @@ async function searchFilteredOnly(
   return buildResult(rows, '', offset, limit);
 }
 
+async function findFreshScopedSearchCandidateIds(
+  q: string,
+  opts: Record<string, any> = {},
+): Promise<string[]> {
+  const trimmed = String(q || '').trim();
+  if (!trimmed || !isScopedSearch(opts)) return [];
+
+  const params: any[] = [trimmed];
+  const scope = buildScopedAccessParts(params, opts);
+  if (!scope) return [];
+
+  const strictTerms = tokenizeStrictSearchTerms(trimmed);
+  const strictMultiWord = strictTerms.length > 1;
+  const rawQueryPh = !strictMultiWord ? p(params, trimmed) : '';
+  const strictTermLikePhs = strictMultiWord ? strictTerms.map((term) => p(params, term)) : [];
+  const freshnessWindowMsPh = p(params, meiliFreshnessWindowMs());
+  const freshnessCapPh = p(params, meiliFreshnessCandidateCap());
+  const authorTimeFilters = buildAuthorTimeFilters(params, opts, 'm0');
+  const strictPredicate = buildStrictLiteralPredicate(
+    'fresh.content',
+    strictMultiWord,
+    strictTermLikePhs,
+    rawQueryPh,
+  );
+
+  let sql = '';
+  if (scope.scopeType === 'community' && scope.targetIdPh && scope.userIdPh) {
+    sql = `
+      WITH search_query AS (
+        SELECT websearch_to_tsquery('english', $1) AS q,
+               numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes
+      ),
+      ${scope.cte.trim()},
+      community_channels AS MATERIALIZED (
+        SELECT ch.id,
+               ch.community_id,
+               ch.name
+        FROM channels ch
+        LEFT JOIN channel_members cm
+          ON cm.channel_id = ch.id
+         AND cm.user_id = ${scope.userIdPh}
+        WHERE ch.community_id = ${scope.targetIdPh}
+          AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
+      ),
+      recent_changed AS MATERIALIZED (
+        SELECT m0.id,
+               m0.content,
+               m0.content_tsv,
+               COALESCE(m0.updated_at, m0.created_at) AS freshness_at
+        FROM messages m0
+        INNER JOIN community_channels cc0
+          ON cc0.id = m0.channel_id
+        WHERE m0.deleted_at IS NULL
+          AND COALESCE(m0.updated_at, m0.created_at) >= NOW() - (${freshnessWindowMsPh}::int * interval '1 millisecond')
+          ${authorTimeFilters}
+        ORDER BY COALESCE(m0.updated_at, m0.created_at) DESC, m0.id DESC
+        LIMIT ${freshnessCapPh}
+      )
+      SELECT scope_access.has_access AS "__scopeAccess",
+        fresh_rows.id
+      FROM scope_access
+      LEFT JOIN LATERAL (
+        SELECT fresh.id
+        FROM recent_changed fresh
+        CROSS JOIN search_query sq
+        WHERE (
+          (sq.tsquery_nodes > 0 AND fresh.content_tsv @@ sq.q)
+          OR ${strictPredicate}
+        )
+        ORDER BY fresh.freshness_at DESC, fresh.id DESC
+        LIMIT ${freshnessCapPh}
+      ) fresh_rows ON scope_access.has_access = TRUE`;
+  } else if (scope.scopeType === 'conversation' && scope.targetIdPh && scope.userIdPh) {
+    sql = `
+      WITH search_query AS (
+        SELECT websearch_to_tsquery('english', $1) AS q,
+               numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes
+      ),
+      ${scope.cte.trim()},
+      recent_changed AS MATERIALIZED (
+        SELECT m0.id,
+               m0.content,
+               m0.content_tsv,
+               COALESCE(m0.updated_at, m0.created_at) AS freshness_at
+        FROM messages m0
+        INNER JOIN conversation_participants cp_gate
+          ON cp_gate.conversation_id = m0.conversation_id
+         AND cp_gate.conversation_id = ${scope.targetIdPh}
+         AND cp_gate.user_id = ${scope.userIdPh}
+         AND cp_gate.left_at IS NULL
+        WHERE m0.deleted_at IS NULL
+          AND m0.conversation_id = ${scope.targetIdPh}
+          AND COALESCE(m0.updated_at, m0.created_at) >= NOW() - (${freshnessWindowMsPh}::int * interval '1 millisecond')
+          ${authorTimeFilters}
+        ORDER BY COALESCE(m0.updated_at, m0.created_at) DESC, m0.id DESC
+        LIMIT ${freshnessCapPh}
+      )
+      SELECT scope_access.has_access AS "__scopeAccess",
+        fresh_rows.id
+      FROM scope_access
+      LEFT JOIN LATERAL (
+        SELECT fresh.id
+        FROM recent_changed fresh
+        CROSS JOIN search_query sq
+        WHERE (
+          (sq.tsquery_nodes > 0 AND fresh.content_tsv @@ sq.q)
+          OR ${strictPredicate}
+        )
+        ORDER BY fresh.freshness_at DESC, fresh.id DESC
+        LIMIT ${freshnessCapPh}
+      ) fresh_rows ON scope_access.has_access = TRUE`;
+  } else {
+    return [];
+  }
+
+  const rows = await runSearchQuery(sql, params, { forcePrimary: true });
+  if (rows[0]?.__scopeAccess === false) {
+    const err: any = new Error('Access denied');
+    err.statusCode = 403;
+    throw err;
+  }
+  return rows.filter((row: any) => row && row.id).map((row: any) => String(row.id));
+}
+
 const {
   shouldRetrySearchOnPrimary,
   logPrimaryRetry,
@@ -572,6 +698,7 @@ const { searchWithMeiliBackend } = createMeiliSearchExecutor({
   meiliClient,
   logger,
   runSearchQuery,
+  findFreshScopedSearchCandidateIds,
   resolvedSearchScope,
   buildScopedAccessParts,
   p,
@@ -638,5 +765,9 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
 
 module.exports =
   process.env.NODE_ENV === 'test'
-    ? { search, __testBuildScopedLiteralParts: buildScopedLiteralParts }
+    ? {
+        search,
+        __testBuildScopedLiteralParts: buildScopedLiteralParts,
+        __testFindFreshScopedSearchCandidateIds: findFreshScopedSearchCandidateIds,
+      }
     : { search };

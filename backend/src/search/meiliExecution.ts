@@ -2,6 +2,7 @@ function createMeiliSearchExecutor({
   meiliClient,
   logger,
   runSearchQuery,
+  findFreshScopedSearchCandidateIds,
   resolvedSearchScope,
   buildScopedAccessParts,
   p,
@@ -91,8 +92,11 @@ function createMeiliSearchExecutor({
       throw createMeiliFallbackError('meili_empty_candidates');
     }
 
+    const freshnessIds = await findFreshScopedSearchCandidateIds(q, opts);
+    const mergedIds = Array.from(new Set([...(ids || []), ...(freshnessIds || [])]));
+
     const tRecheck = Date.now();
-    const recheckMeta = buildRecheckFromCandidates(ids, q, opts);
+    const recheckMeta = buildRecheckFromCandidates(mergedIds, q, opts);
     const rows = await runSearchQuery(recheckMeta.sql, recheckMeta.params);
     const recheckMs = Date.now() - tRecheck;
 
@@ -110,6 +114,14 @@ function createMeiliSearchExecutor({
       );
     }
 
+    const freshnessSupplementUsed = strictRows.some(
+      (row: any) => row && row.id && !ids.includes(String(row.id)),
+    );
+
+    if (freshnessSupplementUsed) {
+      meiliClient.incFallbackTotal();
+    }
+
     if (strictRows.length === 0 && ids.length > 0) {
       meiliClient.incFallbackTotal();
       const totalMs = Date.now() - tAll;
@@ -121,7 +133,9 @@ function createMeiliSearchExecutor({
           resolved_scope: scopeLabel,
           search_backend: 'meili',
           meili_candidate_count: ids.length,
+          pg_fresh_candidate_count: freshnessIds.length,
           postgres_rechecked_count: rows.filter((r: any) => r && r.id).length,
+          freshness_supplement_used: freshnessSupplementUsed,
           strict_term_count: terms.length,
           strict_pass_count: 0,
           reason: 'meili_strict_token_mismatch_fallback_postgres',
@@ -147,7 +161,9 @@ function createMeiliSearchExecutor({
         resolved_scope: scopeLabel,
         search_backend: 'meili',
         meili_candidate_count: ids.length,
+        pg_fresh_candidate_count: freshnessIds.length,
         postgres_rechecked_count: rows.filter((r: any) => r && r.id).length,
+        freshness_supplement_used: freshnessSupplementUsed,
         strict_term_count: terms.length,
         strict_pass_count: finalHits.length,
         final_hit_count: finalHits.length,

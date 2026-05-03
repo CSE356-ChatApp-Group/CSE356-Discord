@@ -47,9 +47,23 @@ function getSearchStatementTimeoutMs() {
   return configuredMs;
 }
 
+function meiliFreshnessWindowMs(): number {
+  const raw = parseInt(process.env.MEILI_FRESHNESS_WINDOW_MS || '600000', 10);
+  const value = Number.isFinite(raw) && raw > 0 ? raw : 600000;
+  return Math.min(Math.max(value, 60000), 3600000);
+}
+
+function meiliFreshnessCandidateCap(): number {
+  const raw = parseInt(process.env.MEILI_FRESHNESS_CANDIDATE_LIMIT || '40', 10);
+  const value = Number.isFinite(raw) && raw > 0 ? raw : 40;
+  return Math.min(Math.max(value, 10), 200);
+}
+
 module.exports = {
   SEARCH_USE_READ_REPLICA,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
   getSearchStatementTimeoutMs,
+  meiliFreshnessWindowMs,
+  meiliFreshnessCandidateCap,
 };
