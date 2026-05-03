@@ -44,6 +44,7 @@ const {
   fanoutTargetCandidatesHistogram,
   wsActiveSubscriberTargetsBucket,
   wsFanoutCandidateCountBucket,
+  wsFanoutOfflineSkippedTotal,
   wsFanoutActiveTargetHitTotal,
   wsFanoutActiveTargetMissTotal,
   wsFanoutRecoveryAsyncTotal,
@@ -105,7 +106,7 @@ async function resolveRecentChannelUserTargets(channelId: string, cap: number) {
     since,
     '+inf',
   );
-  return Array.from(
+  const targets = Array.from(
     new Set(
       (Array.isArray(recentUserIds) ? recentUserIds : [])
         .filter((userId) => typeof userId === 'string' && userId.length > 0)
@@ -113,6 +114,60 @@ async function resolveRecentChannelUserTargets(channelId: string, cap: number) {
         .map((userId) => `user:${userId}`),
     ),
   );
+  return filterActiveConnectedUserTargets(targets, 'channel_message_active_subscribers');
+}
+
+async function filterActiveConnectedUserTargets(targets: string[], path: string) {
+  if (!targets.length) return [];
+  const userIds = targets
+    .map((target) => (typeof target === 'string' && target.startsWith('user:') ? target.slice(5) : ''))
+    .filter((userId) => userId.length > 0);
+  if (!userIds.length) return [];
+
+  try {
+    const raw = await redis.call('SMISMEMBER', connectedUsersKey(), ...userIds);
+    const rows = Array.isArray(raw) ? raw : [];
+    if (rows.length !== userIds.length) {
+      throw new Error('SMISMEMBER result length mismatch');
+    }
+    const activeTargets = targets.filter((_target, idx) => Number(rows[idx]) === 1);
+    const skipped = targets.length - activeTargets.length;
+    if (skipped > 0) {
+      wsFanoutOfflineSkippedTotal?.inc?.({ path }, skipped);
+    }
+    return activeTargets;
+  } catch (err: any) {
+    const message = String(err?.message || '');
+    if (!/unknown command|wrong number of arguments|SMISMEMBER/i.test(message)) {
+      wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'active_recent_filter_failed' });
+      logger.warn(
+        { err, targetCount: targets.length },
+        'Failed to filter recent channel fanout targets by active presence',
+      );
+      return [];
+    }
+  }
+
+  try {
+    const pipe = redis.pipeline();
+    for (const userId of userIds) {
+      pipe.sismember(connectedUsersKey(), userId);
+    }
+    const results = await pipe.exec();
+    const activeTargets = targets.filter((_target, idx) => Number(results?.[idx]?.[1] || 0) === 1);
+    const skipped = targets.length - activeTargets.length;
+    if (skipped > 0) {
+      wsFanoutOfflineSkippedTotal?.inc?.({ path }, skipped);
+    }
+    return activeTargets;
+  } catch (err) {
+    wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'active_recent_filter_fallback_failed' });
+    logger.warn(
+      { err, targetCount: targets.length },
+      'Failed to filter recent channel fanout targets with SISMEMBER fallback',
+    );
+    return [];
+  }
 }
 
 async function resolveActiveConnectedChannelUserTargets(

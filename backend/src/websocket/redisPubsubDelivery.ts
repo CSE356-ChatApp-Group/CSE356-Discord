@@ -8,7 +8,7 @@ const {
   fanoutRecipientsHistogram,
   realtimeMissAttributionTotal,
   wsActiveSubscriberTargetsBucket,
-  wsFanoutRecoveryInlineTotal,
+  wsFanoutRecoveryAsyncTotal,
   wsSocketSendTargetsBucket,
   wsPubsubReceiveLagMs,
   wsDuplicateDeliverySuppressedTotal,
@@ -61,6 +61,7 @@ function createRedisPubsubDelivery(ctx) {
   } = ctx;
   const anonymousSocketIds = new WeakMap();
   let nextAnonymousSocketId = 0;
+  const STALE_MAP_RECOVERY_MAX_USERS = 100;
 
   function reliableMessageId(parsed) {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
@@ -268,22 +269,24 @@ function createRedisPubsubDelivery(ctx) {
     if (!userIds.length || parsed === null || typeof parsed !== "object") return false;
     const ev = parsed.event;
     if (typeof ev !== "string" || !ev.startsWith("message:")) return false;
+    const cappedUserIds = [...new Set(userIds)].slice(0, STALE_MAP_RECOVERY_MAX_USERS);
+    if (!cappedUserIds.length) return false;
     try {
       await publishUserFeedTargets(
-        userIds.map((id) => `user:${id}`),
+        cappedUserIds.map((id) => `user:${id}`),
         parsed,
       );
       realtimeMissAttributionTotal.inc(
         { reason: "channel_topic_stale_map_userfeed_recovery" },
-        userIds.length,
+        cappedUserIds.length,
       );
-      wsFanoutRecoveryInlineTotal?.inc?.(
+      wsFanoutRecoveryAsyncTotal?.inc?.(
         { reason: "channel_topic_stale_map_userfeed_recovery" },
-        userIds.length,
+        cappedUserIds.length,
       );
       recordRealtimeMissAttribution(
         "channel_topic_stale_map_userfeed_recovery",
-        userIds.length,
+        cappedUserIds.length,
       );
       return true;
     } catch (err) {
@@ -293,6 +296,21 @@ function createRedisPubsubDelivery(ctx) {
       );
       return false;
     }
+  }
+
+  function scheduleUserfeedRecoveryAfterStaleTopicMap(channel, parsed, userIds) {
+    if (!userIds.length || parsed === null || typeof parsed !== "object") return false;
+    const cappedUserIds = [...new Set(userIds)].slice(0, STALE_MAP_RECOVERY_MAX_USERS);
+    if (!cappedUserIds.length) return false;
+    setImmediate(() => {
+      userfeedRecoveryAfterStaleTopicMap(channel, parsed, cappedUserIds).catch((err) => {
+        logger.warn(
+          { err, channel, userIdCount: cappedUserIds.length },
+          "WS userfeed recovery after stale topic subscribers failed",
+        );
+      });
+    });
+    return true;
   }
 
   async function deliverUserFeedMessage(channel, routed, pubsubReceiveMs: number | null = null) {
@@ -512,7 +530,7 @@ function createRedisPubsubDelivery(ctx) {
         && staleTopicRecoveryUserIds.length > 0
         && parsed !== null
       ) {
-        await userfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
+        scheduleUserfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
       }
       return;
     }
@@ -579,7 +597,7 @@ function createRedisPubsubDelivery(ctx) {
         }
         let recovered = false;
         if (deliveredCount === 0 && staleTopicRecoveryUserIds.length > 0 && parsed !== null) {
-          recovered = await userfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
+          recovered = scheduleUserfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
         }
         if (deliveredCount === 0 && !recovered) {
           realtimeMissAttributionTotal.inc({ reason: "topic_message_send_blocked" });

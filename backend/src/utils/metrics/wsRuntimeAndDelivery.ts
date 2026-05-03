@@ -580,6 +580,64 @@ const wsFanoutCandidateCountBucket = new client.Histogram({
   buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 });
 
+/** Active connected user targets selected for realtime fanout per message/path. */
+const wsActiveSubscriberTargetsBucket = new client.Histogram({
+  name: 'ws_active_subscriber_targets_bucket',
+  help: 'Number of active connected subscriber targets selected for realtime fanout per message/path',
+  labelNames: ['path'],
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Recent/subscriber candidates skipped before realtime publish because no active connection exists. */
+const wsFanoutOfflineSkippedTotal = new client.Counter({
+  name: 'ws_fanout_offline_skipped_total',
+  help: 'Realtime fanout user targets skipped before Redis publish because the user has no active connection',
+  labelNames: ['path'],
+});
+
+/** Active subscriber target hits selected for realtime fanout. */
+const wsFanoutActiveTargetHitTotal = new client.Counter({
+  name: 'ws_fanout_active_target_hit_total',
+  help: 'Active connected subscriber targets selected for realtime fanout',
+  labelNames: ['path'],
+});
+
+/** Fanout operations that found no active subscriber targets. */
+const wsFanoutActiveTargetMissTotal = new client.Counter({
+  name: 'ws_fanout_active_target_miss_total',
+  help: 'Realtime fanout operations that found no active connected subscriber targets',
+  labelNames: ['path'],
+});
+
+/** Inline fallback/recovery fanout work. */
+const wsFanoutRecoveryInlineTotal = new client.Counter({
+  name: 'ws_fanout_recovery_inline_total',
+  help: 'Realtime fanout recovery actions performed inline with live delivery',
+  labelNames: ['reason'],
+});
+
+/** Async or bounded fallback/recovery fanout work. */
+const wsFanoutRecoveryAsyncTotal = new client.Counter({
+  name: 'ws_fanout_recovery_async_total',
+  help: 'Realtime fanout recovery actions deferred or bounded away from the primary live delivery path',
+  labelNames: ['reason'],
+});
+
+/** Redis EXISTS probes by fanout/pending-replay path. */
+const redisExistsByPathTotal = new client.Counter({
+  name: 'redis_exists_by_path_total',
+  help: 'Redis EXISTS probes issued by fanout and pending-replay paths',
+  labelNames: ['path'],
+});
+
+/** Socket send target slots per local delivery path. */
+const wsSocketSendTargetsBucket = new client.Histogram({
+  name: 'ws_socket_send_targets_bucket',
+  help: 'Number of local socket send target slots per realtime delivery path',
+  labelNames: ['path'],
+  buckets: [0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
 // ── Partial delivery root cause metrics (Patch E) ─────────────────────────────
 
 /** Reason why a recipient was missing from a partial delivery. */
