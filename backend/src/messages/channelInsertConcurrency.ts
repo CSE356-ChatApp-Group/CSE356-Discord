@@ -47,6 +47,8 @@ const {
   MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MIN_MS,
   MESSAGE_INSERT_LOCK_RECENT_TIMEOUT_BACKOFF_MAX_MS,
 } = require('./channelInsertLockEnv');
+const { tracer } = require('../utils/tracer');
+const { SpanStatusCode } = require('@opentelemetry/api');
 
 registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
 const MESSAGE_INSERT_LOCK_TIMEOUT_CODE = 'MESSAGE_INSERT_LOCK_TIMEOUT';
@@ -381,78 +383,104 @@ async function acquireChannelInsertLease(
   opts: { requestId?: string } = {},
 ): Promise<{ lease: MessageInsertLease | null; precallMs: number }> {
   const startedAt = Date.now();
-  const waitQueueLease = await enterChannelInsertWaitQueue(channelId, opts);
+  const waitQueueLease = await tracer.startActiveSpan('channel_insert.queue_wait', async (span: any) => {
+    try {
+      return await enterChannelInsertWaitQueue(channelId, opts);
+    } catch (err: any) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+      span.recordException(err);
+      throw err;
+    } finally {
+      span.setAttribute('queue.wait_ms', Math.max(0, Date.now() - startedAt));
+      span.end();
+    }
+  });
   const lockKey = `message_insert_lock:${channelId}`;
   const token = `${process.pid}:${crypto.randomUUID()}`;
   const deadline = waitQueueLease.entry.deadlineMs;
-  let attempt = 0;
-  while (Date.now() <= deadline) {
+  return tracer.startActiveSpan('channel_insert.redis_spin', async (span: any) => {
+    let attempt = 0;
+    let redisSetCalls = 0;
+    let lockAcquired = false;
+    let redisError = false;
     try {
-      const acquired = await withRedisOpTimeout(
-        redis.set(
-          lockKey,
-          token,
-          'NX',
-          'PX',
-          MESSAGE_INSERT_LOCK_TTL_MS,
-        ),
-        MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS,
-        'set',
-      );
-      if (acquired === 'OK') {
-        const waitMs = Math.max(0, Date.now() - startedAt);
-        messageChannelInsertLockTotal.inc({
-          result: waitMs === 0 ? 'acquired_immediate' : 'acquired_after_wait',
-        });
-        messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, waitMs);
-        if (waitMs > 0) {
-          messageInsertLockAcquiredAfterWaitTotal.inc();
-        }
-        recordMessageChannelInsertLockAcquireWait(waitMs);
-        if (waitMs >= 100) {
-          logger.info(
-            { channelId, requestId: opts.requestId, waitMs },
-            'POST /messages channel insert lock acquired after wait',
+      while (Date.now() <= deadline) {
+        redisSetCalls += 1;
+        try {
+          const acquired = await withRedisOpTimeout(
+            redis.set(
+              lockKey,
+              token,
+              'NX',
+              'PX',
+              MESSAGE_INSERT_LOCK_TTL_MS,
+            ),
+            MESSAGE_INSERT_LOCK_REDIS_OP_TIMEOUT_MS,
+            'set',
           );
+          if (acquired === 'OK') {
+            const waitMs = Math.max(0, Date.now() - startedAt);
+            messageChannelInsertLockTotal.inc({
+              result: waitMs === 0 ? 'acquired_immediate' : 'acquired_after_wait',
+            });
+            messageChannelInsertLockWaitMs.observe({ result: 'acquired' }, waitMs);
+            if (waitMs > 0) {
+              messageInsertLockAcquiredAfterWaitTotal.inc();
+            }
+            recordMessageChannelInsertLockAcquireWait(waitMs);
+            if (waitMs >= 100) {
+              logger.info(
+                { channelId, requestId: opts.requestId, waitMs },
+                'POST /messages channel insert lock acquired after wait',
+              );
+            }
+            lockAcquired = true;
+            return {
+              lease: { lockKey, token, waitMs, queueLease: waitQueueLease },
+              precallMs: waitMs,
+            };
+          }
+        } catch (err) {
+          const waitMs = Math.max(0, Date.now() - startedAt);
+          messageChannelInsertLockTotal.inc({ result: 'redis_error' });
+          messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, waitMs);
+          logger.error(
+            { err, channelId, requestId: opts.requestId, waitMs },
+            'POST /messages channel insert lock Redis error; falling back to local serialization',
+          );
+          leaveChannelInsertWaitQueue(waitQueueLease);
+          redisError = true;
+          return { lease: null, precallMs: waitMs };
         }
-        return {
-          lease: { lockKey, token, waitMs, queueLease: waitQueueLease },
-          precallMs: waitMs,
-        };
+
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        await sleep(Math.min(remainingMs, jitteredSleepMs(attempt)));
+        attempt += 1;
       }
-    } catch (err) {
       const waitMs = Math.max(0, Date.now() - startedAt);
-      messageChannelInsertLockTotal.inc({ result: 'redis_error' });
-      messageChannelInsertLockWaitMs.observe({ result: 'redis_error' }, waitMs);
-      logger.error(
-        { err, channelId, requestId: opts.requestId, waitMs },
-        'POST /messages channel insert lock Redis error; falling back to local serialization',
+      messageChannelInsertLockTotal.inc({ result: 'timeout' });
+      messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, waitMs);
+      messageInsertLockWaitTimeoutTotal.inc();
+      recordMessageChannelInsertLockTimeoutEvent();
+      markRecentChannelTimeout(channelId);
+      logger.warn(
+        { channelId, requestId: opts.requestId, waitMs },
+        'POST /messages channel insert lock timed out',
       );
       leaveChannelInsertWaitQueue(waitQueueLease);
-      return { lease: null, precallMs: waitMs };
+      throw buildInsertLockTimeoutError(
+        channelId,
+        waitMs,
+        'message_insert_lock_wait_timeout',
+      );
+    } finally {
+      span.setAttribute('lock.redis_set_calls', redisSetCalls);
+      span.setAttribute('lock.acquired', lockAcquired);
+      if (redisError) span.setAttribute('lock.redis_error', true);
+      span.end();
     }
-
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) break;
-    await sleep(Math.min(remainingMs, jitteredSleepMs(attempt)));
-    attempt += 1;
-  }
-  const waitMs = Math.max(0, Date.now() - startedAt);
-  messageChannelInsertLockTotal.inc({ result: 'timeout' });
-  messageChannelInsertLockWaitMs.observe({ result: 'timeout' }, waitMs);
-  messageInsertLockWaitTimeoutTotal.inc();
-  recordMessageChannelInsertLockTimeoutEvent();
-  markRecentChannelTimeout(channelId);
-  logger.warn(
-    { channelId, requestId: opts.requestId, waitMs },
-    'POST /messages channel insert lock timed out',
-  );
-  leaveChannelInsertWaitQueue(waitQueueLease);
-  throw buildInsertLockTimeoutError(
-    channelId,
-    waitMs,
-    'message_insert_lock_wait_timeout',
-  );
+  });
 }
 
 async function releaseChannelInsertLease(
@@ -571,7 +599,19 @@ export function runChannelMessageInsertSerialized<T>(
         bypassReasonDetail,
       });
     }
-    return fn();
+    return tracer.startActiveSpan('channel_insert.db_execute', async (span: any) => {
+      try {
+        return await fn();
+      } catch (err: any) {
+        if (!err?.statusCode || err.statusCode >= 500) {
+          span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+          span.recordException(err);
+        }
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   }
   return (async () => {
     const { lease, precallMs } = await acquireChannelInsertLease(channelId, opts);
@@ -606,10 +646,30 @@ export function runChannelMessageInsertSerialized<T>(
     let releaseResult: 'released' | 'release_mismatch' | 'release_error' | 'no_lease' =
       'no_lease';
     try {
-      return await fn();
+      return await tracer.startActiveSpan('channel_insert.db_execute', async (span: any) => {
+        try {
+          return await fn();
+        } catch (err: any) {
+          if (!err?.statusCode || err.statusCode >= 500) {
+            span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+            span.recordException(err);
+          }
+          throw err;
+        } finally {
+          span.end();
+        }
+      });
     } finally {
       const dbTxDurationMs = Math.max(0, Date.now() - dbTxStartedAt);
-      releaseResult = await releaseChannelInsertLease(lease, channelId, opts);
+      releaseResult = await tracer.startActiveSpan('channel_insert.lock_release', async (span: any) => {
+        try {
+          const result = await releaseChannelInsertLease(lease, channelId, opts);
+          span.setAttribute('lock.release_result', result);
+          return result;
+        } finally {
+          span.end();
+        }
+      });
       if (holderStartedAt !== null) {
         const holderDurationMs = Math.max(0, Date.now() - holderStartedAt);
         messageInsertLockHolderDurationMs.observe(

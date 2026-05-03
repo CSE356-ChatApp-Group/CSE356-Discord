@@ -247,18 +247,31 @@ async function runPostInsertPhase({
   trace.getActiveSpan()?.setAttribute('message.insert_path', channelId ? 'channel_merged' : 'dm_sequential');
 
   const runChannelMessageRowUnderInsertLock = () =>
-    withTransaction(async (client: any) => {
-      const { row, communityId: nextCommunityId } =
-        await runChannelInsertTransaction({
-          client,
-          channelId: channelId!,
-          userId,
-          normalizedContent,
-          threadId,
-          txPhases,
+    tracer.startActiveSpan('channel_insert.db_pool', async (span: any) => {
+      try {
+        return await withTransaction(async (client: any) => {
+          const { row, communityId: nextCommunityId } =
+            await runChannelInsertTransaction({
+              client,
+              channelId: channelId!,
+              userId,
+              normalizedContent,
+              threadId,
+              txPhases,
+            });
+          communityId = nextCommunityId;
+          return row;
         });
-      communityId = nextCommunityId;
-      return row;
+      } catch (err: any) {
+        const isExpected4xx = err.statusCode && err.statusCode >= 400 && err.statusCode < 500;
+        if (!isExpected4xx) {
+          span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+          span.recordException(err);
+        }
+        throw err;
+      } finally {
+        span.end();
+      }
     });
 
   const runDmMessageInsertTransaction = () =>
@@ -293,14 +306,27 @@ async function runPostInsertPhase({
         );
         span.setAttribute('tx.config_ms', Math.max(0, txPhases.t_access - txPhases.t0));
         span.setAttribute('tx.merged_sql_ms', Math.max(0, txPhases.t_insert - txPhases.t_access));
+        span.addEvent('tx.config_done', { elapsed_ms: Math.max(0, txPhases.t_access - txPhases.t0) }, txPhases.t_access);
+        span.addEvent('tx.insert_done', { elapsed_ms: Math.max(0, txPhases.t_insert - txPhases.t_access) }, txPhases.t_insert);
         if (attachments.length > 0) {
           span.setAttribute('attachment_count', attachments.length);
           try {
-            await withTransaction(async (client: any) => {
-              await client.query(
-                `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
-              );
-              await insertMessageAttachments(client, row.id, userId, attachments);
+            await tracer.startActiveSpan('channel_insert.attachment_insert', async (attachSpan: any) => {
+              try {
+                await withTransaction(async (client: any) => {
+                  await client.query(
+                    `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+                  );
+                  await insertMessageAttachments(client, row.id, userId, attachments);
+                });
+                attachSpan.setAttribute('attachment_count', attachments.length);
+              } catch (err: any) {
+                attachSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+                attachSpan.recordException(err);
+                throw err;
+              } finally {
+                attachSpan.end();
+              }
             });
           } catch (attachErr) {
             await rollbackInsertedChannelMessage(row.id, channelId, userId);
