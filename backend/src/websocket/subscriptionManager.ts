@@ -56,6 +56,11 @@ function createSubscriptionManager({
 
     await ensureRedisChannelSubscribed(redisChannel);
 
+    // Guard: socket may have closed during the Redis await above.
+    // cleanup() already ran; adding a CLOSED socket to channelClients would
+    // leave a stale entry until the next message on this channel prunes it.
+    if (ws.readyState !== 1 /* WebSocket.OPEN */) return;
+
     if (!channelClients.has(redisChannel)) {
       channelClients.set(redisChannel, new Set());
     }
