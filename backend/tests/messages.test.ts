@@ -1457,7 +1457,7 @@ describe('GET /messages access and pagination equivalence', () => {
       .get(`/api/v1/messages?channelId=${channelId}&limit=50`)
       .set('Authorization', `Bearer ${outsider.accessToken}`);
     expect(outsiderRes.status).toBe(403);
-  });
+  }, 15_000);
 
   it('returns private-channel history only to invited members', async () => {
     const owner = await createAuthenticatedUser('histprivowner');

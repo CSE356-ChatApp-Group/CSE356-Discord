@@ -18,10 +18,26 @@ function isDuplicateSuppressionOnly(reasonCounts: Record<string, unknown> | null
   const entries = Object.entries(reasonCounts)
     .filter(([, count]) => Number(count) > 0);
   if (entries.length === 0) return false;
-  return entries.every(([reason]) => reason === 'dedupe_recent_delivery' || reason === 'dedupe_skip');
+  return entries.every(([reason]) => (
+    reason === 'dedupe_recent_delivery'
+    || reason === 'dedupe_skip'
+    || reason === 'duplicate_candidate'
+  ));
+}
+
+function hasDeliveryRiskReason(reasonCounts: Record<string, unknown> | null | undefined) {
+  if (!reasonCounts || typeof reasonCounts !== 'object') return false;
+  return Object.entries(reasonCounts)
+    .filter(([, count]) => Number(count) > 0)
+    .some(([reason]) => !(
+      reason === 'dedupe_recent_delivery'
+      || reason === 'dedupe_skip'
+      || reason === 'duplicate_candidate'
+    ));
 }
 
 module.exports = {
   normalizeCommunityTopic,
   isDuplicateSuppressionOnly,
+  hasDeliveryRiskReason,
 };

@@ -8,6 +8,11 @@
  *
  * Uses a short-lived Map keyed by `${eventName}:${messageId}:${userId}:${connectionId}`
  * with TTL eviction. This is process-local (each node dedupes independently).
+ *
+ * Entries are first reserved when a frame is accepted into the socket queue and
+ * confirmed once ws.send() succeeds. A failed write releases the reservation so
+ * a later recovery path is not suppressed by a frame that never reached the
+ * socket.
  */
 
 type MetricInc = (labels?: Record<string, string>, value?: number) => void;
@@ -28,14 +33,15 @@ function createFanoutRecipientDedupe(metrics: {
   wsRecipientDedupeTotal?: any;
   wsRecipientDuplicateCandidatesTotal?: any;
 }) {
-  // Map: dedupeKey → timestamp
-  const seen = new Map<string, number>();
+  // Map: dedupeKey → reservation/confirmation state.
+  const seen = new Map<string, { ts: number; state: 'reserved' | 'confirmed'; token: string }>();
+  let nextToken = 0;
 
   function prune(nowMs: number): void {
     const cutoff = nowMs - DEDUPE_TTL_MS;
     // Evict expired entries (iterate from oldest since Map preserves insertion order)
-    for (const [key, ts] of seen) {
-      if (ts >= cutoff) break;
+    for (const [key, entry] of seen) {
+      if (entry.ts >= cutoff) break;
       seen.delete(key);
     }
     // Hard cap
@@ -63,10 +69,53 @@ function createFanoutRecipientDedupe(metrics: {
     return seen.has(buildKey(messageId, userId, eventName, connectionId));
   }
 
+  function reserveRecipient(messageId: string, userId: string, path: string, eventName = 'message:created', connectionId = 'user'): string | null {
+    if (!messageId || !userId || !eventName || !connectionId) return null;
+    const nowMs = Date.now();
+    const key = buildKey(messageId, userId, eventName, connectionId);
+    if (seen.has(key)) return null;
+    nextToken += 1;
+    const token = `${nowMs}:${nextToken}`;
+    seen.set(key, { ts: nowMs, state: 'reserved', token });
+    metrics.wsRecipientDedupeTotal?.inc({ path });
+    prune(nowMs);
+    return token;
+  }
+
+  function confirmRecipient(messageId: string, userId: string, eventName = 'message:created', connectionId = 'user', token: string | null = null): boolean {
+    if (!messageId || !userId || !eventName || !connectionId) return false;
+    const nowMs = Date.now();
+    const key = buildKey(messageId, userId, eventName, connectionId);
+    const existing = seen.get(key);
+    if (existing && token && existing.token !== token) return false;
+    seen.set(key, {
+      ts: nowMs,
+      state: 'confirmed',
+      token: existing?.token || token || `${nowMs}:confirmed`,
+    });
+    prune(nowMs);
+    return true;
+  }
+
+  function releaseRecipient(messageId: string, userId: string, eventName = 'message:created', connectionId = 'user', token: string | null = null): boolean {
+    if (!messageId || !userId || !eventName || !connectionId) return false;
+    const key = buildKey(messageId, userId, eventName, connectionId);
+    const existing = seen.get(key);
+    if (!existing) return false;
+    if (existing.state === 'confirmed') return false;
+    if (token && existing.token !== token) return false;
+    seen.delete(key);
+    return true;
+  }
+
   function markRecipient(messageId: string, userId: string, path: string, eventName = 'message:created', connectionId = 'user'): void {
     if (!messageId || !userId || !eventName || !connectionId) return;
     const nowMs = Date.now();
-    seen.set(buildKey(messageId, userId, eventName, connectionId), nowMs);
+    seen.set(buildKey(messageId, userId, eventName, connectionId), {
+      ts: nowMs,
+      state: 'confirmed',
+      token: `${nowMs}:manual`,
+    });
     metrics.wsRecipientDedupeTotal?.inc({ path });
     prune(nowMs);
   }
@@ -113,6 +162,9 @@ function createFanoutRecipientDedupe(metrics: {
   return {
     shouldSkipRecipient,
     hasSeenRecipient,
+    reserveRecipient,
+    confirmRecipient,
+    releaseRecipient,
     markRecipient,
     markDuplicateRecipient,
     extractMessageId,

@@ -544,6 +544,34 @@ const wsRecipientDuplicateCandidatesTotal = new client.Counter({
   labelNames: ['path'],
 });
 
+/** Informational duplicate delivery suppression; this is not a missing-recipient signal. */
+const wsDuplicateDeliverySuppressedTotal = new client.Counter({
+  name: 'ws_duplicate_delivery_suppressed_total',
+  help: 'Safe duplicate delivery suppressions by path and reason; not counted as partial delivery missing recipients',
+  labelNames: ['path', 'reason', 'vm', 'worker'],
+});
+
+/** Cross-path dedupe reservations made when a reliable frame is accepted for enqueue. */
+const wsDedupeEnqueueReservedTotal = new client.Counter({
+  name: 'ws_dedupe_enqueue_reserved_total',
+  help: 'Reliable realtime fanout dedupe reservations made before socket write confirmation',
+  labelNames: ['path', 'vm', 'worker'],
+});
+
+/** Cross-path dedupe reservations confirmed by successful ws.send callbacks. */
+const wsDedupeSendConfirmedTotal = new client.Counter({
+  name: 'ws_dedupe_send_confirmed_total',
+  help: 'Reliable realtime fanout dedupe reservations confirmed by successful socket writes',
+  labelNames: ['path', 'vm', 'worker'],
+});
+
+/** Cross-path dedupe reservations released after enqueue or ws.send failure. */
+const wsDedupeSendFailedTotal = new client.Counter({
+  name: 'ws_dedupe_send_failed_total',
+  help: 'Reliable realtime fanout dedupe reservations released because enqueue or socket write failed',
+  labelNames: ['path', 'vm', 'worker'],
+});
+
 /** Histogram of fanout candidate counts per path. */
 const wsFanoutCandidateCountBucket = new client.Histogram({
   name: 'ws_fanout_candidate_count_bucket',
@@ -578,12 +606,23 @@ const wsPartialDeliveryMissingReasonTotal = new client.Counter({
   wsRecipientDuplicateCandidatesTotal.inc({ path: 'user_topic' }, 0);
   wsRecipientDuplicateCandidatesTotal.inc({ path: 'recent_connect_bridge' }, 0);
   wsRecipientDuplicateCandidatesTotal.inc({ path: 'stale_map_recovery' }, 0);
+  for (const path of ['channel_topic', 'user_topic', 'recent_connect_bridge', 'stale_map_recovery', 'other']) {
+    wsDuplicateDeliverySuppressedTotal.inc({ path, reason: 'dedupe_skip', vm: 'unknown', worker: 'unknown' }, 0);
+    wsDuplicateDeliverySuppressedTotal.inc({ path, reason: 'dedupe_recent_delivery', vm: 'unknown', worker: 'unknown' }, 0);
+    wsDuplicateDeliverySuppressedTotal.inc({ path, reason: 'duplicate_candidate', vm: 'unknown', worker: 'unknown' }, 0);
+    wsDedupeEnqueueReservedTotal.inc({ path, vm: 'unknown', worker: 'unknown' }, 0);
+    wsDedupeSendConfirmedTotal.inc({ path, vm: 'unknown', worker: 'unknown' }, 0);
+    wsDedupeSendFailedTotal.inc({ path, vm: 'unknown', worker: 'unknown' }, 0);
+  }
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'not_subscribed' }, 0);
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'backpressure_drop' }, 0);
-  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'dedupe_skip' }, 0);
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'socket_not_open' }, 0);
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'reconnecting' }, 0);
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'unknown' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'send_failed' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'no_socket' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'stale_map_miss' }, 0);
+  wsPartialDeliveryMissingReasonTotal.inc({ reason: 'enqueue_failed' }, 0);
 })();
 
 // ── End-to-end WS delivery stage tracing ─────────────────────────────────────
@@ -713,6 +752,10 @@ module.exports = {
   wsBootstrapPausedForLiveFanoutTotal,
   wsRecipientDedupeTotal,
   wsRecipientDuplicateCandidatesTotal,
+  wsDuplicateDeliverySuppressedTotal,
+  wsDedupeEnqueueReservedTotal,
+  wsDedupeSendConfirmedTotal,
+  wsDedupeSendFailedTotal,
   wsFanoutCandidateCountBucket,
   wsPartialDeliveryMissingReasonTotal,
   wsDeliveryStageDurationMs,

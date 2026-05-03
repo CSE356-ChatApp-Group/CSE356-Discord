@@ -18,6 +18,7 @@ describe("redisPubsubTopicUtils characterization", () => {
 
   it("detects duplicate-suppression-only reason maps", () => {
     expect(isDuplicateSuppressionOnly({ dedupe_recent_delivery: 1 })).toBe(true);
+    expect(isDuplicateSuppressionOnly({ duplicate_candidate: 1 })).toBe(true);
     expect(isDuplicateSuppressionOnly({ dedupe_recent_delivery: 2, other: 0 })).toBe(true);
     expect(isDuplicateSuppressionOnly({ dedupe_recent_delivery: 1, ws_slow: 1 })).toBe(false);
     expect(isDuplicateSuppressionOnly({})).toBe(false);

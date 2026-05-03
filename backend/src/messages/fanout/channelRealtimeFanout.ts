@@ -48,6 +48,7 @@ const {
   wsFanoutActiveTargetMissTotal,
   wsFanoutRecoveryAsyncTotal,
   wsRecipientDuplicateCandidatesTotal,
+  wsDuplicateDeliverySuppressedTotal,
   channelMessageFanoutRecipientTotal,
   realtimeMissAttributionTotal,
   wsTargetLookupDurationMs,
@@ -187,6 +188,16 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
   if (duplicateCandidateCount > 0) {
     wsRecipientDuplicateCandidatesTotal?.inc?.(
       { path: 'channel_message_active_subscribers' },
+      duplicateCandidateCount,
+    );
+    const wl = getWorkerLabels();
+    wsDuplicateDeliverySuppressedTotal?.inc?.(
+      {
+        path: 'channel_message_active_subscribers',
+        reason: 'duplicate_candidate',
+        vm: wl.vm,
+        worker: wl.worker,
+      },
       duplicateCandidateCount,
     );
   }

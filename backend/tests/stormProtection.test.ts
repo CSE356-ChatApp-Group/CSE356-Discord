@@ -356,6 +356,10 @@ describe('partial delivery root cause metrics', () => {
     expect(metrics.wsBootstrapPausedForLiveFanoutTotal).toBeDefined();
     expect(metrics.wsRecipientDedupeTotal).toBeDefined();
     expect(metrics.wsRecipientDuplicateCandidatesTotal).toBeDefined();
+    expect(metrics.wsDuplicateDeliverySuppressedTotal).toBeDefined();
+    expect(metrics.wsDedupeEnqueueReservedTotal).toBeDefined();
+    expect(metrics.wsDedupeSendConfirmedTotal).toBeDefined();
+    expect(metrics.wsDedupeSendFailedTotal).toBeDefined();
     expect(metrics.wsFanoutCandidateCountBucket).toBeDefined();
   });
 });

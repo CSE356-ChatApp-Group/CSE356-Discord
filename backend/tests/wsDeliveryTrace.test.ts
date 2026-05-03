@@ -217,6 +217,38 @@ describe('outboundQueue delivery timing', () => {
     expect(wsSocketQueueDepthHistogram.observe).toHaveBeenCalledTimes(1);
   });
 
+  it('calls reliable send confirmation hook after ws.send succeeds', async () => {
+    const { sendPayloadToSocket } = buildHelpers();
+    const ws = makeWs();
+    const onReliableSendConfirmed = jest.fn();
+    const onReliableSendFailed = jest.fn();
+    const result = sendPayloadToSocket(ws, 'channel:c1', { event: 'message:created', data: { id: 'm1' } }, null, {
+      onReliableSendConfirmed,
+      onReliableSendFailed,
+    });
+    expect(result).toBe(true);
+    await new Promise((r) => setImmediate(r));
+    expect(onReliableSendConfirmed).toHaveBeenCalledTimes(1);
+    expect(onReliableSendFailed).not.toHaveBeenCalled();
+  });
+
+  it('calls reliable send failure hook after ws.send fails', async () => {
+    const { sendPayloadToSocket } = buildHelpers();
+    const ws = makeWs({
+      send: jest.fn((_data: unknown, cb: (err?: Error) => void) => cb(new Error('boom'))),
+    });
+    const onReliableSendConfirmed = jest.fn();
+    const onReliableSendFailed = jest.fn();
+    const result = sendPayloadToSocket(ws, 'channel:c1', { event: 'message:created', data: { id: 'm1' } }, null, {
+      onReliableSendConfirmed,
+      onReliableSendFailed,
+    });
+    expect(result).toBe(true);
+    await new Promise((r) => setImmediate(r));
+    expect(onReliableSendConfirmed).not.toHaveBeenCalled();
+    expect(onReliableSendFailed).toHaveBeenCalledWith('send_failed');
+  });
+
   it('does not alter delivery when new metric objects are null (graceful degradation)', async () => {
     const { sendPayloadToSocket } = buildHelpers({
       wsDeliveryStageDurationMs: null,

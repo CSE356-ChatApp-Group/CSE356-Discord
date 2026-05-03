@@ -11,6 +11,10 @@ const {
   wsFanoutRecoveryInlineTotal,
   wsSocketSendTargetsBucket,
   wsPubsubReceiveLagMs,
+  wsDuplicateDeliverySuppressedTotal,
+  wsDedupeEnqueueReservedTotal,
+  wsDedupeSendConfirmedTotal,
+  wsDedupeSendFailedTotal,
 } = require("../utils/metrics");
 const { parsePayloadReferenceTimeMs } = require("./outboundPayload");
 const { getWorkerLabels } = require("./deliveryTrace");
@@ -30,6 +34,7 @@ const {
 const {
   normalizeCommunityTopic,
   isDuplicateSuppressionOnly,
+  hasDeliveryRiskReason,
 } = require("./redisPubsubTopicUtils");
 
 /**
@@ -91,11 +96,38 @@ function createRedisPubsubDelivery(ctx) {
     return id;
   }
 
+  function workerLabels() {
+    return getWorkerLabels();
+  }
+
+  function incWithWorker(metric, labels, count = 1) {
+    const wl = workerLabels();
+    metric?.inc?.({ ...labels, vm: wl.vm, worker: wl.worker }, count);
+  }
+
+  function recordDuplicateSuppression(path, reason, count = 1) {
+    if (!count || count <= 0) return;
+    wsDuplicateDeliverySuppressedTotal?.inc?.(
+      { path, reason, ...workerLabels() },
+      count,
+    );
+  }
+
+  function recordDuplicateSuppressionReasons(path, reasonCounts) {
+    for (const [reason, rawCount] of Object.entries(reasonCounts || {})) {
+      const count = Number(rawCount) || 0;
+      if (count <= 0) continue;
+      if (reason === "duplicate_candidate") {
+        recordDuplicateSuppression(path, reason, count);
+      }
+    }
+  }
+
   function recordPartialReasons(reasonCounts) {
     const entries = Object.entries(reasonCounts || {});
     if (!entries.length) {
       wsPartialDeliveryMissingReasonTotal?.inc?.({ reason: "unknown" });
-      return;
+      return true;
     }
     const mapped = {};
     const add = (reason, count) => {
@@ -104,27 +136,43 @@ function createRedisPubsubDelivery(ctx) {
     for (const [rawReason, rawCount] of entries) {
       const count = Number(rawCount) || 0;
       if (count <= 0) continue;
-      if (rawReason === "dedupe_skip" || rawReason === "dedupe_recent_delivery") {
-        add("dedupe_skip", count);
+      if (
+        rawReason === "dedupe_skip"
+        || rawReason === "dedupe_recent_delivery"
+        || rawReason === "duplicate_candidate"
+      ) {
+        // Duplicate suppression is informational. It is not a missing
+        // recipient unless a non-dedupe delivery-risk reason is also present.
+        continue;
       } else if (rawReason === "not_open" || rawReason === "waiters_overflow_terminated") {
         add("socket_not_open", count);
-      } else if (rawReason === "best_effort_queue_drop") {
+      } else if (rawReason === "best_effort_queue_drop" || rawReason === "backpressure_drop") {
         add("backpressure_drop", count);
+      } else if (rawReason === "backpressure_kill") {
+        add("socket_not_open", count);
       } else if (rawReason === "logical_suppressed") {
         add("not_subscribed", count);
       } else if (rawReason === "reconnecting") {
         add("reconnecting", count);
+      } else if (rawReason === "send_failed") {
+        add("send_failed", count);
+      } else if (rawReason === "enqueue_failed") {
+        add("enqueue_failed", count);
+      } else if (rawReason === "no_socket") {
+        add("no_socket", count);
+      } else if (rawReason === "stale_map_miss") {
+        add("stale_map_miss", count);
       } else {
         add("unknown", count);
       }
     }
     if (!Object.keys(mapped).length) {
-      wsPartialDeliveryMissingReasonTotal?.inc?.({ reason: "unknown" });
-      return;
+      return false;
     }
     for (const [reason, count] of Object.entries(mapped)) {
       wsPartialDeliveryMissingReasonTotal?.inc?.({ reason }, count);
     }
+    return true;
   }
 
   function sendReliablePayloadToSocket(ws, logicalChannel, parsed, rawMessage, options: any = {}) {
@@ -147,12 +195,41 @@ function createRedisPubsubDelivery(ctx) {
     ) {
       if (reasonCounts) reasonCounts.dedupe_skip = (reasonCounts.dedupe_skip || 0) + 1;
       fanoutRecipientDedupe.markDuplicateRecipient?.(messageId, userId, path, messageEvent);
+      recordDuplicateSuppression(path, "dedupe_skip");
       return false;
     }
-    const ok = sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage, options);
-    if (ok && messageId && messageEvent && userId && !allowedInCurrentBatch) {
-      fanoutRecipientDedupe?.markRecipient?.(messageId, userId, path, messageEvent, connectionId);
+    const shouldReserve = Boolean(messageId && messageEvent && userId && !allowedInCurrentBatch);
+    const reservationToken = shouldReserve
+      ? fanoutRecipientDedupe?.reserveRecipient?.(messageId, userId, path, messageEvent, connectionId)
+      : null;
+    if (reservationToken) {
+      incWithWorker(wsDedupeEnqueueReservedTotal, { path });
+    }
+    const releaseReservation = (reason, recordAsyncMissing = false) => {
+      if (!reservationToken || !messageId || !messageEvent || !userId) return;
+      if (fanoutRecipientDedupe?.releaseRecipient?.(messageId, userId, messageEvent, connectionId, reservationToken)) {
+        incWithWorker(wsDedupeSendFailedTotal, { path });
+        if (recordAsyncMissing) {
+          recordPartialReasons({ [reason || "send_failed"]: 1 });
+        }
+      }
+    };
+    const ok = sendPayloadToSocket(ws, logicalChannel, parsed, rawMessage, {
+      ...options,
+      onReliableSendConfirmed: () => {
+        if (!reservationToken || !messageId || !messageEvent || !userId) return;
+        if (fanoutRecipientDedupe?.confirmRecipient?.(messageId, userId, messageEvent, connectionId, reservationToken)) {
+          incWithWorker(wsDedupeSendConfirmedTotal, { path });
+        }
+      },
+      onReliableSendFailed: (reason) => {
+        releaseReservation(reason || "send_failed", true);
+      },
+    });
+    if (ok && reservationToken) {
       if (batchAllowKey) options.dedupeBatchAllowSet?.add?.(batchAllowKey);
+    } else if (!ok && reservationToken) {
+      releaseReservation("enqueue_failed", false);
     }
     return ok;
   }
@@ -476,7 +553,7 @@ function createRedisPubsubDelivery(ctx) {
         && (channelType === "channel" || channelType === "conversation");
       if (isReliableChannelMsg) {
         if (deliveredCount === 0 && isDuplicateSuppressionOnly(reasonCounts)) {
-          recordPartialReasons(reasonCounts);
+          recordDuplicateSuppressionReasons(dedupePathForChannelType(channelType), reasonCounts);
           if (logger.isLevelEnabled("debug")) {
             const messageId =
               parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
@@ -529,10 +606,16 @@ function createRedisPubsubDelivery(ctx) {
             },
             "Reliable realtime message had recipients but zero successful socket sends",
           );
-        } else if (deliveredCount < openRecipientSlots) {
+        } else if (deliveredCount < openRecipientSlots && hasDeliveryRiskReason(reasonCounts)) {
           realtimeMissAttributionTotal.inc({ reason: "topic_message_partial_delivery" });
           recordRealtimeMissAttribution("topic_message_partial_delivery");
           recordPartialReasons(reasonCounts);
+          recordDuplicateSuppressionReasons(dedupePathForChannelType(channelType), reasonCounts);
+        } else if (deliveredCount < openRecipientSlots) {
+          // Dedupe-only skips mean another valid path already handled the same
+          // socket/message. Keep this informational; partial delivery remains
+          // reserved for probable real misses.
+          recordDuplicateSuppressionReasons(dedupePathForChannelType(channelType), reasonCounts);
         }
       }
     } finally {

@@ -11,6 +11,18 @@ jest.mock('../src/utils/metrics', () => ({
   realtimeMissAttributionTotal: {
     inc: jest.fn(),
   },
+  wsDuplicateDeliverySuppressedTotal: {
+    inc: jest.fn(),
+  },
+  wsDedupeEnqueueReservedTotal: {
+    inc: jest.fn(),
+  },
+  wsDedupeSendConfirmedTotal: {
+    inc: jest.fn(),
+  },
+  wsDedupeSendFailedTotal: {
+    inc: jest.fn(),
+  },
 }));
 
 jest.mock('../src/websocket/userFeed', () => ({
@@ -38,6 +50,18 @@ const { realtimeMissAttributionTotal } = require('../src/utils/metrics') as {
   realtimeMissAttributionTotal: { inc: jest.Mock };
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const {
+  wsDuplicateDeliverySuppressedTotal,
+  wsDedupeEnqueueReservedTotal,
+  wsDedupeSendConfirmedTotal,
+  wsDedupeSendFailedTotal,
+} = require('../src/utils/metrics') as {
+  wsDuplicateDeliverySuppressedTotal: { inc: jest.Mock };
+  wsDedupeEnqueueReservedTotal: { inc: jest.Mock };
+  wsDedupeSendConfirmedTotal: { inc: jest.Mock };
+  wsDedupeSendFailedTotal: { inc: jest.Mock };
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createRedisPubsubDelivery } = require('../src/websocket/redisPubsubDelivery') as {
   createRedisPubsubDelivery: (ctx: Record<string, unknown>) => {
     deliverPubsubMessage: (channel: string, message: string) => Promise<void>;
@@ -46,9 +70,12 @@ const { createRedisPubsubDelivery } = require('../src/websocket/redisPubsubDeliv
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createFanoutRecipientDedupe } = require('../src/websocket/fanoutRecipientDedupe') as {
   createFanoutRecipientDedupe: (metrics: Record<string, unknown>) => {
-    hasSeenRecipient: (messageId: string, userId: string, eventName?: string) => boolean;
-    markRecipient: (messageId: string, userId: string, path: string, eventName?: string) => void;
+    hasSeenRecipient: (messageId: string, userId: string, eventName?: string, connectionId?: string) => boolean;
+    markRecipient: (messageId: string, userId: string, path: string, eventName?: string, connectionId?: string) => void;
     markDuplicateRecipient: (messageId: string, userId: string, path: string, eventName?: string) => void;
+    reserveRecipient: (messageId: string, userId: string, path: string, eventName?: string, connectionId?: string) => string | null;
+    confirmRecipient: (messageId: string, userId: string, eventName?: string, connectionId?: string, token?: string | null) => boolean;
+    releaseRecipient: (messageId: string, userId: string, eventName?: string, connectionId?: string, token?: string | null) => boolean;
   };
 };
 
@@ -59,6 +86,10 @@ describe('redisPubsubDelivery', () => {
     logger.isLevelEnabled.mockReset();
     logger.isLevelEnabled.mockReturnValue(false);
     realtimeMissAttributionTotal.inc.mockReset();
+    wsDuplicateDeliverySuppressedTotal.inc.mockReset();
+    wsDedupeEnqueueReservedTotal.inc.mockReset();
+    wsDedupeSendConfirmedTotal.inc.mockReset();
+    wsDedupeSendFailedTotal.inc.mockReset();
   });
 
   function createCtx(sendPayloadToSocket: jest.Mock, overrides: Record<string, unknown> = {}) {
@@ -156,6 +187,50 @@ describe('redisPubsubDelivery', () => {
     expect(partialMetric.inc).toHaveBeenCalledWith({ reason: 'not_subscribed' }, 1);
   });
 
+  it('records dedupe-only partial topic slots as duplicate suppression, not missing delivery', async () => {
+    const partialMetric = { inc: jest.fn() };
+    const duplicateCandidateMetric = { inc: jest.fn() };
+    const dedupeMetric = { inc: jest.fn() };
+    const fanoutRecipientDedupe = createFanoutRecipientDedupe({
+      wsRecipientDedupeTotal: dedupeMetric,
+      wsRecipientDuplicateCandidatesTotal: duplicateCandidateMetric,
+    });
+    fanoutRecipientDedupe.markRecipient(
+      'msg-dedupe-only',
+      'user-2',
+      'user_topic',
+      'message:created',
+      'conn-2',
+    );
+    const openA = { readyState: 1, _userId: 'user-1', _connectionId: 'conn-1' };
+    const openB = { readyState: 1, _userId: 'user-2', _connectionId: 'conn-2' };
+    const sendPayloadToSocket = jest.fn((ws: any) => ws === openA);
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      channelClients: new Map([
+        ['channel:chan-1', new Set([openA, openB])],
+      ]),
+      fanoutRecipientDedupe,
+      wsPartialDeliveryMissingReasonTotal: partialMetric,
+    }));
+
+    await deliverPubsubMessage(
+      'channel:chan-1',
+      JSON.stringify({ event: 'message:created', data: { id: 'msg-dedupe-only' } }),
+    );
+
+    expect(sendPayloadToSocket).toHaveBeenCalledTimes(1);
+    expect(realtimeMissAttributionTotal.inc).not.toHaveBeenCalledWith(
+      { reason: 'topic_message_partial_delivery' },
+    );
+    expect(partialMetric.inc).not.toHaveBeenCalledWith({ reason: 'dedupe_skip' }, expect.anything());
+    expect(wsDuplicateDeliverySuppressedTotal.inc).toHaveBeenCalledWith(
+      expect.objectContaining({ path: 'channel_topic', reason: 'dedupe_skip' }),
+      1,
+    );
+    expect(duplicateCandidateMetric.inc).toHaveBeenCalledWith({ path: 'channel_topic' });
+  });
+
   it('dedupes before enqueue when another path already marked the recipient', async () => {
     const duplicateMetric = { markDuplicateRecipient: jest.fn(), hasSeenRecipient: jest.fn(() => true) };
     const sendPayloadToSocket = jest.fn();
@@ -196,8 +271,12 @@ describe('redisPubsubDelivery', () => {
       'channel:chan-1',
       JSON.stringify({ event: 'message:updated', data: { id: 'msg-5' } }),
     );
+    await deliverPubsubMessage(
+      'channel:chan-1',
+      JSON.stringify({ event: 'message:deleted', data: { id: 'msg-5' } }),
+    );
 
-    expect(sendPayloadToSocket).toHaveBeenCalledTimes(2);
+    expect(sendPayloadToSocket).toHaveBeenCalledTimes(3);
   });
 
   it('delivers the same event to every open socket for a recipient before cross-path dedupe', async () => {
@@ -222,6 +301,70 @@ describe('redisPubsubDelivery', () => {
     );
 
     expect(sendPayloadToSocket).toHaveBeenCalledTimes(2);
+  });
+
+  it('releases a queued reservation after send failure so a later recovery path can deliver', async () => {
+    const sendCallbacks: Array<(reason?: string) => void> = [];
+    const sendPayloadToSocket = jest.fn((_ws: any, _logicalChannel: any, _parsed: any, _rawMessage: any, opts: any) => {
+      sendCallbacks.push(opts.onReliableSendFailed);
+      return true;
+    });
+    const fanoutRecipientDedupe = createFanoutRecipientDedupe({
+      wsRecipientDedupeTotal: { inc: jest.fn() },
+      wsRecipientDuplicateCandidatesTotal: { inc: jest.fn() },
+    });
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      channelClients: new Map([
+        ['channel:chan-1', new Set([{ readyState: 1, _userId: 'user-1', _connectionId: 'conn-1' }])],
+      ]),
+      fanoutRecipientDedupe,
+      wsPartialDeliveryMissingReasonTotal: { inc: jest.fn() },
+    }));
+    const payload = JSON.stringify({ event: 'message:created', data: { id: 'msg-send-fail' } });
+
+    await deliverPubsubMessage('channel:chan-1', payload);
+    await deliverPubsubMessage('channel:chan-1', payload);
+    expect(sendPayloadToSocket).toHaveBeenCalledTimes(1);
+
+    sendCallbacks[0]('send_failed');
+    await deliverPubsubMessage('channel:chan-1', payload);
+
+    expect(sendPayloadToSocket).toHaveBeenCalledTimes(2);
+    expect(wsDedupeSendFailedTotal.inc).toHaveBeenCalledWith(
+      expect.objectContaining({ path: 'channel_topic' }),
+      1,
+    );
+  });
+
+  it('keeps a confirmed send suppressed for later duplicate paths', async () => {
+    const sendCallbacks: Array<() => void> = [];
+    const sendPayloadToSocket = jest.fn((_ws: any, _logicalChannel: any, _parsed: any, _rawMessage: any, opts: any) => {
+      sendCallbacks.push(opts.onReliableSendConfirmed);
+      return true;
+    });
+    const fanoutRecipientDedupe = createFanoutRecipientDedupe({
+      wsRecipientDedupeTotal: { inc: jest.fn() },
+      wsRecipientDuplicateCandidatesTotal: { inc: jest.fn() },
+    });
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      channelClients: new Map([
+        ['channel:chan-1', new Set([{ readyState: 1, _userId: 'user-1', _connectionId: 'conn-1' }])],
+      ]),
+      fanoutRecipientDedupe,
+    }));
+    const payload = JSON.stringify({ event: 'message:created', data: { id: 'msg-send-ok' } });
+
+    await deliverPubsubMessage('channel:chan-1', payload);
+    sendCallbacks[0]();
+    await deliverPubsubMessage('channel:chan-1', payload);
+
+    expect(sendPayloadToSocket).toHaveBeenCalledTimes(1);
+    expect(wsDedupeSendConfirmedTotal.inc).toHaveBeenCalledWith(
+      expect.objectContaining({ path: 'channel_topic' }),
+      1,
+    );
   });
 
   it('skips stale subscription entries and still delivers to remaining open sockets', async () => {

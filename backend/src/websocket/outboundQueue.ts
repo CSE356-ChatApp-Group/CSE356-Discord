@@ -19,6 +19,7 @@ function createOutboundQueueHelpers({
   wsReliableDeliveryLatencyMs,
   wsReliableDeliveryTopicTotal,
   wsRecipientDedupeTotal,
+  wsDuplicateDeliverySuppressedTotal = null,
   // optional new delivery-tracing metrics (null-safe throughout)
   wsDeliveryStageDurationMs = null,
   wsDeliverySlowTraceTotal = null,
@@ -60,11 +61,21 @@ function createOutboundQueueHelpers({
     const q = ws._outboundQueue;
     const n = q.length;
     if (n > 0) {
+      for (const job of q) {
+        if (typeof job?.onReliableSendFailed === "function") {
+          job.onReliableSendFailed("not_open");
+        }
+      }
       q.length = 0;
       adjustWsOutboundGauge(-n);
     }
     const waiters = ws._outMsgWaiters;
     if (waiters && waiters.length) {
+      for (const job of waiters) {
+        if (typeof job?.onReliableSendFailed === "function") {
+          job.onReliableSendFailed("not_open");
+        }
+      }
       waiters.length = 0;
     }
   }
@@ -80,12 +91,29 @@ function createOutboundQueueHelpers({
       deliverySource = "live_pubsub",
       enqueueMs = null,
       pubsubReceiveMs = null,
+      onReliableSendConfirmed = null,
+      onReliableSendFailed = null,
     } = job;
     const flushStartMs = Date.now();
     const delivery_target_kind = wsDeliveryTopicPrefixForMetrics(logicalChannel);
     const delivery_path_kind = deliveryPath === "replay" ? "replay" : "realtime";
-    if (ws.readyState !== WebSocket.OPEN) return;
+    const failReliableReservation = (reason) => {
+      if (typeof onReliableSendFailed === "function") {
+        onReliableSendFailed(reason);
+      }
+    };
+    const confirmReliableReservation = () => {
+      if (typeof onReliableSendConfirmed === "function") {
+        onReliableSendConfirmed();
+      }
+    };
+
+    if (ws.readyState !== WebSocket.OPEN) {
+      failReliableReservation("not_open");
+      return;
+    }
     if (!bypassLogicalDuplicateSuppression && shouldSkipSocketForLogicalChannel(ws, logicalChannel, parsed)) {
+      failReliableReservation("logical_suppressed");
       return;
     }
 
@@ -99,6 +127,14 @@ function createOutboundQueueHelpers({
     } = resolvedPrepared;
     if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
       wsRecipientDedupeTotal?.inc?.({ path: delivery_target_kind });
+      const wl = getWorkerLabels();
+      wsDuplicateDeliverySuppressedTotal?.inc?.({
+        path: delivery_target_kind,
+        reason: "dedupe_recent_delivery",
+        vm: wl.vm,
+        worker: wl.worker,
+      });
+      confirmReliableReservation();
       return;
     }
 
@@ -121,6 +157,7 @@ function createOutboundQueueHelpers({
       noteRecentDisconnectForSocket(ws, 1006, "backpressure_kill");
       clearOutboundQueue(ws);
       ws.terminate();
+      failReliableReservation("backpressure_kill");
       return;
     }
     if (!skipDropForBackpressure && buffered >= WS_BACKPRESSURE_DROP_BYTES) {
@@ -138,6 +175,7 @@ function createOutboundQueueHelpers({
         },
         "WS slow consumer: dropping frame due to backpressure",
       );
+      failReliableReservation("backpressure_drop");
       return;
     }
 
@@ -167,6 +205,7 @@ function createOutboundQueueHelpers({
 
       if (!err) {
         markSocketMessageDelivered(ws, dedupeKey);
+        confirmReliableReservation();
         if (isReliableEvent) {
           wsReliableDeliveryTotal.inc({ path: pathKind, source: sourceKind });
           wsReliableDeliveryTopicTotal.inc({
@@ -226,6 +265,7 @@ function createOutboundQueueHelpers({
         return;
       }
       ws._sawError = true;
+      failReliableReservation("send_failed");
       logger.warn(
         {
           err,
@@ -325,6 +365,8 @@ function createOutboundQueueHelpers({
       deliverySource = "live_pubsub",
       debugReasonCounts = null,
       pubsubReceiveMs = null,
+      onReliableSendConfirmed = null,
+      onReliableSendFailed = null,
     } = {},
   ) {
     const bumpReason = (reason) => {
@@ -348,6 +390,16 @@ function createOutboundQueueHelpers({
     if (wasSocketMessageRecentlyDelivered(ws, dedupeKey)) {
       bumpReason("dedupe_recent_delivery");
       wsRecipientDedupeTotal?.inc?.({ path: wsDeliveryTopicPrefixForMetrics(logicalChannel) });
+      const wl = getWorkerLabels();
+      wsDuplicateDeliverySuppressedTotal?.inc?.({
+        path: wsDeliveryTopicPrefixForMetrics(logicalChannel),
+        reason: "dedupe_recent_delivery",
+        vm: wl.vm,
+        worker: wl.worker,
+      });
+      if (typeof onReliableSendConfirmed === "function") {
+        onReliableSendConfirmed();
+      }
       return false;
     }
 
@@ -395,6 +447,8 @@ function createOutboundQueueHelpers({
           deliverySource,
           enqueueMs: Date.now(),
           pubsubReceiveMs,
+          onReliableSendConfirmed,
+          onReliableSendFailed,
         });
         wsOutboundQueueBlockWaitsTotal.inc();
         scheduleOutboundDrain(ws);
@@ -417,6 +471,8 @@ function createOutboundQueueHelpers({
       deliverySource,
       enqueueMs,
       pubsubReceiveMs,
+      onReliableSendConfirmed,
+      onReliableSendFailed,
     });
     adjustWsOutboundGauge(1);
     const priority = skipDropForBackpressure ? "message" : "best_effort";
