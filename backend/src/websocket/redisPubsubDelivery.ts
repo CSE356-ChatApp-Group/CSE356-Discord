@@ -250,7 +250,13 @@ function createRedisPubsubDelivery(ctx) {
     for (const ws of [...clients]) {
       if (ws.readyState === WebSocket.OPEN) continue;
       const uid = ws._userId;
-      if (typeof uid === "string" && uid.trim()) recoveredUserIds.push(uid.trim());
+      // CLOSING = clean disconnect in progress; 'close' will fire imminently and run cleanup.
+      // The pending mailbox (written before channel PUBLISH) covers reconnect replay for these users.
+      // Only request userfeed recovery for CLOSED/CONNECTING sockets, which indicate an
+      // unexpected state where the normal cleanup path may not have run.
+      if (ws.readyState !== WebSocket.CLOSING && typeof uid === "string" && uid.trim()) {
+        recoveredUserIds.push(uid.trim());
+      }
       unsubscribeClient(ws, topicChannel).catch((err) => {
         logger.warn({ err, topicChannel, userId: uid }, "WS prune: unsubscribeClient failed");
       });
