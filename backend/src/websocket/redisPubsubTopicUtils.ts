@@ -18,7 +18,7 @@ function isDuplicateSuppressionOnly(reasonCounts: Record<string, unknown> | null
   const entries = Object.entries(reasonCounts)
     .filter(([, count]) => Number(count) > 0);
   if (entries.length === 0) return false;
-  return entries.every(([reason]) => reason === 'dedupe_recent_delivery');
+  return entries.every(([reason]) => reason === 'dedupe_recent_delivery' || reason === 'dedupe_skip');
 }
 
 module.exports = {

@@ -141,6 +141,20 @@ const {
   wsBootstrapBlockedTotal,
   wsBootstrapCachedTotal,
   wsBootstrapDbTotal,
+  wsBootstrapHydrationQueueDepth,
+  wsBootstrapHydrationDelayMs,
+  wsBootstrapHydrationActive,
+  wsBootstrapHydrationDeferredTotal,
+  wsBootstrapHydrationSkippedTotal,
+  wsBootstrapHydrationCooldownActive,
+  wsBootstrapCoalescedTotal,
+  wsBootstrapChannelListCacheTotal,
+  wsLiveFanoutStarvationGuardTotal,
+  wsBootstrapPausedForLiveFanoutTotal,
+  wsRecipientDedupeTotal,
+  wsRecipientDuplicateCandidatesTotal,
+  wsFanoutCandidateCountBucket,
+  wsPartialDeliveryMissingReasonTotal,
 } = require('./metrics/wsRuntimeAndDelivery');
 const {
   messagePostAccessDeniedTotal,
@@ -534,6 +548,7 @@ const overloadStageGauge = new client.Gauge({
     wsReadyWallDurationMs.observe({ mode: 'progressive' }, 0);
     wsBootstrapProgressiveTotal.inc({ result: 'ready_sent' }, 0);
     wsBootstrapProgressiveTotal.inc({ result: 'hydration_complete' }, 0);
+    wsBootstrapProgressiveTotal.inc({ result: 'hydration_skipped' }, 0);
     wsBootstrapProgressiveTotal.inc({ result: 'hydration_failed' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/messages' }, 0);
     pgQueriesPerRequestHistogram.observe({ route: '/api/v1/communities' }, 0);
@@ -833,4 +848,18 @@ module.exports = {
   msgTargetCacheTotal,
   msgTargetLookupSourceTotal,
   msgTargetLookupDurationMs,
+  wsBootstrapHydrationQueueDepth,
+  wsBootstrapHydrationDelayMs,
+  wsBootstrapHydrationActive,
+  wsBootstrapHydrationDeferredTotal,
+  wsBootstrapHydrationSkippedTotal,
+  wsBootstrapHydrationCooldownActive,
+  wsBootstrapCoalescedTotal,
+  wsBootstrapChannelListCacheTotal,
+  wsLiveFanoutStarvationGuardTotal,
+  wsBootstrapPausedForLiveFanoutTotal,
+  wsRecipientDedupeTotal,
+  wsRecipientDuplicateCandidatesTotal,
+  wsFanoutCandidateCountBucket,
+  wsPartialDeliveryMissingReasonTotal,
 };

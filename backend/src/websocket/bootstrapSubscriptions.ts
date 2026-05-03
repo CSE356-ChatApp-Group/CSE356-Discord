@@ -23,6 +23,7 @@ function createBootstrapSubscriptionsHelpers({
   wsBootstrapCachedTotal,
   wsBootstrapDbTotal,
   wsBootstrapWallDurationMs,
+  bootstrapHydrationScheduler = null,
   WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
   WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
   WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
@@ -313,6 +314,7 @@ function createBootstrapSubscriptionsHelpers({
   async function hydrateBootstrapSubscriptions(ws, channels) {
     if (!Array.isArray(channels)) return;
     for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
+      await bootstrapHydrationScheduler?.waitForLiveFanoutQuiet?.();
       const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
       await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
       if (ws.readyState !== 1) return;
@@ -376,9 +378,21 @@ function createBootstrapSubscriptionsHelpers({
   }
 
   async function hydrateBootstrapWithMetrics(ws, userId, channels) {
+    const runHydration = async (targetWs, targetChannels) => {
+      await hydrateBootstrapSubscriptions(targetWs, targetChannels);
+      observeBootstrapWall(targetWs, userId);
+      return { status: "hydrated" };
+    };
     try {
-      await hydrateBootstrapSubscriptions(ws, channels);
-      observeBootstrapWall(ws, userId);
+      if (bootstrapHydrationScheduler?.enqueueHydration) {
+        return await bootstrapHydrationScheduler.enqueueHydration(
+          ws,
+          userId,
+          Array.isArray(channels) ? channels : [],
+          runHydration,
+        );
+      }
+      return await runHydration(ws, Array.isArray(channels) ? channels : []);
     } finally {
       clearBootstrapRecentConnectPrimed(ws);
     }
