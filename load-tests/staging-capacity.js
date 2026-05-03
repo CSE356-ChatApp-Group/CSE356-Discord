@@ -631,25 +631,63 @@ export function setup() {
   }
   const communityId = safeJson(communityRes).community.id;
 
-  // Batch-join peer + all readers so their GET /communities responses are
-  // non-empty, making the cached payload realistic.
-  // ws-dm-burst: join DM listener accounts too (same community as other participants).
-  const joinTokens = [peer.token];
-  if (IS_WS_DM_BURST) {
-    for (let i = 0; i < DM_LISTENER_COUNT; i += 1) {
-      joinTokens.push(wsPeers[i].token);
+  // Batch-join all users so their GET /communities responses are non-empty,
+  // making the cached payload realistic. Includes wsPeers so WS connections
+  // pass membership checks in presenceSocketStorm.
+  // Chunk into groups of 15 with retries to avoid 429 rate-limit cascade
+  // (observed: >200 simultaneous joins → 57% get 429 → 403 on all reads).
+  const JOIN_CHUNK = 15;
+  const JOIN_RETRIES = 3;
+  const allJoinUsers = [
+    { token: peer.token },
+    ...wsPeers.map((p) => ({ token: p.token })),
+    ...readerPool.map((r) => ({ token: r.token })),
+  ];
+  const failedJoinTokens = [];
+  for (let offset = 0; offset < allJoinUsers.length; offset += JOIN_CHUNK) {
+    const chunk = allJoinUsers.slice(offset, offset + JOIN_CHUNK);
+    const batch = http.batch(
+      chunk.map((u) => ({
+        method: 'POST',
+        url: `${BASE_URL}/communities/${communityId}/join`,
+        body: JSON.stringify({}),
+        params: jsonParams(u.token, { endpoint: 'communities_join' }),
+      })),
+    );
+    for (const res of batch) recordHttpStatus(res, 'communities_join');
+    // Collect tokens that got 429 for retry
+    for (let i = 0; i < batch.length; i++) {
+      if (batch[i].status === 429 || batch[i].status === 503) {
+        failedJoinTokens.push(chunk[i].token);
+      }
     }
+    // Small sleep between chunks to avoid burst rate limit
+    if (offset + JOIN_CHUNK < allJoinUsers.length) sleep(0.3);
   }
-  joinTokens.push(...readerPool.map((r) => r.token));
-  const joinResponses = http.batch(
-    joinTokens.map((token) => ({
-      method: 'POST',
-      url: `${BASE_URL}/communities/${communityId}/join`,
-      body: JSON.stringify({}),
-      params: jsonParams(token, { endpoint: 'communities_join' }),
-    })),
-  );
-  for (const res of joinResponses) recordHttpStatus(res, 'communities_join');
+  // Retry failed joins (429/503) with exponential backoff
+  let retryTokens = failedJoinTokens;
+  for (let attempt = 1; attempt <= JOIN_RETRIES && retryTokens.length > 0; attempt++) {
+    sleep(0.5 * attempt);
+    const retryBatch = http.batch(
+      retryTokens.map((token) => ({
+        method: 'POST',
+        url: `${BASE_URL}/communities/${communityId}/join`,
+        body: JSON.stringify({}),
+        params: jsonParams(token, { endpoint: 'communities_join' }),
+      })),
+    );
+    for (const res of retryBatch) recordHttpStatus(res, 'communities_join');
+    const nextRetry = [];
+    for (let i = 0; i < retryBatch.length; i++) {
+      if (retryBatch[i].status === 429 || retryBatch[i].status === 503) {
+        nextRetry.push(retryTokens[i]);
+      }
+    }
+    retryTokens = nextRetry;
+  }
+  if (retryTokens.length > 0) {
+    console.warn(`[setup] ${retryTokens.length} users failed to join community after ${JOIN_RETRIES} retries`);
+  }
 
   const channelName = `cap-${RUN_ID}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 28);
   const channelRes = http.post(
