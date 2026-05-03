@@ -162,14 +162,12 @@ export const options = {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function baseParams(token, tags) {
-  return {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    tags: tags || {},
-    timeout: '30s',
-  };
+  // k6's transpiler rejects object spread in literals; Object.assign is supported.
+  const headers = Object.assign(
+    { 'Content-Type': 'application/json' },
+    token ? { Authorization: `Bearer ${token}` } : {},
+  );
+  return Object.assign({ headers: headers, tags: tags || {}, timeout: '30s' });
 }
 
 function safeJson(res) {
