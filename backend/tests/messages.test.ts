@@ -19,6 +19,16 @@ const { flushDirtyReadStatesToDB, enqueueBatchReadStateUpdate } = require('../sr
 const {
   flushDirtyLastMessagePointers,
 } = require('../src/messages/repointLastMessage');
+const {
+  msgInflight,
+  convMsgInflight,
+} = require('../src/messages/lib/messageListCache');
+const {
+  channelMsgCacheKey,
+  channelMsgCacheEpochKey,
+  conversationMsgCacheKey,
+  conversationMsgCacheEpochKey,
+} = require('../src/messages/messageCacheBust');
 const { drainAllQueuesForTests } = require('../src/messages/sideEffects');
 const {
   channelLastMessageUpdateDeferredTotal,
@@ -94,6 +104,16 @@ async function getMessagesWithAccessRetry({
     await new Promise((resolve) => setTimeout(resolve, 60));
   }
   return lastRes;
+}
+
+async function currentChannelMessagesCacheKey(channelId: string, limit = 50) {
+  const epoch = Number((await redis.get(channelMsgCacheEpochKey(channelId))) || 0);
+  return channelMsgCacheKey(channelId, { epoch, limit });
+}
+
+async function currentConversationMessagesCacheKey(conversationId: string, limit = 50) {
+  const epoch = Number((await redis.get(conversationMsgCacheEpochKey(conversationId))) || 0);
+  return conversationMsgCacheKey(conversationId, { epoch, limit });
 }
 
 // ── Overload protection ───────────────────────────────────────────────────────
@@ -1175,6 +1195,219 @@ describe('GET /messages cache-hit authorization regressions', () => {
       .get(`/api/v1/messages?conversationId=${conversationId}&limit=50`)
       .set('Authorization', `Bearer ${outsider.accessToken}`);
     expect(outsiderRes.status).toBe(403);
+  });
+});
+
+describe('GET /messages coalesced authorization regressions', () => {
+  afterEach(() => {
+    msgInflight.clear();
+    convMsgInflight.clear();
+  });
+
+  it('does not serve coalesced private-channel history to a non-member racing an authorized fetch', async () => {
+    const owner = await createAuthenticatedUser('coalauthchanown');
+    const outsider = await createAuthenticatedUser('coalauthchanout');
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'coalauth-chan',
+      channelPrefix: 'coalauth-chan',
+      description: 'coalesced channel auth regression',
+      isPrivate: true,
+    });
+
+    const postRes = await postMessage(owner.accessToken, {
+      channelId,
+      content: `coalesced-private-${uniqueSuffix()}`,
+    });
+    expect(postRes.status).toBe(201);
+
+    const cacheKey = await currentChannelMessagesCacheKey(channelId, 50);
+    msgInflight.set(cacheKey, Promise.resolve({ messages: [postRes.body.message] }));
+
+    const outsiderRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${outsider.accessToken}`)
+      .query({ channelId, limit: 50 });
+
+    expect(outsiderRes.status).toBe(403);
+    expect(JSON.stringify(outsiderRes.body)).not.toContain(postRes.body.message.id);
+    expect(await redis.get(cacheKey)).toBeNull();
+  });
+
+  it('does not serve coalesced private-channel history to a removed member', async () => {
+    const owner = await createAuthenticatedUser('coalauthremown');
+    const member = await createAuthenticatedUser('coalauthremmem');
+    const { communityId, channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'coalauth-rem',
+      channelPrefix: 'coalauth-rem',
+      description: 'coalesced removed channel member regression',
+      isPrivate: true,
+    });
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(joinRes.status).toBe(200);
+
+    const addRes = await request(app)
+      .post(`/api/v1/channels/${channelId}/members`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ userIds: [member.user.id] });
+    expect(addRes.status).toBe(200);
+
+    const postRes = await postMessage(owner.accessToken, {
+      channelId,
+      content: `coalesced-removed-channel-${uniqueSuffix()}`,
+    });
+    expect(postRes.status).toBe(201);
+
+    await pool.query(
+      'DELETE FROM channel_members WHERE channel_id = $1 AND user_id = $2',
+      [channelId, member.user.id],
+    );
+    await redis.del(`ch_access:${channelId}:${member.user.id}`);
+
+    const cacheKey = await currentChannelMessagesCacheKey(channelId, 50);
+    msgInflight.set(cacheKey, Promise.resolve({ messages: [postRes.body.message] }));
+
+    const removedRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${member.accessToken}`)
+      .query({ channelId, limit: 50 });
+
+    expect(removedRes.status).toBe(403);
+    expect(JSON.stringify(removedRes.body)).not.toContain(postRes.body.message.id);
+  });
+
+  it('does not serve coalesced DM history to a non-participant racing a participant fetch', async () => {
+    const owner = await createAuthenticatedUser('coalauthdmown');
+    const participant = await createAuthenticatedUser('coalauthdmpart');
+    const outsider = await createAuthenticatedUser('coalauthdmout');
+
+    const conversationRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [participant.user.id] });
+    expect(conversationRes.status).toBe(201);
+    const conversationId = conversationRes.body.conversation.id;
+
+    const postRes = await postMessage(owner.accessToken, {
+      conversationId,
+      content: `coalesced-dm-${uniqueSuffix()}`,
+    });
+    expect(postRes.status).toBe(201);
+
+    const cacheKey = await currentConversationMessagesCacheKey(conversationId, 50);
+    convMsgInflight.set(cacheKey, Promise.resolve({ messages: [postRes.body.message] }));
+
+    const outsiderRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${outsider.accessToken}`)
+      .query({ conversationId, limit: 50 });
+
+    expect(outsiderRes.status).toBe(403);
+    expect(JSON.stringify(outsiderRes.body)).not.toContain(postRes.body.message.id);
+    expect(await redis.get(cacheKey)).toBeNull();
+  });
+
+  it('does not serve coalesced group-DM history to a participant after they leave', async () => {
+    const owner = await createAuthenticatedUser('coalauthgdown');
+    const leaver = await createAuthenticatedUser('coalauthgdleave');
+    const remaining = await createAuthenticatedUser('coalauthgdrem');
+
+    const conversationRes = await request(app)
+      .post('/api/v1/conversations')
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ participantIds: [leaver.user.id, remaining.user.id], name: `coal-gdm-${uniqueSuffix()}` });
+    expect(conversationRes.status).toBe(201);
+    const conversationId = conversationRes.body.conversation.id;
+
+    const postRes = await postMessage(owner.accessToken, {
+      conversationId,
+      content: `coalesced-left-dm-${uniqueSuffix()}`,
+    });
+    expect(postRes.status).toBe(201);
+
+    const leaveRes = await request(app)
+      .post(`/api/v1/conversations/${conversationId}/leave`)
+      .set('Authorization', `Bearer ${leaver.accessToken}`);
+    expect(leaveRes.status).toBe(200);
+
+    const cacheKey = await currentConversationMessagesCacheKey(conversationId, 50);
+    convMsgInflight.set(cacheKey, Promise.resolve({ messages: [postRes.body.message] }));
+
+    const leftRes = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${leaver.accessToken}`)
+      .query({ conversationId, limit: 50 });
+
+    expect(leftRes.status).toBe(403);
+    expect(JSON.stringify(leftRes.body)).not.toContain(postRes.body.message.id);
+  });
+
+  it('still lets authorized channel members receive a coalesced result', async () => {
+    const owner = await createAuthenticatedUser('coalauthokown');
+    const member = await createAuthenticatedUser('coalauthokmem');
+    const { communityId, channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'coalauth-ok',
+      channelPrefix: 'coalauth-ok',
+      description: 'authorized coalesced channel regression',
+      isPrivate: true,
+    });
+
+    const joinRes = await request(app)
+      .post(`/api/v1/communities/${communityId}/join`)
+      .set('Authorization', `Bearer ${member.accessToken}`);
+    expect(joinRes.status).toBe(200);
+    const addRes = await request(app)
+      .post(`/api/v1/channels/${channelId}/members`)
+      .set('Authorization', `Bearer ${owner.accessToken}`)
+      .send({ userIds: [member.user.id] });
+    expect(addRes.status).toBe(200);
+
+    const postRes = await postMessage(owner.accessToken, {
+      channelId,
+      content: `coalesced-ok-channel-${uniqueSuffix()}`,
+    });
+    expect(postRes.status).toBe(201);
+
+    const cacheKey = await currentChannelMessagesCacheKey(channelId, 50);
+    msgInflight.set(cacheKey, Promise.resolve({ messages: [postRes.body.message] }));
+
+    const [ownerRes, memberRes] = await Promise.all([
+      request(app)
+        .get('/api/v1/messages')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .query({ channelId, limit: 50 }),
+      request(app)
+        .get('/api/v1/messages')
+        .set('Authorization', `Bearer ${member.accessToken}`)
+        .query({ channelId, limit: 50 }),
+    ]);
+
+    expect(ownerRes.status).toBe(200);
+    expect(memberRes.status).toBe(200);
+    expect(ownerRes.body.messages.map((message: any) => message.id)).toContain(postRes.body.message.id);
+    expect(memberRes.body.messages.map((message: any) => message.id)).toContain(postRes.body.message.id);
+  });
+
+  it('does not cache an unauthorized first-page channel response', async () => {
+    const owner = await createAuthenticatedUser('coalnocacheown');
+    const outsider = await createAuthenticatedUser('coalnocacheout');
+    const { channelId } = await createCommunityChannelFixture(owner.accessToken, {
+      slugPrefix: 'coal-nocache',
+      channelPrefix: 'coal-nocache',
+      description: 'unauthorized response must not cache',
+      isPrivate: true,
+    });
+
+    const cacheKey = await currentChannelMessagesCacheKey(channelId, 50);
+    const res = await request(app)
+      .get('/api/v1/messages')
+      .set('Authorization', `Bearer ${outsider.accessToken}`)
+      .query({ channelId, limit: 50 });
+
+    expect(res.status).toBe(403);
+    expect(await redis.get(cacheKey)).toBeNull();
   });
 });
 

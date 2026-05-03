@@ -35,6 +35,7 @@ type SingleflightParams<T> = {
   load: () => Promise<T>;
   readFresh: () => Promise<T | null>;
   readStale?: () => Promise<T | null>;
+  beforeReturnShared?: () => Promise<void>;
   lockTtlMs?: number;
   waitForFreshMs?: number;
   pollMs?: number;
@@ -147,12 +148,16 @@ async function withDistributedSingleflight<T>({
   load,
   readFresh,
   readStale,
+  beforeReturnShared,
   lockTtlMs = DEFAULT_LOCK_TTL_MS,
   waitForFreshMs = DEFAULT_WAIT_FOR_FRESH_MS,
   pollMs = DEFAULT_POLL_MS,
 }: SingleflightParams<T>): Promise<T> {
   const existing = inflight.get(cacheKey);
-  if (existing) return existing;
+  if (existing) {
+    if (beforeReturnShared) await beforeReturnShared();
+    return existing;
+  }
 
   const run = (async () => {
     const lockKey = `sf:lock:${cacheKey}`;
@@ -175,14 +180,20 @@ async function withDistributedSingleflight<T>({
 
       if (readStale) {
         const stale = await readStale();
-        if (stale !== null) return stale;
+        if (stale !== null) {
+          if (beforeReturnShared) await beforeReturnShared();
+          return stale;
+        }
       }
 
       const deadline = Date.now() + clampInt(waitForFreshMs, 100, 5_000);
       const sleepMs = clampInt(pollMs, 10, 250);
       while (Date.now() < deadline) {
         const fresh = await readFresh();
-        if (fresh !== null) return fresh;
+        if (fresh !== null) {
+          if (beforeReturnShared) await beforeReturnShared();
+          return fresh;
+        }
         await sleep(sleepMs);
       }
 

@@ -109,6 +109,22 @@ module.exports = function registerGetRoutes(router) {
       // the key so the latest page stays consistent with new writes; TTL remains
       // a backstop for edits/deletes from other paths.
       if (channelId && !before && !after) {
+        const ensureChannelHistoryAccess = async () => {
+          const hasAccess = await raceChannelAccess(
+            redis,
+            channelId,
+            req.user.id,
+            () => checkChannelAccessForUser(channelId, req.user.id),
+          );
+          if (hasAccess) setChannelAccessCache(redis, channelId, req.user.id);
+          return hasAccess;
+        };
+        const requireChannelHistoryAccess = async () => {
+          if (await ensureChannelHistoryAccess()) return;
+          const err: any = new Error("Access denied");
+          err.statusCode = 403;
+          throw err;
+        };
         const epochKey = channelMsgCacheEpochKey(channelId);
         const epochBefore = await readMessageCacheEpoch(redis, epochKey);
         const cacheKey = channelMsgCacheKey(channelId, {
@@ -117,16 +133,9 @@ module.exports = function registerGetRoutes(router) {
         });
         const cached = await getJsonCache(redis, cacheKey);
         if (cached) {
-          const hasAccess = await raceChannelAccess(
-            redis,
-            channelId,
-            req.user.id,
-            () => checkChannelAccessForUser(channelId, req.user.id),
-          );
-          if (!hasAccess) {
+          if (!(await ensureChannelHistoryAccess())) {
             return res.status(403).json({ error: "Access denied" });
           }
-          setChannelAccessCache(redis, channelId, req.user.id);
           recordEndpointListCache("messages_channel", "hit");
           return res.json(cached);
         }
@@ -136,8 +145,11 @@ module.exports = function registerGetRoutes(router) {
         if (msgInflight.has(cacheKey)) {
           recordEndpointListCache("messages_channel", "coalesced");
           try {
+            await requireChannelHistoryAccess();
             return res.json(await msgInflight.get(cacheKey));
           } catch (err) {
+            if ((err as any)?.statusCode === 403)
+              return res.status(403).json({ error: (err as any).message });
             return next(err);
           }
         }
@@ -150,6 +162,7 @@ module.exports = function registerGetRoutes(router) {
             inflight: msgInflight,
             readFresh: async () => getJsonCache(redis, cacheKey),
             readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+            beforeReturnShared: requireChannelHistoryAccess,
             load: async () => {
               let accessWhere = `EXISTS (
                 SELECT 1
@@ -253,6 +266,14 @@ module.exports = function registerGetRoutes(router) {
       // All participants see identical message history so the cache is shared by conversationId.
       // POST busts this key; WS still carries realtime delivery.
       if (conversationId && !before && !after) {
+        const ensureConversationHistoryAccess = async () =>
+          ensureActiveConversationParticipant(conversationId, req.user.id);
+        const requireConversationHistoryAccess = async () => {
+          if (await ensureConversationHistoryAccess()) return;
+          const err: any = new Error("Not a participant");
+          err.statusCode = 403;
+          throw err;
+        };
         const epochKey = conversationMsgCacheEpochKey(conversationId);
         const epochBefore = await readMessageCacheEpoch(redis, epochKey);
         const cacheKey = conversationMsgCacheKey(conversationId, {
@@ -261,11 +282,7 @@ module.exports = function registerGetRoutes(router) {
         });
         const cached = await getJsonCache(redis, cacheKey);
         if (cached) {
-          const hasAccess = await ensureActiveConversationParticipant(
-            conversationId,
-            req.user.id,
-          );
-          if (!hasAccess) {
+          if (!(await ensureConversationHistoryAccess())) {
             return res.status(403).json({ error: "Not a participant" });
           }
           recordEndpointListCache("messages_conversation", "hit");
@@ -275,8 +292,11 @@ module.exports = function registerGetRoutes(router) {
         if (convMsgInflight.has(cacheKey)) {
           recordEndpointListCache("messages_conversation", "coalesced");
           try {
+            await requireConversationHistoryAccess();
             return res.json(await convMsgInflight.get(cacheKey));
           } catch (err) {
+            if ((err as any)?.statusCode === 403)
+              return res.status(403).json({ error: (err as any).message });
             return next(err);
           }
         }
@@ -289,6 +309,7 @@ module.exports = function registerGetRoutes(router) {
             inflight: convMsgInflight,
             readFresh: async () => getJsonCache(redis, cacheKey),
             readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
+            beforeReturnShared: requireConversationHistoryAccess,
             load: async () => {
               const { rows } = await messagesListQuery(
                 req,
@@ -562,4 +583,3 @@ module.exports = function registerGetRoutes(router) {
   },
   );
 };
-
