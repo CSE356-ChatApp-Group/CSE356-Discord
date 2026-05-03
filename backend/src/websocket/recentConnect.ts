@@ -1,11 +1,11 @@
 
 const redis = require('../db/redis');
 
-const rawRecentConnectTtl = Number(process.env.WS_RECENT_CONNECT_TTL_SECONDS || '20');
+const rawRecentConnectTtl = Number(process.env.WS_RECENT_CONNECT_TTL_SECONDS || '60');
 const WS_RECENT_CONNECT_TTL_SECONDS =
   Number.isFinite(rawRecentConnectTtl) && rawRecentConnectTtl > 0
     ? Math.floor(rawRecentConnectTtl)
-    : 20;
+    : 60;
 
 /** Short-lived key: user had a WebSocket session recently (pending replay enqueue filter). `0` = do not set `ws:replay_pending_eligible:*`. */
 const rawReplayRecentWin = Number(process.env.WS_REPLAY_RECENT_USER_WINDOW_SECONDS ?? '30');

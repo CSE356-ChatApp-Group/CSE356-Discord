@@ -130,11 +130,12 @@ function createDisconnectLifecycle({
 
     removeConnection(userId, ws._connectionId)
       .then(() => {
-        if (abnormalClose) {
+        if (abnormalClose && disconnectReason !== "heartbeat_timeout") {
           return recomputeUserPresence(userId);
         }
-        // Clean disconnect — debounce presence recompute so short-gap reconnects
-        // (grader 30ms cycles) skip the offline→online churn entirely.
+        // Clean disconnect and heartbeat_timeout both use the debounced path.
+        // Heartbeat kills are often followed by an immediate reconnect (mobile tab
+        // backgrounded, brief network hiccup) — debouncing avoids offline→online churn.
         scheduleDebouncedPresenceRecompute(userId);
       })
       .catch((err) => {

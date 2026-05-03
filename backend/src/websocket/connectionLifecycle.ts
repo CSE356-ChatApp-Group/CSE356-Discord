@@ -34,6 +34,7 @@ function createConnectionLifecycle({
   cancelPendingPresenceRecompute,
   recomputeUserPresence,
   WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
+  getBootstrapQueueDepth = null,
   bootstrapWithRetry,
   prepareBootstrapWithRetry,
   hydrateBootstrapWithMetrics,
@@ -140,6 +141,7 @@ function createConnectionLifecycle({
     ws._awayMessage = null;
     ws._sawError = false;
     ws._recentDisconnectRecorded = false;
+    ws._missedPings = 0;
     ws._recentMessageKeys = new Map();
     ws._outboundQueue = [];
     ws._outboundDrainScheduled = false;
@@ -313,7 +315,10 @@ function createConnectionLifecycle({
 
     const progressiveReady = wsBootstrapProgressiveReadyEnabled();
     const bootstrapSubscriptionsPromise = (async () => {
-      if (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS > 0) {
+      // Skip ingress jitter when no hydration work is queued — jitter only helps spread
+      // burst load; when the scheduler queue is empty it adds pure latency.
+      const queueDepth = getBootstrapQueueDepth?.() ?? 1;
+      if (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS > 0 && queueDepth > 0) {
         await new Promise((resolve) =>
           setTimeout(resolve, Math.floor(Math.random() * (WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS + 1))),
         );

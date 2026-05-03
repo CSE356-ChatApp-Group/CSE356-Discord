@@ -227,7 +227,7 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
 describe('primeBootstrapChannelRecentConnect ZSCORE precheck', () => {
   const NOW = Date.now();
   const RECENT_SCORE = String(NOW);
-  const STALE_SCORE = String(NOW - 30_000);
+  const STALE_SCORE = String(NOW - 70_000);
 
   function metricStub() {
     return { inc: jest.fn(), observe: jest.fn() };

@@ -50,19 +50,21 @@ function createRecentDisconnectHelpers({
   async function consumeRecentDisconnect(userId) {
     if (!isRedisOperational(redis)) return null;
     const key = recentDisconnectKey(userId);
-    const raw = await redis.get(key);
+    // Use GETDEL (Redis ≥ 6.2) to fetch-and-delete in one round trip.
+    // Falls back to GET + DEL on older clients.
+    let raw: string | null;
+    if (typeof (redis as any).getdel === 'function') {
+      raw = await (redis as any).getdel(key);
+    } else {
+      raw = await redis.get(key);
+      if (raw) await redis.del(key).catch(() => {});
+    }
     if (!raw) return null;
-
-    let previous;
     try {
-      previous = JSON.parse(raw);
+      return JSON.parse(raw);
     } catch {
-      await redis.del(key).catch(() => {});
       return null;
     }
-
-    await redis.del(key).catch(() => {});
-    return previous;
   }
 
   function observeRecentReconnect(userId, connectionId, previous) {

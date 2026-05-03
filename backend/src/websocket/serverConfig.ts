@@ -98,6 +98,15 @@ const WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS =
     ? Math.min(2000, Math.floor(rawBootstrapDbConcurrencyWaitMs))
     : 300;
 
+// Number of consecutive missed heartbeat pings before a socket is terminated.
+// Default 2 means a socket must miss two back-to-back pings (≥ 2× interval) to be killed,
+// giving transient network hiccups and backgrounded mobile tabs a survival window.
+const rawHeartbeatMissedPings = envNumber('WS_HEARTBEAT_MISSED_PINGS_BEFORE_KILL', 2);
+const WS_HEARTBEAT_MISSED_PINGS_BEFORE_KILL =
+  Number.isFinite(rawHeartbeatMissedPings) && rawHeartbeatMissedPings >= 1
+    ? Math.min(5, Math.floor(rawHeartbeatMissedPings))
+    : 2;
+
 module.exports = {
   IDLE_TTL_SECONDS,
   CONNECTION_ALIVE_TTL_SECONDS,
@@ -129,4 +138,5 @@ module.exports = {
   WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
   WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
   WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
+  WS_HEARTBEAT_MISSED_PINGS_BEFORE_KILL,
 };
