@@ -528,6 +528,24 @@ const wsBootstrapPausedForLiveFanoutTotal = new client.Counter({
   help: 'Bootstrap hydration yielded because live fanout work was pending',
 });
 
+// ── Bootstrap DB hydration cost metrics ───────────────────────────────────────
+
+/** Per-phase timing for each DB query within a bootstrap channel-list cache-miss load. */
+const wsBootstrapDbQueryDurationMs = new client.Histogram({
+  name: 'ws_bootstrap_db_query_duration_ms',
+  help: 'Wall-clock duration of each DB query phase within a WS bootstrap channel list load',
+  labelNames: ['phase'],
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Per-step timing for the subscription hydration loop (delivery vs. community channels). */
+const wsBootstrapHydrationStepDurationMs = new client.Histogram({
+  name: 'ws_bootstrap_hydration_step_duration_ms',
+  help: 'Wall-clock duration of each hydration step (delivery=channel:*/conversation:*, community=community:*)',
+  labelNames: ['step'],
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
 // ── Fanout recipient dedupe metrics (Patch D) ─────────────────────────────────
 
 /** Unique recipient-message pairs seen by the dedupe layer. */
@@ -808,6 +826,8 @@ module.exports = {
   wsBootstrapChannelListCacheTotal,
   wsLiveFanoutStarvationGuardTotal,
   wsBootstrapPausedForLiveFanoutTotal,
+  wsBootstrapDbQueryDurationMs,
+  wsBootstrapHydrationStepDurationMs,
   wsRecipientDedupeTotal,
   wsRecipientDuplicateCandidatesTotal,
   wsDuplicateDeliverySuppressedTotal,

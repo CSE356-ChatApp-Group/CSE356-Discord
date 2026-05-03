@@ -23,6 +23,8 @@ function createBootstrapSubscriptionsHelpers({
   wsBootstrapCachedTotal,
   wsBootstrapDbTotal,
   wsBootstrapWallDurationMs,
+  wsBootstrapDbQueryDurationMs = null,
+  wsBootstrapHydrationStepDurationMs = null,
   bootstrapHydrationScheduler = null,
   WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
   WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
@@ -159,24 +161,38 @@ function createBootstrapSubscriptionsHelpers({
       },
       load: async () => {
         wsBootstrapDbTotal.inc();
+
+        function timedQuery(phase, fn) {
+          if (!wsBootstrapDbQueryDurationMs) return fn();
+          const start = Date.now();
+          return Promise.resolve(fn()).then((result) => {
+            wsBootstrapDbQueryDurationMs.observe({ phase }, Date.now() - start);
+            return result;
+          });
+        }
+
         const [conversationRes, communityRes, channelRes] = await Promise.all([
           scope === "user_only"
             ? Promise.resolve({ rows: [] })
-            : query(
+            : timedQuery("conversations", () => query(
               `SELECT conversation_id::text AS id
                FROM conversation_participants
                WHERE user_id = $1 AND left_at IS NULL`,
               [userId],
-            ),
-          query(
-            `SELECT community_id::text AS id
-             FROM community_members
-             WHERE user_id = $1`,
-            [userId],
-          ),
+            )),
+          // Skip community query in messages scope: community:* topics are not needed
+          // for message:created delivery — subscribeClient covers channel/conversation fanout.
+          scope === "user_only" || scope === "messages"
+            ? Promise.resolve({ rows: [] })
+            : timedQuery("communities", () => query(
+              `SELECT community_id::text AS id
+               FROM community_members
+               WHERE user_id = $1`,
+              [userId],
+            )),
           scope === "user_only"
             ? Promise.resolve({ rows: [] })
-            : query(
+            : timedQuery("channels", () => query(
               `SELECT c.id::text AS id
                FROM channels c
                JOIN community_members cm
@@ -187,7 +203,7 @@ function createBootstrapSubscriptionsHelpers({
                 AND chm.user_id = $1
                WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
               [userId],
-            ),
+            )),
         ]);
 
         const channels = [
@@ -313,11 +329,41 @@ function createBootstrapSubscriptionsHelpers({
 
   async function hydrateBootstrapSubscriptions(ws, channels) {
     if (!Array.isArray(channels)) return;
-    for (let i = 0; i < channels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
-      await bootstrapHydrationScheduler?.waitForLiveFanoutQuiet?.();
-      const batch = channels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-      await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
-      if (ws.readyState !== 1) return;
+
+    // Partition: delivery channels (channel:*, conversation:*) must be set up before
+    // community channels, which are non-critical for message:created delivery and synchronous.
+    const deliveryChannels = [];
+    const communityChannels = [];
+    for (const ch of channels) {
+      if (typeof ch !== "string") continue;
+      if (ch.startsWith("community:")) {
+        communityChannels.push(ch);
+      } else {
+        deliveryChannels.push(ch);
+      }
+    }
+
+    // Step 1: Delivery channels — batched async, yields to live fanout between batches
+    if (deliveryChannels.length > 0) {
+      const stepStart = Date.now();
+      for (let i = 0; i < deliveryChannels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
+        await bootstrapHydrationScheduler?.waitForLiveFanoutQuiet?.();
+        const batch = deliveryChannels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
+        await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
+        if (ws.readyState !== 1) return;
+      }
+      wsBootstrapHydrationStepDurationMs?.observe?.({ step: "delivery" }, Date.now() - stepStart);
+    }
+
+    // Step 2: Community channels — subscribeCommunityClient is synchronous in-memory;
+    // no fanout yield or async batching needed.
+    if (communityChannels.length > 0 && ws.readyState === 1) {
+      const stepStart = Date.now();
+      for (const channel of communityChannels) {
+        const parsed = parseChannelKey(channel);
+        if (parsed?.type === "community") subscribeCommunityClient(ws, parsed.id);
+      }
+      wsBootstrapHydrationStepDurationMs?.observe?.({ step: "community" }, Date.now() - stepStart);
     }
   }
 

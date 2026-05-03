@@ -166,6 +166,8 @@ const {
   wsBootstrapChannelListCacheTotal,
   wsLiveFanoutStarvationGuardTotal,
   wsBootstrapPausedForLiveFanoutTotal,
+  wsBootstrapDbQueryDurationMs,
+  wsBootstrapHydrationStepDurationMs,
   wsPartialDeliveryMissingReasonTotal,
 } = require('./metrics/wsRuntimeAndDelivery');
 const {
@@ -885,5 +887,7 @@ module.exports = {
   wsBootstrapChannelListCacheTotal,
   wsLiveFanoutStarvationGuardTotal,
   wsBootstrapPausedForLiveFanoutTotal,
+  wsBootstrapDbQueryDurationMs,
+  wsBootstrapHydrationStepDurationMs,
   wsPartialDeliveryMissingReasonTotal,
 };
