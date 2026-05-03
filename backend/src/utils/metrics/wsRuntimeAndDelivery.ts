@@ -586,6 +586,55 @@ const wsPartialDeliveryMissingReasonTotal = new client.Counter({
   wsPartialDeliveryMissingReasonTotal.inc({ reason: 'unknown' }, 0);
 })();
 
+// ── End-to-end WS delivery stage tracing ─────────────────────────────────────
+
+/** Per-stage WS delivery latency for slow delivery tracing (socket side). */
+const wsDeliveryStageDurationMs = new client.Histogram({
+  name: 'ws_delivery_stage_duration_ms',
+  help: 'Per-stage WS delivery latency in milliseconds (socket enqueue wait, socket write)',
+  labelNames: ['stage', 'path', 'vm', 'worker'],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Slow WS delivery traces emitted per stage and reason. */
+const wsDeliverySlowTraceTotal = new client.Counter({
+  name: 'ws_delivery_slow_trace_total',
+  help: 'Slow WS delivery traces emitted by stage and reason',
+  labelNames: ['stage', 'reason', 'vm', 'worker'],
+});
+
+/** Per-socket outbound queue depth at enqueue time by worker (complements ws_outbound_queue_depth). */
+const wsSocketQueueDepthHistogram = new client.Histogram({
+  name: 'ws_socket_queue_depth',
+  help: 'Per-socket outbound frame queue depth at enqueue time with vm/worker labels for per-node triage',
+  labelNames: ['vm', 'worker'],
+  buckets: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+});
+
+/** Duration of ws.send() call to its callback (wire + kernel latency). */
+const wsSocketSendDurationMs = new client.Histogram({
+  name: 'ws_socket_send_duration_ms',
+  help: 'Duration from ws.send() call to callback in milliseconds',
+  labelNames: ['vm', 'worker'],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+});
+
+/** Time from message created_at to Redis pubsub receipt on this worker. */
+const wsPubsubReceiveLagMs = new client.Histogram({
+  name: 'ws_pubsub_receive_lag_ms',
+  help: 'Milliseconds from message created_at to Redis pubsub receipt on this worker',
+  labelNames: ['topic_prefix', 'vm', 'worker'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+/** Target lookup duration for realtime fanout by path and cache result with vm/worker for per-node triage. */
+const wsTargetLookupDurationMs = new client.Histogram({
+  name: 'ws_target_lookup_duration_ms',
+  help: 'Realtime fanout target lookup duration in milliseconds with vm/worker labels',
+  labelNames: ['path', 'result', 'vm', 'worker'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
 module.exports = {
   wsConnectionResultTotal,
   wsUpgradeSeenTotal,
@@ -666,4 +715,10 @@ module.exports = {
   wsRecipientDuplicateCandidatesTotal,
   wsFanoutCandidateCountBucket,
   wsPartialDeliveryMissingReasonTotal,
+  wsDeliveryStageDurationMs,
+  wsDeliverySlowTraceTotal,
+  wsSocketQueueDepthHistogram,
+  wsSocketSendDurationMs,
+  wsPubsubReceiveLagMs,
+  wsTargetLookupDurationMs,
 };
