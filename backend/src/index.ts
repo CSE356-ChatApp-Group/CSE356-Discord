@@ -20,6 +20,7 @@ const { startMessageIngestConsumerIfEnabled, stopMessageIngestConsumer } = requi
 const { startChannelLastMessageFlushInterval } = require('./messages/repointLastMessage');
 const { startReadStateFlushInterval } = require('./messages/readState/batchReadState');
 const { startCommunityCountReconcileInterval } = require('./communities/communityMemberCount');
+const { startPresenceMirrorFlushInterval, stopPresenceMirrorFlushInterval } = require('./presence/service');
 const redis    = require('./db/redis');
 const { warmRedisLuaScripts } = require('./db/redisLua');
 const { startPgPoolMetrics } = require('./utils/metrics');
@@ -128,6 +129,7 @@ async function shutdown(signal, err = null) {
   }
 
   stopMessageIngestConsumer();
+  stopPresenceMirrorFlushInterval();
   await Promise.allSettled([
     pool.end(),
     readPool ? readPool.end() : Promise.resolve(),
@@ -147,6 +149,7 @@ async function start() {
   startChannelLastMessageFlushInterval();
   startReadStateFlushInterval();
   startCommunityCountReconcileInterval();
+  startPresenceMirrorFlushInterval();
 
   server = http.createServer(app);
 

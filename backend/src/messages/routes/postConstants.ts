@@ -57,6 +57,20 @@ const MESSAGE_POST_IMMEDIATE_RECENT_BRIDGE_ENABLED = (() => {
   return raw === "1" || raw === "true";
 })();
 
+const MESSAGE_POST_FAST_ACCEPT_ENABLED = (() => {
+  const raw = String(
+    process.env.MESSAGE_POST_FAST_ACCEPT_ENABLED ?? "true",
+  ).toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "no";
+})();
+
+const MESSAGE_POST_AWAIT_CACHE_BUST = (() => {
+  const raw = String(
+    process.env.MESSAGE_POST_AWAIT_CACHE_BUST ?? "true",
+  ).toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "no";
+})();
+
 function messagePostAsyncFanoutEnabled() {
   const v = process.env.MESSAGE_POST_SYNC_FANOUT;
   return !(v === "1" || v === "true" || v === "yes");
@@ -77,6 +91,8 @@ module.exports = {
   MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
   MESSAGE_POST_RECENT_BRIDGE_TIMEOUT_MS,
   MESSAGE_POST_IMMEDIATE_RECENT_BRIDGE_ENABLED,
+  MESSAGE_POST_FAST_ACCEPT_ENABLED,
+  MESSAGE_POST_AWAIT_CACHE_BUST,
   messagePostAsyncFanoutEnabled,
   ALLOWED_ATTACHMENT_TYPES,
   MAX_ATTACHMENTS_PER_MESSAGE,

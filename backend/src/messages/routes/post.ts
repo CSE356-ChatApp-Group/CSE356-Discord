@@ -39,6 +39,8 @@ const { messagePostIpRateLimiter, messagePostUserRateLimiter } = createMessagePo
 const {
   BG_WRITE_POOL_GUARD,
   MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
+  MESSAGE_POST_FAST_ACCEPT_ENABLED,
+  MESSAGE_POST_AWAIT_CACHE_BUST,
   MAX_ATTACHMENTS_PER_MESSAGE,
   ALLOWED_ATTACHMENT_TYPES,
 } = require("./postConstants");
@@ -276,10 +278,20 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           }
         }
 
-        // --- POST /messages: hydrate full message row ---
+        // --- POST /messages: build response message ---
         let message: any;
         const tHydrateStart = Date.now();
-        if (channelId) {
+        const canFastAccept =
+          MESSAGE_POST_FAST_ACCEPT_ENABLED &&
+          (Boolean(channelId) || attachments.length === 0);
+        if (canFastAccept) {
+          message = {
+            ...baseMessage,
+            attachments: Array.isArray((baseMessage as any).attachments)
+              ? (baseMessage as any).attachments
+              : [],
+          };
+        } else if (channelId) {
           const hydrated = await loadHydratedMessageById(baseMessage.id);
           if (!hydrated) {
             const err: any = new Error("Message not found after insert");
@@ -355,21 +367,52 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
           fanoutTimings = cv.timings_ms || fanoutTimings;
         }
         t_after_fanout = Date.now();
-        const cacheBustRun = await cacheBustPromise;
-        if (!cacheBustRun.ok && cacheBustRun.timedOut) {
-          deliveryTimeoutTotal.inc({ phase: "cache_bust" });
-          logger.warn(
-            {
-              requestId: authReq.id,
-              channelId: channelId ?? undefined,
-              conversationId: conversationId ?? undefined,
-              timeoutMs: MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
-              gradingNote: "post_insert_delivery_timeout_not_http_failure",
-            },
-            "POST /messages: cache_bust wall budget exceeded (201 still returned after commit)",
-          );
+        if (MESSAGE_POST_AWAIT_CACHE_BUST) {
+          const cacheBustRun = await cacheBustPromise;
+          if (!cacheBustRun.ok && cacheBustRun.timedOut) {
+            deliveryTimeoutTotal.inc({ phase: "cache_bust" });
+            logger.warn(
+              {
+                requestId: authReq.id,
+                channelId: channelId ?? undefined,
+                conversationId: conversationId ?? undefined,
+                timeoutMs: MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
+                gradingNote: "post_insert_delivery_timeout_not_http_failure",
+              },
+              "POST /messages: cache_bust wall budget exceeded (201 still returned after commit)",
+            );
+          }
+          t_after_cache_bust = Date.now();
+        } else {
+          t_after_cache_bust = Date.now();
+          cacheBustPromise
+            .then((cacheBustRun) => {
+              if (!cacheBustRun.ok && cacheBustRun.timedOut) {
+                deliveryTimeoutTotal.inc({ phase: "cache_bust" });
+                logger.warn(
+                  {
+                    requestId: authReq.id,
+                    channelId: channelId ?? undefined,
+                    conversationId: conversationId ?? undefined,
+                    timeoutMs: MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
+                    gradingNote: "post_insert_delivery_timeout_not_http_failure",
+                  },
+                  "POST /messages: async cache_bust wall budget exceeded after 201",
+                );
+              }
+            })
+            .catch((err: unknown) => {
+              logger.warn(
+                {
+                  err,
+                  requestId: authReq.id,
+                  channelId: channelId ?? undefined,
+                  conversationId: conversationId ?? undefined,
+                },
+                "POST /messages: async cache_bust failed after 201",
+              );
+            });
         }
-        t_after_cache_bust = Date.now();
 
         // --- POST /messages: 201 + idempotency + traces + Meili (see postFinish.ts) ---
         runPostSuccessFollowup({

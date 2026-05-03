@@ -73,6 +73,98 @@ function fanoutTargetsKey(userId) {
 }
 
 const PRESENCE_FANOUT_RECIPIENTS_CACHE_VERSION = 2;
+const PRESENCE_FANOUT_RECIPIENT_LOOKUP_MODE = String(
+  process.env.PRESENCE_FANOUT_RECIPIENT_LOOKUP_MODE || 'db_cache',
+).toLowerCase();
+const PRESENCE_DB_MIRROR_MODE = String(
+  process.env.PRESENCE_DB_MIRROR_MODE || 'async',
+).toLowerCase();
+const PRESENCE_DB_MIRROR_FLUSH_INTERVAL_MS = (() => {
+  const raw = parseInt(process.env.PRESENCE_DB_MIRROR_FLUSH_INTERVAL_MS || '1000', 10);
+  if (!Number.isFinite(raw) || raw < 100) return 1000;
+  return Math.min(30_000, raw);
+})();
+const PRESENCE_DB_MIRROR_BATCH_SIZE = (() => {
+  const raw = parseInt(process.env.PRESENCE_DB_MIRROR_BATCH_SIZE || '250', 10);
+  if (!Number.isFinite(raw) || raw < 1) return 250;
+  return Math.min(2000, raw);
+})();
+
+const pendingPresenceDbMirrors = new Map();
+let presenceMirrorFlushTimer = null;
+let presenceMirrorFlushInFlight = false;
+
+function shouldUsePresenceDbMirror() {
+  return PRESENCE_DB_MIRROR_MODE !== 'off' && PRESENCE_DB_MIRROR_MODE !== 'disabled';
+}
+
+function shouldMirrorPresenceInline() {
+  return PRESENCE_DB_MIRROR_MODE === 'inline' || PRESENCE_DB_MIRROR_MODE === 'sync';
+}
+
+function enqueuePresenceDbMirror(userId, status, customMsg) {
+  if (!shouldUsePresenceDbMirror()) return;
+  pendingPresenceDbMirrors.set(userId, {
+    userId,
+    status,
+    customMsg: status === 'away' ? customMsg : null,
+  });
+}
+
+async function flushPresenceDbMirrorBatch() {
+  if (presenceMirrorFlushInFlight || pendingPresenceDbMirrors.size === 0) return;
+  presenceMirrorFlushInFlight = true;
+  const batch = [];
+  for (const [userId, payload] of pendingPresenceDbMirrors) {
+    pendingPresenceDbMirrors.delete(userId);
+    batch.push(payload);
+    if (batch.length >= PRESENCE_DB_MIRROR_BATCH_SIZE) break;
+  }
+
+  try {
+    await query(
+      `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
+       SELECT *
+       FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::timestamptz[])
+            AS payload(user_id, status, custom_msg, updated_at)
+       ON CONFLICT (user_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         custom_msg = EXCLUDED.custom_msg,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        batch.map((row) => row.userId),
+        batch.map((row) => row.status),
+        batch.map((row) => row.customMsg),
+        batch.map(() => new Date().toISOString()),
+      ],
+    );
+  } catch (err) {
+    logger.debug(
+      { err, batchSize: batch.length },
+      'presence: async DB mirror batch failed',
+    );
+  } finally {
+    presenceMirrorFlushInFlight = false;
+  }
+}
+
+function startPresenceMirrorFlushInterval() {
+  if (presenceMirrorFlushTimer || shouldMirrorPresenceInline() || !shouldUsePresenceDbMirror()) {
+    return;
+  }
+  presenceMirrorFlushTimer = setInterval(() => {
+    void flushPresenceDbMirrorBatch();
+  }, PRESENCE_DB_MIRROR_FLUSH_INTERVAL_MS);
+  if (typeof presenceMirrorFlushTimer.unref === 'function') {
+    presenceMirrorFlushTimer.unref();
+  }
+}
+
+function stopPresenceMirrorFlushInterval() {
+  if (!presenceMirrorFlushTimer) return;
+  clearInterval(presenceMirrorFlushTimer);
+  presenceMirrorFlushTimer = null;
+}
 
 /** Cap keys per Redis UNLINK/DEL to avoid multi-thousand-argument commands (main-thread stalls). */
 const PRESENCE_FANOUT_TARGETS_UNLINK_CHUNK = 512;
@@ -151,12 +243,22 @@ function parsePresenceFanoutRecipientsCached(cached) {
 }
 
 async function getPresenceFanoutRecipientUserIds(userId) {
+  if (PRESENCE_FANOUT_RECIPIENT_LOOKUP_MODE === 'self') {
+    return [userId];
+  }
   const cacheKey = fanoutTargetsKey(userId);
   const cached = await redis.get(cacheKey);
   if (cached) {
     const parsed = parsePresenceFanoutRecipientsCached(cached);
     if (parsed) return parsed;
     await unlinkOrDelPresenceFanoutTargetKeys(redis, [cacheKey], 'single');
+  }
+
+  if (
+    PRESENCE_FANOUT_RECIPIENT_LOOKUP_MODE === 'cache_only' ||
+    PRESENCE_FANOUT_RECIPIENT_LOOKUP_MODE === 'redis_only'
+  ) {
+    return [userId];
   }
 
   const { rows } = await query(
@@ -331,20 +433,25 @@ async function setPresence(userId, status, awayMessage) {
       // Fail open — if Redis is unavailable, write DB anyway
       logger.warn({ err: redisErr, userId }, 'presence: Redis CAS eval failed, writing DB anyway');
     }
-    if (shouldWriteDb) {
-      // Mirror to Postgres (non-blocking, synchronous_commit=off — losing last presence on crash is acceptable)
-      withTransaction(async (client) => {
-        await client.query('SET LOCAL synchronous_commit = off');
-        await client.query(
-          `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
-           VALUES ($1, $2, $3, NOW())
-           ON CONFLICT (user_id) DO UPDATE SET
-             status = EXCLUDED.status,
-             custom_msg = EXCLUDED.custom_msg,
-             updated_at = NOW()`,
-          [userId, status, status === "away" ? nextAwayMessage : null],
-        );
-      }).catch(() => {});
+    if (shouldWriteDb && shouldUsePresenceDbMirror()) {
+      const customMsg = status === "away" ? nextAwayMessage : null;
+      if (shouldMirrorPresenceInline()) {
+        // Compatibility mode for diagnostics. Production should prefer async batching.
+        withTransaction(async (client) => {
+          await client.query('SET LOCAL synchronous_commit = off');
+          await client.query(
+            `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (user_id) DO UPDATE SET
+               status = EXCLUDED.status,
+               custom_msg = EXCLUDED.custom_msg,
+               updated_at = NOW()`,
+            [userId, status, customMsg],
+          );
+        }).catch(() => {});
+      } else {
+        enqueuePresenceDbMirror(userId, status, customMsg);
+      }
     }
   }
 }
@@ -409,4 +516,7 @@ module.exports = {
   getPresenceDetails,
   getBulkPresence,
   getBulkPresenceDetails,
+  startPresenceMirrorFlushInterval,
+  stopPresenceMirrorFlushInterval,
+  flushPresenceDbMirrorBatch,
 };

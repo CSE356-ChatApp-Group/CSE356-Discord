@@ -51,6 +51,13 @@ function createConnectionLifecycle({
     return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
   }
 
+  function wsReplaySkipDbWhenPendingHit() {
+    const raw = process.env.WS_REPLAY_SKIP_DB_WHEN_PENDING_HIT;
+    if (raw === undefined || raw === "") return false;
+    const normalized = String(raw).trim().toLowerCase();
+    return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+  }
+
   function bearerTokenFromUpgradeHeaders(req) {
     const raw = req?.headers?.authorization;
     if (typeof raw !== "string") return null;
@@ -228,13 +235,27 @@ function createConnectionLifecycle({
                   try {
                     const replayStartedAt = Date.now();
                     const replayAllowed = canRunReplayForUser(user.id);
+                    const preferPendingReplay = wsReplaySkipDbWhenPendingHit();
+                    let pendingReplayed = 0;
+                    if (preferPendingReplay) {
+                      pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
+                    }
                     if (replayAllowed) {
-                      await replayMissedMessagesToSocket(
-                        ws,
-                        user.id,
-                        recentDisconnect,
-                        replayUpperBoundMs,
-                      );
+                      if (preferPendingReplay && pendingReplayed > 0) {
+                        logWsHotInfo(() => ({
+                            userId: user.id,
+                            connectionId: ws._connectionId,
+                            pendingReplayed,
+                          }),
+                          "WS reconnect DB replay skipped because Redis pending replay produced messages");
+                      } else {
+                        await replayMissedMessagesToSocket(
+                          ws,
+                          user.id,
+                          recentDisconnect,
+                          replayUpperBoundMs,
+                        );
+                      }
                     } else {
                       logWsHotInfo(() => ({
                           userId: user.id,
@@ -243,7 +264,9 @@ function createConnectionLifecycle({
                         }),
                         "WS reconnect replay DB query skipped due to short per-user cooldown");
                     }
-                    const pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
+                    if (!preferPendingReplay) {
+                      pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
+                    }
                     logWsHotInfo(() => ({
                         event: "ws.replay.pending_drain",
                         userId: user.id,
