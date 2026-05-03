@@ -61,6 +61,7 @@ const {
   CHANNEL_MESSAGE_RECENT_CONNECT_FALLBACK_PROBE_MAX,
   CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
   CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST,
+  CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH,
   MESSAGE_USER_FANOUT_HTTP_BLOCKING,
   CHANNEL_MESSAGE_USER_FANOUT_MAX,
 } = channelRealtimeConfig;
@@ -555,7 +556,7 @@ async function publishChannelMessageEvent(
     }
   }
 
-  if (inlineTargets.length > 0) {
+  if (inlineTargets.length > 0 && !CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH) {
     await publishUserTopicTargets(
       inlineTargets,
       envelope,

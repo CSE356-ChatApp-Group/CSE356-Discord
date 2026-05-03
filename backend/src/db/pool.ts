@@ -167,7 +167,7 @@ const POOL_MAX = parseInt(process.env.PG_POOL_MAX || '25', 10);
  * connections are available, so a growing queue signals real DB overload.
  */
 const CIRCUIT_BREAKER_QUEUE = Math.min(
-  50,
+  100,
   Math.max(1, parseInt(process.env.POOL_CIRCUIT_BREAKER_QUEUE || '50', 10)),
 );
 
