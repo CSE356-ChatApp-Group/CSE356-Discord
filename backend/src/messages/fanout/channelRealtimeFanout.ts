@@ -497,10 +497,8 @@ async function publishChannelMessageEvent(
     }
   }
 
-  if (firstChannel) {
-    await publishChannelTopicOnly();
-  }
-
+  // Resolve targets before publishing so the pending mailbox is populated
+  // before the channel PUBLISH fires stale-socket detection.
   ({
     allTargets,
     pendingEnqueueTargets,
@@ -510,9 +508,8 @@ async function publishChannelMessageEvent(
   } = await userTargetsPromise);
   trace.getActiveSpan()?.setAttribute('fanout.recipient_count', allTargets.length);
 
-  await publishCommunityFeedIfPublic();
-
   if (envelope?.event === 'message:created' && pendingEnqueueTargets.length > 0) {
+    // Fire-and-forget: runs concurrently with channel publish and community feed.
     // Reconnect bridge: keep a short-lived per-user pending pointer so reconnect
     // drain can recover missed live fanout quickly before marking socket ready.
     enqueuePendingMessageForUsers(pendingEnqueueTargets, envelope, {
@@ -524,6 +521,12 @@ async function publishChannelMessageEvent(
       );
     });
   }
+
+  if (firstChannel) {
+    await publishChannelTopicOnly();
+  }
+
+  await publishCommunityFeedIfPublic();
 
   const blocking = MESSAGE_USER_FANOUT_HTTP_BLOCKING;
   const recentTargets =

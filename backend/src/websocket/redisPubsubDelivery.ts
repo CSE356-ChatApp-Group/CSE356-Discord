@@ -58,6 +58,7 @@ function createRedisPubsubDelivery(ctx) {
     wsPartialDeliveryMissingReasonTotal = null,
     signalLiveFanoutPending = null,
     releaseLiveFanoutPending = null,
+    enqueuePendingMessageForUsers = null,
   } = ctx;
   const anonymousSocketIds = new WeakMap();
   let nextAnonymousSocketId = 0;
@@ -288,6 +289,16 @@ function createRedisPubsubDelivery(ctx) {
         "channel_topic_stale_map_userfeed_recovery",
         cappedUserIds.length,
       );
+      // Also write to the pending mailbox so a user who is between connections
+      // (userfeed PUBLISH lands with 0 local clients) can still recover on reconnect.
+      if (enqueuePendingMessageForUsers) {
+        enqueuePendingMessageForUsers(cappedUserIds, parsed, {}).catch((err) => {
+          logger.warn(
+            { err, channel, userIdCount: cappedUserIds.length },
+            "WS pending enqueue after stale topic recovery failed",
+          );
+        });
+      }
       return true;
     } catch (err) {
       logger.warn(
