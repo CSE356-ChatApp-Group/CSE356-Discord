@@ -474,7 +474,8 @@ if (!IS_WS_DM_BURST && wsMessageDeliveryProbeEnabled) {
 }
 
 export const options = {
-  discardResponseBodies: true,
+  // NOTE: do NOT set discardResponseBodies:true here — it breaks res.json() in
+  // setup() even when keepBody=true is used on individual requests (k6 quirk).
   thresholds: httpThresholds,
   scenarios: scenarioTable,
 };
