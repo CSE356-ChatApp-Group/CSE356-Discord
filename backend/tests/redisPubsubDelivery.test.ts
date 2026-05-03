@@ -223,4 +223,31 @@ describe('redisPubsubDelivery', () => {
 
     expect(sendPayloadToSocket).toHaveBeenCalledTimes(2);
   });
+
+  it('skips stale subscription entries and still delivers to remaining open sockets', async () => {
+    const stale = { readyState: 3, _userId: 'user-stale' };
+    const open = { readyState: 1, _userId: 'user-open' };
+    const clients = new Set([stale, open]);
+    const unsubscribeClient = jest.fn((ws) => {
+      clients.delete(ws);
+      return Promise.resolve();
+    });
+    const sendPayloadToSocket = jest.fn(() => true);
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      channelClients: new Map([
+        ['channel:chan-1', clients],
+      ]),
+      unsubscribeClient,
+    }));
+
+    await deliverPubsubMessage(
+      'channel:chan-1',
+      JSON.stringify({ event: 'message:created', data: { id: 'msg-stale-safe' } }),
+    );
+
+    expect(unsubscribeClient).toHaveBeenCalledWith(stale, 'channel:chan-1');
+    expect(sendPayloadToSocket).toHaveBeenCalledTimes(1);
+    expect((sendPayloadToSocket.mock.calls as unknown as any[][])[0][0]).toBe(open);
+  });
 });

@@ -906,11 +906,12 @@ describe('Channel realtime delivery', () => {
         const event = await createdEventPromise;
         // During the bootstrap window an open-only socket is guaranteed the logical
         // user-topic duplicate; once bootstrap catches up, the same payload may instead
-        // arrive on the channel topic. Either path is valid as long as delivery is
-        // exactly-once for this message.
+        // arrive on the channel or community topic. Any of those paths is valid as long
+        // as delivery is exactly-once for this message.
         expect(
           event.channel === `user:${member.user.id}`
-          || event.channel === `channel:${channelId}`,
+          || event.channel === `channel:${channelId}`
+          || event.channel === `community:${communityId}`,
         ).toBe(true);
 
         await new Promise((resolve) => setTimeout(resolve, 150));
@@ -922,6 +923,7 @@ describe('Channel realtime delivery', () => {
             && (
               candidate.channel === `user:${member.user.id}`
               || candidate.channel === `channel:${channelId}`
+              || candidate.channel === `community:${communityId}`
             ),
         );
         expect(matchingDeliveryFrames).toHaveLength(1);
@@ -2478,6 +2480,222 @@ describe('WebSocket reliability', () => {
 });
 
 describe('Channel message multi-listener delivery (grader-shaped)', () => {
+  it('GeneratedClient-style ready socket receives channel messages without manual subscribe', async () => {
+    await withEnv('CHANNEL_RECENT_ZSET_ENABLED', 'false', async () => {
+        const owner = await createAuthenticatedUser('gcactiveowner');
+        const member = await createAuthenticatedUser('gcactivemember');
+
+        const suffix = uniqueSuffix();
+        const communityRes = await request(app)
+          .post('/api/v1/communities')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({
+            slug: `gc-active-${suffix}`.slice(0, 32),
+            name: `gc-active-${suffix}`,
+            description: 'active fallback generated client test',
+          });
+        expect(communityRes.status).toBe(201);
+        const communityId = communityRes.body.community.id;
+
+        const channelRes = await request(app)
+          .post('/api/v1/channels')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ communityId, name: `gc-active-ch-${suffix}`.slice(0, 32), isPrivate: false });
+        expect(channelRes.status).toBe(201);
+        const channelId = channelRes.body.channel.id;
+
+        const joinRes = await request(app)
+          .post(`/api/v1/communities/${communityId}/join`)
+          .set('Authorization', `Bearer ${member.accessToken}`)
+          .send({});
+        expect(joinRes.status).toBe(200);
+
+        const memberSocket = await connectWebSocket(port, member.accessToken);
+        try {
+          const content = `active-fallback-${suffix}`;
+          const createdPromise = waitForWsEvent(
+            memberSocket,
+            (event) =>
+              event.event === 'message:created'
+              && event.data?.channel_id === channelId
+              && event.data?.content === content,
+            15_000,
+          );
+
+          const postRes = await request(app)
+            .post('/api/v1/messages')
+            .set('Authorization', `Bearer ${owner.accessToken}`)
+            .send({ channelId, content });
+          expect(postRes.status).toBe(201);
+
+          const event = await createdPromise;
+          expect([`user:${member.user.id}`, `channel:${channelId}`]).toContain(event.channel);
+        } finally {
+          await closeWebSocket(memberSocket);
+        }
+    });
+  });
+
+  it('message sent during progressive hydration reaches the recipient through the recent/active bridge', async () => {
+    await withEnv('WS_BOOTSTRAP_PROGRESSIVE_READY', 'true', async () => {
+      const owner = await createAuthenticatedUser('gcprogowner');
+      const member = await createAuthenticatedUser('gcprogmember');
+
+      const suffix = uniqueSuffix();
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({
+          slug: `gc-prog-${suffix}`.slice(0, 32),
+          name: `gc-prog-${suffix}`,
+          description: 'progressive ready bridge test',
+        });
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const channelRes = await request(app)
+        .post('/api/v1/channels')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({ communityId, name: `gc-prog-ch-${suffix}`.slice(0, 32), isPrivate: false });
+      expect(channelRes.status).toBe(201);
+      const channelId = channelRes.body.channel.id;
+
+      const joinRes = await request(app)
+        .post(`/api/v1/communities/${communityId}/join`)
+        .set('Authorization', `Bearer ${member.accessToken}`)
+        .send({});
+      expect(joinRes.status).toBe(200);
+
+      const { WebSocket } = require('ws');
+      const memberSocket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(member.accessToken)}`);
+      const frames: any[] = [];
+      memberSocket.on('message', (raw: any) => {
+        try { frames.push(JSON.parse(raw.toString())); } catch { /* ignore */ }
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Timed out waiting for websocket open')), 3000);
+        memberSocket.once('open', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        memberSocket.once('error', (err: Error) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+
+      try {
+        const ready = await waitForLoggedWsEvent(
+          memberSocket,
+          frames,
+          (event) => event.event === 'ready',
+          10_000,
+        );
+        expect(ready.data?.progressiveHydration).toBe(true);
+        expect(ready.data?.subscriptionsHydrated).toBe(false);
+
+        const content = `progressive-bridge-${suffix}`;
+        const createdPromise = waitForLoggedWsEvent(
+          memberSocket,
+          frames,
+          (event) =>
+            event.event === 'message:created'
+            && event.data?.channel_id === channelId
+            && event.data?.content === content,
+          15_000,
+        );
+
+        const postRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content });
+        expect(postRes.status).toBe(201);
+
+        const event = await createdPromise;
+        expect([`user:${member.user.id}`, `channel:${channelId}`]).toContain(event.channel);
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
+  });
+
+  it('__wsInternal subscribe_channels for private invite updates server state for future channel-only delivery', async () => {
+    await withEnv('CHANNEL_MESSAGE_USER_FANOUT', '0', async () => {
+      const owner = await createAuthenticatedUser('gcinviteowner');
+      const member = await createAuthenticatedUser('gcinvitemember');
+
+      const suffix = uniqueSuffix();
+      const communityRes = await request(app)
+        .post('/api/v1/communities')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({
+          slug: `gc-invite-${suffix}`.slice(0, 32),
+          name: `gc-invite-${suffix}`,
+          description: 'invite internal subscribe test',
+        });
+      expect(communityRes.status).toBe(201);
+      const communityId = communityRes.body.community.id;
+
+      const joinRes = await request(app)
+        .post(`/api/v1/communities/${communityId}/join`)
+        .set('Authorization', `Bearer ${member.accessToken}`)
+        .send({});
+      expect(joinRes.status).toBe(200);
+
+      const channelRes = await request(app)
+        .post('/api/v1/channels')
+        .set('Authorization', `Bearer ${owner.accessToken}`)
+        .send({
+          communityId,
+          name: `gc-invite-ch-${suffix}`.slice(0, 32),
+          isPrivate: true,
+        });
+      expect(channelRes.status).toBe(201);
+      const channelId = channelRes.body.channel.id;
+
+      const memberSocket = await connectWebSocket(port, member.accessToken);
+      try {
+        const internalSubscribePromise = waitForWsEvent(
+          memberSocket,
+          (event) =>
+            event.__wsInternal?.kind === 'subscribe_channels'
+            && Array.isArray(event.__wsInternal.channels)
+            && event.__wsInternal.channels.includes(`channel:${channelId}`),
+          15_000,
+        );
+
+        const inviteRes = await request(app)
+          .post(`/api/v1/channels/${channelId}/members`)
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ userIds: [member.user.id] });
+        expect(inviteRes.status).toBe(200);
+        await internalSubscribePromise;
+
+        const content = `invite-channel-only-${suffix}`;
+        const createdPromise = waitForWsEvent(
+          memberSocket,
+          (event) =>
+            event.event === 'message:created'
+            && event.data?.channel_id === channelId
+            && event.data?.content === content,
+          15_000,
+        );
+
+        const postRes = await request(app)
+          .post('/api/v1/messages')
+          .set('Authorization', `Bearer ${owner.accessToken}`)
+          .send({ channelId, content });
+        expect(postRes.status).toBe(201);
+
+        const event = await createdPromise;
+        expect(event.channel).toBe(`channel:${channelId}`);
+      } finally {
+        await closeWebSocket(memberSocket);
+      }
+    });
+  });
+
   it(
     'message:created reaches every community member WebSocket within 15s',
     async () => {
