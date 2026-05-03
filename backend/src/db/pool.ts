@@ -42,6 +42,8 @@ const { Pool } = require('pg');
 const logger = require('../utils/logger');
 const { incrementDbQuery, recordDbQueryWall } = require('../utils/requestDbContext');
 const { pgPoolCircuitBreakerRejectsTotal, pgPoolOperationErrorsTotal, pgQueriesTotal, pgQueryGateActive, pgQueryGateWaiting, pgQueryGateRejectsTotal } = require('../utils/metrics');
+const { tracer } = require('../utils/tracer');
+const { SpanStatusCode } = require('@opentelemetry/api');
 
 function extractSqlText(queryArg) {
   if (!queryArg) return '';
@@ -469,9 +471,27 @@ async function query(sql: unknown, params?: unknown, opts?: QueryOpts) {
 async function getClient() {
   checkCircuitBreaker('getClient');
   await acquireQueryGate();
-  let client;
+  const waitingBefore = pool.waitingCount;
+  const t0 = Date.now();
+  let client: any;
   try {
-    client = wrapPoolClientForRequestMetrics(await pool.connect());
+    client = await tracer.startActiveSpan('db.pool_checkout', async (span: any) => {
+      try {
+        span.setAttribute('pool.waiting_count_before', waitingBefore);
+        span.setAttribute('pool.total', pool.totalCount);
+        span.setAttribute('pool.idle', pool.idleCount);
+        span.setAttribute('pool.max', POOL_MAX);
+        const c = wrapPoolClientForRequestMetrics(await pool.connect());
+        span.setAttribute('pool.acquire_ms', Date.now() - t0);
+        return c;
+      } catch (err: any) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+        span.recordException(err);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   } catch (err) {
     releaseQueryGate();
     throw err;
@@ -500,9 +520,29 @@ async function getClientTimed() {
  * The caller must not release the client; withTransaction handles that.
  * Any exception thrown by the callback causes a ROLLBACK.
  */
-async function withTransaction(callback) {
+async function withTransaction(callback, opts?: { onCheckout?: (acquireMs: number) => void }) {
   checkCircuitBreaker('withTransaction');
-  const client = wrapPoolClientForRequestMetrics(await pool.connect());
+  const waitingBefore = pool.waitingCount;
+  const t0 = Date.now();
+  const client: any = await tracer.startActiveSpan('db.pool_checkout', async (span: any) => {
+    try {
+      span.setAttribute('pool.waiting_count_before', waitingBefore);
+      span.setAttribute('pool.total', pool.totalCount);
+      span.setAttribute('pool.idle', pool.idleCount);
+      span.setAttribute('pool.max', POOL_MAX);
+      const c = wrapPoolClientForRequestMetrics(await pool.connect());
+      const acquireMs = Date.now() - t0;
+      span.setAttribute('pool.acquire_ms', acquireMs);
+      opts?.onCheckout?.(acquireMs);
+      return c;
+    } catch (err: any) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
+      span.recordException(err);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
   try {
     await client.query('BEGIN');
     const result = await callback(client);
