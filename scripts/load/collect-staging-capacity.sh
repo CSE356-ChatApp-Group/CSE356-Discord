@@ -125,6 +125,19 @@ def run_query(name, query, retries=2):
                 time.sleep(0.4 * (attempt + 1))
     return {"status": "error", "error": str(last_err)}
 
+# Quick health-check: if Prometheus is unreachable, bail immediately rather
+# than burning 3 retries × 47 queries through SSH tunnels.
+def _prom_healthy():
+    cmd = [
+        'ssh', *_ssh_base, ssh_host,
+        f"curl -fsS --connect-timeout 2 --max-time 3 '{prom_url}/api/v1/status/config'",
+    ]
+    try:
+        subprocess.check_output(cmd, text=True, timeout=10)
+        return True
+    except Exception:
+        return False
+
 payload = {
     "capturedAt": datetime.now(timezone.utc).isoformat(),
     "sshHost": ssh_host,
@@ -132,10 +145,12 @@ payload = {
     "queries": {},
 }
 try:
-    for qname, qexpr in queries.items():
-        payload['queries'][qname] = run_query(qname, qexpr)
-        # Tiny gap so multiplexed sessions are not confused with flood traffic on fragile hosts.
-        time.sleep(0.02)
+    if not _prom_healthy():
+        print(f"Warning: Prometheus at {prom_url} unreachable via {ssh_host}; skipping snapshot", file=sys.stderr)
+    else:
+        for qname, qexpr in queries.items():
+            payload['queries'][qname] = run_query(qname, qexpr)
+            time.sleep(0.02)
 finally:
     _ssh_mux_teardown()
 
