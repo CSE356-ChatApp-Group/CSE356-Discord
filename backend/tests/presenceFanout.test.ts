@@ -59,9 +59,13 @@ const pool = require('../src/db/pool') as {
 const { publishUserFeedTargets } = require('../src/websocket/userFeed') as {
   publishUserFeedTargets: jest.Mock;
 };
-const { setPresence, getBulkPresenceDetails } = require('../src/presence/service') as {
+const { setPresence, getBulkPresenceDetails, flushPresenceDbMirrorBatch } = require('../src/presence/service') as {
   setPresence: (userId: string, status: string, awayMessage?: string | null) => Promise<void>;
   getBulkPresenceDetails: (userIds: string[]) => Promise<Record<string, { status: string; awayMessage: string | null }>>;
+  flushPresenceDbMirrorBatch: () => Promise<void>;
+};
+const overload = require('../src/utils/overload') as {
+  shouldSkipPresenceMirror: jest.Mock;
 };
 
 describe('presence fanout', () => {
@@ -160,6 +164,23 @@ describe('presence fanout', () => {
         },
       },
     );
+  });
+
+  it('casts async presence mirror status values to the presence_status enum', async () => {
+    overload.shouldSkipPresenceMirror.mockReturnValueOnce(false);
+    redis.get.mockResolvedValueOnce(JSON.stringify({
+      v: 2,
+      u: ['bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],
+    }));
+    pool.query.mockResolvedValueOnce({ rowCount: 1, rows: [] });
+
+    await setPresence('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'away', 'stepped away');
+    await flushPresenceDbMirrorBatch();
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sqlText, sqlParams] = pool.query.mock.calls[0];
+    expect(sqlText).toContain('$2::presence_status[]');
+    expect(sqlParams[1]).toEqual(['away']);
   });
 
   it('matches old UNION semantics for overlapping branch fixtures', () => {

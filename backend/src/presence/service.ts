@@ -125,7 +125,7 @@ async function flushPresenceDbMirrorBatch() {
     await query(
       `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
        SELECT *
-       FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::timestamptz[])
+       FROM UNNEST($1::uuid[], $2::presence_status[], $3::text[], $4::timestamptz[])
             AS payload(user_id, status, custom_msg, updated_at)
        ON CONFLICT (user_id) DO UPDATE SET
          status = EXCLUDED.status,
@@ -441,7 +441,7 @@ async function setPresence(userId, status, awayMessage) {
           await client.query('SET LOCAL synchronous_commit = off');
           await client.query(
             `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
-             VALUES ($1, $2, $3, NOW())
+             VALUES ($1, $2::presence_status, $3, NOW())
              ON CONFLICT (user_id) DO UPDATE SET
                status = EXCLUDED.status,
                custom_msg = EXCLUDED.custom_msg,
