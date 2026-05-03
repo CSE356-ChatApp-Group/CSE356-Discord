@@ -155,7 +155,6 @@ if (WS_DELIVERY_PROBE) {
 }
 
 export const options = {
-  discardResponseBodies: true,
   thresholds,
   scenarios,
 };
@@ -168,6 +167,16 @@ function baseParams(token, tags) {
     token ? { Authorization: `Bearer ${token}` } : {},
   );
   return Object.assign({ headers: headers, tags: tags || {}, timeout: '30s' });
+}
+
+function parseDurationMs(s) {
+  // Parse k6-style duration strings like '1m30s', '10m30s', '2m' to milliseconds.
+  let ms = 0;
+  const m = s.match(/(\d+)m/);
+  const sec = s.match(/(\d+)s/);
+  if (m) ms += parseInt(m[1]) * 60000;
+  if (sec) ms += parseInt(sec[1]) * 1000;
+  return ms || 90000;
 }
 
 function safeJson(res) {
@@ -370,7 +379,7 @@ export function wsListener(data) {
 
     socket.setTimeout(() => {
       socket.close();
-    }, parseInt(profile.wsDuration || '120000') * 1000 - 2000);
+    }, parseDurationMs(profile.wsDuration) - 2000);
   });
 
   const ok = check(response, {
