@@ -10,6 +10,7 @@
 const crypto = require('crypto');
 const jwt   = require('jsonwebtoken');
 const redis = require('../db/redis');
+const { tracer } = require('./tracer');
 
 const ACCESS_SECRET  = process.env.JWT_ACCESS_SECRET  || 'change-me-access';
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'change-me-refresh';
@@ -75,24 +76,36 @@ function signRefresh(payload) {
 }
 
 function verifyAccess(token) {
-  const now = Date.now();
-  const cached = getCachedEntry(verifiedAccessCache, token, now);
-  if (cached) {
-    return cached.payload;
-  }
+  return tracer.startActiveSpan('jwt.verifyAccess', (span) => {
+    try {
+      const now = Date.now();
+      const cached = getCachedEntry(verifiedAccessCache, token, now);
+      if (cached) {
+        span.setAttribute('cache.hit', true);
+        return cached.payload;
+      }
+      span.setAttribute('cache.hit', false);
 
-  const payload = jwt.verify(token, ACCESS_SECRET);
-  const expiresAtMs = typeof payload?.exp === 'number'
-    ? payload.exp * 1000
-    : now + ACCESS_VERIFY_CACHE_TTL_MS;
+      const payload = jwt.verify(token, ACCESS_SECRET);
+      const expiresAtMs = typeof payload?.exp === 'number'
+        ? payload.exp * 1000
+        : now + ACCESS_VERIFY_CACHE_TTL_MS;
 
-  setCachedEntry(verifiedAccessCache, token, {
-    payload,
-    expiresAtMs,
-    cacheUntilMs: Math.min(expiresAtMs, now + ACCESS_VERIFY_CACHE_TTL_MS),
+      setCachedEntry(verifiedAccessCache, token, {
+        payload,
+        expiresAtMs,
+        cacheUntilMs: Math.min(expiresAtMs, now + ACCESS_VERIFY_CACHE_TTL_MS),
+      });
+
+      return payload;
+    } catch (err) {
+      const { SpanStatusCode } = require('@opentelemetry/api');
+      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+      throw err;
+    } finally {
+      span.end();
+    }
   });
-
-  return payload;
 }
 
 function verifyRefresh(token) {
@@ -116,40 +129,61 @@ async function denyToken(token, expiresAt) {
 }
 
 async function isDenied(token) {
-  const now = Date.now();
-  const cached = getCachedEntry(denylistCache, token, now);
-  if (cached) {
-    return cached.denied;
-  }
+  return tracer.startActiveSpan('jwt.isDenied', async (span) => {
+    try {
+      const now = Date.now();
+      const cached = getCachedEntry(denylistCache, token, now);
+      if (cached) {
+        span.setAttribute('cache.hit', true);
+        return cached.denied;
+      }
+      span.setAttribute('cache.hit', false);
 
-  let denied: boolean;
-  try {
-    denied = (await redis.exists(`deny:${token}`)) === 1;
-  } catch (err) {
-    // Redis unavailable: fail open rather than blocking all authenticated requests.
-    // The in-process verify cache already validated the signature; this is a
-    // brief availability trade-off during Redis downtime.
-    const logger = require('./logger');
-    logger.warn({ err }, 'jwt: Redis denylist check failed, failing open');
-    return false;
-  }
-  const expiresAtMs = getTokenExpiryMs(token, now + DENYLIST_CHECK_CACHE_TTL_MS);
-  setCachedEntry(denylistCache, token, {
-    denied,
-    expiresAtMs,
-    cacheUntilMs: Math.min(expiresAtMs, now + DENYLIST_CHECK_CACHE_TTL_MS),
+      let denied;
+      try {
+        denied = (await redis.exists(`deny:${token}`)) === 1;
+      } catch (err) {
+        const { SpanStatusCode } = require('@opentelemetry/api');
+        span.setStatus({ code: SpanStatusCode.ERROR, message: 'Redis check failed, failing open' });
+        span.recordException(err);
+        // Redis unavailable: fail open rather than blocking all authenticated requests.
+        // The in-process verify cache already validated the signature; this is a
+        // brief availability trade-off during Redis downtime.
+        const logger = require('./logger');
+        logger.warn({ err }, 'jwt: Redis denylist check failed, failing open');
+        return false;
+      }
+      const expiresAtMs = getTokenExpiryMs(token, now + DENYLIST_CHECK_CACHE_TTL_MS);
+      setCachedEntry(denylistCache, token, {
+        denied,
+        expiresAtMs,
+        cacheUntilMs: Math.min(expiresAtMs, now + DENYLIST_CHECK_CACHE_TTL_MS),
+      });
+      return denied;
+    } finally {
+      span.end();
+    }
   });
-  return denied;
 }
 
 async function authenticateAccessToken(token) {
-  const payload = verifyAccess(token);
-  if (await isDenied(token)) {
-    const err = new Error('Token has been revoked');
-    Object.assign(err, { code: 'TOKEN_REVOKED' });
-    throw err;
-  }
-  return payload;
+  return tracer.startActiveSpan('jwt.authenticateAccessToken', async (span) => {
+    try {
+      const payload = verifyAccess(token);
+      if (await isDenied(token)) {
+        const err = new Error('Token has been revoked');
+        Object.assign(err, { code: 'TOKEN_REVOKED' });
+        throw err;
+      }
+      return payload;
+    } catch (err) {
+      const { SpanStatusCode } = require('@opentelemetry/api');
+      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 module.exports = { signAccess, signRefresh, verifyAccess, verifyRefresh, denyToken, isDenied, authenticateAccessToken };
