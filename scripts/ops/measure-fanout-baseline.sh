@@ -21,6 +21,24 @@ query "Realtime fanout stage p95 (last 5m)" \
 query "Realtime fanout targets p95 (last 5m)" \
   'histogram_quantile(0.95, sum by (le, path) (rate(fanout_publish_targets_bucket[5m])))'
 
+query "Realtime fanout candidates p95 (last 5m)" \
+  'histogram_quantile(0.95, sum by (le, path) (rate(fanout_target_candidates_bucket[5m])))'
+
+query "Realtime fanout candidates p99 (last 5m)" \
+  'histogram_quantile(0.99, sum by (le, path) (rate(fanout_target_candidates_bucket[5m])))'
+
+query "Realtime active targets p95 (last 5m)" \
+  'histogram_quantile(0.95, sum by (le, path) (rate(ws_active_subscriber_targets_bucket_bucket[5m])))'
+
+query "Realtime offline skipped (last 5m)" \
+  'sum by (path) (rate(ws_fanout_offline_skipped_total[5m]))'
+
+query "Redis EXISTS by path (last 5m)" \
+  'sum by (path) (rate(redis_exists_by_path_total[5m]))'
+
+query "Duplicate candidates by path (last 5m)" \
+  'sum by (path) (rate(ws_recipient_duplicate_candidates_total[5m]))'
+
 query "Realtime fanout publish failures (last 5m)" \
   'sum by (channel_prefix) (rate(redis_fanout_publish_failures_total[5m]))'
 
