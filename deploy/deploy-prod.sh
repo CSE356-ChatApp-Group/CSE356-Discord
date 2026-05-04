@@ -173,7 +173,16 @@ acquire_remote_deploy_lock() {
     else
       owner=\$(cat \"\$lock/owner\" 2>/dev/null || echo unknown)
       started=\$(cat \"\$lock/started_at_iso\" 2>/dev/null || echo unknown)
-      echo \"ERROR: another prod deploy is running (owner=\$owner started_at=\$started)\" >&2
+      sha=\$(cat \"\$lock/release_sha\" 2>/dev/null || echo unknown)
+      age=\$(( now - \$(cat \"\$lock/started_at\" 2>/dev/null || echo \$now) ))
+      echo \"\" >&2
+      echo \"ERROR: prod deploy lock is held\" >&2
+      echo \"  owner      : \$owner\" >&2
+      echo \"  release_sha: \$sha\" >&2
+      echo \"  started_at : \$started\" >&2
+      echo \"  age        : \${age}s (TTL=${DEPLOY_LOCK_TTL_SECS}s)\" >&2
+      echo \"\" >&2
+      echo \"To clear: rm -rf \$lock   (only if the owning deploy has finished or died)\" >&2
       exit 42
     fi
     echo '${RELEASE_SHA}' > \"\$lock/release_sha\"
@@ -185,6 +194,30 @@ acquire_remote_deploy_lock() {
 
 release_remote_deploy_lock() {
   ssh_prod "rm -rf '${DEPLOY_LOCK_DIR}'" >/dev/null 2>&1 || true
+}
+
+# Print lock state without acquiring it; exit 0=free, 1=held, 2=stale.
+diagnose_remote_deploy_lock() {
+  ssh_prod "
+    set -euo pipefail
+    lock='${DEPLOY_LOCK_DIR}'
+    ttl='${DEPLOY_LOCK_TTL_SECS}'
+    now=\$(date +%s)
+    if [ ! -d \"\$lock\" ]; then
+      echo 'Lock: free'
+      exit 0
+    fi
+    owner=\$(cat \"\$lock/owner\" 2>/dev/null || echo unknown)
+    sha=\$(cat \"\$lock/release_sha\" 2>/dev/null || echo unknown)
+    started=\$(cat \"\$lock/started_at_iso\" 2>/dev/null || echo unknown)
+    age=\$(( now - \$(cat \"\$lock/started_at\" 2>/dev/null || echo \$now) ))
+    if [ \$age -gt \$ttl ]; then
+      echo \"Lock: STALE (age=\${age}s > TTL=\${ttl}s) owner=\$owner sha=\$sha started=\$started\"
+      exit 2
+    fi
+    echo \"Lock: held  owner=\$owner sha=\$sha started=\$started age=\${age}s\"
+    exit 1
+  " 2>&1 || true
 }
 
 MONITOR_SECONDS="${MONITOR_SECONDS:-0}"

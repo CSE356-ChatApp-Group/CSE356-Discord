@@ -1,0 +1,215 @@
+name: Canary Promote
+
+# Two-phase prod rollout: deploy to VM3 only, gate, then promote to full fleet.
+#
+# Phase 1 (canary):
+#   - Deploys SHA to VM3 (6 workers, ~37% of fleet traffic)
+#   - Waits soak_minutes
+#   - Runs release-gate.sh against Prometheus
+#   - If gate is GREEN → proceeds to Phase 2 automatically
+#   - If gate is RED   → stops and notifies; full fleet NOT touched
+#
+# Phase 2 (promote):
+#   - Deploys same SHA to VM2 then VM1
+#   - Runs post-deploy gate and endpoint verify
+#
+# Usage: trigger manually from the Actions UI with a SHA.
+# To run Phase 1 only (manual soak): set promote_on_green=false.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to deploy (must already have a CI release artifact)"
+        required: true
+        type: string
+      soak_minutes:
+        description: "VM3 soak window before gate check (minutes)"
+        required: false
+        default: "5"
+        type: string
+      promote_on_green:
+        description: "Auto-promote to VM2+VM1 when gate is GREEN"
+        required: false
+        default: true
+        type: boolean
+      clear_prod_deploy_lock:
+        description: "Clear stale prod deploy lock before starting"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  resolve-target:
+    runs-on: ubuntu-latest
+    outputs:
+      resolved_sha: ${{ steps.resolve.outputs.resolved_sha }}
+    steps:
+      - name: Resolve target SHA
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ref = `${{ inputs.sha }}`.trim();
+            const { data } = await github.rest.repos.getCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref,
+            });
+            core.setOutput('resolved_sha', data.sha);
+            core.info(`Resolved deploy target ${ref} -> ${data.sha}`);
+
+  canary-vm3:
+    needs: resolve-target
+    uses: ./.github/workflows/reusable-vm-deploy.yml
+    secrets: inherit
+    with:
+      environment: production
+      target_sha: ${{ needs.resolve-target.outputs.resolved_sha }}
+      host: ${{ vars.CHATAPP_INV_VM1_PUBLIC || '130.245.136.44' }}
+      user: ubuntu
+      script_path: deploy/deploy-prod-multi.sh
+      runs_on_json: '["self-hosted","deploy-prod"]'
+      artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
+      verify_public_host: false
+      auto_confirm: true
+      chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '5' }}
+      clear_prod_deploy_lock: ${{ inputs.clear_prod_deploy_lock }}
+      prod_canary_vm3_only: true
+      sha: ${{ inputs.sha }}
+
+  gate:
+    needs: [resolve-target, canary-vm3]
+    runs-on: ["self-hosted", "deploy-prod"]
+    timeout-minutes: 20
+    outputs:
+      verdict: ${{ steps.gate.outputs.verdict }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-target.outputs.resolved_sha }}
+
+      - name: Soak — wait ${{ inputs.soak_minutes }} minutes
+        run: |
+          echo "=== VM3 canary is live. Soaking for ${{ inputs.soak_minutes }} minute(s)... ==="
+          sleep $(( ${{ inputs.soak_minutes }} * 60 ))
+
+      - name: Open Prometheus tunnel
+        run: |
+          set -euo pipefail
+          PROM_HOST="${PROM_HOST:-130.245.136.120}"
+          ssh -fN -o StrictHostKeyChecking=accept-new \
+            -o ExitOnForwardFailure=yes \
+            -L 19090:127.0.0.1:9090 "ubuntu@${PROM_HOST}" &
+          echo "TUNNEL_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 10); do
+            if curl -fsS --max-time 2 http://127.0.0.1:19090/-/healthy >/dev/null 2>&1; then
+              echo "Prometheus tunnel ready"
+              break
+            fi
+            sleep 2
+          done
+        env:
+          PROM_HOST: ${{ vars.CHATAPP_INV_MONITORING_PUBLIC || '130.245.136.120' }}
+
+      - name: Run release gate
+        id: gate
+        run: |
+          set -euo pipefail
+          if PROMETHEUS_URL=http://127.0.0.1:19090 \
+             EXPECTED_WORKERS=6 \
+             METRICS_SNAPSHOT_RANGE=5m \
+             GATE_SKIP_REDIS=0 \
+             bash scripts/metrics/release-gate.sh; then
+            echo "verdict=green" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release gate: GREEN — VM3 canary healthy, ready to promote"
+          else
+            echo "verdict=red" >> "$GITHUB_OUTPUT"
+            echo "::error::Release gate: RED — canary unhealthy, holding at VM3"
+          fi
+
+      - name: Teardown tunnel
+        if: always()
+        run: kill "${TUNNEL_PID}" 2>/dev/null || true
+
+  promote:
+    needs: [resolve-target, canary-vm3, gate]
+    if: |
+      needs.gate.outputs.verdict == 'green' &&
+      inputs.promote_on_green == true
+    uses: ./.github/workflows/reusable-vm-deploy.yml
+    secrets: inherit
+    with:
+      environment: production
+      target_sha: ${{ needs.resolve-target.outputs.resolved_sha }}
+      host: ${{ vars.CHATAPP_INV_VM1_PUBLIC || '130.245.136.44' }}
+      user: ubuntu
+      script_path: deploy/deploy-prod-multi.sh
+      runs_on_json: '["self-hosted","deploy-prod"]'
+      artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
+      verify_public_host: true
+      auto_confirm: true
+      chatapp_instances: ${{ vars.CHATAPP_INSTANCES_PROD != '' && vars.CHATAPP_INSTANCES_PROD || '5' }}
+      clear_prod_deploy_lock: false
+      prod_canary_vm3_only: false
+      sha: ${{ inputs.sha }}
+
+  gate-post-promote:
+    needs: [promote, gate]
+    if: needs.gate.outputs.verdict == 'green' && inputs.promote_on_green == true
+    runs-on: ["self-hosted", "deploy-prod"]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Open Prometheus tunnel
+        run: |
+          set -euo pipefail
+          PROM_HOST="${PROM_HOST:-130.245.136.120}"
+          ssh -fN -o StrictHostKeyChecking=accept-new \
+            -o ExitOnForwardFailure=yes \
+            -L 19090:127.0.0.1:9090 "ubuntu@${PROM_HOST}" &
+          echo "TUNNEL_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 10); do
+            if curl -fsS --max-time 2 http://127.0.0.1:19090/-/healthy >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+        env:
+          PROM_HOST: ${{ vars.CHATAPP_INV_MONITORING_PUBLIC || '130.245.136.120' }}
+
+      - name: Post-promote release gate (full fleet)
+        run: |
+          PROMETHEUS_URL=http://127.0.0.1:19090 \
+          EXPECTED_WORKERS=${{ vars.CHATAPP_INSTANCES_PROD || '16' }} \
+          METRICS_SNAPSHOT_RANGE=5m \
+          bash scripts/metrics/release-gate.sh || echo "::warning::Post-promote gate has warnings — monitor closely"
+
+      - name: Teardown tunnel
+        if: always()
+        run: kill "${TUNNEL_PID}" 2>/dev/null || true
+
+  notify-hold:
+    needs: [gate]
+    if: needs.gate.outputs.verdict == 'red'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate failed — rollout held at VM3
+        run: |
+          echo "::error::Canary gate is RED. VM3 has the new code; VM2 and VM1 are on the previous release."
+          echo "::error::Investigate via Grafana/Prometheus then either:"
+          echo "::error::  - Re-run 'Canary Promote' with the same or a fixed SHA once resolved"
+          echo "::error::  - Roll back VM3 via 'Manual Deploy' with prod_fast_rollback=true"
+          exit 1
