@@ -14,7 +14,11 @@ const {
   fanoutQueueDepth,
 } = require('../utils/metrics');
 
-const queues: Record<string, Array<{ name: string; fn: () => Promise<void>; enqueuedAt: number; queueName: string; otelCtx: any }>> = {
+type FanoutJob = { name: string; fn: () => Promise<void>; enqueuedAt: number; queueName: string; otelCtx: any };
+
+// fanout:critical jobs are dispatched directly (see enqueue) — this entry is kept so metrics
+// code that reads queues['fanout:critical'].length still works (it will always be 0).
+const queues: Record<string, Array<FanoutJob>> = {
   'fanout:critical': [],
   'fanout:background': [],
   /** Channel read-receipt WS fanout only — lower priority than message:created (see queueNameForJob). */
@@ -56,12 +60,7 @@ function queueConfig(queueName) {
       dropOnOverflow: true,
     };
   }
-  // fanout:critical — message POST fanout, last_message.* pointers, fanout.publish, etc.
-  // (Channel read receipt WS fanout uses fanout:read_receipt instead.)
-  // Concurrency > 1 is safe
-  // because each publish is an independent Redis call; within-channel ordering
-  // is best-effort across the cluster anyway (multiple API nodes publish
-  // concurrently).  Higher concurrency reduces queue build-up under burst load.
+  // fanout:critical — kept for getQueueStats; enqueue bypasses the queue entirely.
   return {
     concurrency: FANOUT_QUEUE_CONCURRENCY,
     maxDepth: FANOUT_CRITICAL_MAX_DEPTH,
@@ -92,8 +91,56 @@ function maybeStartWorkers(queueName) {
   }
 }
 
+async function executeJob(job: FanoutJob) {
+  const queueDelayMs = Math.max(0, Date.now() - job.enqueuedAt);
+  sideEffectQueueDelayMs.observe({ queue: job.queueName, name: job.name }, queueDelayMs);
+
+  const startedAt = process.hrtime.bigint();
+  try {
+    await otelContext.with(job.otelCtx, () =>
+      tracer.startActiveSpan(
+        'fanout.execute',
+        { attributes: { 'fanout.job': job.name, 'fanout.queue': job.queueName } },
+        async (span: any) => {
+          try {
+            await job.fn();
+          } catch (err) {
+            span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || err) });
+            span.recordException(err);
+            throw err;
+          } finally {
+            span.end();
+          }
+        },
+      )
+    );
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    sideEffectJobDurationMs.observe({ queue: job.queueName, name: job.name, status: 'success' }, durationMs);
+  } catch (err) {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    sideEffectJobDurationMs.observe({ queue: job.queueName, name: job.name, status: 'error' }, durationMs);
+    logger.warn({ err, sideEffect: job.name, queue: job.queueName }, 'Async side-effect failed');
+  }
+}
+
 function enqueue(name, fn) {
   const queueName = queueNameForJob(name);
+
+  if (queueName === 'fanout:critical') {
+    // Bypass the queue: dispatch directly so there is no head-of-line wait.
+    // activeWorkers['fanout:critical'] tracks in-flight count for metrics/test drain.
+    const job: FanoutJob = { name, fn, enqueuedAt: Date.now(), queueName, otelCtx: otelContext.active() };
+    activeWorkers['fanout:critical'] += 1;
+    refreshQueueMetrics('fanout:critical');
+    setImmediate(() => {
+      void executeJob(job).finally(() => {
+        activeWorkers['fanout:critical'] = Math.max(0, activeWorkers['fanout:critical'] - 1);
+        refreshQueueMetrics('fanout:critical');
+      });
+    });
+    return true;
+  }
+
   const queue = queues[queueName];
   const { maxDepth, dropOnOverflow } = queueConfig(queueName);
 
@@ -101,9 +148,7 @@ function enqueue(name, fn) {
     sideEffectQueueDroppedTotal.inc({ queue: queueName, name, reason: 'queue_full' });
     logger.warn(
       { sideEffect: name, queue: queueName, queueDepth: queue.length, maxQueueDepth: maxDepth },
-      queueName === 'fanout:critical'
-        ? 'Dropping fanout:critical side-effect (WS delivery may be missed for this event)'
-        : 'Dropping lower-priority side-effect due to queue pressure'
+      'Dropping lower-priority side-effect due to queue pressure'
     );
     return false;
   }
@@ -123,41 +168,8 @@ async function drainWorker(queueName) {
       refreshQueueMetrics(queueName);
       if (!job) continue;
 
-      const queueDelayMs = Math.max(0, Date.now() - job.enqueuedAt);
-      sideEffectQueueDelayMs.observe({ queue: queueName, name: job.name }, queueDelayMs);
+      await executeJob(job);
 
-      const startedAt = process.hrtime.bigint();
-      try {
-        await otelContext.with(job.otelCtx, () =>
-          tracer.startActiveSpan(
-            'fanout.execute',
-            { attributes: { 'fanout.job': job.name, 'fanout.queue': job.queueName } },
-            async (span: any) => {
-              try {
-                await job.fn();
-              } catch (err) {
-                span.setStatus({ code: SpanStatusCode.ERROR, message: String((err as any)?.message || err) });
-                span.recordException(err);
-                throw err;
-              } finally {
-                span.end();
-              }
-            },
-          )
-        );
-        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-        sideEffectJobDurationMs.observe(
-          { queue: queueName, name: job.name, status: 'success' },
-          durationMs
-        );
-      } catch (err) {
-        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-        sideEffectJobDurationMs.observe(
-          { queue: queueName, name: job.name, status: 'error' },
-          durationMs
-        );
-        logger.warn({ err, sideEffect: job.name, queue: queueName }, 'Async side-effect failed');
-      }
       processedInWorker += 1;
       if (
         FANOUT_QUEUE_YIELD_EVERY > 0
