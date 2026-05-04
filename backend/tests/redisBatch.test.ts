@@ -9,8 +9,8 @@ function makeClient(execResultFactory) {
     pipeline: () => {
       const calls = [];
       const p = {
-        mget: (...keys) => {
-          calls.push({ cmd: 'mget', keys });
+        get: (key) => {
+          calls.push({ cmd: 'get', key });
           return p;
         },
         hmget: (key, ...fields) => {
@@ -34,16 +34,18 @@ function makeClient(execResultFactory) {
 
 describe('redisBatch', () => {
   it('redisBatchMget preserves key order across chunks', async () => {
+    // redisBatchMget now issues one GET per key (not chunked MGET) so cross-slot
+    // keys work in cluster mode. Each call has shape { cmd: 'get', key }.
     const client = makeClient((calls) =>
-      calls.map((call) => [null, call.keys.map((k) => `v:${k}`)]),
+      calls.map((call) => [null, `v:${call.key}`]),
     );
     const out = await redisBatchMget(client, ['a', 'b', 'c'], 2);
     expect(out).toEqual(['v:a', 'v:b', 'v:c']);
   });
 
-  it('redisBatchMget throws when a chunk command fails', async () => {
+  it('redisBatchMget throws when a key command fails', async () => {
     const err = new Error('redis chunk failed');
-    const client = makeClient((_calls) => [[null, ['v:a']], [err, null]]);
+    const client = makeClient((_calls) => [[null, 'v:a'], [err, null]]);
     await expect(redisBatchMget(client, ['a', 'b'], 1)).rejects.toThrow('redis chunk failed');
   });
 

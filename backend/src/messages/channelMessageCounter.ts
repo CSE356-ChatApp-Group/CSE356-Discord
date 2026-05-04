@@ -38,8 +38,14 @@ const MSG_COUNT_REDIS_TTL_SECS = (() => {
 
 registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
 
+// Hash tag {channelId} co-locates the count key with userLastReadCountKey on the
+// same cluster slot, which is required for the RESET_UNREAD_WATERMARK_LUA script.
 function countKeyForChannel(channelId: string) {
-  return `channel:msg_count:${channelId}`;
+  return `channel:msg_count:{${channelId}}`;
+}
+
+function userLastReadCountKey(channelId: string, userId: string) {
+  return `user:last_read_count:{${channelId}}:${userId}`;
 }
 
 function reconcileLockKeyForChannel(channelId: string) {
@@ -147,4 +153,6 @@ async function decrementChannelMessageCount(channelId: string) {
 module.exports = {
   incrementChannelMessageCount,
   decrementChannelMessageCount,
+  countKeyForChannel,
+  userLastReadCountKey,
 };

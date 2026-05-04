@@ -27,6 +27,7 @@ const {
 const overload = require("../../utils/overload");
 const redis = require("../../db/redis");
 const { ensureRedisLuaSha, REDIS_LUA_IDS } = require("../../db/redisLua");
+const { countKeyForChannel, userLastReadCountKey } = require("../channelMessageCounter");
 const logger = require("../../utils/logger");
 const sideEffects = require("../sideEffects");
 const {
@@ -404,8 +405,8 @@ async function executeReadReceiptMark(
   if (channel_id) {
     await observeReadPhase("watermark_cache", async () => {
       try {
-        const countKey = `channel:msg_count:${channel_id}`;
-        const readKey = `user:last_read_count:${channel_id}:${uid}`;
+        const countKey = countKeyForChannel(channel_id);
+        const readKey = userLastReadCountKey(channel_id, uid);
         const wmSha = await ensureRedisLuaSha(
           redis,
           REDIS_LUA_IDS.READ_RECEIPT_RESET_UNREAD_WATERMARK,

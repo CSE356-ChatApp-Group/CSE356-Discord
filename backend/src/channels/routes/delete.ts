@@ -4,6 +4,7 @@
 const { param } = require('express-validator');
 const { query } = require('../../db/pool');
 const redis = require('../../db/redis');
+const { countKeyForChannel } = require('../../messages/channelMessageCounter');
 const {
   invalidateWsBootstrapCaches,
   evictUnauthorizedChannelSubscribers,
@@ -41,7 +42,7 @@ router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
         community_id: communityId,
       });
       // Remove unread-counter helpers for deleted channel to avoid stale key buildup.
-      redis.del(`channel:msg_count:${rows[0].id}`).catch(() => {});
+      redis.del(countKeyForChannel(rows[0].id)).catch(() => {});
       S.bustChannelListCache(communityId).catch(() => {});
     }
     res.json({ success: true });
