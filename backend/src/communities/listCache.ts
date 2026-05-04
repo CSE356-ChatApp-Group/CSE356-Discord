@@ -3,6 +3,7 @@
  */
 
 const redis = require("../db/redis");
+const { redisBatchUnlink } = require("../db/redisBatch");
 const { staleCacheKey } = require("../utils/distributedSingleflight");
 const {
   PUBLIC_COMMUNITIES_VERSION_KEY,
@@ -67,7 +68,7 @@ async function invalidateCommunitiesCaches(userIds, publicVersion = "0") {
     ),
   ];
   if (keys.length > 0) {
-    await redis.del(...new Set(keys));
+    await redisBatchUnlink(redis, keys);
   }
   await Promise.allSettled(
     normalizedUserIds.map(async (userId) => {

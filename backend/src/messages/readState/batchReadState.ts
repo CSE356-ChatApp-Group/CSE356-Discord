@@ -13,6 +13,7 @@
  */
 
 const redis = require('../../db/redis');
+const { redisBatchSrem } = require('../../db/redisBatch');
 const logger = require('../../utils/logger');
 const {
   readStateDirtyKeysGauge,
@@ -320,11 +321,7 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
         if (toClear.length === 0) continue;
 
         try {
-          if (toClear.length === 1) {
-            await redis.srem(RS_DIRTY_SET, toClear[0]);
-          } else {
-            await redis.srem(RS_DIRTY_SET, ...toClear);
-          }
+          await redisBatchSrem(redis, RS_DIRTY_SET, toClear);
         } catch {
           readStateFlushErrorsTotal.inc({ stage: 'clear_dirty' });
         }

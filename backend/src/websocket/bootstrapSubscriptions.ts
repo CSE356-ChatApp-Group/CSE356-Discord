@@ -38,6 +38,7 @@ function createBootstrapSubscriptionsHelpers({
   const {
     recordWsBootstrapWallMs,
   } = require("./wsDeliveryPressure");
+  const { redisBatchUnlink } = require("../db/redisBatch");
 
   const {
     channelRecentConnectKey,
@@ -152,16 +153,7 @@ function createBootstrapSubscriptionsHelpers({
       );
     }
     if (!keys.length) return;
-    const UNLINK_BATCH = 500;
-    if (keys.length <= UNLINK_BATCH) {
-      await redis.unlink(...keys);
-      return;
-    }
-    const pipeline = redis.pipeline();
-    for (let i = 0; i < keys.length; i += UNLINK_BATCH) {
-      pipeline.unlink(...keys.slice(i, i + UNLINK_BATCH));
-    }
-    await pipeline.exec();
+    await redisBatchUnlink(redis, keys, 500);
   }
 
   function wsAutoSubscribeMode() {

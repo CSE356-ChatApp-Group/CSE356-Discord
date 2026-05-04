@@ -12,6 +12,7 @@
 
 
 const redis = require("../db/redis");
+const { redisBatchMget } = require("../db/redisBatch");
 const {
   REDIS_LUA_IDS,
   registerRedisLuaScript,
@@ -470,7 +471,7 @@ async function getPresenceDetails(userId) {
 async function getBulkPresence(userIds) {
   if (!userIds.length) return {};
   const keys = userIds.map((id) => presenceStatusKey(id));
-  const values = await redis.mget(...keys);
+  const values = await redisBatchMget(redis, keys);
   return Object.fromEntries(
     userIds.map((id, i) => [id, values[i] || "offline"]),
   );
@@ -479,7 +480,7 @@ async function getBulkPresence(userIds) {
 async function getBulkPresenceDetails(userIds) {
   if (!userIds.length) return {};
   const statusKeys = userIds.map((id) => presenceStatusKey(id));
-  const statuses = await redis.mget(...statusKeys);
+  const statuses = await redisBatchMget(redis, statusKeys);
   const awayUserIds = [];
   userIds.forEach((id, index) => {
     if ((statuses[index] || "offline") === "away") {
@@ -490,7 +491,7 @@ async function getBulkPresenceDetails(userIds) {
   const awayMessagesByUserId = {};
   if (awayUserIds.length > 0) {
     const awayMessageKeys = awayUserIds.map((id) => awayMessageKey(id));
-    const awayValues = await redis.mget(...awayMessageKeys);
+    const awayValues = await redisBatchMget(redis, awayMessageKeys);
     awayUserIds.forEach((id, index) => {
       awayMessagesByUserId[id] = awayValues[index] || null;
     });

@@ -23,7 +23,7 @@ const redisMock = {
   }),
   pipeline: jest.fn(() => {
     pipelineCallCount += 1;
-    const p = {
+    const p: any = {
       exists: jest.fn().mockReturnThis(),
       scard: jest.fn().mockReturnThis(),
       set: jest.fn().mockReturnThis(),
@@ -31,7 +31,8 @@ const redisMock = {
       expire: jest.fn().mockReturnThis(),
       zremrangebyrank: jest.fn().mockReturnThis(),
       zcard: jest.fn().mockReturnThis(),
-      exec: jest.fn(() => {
+      call: jest.fn().mockReturnThis(),
+      exec: jest.fn(async () => {
         if (!filterOnFromEnv()) {
           return enqueueExec();
         }
@@ -107,8 +108,9 @@ describe('realtimePending recipient filter', () => {
 
   it('skips Redis pending writes when no user is connected or recent', async () => {
     classifyExec
-      .mockResolvedValueOnce([[null, 0]])
-      .mockResolvedValueOnce([[null, 0], [null, 0]]);
+      .mockResolvedValueOnce([[null, 0]]) // pendingProbePromise
+      .mockResolvedValueOnce([[null, [0]]]) // batchUsersAppearGloballyConnected
+      .mockResolvedValueOnce([[null, 0], [null, 0]]); // legRes
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:ghost'], {
       event: 'message:created',
@@ -118,12 +120,13 @@ describe('realtimePending recipient filter', () => {
     expect(offlineSkipMetric.inc).toHaveBeenCalledWith(1);
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'offline_skipped' }, 1);
     expect(enqueueExec).not.toHaveBeenCalled();
-    expect(pipelineCallCount).toBe(2);
+    expect(pipelineCallCount).toBe(3);
   });
 
   it('enqueues when user has active connections (connections set key exists)', async () => {
-    classifyExec.mockResolvedValueOnce([[null, 0]]);
-    (redisMock.call as jest.Mock).mockResolvedValueOnce([1]);
+    classifyExec
+      .mockResolvedValueOnce([[null, 0]])
+      .mockResolvedValueOnce([[null, [1]]]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
       [null, 1],
@@ -139,11 +142,13 @@ describe('realtimePending recipient filter', () => {
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'connected' }, 1);
     expect(pendingEntriesHist.observe).toHaveBeenCalledWith(1);
     expect(enqueueExec).toHaveBeenCalled();
-    expect(pipelineCallCount).toBe(2);
+    expect(pipelineCallCount).toBe(3);
   });
 
   it('skips second EXISTS probe when recentTargets is present but empty (channel-style)', async () => {
-    classifyExec.mockResolvedValueOnce([[null, 0]]);
+    classifyExec
+      .mockResolvedValueOnce([[null, 0]])
+      .mockResolvedValueOnce([[null, [0]]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(
       ['user:ghost'],
@@ -152,12 +157,14 @@ describe('realtimePending recipient filter', () => {
     );
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'offline_skipped' }, 1);
     expect(enqueueExec).not.toHaveBeenCalled();
-    expect(classifyExec).toHaveBeenCalledTimes(1);
+    expect(classifyExec).toHaveBeenCalledTimes(2);
   });
 
   it('conversation path skips second probe when WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK=false', async () => {
     process.env.WS_PENDING_ELIGIBLE_CONVERSATION_MARKER_FALLBACK = 'false';
-    classifyExec.mockResolvedValueOnce([[null, 0]]);
+    classifyExec
+      .mockResolvedValueOnce([[null, 0]])
+      .mockResolvedValueOnce([[null, [0]]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:strict'], {
       event: 'message:created',
@@ -165,12 +172,13 @@ describe('realtimePending recipient filter', () => {
     });
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'offline_skipped' }, 1);
     expect(enqueueExec).not.toHaveBeenCalled();
-    expect(classifyExec).toHaveBeenCalledTimes(1);
+    expect(classifyExec).toHaveBeenCalledTimes(2);
   });
 
   it('conversation path (no recentTargets opt) second-probes ws:recent_connect when unified misses', async () => {
     classifyExec
       .mockResolvedValueOnce([[null, 0]])
+      .mockResolvedValueOnce([[null, [0]]])
       .mockResolvedValueOnce([[null, 1], [null, 0]]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
@@ -187,11 +195,11 @@ describe('realtimePending recipient filter', () => {
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'recent' }, 1);
     expect(secondProbeRecentMetric.inc).toHaveBeenCalledWith({ mode: 'conversation_marker' }, 1);
     expect(enqueueExec).toHaveBeenCalled();
-    expect(classifyExec).toHaveBeenCalledTimes(2);
+    expect(classifyExec).toHaveBeenCalledTimes(3);
   });
 
   it('enqueues recent class when recentTargets hints user (skips pending EXISTS; connections absent)', async () => {
-    (redisMock.call as jest.Mock).mockResolvedValueOnce([0]);
+    classifyExec.mockResolvedValueOnce([[null, [0]]]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
       [null, 1],
@@ -208,13 +216,14 @@ describe('realtimePending recipient filter', () => {
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'recent' }, 1);
     expect(pendingEntriesHist.observe).toHaveBeenCalledWith(1);
     expect(enqueueExec).toHaveBeenCalled();
-    expect(pipelineCallCount).toBe(1);
+    expect(pipelineCallCount).toBe(2);
   });
 
   it('legacy fallback enqueues recent when unified key miss but ws:recent_connect set', async () => {
     process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK = 'true';
     classifyExec
       .mockResolvedValueOnce([[null, 0]])
+      .mockResolvedValueOnce([[null, [0]]])
       .mockResolvedValueOnce([[null, 1], [null, 0]]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
@@ -231,13 +240,14 @@ describe('realtimePending recipient filter', () => {
     expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'recent' }, 1);
     expect(secondProbeRecentMetric.inc).toHaveBeenCalledWith({ mode: 'legacy_global' }, 1);
     expect(enqueueExec).toHaveBeenCalled();
-    expect(classifyExec).toHaveBeenCalledTimes(2);
+    expect(classifyExec).toHaveBeenCalledTimes(3);
   });
 
   it('legacy fallback still skips when unified and legacy markers all absent', async () => {
     process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK = 'true';
     classifyExec
       .mockResolvedValueOnce([[null, 0]])
+      .mockResolvedValueOnce([[null, [0]]])
       .mockResolvedValueOnce([[null, 0], [null, 0]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:gone'], {
@@ -246,12 +256,13 @@ describe('realtimePending recipient filter', () => {
     });
     expect(offlineSkipMetric.inc).toHaveBeenCalledWith(1);
     expect(enqueueExec).not.toHaveBeenCalled();
-    expect(classifyExec).toHaveBeenCalledTimes(2);
+    expect(classifyExec).toHaveBeenCalledTimes(3);
   });
 
   it('enqueues when pending eligible marker exists (pending EXISTS + connections EXISTS)', async () => {
-    classifyExec.mockResolvedValueOnce([[null, 1]]);
-    (redisMock.call as jest.Mock).mockResolvedValueOnce([0]);
+    classifyExec
+      .mockResolvedValueOnce([[null, 1]])
+      .mockResolvedValueOnce([[null, [0]]]);
     enqueueExec.mockResolvedValue([
       [null, 'OK'],
       [null, 1],

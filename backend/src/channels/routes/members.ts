@@ -5,6 +5,7 @@ const { body, param } = require('express-validator');
 const { queryRead, getClient } = require('../../db/pool');
 const sideEffects = require('../../messages/sideEffects');
 const redis = require('../../db/redis');
+const { redisBatchUnlink } = require('../../db/redisBatch');
 const logger = require('../../utils/logger');
 const { publishUserFeedTargets } = require('../../websocket/userFeed');
 const { invalidateWsAclCache, invalidateWsBootstrapCaches } = require('../../websocket/server');
@@ -145,7 +146,7 @@ router.post('/:id/members',
           const key = `channels:list:${channel.community_id}:${userId}`;
           return [key, staleCacheKey(key)];
         });
-        redis.del(...keys).catch(() => {});
+        redisBatchUnlink(redis, keys).catch(() => {});
       }
       for (const { user_id } of insertedRows) {
         // Expire the WS ACL cache so subsequent subscribe attempts are checked fresh.

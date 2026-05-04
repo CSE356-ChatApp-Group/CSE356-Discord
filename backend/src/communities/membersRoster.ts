@@ -4,6 +4,7 @@
 
 const { query } = require("../db/pool");
 const redis = require("../db/redis");
+const { redisBatchUnlink } = require("../db/redisBatch");
 const { getJsonCache, withDistributedSingleflight } = require("../utils/distributedSingleflight");
 const { membersCacheKey } = require("./cacheKeys");
 
@@ -116,7 +117,7 @@ async function invalidateCommunityMemberRostersForUser(userId) {
       .map((communityId: string) => membersCacheKey(communityId))
   )];
   if (!keys.length) return;
-  await redis.del(...keys);
+  await redisBatchUnlink(redis, keys);
 }
 
 module.exports = {

@@ -2,6 +2,10 @@ jest.mock('../src/db/pool', () => ({
   query: jest.fn(),
 }));
 
+jest.mock('../src/db/redisBatch', () => ({
+  redisBatchSrem: jest.fn((client, key, members) => client.srem(key, ...members)),
+}));
+
 jest.mock('../src/db/redis', () => ({
   set: jest.fn(),
   smembers: jest.fn(),

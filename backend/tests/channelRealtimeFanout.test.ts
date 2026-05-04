@@ -26,6 +26,11 @@ jest.mock('../src/messages/pending/realtimePending', () => ({
   enqueuePendingMessageForUsers: jest.fn(),
 }));
 
+jest.mock('../src/db/redisBatch', () => ({
+  redisBatchSmismember: jest.fn((client, key, members) => client.call('SMISMEMBER', key, ...members)),
+  redisBatchSrem: jest.fn((client, key, members) => client.srem(key, ...members)),
+}));
+
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(() => Promise.resolve(null)),
   mget: jest.fn(() => Promise.resolve([])),

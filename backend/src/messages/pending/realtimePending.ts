@@ -1,5 +1,6 @@
 
 const redis = require('../../db/redis');
+const { redisBatchMget, redisBatchSmismember } = require('../../db/redisBatch');
 const { connectedUsersKey } = require('../../websocket/presenceKeys');
 const logger = require('../../utils/logger');
 const { loadHydratedMessagesByIds } = require('../messageHydrate');
@@ -62,12 +63,8 @@ async function batchUsersAppearGloballyConnected(userIds: string[]): Promise<boo
   if (!userIds.length) return [];
   const globalKey = connectedUsersKey();
   try {
-    const raw = await redis.call('SMISMEMBER', globalKey, ...userIds);
-    const values = Array.isArray(raw) ? raw : [];
-    if (values.length !== userIds.length) {
-      throw new Error('SMISMEMBER result length mismatch');
-    }
-    return values.map((v: unknown) => Number(v) === 1);
+    const values = await redisBatchSmismember(redis, globalKey, userIds);
+    return values.map((v) => v === 1);
   } catch (err: unknown) {
     const message = String((err as { message?: string })?.message || '');
     if (!/unknown command|wrong number of arguments|SMISMEMBER/i.test(message)) {
@@ -404,7 +401,7 @@ async function drainPendingMessagesForUser(userId: string) {
   if (!Array.isArray(messageIds) || messageIds.length === 0) return [];
 
   const payloadKeys = messageIds.map((messageId) => pendingMessageKey(messageId));
-  const payloadRows = await redis.mget(...payloadKeys);
+  const payloadRows = await redisBatchMget(redis, payloadKeys);
   const pipeline = redis.pipeline();
   const toHydrate: Array<{ parsed: Record<string, unknown>; messageId: string }> = [];
   const legacyByIndex: Array<Record<string, unknown> | null> = new Array(messageIds.length).fill(null);

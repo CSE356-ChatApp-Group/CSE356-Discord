@@ -7,6 +7,10 @@ jest.mock('../src/db/pool', () => ({
   getClient: jest.fn(),
 }));
 
+jest.mock('../src/db/redisBatch', () => ({
+  redisBatchUnlink: jest.fn((client, keys) => client.del(...keys)),
+}));
+
 jest.mock('../src/db/redis', () => ({
   get: jest.fn(),
   set: jest.fn(),
@@ -14,6 +18,10 @@ jest.mock('../src/db/redis', () => ({
   del: jest.fn(),
   incr: jest.fn(),
   eval: jest.fn(),
+  pipeline: jest.fn(() => ({
+    unlink: jest.fn().mockReturnThis(),
+    exec: jest.fn().mockResolvedValue([]),
+  })),
 }));
 
 jest.mock('../src/utils/logger', () => ({

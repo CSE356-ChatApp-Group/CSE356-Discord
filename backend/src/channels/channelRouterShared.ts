@@ -1,6 +1,7 @@
 const { validationResult } = require('express-validator');
 const { query, queryRead } = require('../db/pool');
 const redis            = require('../db/redis');
+const { redisBatchUnlink } = require('../db/redisBatch');
 const logger           = require('../utils/logger');
 const fanout           = require('../websocket/fanout');
 const { publishUserFeedTargets } = require('../websocket/userFeed');
@@ -261,7 +262,7 @@ async function bustChannelListCache(communityId) {
       const key = `channels:list:${communityId}:${r.user_id}`;
       return [key, staleCacheKey(key)];
     });
-    await redis.del(...keys);
+    await redisBatchUnlink(redis, keys);
   } catch (err) {
     logger.warn({ err }, 'channels:list cache bust failed');
   }
