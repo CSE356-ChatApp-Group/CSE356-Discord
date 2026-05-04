@@ -15,7 +15,7 @@ const { randomUUID } = require('crypto');
 const multer   = require('multer');
 const { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { body, validationResult } = require('express-validator');
-const { query } = require('../db/pool');
+const { query, queryRead } = require('../db/pool');
 const { authenticate } = require('../middleware/authenticate');
 const { hashPassword } = require('./passwords');
 const presenceService  = require('../presence/service');
@@ -162,7 +162,7 @@ router.get('/', authenticate, async (req, res, next) => {
       return res.status(400).json({ error: 'q query param required' });
     }
     const pattern = `%${q}%`;
-    const { rows } = await query(
+    const { rows } = await queryRead(
       `SELECT ${PUBLIC_FIELDS}
        FROM   users
        WHERE  is_active = TRUE
@@ -178,7 +178,7 @@ router.get('/', authenticate, async (req, res, next) => {
 // ── Serve avatar image (public — browsers cannot send Authorization via <img>) ──
 router.get('/:id/avatar', async (req, res, next) => {
   try {
-    const { rows } = await query(
+    const { rows } = await queryRead(
       `SELECT avatar_storage_key, avatar_data, avatar_content_type FROM users WHERE id=$1`,
       [req.params.id]
     );
@@ -219,9 +219,11 @@ router.use(authenticate);
 
 router.get('/me', async (req, res, next) => {
   try {
-    const { rows } = await query(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]);
+    const [{ rows }, { status, awayMessage }] = await Promise.all([
+      queryRead(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.user.id]),
+      presenceService.getPresenceDetails(req.user.id),
+    ]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const { status, awayMessage } = await presenceService.getPresenceDetails(req.user.id);
     res.json({ user: { ...rows[0], status, away_message: awayMessage } });
   } catch (err) { next(err); }
 });
@@ -315,12 +317,11 @@ router.put('/me/avatar', upload.single('avatar'), async (req, res, next) => {
 router.get('/:id', async (req, res, next) => {
   try {
     // Include email so clients can map SSO usernames
-    const { rows } = await query(
-      `SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`,
-      [req.params.id]
-    );
+    const [{ rows }, { status, awayMessage }] = await Promise.all([
+      queryRead(`SELECT ${PUBLIC_FIELDS}, email FROM users WHERE id=$1`, [req.params.id]),
+      presenceService.getPresenceDetails(req.params.id),
+    ]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const { status, awayMessage } = await presenceService.getPresenceDetails(req.params.id);
     res.json({ user: { ...rows[0], status, away_message: awayMessage } });
   } catch (err) { next(err); }
 });

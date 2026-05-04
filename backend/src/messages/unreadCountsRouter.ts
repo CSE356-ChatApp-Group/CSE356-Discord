@@ -158,6 +158,41 @@ router.get('/', async (req, res, next) => {
       let conversationResult = { rows: [] };
       const channelCountsById = new Map();
       try {
+        // Fire conversation query immediately — fully independent of channel work.
+        const conversationQueryPromise = safeUnreadCountsQuery('conversation', () => queryRead({
+          text: `
+          SELECT
+            'conversation'::text AS type,
+            NULL::text AS channel_id,
+            c.id::text AS conversation_id,
+            COUNT(m.id)::int AS count
+          FROM conversations c
+          JOIN conversation_participants cp
+            ON cp.conversation_id = c.id
+           AND cp.user_id = $1
+           AND cp.left_at IS NULL
+          LEFT JOIN read_states rs
+            ON rs.conversation_id = c.id
+           AND rs.user_id = $1
+          LEFT JOIN messages last_read
+            ON rs.last_read_message_created_at IS NULL
+           AND last_read.id = rs.last_read_message_id
+          LEFT JOIN messages m
+            ON m.conversation_id = c.id
+           AND m.deleted_at IS NULL
+           AND m.author_id IS DISTINCT FROM $1
+           AND m.created_at > COALESCE(
+             rs.last_read_message_created_at,
+             last_read.created_at,
+             '-infinity'::timestamptz
+           )
+          GROUP BY c.id`,
+          values: [userId],
+          query_timeout: UNREAD_COUNTS_QUERY_TIMEOUT_MS,
+        }));
+        // Prevent unhandled rejection if channel processing throws before we await.
+        conversationQueryPromise.catch(() => {});
+
         // Channels: fetch access + last-read metadata first, then use Redis counters
         // for the hot path and fall back to exact SQL only for cold/missing keys.
         channelMetaResult = await safeUnreadCountsQuery('channel_meta', () => queryRead({
@@ -258,37 +293,7 @@ router.get('/', async (req, res, next) => {
           }
         }
 
-        conversationResult = await safeUnreadCountsQuery('conversation', () => queryRead({
-          text: `
-          SELECT
-            'conversation'::text AS type,
-            NULL::text AS channel_id,
-            c.id::text AS conversation_id,
-            COUNT(m.id)::int AS count
-          FROM conversations c
-          JOIN conversation_participants cp
-            ON cp.conversation_id = c.id
-           AND cp.user_id = $1
-           AND cp.left_at IS NULL
-          LEFT JOIN read_states rs
-            ON rs.conversation_id = c.id
-           AND rs.user_id = $1
-          LEFT JOIN messages last_read
-            ON rs.last_read_message_created_at IS NULL
-           AND last_read.id = rs.last_read_message_id
-          LEFT JOIN messages m
-            ON m.conversation_id = c.id
-           AND m.deleted_at IS NULL
-           AND m.author_id IS DISTINCT FROM $1
-           AND m.created_at > COALESCE(
-             rs.last_read_message_created_at,
-             last_read.created_at,
-             '-infinity'::timestamptz
-           )
-          GROUP BY c.id`,
-          values: [userId],
-          query_timeout: UNREAD_COUNTS_QUERY_TIMEOUT_MS,
-        }));
+        conversationResult = await conversationQueryPromise;
       } finally {
         unreadCountsInFlight = Math.max(0, unreadCountsInFlight - 1);
       }

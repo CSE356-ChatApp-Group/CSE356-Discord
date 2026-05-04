@@ -5,7 +5,7 @@
  */
 
 
-const { query } = require("../../db/pool");
+const { query, queryRead } = require("../../db/pool");
 const {
   messagesListQuery,
   channelMessagesListQueryWithPrimaryRetry,
@@ -508,7 +508,7 @@ module.exports = function registerGetRoutes(router) {
         ? "m.channel_id = t.channel_id"
         : "m.conversation_id = t.conversation_id";
 
-      const { rows } = await query(
+      const { rows } = await queryRead(
         `WITH target AS (
            SELECT id, channel_id, conversation_id, created_at
            FROM messages

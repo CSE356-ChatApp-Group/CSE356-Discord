@@ -436,7 +436,7 @@ function isCommunitiesTransientFailure(err) {
 }
 
 async function queryCommunitiesListFull(userId) {
-  return query({
+  return queryRead({
     text: COMMUNITIES_LIST_FULL_SQL,
     values: [userId],
     query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
@@ -449,7 +449,7 @@ async function queryCommunitiesListPage(
   cursorId,
   fetchLimit,
 ) {
-  return query({
+  return queryRead({
     text: COMMUNITIES_LIST_PAGE_SQL,
     values: [userId, cursorName, cursorId, fetchLimit],
     query_timeout: COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS,
