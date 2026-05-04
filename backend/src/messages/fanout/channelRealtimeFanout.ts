@@ -314,11 +314,11 @@ async function resolveUserTopicTargets(channelId: string, envelope: Record<strin
     };
   }
 
-  if (isChannelMessageLiveEvent(envelope)) {
+  const mode = resolveChannelUserFanoutMode();
+  if (isChannelMessageLiveEvent(envelope) && mode !== 'all') {
     return resolveActiveChannelMessageTargets(channelId);
   }
 
-  const mode = resolveChannelUserFanoutMode();
   const candidateMetricPath =
     mode === 'all'
       ? 'channel_message_user_topics'
@@ -495,8 +495,10 @@ async function publishChannelMessageEvent(
     }
   }
 
-  // Resolve targets before publishing so the pending mailbox is populated
-  // before the channel PUBLISH fires stale-socket detection.
+  if (firstChannel) {
+    await publishChannelTopicOnly();
+  }
+
   ({
     allTargets,
     pendingEnqueueTargets,
@@ -518,10 +520,6 @@ async function publishChannelMessageEvent(
         'Failed to enqueue channel message pending replay pointers',
       );
     });
-  }
-
-  if (firstChannel) {
-    await publishChannelTopicOnly();
   }
 
   await publishCommunityFeedIfPublic();

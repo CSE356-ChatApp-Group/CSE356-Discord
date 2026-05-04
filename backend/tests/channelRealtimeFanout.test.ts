@@ -112,6 +112,7 @@ describe('channelRealtimeFanout', () => {
 
   beforeEach(() => {
     process.env.CHANNEL_RECENT_ZSET_ENABLED = 'false';
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
   });
 
   afterEach(() => {
@@ -232,6 +233,72 @@ describe('channelRealtimeFanout', () => {
     expect(enqueuePendingMessageForUsers).not.toHaveBeenCalled();
     expect(fanout.publish).toHaveBeenCalledTimes(1);
     expect(fanout.publish.mock.calls[0][0]).toBe('channel:c1');
+  });
+
+  it('publishChannelMessageCreated does not wait for recent target lookup before channel publish', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-slow-target-lookup';
+    let resolveRecent: (value: string[]) => void = () => {};
+    redis.zrangebyscore.mockImplementationOnce(
+      () => new Promise<string[]>((resolve) => { resolveRecent = resolve; }),
+    );
+
+    try {
+      const publishPromise = publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-slow-target-lookup' },
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(fanout.publish).toHaveBeenCalledTimes(1);
+      expect(fanout.publish.mock.calls[0][0]).toBe(`channel:${ch}`);
+      expect(enqueuePendingMessageForUsers).not.toHaveBeenCalled();
+
+      resolveRecent([]);
+      await publishPromise;
+      expect(fanout.publish.mock.calls.map((c) => c[0])).toEqual([`channel:${ch}`]);
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+    }
+  });
+
+  it('publishChannelMessageCreated mode=all publishes to the full visible member audience', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'all';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-all-mode';
+    try {
+      query.mockResolvedValueOnce({
+        rows: [{ user_id: 'a' }, { user_id: 'b' }],
+      });
+
+      await publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-all-mode' },
+      });
+
+      expect(redis.zrangebyscore).not.toHaveBeenCalled();
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+        ['user:a', 'user:b'],
+        expect.objectContaining({ event: 'message:created' }),
+        { recentTargets: [] },
+      );
+      const expectedChannels = [
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+        userFeedRedisChannelForUserId('b'),
+      ].sort();
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+    }
   });
 
   it('publishChannelMessageCreated bridges active connected channel members without enumerating offline members', async () => {
