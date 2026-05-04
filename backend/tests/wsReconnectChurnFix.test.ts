@@ -243,6 +243,25 @@ describe('disconnectLifecycle: heartbeat_timeout uses debounced presence path', 
     expect(scheduleDebouncedPresenceRecompute).toHaveBeenCalledWith('user-1');
     expect(recomputeUserPresence).not.toHaveBeenCalled();
   });
+
+  it('bare 1006 network drops use the debounced path', async () => {
+    const { cleanup, recomputeUserPresence, scheduleDebouncedPresenceRecompute } = buildCleanup();
+    const ws = {
+      _subscriptions: new Set(),
+      _communityIds: new Set(),
+      _bootstrapReady: true,
+      _connectedAt: Date.now() - 5000,
+      _connectionId: 'conn-1',
+      _sawError: false,
+      _disconnectReasonHint: '',
+    };
+
+    cleanup(ws, 'user-1', 1006, '');
+    await new Promise((r) => setImmediate(r));
+
+    expect(scheduleDebouncedPresenceRecompute).toHaveBeenCalledWith('user-1');
+    expect(recomputeUserPresence).not.toHaveBeenCalled();
+  });
 });
 
 // ── recentDisconnect: GETDEL ──────────────────────────────────────────────────

@@ -117,6 +117,14 @@ function createDisconnectLifecycle({
       || ws._sawError === true
       || closeCode === 1011
       || closeCode === 4001;
+    const debouncePresenceForDisconnect =
+      disconnectReason === "heartbeat_timeout"
+      || (
+        disconnectReason === "network_abnormal"
+        && closeCode === 1006
+        && !effectiveCloseReason
+        && ws._sawError !== true
+      );
 
     if (isShuttingDown()) {
       logWsHotInfo(() => ({ ...logPayload, shuttingDown: true }), "WS disconnected");
@@ -130,7 +138,7 @@ function createDisconnectLifecycle({
 
     removeConnection(userId, ws._connectionId)
       .then(() => {
-        if (abnormalClose && disconnectReason !== "heartbeat_timeout") {
+        if (abnormalClose && !debouncePresenceForDisconnect) {
           return recomputeUserPresence(userId);
         }
         // Clean disconnect and heartbeat_timeout both use the debounced path.

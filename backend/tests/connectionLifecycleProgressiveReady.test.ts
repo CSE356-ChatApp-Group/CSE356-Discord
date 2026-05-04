@@ -208,7 +208,7 @@ describe('progressive websocket bootstrap ready', () => {
     );
   });
 
-  it('keeps reconnect replay and pending drain before progressive ready', async () => {
+  it('sends progressive ready before reconnect replay and pending drain finish', async () => {
     process.env.WS_BOOTSTRAP_PROGRESSIVE_READY = 'true';
     const replay = deferred();
     const pending = deferred();
@@ -221,14 +221,12 @@ describe('progressive websocket bootstrap ready', () => {
 
     await handleConnection(ws, { url: '/ws?token=t', headers: {} });
     await flush();
-    expect(ws.sent.some((frame) => frame.event === 'ready')).toBe(false);
-
-    replay.resolve();
-    await flush();
-    expect(ws.sent.some((frame) => frame.event === 'ready')).toBe(false);
-
     pending.resolve(0);
     const ready = await waitForFrame(ws, (frame) => frame.event === 'ready');
     expect(ready.data.progressiveHydration).toBe(true);
+    expect(ws.sent.some((frame) => frame.event === 'ready')).toBe(true);
+
+    replay.resolve();
+    await flush();
   });
 });

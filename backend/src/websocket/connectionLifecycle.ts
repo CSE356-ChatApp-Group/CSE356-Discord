@@ -83,6 +83,120 @@ function createConnectionLifecycle({
     return null;
   }
 
+  async function runReconnectReplay(ws, user, recentDisconnect, replayUpperBoundMs) {
+    if (!recentDisconnect) return;
+    if (isWsReplayDisabled()) {
+      wsReplayFailOpenTotal.inc({ reason: "disabled" });
+      logWsHotInfo(() => ({ userId: user.id }), "WS reconnect replay skipped: DISABLE_WS_REPLAY");
+      return;
+    }
+    if (ws._replayConsumed === true) {
+      wsReplayFailOpenTotal.inc({ reason: "per_socket" });
+      return;
+    }
+    if (!tryBeginReplayForIp(ws._clientIp)) {
+      wsReplayFailOpenTotal.inc({ reason: "per_ip" });
+      logger.warn(
+        { userId: user.id, clientIp: ws._clientIp },
+        "WS reconnect replay skipped: per-IP concurrent replay cap",
+      );
+      return;
+    }
+
+    const admission = await waitForReplayGateOpen(ws, user.id);
+    if (!admission.ok) {
+      if (!admission.cancelled) {
+        wsReplayFailOpenTotal.inc({ reason: admission.gate.reason || "gate" });
+      }
+      logger.warn(
+        {
+          userId: user.id,
+          reason: admission.gate.reason,
+          waiting: admission.gate.pool.waiting,
+          inFlight: getReplayInFlightCount(),
+          maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+          attempts: admission.attempts,
+          deferredWaitMs: admission.totalWaitMs,
+          cancelled: admission.cancelled,
+        },
+        "WS reconnect replay skipped after bounded admission waits",
+      );
+      endReplayForIp(ws._clientIp);
+      return;
+    }
+
+    ws._replayConsumed = true;
+    await new Promise((r) => setTimeout(r, replayStartupJitterMs()));
+    if (ws.readyState !== WebSocket.OPEN) {
+      endReplayForIp(ws._clientIp);
+      return;
+    }
+
+    if (!tryAcquireReplaySlot()) {
+      wsReplayFailOpenTotal.inc({ reason: "semaphore_full" });
+      logger.warn(
+        {
+          userId: user.id,
+          inFlight: getReplayInFlightCount(),
+          maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+        },
+        "WS reconnect replay skipped: semaphore slot unavailable at execution",
+      );
+      endReplayForIp(ws._clientIp);
+      return;
+    }
+
+    try {
+      const replayStartedAt = Date.now();
+      const replayAllowed = canRunReplayForUser(user.id);
+      const preferPendingReplay = wsReplaySkipDbWhenPendingHit();
+      let pendingReplayed = 0;
+      if (preferPendingReplay) {
+        pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
+      }
+      if (replayAllowed) {
+        if (preferPendingReplay && pendingReplayed > 0) {
+          logWsHotInfo(() => ({
+              userId: user.id,
+              connectionId: ws._connectionId,
+              pendingReplayed,
+            }),
+            "WS reconnect DB replay skipped because Redis pending replay produced messages");
+        } else {
+          await replayMissedMessagesToSocket(
+            ws,
+            user.id,
+            recentDisconnect,
+            replayUpperBoundMs,
+          );
+        }
+      } else {
+        logWsHotInfo(() => ({
+            userId: user.id,
+            connectionId: ws._connectionId,
+            cooldownMs: WS_REPLAY_USER_COOLDOWN_MS,
+          }),
+          "WS reconnect replay DB query skipped due to short per-user cooldown");
+      }
+      if (!preferPendingReplay) {
+        pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
+      }
+      logWsHotInfo(() => ({
+          event: "ws.replay.pending_drain",
+          userId: user.id,
+          connectionId: ws._connectionId,
+          replayAndDrainMs: Date.now() - replayStartedAt,
+          pendingReplayed,
+        }),
+        "WS reconnect replay + pending drain completed after ready");
+    } catch (err) {
+      logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
+    } finally {
+      releaseReplaySlot();
+      endReplayForIp(ws._clientIp);
+    }
+  }
+
   async function userFromRefreshCookie(req) {
     const refreshToken = refreshTokenFromCookieHeader(req?.headers?.cookie);
     if (!refreshToken) return null;
@@ -182,111 +296,12 @@ function createConnectionLifecycle({
         // would then have no key and silently skip replay.
         const recentDisconnect = await consumeRecentDisconnect(user.id).catch(() => null);
         observeRecentReconnect(user.id, ws._connectionId, recentDisconnect);
-        if (recentDisconnect) {
-          if (isWsReplayDisabled()) {
-            wsReplayFailOpenTotal.inc({ reason: "disabled" });
-            logWsHotInfo(() => ({ userId: user.id }), "WS reconnect replay skipped: DISABLE_WS_REPLAY");
-          } else if (ws._replayConsumed === true) {
-            wsReplayFailOpenTotal.inc({ reason: "per_socket" });
-          } else if (!tryBeginReplayForIp(ws._clientIp)) {
-            wsReplayFailOpenTotal.inc({ reason: "per_ip" });
-            logger.warn(
-              { userId: user.id, clientIp: ws._clientIp },
-              "WS reconnect replay skipped: per-IP concurrent replay cap",
-            );
-          } else {
-            const admission = await waitForReplayGateOpen(ws, user.id);
-            if (!admission.ok) {
-              if (!admission.cancelled) {
-                wsReplayFailOpenTotal.inc({ reason: admission.gate.reason || "gate" });
-              }
-              logger.warn(
-                {
-                  userId: user.id,
-                  reason: admission.gate.reason,
-                  waiting: admission.gate.pool.waiting,
-                  inFlight: getReplayInFlightCount(),
-                  maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
-                  attempts: admission.attempts,
-                  deferredWaitMs: admission.totalWaitMs,
-                  cancelled: admission.cancelled,
-                },
-                "WS reconnect replay skipped after bounded admission waits",
-              );
-              endReplayForIp(ws._clientIp);
-            } else {
-              ws._replayConsumed = true;
-              await new Promise((r) => setTimeout(r, replayStartupJitterMs()));
-              if (ws.readyState !== WebSocket.OPEN) {
-                endReplayForIp(ws._clientIp);
-              } else {
-                if (!tryAcquireReplaySlot()) {
-                  wsReplayFailOpenTotal.inc({ reason: "semaphore_full" });
-                  logger.warn(
-                    {
-                      userId: user.id,
-                      inFlight: getReplayInFlightCount(),
-                      maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
-                    },
-                    "WS reconnect replay skipped: semaphore slot unavailable at execution",
-                  );
-                  endReplayForIp(ws._clientIp);
-                } else {
-                  try {
-                    const replayStartedAt = Date.now();
-                    const replayAllowed = canRunReplayForUser(user.id);
-                    const preferPendingReplay = wsReplaySkipDbWhenPendingHit();
-                    let pendingReplayed = 0;
-                    if (preferPendingReplay) {
-                      pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
-                    }
-                    if (replayAllowed) {
-                      if (preferPendingReplay && pendingReplayed > 0) {
-                        logWsHotInfo(() => ({
-                            userId: user.id,
-                            connectionId: ws._connectionId,
-                            pendingReplayed,
-                          }),
-                          "WS reconnect DB replay skipped because Redis pending replay produced messages");
-                      } else {
-                        await replayMissedMessagesToSocket(
-                          ws,
-                          user.id,
-                          recentDisconnect,
-                          replayUpperBoundMs,
-                        );
-                      }
-                    } else {
-                      logWsHotInfo(() => ({
-                          userId: user.id,
-                          connectionId: ws._connectionId,
-                          cooldownMs: WS_REPLAY_USER_COOLDOWN_MS,
-                        }),
-                        "WS reconnect replay DB query skipped due to short per-user cooldown");
-                    }
-                    if (!preferPendingReplay) {
-                      pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
-                    }
-                    logWsHotInfo(() => ({
-                        event: "ws.replay.pending_drain",
-                        userId: user.id,
-                        connectionId: ws._connectionId,
-                        replayAndDrainMs: Date.now() - replayStartedAt,
-                        pendingReplayed,
-                      }),
-                      "WS reconnect replay + pending drain completed before ready");
-                  } catch (err) {
-                    logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
-                  } finally {
-                    releaseReplaySlot();
-                    endReplayForIp(ws._clientIp);
-                  }
-                }
-              }
-            }
-          }
-        }
         ws._bootstrapReady = true;
+        if (recentDisconnect) {
+          setImmediate(() => {
+            void runReconnectReplay(ws, user, recentDisconnect, replayUpperBoundMs);
+          });
+        }
       })
       .catch((err) => {
         wsConnectionResultTotal.inc({ result: "user_subscribe_failed" });
