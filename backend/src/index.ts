@@ -89,7 +89,7 @@ async function waitForDependencies() {
   for (;;) {
     attempt += 1;
     try {
-      await redis.ping();
+      await Promise.all([redis.ping(), redis.redisAuth.ping()]);
       await warmRedisLuaScripts(redis);
       logger.info({ attempt }, 'Redis connected');
       return;

@@ -327,8 +327,10 @@ PORT=4000
 DATABASE_URL=postgres://user:password@db.internal:5432/chatapp_prod
 POSTGRES_SSL=require
 
-# Redis (production)
+# Redis (production) – main: fanout, presence, caches
 REDIS_URL=redis://:password@redis.internal:6379/0
+# Auth Redis – JWT deny-list + auth rate-limit counters (separate VM from REDIS_URL)
+REDIS_AUTH_URL=redis://:password@redis-auth.internal:6379/0
 
 # Secrets
 JWT_SECRET=generate-random-32-char-string

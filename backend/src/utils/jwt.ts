@@ -9,7 +9,7 @@
 
 const crypto = require('crypto');
 const jwt   = require('jsonwebtoken');
-const redis = require('../db/redis');
+const redis = require('../db/redis').redisAuth;
 const { tracer } = require('./tracer');
 
 const ACCESS_SECRET  = process.env.JWT_ACCESS_SECRET  || 'change-me-access';

@@ -8,7 +8,7 @@ const { RedisStore } = require('rate-limit-redis');
 const passport = require('passport');
 
 const { query, getClient } = require('../db/pool');
-const redis            = require('../db/redis');
+const redis            = require('../db/redis').redisAuth;
 const { signAccess, signRefresh } = require('../utils/jwt');
 const { authRateLimitHitsTotal, authSessionFlowTotal } = require('../utils/metrics');
 const logger = require('../utils/logger');

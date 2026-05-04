@@ -20,6 +20,7 @@ networks:
 volumes:
   pg_data:
   redis_data:
+  redis_auth_data:
   minio_data:
   prometheus_data:
   grafana_data:
@@ -70,6 +71,22 @@ services:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_dev}", "ping"]
       interval: 10s
 
+  # Auth-only Redis: JWT deny-list + auth rate-limit counters.
+  # Isolated from the main Redis so fanout/pub-sub traffic cannot starve auth checks.
+  redis-auth:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_AUTH_PASSWORD:-redis_dev}
+      --appendonly yes
+    volumes:
+      - redis_auth_data:/data
+    networks: [chatapp]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_AUTH_PASSWORD:-redis_dev}", "ping"]
+      interval: 10s
+
   # Prometheus scrape target for redis_exporter (see infrastructure/monitoring/prometheus.yml job `redis`).
   redis-exporter:
     image: oliver006/redis_exporter:v1.62.0
@@ -101,6 +118,7 @@ services:
       DATABASE_URL: postgres://chatapp:${POSTGRES_PASSWORD:-chatapp_dev}@postgres:5432/chatapp
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_dev}@${REDIS_HOST:-redis}:6379
+      REDIS_AUTH_URL: redis://:${REDIS_AUTH_PASSWORD:-redis_dev}@redis-auth:6379
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change_me_access}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change_me_refresh}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
@@ -139,6 +157,7 @@ services:
       migrate: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      redis-auth: { condition: service_healthy }
     healthcheck:
       test:
         [

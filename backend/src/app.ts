@@ -311,7 +311,8 @@ app.get('/health', async (req, res) => {
   try {
     const { query, poolStats } = require('./db/pool');
     await query('SELECT 1');
-    await require('./db/redis').ping();
+    const redisModule = require('./db/redis');
+    await Promise.all([redisModule.ping(), redisModule.redisAuth.ping()]);
     const body: Record<string, unknown> = {
       status: 'ok',
       timestamp: new Date().toISOString(),
