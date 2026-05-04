@@ -65,19 +65,28 @@ function createRedisPubsubDelivery(ctx) {
   const STALE_MAP_RECOVERY_MAX_USERS = 100;
 
   function reliableMessageId(parsed) {
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!isPlainJsonObject(parsed)) return null;
     const event = parsed.event;
     if (typeof event !== "string" || !event.startsWith("message:")) return null;
     const data = parsed.data;
-    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    if (!isPlainJsonObject(data)) return null;
     const id = data.id || data.messageId || data.message_id;
     return typeof id === "string" && id ? id : null;
   }
 
   function reliableMessageEvent(parsed) {
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!isPlainJsonObject(parsed)) return null;
     const event = parsed.event;
     return typeof event === "string" && event.startsWith("message:") ? event : null;
+  }
+
+  function isPlainJsonObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function extractChannelType(channel) {
+    const colonIdx = channel.indexOf(":");
+    return colonIdx > 0 ? channel.substring(0, colonIdx) : "unknown";
   }
 
   function dedupePathForChannelType(channelType) {
@@ -116,8 +125,9 @@ function createRedisPubsubDelivery(ctx) {
   }
 
   function recordDuplicateSuppressionReasons(path, reasonCounts) {
-    for (const [reason, rawCount] of Object.entries(reasonCounts || {})) {
-      const count = Number(rawCount) || 0;
+    const counts = reasonCounts || {};
+    for (const reason in counts) {
+      const count = Number(counts[reason]) || 0;
       if (count <= 0) continue;
       if (reason === "duplicate_candidate") {
         recordDuplicateSuppression(path, reason, count);
@@ -126,8 +136,9 @@ function createRedisPubsubDelivery(ctx) {
   }
 
   function recordPartialReasons(reasonCounts) {
-    const entries = Object.entries(reasonCounts || {});
-    if (!entries.length) {
+    const counts = reasonCounts || {};
+    const keys = Object.keys(counts);
+    if (!keys.length) {
       wsPartialDeliveryMissingReasonTotal?.inc?.({ reason: "unknown" });
       return true;
     }
@@ -135,8 +146,8 @@ function createRedisPubsubDelivery(ctx) {
     const add = (reason, count) => {
       mapped[reason] = (mapped[reason] || 0) + count;
     };
-    for (const [rawReason, rawCount] of entries) {
-      const count = Number(rawCount) || 0;
+    for (const rawReason of keys) {
+      const count = Number(counts[rawReason]) || 0;
       if (count <= 0) continue;
       if (
         rawReason === "dedupe_skip"
@@ -168,11 +179,12 @@ function createRedisPubsubDelivery(ctx) {
         add("unknown", count);
       }
     }
-    if (!Object.keys(mapped).length) {
+    const mappedKeys = Object.keys(mapped);
+    if (!mappedKeys.length) {
       return false;
     }
-    for (const [reason, count] of Object.entries(mapped)) {
-      wsPartialDeliveryMissingReasonTotal?.inc?.({ reason }, count);
+    for (const reason of mappedKeys) {
+      wsPartialDeliveryMissingReasonTotal?.inc?.({ reason }, mapped[reason]);
     }
     return true;
   }
@@ -182,7 +194,7 @@ function createRedisPubsubDelivery(ctx) {
     const messageEvent = reliableMessageEvent(parsed);
     const userId = typeof ws?._userId === "string" ? ws._userId : null;
     const connectionId = socketDedupeId(ws);
-    const path = options.dedupePath || dedupePathForChannelType((logicalChannel || "").split(":")[0] || "unknown");
+    const path = options.dedupePath || dedupePathForChannelType(extractChannelType(logicalChannel || ""));
     const reasonCounts = options.debugReasonCounts || null;
     const batchAllowKey = messageId && messageEvent && userId
       ? `${messageEvent}:${messageId}:${userId}:${connectionId}`
@@ -246,8 +258,8 @@ function createRedisPubsubDelivery(ctx) {
 
   function pruneNonOpenSocketsFromLocalTopicSubscribers(topicChannel, clients) {
     if (!clients || clients.size === 0) return [];
-    const recoveredUserIds = [];
-    for (const ws of [...clients]) {
+    const recoveredUserIds = new Set();
+    for (const ws of clients) {
       if (ws.readyState === WebSocket.OPEN) continue;
       const uid = ws._userId;
       // CLOSING = clean disconnect in progress; 'close' will fire imminently and run cleanup.
@@ -255,18 +267,18 @@ function createRedisPubsubDelivery(ctx) {
       // Only request userfeed recovery for CLOSED/CONNECTING sockets, which indicate an
       // unexpected state where the normal cleanup path may not have run.
       if (ws.readyState !== WebSocket.CLOSING && typeof uid === "string" && uid.trim()) {
-        recoveredUserIds.push(uid.trim());
+        recoveredUserIds.add(uid.trim());
       }
       unsubscribeClient(ws, topicChannel).catch((err) => {
         logger.warn({ err, topicChannel, userId: uid }, "WS prune: unsubscribeClient failed");
       });
     }
-    return [...new Set(recoveredUserIds)];
+    return recoveredUserIds.size ? Array.from(recoveredUserIds) : [];
   }
 
   function pruneNonOpenFromCommunitySubscribers(communityId, clients) {
     if (!clients || clients.size === 0) return;
-    for (const ws of [...clients]) {
+    for (const ws of clients) {
       if (ws.readyState === WebSocket.OPEN) continue;
       unsubscribeCommunityClient(ws, communityId);
     }
@@ -276,7 +288,12 @@ function createRedisPubsubDelivery(ctx) {
     if (!userIds.length || parsed === null || typeof parsed !== "object") return false;
     const ev = parsed.event;
     if (typeof ev !== "string" || !ev.startsWith("message:")) return false;
-    const cappedUserIds = [...new Set(userIds)].slice(0, STALE_MAP_RECOVERY_MAX_USERS);
+    const deduped = new Set(userIds);
+    const all = Array.from(deduped);
+    const cappedUserIds =
+      all.length > STALE_MAP_RECOVERY_MAX_USERS
+        ? all.slice(0, STALE_MAP_RECOVERY_MAX_USERS)
+        : all;
     if (!cappedUserIds.length) return false;
     try {
       await publishUserFeedTargets(
@@ -317,7 +334,12 @@ function createRedisPubsubDelivery(ctx) {
 
   function scheduleUserfeedRecoveryAfterStaleTopicMap(channel, parsed, userIds) {
     if (!userIds.length || parsed === null || typeof parsed !== "object") return false;
-    const cappedUserIds = [...new Set(userIds)].slice(0, STALE_MAP_RECOVERY_MAX_USERS);
+    const deduped = new Set(userIds);
+    const all = Array.from(deduped);
+    const cappedUserIds =
+      all.length > STALE_MAP_RECOVERY_MAX_USERS
+        ? all.slice(0, STALE_MAP_RECOVERY_MAX_USERS)
+        : all;
     if (!cappedUserIds.length) return false;
     setImmediate(() => {
       userfeedRecoveryAfterStaleTopicMap(channel, parsed, cappedUserIds).catch((err) => {
@@ -332,7 +354,12 @@ function createRedisPubsubDelivery(ctx) {
 
   async function deliverUserFeedMessage(channel, routed, pubsubReceiveMs: number | null = null) {
     const payload = routed.payload;
-    const userIds = [...new Set(routed.__wsRoute.userIds.filter((value) => typeof value === "string"))];
+    const userIdsRaw = routed.__wsRoute.userIds || [];
+    const userIdsSet = new Set();
+    for (const value of userIdsRaw) {
+      if (typeof value === "string") userIdsSet.add(value);
+    }
+    const userIds = Array.from(userIdsSet);
     const dedupeBatchAllowSet = new Set();
     if (!userIds.length) return;
 
@@ -347,18 +374,34 @@ function createRedisPubsubDelivery(ctx) {
 
     const internalCommand = extractInternalUserFeedCommand(payload);
     const internalSubscribeChannels = internalCommand?.kind === "subscribe_channels"
-      ? [...new Set(
-        (Array.isArray(internalCommand.channels) ? internalCommand.channels : [])
-          .filter((value) => typeof value === "string")
-          .filter((value) => parseChannelKey(value)),
-      )]
+      ? (() => {
+        const channels = Array.isArray(internalCommand.channels) ? internalCommand.channels : [];
+        const seen = new Set();
+        const result = [];
+        for (const value of channels) {
+          if (typeof value !== "string") continue;
+          if (!parseChannelKey(value)) continue;
+          if (seen.has(value)) continue;
+          seen.add(value);
+          result.push(value);
+        }
+        return result;
+      })()
       : null;
     const internalSubscribeCommunities = internalCommand?.kind === "subscribe_communities"
-      ? [...new Set(
-        (Array.isArray(internalCommand.communityIds) ? internalCommand.communityIds : [])
-          .map((value) => normalizeCommunityTopic(value))
-          .filter((value) => typeof value === "string"),
-      )]
+      ? (() => {
+        const communityIds = Array.isArray(internalCommand.communityIds) ? internalCommand.communityIds : [];
+        const seen = new Set();
+        const result = [];
+        for (const value of communityIds) {
+          const normalized = normalizeCommunityTopic(value);
+          if (typeof normalized !== "string") continue;
+          if (seen.has(normalized)) continue;
+          seen.add(normalized);
+          result.push(normalized);
+        }
+        return result;
+      })()
       : null;
 
     const payloadEvent = payload?.event;
@@ -468,40 +511,35 @@ function createRedisPubsubDelivery(ctx) {
     };
 
     const pubsubReceiveMs = Date.now();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(message);
+    } catch {
+      return; // Bail early if message is not valid JSON
+    }
+
     try {
       if (USER_FEED_SHARD_CHANNEL_SET.has(channel)) {
-        let routed = null;
-        try {
-          routed = JSON.parse(message);
-        } catch {
-          return;
-        }
-        if (isUserFeedEnvelope(routed)) {
-          const payloadEvent = routed?.payload?.event;
+        if (isUserFeedEnvelope(parsed)) {
+          const payloadEvent = parsed?.payload?.event;
           if (typeof payloadEvent === "string" && payloadEvent.startsWith("message:")) {
             markLiveFanoutPending();
           }
-          await deliverUserFeedMessage(channel, routed, pubsubReceiveMs);
+          await deliverUserFeedMessage(channel, parsed, pubsubReceiveMs);
         }
         return;
       }
 
       if (COMMUNITY_FEED_SHARD_CHANNEL_SET.has(channel)) {
-        let routed = null;
-        try {
-          routed = JSON.parse(message);
-        } catch {
-          return;
-        }
-        if (isCommunityFeedEnvelope(routed)) {
-          deliverCommunityFeedMessage(channel, routed);
+        if (isCommunityFeedEnvelope(parsed)) {
+          deliverCommunityFeedMessage(channel, parsed);
         }
         return;
       }
 
+      const channelType = extractChannelType(channel);
       const clients = recipientClientsForChannel(channel);
       const recipientCount = clients ? clients.size : 0;
-      const channelType = channel.split(":")[0] || "unknown";
       fanoutRecipientsHistogram.observe(
         { channel_type: channelType },
         recipientCount,
@@ -511,15 +549,8 @@ function createRedisPubsubDelivery(ctx) {
         if (!logger.isLevelEnabled("debug")) return;
       }
 
-      let parsed = null;
-      try {
-        parsed = JSON.parse(message);
-      } catch {
-        /* ignore */
-      }
-
       const parsedEvent =
-        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        isPlainJsonObject(parsed)
           ? parsed.event
           : null;
       const isMessageEvent = typeof parsedEvent === "string" && parsedEvent.startsWith("message:");
@@ -528,7 +559,7 @@ function createRedisPubsubDelivery(ctx) {
       }
 
       // Observe pubsub receive lag (created_at → receive time) for message events.
-      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      if (isPlainJsonObject(parsed)) {
         const refMs = parsePayloadReferenceTimeMs(parsed);
         if (refMs != null) {
           const lagMs = pubsubReceiveMs - refMs;
@@ -541,7 +572,7 @@ function createRedisPubsubDelivery(ctx) {
 
     if (channelType === "conversation" && logger.isLevelEnabled("debug")) {
       if (isMessageEvent) {
-        const messageId = parsed?.data?.id;
+        const messageId = isPlainJsonObject(parsed) ? parsed.data?.id : null;
         logger.debug(
           { channel, event: parsedEvent, messageId, recipientCount },
           recipientCount > 0
@@ -603,7 +634,7 @@ function createRedisPubsubDelivery(ctx) {
           recordDuplicateSuppressionReasons(dedupePathForChannelType(channelType), reasonCounts);
           if (logger.isLevelEnabled("debug")) {
             const messageId =
-              parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+              isPlainJsonObject(parsed)
                 ? parsed.data
                 : null;
             const resolvedMessageId = messageId?.id || messageId?.messageId || messageId?.message_id || null;
@@ -633,7 +664,7 @@ function createRedisPubsubDelivery(ctx) {
           recordRealtimeMissAttribution("topic_message_send_blocked");
           recordPartialReasons(reasonCounts);
           const messageId =
-            parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+            isPlainJsonObject(parsed)
               ? parsed.data
               : null;
           const resolvedMessageId = messageId?.id || messageId?.messageId || messageId?.message_id || null;

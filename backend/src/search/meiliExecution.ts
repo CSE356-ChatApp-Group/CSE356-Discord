@@ -93,7 +93,12 @@ function createMeiliSearchExecutor({
     }
 
     const freshnessIds = await findFreshScopedSearchCandidateIds(q, opts);
-    const mergedIds = Array.from(new Set([...(ids || []), ...(freshnessIds || [])]));
+    const mergedSet = new Set(ids || []);
+    const freshnessArray = freshnessIds || [];
+    for (const id of freshnessArray) {
+      mergedSet.add(id);
+    }
+    const mergedIds = Array.from(mergedSet);
 
     const tRecheck = Date.now();
     const recheckMeta = buildRecheckFromCandidates(mergedIds, q, opts);
@@ -114,15 +119,22 @@ function createMeiliSearchExecutor({
       );
     }
 
-    const freshnessSupplementUsed = strictRows.some(
-      (row: any) => row && row.id && !ids.includes(String(row.id)),
-    );
+    const freshnessSupplementUsed = (() => {
+      const idsSet = new Set(ids.map(String));
+      return strictRows.some(
+        (row: any) => row && row.id && !idsSet.has(String(row.id)),
+      );
+    })();
 
     if (freshnessSupplementUsed) {
       meiliClient.incFallbackTotal();
     }
 
-    if (strictRows.length === 0 && ids.length > 0) {
+    // Cache filtered rows for reuse
+    const validRows = strictRows.filter((r: any) => r && r.id);
+    const validRowsCount = validRows.length;
+
+    if (validRowsCount === 0 && ids.length > 0) {
       meiliClient.incFallbackTotal();
       const totalMs = Date.now() - tAll;
       logger.warn(
@@ -150,7 +162,7 @@ function createMeiliSearchExecutor({
       return searchOnce(q, opts, initialForcePrimary);
     }
 
-    const finalHits = strictRows.filter((r: any) => r && r.id);
+    const finalHits = validRows;
     const totalMs = Date.now() - tAll;
 
     logger.info(

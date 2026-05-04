@@ -229,8 +229,12 @@ module.exports = function registerGetRoutes(router) {
                 throw err;
               }
               setChannelAccessCache(redis, channelId, req.user.id);
-              const messages = rows.filter((row) => row.id);
-              const body = { messages: messages.reverse() };
+              const messages: any[] = [];
+              for (let i = rows.length - 1; i >= 0; i -= 1) {
+                const row = rows[i];
+                if (row && row.id) messages.push(row);
+              }
+              const body = { messages };
               const epochAfter = await readMessageCacheEpoch(redis, epochKey);
               if (epochBefore === epochAfter) {
                 await setJsonCacheWithStale(
@@ -344,8 +348,12 @@ module.exports = function registerGetRoutes(router) {
                 err.statusCode = 403;
                 throw err;
               }
-              const messages = rows.filter((row) => row.id);
-              const body = { messages: messages.reverse() };
+              const messages: any[] = [];
+              for (let i = rows.length - 1; i >= 0; i -= 1) {
+                const row = rows[i];
+                if (row && row.id) messages.push(row);
+              }
+              const body = { messages };
               const epochAfter = await readMessageCacheEpoch(redis, epochKey);
               if (epochBefore === epochAfter) {
                 await setJsonCacheWithStale(

@@ -343,7 +343,7 @@ async function runPostInsertPhase({
                   try {
                     await withTransaction(async (client: any) => {
                       await client.query(
-                        `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'`,
+                        `SET LOCAL statement_timeout = '${MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS}ms'; SET LOCAL synchronous_commit = off`,
                       );
                       await insertMessageAttachments(
                         client,
