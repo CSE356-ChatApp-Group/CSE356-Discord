@@ -49,6 +49,8 @@ const COMMUNITY_COUNT_RECONCILE_LOCK_TTL_MS = Math.max(
 const COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE = parseInt(
   process.env.COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE || '2', 10,
 );
+const COMMUNITY_COUNT_PG_DIRECT =
+  process.env.COMMUNITY_COUNT_PG_DIRECT === 'true';
 
 let localReconcileInFlight = false;
 registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
@@ -98,11 +100,20 @@ async function releaseReconcileLock(token: string): Promise<void> {
   }
 }
 
-/**
- * Fire-and-forget: increment member_count for communityId in Redis.
- * Marks communityId dirty for background reconcile.
- */
 async function incrCommunityMemberCount(communityId: string): Promise<void> {
+  if (COMMUNITY_COUNT_PG_DIRECT) {
+    try {
+      await query(
+        'UPDATE communities SET member_count = member_count + 1 WHERE id = $1',
+        [communityId],
+      );
+      communityCountRedisUpdateTotal.inc({ result: 'ok' });
+    } catch (err: any) {
+      communityCountRedisUpdateTotal.inc({ result: 'error' });
+      logger.warn({ err, communityId }, 'communityMemberCount: PG incr failed');
+    }
+    return;
+  }
   try {
     await redis
       .pipeline()
@@ -116,11 +127,20 @@ async function incrCommunityMemberCount(communityId: string): Promise<void> {
   }
 }
 
-/**
- * Fire-and-forget: decrement member_count for communityId in Redis, clamped to 0.
- * Marks communityId dirty for background reconcile.
- */
 async function decrCommunityMemberCount(communityId: string): Promise<void> {
+  if (COMMUNITY_COUNT_PG_DIRECT) {
+    try {
+      await query(
+        'UPDATE communities SET member_count = GREATEST(member_count - 1, 0) WHERE id = $1',
+        [communityId],
+      );
+      communityCountRedisUpdateTotal.inc({ result: 'ok' });
+    } catch (err: any) {
+      communityCountRedisUpdateTotal.inc({ result: 'error' });
+      logger.warn({ err, communityId }, 'communityMemberCount: PG decr failed');
+    }
+    return;
+  }
   try {
     const results = await redis
       .pipeline()
@@ -146,7 +166,7 @@ async function getCommunityMemberCountsFromRedis(
   communityIds: string[],
 ): Promise<Map<string, number>> {
   const result = new Map<string, number>();
-  if (!communityIds.length) return result;
+  if (COMMUNITY_COUNT_PG_DIRECT || !communityIds.length) return result;
   try {
     const values: (string | null)[] = await redis.hmget(COMMUNITY_COUNTS_KEY, ...communityIds);
     for (let i = 0; i < communityIds.length; i++) {
@@ -248,6 +268,7 @@ async function runReconcile(): Promise<void> {
 function startCommunityCountReconcileInterval(
   intervalMs: number = COMMUNITY_COUNT_RECONCILE_INTERVAL_MS,
 ): void {
+  if (COMMUNITY_COUNT_PG_DIRECT) return;
   setInterval(() => { runReconcile().catch(() => {}); }, intervalMs).unref();
 }
 
