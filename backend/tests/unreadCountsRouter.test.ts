@@ -73,20 +73,20 @@ describe('GET /unread-counts', () => {
       .mockResolvedValueOnce({
         rows: [
           {
-            channel_id: channelId,
-            last_message_id: '00000000-0000-4000-8000-000000000010',
-            last_message_author_id: '00000000-0000-4000-8000-000000000011',
-            my_last_read_message_id: '00000000-0000-4000-8000-000000000009',
+            type: 'conversation',
+            channel_id: null,
+            conversation_id: conversationId,
+            count: 2,
           },
         ],
       })
       .mockResolvedValueOnce({
         rows: [
           {
-            type: 'conversation',
-            channel_id: null,
-            conversation_id: conversationId,
-            count: 2,
+            channel_id: channelId,
+            last_message_id: '00000000-0000-4000-8000-000000000010',
+            last_message_author_id: '00000000-0000-4000-8000-000000000011',
+            my_last_read_message_id: '00000000-0000-4000-8000-000000000009',
           },
         ],
       });
@@ -136,6 +136,16 @@ describe('GET /unread-counts', () => {
       .mockResolvedValueOnce({
         rows: [
           {
+            type: 'conversation',
+            channel_id: null,
+            conversation_id: conversationId,
+            count: 2,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
             channel_id: channelId,
             last_message_id: '00000000-0000-4000-8000-000000000010',
             last_message_author_id: '00000000-0000-4000-8000-000000000011',
@@ -143,17 +153,7 @@ describe('GET /unread-counts', () => {
           },
         ],
       })
-      .mockRejectedValueOnce(Object.assign(new Error('Query read timeout'), { code: '57014' }))
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            type: 'conversation',
-            channel_id: null,
-            conversation_id: conversationId,
-            count: 2,
-          },
-        ],
-      });
+      .mockRejectedValueOnce(Object.assign(new Error('Query read timeout'), { code: '57014' }));
     redis.mget
       .mockResolvedValueOnce([null])
       .mockResolvedValueOnce([null]);
@@ -182,7 +182,9 @@ describe('GET /unread-counts', () => {
   it('propagates non-timeout errors to the global error handler', async () => {
     pool.queryRead.mockReset();
     redis.mget.mockReset();
-    pool.queryRead.mockRejectedValueOnce(new Error('database exploded'));
+    pool.queryRead
+      .mockRejectedValueOnce(new Error('database exploded'))
+      .mockResolvedValueOnce({ rows: [] });
 
     await expect(requestUnreadCounts()).rejects.toThrow('database exploded');
   });
@@ -232,27 +234,18 @@ describe('GET /unread-counts', () => {
       releaseFirstRead = resolve;
     });
     pool.queryRead
-      .mockImplementationOnce(() => firstRead)
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            type: 'conversation',
-            channel_id: null,
-            conversation_id: conversationId,
-            count: 2,
-          },
-        ],
-      });
-    redis.mget
-      .mockResolvedValueOnce(['0'])
-      .mockResolvedValueOnce(['0']);
+      .mockImplementationOnce(() => firstRead)  // call 1: conversation query blocks
+      .mockResolvedValueOnce({ rows: [] });      // call 2: channel meta → empty (no channels)
+    // No redis.mget mocks: no channels → no mget calls
 
     const req1 = requestUnreadCounts();
     const req2 = requestUnreadCounts();
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(pool.queryRead).toHaveBeenCalledTimes(1);
-    releaseFirstRead({ rows: [] });
+    // Both parallel queries (conversation + channel meta) were fired by req1.
+    // req2 was coalesced — it did not fire additional queries.
+    expect(pool.queryRead).toHaveBeenCalledTimes(2);
+    releaseFirstRead({ rows: [{ type: 'conversation', channel_id: null, conversation_id: conversationId, count: 2 }] });
 
     const [res1, res2] = await Promise.all([req1, req2]);
     expect(pool.queryRead).toHaveBeenCalledTimes(2);

@@ -420,10 +420,9 @@ describe('GET /communities — member_count Redis overlay', () => {
   const COMMUNITY_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
   it('returns Redis member_count when Redis has a value', async () => {
-    poolMock.query.mockResolvedValue({
+    poolMock.queryRead.mockResolvedValue({
       rows: [{ id: COMMUNITY_ID, name: 'test', member_count: 1, is_public: true }],
     });
-    poolMock.queryRead.mockResolvedValue({ rows: [] }); // unread counts
     redisMock.hmget.mockResolvedValue(['42']); // Redis has count=42
 
     const app = buildApp();
@@ -437,10 +436,9 @@ describe('GET /communities — member_count Redis overlay', () => {
   });
 
   it('falls back to DB member_count when Redis has no entry', async () => {
-    poolMock.query.mockResolvedValue({
+    poolMock.queryRead.mockResolvedValue({
       rows: [{ id: COMMUNITY_ID, name: 'test', member_count: 7, is_public: true }],
     });
-    poolMock.queryRead.mockResolvedValue({ rows: [] });
     redisMock.hmget.mockResolvedValue([null]); // Redis miss
 
     const app = buildApp();
@@ -454,10 +452,9 @@ describe('GET /communities — member_count Redis overlay', () => {
   });
 
   it('falls back to DB member_count when Redis throws', async () => {
-    poolMock.query.mockResolvedValue({
+    poolMock.queryRead.mockResolvedValue({
       rows: [{ id: COMMUNITY_ID, name: 'test', member_count: 9, is_public: true }],
     });
-    poolMock.queryRead.mockResolvedValue({ rows: [] });
     redisMock.hmget.mockRejectedValue(new Error('ECONNREFUSED'));
 
     const app = buildApp();
