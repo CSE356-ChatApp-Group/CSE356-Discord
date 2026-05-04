@@ -162,6 +162,8 @@ const WS_REPLAY_CURSOR_BUCKET_MS =
 const WS_MESSAGE_REPLAY_MAX_CONCURRENT = WS_REPLAY_DB_MAX_GLOBAL;
 
 let replayDbInFlight = 0;
+/** In-process singleflight: collapses concurrent same-user same-cursor replay DB queries within this worker. */
+const replayDbInflight = new Map<string, Promise<any[]>>();
 let replayDbPressureUntilMs = 0;
 let replayDbPressureGlobalCached = false;
 let replayDbPressureLastPollMs = 0;
@@ -593,10 +595,19 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
     // Cache miss on dedupe fingerprint: proceed with DB to avoid false-empty replay.
   }
 
+  // In-process singleflight: collapse concurrent same-user same-cursor replay DB queries within this worker.
+  const sfKey = `${userId}:${cursor}`;
+  const existingDbPromise = replayDbInflight.get(sfKey);
+  if (existingDbPromise) {
+    wsReplayCachedTotal.inc();
+    return (await existingDbPromise.catch(() => [])) ?? [];
+  }
+
   const startedAt = Date.now();
   wsReplayStartedTotal.inc();
   wsReplayDbQueryTotal.inc();
   replayDbInFlight += 1;
+  const replayDbPromise = (async () => {
   try {
     const statementTimeoutMs = WS_MESSAGE_REPLAY_STATEMENT_TIMEOUT_MS_CAPPED;
     const branchCandidateLimit = Math.min(200, Math.max(profile.limit * 4, 50));
@@ -761,6 +772,9 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   } finally {
     replayDbInFlight -= 1;
   }
+  })().finally(() => replayDbInflight.delete(sfKey));
+  replayDbInflight.set(sfKey, replayDbPromise);
+  return replayDbPromise;
 }
 
 module.exports = {
