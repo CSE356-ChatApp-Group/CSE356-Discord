@@ -14,6 +14,8 @@ function createSearchRetryPolicy({
   ) {
     if (forcePrimary || !searchUseReadReplica || !hasReadPool) return false;
     if (err?.statusCode === 403) return true;
+    // Replica connection returned in an aborted transaction state — retry on primary.
+    if (err?.code === '25P02') return true;
     return Array.isArray(result?.hits) && result!.hits.length === 0;
   }
 

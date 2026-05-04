@@ -57,6 +57,7 @@ async function withSearchClientTransaction<T>(
     const client = await readPool.connect();
     const acquireMs = Date.now() - tConn;
     const tWork = Date.now();
+    let rollbackErr: Error | null = null;
     try {
       await client.query('BEGIN READ ONLY');
       await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
@@ -66,15 +67,17 @@ async function withSearchClientTransaction<T>(
       await client.query('COMMIT');
       return logAndReturn(acquireMs, tWork, out);
     } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
+      await client.query('ROLLBACK').catch((e: any) => { rollbackErr = e; });
       throw err;
     } finally {
-      client.release();
+      // If ROLLBACK failed the connection may be in an unknown state — destroy it.
+      rollbackErr ? client.release(rollbackErr) : client.release();
     }
   }
 
   const { client, acquireMs } = await getClientTimed();
   const tWork = Date.now();
+  let rollbackErr: Error | null = null;
   try {
     await client.query('BEGIN');
     await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
@@ -84,10 +87,11 @@ async function withSearchClientTransaction<T>(
     await client.query('COMMIT');
     return logAndReturn(acquireMs, tWork, out);
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch((e: any) => { rollbackErr = e; });
     throw err;
   } finally {
-    client.release();
+    // If ROLLBACK failed the connection may be in an unknown state — destroy it.
+    rollbackErr ? client.release(rollbackErr) : client.release();
   }
 }
 
