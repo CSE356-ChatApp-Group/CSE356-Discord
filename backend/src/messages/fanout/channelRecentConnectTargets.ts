@@ -1,4 +1,5 @@
 const redis = require('../../db/redis');
+const { redisBatchMget } = require('../../db/redisBatch');
 const {
   wsRecentConnectKey,
   channelRecentConnectKey,
@@ -55,16 +56,8 @@ function invalidateRecentConnectTargetsCache(channelId: string) {
   recentConnectTargetsCache.delete(recentConnectTargetsCacheKey(channelId));
 }
 
-/** Sequential MGET batches — avoids firing dozens of MGETs at once (Redis single-thread + ioredis). */
-async function mgetKeyBatches(keys: string[], batchSize: number): Promise<(string | null)[]> {
-  if (!keys.length) return [];
-  const out: (string | null)[] = [];
-  for (let i = 0; i < keys.length; i += batchSize) {
-    const slice = keys.slice(i, i + batchSize);
-    const part = await redis.mget(...slice);
-    out.push(...part);
-  }
-  return out;
+function mgetKeyBatches(keys: string[], batchSize: number): Promise<(string | null)[]> {
+  return redisBatchMget(redis, keys, batchSize);
 }
 
 function connectedUsersKey() {

@@ -54,6 +54,7 @@ const {
 
 const { query, queryRead, getClient } = require("../db/pool");
 const redis = require("../db/redis");
+const { redisBatchUnlink } = require("../db/redisBatch");
 const logger = require("../utils/logger");
 const presenceService = require("../presence/service");
 const { publishUserFeedTargets } = require("../websocket/userFeed");
@@ -356,7 +357,7 @@ async function cleanupCommunityUnreadCounterKeys(communityId) {
     );
     if (!rows.length) return;
     const channelKeys = rows.map((row) => `channel:msg_count:${row.id}`);
-    await redis.del(...channelKeys);
+    await redisBatchUnlink(redis, channelKeys);
   } catch {
     // Best-effort cleanup; never block community deletion.
   }

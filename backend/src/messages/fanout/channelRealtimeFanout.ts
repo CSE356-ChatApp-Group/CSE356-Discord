@@ -5,6 +5,7 @@
 
 
 const redis = require('../../db/redis');
+const { redisBatchSmismember } = require('../../db/redisBatch');
 const { query } = require('../../db/pool');
 const fanout = require('../../websocket/fanout');
 const { tracer, trace } = require('../../utils/tracer');
@@ -126,12 +127,8 @@ async function filterActiveConnectedUserTargets(targets: string[], path: string)
   if (!userIds.length) return [];
 
   try {
-    const raw = await redis.call('SMISMEMBER', connectedUsersKey(), ...userIds);
-    const rows = Array.isArray(raw) ? raw : [];
-    if (rows.length !== userIds.length) {
-      throw new Error('SMISMEMBER result length mismatch');
-    }
-    const activeTargets = targets.filter((_target, idx) => Number(rows[idx]) === 1);
+    const rows = await redisBatchSmismember(redis, connectedUsersKey(), userIds);
+    const activeTargets = targets.filter((_target, idx) => rows[idx] === 1);
     const skipped = targets.length - activeTargets.length;
     if (skipped > 0) {
       wsFanoutOfflineSkippedTotal?.inc?.({ path }, skipped);

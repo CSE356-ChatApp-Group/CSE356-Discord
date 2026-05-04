@@ -2,6 +2,7 @@
 const express = require('express');
 const { queryRead, poolStats } = require('../db/pool');
 const redis = require('../db/redis');
+const { redisBatchMget } = require('../db/redisBatch');
 const { authenticate } = require('../middleware/authenticate');
 const logger = require('../utils/logger');
 const {
@@ -233,8 +234,8 @@ router.get('/', async (req, res, next) => {
             const countKeys = channelRows.map((row) => `channel:msg_count:${row.channel_id}`);
             const readKeys = channelRows.map((row) => `user:last_read_count:${row.channel_id}:${userId}`);
             const [rawCounts, rawReads] = await Promise.all([
-              redis.mget(...countKeys),
-              redis.mget(...readKeys),
+              redisBatchMget(redis, countKeys),
+              redisBatchMget(redis, readKeys),
             ]);
 
             for (let i = 0; i < channelRows.length; i += 1) {

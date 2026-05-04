@@ -14,6 +14,7 @@
 
 const { query, poolStats } = require('../db/pool');
 const redis = require('../db/redis');
+const { redisBatchHmget, redisBatchSrem } = require('../db/redisBatch');
 const {
   REDIS_LUA_IDS,
   registerRedisLuaScript,
@@ -51,6 +52,16 @@ const COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE = parseInt(
 );
 const COMMUNITY_COUNT_PG_DIRECT =
   process.env.COMMUNITY_COUNT_PG_DIRECT === 'true';
+const COMMUNITY_COUNT_REDIS_BATCH_FLUSH_MS = parseInt(
+  process.env.COMMUNITY_COUNT_REDIS_BATCH_FLUSH_MS || '50', 10,
+);
+const COMMUNITY_COUNT_REDIS_HMGET_CHUNK = parseInt(
+  process.env.COMMUNITY_COUNT_REDIS_HMGET_CHUNK || '50', 10,
+);
+
+// Pending in-process deltas for the Redis batch path.
+const pendingDeltas = new Map<string, number>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 let localReconcileInFlight = false;
 registerRedisLuaScript(REDIS_LUA_IDS.LOCK_RELEASE_IF_MATCH, LOCK_RELEASE_IF_MATCH_LUA);
@@ -100,6 +111,49 @@ async function releaseReconcileLock(token: string): Promise<void> {
   }
 }
 
+async function flushPendingDeltas(): Promise<void> {
+  if (pendingDeltas.size === 0) return;
+  const snapshot = new Map(pendingDeltas);
+  pendingDeltas.clear();
+
+  const entries = [...snapshot.entries()];
+  const dirtyIds = entries.map(([id]) => id);
+  try {
+    const pipeline = redis.pipeline();
+    for (const [communityId, delta] of entries) {
+      pipeline.hincrby(COMMUNITY_COUNTS_KEY, communityId, delta);
+    }
+    pipeline.sadd(COMMUNITY_COUNTS_DIRTY_KEY, ...dirtyIds);
+    const results: [Error | null, number][] = await pipeline.exec();
+
+    // Clamp any values that went negative due to decr-before-incr races.
+    const clampPipeline = redis.pipeline();
+    let needsClamp = false;
+    for (let i = 0; i < entries.length; i++) {
+      const [err, newVal] = results[i];
+      if (!err && typeof newVal === 'number' && newVal < 0) {
+        clampPipeline.hset(COMMUNITY_COUNTS_KEY, entries[i][0], '0');
+        needsClamp = true;
+      }
+    }
+    if (needsClamp) await clampPipeline.exec();
+
+    communityCountRedisUpdateTotal.inc({ result: 'ok' });
+  } catch (err: any) {
+    communityCountRedisUpdateTotal.inc({ result: 'error' });
+    logger.warn({ err, size: entries.length }, 'communityMemberCount: Redis batch flush failed');
+  }
+}
+
+function scheduleDeltaFlush(): void {
+  if (flushTimer !== null) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    flushPendingDeltas().catch(() => {});
+  }, COMMUNITY_COUNT_REDIS_BATCH_FLUSH_MS);
+  if (flushTimer.unref) flushTimer.unref();
+}
+
 async function incrCommunityMemberCount(communityId: string): Promise<void> {
   if (COMMUNITY_COUNT_PG_DIRECT) {
     try {
@@ -114,17 +168,8 @@ async function incrCommunityMemberCount(communityId: string): Promise<void> {
     }
     return;
   }
-  try {
-    await redis
-      .pipeline()
-      .hincrby(COMMUNITY_COUNTS_KEY, communityId, 1)
-      .sadd(COMMUNITY_COUNTS_DIRTY_KEY, communityId)
-      .exec();
-    communityCountRedisUpdateTotal.inc({ result: 'ok' });
-  } catch (err: any) {
-    communityCountRedisUpdateTotal.inc({ result: 'error' });
-    logger.warn({ err, communityId }, 'communityMemberCount: Redis incr failed');
-  }
+  pendingDeltas.set(communityId, (pendingDeltas.get(communityId) ?? 0) + 1);
+  scheduleDeltaFlush();
 }
 
 async function decrCommunityMemberCount(communityId: string): Promise<void> {
@@ -141,21 +186,8 @@ async function decrCommunityMemberCount(communityId: string): Promise<void> {
     }
     return;
   }
-  try {
-    const results = await redis
-      .pipeline()
-      .hincrby(COMMUNITY_COUNTS_KEY, communityId, -1)
-      .sadd(COMMUNITY_COUNTS_DIRTY_KEY, communityId)
-      .exec();
-    const [[incrErr, newVal]] = results;
-    if (!incrErr && typeof newVal === 'number' && newVal < 0) {
-      await redis.hset(COMMUNITY_COUNTS_KEY, communityId, '0');
-    }
-    communityCountRedisUpdateTotal.inc({ result: 'ok' });
-  } catch (err: any) {
-    communityCountRedisUpdateTotal.inc({ result: 'error' });
-    logger.warn({ err, communityId }, 'communityMemberCount: Redis decr failed');
-  }
+  pendingDeltas.set(communityId, (pendingDeltas.get(communityId) ?? 0) - 1);
+  scheduleDeltaFlush();
 }
 
 /**
@@ -168,9 +200,9 @@ async function getCommunityMemberCountsFromRedis(
   const result = new Map<string, number>();
   if (COMMUNITY_COUNT_PG_DIRECT || !communityIds.length) return result;
   try {
-    const values: (string | null)[] = await redis.hmget(COMMUNITY_COUNTS_KEY, ...communityIds);
+    const allValues = await redisBatchHmget(redis, COMMUNITY_COUNTS_KEY, communityIds, COMMUNITY_COUNT_REDIS_HMGET_CHUNK);
     for (let i = 0; i < communityIds.length; i++) {
-      const raw = values[i];
+      const raw = allValues[i];
       if (raw !== null && raw !== undefined) {
         const n = parseInt(raw, 10);
         if (Number.isFinite(n)) {
@@ -248,11 +280,7 @@ async function runReconcile(): Promise<void> {
           await pipeline.exec();
         }
 
-        if (batch.length === 1) {
-          await redis.srem(COMMUNITY_COUNTS_DIRTY_KEY, batch[0]);
-        } else {
-          await redis.srem(COMMUNITY_COUNTS_DIRTY_KEY, ...batch);
-        }
+        await redisBatchSrem(redis, COMMUNITY_COUNTS_DIRTY_KEY, batch);
         communityCountPgReconcileTotal.inc({ result: 'ok' });
       } catch (err: any) {
         communityCountPgReconcileTotal.inc({ result: 'error' });

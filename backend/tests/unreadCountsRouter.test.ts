@@ -9,6 +9,14 @@ jest.mock('../src/db/pool', () => ({
 
 jest.mock('../src/db/redis', () => ({
   mget: jest.fn(),
+  pipeline: jest.fn(() => ({
+    mget: jest.fn().mockReturnThis(),
+    exec: jest.fn().mockResolvedValue([]),
+  })),
+}));
+
+jest.mock('../src/db/redisBatch', () => ({
+  redisBatchMget: jest.fn((client, keys) => client.mget(keys)),
 }));
 
 jest.mock('../src/middleware/authenticate', () => ({
@@ -24,6 +32,7 @@ const pool = require('../src/db/pool') as {
 };
 const redis = require('../src/db/redis') as {
   mget: jest.Mock;
+  pipeline: jest.Mock;
 };
 
 const emptyUnreadCountsPayload = {

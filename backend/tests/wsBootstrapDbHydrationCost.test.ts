@@ -19,6 +19,10 @@ jest.mock('../src/utils/distributedSingleflight', () => {
   };
 });
 
+jest.mock('../src/db/redisBatch', () => ({
+  redisBatchUnlink: jest.fn((client, keys) => client.unlink(...keys)),
+}));
+
 const { parseChannelKey } = require('../src/websocket/channelKeyParse');
 const { createBootstrapSubscriptionsHelpers } = require('../src/websocket/bootstrapSubscriptions');
 

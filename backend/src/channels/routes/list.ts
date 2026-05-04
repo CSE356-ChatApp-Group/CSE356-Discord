@@ -4,6 +4,7 @@
 const { query: qv } = require('express-validator');
 const { query, queryRead } = require('../../db/pool');
 const redis = require('../../db/redis');
+const { redisBatchMget } = require('../../db/redisBatch');
 const logger = require('../../utils/logger');
 const { recordEndpointListCache } = require('../../utils/endpointCacheMetrics');
 const {
@@ -109,8 +110,8 @@ router.get('/',
               const countKeys = accessibleRows.map((ch) => `channel:msg_count:${ch.id}`);
               const readKeys = accessibleRows.map((ch) => `user:last_read_count:${ch.id}:${userId}`);
               const [rawCounts, rawReads] = await Promise.all([
-                redis.mget(...countKeys),
-                redis.mget(...readKeys),
+                redisBatchMget(redis, countKeys),
+                redisBatchMget(redis, readKeys),
               ]);
 
               const missingChannels = [];

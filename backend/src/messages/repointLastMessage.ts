@@ -15,6 +15,7 @@
 
 const { query } = require('../db/pool');
 const redis = require('../db/redis');
+const { redisBatchSrem } = require('../db/redisBatch');
 const logger = require('../utils/logger');
 const {
   messageLastMessageRepointFkRetryTotal,
@@ -317,9 +318,7 @@ async function flushDirtyTargetsToDB(
   // Remove from dirty set before flushing so a crash mid-flush does not
   // re-flush stale data; the next message write will re-dirty the entry.
   try {
-    await (ids.length === 1
-      ? redis.srem(dirtySetKey, ids[0])
-      : redis.srem(dirtySetKey, ...ids));
+    await redisBatchSrem(redis, dirtySetKey, ids);
   } catch { return; }
 
   for (let i = 0; i < ids.length; i += CHANNEL_FLUSH_BATCH_SIZE) {

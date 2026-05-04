@@ -3,6 +3,7 @@
  */
 
 const redis = require('../db/redis');
+const { redisBatchUnlink } = require('../db/redisBatch');
 const { staleCacheKey } = require('../utils/distributedSingleflight');
 
 // Aligns with CHANNELS_LIST_CACHE_TTL_SECS pattern (channelRouterShared.ts). Fanout invalidates on DM activity.
@@ -24,7 +25,7 @@ async function invalidateConversationsListCaches(userIds) {
       })
   )];
   if (!keys.length) return;
-  await redis.del(...keys);
+  await redisBatchUnlink(redis, keys);
 }
 
 // In-process singleflight: prevents thundering-herd on cache expiry.
