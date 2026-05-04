@@ -18,6 +18,7 @@
 
 const logger = require('../utils/logger');
 const client = require('prom-client');
+const redis = require('../db/redis');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -39,6 +40,38 @@ const MEILI_WRITE_BATCH_SIZE = Math.max(
 const MEILI_WRITE_FLUSH_MS = Math.max(
   5,
   parseInt(process.env.MEILI_WRITE_FLUSH_MS || '50', 10) || 50,
+);
+const MEILI_WRITE_STREAM_ENABLED =
+  String(process.env.MEILI_WRITE_STREAM_ENABLED || '').toLowerCase() === 'true'
+  || process.env.MEILI_WRITE_STREAM_ENABLED === '1';
+const MEILI_WRITE_STREAM_CONSUMER_ENABLED =
+  String(process.env.MEILI_WRITE_STREAM_CONSUMER_ENABLED || '').toLowerCase() === 'true'
+  || process.env.MEILI_WRITE_STREAM_CONSUMER_ENABLED === '1';
+const MEILI_WRITE_STREAM_KEY = process.env.MEILI_WRITE_STREAM_KEY || 'meili:messages:write';
+const MEILI_WRITE_STREAM_GROUP = process.env.MEILI_WRITE_STREAM_GROUP || 'meili-indexers';
+const MEILI_WRITE_STREAM_MAXLEN = Math.max(
+  1000,
+  parseInt(process.env.MEILI_WRITE_STREAM_MAXLEN || '100000', 10) || 100000,
+);
+const MEILI_WRITE_STREAM_CONSUMER_SLOTS = Math.max(
+  1,
+  Math.min(16, parseInt(process.env.MEILI_WRITE_STREAM_CONSUMER_SLOTS || '1', 10) || 1),
+);
+const MEILI_WRITE_STREAM_READ_COUNT = Math.max(
+  1,
+  Math.min(1000, parseInt(process.env.MEILI_WRITE_STREAM_READ_COUNT || String(MEILI_WRITE_BATCH_SIZE), 10) || MEILI_WRITE_BATCH_SIZE),
+);
+const MEILI_WRITE_STREAM_BLOCK_MS = Math.max(
+  100,
+  Math.min(5000, parseInt(process.env.MEILI_WRITE_STREAM_BLOCK_MS || '1000', 10) || 1000),
+);
+const MEILI_WRITE_STREAM_LOCK_TTL_MS = Math.max(
+  5000,
+  Math.min(60000, parseInt(process.env.MEILI_WRITE_STREAM_LOCK_TTL_MS || '15000', 10) || 15000),
+);
+const MEILI_WRITE_STREAM_CLAIM_IDLE_MS = Math.max(
+  10000,
+  Math.min(600000, parseInt(process.env.MEILI_WRITE_STREAM_CLAIM_IDLE_MS || '60000', 10) || 60000),
 );
 
 function isEnabled(): boolean {
@@ -88,12 +121,33 @@ const meiliCandidateCount = new client.Histogram({
   buckets: [0, 5, 10, 25, 50, 100, 200, 500],
 });
 
+const meiliWriteStreamEnqueuedTotal = new client.Counter({
+  name: 'meili_write_stream_enqueued_total',
+  help: 'Meilisearch write operations enqueued to Redis Stream',
+  labelNames: ['op', 'result'],
+});
+
+const meiliWriteStreamConsumedTotal = new client.Counter({
+  name: 'meili_write_stream_consumed_total',
+  help: 'Meilisearch write stream operations consumed',
+  labelNames: ['op', 'result'],
+});
+
+const meiliWriteStreamBatchSize = new client.Histogram({
+  name: 'meili_write_stream_batch_size',
+  help: 'Number of Redis Stream entries handled per Meili write consumer batch',
+  buckets: [1, 5, 10, 25, 50, 100, 200, 500, 1000],
+});
+
 // ── In-process write batching ────────────────────────────────────────────────
 
 const pendingUpserts = new Map<string, MeiliMessageDoc>();
 let writeFlushTimer: NodeJS.Timeout | null = null;
 let writeFlushInFlight = false;
 let writeFlushQueued = false;
+let streamConsumerClients: any[] = [];
+let streamConsumerStopping = false;
+let streamConsumerStarted = false;
 
 function pendingWriteCount(): number {
   return pendingUpserts.size;
@@ -168,6 +222,250 @@ async function flushPendingWrites(): Promise<void> {
     writeFlushInFlight = false;
     if (pendingWriteCount() > 0) scheduleWriteFlush(true);
   }
+}
+
+function streamConsumerName(slot: number) {
+  return `meili-${process.env.HOSTNAME || 'host'}-${process.env.PORT || '0'}-${process.pid}-${slot}`;
+}
+
+function streamLockKey(slot: number) {
+  return `${MEILI_WRITE_STREAM_KEY}:consumer_lock:${slot}`;
+}
+
+function parseStreamFields(fields: string[]) {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < fields.length - 1; i += 2) {
+    out[String(fields[i])] = String(fields[i + 1]);
+  }
+  return out;
+}
+
+async function enqueueMeiliWriteStream(op: 'upsert' | 'delete', payload: Record<string, unknown>) {
+  await redis.xadd(
+    MEILI_WRITE_STREAM_KEY,
+    'MAXLEN',
+    '~',
+    String(MEILI_WRITE_STREAM_MAXLEN),
+    '*',
+    'op',
+    op,
+    'payload',
+    JSON.stringify(payload),
+  );
+  meiliWriteStreamEnqueuedTotal.inc({ op, result: 'ok' });
+}
+
+async function ensureMeiliWriteStreamGroup(clientForStream: any) {
+  try {
+    await clientForStream.xgroup(
+      'CREATE',
+      MEILI_WRITE_STREAM_KEY,
+      MEILI_WRITE_STREAM_GROUP,
+      '0',
+      'MKSTREAM',
+    );
+  } catch (err: any) {
+    if (!String(err?.message || '').includes('BUSYGROUP')) throw err;
+  }
+}
+
+async function processMeiliWriteStreamMessages(
+  clientForStream: any,
+  entries: Array<[string, string[]]>,
+) {
+  if (!entries.length) return;
+
+  const latestByMessageId = new Map<string, { op: 'upsert' | 'delete'; doc?: MeiliMessageDoc }>();
+  const ackIds: string[] = [];
+
+  for (const [entryId, fields] of entries) {
+    const parsed = parseStreamFields(fields);
+    const op = parsed.op === 'delete' ? 'delete' : parsed.op === 'upsert' ? 'upsert' : null;
+    if (!op) {
+      ackIds.push(entryId);
+      meiliWriteStreamConsumedTotal.inc({ op: 'unknown', result: 'invalid' });
+      continue;
+    }
+    let payload: any = null;
+    try {
+      payload = JSON.parse(parsed.payload || '{}');
+    } catch {
+      ackIds.push(entryId);
+      meiliWriteStreamConsumedTotal.inc({ op, result: 'invalid' });
+      continue;
+    }
+
+    const messageId = String(payload.id || '');
+    if (!messageId) {
+      ackIds.push(entryId);
+      meiliWriteStreamConsumedTotal.inc({ op, result: 'invalid' });
+      continue;
+    }
+    if (op === 'delete') {
+      latestByMessageId.set(messageId, { op });
+    } else {
+      latestByMessageId.set(messageId, { op, doc: toDoc(payload) });
+    }
+    ackIds.push(entryId);
+  }
+
+  const upserts: MeiliMessageDoc[] = [];
+  const deletes: string[] = [];
+  for (const [id, item] of latestByMessageId) {
+    if (item.op === 'delete') {
+      deletes.push(id);
+    } else if (item.doc) {
+      upserts.push(item.doc);
+    }
+  }
+
+  if (upserts.length) {
+    const t0 = Date.now();
+    await batchIndexMessages(upserts);
+    meiliIndexDurationMs.observe({ op: 'index_stream' }, Date.now() - t0);
+    meiliWriteStreamConsumedTotal.inc({ op: 'upsert', result: 'ok' }, upserts.length);
+  }
+  if (deletes.length) {
+    const t0 = Date.now();
+    await batchDeleteMessages(deletes, 'delete_stream');
+    meiliIndexDurationMs.observe({ op: 'delete_stream' }, Date.now() - t0);
+    meiliWriteStreamConsumedTotal.inc({ op: 'delete', result: 'ok' }, deletes.length);
+  }
+
+  if (ackIds.length) {
+    await clientForStream.xack(MEILI_WRITE_STREAM_KEY, MEILI_WRITE_STREAM_GROUP, ...ackIds);
+    meiliWriteStreamBatchSize.observe(ackIds.length);
+  }
+}
+
+async function readMeiliWriteStreamBatch(clientForStream: any, consumerName: string) {
+  try {
+    const claimed = await clientForStream.xautoclaim(
+      MEILI_WRITE_STREAM_KEY,
+      MEILI_WRITE_STREAM_GROUP,
+      consumerName,
+      MEILI_WRITE_STREAM_CLAIM_IDLE_MS,
+      '0-0',
+      'COUNT',
+      String(MEILI_WRITE_STREAM_READ_COUNT),
+    );
+    const claimedMessages = Array.isArray(claimed?.[1]) ? claimed[1] : [];
+    if (claimedMessages.length) {
+      await processMeiliWriteStreamMessages(clientForStream, claimedMessages);
+      return;
+    }
+  } catch (err: any) {
+    if (!String(err?.message || '').includes('unknown command')) {
+      logger.warn(
+        { err: { message: err?.message } },
+        'meili: write stream pending reclaim failed',
+      );
+    }
+  }
+
+  const res = await clientForStream.xreadgroup(
+    'GROUP',
+    MEILI_WRITE_STREAM_GROUP,
+    consumerName,
+    'COUNT',
+    String(MEILI_WRITE_STREAM_READ_COUNT),
+    'BLOCK',
+    String(MEILI_WRITE_STREAM_BLOCK_MS),
+    'STREAMS',
+    MEILI_WRITE_STREAM_KEY,
+    '>',
+  );
+  if (!Array.isArray(res) || !res.length) return;
+  const first = res[0];
+  const messages = Array.isArray(first?.[1]) ? first[1] : [];
+  if (!messages.length) return;
+  await processMeiliWriteStreamMessages(clientForStream, messages);
+}
+
+async function runMeiliWriteStreamConsumerSlot(clientForStream: any, slot: number) {
+  const consumerName = streamConsumerName(slot);
+  const lockKey = streamLockKey(slot);
+  const lockValue = consumerName;
+
+  while (!streamConsumerStopping) {
+    try {
+      const acquired = await redis.set(lockKey, lockValue, 'PX', MEILI_WRITE_STREAM_LOCK_TTL_MS, 'NX');
+      if (!acquired) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1000, MEILI_WRITE_STREAM_LOCK_TTL_MS / 3)));
+        continue;
+      }
+
+      try {
+        while (!streamConsumerStopping) {
+          const current = await redis.get(lockKey).catch(() => null);
+          if (current !== lockValue) break;
+          await redis.pexpire(lockKey, MEILI_WRITE_STREAM_LOCK_TTL_MS);
+          await readMeiliWriteStreamBatch(clientForStream, consumerName);
+        }
+      } finally {
+        const current = await redis.get(lockKey).catch(() => null);
+        if (current === lockValue) await redis.del(lockKey).catch(() => {});
+      }
+    } catch (err: any) {
+      if (!streamConsumerStopping) {
+        logger.warn(
+          { err: { message: err?.message }, slot },
+          'meili: write stream consumer tick failed',
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+  }
+}
+
+function startMeiliWriteStreamConsumerIfEnabled() {
+  if (!isEnabled() || !MEILI_WRITE_STREAM_ENABLED || !MEILI_WRITE_STREAM_CONSUMER_ENABLED) return;
+  if (streamConsumerStarted) return;
+  streamConsumerStarted = true;
+  streamConsumerStopping = false;
+
+  streamConsumerClients = Array.from(
+    { length: MEILI_WRITE_STREAM_CONSUMER_SLOTS },
+    () => redis.duplicate(),
+  );
+  for (const streamConsumerClient of streamConsumerClients) {
+    streamConsumerClient.on('error', (err: any) => {
+      if (!streamConsumerStopping) logger.warn({ err }, 'meili: write stream Redis consumer error');
+    });
+  }
+
+  void (async () => {
+    try {
+      await ensureMeiliWriteStreamGroup(streamConsumerClients[0]);
+      logger.info(
+        {
+          stream: MEILI_WRITE_STREAM_KEY,
+          group: MEILI_WRITE_STREAM_GROUP,
+          slots: MEILI_WRITE_STREAM_CONSUMER_SLOTS,
+          readCount: MEILI_WRITE_STREAM_READ_COUNT,
+        },
+        'meili: write stream consumer starting',
+      );
+      for (let slot = 0; slot < MEILI_WRITE_STREAM_CONSUMER_SLOTS; slot += 1) {
+        void runMeiliWriteStreamConsumerSlot(streamConsumerClients[slot], slot);
+      }
+    } catch (err) {
+      logger.error({ err }, 'meili: write stream consumer failed to start');
+      void stopMeiliWriteStreamConsumer();
+    }
+  })();
+}
+
+async function stopMeiliWriteStreamConsumer() {
+  streamConsumerStopping = true;
+  streamConsumerStarted = false;
+  const clientsToClose = streamConsumerClients;
+  streamConsumerClients = [];
+  await Promise.allSettled(
+    clientsToClose.map((clientToClose) => (
+      clientToClose.quit().catch(() => clientToClose.disconnect())
+    )),
+  );
 }
 
 // ── Internal HTTP helper ──────────────────────────────────────────────────────
@@ -304,22 +602,70 @@ async function checkIndex(): Promise<{ ok: boolean; uid?: string; error?: string
 
 async function indexMessage(msg: MeiliMessageDoc): Promise<void> {
   if (!isEnabled()) return;
-  pendingUpserts.set(String(msg.id), toDoc(msg));
+  const doc = toDoc(msg);
+  if (MEILI_WRITE_STREAM_ENABLED) {
+    try {
+      await enqueueMeiliWriteStream('upsert', doc as unknown as Record<string, unknown>);
+      return;
+    } catch (err: any) {
+      meiliWriteStreamEnqueuedTotal.inc({ op: 'upsert', result: 'error' });
+      logger.warn(
+        { err: { message: err?.message }, messageId: doc.id },
+        'meili: stream enqueue failed; falling back to local batch',
+      );
+    }
+  }
+  pendingUpserts.set(String(doc.id), doc);
   scheduleWriteFlush();
 }
 
 async function deleteMessage(id: string): Promise<void> {
   if (!isEnabled()) return;
-  pendingUpserts.delete(String(id));
+  const messageId = String(id);
+  pendingUpserts.delete(messageId);
+  if (MEILI_WRITE_STREAM_ENABLED) {
+    try {
+      await enqueueMeiliWriteStream('delete', { id: messageId });
+      return;
+    } catch (err: any) {
+      meiliWriteStreamEnqueuedTotal.inc({ op: 'delete', result: 'error' });
+      logger.warn(
+        { err: { message: err?.message }, messageId },
+        'meili: stream delete enqueue failed; falling back to direct delete',
+      );
+    }
+  }
+  await deleteMessageNow(messageId, 'delete');
+}
+
+async function deleteMessageNow(id: string, op = 'delete'): Promise<void> {
   const t0 = Date.now();
   try {
     await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/documents/${id}`, {
       method: 'DELETE',
     });
-    meiliIndexDurationMs.observe({ op: 'delete' }, Date.now() - t0);
+    meiliIndexDurationMs.observe({ op }, Date.now() - t0);
   } catch (err: any) {
-    meiliIndexFailuresTotal.inc({ op: 'delete' });
+    meiliIndexFailuresTotal.inc({ op });
     logger.warn({ err: { message: err?.message }, messageId: id }, 'meili: deleteMessage failed');
+  }
+}
+
+async function batchDeleteMessages(ids: string[], op = 'delete'): Promise<void> {
+  if (!ids.length) return;
+  try {
+    await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/documents/delete-batch`, {
+      method: 'POST',
+      body: ids,
+      timeoutMs: Math.max(MEILI_TIMEOUT_MS, 10_000),
+    });
+  } catch (err: any) {
+    meiliIndexFailuresTotal.inc({ op }, ids.length);
+    logger.warn(
+      { err: { message: err?.message }, messageIds: ids.slice(0, 5), batchSize: ids.length },
+      'meili: batch delete failed',
+    );
+    throw err;
   }
 }
 
@@ -426,6 +772,8 @@ module.exports = {
   indexMessage,
   deleteMessage,
   batchIndexMessages,
+  startMeiliWriteStreamConsumerIfEnabled,
+  stopMeiliWriteStreamConsumer,
   searchMessageCandidates,
   incFallbackTotal,
   MEILI_INDEX_MESSAGES,

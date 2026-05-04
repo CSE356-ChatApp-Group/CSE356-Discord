@@ -25,6 +25,10 @@ const redis    = require('./db/redis');
 const { warmRedisLuaScripts } = require('./db/redisLua');
 const { startPgPoolMetrics } = require('./utils/metrics');
 const { startCapacitySnapshotHeartbeat } = require('./utils/capacitySnapshot');
+const {
+  startMeiliWriteStreamConsumerIfEnabled,
+  stopMeiliWriteStreamConsumer,
+} = require('./search/meiliClient');
 
 const PORT = process.env.PORT || 3000;
 let server;
@@ -129,6 +133,7 @@ async function shutdown(signal, err = null) {
   }
 
   stopMessageIngestConsumer();
+  await stopMeiliWriteStreamConsumer();
   stopPresenceMirrorFlushInterval();
   await Promise.allSettled([
     pool.end(),
@@ -190,6 +195,7 @@ async function start() {
   server.listen({ port: PORT, backlog: 4096 }, () => {
     logger.info({ port: PORT }, 'ChatApp API listening');
     startMessageIngestConsumerIfEnabled();
+    startMeiliWriteStreamConsumerIfEnabled();
   });
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
