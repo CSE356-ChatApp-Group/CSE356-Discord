@@ -151,6 +151,12 @@ const WS_REPLAY_ERROR_LOG_SAMPLE_RATE =
     ? Math.min(1, Math.max(0, rawReplayErrorLogSampleRate))
     : 0.1;
 
+const rawReplayCursorBucketMs = Number(process.env.WS_REPLAY_CURSOR_BUCKET_MS || '250');
+const WS_REPLAY_CURSOR_BUCKET_MS =
+  Number.isFinite(rawReplayCursorBucketMs)
+    ? Math.min(2000, Math.max(50, Math.floor(rawReplayCursorBucketMs)))
+    : 250;
+
 /** Same value as `WS_REPLAY_DB_MAX_GLOBAL` (exposed for metrics; env uses `WS_REPLAY_DB_MAX_IN_FLIGHT` or legacy `WS_MESSAGE_REPLAY_MAX_CONCURRENT`). */
 const WS_MESSAGE_REPLAY_MAX_CONCURRENT = WS_REPLAY_DB_MAX_GLOBAL;
 
@@ -175,6 +181,15 @@ function replayDedupeRedisKey(userId) {
 
 function replayCursorKey(userId, cursor) {
   return `ws:replay:${userId}:${cursor}`;
+}
+
+function replayBucketTs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return 0;
+  return Math.floor(ms / WS_REPLAY_CURSOR_BUCKET_MS) * WS_REPLAY_CURSOR_BUCKET_MS;
+}
+
+function replayCursorFingerprint(disconnectedAtMs, reconnectObservedAtMs, closeCode) {
+  return `${disconnectedAtMs}:${replayBucketTs(reconnectObservedAtMs)}:${closeCode ?? ''}`;
 }
 
 function replayDedupeFingerprint(
@@ -230,13 +245,28 @@ async function writeReplayDedupe(userId, fingerprint) {
   });
 }
 
-async function readReplayResultCache(userId, cursor) {
+async function readReplayResultCache(
+  userId,
+  cursor,
+  opts = { replayLowerBoundMs: 0, upperBoundMs: 0, replayLimit: 0, stage: 0 },
+) {
   if (isRedisReplayDedupeOperational()) {
     try {
       const raw = await redis.get(replayCursorKey(userId, cursor));
       if (!raw) return null;
       const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : null;
+      if (Array.isArray(parsed)) return parsed;
+      if (!parsed || typeof parsed !== 'object') return null;
+      if (!Array.isArray(parsed.rows)) return null;
+      const cachedUpperBoundMs = Number(parsed.upperBoundMs || 0);
+      const cachedLowerBoundMs = Number(parsed.replayLowerBoundMs || 0);
+      const cachedLimit = Number(parsed.replayLimit || 0);
+      const cachedStage = Number(parsed.stage || 0);
+      if (cachedUpperBoundMs < Number(opts.upperBoundMs || 0)) return null;
+      if (cachedLowerBoundMs !== Number(opts.replayLowerBoundMs || 0)) return null;
+      if (cachedLimit !== Number(opts.replayLimit || 0)) return null;
+      if (cachedStage !== Number(opts.stage || 0)) return null;
+      return parsed.rows;
     } catch {
       return null;
     }
@@ -247,15 +277,31 @@ async function readReplayResultCache(userId, cursor) {
     replayResultMem.delete(`${userId}:${cursor}`);
     return null;
   }
+  if (Number(ent.upperBoundMs || 0) < Number(opts.upperBoundMs || 0)) return null;
+  if (Number(ent.replayLowerBoundMs || 0) !== Number(opts.replayLowerBoundMs || 0)) return null;
+  if (Number(ent.replayLimit || 0) !== Number(opts.replayLimit || 0)) return null;
+  if (Number(ent.stage || 0) !== Number(opts.stage || 0)) return null;
   return Array.isArray(ent.rows) ? ent.rows : null;
 }
 
-async function writeReplayResultCache(userId, cursor, rows) {
+async function writeReplayResultCache(
+  userId,
+  cursor,
+  rows,
+  opts = { replayLowerBoundMs: 0, upperBoundMs: 0, replayLimit: 0, stage: 0 },
+) {
+  const payload = {
+    rows: Array.isArray(rows) ? rows : [],
+    replayLowerBoundMs: Number(opts.replayLowerBoundMs || 0),
+    upperBoundMs: Number(opts.upperBoundMs || 0),
+    replayLimit: Number(opts.replayLimit || 0),
+    stage: Number(opts.stage || 0),
+  };
   if (isRedisReplayDedupeOperational()) {
     try {
       await redis.set(
         replayCursorKey(userId, cursor),
-        JSON.stringify(Array.isArray(rows) ? rows : []),
+        JSON.stringify(payload),
         'EX',
         WS_REPLAY_DEDUP_TTL_SEC,
       );
@@ -265,7 +311,11 @@ async function writeReplayResultCache(userId, cursor, rows) {
     }
   }
   replayResultMem.set(`${userId}:${cursor}`, {
-    rows: Array.isArray(rows) ? rows : [],
+    rows: payload.rows,
+    replayLowerBoundMs: payload.replayLowerBoundMs,
+    upperBoundMs: payload.upperBoundMs,
+    replayLimit: payload.replayLimit,
+    stage: payload.stage,
     expiresAt: Date.now() + WS_REPLAY_DEDUP_TTL_SEC * 1000,
   });
 }
@@ -439,12 +489,7 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   if (lowerBoundMs <= 0 || reconnectObservedMs <= lowerBoundMs) return [];
 
   const gapMs = reconnectObservedMs - lowerBoundMs;
-  const cursor = `${lowerBoundMs}:${reconnectObservedMs}:${closeCode ?? ''}`;
-  const cachedRows = await readReplayResultCache(userId, cursor);
-  if (cachedRows) {
-    wsReplayCachedTotal.inc();
-    return cachedRows;
-  }
+  const cursor = replayCursorFingerprint(lowerBoundMs, reconnectObservedMs, closeCode);
 
   await refreshReplayDbPressureGlobalCacheIfNeeded();
   if (isReplayDbPressureDegraded()) {
@@ -487,6 +532,17 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   );
   if (upperBoundMs <= lowerBoundMs) return [];
 
+  const cachedRows = await readReplayResultCache(userId, cursor, {
+    replayLowerBoundMs,
+    upperBoundMs,
+    replayLimit: profile.limit,
+    stage: profile.stage,
+  });
+  if (cachedRows) {
+    wsReplayCachedTotal.inc();
+    return cachedRows;
+  }
+
   const fingerprint = replayDedupeFingerprint(
     lowerBoundMs,
     reconnectObservedMs,
@@ -499,12 +555,17 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
   const recentFingerprint = await readReplayDedupe(userId);
   if (recentFingerprint === fingerprint) {
     wsReplayDedupedTotal.inc();
-    const dedupedCachedRows = await readReplayResultCache(userId, cursor);
+    const dedupedCachedRows = await readReplayResultCache(userId, cursor, {
+      replayLowerBoundMs,
+      upperBoundMs,
+      replayLimit: profile.limit,
+      stage: profile.stage,
+    });
     if (dedupedCachedRows) {
       wsReplayCachedTotal.inc();
       return dedupedCachedRows;
     }
-    return [];
+    // Cache miss on dedupe fingerprint: proceed with DB to avoid false-empty replay.
   }
 
   const startedAt = Date.now();
@@ -664,7 +725,12 @@ async function loadReplayableMessagesForUser(userId, disconnectedAtMs, reconnect
     wsReplayQueryDurationMs.observe({ result: 'ok' }, Date.now() - startedAt);
     await Promise.allSettled([
       writeReplayDedupe(userId, fingerprint),
-      writeReplayResultCache(userId, cursor, rows),
+      writeReplayResultCache(userId, cursor, rows, {
+        replayLowerBoundMs,
+        upperBoundMs,
+        replayLimit: profile.limit,
+        stage: profile.stage,
+      }),
     ]);
     return rows;
   } finally {

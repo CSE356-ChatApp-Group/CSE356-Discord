@@ -73,7 +73,7 @@ const {
   setJsonCacheWithStale,
   withDistributedSingleflight,
 } = require("../utils/distributedSingleflight");
-const { query, poolStats } = require("../db/pool");
+const { query, queryRead, poolStats } = require("../db/pool");
 const logger = require("../utils/logger");
 const { isRuntimeLogCategoryEnabled } = require("../utils/runtimeLogControl");
 const presenceService = require("../presence/service");
@@ -521,6 +521,7 @@ const {
   redis,
   isRedisOperational,
   query,
+  queryRead,
   logger,
   staleCacheKey,
   getJsonCache,

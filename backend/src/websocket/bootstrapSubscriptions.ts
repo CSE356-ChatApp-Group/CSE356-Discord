@@ -2,6 +2,7 @@ function createBootstrapSubscriptionsHelpers({
   redis,
   isRedisOperational,
   query,
+  queryRead,
   logger,
   staleCacheKey,
   getJsonCache,
@@ -84,6 +85,39 @@ function createBootstrapSubscriptionsHelpers({
 
   function wsBootstrapCacheKey(userId, scope = "full") {
     return `ws:bootstrap:${userId}:${scope}`;
+  }
+
+  function shouldFallbackBootstrapReadToPrimary(err) {
+    const code = String(err?.code || "");
+    const msg = String(err?.message || "").toLowerCase();
+    return (
+      code === "READ_REPLICA_DISABLED"
+      || code === "READ_REPLICA_UNHEALTHY"
+      || code === "READ_REPLICA_ERROR"
+      || msg.includes("read replica")
+      || msg.includes("econnrefused")
+      || msg.includes("timeout")
+      || msg.includes("terminated")
+      || msg.includes("connection")
+    );
+  }
+
+  async function bootstrapListQuery(phase, text, values) {
+    if (typeof queryRead !== "function") {
+      return query(text, values);
+    }
+    try {
+      return await queryRead({ text, values });
+    } catch (err) {
+      if (!shouldFallbackBootstrapReadToPrimary(err)) {
+        throw err;
+      }
+      logger.warn(
+        { err, phase },
+        "WS bootstrap list query falling back to primary after replica read error",
+      );
+      return query(text, values);
+    }
   }
 
   async function invalidateWsBootstrapCache(userId) {
@@ -174,7 +208,8 @@ function createBootstrapSubscriptionsHelpers({
         const [conversationRes, communityRes, channelRes] = await Promise.all([
           scope === "user_only"
             ? Promise.resolve({ rows: [] })
-            : timedQuery("conversations", () => query(
+            : timedQuery("conversations", () => bootstrapListQuery(
+              "conversations",
               `SELECT conversation_id::text AS id
                FROM conversation_participants
                WHERE user_id = $1 AND left_at IS NULL`,
@@ -184,7 +219,8 @@ function createBootstrapSubscriptionsHelpers({
           // for message:created delivery — subscribeClient covers channel/conversation fanout.
           scope === "user_only" || scope === "messages"
             ? Promise.resolve({ rows: [] })
-            : timedQuery("communities", () => query(
+            : timedQuery("communities", () => bootstrapListQuery(
+              "communities",
               `SELECT community_id::text AS id
                FROM community_members
                WHERE user_id = $1`,
@@ -192,7 +228,8 @@ function createBootstrapSubscriptionsHelpers({
             )),
           scope === "user_only"
             ? Promise.resolve({ rows: [] })
-            : timedQuery("channels", () => query(
+            : timedQuery("channels", () => bootstrapListQuery(
+              "channels",
               `SELECT c.id::text AS id
                FROM channels c
                JOIN community_members cm
