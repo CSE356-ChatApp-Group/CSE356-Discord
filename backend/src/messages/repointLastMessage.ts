@@ -12,11 +12,10 @@
  * back to DB columns when missing.
  */
 
-
-const { query } = require('../db/pool');
-const redis = require('../db/redis');
-const { redisBatchSrem } = require('../db/redisBatch');
-const logger = require('../utils/logger');
+const { query } = require("../db/pool");
+const redis = require("../db/redis");
+const { redisBatchSrem } = require("../db/redisBatch");
+const logger = require("../utils/logger");
 const {
   messageLastMessageRepointFkRetryTotal,
   channelLastMessageUpdateDeferredTotal,
@@ -26,51 +25,52 @@ const {
   lastMessagePgReconcileTotal,
   lastMessagePgReconcileSkippedTotal,
   lastMessageCacheTotal,
-} = require('../utils/metrics');
-const sideEffects = require('./sideEffects');
+} = require("../utils/metrics");
+const sideEffects = require("./sideEffects");
 const {
   getShouldDeferReadReceiptForInsertLockPressure,
-} = require('./messageInsertLockPressure');
+} = require("./messageInsertLockPressure");
 
 // Redis keys for deferred channel last_message pointer updates.
 // Hot path writes to Redis (loopback); a background interval batch-flushes to DB.
-const CH_LAST_MSG_KEY_PREFIX = 'ch:last_msg:';
-const CH_LAST_MSG_DIRTY_SET  = 'ch:last_msg:dirty';
+const CH_LAST_MSG_KEY_PREFIX = "ch:last_msg:";
+const CH_LAST_MSG_DIRTY_SET = "ch:last_msg:dirty";
 
 // Redis keys for deferred conversation last_message pointer updates (same pattern).
-const CONV_LAST_MSG_KEY_PREFIX = 'conv:last_msg:';
-const CONV_LAST_MSG_DIRTY_SET  = 'conv:last_msg:dirty';
+const CONV_LAST_MSG_KEY_PREFIX = "conv:last_msg:";
+const CONV_LAST_MSG_DIRTY_SET = "conv:last_msg:dirty";
 
 const LAST_MESSAGE_REDIS_TTL_SECS = (() => {
-  const raw = parseInt(process.env.LAST_MESSAGE_REDIS_TTL_SECS || '43200', 10);
+  const raw = parseInt(process.env.LAST_MESSAGE_REDIS_TTL_SECS || "43200", 10);
   if (!Number.isFinite(raw) || raw < 300) return 43_200;
   return Math.min(86_400 * 30, raw);
 })();
 
 const CHANNEL_FLUSH_INTERVAL_MS = parseInt(
-  process.env.CHANNEL_LAST_MSG_FLUSH_INTERVAL_MS || '10000', 10
+  process.env.CHANNEL_LAST_MSG_FLUSH_INTERVAL_MS || "10000",
+  10,
 );
 const CHANNEL_FLUSH_BATCH_SIZE = 50;
 
 /** Primary env wins when both primary and legacy are set (including `primary=` empty). */
 function parseBoolEnv(primary: string, legacyAlias?: string): boolean {
   if (process.env[primary] !== undefined) {
-    return String(process.env[primary]).toLowerCase() === 'true';
+    return String(process.env[primary]).toLowerCase() === "true";
   }
   if (legacyAlias !== undefined && process.env[legacyAlias] !== undefined) {
-    return String(process.env[legacyAlias]).toLowerCase() === 'true';
+    return String(process.env[legacyAlias]).toLowerCase() === "true";
   }
   return false;
 }
 
 /** DB writes for channel last_message_* (flush + delete repoint). Alias matches ops naming. */
 const LAST_MESSAGE_PG_RECONCILE_ENABLED = parseBoolEnv(
-  'LAST_MESSAGE_PG_RECONCILE_ENABLED',
-  'CHANNEL_LAST_MESSAGE_PG_RECONCILE_ENABLED',
+  "LAST_MESSAGE_PG_RECONCILE_ENABLED",
+  "CHANNEL_LAST_MESSAGE_PG_RECONCILE_ENABLED",
 );
 /** DB writes for conversation last_message_* (flush + delete repoint). */
 const CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED = parseBoolEnv(
-  'CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED',
+  "CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED",
 );
 
 // SQL for background flush — no 1 ms lock_timeout, normal lock wait is fine
@@ -184,10 +184,14 @@ const CONVERSATION_REPOINT_SQL = `WITH lm AS (
      FROM lm
      WHERE conv.id = $1`;
 
-type LastMessagePayload = { messageId: string; authorId: string | null; createdAt: string | Date };
+type LastMessagePayload = {
+  messageId: string;
+  authorId: string | null;
+  createdAt: string | Date;
+};
 
 type DeferredPointerCtx = {
-  kind: 'channel' | 'conversation';
+  kind: "channel" | "conversation";
   keyPrefix: string;
   dirtySet: string;
   pending: Map<string, LastMessagePayload>;
@@ -197,23 +201,23 @@ type DeferredPointerCtx = {
 };
 
 const channelDeferredCtx: DeferredPointerCtx = {
-  kind: 'channel',
+  kind: "channel",
   keyPrefix: CH_LAST_MSG_KEY_PREFIX,
   dirtySet: CH_LAST_MSG_DIRTY_SET,
   pending: new Map(),
   queued: new Set(),
-  jobName: 'last_message.channel_pointer',
-  logLabel: 'channel',
+  jobName: "last_message.channel_pointer",
+  logLabel: "channel",
 };
 
 const conversationDeferredCtx: DeferredPointerCtx = {
-  kind: 'conversation',
+  kind: "conversation",
   keyPrefix: CONV_LAST_MSG_KEY_PREFIX,
   dirtySet: CONV_LAST_MSG_DIRTY_SET,
   pending: new Map(),
   queued: new Set(),
-  jobName: 'last_message.conversation_pointer',
-  logLabel: 'conversation',
+  jobName: "last_message.conversation_pointer",
+  logLabel: "conversation",
 };
 
 function lastMessagePointerSortValue(createdAt: string | Date) {
@@ -236,39 +240,56 @@ async function flushLastMessageToRedis(
   keyPrefix: string,
   dirtySet: string,
   id: string,
-  pending: { messageId: string; authorId: string | null; createdAt: string | Date },
+  pending: {
+    messageId: string;
+    authorId: string | null;
+    createdAt: string | Date;
+  },
   logLabel: string,
 ): Promise<boolean> {
-  const atStr = typeof pending.createdAt === 'string'
-    ? pending.createdAt
-    : (pending.createdAt as Date).toISOString();
+  const atStr =
+    typeof pending.createdAt === "string"
+      ? pending.createdAt
+      : (pending.createdAt as Date).toISOString();
   try {
     const key = `${keyPrefix}${id}`;
-    await redis.hset(
+
+    const p1 = redis.pipeline();
+    await p1.hset(
       key,
-      'msg_id',    pending.messageId,
-      'author_id', pending.authorId ?? '',
-      'at',        atStr,
+      "msg_id",
+      pending.messageId,
+      "author_id",
+      pending.authorId ?? "",
+      "at",
+      atStr,
     );
-    if (typeof redis.expire === 'function') {
+    if (typeof redis.expire === "function") {
       try {
-        await redis.expire(key, LAST_MESSAGE_REDIS_TTL_SECS);
+        await p1.expire(key, LAST_MESSAGE_REDIS_TTL_SECS);
       } catch (expireErr: any) {
-        logger.warn({ err: expireErr, id }, `${logLabel} last_message Redis expire failed`);
+        logger.warn(
+          { err: expireErr, id },
+          `${logLabel} last_message Redis expire failed`,
+        );
       }
     }
-    await redis.sadd(dirtySet, id);
-    lastMessageRedisUpdateTotal.inc({ target: logLabel, result: 'ok' });
+    await p1.sadd(dirtySet, id);
+    await p1.exec();
+    lastMessageRedisUpdateTotal.inc({ target: logLabel, result: "ok" });
     return true;
   } catch (err: any) {
     logger.warn({ err, id }, `${logLabel} last_message Redis write failed`);
-    lastMessageRedisUpdateTotal.inc({ target: logLabel, result: 'error' });
+    lastMessageRedisUpdateTotal.inc({ target: logLabel, result: "error" });
     return false;
   }
 }
 
 /** Drain coalesced pending payload(s) for one channel or conversation into Redis. */
-async function flushDeferredPointerToRedis(ctx: DeferredPointerCtx, targetId: string) {
+async function flushDeferredPointerToRedis(
+  ctx: DeferredPointerCtx,
+  targetId: string,
+) {
   while (true) {
     const pending = ctx.pending.get(targetId);
     if (!pending) return;
@@ -294,24 +315,29 @@ async function flushDirtyTargetsToDB(
   dirtySetKey: string,
   keyPrefix: string,
   sql: string,
-  target: 'channel' | 'conversation',
+  target: "channel" | "conversation",
 ) {
-  if (target === 'channel' && !LAST_MESSAGE_PG_RECONCILE_ENABLED) {
-    lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_disabled' });
+  if (target === "channel" && !LAST_MESSAGE_PG_RECONCILE_ENABLED) {
+    lastMessagePgReconcileSkippedTotal.inc({ reason: "channel_disabled" });
     return;
   }
-  if (target === 'conversation' && !CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED) {
-    lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_disabled' });
+  if (
+    target === "conversation" &&
+    !CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED
+  ) {
+    lastMessagePgReconcileSkippedTotal.inc({ reason: "conversation_disabled" });
     return;
   }
   if (getShouldDeferReadReceiptForInsertLockPressure()) {
-    lastMessagePgReconcileSkippedTotal.inc({ reason: 'insert_lock_pressure' });
+    lastMessagePgReconcileSkippedTotal.inc({ reason: "insert_lock_pressure" });
     return;
   }
   let ids: string[];
   try {
     ids = await redis.smembers(dirtySetKey);
-  } catch { return; }
+  } catch {
+    return;
+  }
 
   if (ids.length === 0) return;
 
@@ -319,7 +345,9 @@ async function flushDirtyTargetsToDB(
   // re-flush stale data; the next message write will re-dirty the entry.
   try {
     await redisBatchSrem(redis, dirtySetKey, ids);
-  } catch { return; }
+  } catch {
+    return;
+  }
 
   for (let i = 0; i < ids.length; i += CHANNEL_FLUSH_BATCH_SIZE) {
     const batch = ids.slice(i, i + CHANNEL_FLUSH_BATCH_SIZE);
@@ -328,7 +356,9 @@ async function flushDirtyTargetsToDB(
     let results: [Error | null, Record<string, string>][];
     try {
       results = await pipeline.exec();
-    } catch { continue; }
+    } catch {
+      continue;
+    }
 
     const targetIds: string[] = [];
     const messageIds: string[] = [];
@@ -342,22 +372,33 @@ async function flushDirtyTargetsToDB(
       targetIds.push(id);
       messageIds.push(data.msg_id);
       // authorId stored as '' for null (system messages); restore null.
-      authorIds.push(data.author_id === '' ? null : data.author_id);
+      authorIds.push(data.author_id === "" ? null : data.author_id);
       timestamps.push(data.at);
     }
     if (!targetIds.length) continue;
 
     try {
       const batchSql =
-        target === 'channel'
+        target === "channel"
           ? CHANNEL_LAST_MESSAGE_FLUSH_BATCH_SQL
           : CONVERSATION_LAST_MESSAGE_FLUSH_BATCH_SQL;
-      const updated = await query(batchSql, [targetIds, messageIds, authorIds, timestamps]);
+      const updated = await query(batchSql, [
+        targetIds,
+        messageIds,
+        authorIds,
+        timestamps,
+      ]);
       channelLastMessageUpdateFlushedTotal.inc({ target }, targetIds.length);
-      lastMessagePgReconcileTotal.inc({ target, result: 'ok' }, updated.rowCount || 0);
+      lastMessagePgReconcileTotal.inc(
+        { target, result: "ok" },
+        updated.rowCount || 0,
+      );
     } catch (qErr: any) {
       channelLastMessageUpdateFailedTotal.inc({ target }, targetIds.length);
-      lastMessagePgReconcileTotal.inc({ target, result: 'error' }, targetIds.length);
+      lastMessagePgReconcileTotal.inc(
+        { target, result: "error" },
+        targetIds.length,
+      );
       logger.debug(
         { err: qErr, target, batchSize: targetIds.length },
         `${target} last_msg bg flush batch query failed`,
@@ -369,11 +410,11 @@ async function flushDirtyTargetsToDB(
           query(sql, [messageIds[k], authorIds[k], timestamps[k], targetIds[k]])
             .then(() => {
               channelLastMessageUpdateFlushedTotal.inc({ target });
-              lastMessagePgReconcileTotal.inc({ target, result: 'ok' });
+              lastMessagePgReconcileTotal.inc({ target, result: "ok" });
             })
             .catch((singleErr: any) => {
               channelLastMessageUpdateFailedTotal.inc({ target });
-              lastMessagePgReconcileTotal.inc({ target, result: 'error' });
+              lastMessagePgReconcileTotal.inc({ target, result: "error" });
               logger.debug(
                 { err: singleErr, target, id: targetIds[k] },
                 `${target} last_msg bg flush single fallback failed`,
@@ -392,13 +433,13 @@ function startChannelLastMessageFlushInterval() {
       CH_LAST_MSG_DIRTY_SET,
       CH_LAST_MSG_KEY_PREFIX,
       CHANNEL_LAST_MESSAGE_FLUSH_SQL,
-      'channel',
+      "channel",
     );
     void flushDirtyTargetsToDB(
       CONV_LAST_MSG_DIRTY_SET,
       CONV_LAST_MSG_KEY_PREFIX,
       CONVERSATION_LAST_MESSAGE_FLUSH_SQL,
-      'conversation',
+      "conversation",
     );
   }, CHANNEL_FLUSH_INTERVAL_MS).unref();
 }
@@ -426,7 +467,11 @@ function scheduleDeferredPointerUpdate(
     } finally {
       ctx.queued.delete(targetId);
       if (ctx.pending.has(targetId)) {
-        scheduleDeferredPointerUpdate(ctx, targetId, ctx.pending.get(targetId)!);
+        scheduleDeferredPointerUpdate(
+          ctx,
+          targetId,
+          ctx.pending.get(targetId)!,
+        );
       }
     }
   });
@@ -441,14 +486,24 @@ function scheduleChannelLastMessagePointerUpdate(
 
 function scheduleConversationLastMessagePointerUpdate(
   conversationId: string,
-  payload: { messageId: string; authorId: string | null; createdAt: string | Date },
+  payload: {
+    messageId: string;
+    authorId: string | null;
+    createdAt: string | Date;
+  },
 ) {
-  return scheduleDeferredPointerUpdate(conversationDeferredCtx, conversationId, payload);
+  return scheduleDeferredPointerUpdate(
+    conversationDeferredCtx,
+    conversationId,
+    payload,
+  );
 }
 
 async function repointChannelLastMessage(channelId: string) {
   if (!LAST_MESSAGE_PG_RECONCILE_ENABLED) {
-    lastMessagePgReconcileSkippedTotal.inc({ reason: 'channel_repoint_disabled' });
+    lastMessagePgReconcileSkippedTotal.inc({
+      reason: "channel_repoint_disabled",
+    });
     return;
   }
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -459,19 +514,19 @@ async function repointChannelLastMessage(channelId: string) {
       }
       return;
     } catch (err: any) {
-      if (err?.code !== '23503') throw err;
-      messageLastMessageRepointFkRetryTotal.inc({ scope: 'channel' });
+      if (err?.code !== "23503") throw err;
+      messageLastMessageRepointFkRetryTotal.inc({ scope: "channel" });
       if (attempt >= 3) {
         logger.warn(
           { channelId, attempt, detail: err.detail },
-          'repointChannelLastMessage: FK persists after retries; nulling last_message (delete already committed)',
+          "repointChannelLastMessage: FK persists after retries; nulling last_message (delete already committed)",
         );
         await clearChannelLastMessagePointers(channelId);
         return;
       }
       logger.warn(
         { channelId, attempt, detail: err.detail },
-        'repointChannelLastMessage: FK race, clearing last_message pointers and retrying',
+        "repointChannelLastMessage: FK race, clearing last_message pointers and retrying",
       );
       await clearChannelLastMessagePointers(channelId);
     }
@@ -480,30 +535,34 @@ async function repointChannelLastMessage(channelId: string) {
 
 async function repointConversationLastMessage(conversationId: string) {
   if (!CONVERSATION_LAST_MESSAGE_PG_RECONCILE_ENABLED) {
-    lastMessagePgReconcileSkippedTotal.inc({ reason: 'conversation_repoint_disabled' });
+    lastMessagePgReconcileSkippedTotal.inc({
+      reason: "conversation_repoint_disabled",
+    });
     return;
   }
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      const { rowCount } = await query(CONVERSATION_REPOINT_SQL, [conversationId]);
+      const { rowCount } = await query(CONVERSATION_REPOINT_SQL, [
+        conversationId,
+      ]);
       if (!rowCount) {
         await clearConversationLastMessagePointers(conversationId);
       }
       return;
     } catch (err: any) {
-      if (err?.code !== '23503') throw err;
-      messageLastMessageRepointFkRetryTotal.inc({ scope: 'conversation' });
+      if (err?.code !== "23503") throw err;
+      messageLastMessageRepointFkRetryTotal.inc({ scope: "conversation" });
       if (attempt >= 3) {
         logger.warn(
           { conversationId, attempt, detail: err.detail },
-          'repointConversationLastMessage: FK persists after retries; nulling last_message (delete already committed)',
+          "repointConversationLastMessage: FK persists after retries; nulling last_message (delete already committed)",
         );
         await clearConversationLastMessagePointers(conversationId);
         return;
       }
       logger.warn(
         { conversationId, attempt, detail: err.detail },
-        'repointConversationLastMessage: FK race, clearing last_message pointers and retrying',
+        "repointConversationLastMessage: FK race, clearing last_message pointers and retrying",
       );
       await clearConversationLastMessagePointers(conversationId);
     }
@@ -516,13 +575,13 @@ async function flushDirtyLastMessagePointers() {
       CH_LAST_MSG_DIRTY_SET,
       CH_LAST_MSG_KEY_PREFIX,
       CHANNEL_LAST_MESSAGE_FLUSH_SQL,
-      'channel',
+      "channel",
     ),
     flushDirtyTargetsToDB(
       CONV_LAST_MSG_DIRTY_SET,
       CONV_LAST_MSG_KEY_PREFIX,
       CONVERSATION_LAST_MESSAGE_FLUSH_SQL,
-      'conversation',
+      "conversation",
     ),
   ]);
 }
@@ -533,7 +592,10 @@ type LastMessageMeta = {
   at?: string;
 };
 
-type LastMessageMetaMetricTarget = 'channel' | 'community_channel' | 'conversation';
+type LastMessageMetaMetricTarget =
+  | "channel"
+  | "community_channel"
+  | "conversation";
 
 async function getLastMessageMetaMapFromRedis(
   entityIds: string[],
@@ -542,7 +604,9 @@ async function getLastMessageMetaMapFromRedis(
 ) {
   const out = new Map<string, LastMessageMeta>();
   if (!Array.isArray(entityIds) || entityIds.length === 0) return out;
-  const ids = [...new Set(entityIds.filter((id) => typeof id === 'string' && id))];
+  const ids = [
+    ...new Set(entityIds.filter((id) => typeof id === "string" && id)),
+  ];
   if (ids.length === 0) return out;
   try {
     const pipeline = redis.pipeline();
@@ -551,15 +615,18 @@ async function getLastMessageMetaMapFromRedis(
     for (let i = 0; i < ids.length; i += 1) {
       const [err, data] = results[i] || [];
       if (err || !data || !data.msg_id) {
-        lastMessageCacheTotal.inc({ target: metricTarget, result: err ? 'error' : 'miss' });
+        lastMessageCacheTotal.inc({
+          target: metricTarget,
+          result: err ? "error" : "miss",
+        });
         continue;
       }
       out.set(ids[i], data as LastMessageMeta);
-      lastMessageCacheTotal.inc({ target: metricTarget, result: 'hit' });
+      lastMessageCacheTotal.inc({ target: metricTarget, result: "hit" });
     }
   } catch {
     for (const _id of ids) {
-      lastMessageCacheTotal.inc({ target: metricTarget, result: 'error' });
+      lastMessageCacheTotal.inc({ target: metricTarget, result: "error" });
     }
   }
   return out;
@@ -567,13 +634,23 @@ async function getLastMessageMetaMapFromRedis(
 
 async function getChannelLastMessageMetaMapFromRedis(
   channelIds: string[],
-  target: 'channel' | 'community_channel' = 'channel',
+  target: "channel" | "community_channel" = "channel",
 ) {
-  return getLastMessageMetaMapFromRedis(channelIds, CH_LAST_MSG_KEY_PREFIX, target);
+  return getLastMessageMetaMapFromRedis(
+    channelIds,
+    CH_LAST_MSG_KEY_PREFIX,
+    target,
+  );
 }
 
-async function getConversationLastMessageMetaMapFromRedis(conversationIds: string[]) {
-  return getLastMessageMetaMapFromRedis(conversationIds, CONV_LAST_MSG_KEY_PREFIX, 'conversation');
+async function getConversationLastMessageMetaMapFromRedis(
+  conversationIds: string[],
+) {
+  return getLastMessageMetaMapFromRedis(
+    conversationIds,
+    CONV_LAST_MSG_KEY_PREFIX,
+    "conversation",
+  );
 }
 
 module.exports = {
