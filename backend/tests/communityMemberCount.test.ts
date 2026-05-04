@@ -214,6 +214,31 @@ describe("incrCommunityMemberCount", () => {
       { result: "error" },
     );
   });
+
+  it("retries pending delta after a failed flush", async () => {
+    const failingPipeline = makePipeline();
+    failingPipeline.exec.mockRejectedValue(new Error("transient redis error"));
+    const successPipeline = makePipeline([
+      [null, 1],
+      [null, 1],
+    ]);
+    redisMock.pipeline
+      .mockReturnValueOnce(failingPipeline)
+      .mockReturnValueOnce(successPipeline);
+
+    await incrCommunityMemberCount("c-1");
+    jest.runOnlyPendingTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Retry timer scheduled by the failed flush
+    jest.runOnlyPendingTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(successPipeline.hincrby).toHaveBeenCalledWith("community:counts", "c-1", 1);
+    expect(successPipeline.sadd).toHaveBeenCalledWith("community:counts:dirty", "c-1");
+  });
 });
 
 // ── decrCommunityMemberCount ─────────────────────────────────────────────────────

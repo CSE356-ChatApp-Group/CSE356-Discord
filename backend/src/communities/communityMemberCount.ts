@@ -52,12 +52,20 @@ const COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE = parseInt(
 );
 const COMMUNITY_COUNT_PG_DIRECT =
   process.env.COMMUNITY_COUNT_PG_DIRECT === 'true';
-const COMMUNITY_COUNT_REDIS_BATCH_FLUSH_MS = parseInt(
+const rawCommunityCountRedisBatchFlushMs = parseInt(
   process.env.COMMUNITY_COUNT_REDIS_BATCH_FLUSH_MS || '50', 10,
 );
-const COMMUNITY_COUNT_REDIS_HMGET_CHUNK = parseInt(
+const COMMUNITY_COUNT_REDIS_BATCH_FLUSH_MS =
+  Number.isFinite(rawCommunityCountRedisBatchFlushMs) && rawCommunityCountRedisBatchFlushMs > 0
+    ? Math.min(1000, Math.max(5, rawCommunityCountRedisBatchFlushMs))
+    : 50;
+const rawCommunityCountRedisHmgetChunk = parseInt(
   process.env.COMMUNITY_COUNT_REDIS_HMGET_CHUNK || '50', 10,
 );
+const COMMUNITY_COUNT_REDIS_HMGET_CHUNK =
+  Number.isFinite(rawCommunityCountRedisHmgetChunk) && rawCommunityCountRedisHmgetChunk > 0
+    ? Math.min(500, Math.max(10, rawCommunityCountRedisHmgetChunk))
+    : 50;
 
 // Pending in-process deltas for the Redis batch path.
 const pendingDeltas = new Map<string, number>();
@@ -140,6 +148,11 @@ async function flushPendingDeltas(): Promise<void> {
 
     communityCountRedisUpdateTotal.inc({ result: 'ok' });
   } catch (err: any) {
+    // Re-queue failed deltas so transient Redis errors do not permanently drop updates.
+    for (const [communityId, delta] of entries) {
+      pendingDeltas.set(communityId, (pendingDeltas.get(communityId) ?? 0) + delta);
+    }
+    scheduleDeltaFlush();
     communityCountRedisUpdateTotal.inc({ result: 'error' });
     logger.warn({ err, size: entries.length }, 'communityMemberCount: Redis batch flush failed');
   }
