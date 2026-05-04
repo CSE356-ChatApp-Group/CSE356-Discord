@@ -33,13 +33,12 @@ ports = [p.strip() for p in os.environ['PORTS_CSV'].split(',') if p.strip()]
 if not ports:
     raise SystemExit('no upstream ports provided')
 
-# Keepalive tuning for performance: lower pool size + shorter lifetime force faster
-# connection rotation and more even distribution of new requests across workers.
-# This is especially important in multi-worker setups to avoid connection reuse bias.
+# Keepalive tuning for throughput: larger pools and longer reuse reduce upstream
+# TCP churn and handshake overhead during sustained high request rates.
 # Nginx has no explicit round_robin keyword; default multi-upstream scheduling is round-robin.
-keepalive = '''  keepalive 16;
-  keepalive_requests 100;
-  keepalive_timeout 10s;
+keepalive = '''  keepalive 256;
+  keepalive_requests 10000;
+  keepalive_timeout 75s;
 '''
 if len(ports) == 1:
     servers = f'  server localhost:{ports[0]} max_fails=0;\\n'

@@ -58,9 +58,9 @@ deploy_prod_run_nginx_cutover_and_worker_roll() {
 import os, re
 cfg_path = os.environ['TMP_SITE']
 newp = os.environ['NEW_PORT']
-keepalive = '''  keepalive 16;
-  keepalive_requests 100;
-  keepalive_timeout 10s;
+keepalive = '''  keepalive 256;
+  keepalive_requests 10000;
+  keepalive_timeout 75s;
 '''
 block = (
     'upstream app {\\n'
@@ -213,9 +213,9 @@ PY
 import os, re
 cfg_path = os.environ['TMP_SITE']
 newp = os.environ['NEW_PORT']
-keepalive = '''  keepalive 16;
-  keepalive_requests 100;
-  keepalive_timeout 10s;
+keepalive = '''  keepalive 256;
+  keepalive_requests 10000;
+  keepalive_timeout 75s;
 '''
 block = (
     'upstream app {\\n'
