@@ -3,6 +3,7 @@ import request from 'supertest';
 
 jest.mock('../src/db/pool', () => ({
   query: jest.fn(),
+  queryRead: jest.fn(),
   getClient: jest.fn(),
 }));
 
@@ -66,6 +67,7 @@ jest.mock('../src/utils/logger', () => ({
 
 const pool = require('../src/db/pool') as {
   query: jest.Mock;
+  queryRead: jest.Mock;
 };
 const redis = require('../src/db/redis') as {
   get: jest.Mock;
@@ -91,8 +93,8 @@ describe('conversation list/read consistency', () => {
     redis.eval.mockResolvedValue(1);
   });
 
-  it('reads the conversation list from primary on cache miss', async () => {
-    pool.query.mockResolvedValueOnce({
+  it('reads the conversation list from replica on cache miss', async () => {
+    pool.queryRead.mockResolvedValueOnce({
       rows: [{
         id: 'conv-1',
         name: null,
@@ -115,13 +117,14 @@ describe('conversation list/read consistency', () => {
     const res = await request(app).get('/api/v1/conversations');
 
     expect(res.status).toBe(200);
-    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(pool.queryRead).toHaveBeenCalledTimes(1);
+    expect(pool.query).not.toHaveBeenCalled();
     expect(res.body.conversations).toHaveLength(1);
     expect(res.body.conversations[0].id).toBe('conv-1');
   });
 
-  it('reads a single conversation from primary', async () => {
-    pool.query.mockResolvedValueOnce({
+  it('reads a single conversation from replica', async () => {
+    pool.queryRead.mockResolvedValueOnce({
       rows: [{
         id: 'conv-2',
         name: 'Group',
@@ -140,7 +143,8 @@ describe('conversation list/read consistency', () => {
     const res = await request(app).get('/api/v1/conversations/conv-2');
 
     expect(res.status).toBe(200);
-    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(pool.queryRead).toHaveBeenCalledTimes(1);
+    expect(pool.query).not.toHaveBeenCalled();
     expect(res.body.conversation.id).toBe('conv-2');
   });
 });

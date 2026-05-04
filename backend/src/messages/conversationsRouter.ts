@@ -9,7 +9,7 @@
 
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
-const { query, getClient } = require('../db/pool');
+const { query, queryRead, getClient } = require('../db/pool');
 const redis            = require('../db/redis');
 const { authenticate } = require('../middleware/authenticate');
 const presenceService  = require('../presence/service');
@@ -89,18 +89,26 @@ router.get('/', async (req, res, next) => {
     readFresh: async () => getJsonCache(redis, cacheKey),
     readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
     load: async () => {
-      const { rows } = await query(
-        `SELECT ${CONVERSATION_LIST_FIELDS},
+      const { rows } = await queryRead(
+        `WITH my_convos AS (
+         SELECT cp.conversation_id,
+                COALESCE(c.last_message_at, c.updated_at) AS sort_key
+         FROM   conversation_participants cp
+         JOIN   conversations c ON c.id = cp.conversation_id
+         WHERE  cp.user_id = $1
+           AND  cp.left_at IS NULL
+         ORDER  BY COALESCE(c.last_message_at, c.updated_at) DESC
+         LIMIT  200
+       )
+       SELECT ${CONVERSATION_LIST_FIELDS},
               my_rs.last_read_message_id AS my_last_read_message_id,
               my_rs.last_read_at AS my_last_read_at,
               latest_other_rs.last_read_message_id AS other_last_read_message_id,
               latest_other_rs.last_read_at AS other_last_read_at,
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name,'avatarUrl',u.avatar_url))
                 AS participants
-       FROM   conversations c
-       JOIN   conversation_participants cp ON cp.conversation_id = c.id
-                                           AND cp.user_id = $1
-                                           AND cp.left_at IS NULL
+       FROM   my_convos mc
+       JOIN   conversations c ON c.id = mc.conversation_id
        JOIN   conversation_participants cp2 ON cp2.conversation_id = c.id
                                             AND cp2.left_at IS NULL
        JOIN   users u ON u.id = cp2.user_id
@@ -123,9 +131,10 @@ router.get('/', async (req, res, next) => {
          LIMIT 1
        ) latest_other_rs ON TRUE
        GROUP  BY c.id, my_rs.last_read_message_id, my_rs.last_read_at,
-                 latest_other_rs.last_read_message_id, latest_other_rs.last_read_at
+                 latest_other_rs.last_read_message_id, latest_other_rs.last_read_at,
+                 mc.sort_key
       HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
-       ORDER  BY COALESCE(c.last_message_at, c.updated_at) DESC`,
+       ORDER  BY mc.sort_key DESC`,
         [req.user.id]
       );
       const latestByConversation = await getConversationLastMessageMetaMapFromRedis(
@@ -273,7 +282,7 @@ router.post('/',
 // ── Get single ─────────────────────────────────────────────────────────────────
 router.get('/:id', async (req, res, next) => {
   try {
-    const { rows } = await query(
+    const { rows } = await queryRead(
       `SELECT ${CONVERSATION_FIELDS},
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name))
                 AS participants
