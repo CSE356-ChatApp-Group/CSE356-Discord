@@ -27,6 +27,8 @@ function createBootstrapSubscriptionsHelpers({
   wsBootstrapDbQueryDurationMs = null,
   wsBootstrapHydrationStepDurationMs = null,
   bootstrapHydrationScheduler = null,
+  wsBootstrapReplicaReadTotal = null,
+  wsBootstrapReplicaFallbackTotal = null,
   WS_BOOTSTRAP_INGRESS_TTL_SECONDS,
   WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
   WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
@@ -107,11 +109,14 @@ function createBootstrapSubscriptionsHelpers({
       return query(text, values);
     }
     try {
-      return await queryRead({ text, values });
+      const result = await queryRead({ text, values });
+      if (wsBootstrapReplicaReadTotal) wsBootstrapReplicaReadTotal.inc({ phase });
+      return result;
     } catch (err) {
       if (!shouldFallbackBootstrapReadToPrimary(err)) {
         throw err;
       }
+      if (wsBootstrapReplicaFallbackTotal) wsBootstrapReplicaFallbackTotal.inc({ phase });
       logger.warn(
         { err, phase },
         "WS bootstrap list query falling back to primary after replica read error",

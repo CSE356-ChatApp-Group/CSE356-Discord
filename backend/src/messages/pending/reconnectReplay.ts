@@ -9,6 +9,7 @@ const {
   wsReplayFailOpenTotal,
   wsReplayDedupedTotal,
   wsReplayCachedTotal,
+  wsReplayCacheMetadataMismatchTotal,
   wsReplayDbQueryTotal,
   wsReplayStartedTotal,
   wsReplayErrorClassTotal,
@@ -262,10 +263,22 @@ async function readReplayResultCache(
       const cachedLowerBoundMs = Number(parsed.replayLowerBoundMs || 0);
       const cachedLimit = Number(parsed.replayLimit || 0);
       const cachedStage = Number(parsed.stage || 0);
-      if (cachedUpperBoundMs < Number(opts.upperBoundMs || 0)) return null;
-      if (cachedLowerBoundMs !== Number(opts.replayLowerBoundMs || 0)) return null;
-      if (cachedLimit !== Number(opts.replayLimit || 0)) return null;
-      if (cachedStage !== Number(opts.stage || 0)) return null;
+      if (cachedUpperBoundMs < Number(opts.upperBoundMs || 0)) {
+        wsReplayCacheMetadataMismatchTotal.inc({ reason: 'upper_bound' });
+        return null;
+      }
+      if (cachedLowerBoundMs !== Number(opts.replayLowerBoundMs || 0)) {
+        wsReplayCacheMetadataMismatchTotal.inc({ reason: 'lower_bound' });
+        return null;
+      }
+      if (cachedLimit !== Number(opts.replayLimit || 0)) {
+        wsReplayCacheMetadataMismatchTotal.inc({ reason: 'limit' });
+        return null;
+      }
+      if (cachedStage !== Number(opts.stage || 0)) {
+        wsReplayCacheMetadataMismatchTotal.inc({ reason: 'stage' });
+        return null;
+      }
       return parsed.rows;
     } catch {
       return null;
@@ -277,10 +290,22 @@ async function readReplayResultCache(
     replayResultMem.delete(`${userId}:${cursor}`);
     return null;
   }
-  if (Number(ent.upperBoundMs || 0) < Number(opts.upperBoundMs || 0)) return null;
-  if (Number(ent.replayLowerBoundMs || 0) !== Number(opts.replayLowerBoundMs || 0)) return null;
-  if (Number(ent.replayLimit || 0) !== Number(opts.replayLimit || 0)) return null;
-  if (Number(ent.stage || 0) !== Number(opts.stage || 0)) return null;
+  if (Number(ent.upperBoundMs || 0) < Number(opts.upperBoundMs || 0)) {
+    wsReplayCacheMetadataMismatchTotal.inc({ reason: 'upper_bound' });
+    return null;
+  }
+  if (Number(ent.replayLowerBoundMs || 0) !== Number(opts.replayLowerBoundMs || 0)) {
+    wsReplayCacheMetadataMismatchTotal.inc({ reason: 'lower_bound' });
+    return null;
+  }
+  if (Number(ent.replayLimit || 0) !== Number(opts.replayLimit || 0)) {
+    wsReplayCacheMetadataMismatchTotal.inc({ reason: 'limit' });
+    return null;
+  }
+  if (Number(ent.stage || 0) !== Number(opts.stage || 0)) {
+    wsReplayCacheMetadataMismatchTotal.inc({ reason: 'stage' });
+    return null;
+  }
   return Array.isArray(ent.rows) ? ent.rows : null;
 }
 

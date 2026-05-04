@@ -172,6 +172,13 @@ const wsReplayCachedTotal = new client.Counter({
   help: 'WS reconnect replay served from short-TTL cache by user+cursor before DB',
 });
 
+/** Cache entry existed but metadata (bounds/limit/stage) didn't match the current replay request. */
+const wsReplayCacheMetadataMismatchTotal = new client.Counter({
+  name: 'ws_replay_cache_metadata_mismatch_total',
+  help: 'Replay cache entry found but discarded due to metadata mismatch (bounds, limit, or stage changed)',
+  labelNames: ['reason'],
+});
+
 /** Reconnect replay Postgres round-trips actually started (after dedupe admission). */
 const wsReplayDbQueryTotal = new client.Counter({
   name: 'ws_replay_db_query_total',
@@ -528,6 +535,20 @@ const wsBootstrapPausedForLiveFanoutTotal = new client.Counter({
   help: 'Bootstrap hydration yielded because live fanout work was pending',
 });
 
+/** Bootstrap list DB query served from replica (no fallback needed). */
+const wsBootstrapReplicaReadTotal = new client.Counter({
+  name: 'ws_bootstrap_replica_read_total',
+  help: 'WS bootstrap list DB query completed successfully via read replica',
+  labelNames: ['phase'],
+});
+
+/** Bootstrap list DB query fell back to primary after a replica error. */
+const wsBootstrapReplicaFallbackTotal = new client.Counter({
+  name: 'ws_bootstrap_replica_fallback_total',
+  help: 'WS bootstrap list DB query fell back to primary after read replica error',
+  labelNames: ['phase'],
+});
+
 // ── Bootstrap DB hydration cost metrics ───────────────────────────────────────
 
 /** Per-phase timing for each DB query within a bootstrap channel-list cache-miss load. */
@@ -777,6 +798,7 @@ module.exports = {
   wsReconnectGapMs,
   wsReplayDedupedTotal,
   wsReplayCachedTotal,
+  wsReplayCacheMetadataMismatchTotal,
   wsReplayDbQueryTotal,
   wsReplayQueryTotal,
   wsReplayErrorClassTotal,
@@ -826,6 +848,8 @@ module.exports = {
   wsBootstrapChannelListCacheTotal,
   wsLiveFanoutStarvationGuardTotal,
   wsBootstrapPausedForLiveFanoutTotal,
+  wsBootstrapReplicaReadTotal,
+  wsBootstrapReplicaFallbackTotal,
   wsBootstrapDbQueryDurationMs,
   wsBootstrapHydrationStepDurationMs,
   wsRecipientDedupeTotal,
