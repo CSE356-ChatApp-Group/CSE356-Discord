@@ -7,6 +7,7 @@ function createSubscriptionManager({
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
   markChannelRecentConnect,
+  clearChannelBootstrapPending = null,
   invalidateRecentConnectTargetsCache,
 }) {
   function subscribeCommunityClient(ws, communityId) {
@@ -71,6 +72,7 @@ function createSubscriptionManager({
       const uid = ws._userId;
       if (uid) {
         const channelId = redisChannel.slice("channel:".length);
+        clearChannelBootstrapPending?.(uid, channelId).catch(() => {});
         const skipRecentConnectSideEffects = ws._bootstrapRecentConnectChannelIds?.has(channelId);
         if (!skipRecentConnectSideEffects) {
           markChannelRecentConnect(uid, channelId)

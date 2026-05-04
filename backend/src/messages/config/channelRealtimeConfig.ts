@@ -62,5 +62,12 @@ function channelMessageUserFanoutEnabled() {
   return envBool('CHANNEL_MESSAGE_USER_FANOUT', true);
 }
 
-module.exports = { channelRealtimeConfig, channelMessageUserFanoutEnabled };
+function channelMessageSkipUserfeedPublishEnabled() {
+  return envBool('CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH', false);
+}
 
+module.exports = {
+  channelRealtimeConfig,
+  channelMessageUserFanoutEnabled,
+  channelMessageSkipUserfeedPublishEnabled,
+};

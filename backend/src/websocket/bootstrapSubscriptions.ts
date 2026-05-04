@@ -14,6 +14,7 @@ function createBootstrapSubscriptionsHelpers({
   resolvedWsRuntimeConfig,
   warmWsAclCacheFromChannelList,
   markChannelRecentConnect,
+  markChannelBootstrapPending = null,
   invalidateRecentConnectTargetsCache,
   subscribeClient,
   subscribeCommunityClient,
@@ -274,6 +275,12 @@ function createBootstrapSubscriptionsHelpers({
     ws._bootstrapRecentConnectChannelIds = new Set();
 
     const channelIds = channelTopics.map((ch) => ch.slice("channel:".length));
+    await markChannelBootstrapPending?.(userId, channelIds).catch((err) => {
+      logger.warn(
+        { err, userId, channelCount: channelIds.length },
+        "WS bootstrap pending-channel marker failed",
+      );
+    });
 
     // Per-channel precheck: pipeline ZSCORE for each channel to find which ones
     // already have a recent-enough score for this user. Channels where the score

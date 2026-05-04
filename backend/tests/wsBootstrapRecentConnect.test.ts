@@ -29,6 +29,7 @@ describe('WS bootstrap recent-connect hybrid', () => {
     markChannelRecentConnect: jest.Mock;
     invalidateRecentConnectTargetsCache: jest.Mock;
     ensureRedisChannelSubscribed?: jest.Mock;
+    clearChannelBootstrapPending?: jest.Mock;
   }) {
     const redis = {
       set: jest.fn().mockResolvedValue('OK'),
@@ -59,6 +60,7 @@ describe('WS bootstrap recent-connect hybrid', () => {
       ensureRedisChannelSubscribed,
       releaseRedisChannelSubscription: jest.fn(),
       markChannelRecentConnect: opts.markChannelRecentConnect,
+      clearChannelBootstrapPending: opts.clearChannelBootstrapPending,
       invalidateRecentConnectTargetsCache: opts.invalidateRecentConnectTargetsCache,
     });
     const { bootstrapWithRetry, subscribeBootstrapChannel } = createBootstrapSubscriptionsHelpers({
@@ -77,6 +79,7 @@ describe('WS bootstrap recent-connect hybrid', () => {
       resolvedWsRuntimeConfig: () => ({ autoSubscribeMode: 'full' }),
       warmWsAclCacheFromChannelList: jest.fn(),
       markChannelRecentConnect: opts.markChannelRecentConnect,
+      markChannelBootstrapPending: jest.fn().mockResolvedValue(undefined),
       invalidateRecentConnectTargetsCache: opts.invalidateRecentConnectTargetsCache,
       subscribeClient,
       subscribeCommunityClient: jest.fn(),
@@ -199,6 +202,7 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
   it('skips mark and invalidate when channel id is bootstrap-primed', async () => {
     const markChannelRecentConnect = jest.fn().mockResolvedValue(undefined);
     const invalidateRecentConnectTargetsCache = jest.fn().mockResolvedValue(undefined);
+    const clearChannelBootstrapPending = jest.fn().mockResolvedValue(undefined);
     const { subscribeClient } = createSubscriptionManager({
       localUserClients: new Map(),
       channelClients: new Map(),
@@ -208,6 +212,7 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
       ensureRedisChannelSubscribed: jest.fn().mockResolvedValue(undefined),
       releaseRedisChannelSubscription: jest.fn(),
       markChannelRecentConnect,
+      clearChannelBootstrapPending,
       invalidateRecentConnectTargetsCache,
     });
     const ws = {
@@ -219,6 +224,7 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
     };
     await subscribeClient(ws, 'channel:abc');
     await new Promise<void>((r) => setImmediate(r));
+    expect(clearChannelBootstrapPending).toHaveBeenCalledWith('u9', 'abc');
     expect(markChannelRecentConnect).not.toHaveBeenCalled();
     expect(invalidateRecentConnectTargetsCache).not.toHaveBeenCalled();
   });
@@ -238,9 +244,12 @@ describe('primeBootstrapChannelRecentConnect ZSCORE precheck', () => {
     channelScores?: Record<string, string | null>;
     pipelineError?: boolean;
     markChannelRecentConnect?: jest.Mock;
+    markChannelBootstrapPending?: jest.Mock;
     invalidateRecentConnectTargetsCache?: jest.Mock;
   }) {
     const markRecent = opts.markChannelRecentConnect ?? jest.fn().mockResolvedValue(undefined);
+    const markBootstrapPending =
+      opts.markChannelBootstrapPending ?? jest.fn().mockResolvedValue(undefined);
     const invalidateRecent =
       opts.invalidateRecentConnectTargetsCache ?? jest.fn().mockResolvedValue(undefined);
 
@@ -288,6 +297,7 @@ describe('primeBootstrapChannelRecentConnect ZSCORE precheck', () => {
         resolvedWsRuntimeConfig: () => ({ autoSubscribeMode: 'full' }),
         warmWsAclCacheFromChannelList: jest.fn(),
         markChannelRecentConnect: markRecent,
+        markChannelBootstrapPending: markBootstrapPending,
         invalidateRecentConnectTargetsCache: invalidateRecent,
         subscribeClient: jest.fn().mockResolvedValue(undefined),
         subscribeCommunityClient: jest.fn(),
@@ -305,16 +315,17 @@ describe('primeBootstrapChannelRecentConnect ZSCORE precheck', () => {
         WS_BOOTSTRAP_BATCH_SIZE: 96,
       });
 
-    return { markRecent, invalidateRecent, prepareBootstrapWithRetry };
+    return { markRecent, markBootstrapPending, invalidateRecent, prepareBootstrapWithRetry };
   }
 
   it('fresh connect: marks and invalidates all channels when no ZSCORE exists', async () => {
-    const { markRecent, invalidateRecent, prepareBootstrapWithRetry } = buildPrecheckHarness({
+    const { markRecent, markBootstrapPending, invalidateRecent, prepareBootstrapWithRetry } = buildPrecheckHarness({
       channels: ['channel:ch1', 'channel:ch2'],
       channelScores: {},
     });
     const ws = { readyState: 1 } as any;
     await prepareBootstrapWithRetry(ws, 'u1');
+    expect(markBootstrapPending).toHaveBeenCalledWith('u1', ['ch1', 'ch2']);
     expect(markRecent).toHaveBeenCalledTimes(2);
     expect(markRecent).toHaveBeenCalledWith('u1', 'ch1');
     expect(markRecent).toHaveBeenCalledWith('u1', 'ch2');

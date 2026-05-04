@@ -106,6 +106,8 @@ Lua scripts and batch keys — [`backend/src/messages/lib/readReceiptState.ts`](
 | `channel:<channelId>:user_fanout_targets_v` | Version key for channel user fanout targets (`accessVersionCache.ts`) |
 | `conversation:<conversationId>:fanout_targets_v` | Conversation fanout version |
 | `rc_targets:<channelId>` | Recent-connect fanout targets cache (`channelRecentConnectTargets.ts`) |
+| `channel:recent_connect:<channelId>` | Per-channel recent-connect ZSET used by `CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect` |
+| `channel:bootstrap_pending:<channelId>` | Short-lived ZSET for users whose websocket bootstrap has not yet joined `channel:<id>`; keeps the userfeed bridge only for that hydration gap when `CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH=true` |
 | `ch_compat:<uuid>:<userId>` | Legacy conversationId→channel resolution (`accessCaches.ts`) |
 
 Message-target JSON caches use scoped keys from [`backend/src/messages/accessCaches.ts`](../backend/src/messages/accessCaches.ts) and [`backend/src/utils/versionedAccessCache.ts`](../backend/src/utils/versionedAccessCache.ts).

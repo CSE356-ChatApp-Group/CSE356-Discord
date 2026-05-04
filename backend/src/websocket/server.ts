@@ -80,7 +80,12 @@ const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
 const { loadReplayableMessagesForUser } = require("../messages/pending/reconnectReplay");
 const { drainPendingMessagesForUser, enqueuePendingMessageForUsers } = require("../messages/pending/realtimePending");
-const { markWsRecentConnect, markChannelRecentConnect } = require("./recentConnect");
+const {
+  markWsRecentConnect,
+  markChannelRecentConnect,
+  markChannelBootstrapPending,
+  clearChannelBootstrapPending,
+} = require("./recentConnect");
 const { isWsReplayDisabled } = require("../utils/abuseKillSwitch");
 const { clientIpFromReq } = require("../middleware/wsUpgradeLimiter");
 const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
@@ -403,6 +408,7 @@ const {
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
   markChannelRecentConnect,
+  clearChannelBootstrapPending,
   invalidateRecentConnectTargetsCache,
 });
 const { parseChannelKey, isAllowedChannel } = createChannelAclHelpers({
@@ -535,6 +541,7 @@ const {
   resolvedWsRuntimeConfig,
   warmWsAclCacheFromChannelList,
   markChannelRecentConnect,
+  markChannelBootstrapPending,
   invalidateRecentConnectTargetsCache,
   subscribeClient,
   subscribeCommunityClient,

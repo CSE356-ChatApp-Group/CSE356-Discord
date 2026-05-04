@@ -151,6 +151,7 @@ describe('channelRealtimeFanout', () => {
     pipelineZadd = jest.fn();
     pipelineExpire = jest.fn();
     const pipelineSismember = jest.fn();
+    const pipelineZscore = jest.fn();
     pipelineExec = jest.fn(() => Promise.resolve([]));
     const pipelineObj: any = {
       del: (...args: any[]) => { pipelineDel(...args); return pipelineObj; },
@@ -158,6 +159,7 @@ describe('channelRealtimeFanout', () => {
       set: (...args: any[]) => { pipelineSet(...args); return pipelineObj; },
       zadd: (...args: any[]) => { pipelineZadd(...args); return pipelineObj; },
       expire: (...args: any[]) => { pipelineExpire(...args); return pipelineObj; },
+      zscore: (...args: any[]) => { pipelineZscore(...args); return pipelineObj; },
       sismember: (...args: any[]) => { pipelineSismember(...args); return pipelineObj; },
       exec: pipelineExec,
     };
@@ -169,6 +171,7 @@ describe('channelRealtimeFanout', () => {
       exec: jest.fn(() => Promise.resolve([])),
     });
     delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
     delete process.env.CHANNEL_RECENT_ZSET_ENABLED;
   });
 
@@ -347,6 +350,102 @@ describe('channelRealtimeFanout', () => {
     } finally {
       if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
       else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+    }
+  });
+
+  it('publishChannelMessageCreated with userfeed skip bridges only bootstrap-pending active users', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = 'true';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-bootstrap-pending-only';
+    try {
+      redis.zrangebyscore.mockResolvedValueOnce(['a', 'b']);
+      redis.call.mockResolvedValueOnce([1, 0]);
+
+      await publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-bootstrap-pending-only' },
+      });
+
+      expect(redis.zrangebyscore.mock.calls[0][0]).toBe(`channel:bootstrap_pending:${ch}`);
+      expect(redis.call).toHaveBeenCalledWith('SMISMEMBER', 'presence:connected_users', 'a', 'b');
+      expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+        ['user:a'],
+        expect.objectContaining({ event: 'message:created' }),
+        { recentTargets: ['user:a'] },
+      );
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+      ].sort());
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevSkip === undefined) delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+      else process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = prevSkip;
+    }
+  });
+
+  it('publishChannelMessageCreated with userfeed skip omits hydrated active users from userfeed bridge', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = 'true';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-no-bootstrap-pending';
+    try {
+      redis.zrangebyscore.mockResolvedValueOnce([]);
+
+      await publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-no-bootstrap-pending' },
+      });
+
+      expect(enqueuePendingMessageForUsers).not.toHaveBeenCalled();
+      expect(redis.call).not.toHaveBeenCalled();
+      expect(fanout.publish.mock.calls.map((c) => c[0])).toEqual([`channel:${ch}`]);
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevSkip === undefined) delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+      else process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = prevSkip;
+    }
+  });
+
+  it('publishChannelMessageCreated with userfeed skip fails open when bootstrap-pending filter errors', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = 'true';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-bootstrap-filter-fail-open';
+    try {
+      redis.zrangebyscore
+        .mockRejectedValueOnce(new Error('bootstrap pending zrange failed'))
+        .mockResolvedValueOnce(['a']);
+      redis.call.mockResolvedValueOnce([1]);
+
+      await publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-bootstrap-filter-fail-open' },
+      });
+
+      expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+        ['user:a'],
+        expect.objectContaining({ event: 'message:created' }),
+        { recentTargets: ['user:a'] },
+      );
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+      ].sort());
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevSkip === undefined) delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+      else process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = prevSkip;
     }
   });
 

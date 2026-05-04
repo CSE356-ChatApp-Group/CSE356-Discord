@@ -39,7 +39,7 @@ For a **pure grader-only** host, operators historically pinned:
 
 1. **`DISABLE_RATE_LIMITS=true`** — removes throttling on register, login, OAuth connect, and the optional **`POST /api/v1/rum`** limiter.
 2. **`AUTH_GLOBAL_PER_IP_RATE_LIMIT=false`** — avoids extra 429s for many bot users behind one source IP on **login**.
-3. **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`** and **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`** — keep reconnect-bridge user-topic delivery inline before **201** while avoiding all-member duplicate publish on every channel message.
+3. **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`**, **`CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH=true`**, and **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`** — keep the bootstrap/reconnect user-topic bridge inline before **201** while avoiding duplicate userfeed publishes for sockets already hydrated on `channel:<id>`.
 4. **`WS_AUTO_SUBSCRIBE_MODE=messages`**, **`USER_FEED_SHARD_COUNT=64`**, and **`WS_RECENT_CONNECT_TTL_SECONDS=300`** — generated clients that do not send explicit subscribe frames still receive `channel:`/`conversation:` delivery directly after connect.
 5. **`WS_APP_KEEPALIVE_INTERVAL_MS=8000`** — sends a tiny app-level keepalive frame on otherwise-idle sockets every 8s. This is a conservative hedge for grader/network paths that appear to churn idle WebSocket upgrades on ~30s boundaries even when control ping/pong is enabled.
 
@@ -52,7 +52,7 @@ Those settings prioritize grader throughput on trusted bot traffic while still p
 For generated clients that do not send explicit subscribe frames after `ready`, keep this as the normal operating profile:
 
 1. **`WS_AUTO_SUBSCRIBE_MODE=messages`** (direct `channel:`/`conversation:` delivery after connect)
-2. **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`** (keep duplicate fanout focused on reconnect / bootstrap recipients)
+2. **`CHANNEL_MESSAGE_USER_FANOUT_MODE=recent_connect`** plus **`CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH=true`** (keep duplicate fanout focused on reconnect / bootstrap-pending recipients)
 3. **`MESSAGE_USER_FANOUT_HTTP_BLOCKING=true`** (preserve delivery correctness before `201`)
 4. **`WS_RECENT_CONNECT_TTL_SECONDS=120-300`** (reconnect bridge window)
 5. For reconnect-heavy fleets, consider **`CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK=true`** so actively connected users still get the bridge after their per-channel recent-connect score ages out; keep **`CHANNEL_MESSAGE_RECENT_CONNECT_FALLBACK_PROBE_MAX=512`** unless large-channel audits prove you need a higher cap. Production currently pins this fallback **off** to keep active-user membership probing out of the hot send path.
@@ -197,6 +197,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST` | When `true` (default), `message:created` is published to `channel:<uuid>` before logical per-member user delivery |
 | `CHANNEL_MESSAGE_USER_FANOUT` | Master toggle for logical per-member duplicate fanout on channel posts (set **`0`/`false`/`off`** to disable). Distinct from mode below. |
 | `CHANNEL_MESSAGE_USER_FANOUT_MODE` | `all` (**code default**): duplicate `message:created` to every visible member. **`recent_connect`** limits duplicate fanout to members with a recent WebSocket session (throughput tradeoff; requires `CHANNEL_RECENT_ZSET_ENABLED`). Current staged/prod baseline pins **`recent_connect`** with `WS_AUTO_SUBSCRIBE_MODE=messages`; production keeps `CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK=false` to avoid active-user membership lookups on every channel send, while staging may keep it on for wider reconnect-bridge soak tests. |
+| `CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH` | When **`true`**, channel `message:created` skips duplicate userfeed publishes for active/recent users that have already hydrated the direct `channel:<id>` subscription. During progressive bootstrap, `bootstrapSubscriptions.ts` marks `channel:bootstrap_pending:<channelId>` before hydration and `subscribeClient` clears the marker after the socket joins `channel:<id>`, so the userfeed bridge remains active only for recipients still in that gap. Production pins **`true`** for Redis pub/sub savings; set **`false`** to restore the broader recent-connect duplicate bridge. |
 | `CHANNEL_MESSAGE_USER_FANOUT_MAX` | Max per-message logical user duplicate deliveries (default **10000**, cap **10000**). Members beyond this rely on **`channel:`** delivery only — intentional for mega-channels; clients must listen on `channel:` or accept missing user-scope delivery. |
 | `COMMUNITY_FEED_SHARD_COUNT` | Number of sharded Redis pub/sub channels used for server-side community membership delivery. Public channel messages are also published to the owning community feed so connected community members receive notifications without stale per-channel recipient caches. Default/prod **64**. |
 | `CHANNEL_USER_FANOUT_TARGETS_CACHE_TTL_SECS` | Redis TTL for cached per-channel user fanout audiences used by channel message publishes (default `180`) |

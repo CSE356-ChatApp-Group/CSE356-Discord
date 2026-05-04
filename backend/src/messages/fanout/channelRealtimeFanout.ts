@@ -15,6 +15,7 @@ const { publishCommunityFeedMessage } = require('../../websocket/communityFeed')
 const {
   channelRealtimeConfig,
   channelMessageUserFanoutEnabled,
+  channelMessageSkipUserfeedPublishEnabled,
 } = require('../config/channelRealtimeConfig');
 const { resolveChannelUserFanoutMode } = require('../../websocket/profile');
 const {
@@ -29,6 +30,7 @@ const sideEffects = require('../sideEffects');
 const { enqueuePendingMessageForUsers } = require('../pending/realtimePending');
 const {
   channelRecentConnectKey,
+  channelBootstrapPendingKey,
   channelRecentZsetEnabled,
   WS_RECENT_CONNECT_TTL_SECONDS,
 } = require('../../websocket/recentConnect');
@@ -62,7 +64,6 @@ const {
   CHANNEL_MESSAGE_RECENT_CONNECT_FALLBACK_PROBE_MAX,
   CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
   CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST,
-  CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH,
   MESSAGE_USER_FANOUT_HTTP_BLOCKING,
   CHANNEL_MESSAGE_USER_FANOUT_MAX,
 } = channelRealtimeConfig;
@@ -172,6 +173,28 @@ async function filterActiveConnectedUserTargets(targets: string[], path: string)
   }
 }
 
+async function resolveBootstrapPendingChannelUserTargets(channelId: string, cap: number) {
+  if (!channelRecentZsetEnabled()) {
+    throw new Error('channel recent ZSETs disabled; bootstrap-pending bridge unavailable');
+  }
+  const ttlSeconds = Math.max(30, Math.min(WS_RECENT_CONNECT_TTL_SECONDS, 60));
+  const since = Date.now() - ttlSeconds * 1000 - 1000;
+  const pendingUserIds = await redis.zrangebyscore(
+    channelBootstrapPendingKey(channelId),
+    since,
+    '+inf',
+  );
+  const targets = Array.from(
+    new Set(
+      (Array.isArray(pendingUserIds) ? pendingUserIds : [])
+        .filter((userId) => typeof userId === 'string' && userId.length > 0)
+        .slice(0, cap)
+        .map((userId) => `user:${userId}`),
+    ),
+  );
+  return filterActiveConnectedUserTargets(targets, 'channel_message_bootstrap_pending_subscribers');
+}
+
 async function resolveActiveConnectedChannelUserTargets(
   channelId: string,
   alreadyTargeted: Set<string>,
@@ -229,6 +252,39 @@ async function resolveActiveConnectedChannelUserTargets(
 
 async function resolveActiveChannelMessageTargets(channelId: string) {
   const startedAt = process.hrtime.bigint();
+  if (channelMessageSkipUserfeedPublishEnabled()) {
+    try {
+      const bootstrapPendingTargets = await resolveBootstrapPendingChannelUserTargets(
+        channelId,
+        CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
+      );
+      const bootstrapPendingLookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      fanoutPublishDurationMs.observe(
+        { path: 'channel_message_bootstrap_pending_subscribers', stage: 'target_lookup' },
+        bootstrapPendingLookupMs,
+      );
+      fanoutTargetCandidatesHistogram.observe(
+        { path: 'channel_message_bootstrap_pending_subscribers' },
+        bootstrapPendingTargets.length + 1,
+      );
+      return {
+        allTargets: bootstrapPendingTargets,
+        recentTargets: bootstrapPendingTargets,
+        candidateCount: bootstrapPendingTargets.length + 1,
+        cacheResult: 'miss' as const,
+        pendingEnqueueTargets: bootstrapPendingTargets,
+      };
+    } catch (err) {
+      // Fail open: if the new narrow marker path cannot answer, fall back to
+      // the previous active/recent bridge rather than risk a missed recipient.
+      wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'bootstrap_pending_lookup_failed' });
+      logger.warn(
+        { err, channelId },
+        'Failed to resolve bootstrap-pending channel fanout targets; falling back to active bridge',
+      );
+    }
+  }
+
   const recentTargets = await resolveRecentChannelUserTargets(
     channelId,
     CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
@@ -551,7 +607,7 @@ async function publishChannelMessageEvent(
     }
   }
 
-  if (inlineTargets.length > 0 && !CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH) {
+  if (inlineTargets.length > 0) {
     await publishUserTopicTargets(
       inlineTargets,
       envelope,

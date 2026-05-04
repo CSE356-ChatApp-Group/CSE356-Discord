@@ -46,6 +46,10 @@ function channelRecentConnectKey(channelId: string) {
   return `channel:recent_connect:${channelId}`;
 }
 
+function channelBootstrapPendingKey(channelId: string) {
+  return `channel:bootstrap_pending:${channelId}`;
+}
+
 async function markWsRecentConnect(userId: string) {
   const recentTtl = WS_RECENT_CONNECT_TTL_SECONDS;
   const replayTtl = WS_REPLAY_RECENT_USER_WINDOW_SECONDS;
@@ -77,6 +81,31 @@ async function markChannelRecentConnect(userId: string, channelId: string) {
     .exec();
 }
 
+async function markChannelBootstrapPending(userId: string, channelIds: string[]) {
+  if (!channelRecentZsetEnabled()) return;
+  const ids = Array.isArray(channelIds)
+    ? [...new Set(channelIds.filter((id) => typeof id === 'string' && id.length > 0))]
+    : [];
+  if (!ids.length) return;
+  const now = Date.now();
+  const ttlSeconds = Math.max(30, Math.min(WS_RECENT_CONNECT_TTL_SECONDS, 60));
+  const cutoff = now - ttlSeconds * 1000 - 1000;
+  const multi = redis.multi();
+  for (const channelId of ids) {
+    const key = channelBootstrapPendingKey(channelId);
+    multi.zremrangebyscore(key, '-inf', cutoff);
+    multi.zadd(key, now, userId);
+    multi.expire(key, ttlSeconds + 30);
+  }
+  await multi.exec();
+}
+
+async function clearChannelBootstrapPending(userId: string, channelId: string) {
+  if (!channelRecentZsetEnabled()) return;
+  if (typeof userId !== 'string' || !userId || typeof channelId !== 'string' || !channelId) return;
+  await redis.zrem(channelBootstrapPendingKey(channelId), userId);
+}
+
 module.exports = {
   WS_RECENT_CONNECT_TTL_SECONDS,
   WS_REPLAY_RECENT_USER_WINDOW_SECONDS,
@@ -84,7 +113,10 @@ module.exports = {
   wsReplayPendingEligibilityKey,
   wsPendingEligibleKey,
   channelRecentConnectKey,
+  channelBootstrapPendingKey,
   channelRecentZsetEnabled,
   markWsRecentConnect,
   markChannelRecentConnect,
+  markChannelBootstrapPending,
+  clearChannelBootstrapPending,
 };
