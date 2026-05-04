@@ -97,6 +97,8 @@ jest.mock('../src/messages/conversationsRouterRepo', () => ({
   getDirectConversationPairConversationId: jest.fn(async () => null),
   findLegacyDirectConversationId: jest.fn(async () => null),
   upsertDirectConversationPair: jest.fn(async () => undefined),
+  getCachedDmPairConversationId: jest.fn(async () => null),
+  cacheDmPairConversationId: jest.fn(async () => undefined),
 }));
 
 const { getClient } = require('../src/db/pool') as {

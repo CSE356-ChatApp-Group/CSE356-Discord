@@ -97,7 +97,7 @@ function buildFtsParts(
   const scope = buildScopedAccessParts(params, opts);
   const limit = Number(opts.limit) || 20;
   const offset = Number(opts.offset) || 0;
-  const ctes = [`search_query AS (SELECT websearch_to_tsquery('english', $1) AS q)`];
+  const ctes = [`search_query AS (SELECT websearch_to_tsquery('english', $1) AS q, numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes, websearch_to_tsquery('english', $1)::text AS tsquery_text)`];
   if (scope) ctes.push(scope.cte.trim());
 
   // Bound the scoped working set before FTS candidate evaluation work.
@@ -665,19 +665,27 @@ async function searchOnce(
       queryMsAccum += Date.now() - t;
       return result;
     };
-    const tsqueryMetaRes = await timedQuery(
-      `SELECT websearch_to_tsquery('english', $1)::text AS tsquery_text,
-              numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes`,
-      [trimmed],
-    );
-    const tsqueryText = String(tsqueryMetaRes.rows[0]?.tsquery_text ?? '');
-    const tsqueryNodes = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0);
+
+    // Compute pure-JS terms upfront (no DB needed).
     const strictTerms = tokenizeStrictSearchTerms(trimmed);
     const strictMultiWord = strictTerms.length > 1;
+
+    // Run tsquery metadata + FTS candidate query concurrently to eliminate
+    // one serial DB round-trip (~30-80ms savings on cold paths).
+    const ftsMeta = buildFtsParts(trimmed, opts);
+    const [tsqueryMetaRes, ftsRes] = await Promise.all([
+      timedQuery(
+        `SELECT websearch_to_tsquery('english', $1)::text AS tsquery_text,
+                numnode(websearch_to_tsquery('english', $1)) AS tsquery_nodes`,
+        [trimmed],
+      ),
+      timedQuery(ftsMeta.sql, ftsMeta.params),
+    ]);
+
+    const tsqueryText = String(tsqueryMetaRes.rows[0]?.tsquery_text ?? '');
+    const tsqueryNodes = Number(tsqueryMetaRes.rows[0]?.tsquery_nodes || 0);
     const weakTsquery = strictMultiWord && tsqueryNodes <= 1;
 
-    const ftsMeta = buildFtsParts(trimmed, opts);
-    const ftsRes = await timedQuery(ftsMeta.sql, ftsMeta.params);
     throwIfScopeDenied(ftsRes.rows);
 
     const ftsHits = ftsRes.rows.filter((row: any) => row && row.id);

@@ -302,6 +302,29 @@ async function upsertDirectConversationPair(client, conversationId, userLow, use
   );
 }
 
+const DM_PAIR_CACHE_TTL_SECS = 3600; // 1 hour – pairs are immutable
+
+function dmPairCacheKey(userLow, userHigh) {
+  return `dm:pair:${userLow}:${userHigh}`;
+}
+
+async function getCachedDmPairConversationId(redis, userLow, userHigh) {
+  try {
+    const cached = await redis.get(dmPairCacheKey(userLow, userHigh));
+    return cached || null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheDmPairConversationId(redis, userLow, userHigh, conversationId) {
+  try {
+    await redis.setex(dmPairCacheKey(userLow, userHigh), DM_PAIR_CACHE_TTL_SECS, conversationId);
+  } catch {
+    /* non-fatal */
+  }
+}
+
 module.exports = {
   CONVERSATION_FIELDS,
   CONVERSATION_LIST_FIELDS,
@@ -322,4 +345,6 @@ module.exports = {
   getDirectConversationPairConversationId,
   findLegacyDirectConversationId,
   upsertDirectConversationPair,
+  getCachedDmPairConversationId,
+  cacheDmPairConversationId,
 };

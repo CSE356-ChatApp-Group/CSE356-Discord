@@ -44,6 +44,8 @@ const {
   getDirectConversationPairConversationId,
   findLegacyDirectConversationId,
   upsertDirectConversationPair,
+  getCachedDmPairConversationId,
+  cacheDmPairConversationId,
 } = require('./conversationsRouterRepo');
 const {
   CONVERSATIONS_CACHE_TTL_SECS,
@@ -193,6 +195,22 @@ router.post('/',
         const [userLow, userHigh] = sortDirectPairUserIds(req.user.id, otherId);
         directPairIds = { userLow, userHigh };
         directPairMemberIds = [req.user.id, otherId].filter(Boolean);
+
+        // Fast path: check Redis cache first to skip the transaction entirely.
+        const cachedId = await getCachedDmPairConversationId(redis, userLow, userHigh);
+        if (cachedId) {
+          const existing = await loadConversationWithParticipants(client, cachedId);
+          if (existing) {
+            await client.query('ROLLBACK');
+            client.release();
+            client = null;
+            const pairIds = [req.user.id, otherId].filter(Boolean);
+            await runExistingDmSideEffects({ existingId: cachedId, pairIds });
+            return res.json({ conversation: existing, created: false });
+          }
+          // Cache stale – fall through to DB lookup.
+        }
+
         await lockDirectConversationPair(client, userLow, userHigh);
 
         let existingId = await getDirectConversationPairConversationId(client, userLow, userHigh);
@@ -205,11 +223,10 @@ router.post('/',
         }
 
         if (existingId) {
+          // Cache the pair for future fast-path lookups.
+          await cacheDmPairConversationId(redis, userLow, userHigh, existingId);
           const existing = await loadConversationWithParticipants(client, existingId);
           await client.query('COMMIT');
-          // Same realtime hints as a newly created DM: grader harnesses often hit
-          // create-or-get 1:1 with fresh WS sessions; without subscribe + cache bust,
-          // an existing thread can miss message:created on conversation:<id> until reconnect.
           const pairIds = [req.user.id, otherId].filter(Boolean);
           await runExistingDmSideEffects({ existingId, pairIds });
           return res.json({ conversation: existing, created: false });

@@ -495,9 +495,10 @@ chatapp_ssh_staging_app "
     || echo 'AUTH_PASSWORD_STORAGE_MODE=plain' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer interferes.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
+  # shellcheck disable=SC2086
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS="--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=16"/' /opt/chatapp/shared/.env \
-    || echo 'NODE_OPTIONS="--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=16"' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS="--max-old-space-size='"${NODE_OLD_SPACE_MB}"' --max-semi-space-size=16"/' /opt/chatapp/shared/.env \
+    || echo 'NODE_OPTIONS="--max-old-space-size='"${NODE_OLD_SPACE_MB}"' --max-semi-space-size=16"' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Enforce git-tracked realtime profile so deploys cannot drift.
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \
