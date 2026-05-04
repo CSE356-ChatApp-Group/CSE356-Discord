@@ -131,8 +131,7 @@ function buildStrictLiteralPredicate(
       .map((ph) => `lower(coalesce(${contentExpr}, '')) LIKE ('%' || ${ph}::text || '%')`)
       .join('\n             AND ');
   }
-  return `lower(coalesce(${contentExpr}, '')) LIKE ('%' || lower(${rawQueryPh}::text) || '%')
-             OR position(lower(${rawQueryPh}::text) in lower(coalesce(${contentExpr}, ''))) > 0`;
+  return `position(lower(${rawQueryPh}::text) in lower(coalesce(${contentExpr}, ''))) > 0`;
 }
 
 module.exports = {

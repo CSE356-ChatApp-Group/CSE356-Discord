@@ -56,6 +56,7 @@ const {
   SEARCH_USE_READ_REPLICA,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
+  ftsRecentCandidateCapDeep,
   meiliFreshnessWindowMs,
   meiliFreshnessCandidateCap,
 } = require('./searchQueryEnv');
@@ -87,7 +88,11 @@ function ftsRecentCandidateCap(limit: number, offset: number): number {
 }
 
 /** Statement + paging metadata for FTS (content_tsv GIN). */
-function buildFtsParts(q: string, opts: Record<string, any>) {
+function buildFtsParts(
+  q: string,
+  opts: Record<string, any>,
+  recentCandidatesLimitOverride?: number,
+) {
   const params: any[] = [q]; // $1 reserved for the query string
   const scope = buildScopedAccessParts(params, opts);
   const limit = Number(opts.limit) || 20;
@@ -96,7 +101,11 @@ function buildFtsParts(q: string, opts: Record<string, any>) {
   if (scope) ctes.push(scope.cte.trim());
 
   // Bound the scoped working set before FTS candidate evaluation work.
-  const recentCandidatesLimit = ftsRecentCandidateCap(limit, offset);
+  const recentCandidatesLimit =
+    Number.isFinite(recentCandidatesLimitOverride as number) &&
+    (recentCandidatesLimitOverride as number) > 0
+      ? Number(recentCandidatesLimitOverride)
+      : ftsRecentCandidateCap(limit, offset);
 
   const candidateFilters: string[] = [];
   if (opts.authorId) candidateFilters.push(`AND m0.author_id = ${p(params, opts.authorId)}`);
@@ -700,6 +709,7 @@ async function searchOnce(
         ...basePayload,
         fallback_used: false,
         fallback_hit_count: 0,
+        fts_deep_used: false,
         ...buildCommunityTraceFields(
           scopeLabel,
           communityFtsCandidateCount,
@@ -707,6 +717,63 @@ async function searchOnce(
         ),
       });
       return buildResult(strictFtsHits, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
+    }
+
+    let deepFtsUsed = false;
+    let deepFtsHitCount = 0;
+    let deepStrictFtsHitCount = 0;
+    let deepCommunityFtsCandidateCount: number | undefined;
+    let effectiveStrictFtsHits = strictFtsHits;
+
+    if (strictFtsHitCount === 0 && !weakTsquery) {
+      const deepFtsMeta = buildFtsParts(trimmed, opts, ftsRecentCandidateCapDeep());
+      const deepFtsRes = await timedQuery(deepFtsMeta.sql, deepFtsMeta.params);
+      throwIfScopeDenied(deepFtsRes.rows);
+      const deepFtsHits = deepFtsRes.rows.filter((row: any) => row && row.id);
+      const deepStrictHits = strictMultiWord
+        ? deepFtsHits.filter((row: any) => messageMatchesAllStrictTerms(row?.content, strictTerms))
+        : deepFtsHits;
+      deepFtsHitCount = deepFtsHits.length;
+      deepStrictFtsHitCount = deepStrictHits.length;
+      deepCommunityFtsCandidateCount =
+        scopeLabel === 'community'
+          ? deepFtsRes.rows.find((r: any) => r && r.fts_candidate_count != null)?.fts_candidate_count
+          : undefined;
+      deepFtsUsed = true;
+
+      if (deepStrictHits.length > 0) {
+        effectiveStrictFtsHits = deepStrictHits;
+      }
+    }
+
+    if (effectiveStrictFtsHits.length > 0 && !weakTsquery) {
+      const totalMs = Date.now() - tSearchStart;
+      const basePayload = buildBaseSearchTracePayload({
+        requestId,
+        query: trimmed,
+        scopeLabel,
+        tsqueryText,
+        tsqueryNodes,
+        ftsHitCount,
+        strictTermCount: strictTerms.length,
+        strictFtsHitCount: effectiveStrictFtsHits.length,
+        queryMs: queryMsAccum,
+        totalMs,
+      });
+      logSearchTrace({
+        ...basePayload,
+        fallback_used: false,
+        fallback_hit_count: 0,
+        fts_deep_used: deepFtsUsed,
+        deep_fts_hit_count: deepFtsHitCount,
+        deep_strict_fts_hit_count: deepStrictFtsHitCount,
+        ...buildCommunityTraceFields(
+          scopeLabel,
+          deepFtsUsed ? deepCommunityFtsCandidateCount : communityFtsCandidateCount,
+          effectiveStrictFtsHits.length,
+        ),
+      });
+      return buildResult(effectiveStrictFtsHits, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
     }
 
     const literalMeta = buildScopedLiteralParts(
@@ -719,7 +786,7 @@ async function searchOnce(
     throwIfScopeDenied(literalRes.rows);
     const fallbackHits = literalRes.rows.filter((row: any) => row && row.id);
     const combinedHits = weakTsquery || strictMultiWord
-      ? mergeSearchRowsPreferLiteral(fallbackHits, strictFtsHits, limit, offset)
+      ? mergeSearchRowsPreferLiteral(fallbackHits, effectiveStrictFtsHits, limit, offset)
       : fallbackHits;
     const totalMs = Date.now() - tSearchStart;
     const basePayload = buildBaseSearchTracePayload({
@@ -739,9 +806,12 @@ async function searchOnce(
       fallback_used: true,
       fallback_hit_count: fallbackHits.length,
       weak_tsquery: weakTsquery,
+      fts_deep_used: deepFtsUsed,
+      deep_fts_hit_count: deepFtsHitCount,
+      deep_strict_fts_hit_count: deepStrictFtsHitCount,
       ...buildCommunityTraceFields(
         scopeLabel,
-        communityFtsCandidateCount,
+        deepFtsUsed ? deepCommunityFtsCandidateCount : communityFtsCandidateCount,
         combinedHits.length,
       ),
     });

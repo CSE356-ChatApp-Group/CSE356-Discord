@@ -29,6 +29,9 @@ describe('search() – FTS zero → scoped literal', () => {
         rows: [{ __scopeAccess: true }],
       })
       .mockResolvedValueOnce({
+        rows: [{ __scopeAccess: true }],
+      })
+      .mockResolvedValueOnce({
         rows: [
           {
             __scopeAccess: true,
@@ -63,7 +66,7 @@ describe('search() – FTS zero → scoped literal', () => {
 
     expect(out.hits).toHaveLength(1);
     expect(out.hits[0].content).toContain('That makes more');
-    expect(mockQuery).toHaveBeenCalledTimes(8);
+    expect(mockQuery).toHaveBeenCalledTimes(9);
 
     const traceCall = infoSpy.mock.calls.find((c) => c[1] === 'search_trace');
     expect(traceCall).toBeDefined();
@@ -136,6 +139,68 @@ describe('search() – FTS zero → scoped literal', () => {
       fallback_used: false,
       fts_hit_count: 1,
       fallback_hit_count: 0,
+    });
+  });
+
+  it('retries FTS with deeper candidate cap before literal fallback', async () => {
+    jest.resetModules();
+    const logger = require('../src/utils/logger');
+    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
+
+    const pool = require('../src/db/pool');
+    const mockQuery = jest.fn();
+    mockQuery
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [{ tsquery_text: "'make' & 'foo'", tsquery_nodes: 2 }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ __scopeAccess: true }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            __scopeAccess: true,
+            id: '00000000-0000-4000-8000-000000000051',
+            content: 'That makes foo appear in older window',
+            authorId: '00000000-0000-4000-8000-000000000052',
+            authorDisplayName: 'E',
+            channelId: '00000000-0000-4000-8000-000000000053',
+            conversationId: null,
+            communityId: '00000000-0000-4000-8000-000000000054',
+            channelName: 'general',
+            createdAt: '2026-04-23T12:00:00.000Z',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({});
+
+    jest.spyOn(pool, 'getClientTimed').mockResolvedValue({
+      client: { query: mockQuery, release: jest.fn() },
+      acquireMs: 0,
+    });
+
+    const { search } = require('../src/search/client');
+
+    const out = await search('That makes foo', {
+      communityId: '00000000-0000-4000-8000-000000000054',
+      userId: '00000000-0000-4000-8000-000000000052',
+      limit: 10,
+      offset: 0,
+      requestId: `req-deep-fts-${uniqueSuffix()}`,
+    });
+
+    expect(out.hits).toHaveLength(1);
+    const traceCall = infoSpy.mock.calls.find((c) => c[1] === 'search_trace');
+    expect(traceCall).toBeDefined();
+    expect(traceCall![0]).toMatchObject({
+      fallback_used: false,
+      fts_deep_used: true,
+      deep_fts_hit_count: 1,
+      deep_strict_fts_hit_count: 1,
     });
   });
 

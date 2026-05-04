@@ -38,6 +38,21 @@ function literalRecentCandidateCapDeep(): number {
   return Math.min(Math.max(v, 2000), 4000);
 }
 
+/**
+ * Deeper bounded scan for FTS candidate generation when initial FTS returns
+ * no strict hits. This reduces false empties from hot-path candidate windows
+ * while still keeping the query bounded.
+ * Default 2500, clamped 1200..5000.
+ */
+function ftsRecentCandidateCapDeep(): number {
+  const raw = parseInt(
+    process.env.SEARCH_FTS_RECENT_CANDIDATES_LIMIT_DEEP || '2500',
+    10,
+  );
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 2500;
+  return Math.min(Math.max(v, 1200), 5000);
+}
+
 function getSearchStatementTimeoutMs() {
   const rawMs = process.env.SEARCH_STATEMENT_TIMEOUT_MS;
   const configuredMs = Math.min(2000, Math.max(1500, parseInt(rawMs || '2000', 10) || 2000));
@@ -80,6 +95,7 @@ module.exports = {
   SEARCH_USE_READ_REPLICA,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
+  ftsRecentCandidateCapDeep,
   getSearchStatementTimeoutMs,
   meiliFreshnessWindowMs,
   meiliFreshnessCandidateCap,
