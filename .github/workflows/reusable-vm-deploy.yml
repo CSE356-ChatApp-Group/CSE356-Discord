@@ -63,6 +63,11 @@ on:
         required: false
         default: false
         type: boolean
+      skip_prod_nginx_audit:
+        description: "Production only — skip pre/post prod nginx parity audit in workflow"
+        required: false
+        default: false
+        type: boolean
     secrets:
       DEPLOY_SSH_KEY:
         required: true
@@ -273,7 +278,7 @@ jobs:
       # Rollback deploys check out an old SHA whose prod-nginx-audit.sh may still
       # fail on benign nginx/worker drift. Always audit using origin/main's script.
       - name: Resolve prod nginx audit script from main
-        if: ${{ inputs.environment == 'production' && inputs.prod_fast_rollback != true }}
+        if: ${{ inputs.environment == 'production' && inputs.prod_fast_rollback != true && inputs.skip_prod_nginx_audit != true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -283,7 +288,7 @@ jobs:
           chmod +x .nginx-audit/prod-nginx-audit.sh
 
       - name: Audit prod nginx parity before deploy
-        if: ${{ inputs.environment == 'production' && inputs.prod_fast_rollback != true }}
+        if: ${{ inputs.environment == 'production' && inputs.prod_fast_rollback != true && inputs.skip_prod_nginx_audit != true }}
         shell: bash
         env:
           PROD_HOST: ${{ inputs.host }}
@@ -381,7 +386,7 @@ jobs:
           fi
 
       - name: Audit prod nginx parity after deploy
-        if: ${{ always() && inputs.environment == 'production' }}
+        if: ${{ always() && inputs.environment == 'production' && inputs.skip_prod_nginx_audit != true }}
         shell: bash
         env:
           PROD_HOST: ${{ inputs.host }}
