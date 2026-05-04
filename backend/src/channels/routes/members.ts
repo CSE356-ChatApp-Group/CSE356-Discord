@@ -12,6 +12,7 @@ const { invalidateWsAclCache, invalidateWsBootstrapCaches } = require('../../web
 const { staleCacheKey } = require('../../utils/distributedSingleflight');
 const { raceChannelAccess } = require('../../messages/channelAccessCache');
 const { invalidateChannelUserFanoutTargetsCache } = require('../../messages/fanout/channelRealtimeFanout');
+const { markChannelBootstrapPending } = require('../../websocket/recentConnect');
 const S = require('../channelRouterShared');
 
 module.exports = function register(router) {
@@ -142,6 +143,17 @@ router.post('/:id/members',
             channels: [`channel:${req.params.id}`],
           },
         }).catch(() => {});
+        Promise.allSettled(
+          insertedUserIds.map((userId) => markChannelBootstrapPending(userId, [req.params.id])),
+        ).then((results) => {
+          const rejected = results.find((result) => result.status === 'rejected');
+          if (rejected && rejected.status === 'rejected') {
+            logger.warn(
+              { err: rejected.reason, channelId: req.params.id, userCount: insertedUserIds.length },
+              'Failed to mark private channel invitees as pending WS subscribe targets',
+            );
+          }
+        });
         const keys = insertedUserIds.flatMap((userId) => {
           const key = `channels:list:${channel.community_id}:${userId}`;
           return [key, staleCacheKey(key)];

@@ -33,6 +33,7 @@ const {
   channelBootstrapPendingKey,
   channelRecentZsetEnabled,
   WS_RECENT_CONNECT_TTL_SECONDS,
+  CHANNEL_BOOTSTRAP_PENDING_TTL_SECONDS,
 } = require('../../websocket/recentConnect');
 const { connectedUsersKey } = require('../../websocket/presenceKeys');
 const {
@@ -177,7 +178,7 @@ async function resolveBootstrapPendingChannelUserTargets(channelId: string, cap:
   if (!channelRecentZsetEnabled()) {
     throw new Error('channel recent ZSETs disabled; bootstrap-pending bridge unavailable');
   }
-  const ttlSeconds = Math.max(30, Math.min(WS_RECENT_CONNECT_TTL_SECONDS, 60));
+  const ttlSeconds = CHANNEL_BOOTSTRAP_PENDING_TTL_SECONDS;
   const since = Date.now() - ttlSeconds * 1000 - 1000;
   const pendingUserIds = await redis.zrangebyscore(
     channelBootstrapPendingKey(channelId),

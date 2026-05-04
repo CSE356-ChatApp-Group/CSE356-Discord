@@ -71,6 +71,7 @@ const {
   warmChannelAccessCacheForUser,
   evictChannelAccessCacheForUser,
 } = require("../messages/channelAccessCache");
+const { markChannelBootstrapPending } = require("../websocket/recentConnect");
 const {
   recordEndpointListCache,
   recordEndpointListCacheBypass,
@@ -196,6 +197,12 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
     warmChannelAccessCacheForUser(redis, channelIds, req.user.id).catch(
       () => {},
     );
+    markChannelBootstrapPending(req.user.id, channelIds).catch((err) => {
+      logger.warn(
+        { err, userId: req.user.id, communityId, channelCount: channelIds.length },
+        "Failed to mark joined community channels as pending WS subscribe targets",
+      );
+    });
 
     await Promise.allSettled([
       invalidateCommunityChannelUserFanoutTargetsCache(communityId, channelIds),

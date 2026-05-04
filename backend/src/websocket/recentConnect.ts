@@ -7,6 +7,13 @@ const WS_RECENT_CONNECT_TTL_SECONDS =
     ? Math.floor(rawRecentConnectTtl)
     : 60;
 
+const defaultBootstrapPendingTtl = Math.max(30, Math.min(WS_RECENT_CONNECT_TTL_SECONDS, 60));
+const rawBootstrapPendingTtl = Number(process.env.CHANNEL_BOOTSTRAP_PENDING_TTL_SECONDS);
+const CHANNEL_BOOTSTRAP_PENDING_TTL_SECONDS =
+  Number.isFinite(rawBootstrapPendingTtl) && rawBootstrapPendingTtl >= 30 && rawBootstrapPendingTtl <= 600
+    ? Math.floor(rawBootstrapPendingTtl)
+    : defaultBootstrapPendingTtl;
+
 /** Short-lived key: user had a WebSocket session recently (pending replay enqueue filter). `0` = do not set `ws:replay_pending_eligible:*`. */
 const rawReplayRecentWin = Number(process.env.WS_REPLAY_RECENT_USER_WINDOW_SECONDS ?? '30');
 const WS_REPLAY_RECENT_USER_WINDOW_SECONDS = (() => {
@@ -88,7 +95,7 @@ async function markChannelBootstrapPending(userId: string, channelIds: string[])
     : [];
   if (!ids.length) return;
   const now = Date.now();
-  const ttlSeconds = Math.max(30, Math.min(WS_RECENT_CONNECT_TTL_SECONDS, 60));
+  const ttlSeconds = CHANNEL_BOOTSTRAP_PENDING_TTL_SECONDS;
   const cutoff = now - ttlSeconds * 1000 - 1000;
   const multi = redis.multi();
   for (const channelId of ids) {
@@ -109,6 +116,7 @@ async function clearChannelBootstrapPending(userId: string, channelId: string) {
 module.exports = {
   WS_RECENT_CONNECT_TTL_SECONDS,
   WS_REPLAY_RECENT_USER_WINDOW_SECONDS,
+  CHANNEL_BOOTSTRAP_PENDING_TTL_SECONDS,
   wsRecentConnectKey,
   wsReplayPendingEligibilityKey,
   wsPendingEligibleKey,
