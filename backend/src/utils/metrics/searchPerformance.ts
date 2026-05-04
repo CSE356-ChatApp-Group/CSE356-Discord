@@ -76,6 +76,13 @@ const searchFreshnessCacheHitsTotal = new client.Counter({
   help: 'Cache hits for Meili search freshness supplement results in Redis',
 });
 
+/** Cache misses / bypass reasons for Meili freshness candidate results in Redis. */
+const searchFreshnessCacheMissesTotal = new client.Counter({
+  name: 'search_freshness_cache_misses_total',
+  help: 'Cache misses or bypass reasons for Meili search freshness supplement results in Redis',
+  labelNames: ['reason'],
+});
+
 /** Freshness supplement queries skipped for short queries (< 3 chars). */
 const searchFreshnessSkippedShortQueryTotal = new client.Counter({
   name: 'search_freshness_skipped_short_query_total',
@@ -93,5 +100,6 @@ module.exports = {
   messageCacheBustWallDurationMs,
   searchFreshnessQueryDurationMs,
   searchFreshnessCacheHitsTotal,
+  searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
 };

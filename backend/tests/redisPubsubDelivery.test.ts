@@ -62,6 +62,10 @@ const {
   wsDedupeSendFailedTotal: { inc: jest.Mock };
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { publishUserFeedTargets } = require('../src/websocket/userFeed') as {
+  publishUserFeedTargets: jest.Mock;
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createRedisPubsubDelivery } = require('../src/websocket/redisPubsubDelivery') as {
   createRedisPubsubDelivery: (ctx: Record<string, unknown>) => {
     deliverPubsubMessage: (channel: string, message: string) => Promise<void>;
@@ -90,6 +94,8 @@ describe('redisPubsubDelivery', () => {
     wsDedupeEnqueueReservedTotal.inc.mockReset();
     wsDedupeSendConfirmedTotal.inc.mockReset();
     wsDedupeSendFailedTotal.inc.mockReset();
+    publishUserFeedTargets.mockReset();
+    publishUserFeedTargets.mockResolvedValue(undefined);
   });
 
   function createCtx(sendPayloadToSocket: jest.Mock, overrides: Record<string, unknown> = {}) {
@@ -392,5 +398,44 @@ describe('redisPubsubDelivery', () => {
     expect(unsubscribeClient).toHaveBeenCalledWith(stale, 'channel:chan-1');
     expect(sendPayloadToSocket).toHaveBeenCalledTimes(1);
     expect((sendPayloadToSocket.mock.calls as unknown as any[][])[0][0]).toBe(open);
+  });
+
+  it('schedules stale-map recovery even when some recipients still receive the message', async () => {
+    const stale = { readyState: 3, _userId: 'user-stale' };
+    const open = { readyState: 1, _userId: 'user-open' };
+    const clients = new Set([stale, open]);
+    const unsubscribeClient = jest.fn((ws) => {
+      clients.delete(ws);
+      return Promise.resolve();
+    });
+    const sendPayloadToSocket = jest.fn(() => true);
+    const enqueuePendingMessageForUsers = jest.fn(() => Promise.resolve());
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      channelClients: new Map([
+        ['channel:chan-1', clients],
+      ]),
+      unsubscribeClient,
+      enqueuePendingMessageForUsers,
+    }));
+
+    await deliverPubsubMessage(
+      'channel:chan-1',
+      JSON.stringify({ event: 'message:created', data: { id: 'msg-stale-recover' } }),
+    );
+
+    // Let setImmediate recovery callback run.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sendPayloadToSocket).toHaveBeenCalledTimes(1);
+    expect(publishUserFeedTargets).toHaveBeenCalledWith(
+      ['user:user-stale'],
+      expect.objectContaining({ event: 'message:created' }),
+    );
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      ['user-stale'],
+      expect.objectContaining({ event: 'message:created' }),
+      {},
+    );
   });
 });

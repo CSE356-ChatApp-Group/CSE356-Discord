@@ -24,6 +24,7 @@ const redis = require('../db/redis');
 const {
   searchFreshnessQueryDurationMs,
   searchFreshnessCacheHitsTotal,
+  searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
 } = require('../utils/metrics/searchPerformance');
 const {
@@ -448,15 +449,31 @@ async function findFreshScopedSearchCandidateIds(
 
   // Try Redis cache first (5-second TTL)
   const cacheKey = `search:fresh:${opts.communityId || opts.conversationId}:${opts.userId}:${trimmed.substring(0, 50)}`;
+  let cached: string | null = null;
+  let cacheReadFailed = false;
   try {
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      searchFreshnessCacheHitsTotal.inc();
-      return JSON.parse(cached);
-    }
+    cached = await redis.get(cacheKey);
   } catch (err: any) {
+    cacheReadFailed = true;
+    searchFreshnessCacheMissesTotal.inc({ reason: 'read_error' });
     logger.debug({ err: { message: err?.message }, cacheKey }, 'search: freshness cache read failed');
     // Continue to query if cache read fails
+  }
+
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed)) {
+        searchFreshnessCacheHitsTotal.inc();
+        return parsed;
+      }
+      searchFreshnessCacheMissesTotal.inc({ reason: 'invalid_shape' });
+    } catch (err: any) {
+      searchFreshnessCacheMissesTotal.inc({ reason: 'parse_error' });
+      logger.debug({ err: { message: err?.message }, cacheKey }, 'search: freshness cache parse failed');
+    }
+  } else if (!cacheReadFailed) {
+    searchFreshnessCacheMissesTotal.inc({ reason: 'empty' });
   }
 
   const tStart = Date.now();

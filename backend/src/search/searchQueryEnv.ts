@@ -56,7 +56,24 @@ function meiliFreshnessWindowMs(): number {
 function meiliFreshnessCandidateCap(): number {
   const raw = parseInt(process.env.MEILI_FRESHNESS_CANDIDATE_LIMIT || '15', 10);
   const value = Number.isFinite(raw) && raw > 0 ? raw : 15;
-  return Math.min(Math.max(value, 10), 200);
+  const baseCap = Math.min(Math.max(value, 10), 200);
+
+  // Optional adaptive cap for overload stages (disabled when explicitly set false).
+  const adaptiveEnabled =
+    String(process.env.MEILI_FRESHNESS_ADAPTIVE_CAP_ENABLED || 'true')
+      .trim()
+      .toLowerCase() !== 'false';
+  if (!adaptiveEnabled) return baseCap;
+
+  const stage = overload.getStage();
+  const stage2Raw = parseInt(process.env.MEILI_FRESHNESS_CANDIDATE_LIMIT_STAGE2 || '12', 10);
+  const stage3Raw = parseInt(process.env.MEILI_FRESHNESS_CANDIDATE_LIMIT_STAGE3 || '10', 10);
+  const stage2Cap = Math.min(Math.max(Number.isFinite(stage2Raw) && stage2Raw > 0 ? stage2Raw : 12, 5), baseCap);
+  const stage3Cap = Math.min(Math.max(Number.isFinite(stage3Raw) && stage3Raw > 0 ? stage3Raw : 10, 5), baseCap);
+
+  if (stage >= 3) return Math.min(baseCap, stage3Cap);
+  if (stage >= 2) return Math.min(baseCap, stage2Cap);
+  return baseCap;
 }
 
 module.exports = {

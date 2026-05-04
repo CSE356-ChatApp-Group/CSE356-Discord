@@ -630,6 +630,12 @@ function createRedisPubsubDelivery(ctx) {
         isMessageEvent
         && (channelType === "channel" || channelType === "conversation");
       if (isReliableChannelMsg) {
+        const hasPartialRisk =
+          deliveredCount < openRecipientSlots && hasDeliveryRiskReason(reasonCounts);
+        const recoveredFromStaleTopicMap =
+          staleTopicRecoveryUserIds.length > 0
+          && parsed !== null
+          && scheduleUserfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
         if (deliveredCount === 0 && isDuplicateSuppressionOnly(reasonCounts)) {
           recordDuplicateSuppressionReasons(dedupePathForChannelType(channelType), reasonCounts);
           if (logger.isLevelEnabled("debug")) {
@@ -655,11 +661,7 @@ function createRedisPubsubDelivery(ctx) {
           }
           return;
         }
-        let recovered = false;
-        if (deliveredCount === 0 && staleTopicRecoveryUserIds.length > 0 && parsed !== null) {
-          recovered = scheduleUserfeedRecoveryAfterStaleTopicMap(channel, parsed, staleTopicRecoveryUserIds);
-        }
-        if (deliveredCount === 0 && !recovered) {
+        if (deliveredCount === 0 && !recoveredFromStaleTopicMap) {
           realtimeMissAttributionTotal.inc({ reason: "topic_message_send_blocked" });
           recordRealtimeMissAttribution("topic_message_send_blocked");
           recordPartialReasons(reasonCounts);
@@ -684,7 +686,7 @@ function createRedisPubsubDelivery(ctx) {
             },
             "Reliable realtime message had recipients but zero successful socket sends",
           );
-        } else if (deliveredCount < openRecipientSlots && hasDeliveryRiskReason(reasonCounts)) {
+        } else if (hasPartialRisk) {
           realtimeMissAttributionTotal.inc({ reason: "topic_message_partial_delivery" });
           recordRealtimeMissAttribution("topic_message_partial_delivery");
           recordPartialReasons(reasonCounts);

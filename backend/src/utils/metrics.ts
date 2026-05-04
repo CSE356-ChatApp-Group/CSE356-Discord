@@ -47,6 +47,7 @@ const {
   messageCacheBustWallDurationMs,
   searchFreshnessQueryDurationMs,
   searchFreshnessCacheHitsTotal,
+  searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
 } = require('./metrics/searchPerformance');
 const {
@@ -847,6 +848,10 @@ module.exports = {
   searchResultsReturnedHistogram,
   searchThrottledTotal,
   searchQueryDurationMs,
+  searchFreshnessQueryDurationMs,
+  searchFreshnessCacheHitsTotal,
+  searchFreshnessCacheMissesTotal,
+  searchFreshnessSkippedShortQueryTotal,
   startPgPoolMetrics,
   pgPoolCircuitBreakerRejectsTotal,
   pgPoolOperationErrorsTotal,
