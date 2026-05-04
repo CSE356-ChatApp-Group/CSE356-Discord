@@ -54,8 +54,8 @@ function meiliFreshnessWindowMs(): number {
 }
 
 function meiliFreshnessCandidateCap(): number {
-  const raw = parseInt(process.env.MEILI_FRESHNESS_CANDIDATE_LIMIT || '40', 10);
-  const value = Number.isFinite(raw) && raw > 0 ? raw : 40;
+  const raw = parseInt(process.env.MEILI_FRESHNESS_CANDIDATE_LIMIT || '15', 10);
+  const value = Number.isFinite(raw) && raw > 0 ? raw : 15;
   return Math.min(Math.max(value, 10), 200);
 }
 

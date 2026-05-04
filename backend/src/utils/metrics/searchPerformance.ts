@@ -63,6 +63,25 @@ const messageCacheBustWallDurationMs = new client.Histogram({
   buckets: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 });
 
+/** Meili freshness supplement query execution time in milliseconds. */
+const searchFreshnessQueryDurationMs = new client.Histogram({
+  name: 'search_freshness_query_duration_ms',
+  help: 'Database query duration for Meili search freshness supplement (recent message scan)',
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Cache hits for Meili freshness candidate results in Redis (incremented per hit). */
+const searchFreshnessCacheHitsTotal = new client.Counter({
+  name: 'search_freshness_cache_hits_total',
+  help: 'Cache hits for Meili search freshness supplement results in Redis',
+});
+
+/** Freshness supplement queries skipped for short queries (< 3 chars). */
+const searchFreshnessSkippedShortQueryTotal = new client.Counter({
+  name: 'search_freshness_skipped_short_query_total',
+  help: 'Freshness supplement queries skipped due to short query length (< 3 chars)',
+});
+
 module.exports = {
   searchReplicaRetryTotal,
   searchResultsReturnedHistogram,
@@ -72,4 +91,7 @@ module.exports = {
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,
   messageCacheBustWallDurationMs,
+  searchFreshnessQueryDurationMs,
+  searchFreshnessCacheHitsTotal,
+  searchFreshnessSkippedShortQueryTotal,
 };

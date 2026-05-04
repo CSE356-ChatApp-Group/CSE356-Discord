@@ -20,6 +20,12 @@
 const db = require('../db/pool');
 const logger = require('../utils/logger');
 const meiliClient = require('./meiliClient');
+const redis = require('../db/redis');
+const {
+  searchFreshnessQueryDurationMs,
+  searchFreshnessCacheHitsTotal,
+  searchFreshnessSkippedShortQueryTotal,
+} = require('../utils/metrics/searchPerformance');
 const {
   tokenizeStrictSearchTerms,
   buildResult,
@@ -434,6 +440,26 @@ async function findFreshScopedSearchCandidateIds(
   const trimmed = String(q || '').trim();
   if (!trimmed || !isScopedSearch(opts)) return [];
 
+  // Skip freshness supplement for very short queries (< 3 chars: high recall, low latency trade-off)
+  if (trimmed.length < 3) {
+    searchFreshnessSkippedShortQueryTotal.inc();
+    return [];
+  }
+
+  // Try Redis cache first (5-second TTL)
+  const cacheKey = `search:fresh:${opts.communityId || opts.conversationId}:${opts.userId}:${trimmed.substring(0, 50)}`;
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      searchFreshnessCacheHitsTotal.inc();
+      return JSON.parse(cached);
+    }
+  } catch (err: any) {
+    logger.debug({ err: { message: err?.message }, cacheKey }, 'search: freshness cache read failed');
+    // Continue to query if cache read fails
+  }
+
+  const tStart = Date.now();
   const params: any[] = [trimmed];
   const scope = buildScopedAccessParts(params, opts);
   if (!scope) return [];
@@ -548,7 +574,21 @@ async function findFreshScopedSearchCandidateIds(
     err.statusCode = 403;
     throw err;
   }
-  return rows.filter((row: any) => row && row.id).map((row: any) => String(row.id));
+  const resultIds = rows.filter((row: any) => row && row.id).map((row: any) => String(row.id));
+  const elapsedMs = Date.now() - tStart;
+  
+  // Cache fresh candidate results for 5 seconds
+  try {
+    await redis.setex(cacheKey, 5, JSON.stringify(resultIds));
+  } catch (err: any) {
+    logger.debug({ err: { message: err?.message }, cacheKey }, 'search: freshness cache write failed');
+    // Non-fatal: continue on cache write failure
+  }
+  
+  // Record timing metric for freshness query
+  searchFreshnessQueryDurationMs.observe(elapsedMs);
+  
+  return resultIds;
 }
 
 const {

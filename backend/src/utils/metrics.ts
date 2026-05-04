@@ -45,6 +45,9 @@ const {
   wsBootstrapChannelsHistogram,
   messageCacheBustFailuresTotal,
   messageCacheBustWallDurationMs,
+  searchFreshnessQueryDurationMs,
+  searchFreshnessCacheHitsTotal,
+  searchFreshnessSkippedShortQueryTotal,
 } = require('./metrics/searchPerformance');
 const {
   pgPoolTotal,
