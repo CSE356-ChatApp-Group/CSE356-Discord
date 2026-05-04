@@ -124,6 +124,7 @@ print(max(2, min(4, per_inst_cpu - 1)))
 #   2 GB / 2 inst: min(1500, max(123, 192)) = 192 MB   (floor kicks in)
 #   7.8 GB / 2 inst: min(1500, max(468, 192)) = 468 MB ← reasonable on staging
 _REMOTE_RAM_MB=$(chatapp_ssh_staging_app "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 7800)
+# shellcheck disable=SC2034  # used inside chatapp_ssh_staging_app string on lines ~500-501
 NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
@@ -495,7 +496,7 @@ chatapp_ssh_staging_app "
     || echo 'AUTH_PASSWORD_STORAGE_MODE=plain' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer interferes.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
-  # shellcheck disable=SC2086
+  # shellcheck disable=SC2086,SC2016
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
     && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS="--max-old-space-size='"${NODE_OLD_SPACE_MB}"' --max-semi-space-size=16"/' /opt/chatapp/shared/.env \
     || echo 'NODE_OPTIONS="--max-old-space-size='"${NODE_OLD_SPACE_MB}"' --max-semi-space-size=16"' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
