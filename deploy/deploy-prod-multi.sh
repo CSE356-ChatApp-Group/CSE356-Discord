@@ -690,7 +690,7 @@ expected = [
     if endpoint.strip()
 ]
 extra_servers = ''.join(
-    f'  server {endpoint} max_fails=2 fail_timeout=10s;\\n'
+    f'  server {endpoint} max_fails=0;\\n'
     for endpoint in expected
 )
 

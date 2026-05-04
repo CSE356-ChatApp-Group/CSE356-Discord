@@ -46,7 +46,7 @@ if len(ports) == 1:
     balance = ''
 else:
     servers = ''.join(
-        f'  server localhost:{port} max_fails=2 fail_timeout=10s;\\n'
+        f'  server localhost:{port} max_fails=0;\\n'
         for port in ports
     )
     balance = ''
@@ -57,7 +57,7 @@ if extra_csv:
     for ep in extra_csv.split(','):
         ep = ep.strip()
         if ep:
-            servers += f'  server {ep} max_fails=2 fail_timeout=10s;\\n'
+            servers += f'  server {ep} max_fails=0;\\n'
 
 block = (
     'upstream app {\\n'
