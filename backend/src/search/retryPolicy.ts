@@ -16,6 +16,8 @@ function createSearchRetryPolicy({
     if (err?.statusCode === 403) return true;
     // Replica connection returned in an aborted transaction state — retry on primary.
     if (err?.code === '25P02') return true;
+    // pg-pool query_timeout fired on replica (no PG error code) — retry on primary.
+    if (!err?.code && err?.message === 'Query read timeout') return true;
     return Array.isArray(result?.hits) && result!.hits.length === 0;
   }
 
