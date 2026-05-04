@@ -179,7 +179,27 @@ function prepareSocketPayload(logicalChannel, parsed, rawMessage) {
         skipDropForBackpressure = true;
       }
     }
-    outbound = JSON.stringify({ ...parsed, channel: logicalChannel });
+    // Avoid object spread+stringify per delivery: append the channel field
+    // directly into the raw JSON string.  The raw message is always a
+    // JSON-stringified object ending with '}', so we can insert
+    // `,"channel":<value>` just before the closing brace.
+    // Falls back to the safe spread path for unexpected shapes.
+    const existingChannel = (parsed as { channel?: unknown }).channel;
+    if (existingChannel === logicalChannel) {
+      // Channel already embedded at publish time — use raw string unchanged.
+      outbound = rawMessage;
+    } else if (
+      typeof rawMessage === 'string'
+      && rawMessage.length > 1
+      && rawMessage.charCodeAt(rawMessage.length - 1) === 125 /* } */
+    ) {
+      const channelJson = JSON.stringify(logicalChannel);
+      outbound = rawMessage.length > 2
+        ? `${rawMessage.slice(0, -1)},"channel":${channelJson}}`
+        : `{"channel":${channelJson}}`;
+    } else {
+      outbound = JSON.stringify({ ...parsed, channel: logicalChannel });
+    }
   }
 
   return { dedupeKey, outbound, payloadEventName, skipDropForBackpressure };
