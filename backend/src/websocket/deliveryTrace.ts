@@ -7,7 +7,7 @@
  *   WS_SLOW_DELIVERY_PUBSUB_MS      (default 500)
  *   WS_SLOW_DELIVERY_LOOKUP_MS      (default 500)
  *   WS_SLOW_DELIVERY_REDIS_MS       (default 500)
- *   WS_SLOW_DELIVERY_SAMPLE_RATE    (default 0.001 = 0.1%)
+ *   WS_SLOW_DELIVERY_SAMPLE_RATE    (default 0 = disabled)
  */
 
 import os from 'os';
@@ -30,8 +30,8 @@ function slowThreshold(envKey: string, defaultMs: number): number {
 }
 
 function sampleRate(): number {
-  const raw = Number(process.env.WS_SLOW_DELIVERY_SAMPLE_RATE ?? '0.001');
-  return Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0.001;
+  const raw = Number(process.env.WS_SLOW_DELIVERY_SAMPLE_RATE ?? '0');
+  return Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
 }
 
 export interface SlowDeliveryTrace {
@@ -80,7 +80,8 @@ function shouldEmitSlowTrace(fields: SlowDeliveryTrace): boolean {
   if (fields.pubsub_receive_lag_ms != null && fields.pubsub_receive_lag_ms > slowThreshold('WS_SLOW_DELIVERY_PUBSUB_MS', 500)) return true;
   if (fields.stale_map_recovery === true) return true;
   if (fields.partial_delivery === true) return true;
-  if (Math.random() < sampleRate()) return true;
+  const sampledRate = sampleRate();
+  if (sampledRate > 0 && Math.random() < sampledRate) return true;
   return false;
 }
 

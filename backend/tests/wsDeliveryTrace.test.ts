@@ -98,6 +98,16 @@ describe('deliveryTrace', () => {
     expect(call.displayName).toBeUndefined();
   });
 
+  it('can emit sampled trace for fast delivery only when sampling is explicitly enabled', () => {
+    process.env.WS_SLOW_DELIVERY_SAMPLE_RATE = '1';
+    emitSlowDeliveryTrace({ total_delivery_ms: 10, messageId: 'sample-fast' });
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const call = logger.warn.mock.calls[0][0];
+    expect(call.event).toBe('ws.delivery.slow_trace');
+    expect(call.total_delivery_ms).toBe(10);
+    expect(call.messageId).toBe('sample-fast');
+  });
+
   it('emits at most once per call — does not double-log', () => {
     emitSlowDeliveryTrace({ total_delivery_ms: 2000 });
     emitSlowDeliveryTrace({ total_delivery_ms: 50 }); // fast, no log
