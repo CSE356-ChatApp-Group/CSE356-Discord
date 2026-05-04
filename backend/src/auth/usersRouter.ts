@@ -22,8 +22,42 @@ const presenceService  = require('../presence/service');
 const { invalidateCommunityMemberRostersForUser } = require('../communities/membersRoster');
 const { BUCKET, s3 } = require('../attachments/storage');
 const logger = require('../utils/logger');
+const redis = require('../db/redis');
 
 const router = express.Router();
+
+// ── Avatar metadata cache ──────────────────────────────────────────────────────
+const AVATAR_META_TTL_SECS = 3600; // matches Cache-Control max-age
+
+function avatarMetaCacheKey(userId: string) {
+  return `user:avatar:meta:${userId}`;
+}
+
+async function getAvatarMetaFromCache(userId: string): Promise<{ sk: string | null; ct: string | null } | null> {
+  try {
+    const raw = await redis.get(avatarMetaCacheKey(userId));
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function setAvatarMetaInCache(userId: string, sk: string | null, ct: string | null) {
+  try {
+    await redis.setex(avatarMetaCacheKey(userId), AVATAR_META_TTL_SECS, JSON.stringify({ sk, ct }));
+  } catch {
+    // fire-and-forget; cache miss is safe
+  }
+}
+
+async function invalidateAvatarMetaCache(userId: string) {
+  try {
+    await redis.del(avatarMetaCacheKey(userId));
+  } catch {
+    // ignore
+  }
+}
 
 const PUBLIC_FIELDS = 'id, username, display_name, avatar_url, bio, created_at, last_seen_at';
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
@@ -119,6 +153,7 @@ async function saveAvatarForUser(userId, file) {
     logger.warn({ err, userId }, 'avatar upload to object storage failed; falling back to inline DB storage');
     await saveAvatarInline(userId, file);
     await invalidateCommunityMemberRostersForUser(userId).catch(() => {});
+  invalidateAvatarMetaCache(userId).catch(() => {});
 
     if (previousStorageKey) {
       s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: previousStorageKey })).catch(() => {});
@@ -174,20 +209,35 @@ router.get('/', authenticate, async (req, res, next) => {
     res.json({ users: rows });
   } catch (err) { next(err); }
 });
-
-// ── Serve avatar image (public — browsers cannot send Authorization via <img>) ──
 router.get('/:id/avatar', async (req, res, next) => {
   try {
-    const { rows } = await queryRead(
-      `SELECT avatar_storage_key, avatar_data, avatar_content_type FROM users WHERE id=$1`,
-      [req.params.id]
-    );
-    if (!rows.length) {
-      return res.status(404).json({ error: 'No avatar' });
+    const userId = req.params.id;
+    // Fast path: check Redis cache for the avatar metadata (storage key + content type)
+    const cached = await getAvatarMetaFromCache(userId);
+    let avatar: { avatar_storage_key: string | null; avatar_data: Buffer | null; avatar_content_type: string | null };
+
+    if (cached !== null) {
+      // Cache hit: skip DB query, reconstruct avatar object from cached metadata.
+      // Only the S3 path is cache-eligible (inline data is not cached in Redis).
+      avatar = { avatar_storage_key: cached.sk, avatar_data: null, avatar_content_type: cached.ct };
+    } else {
+      const { rows } = await queryRead(
+        `SELECT avatar_storage_key, avatar_data, avatar_content_type FROM users WHERE id=$1`,
+        [userId]
+      );
+      if (!rows.length) {
+        return res.status(404).json({ error: 'No avatar' });
+      }
+      avatar = rows[0];
+      // Cache the metadata for S3-backed avatars. Inline avatars are not cached
+      // (binary data too large for Redis).
+      if (avatar.avatar_storage_key) {
+        setAvatarMetaInCache(userId, avatar.avatar_storage_key, avatar.avatar_content_type);
+      }
     }
 
-    const avatar = rows[0];
     if (avatar.avatar_storage_key) {
+        invalidateAvatarMetaCache(userId).catch(() => {});
       try {
         const object = await s3.send(new GetObjectCommand({
           Bucket: BUCKET,

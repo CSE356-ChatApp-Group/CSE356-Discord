@@ -141,3 +141,32 @@ RETURNING
   ${MESSAGE_INSERT_RETURNING_AUTHOR.trim()},
   '[]'::json AS attachments,
   (SELECT ch.community_id FROM channels ch WHERE ch.id = m.channel_id LIMIT 1) AS post_insert_community_id`;
+
+/**
+ * DM POST: one DB round-trip for participant check + row insert (no separate SELECT on success).
+ * Params: $1 conversation_id, $2 author_id, $3 content, $4 thread_id.
+ * Returns 0 rows when the user is not an active participant or doesn't exist.
+ */
+export const MESSAGE_POST_DM_INSERT_MERGED_SQL = `
+INSERT INTO messages AS m (conversation_id, author_id, content, thread_id)
+SELECT
+  cp.conversation_id,
+  $2::uuid,
+  $3::text,
+  CAST($4 AS uuid)
+FROM conversation_participants cp
+WHERE cp.conversation_id = $1::uuid
+  AND cp.user_id = $2::uuid
+  AND cp.left_at IS NULL
+RETURNING
+  ${MESSAGE_INSERT_RETURNING_AUTHOR.trim()},
+  '[]'::json AS attachments`;
+
+/** Diagnostic query to distinguish 401 (author missing) from 403 (not a participant) after DM insert returns 0 rows. */
+export const MESSAGE_POST_DM_ACCESS_DIAGNOSTIC_SQL = `
+SELECT
+  EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
+  EXISTS(
+    SELECT 1 FROM conversation_participants
+    WHERE conversation_id = $1 AND user_id = $2 AND left_at IS NULL
+  ) AS has_access`;

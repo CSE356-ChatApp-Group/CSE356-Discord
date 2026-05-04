@@ -16,6 +16,8 @@ const {
   MESSAGE_INSERT_RETURNING_AUTHOR,
   MESSAGE_POST_CHANNEL_ACCESS_DIAGNOSTIC_SQL,
   MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL,
+  MESSAGE_POST_DM_INSERT_MERGED_SQL,
+  MESSAGE_POST_DM_ACCESS_DIAGNOSTIC_SQL,
 } = require("../sqlFragments");
 import type { MessagesAuthedRequest } from "./postTypes";
 
@@ -163,42 +165,30 @@ async function runConversationInsertTransaction({
     client,
     MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS,
   );
-
-  const accessRes = await client.query(
-    `SELECT
-       EXISTS(SELECT 1 FROM users WHERE id = $2) AS author_exists,
-       COUNT(*)::int                             AS has_access
-     FROM conversation_participants
-     WHERE conversation_id = $1
-       AND user_id = $2
-       AND left_at IS NULL`,
-    [conversationId, userId],
-  );
   txPhases.t_access = Date.now();
-  const accessRow = accessRes.rows[0];
-  if (accessRow && accessRow.author_exists === false) {
-    throw buildMessagePostError(
-      "Session no longer valid",
-      401,
-      "author_missing",
-    );
-  }
-  if (!accessRow?.has_access) {
-    throw buildMessagePostError(
-      "Not a participant",
-      403,
-      "conversation_participant",
-    );
+
+  // Merged access-check + insert: participant predicate in the FROM clause means
+  // 0 rows → access denied; on success saves one DB round-trip vs the old 2-query path.
+  const insertRes = await client.query(MESSAGE_POST_DM_INSERT_MERGED_SQL, [
+    conversationId,
+    userId,
+    normalizedContent || null,
+    threadId || null,
+  ]);
+  txPhases.t_insert = Date.now();
+
+  if (!insertRes.rows.length) {
+    const diagRes = await client.query(MESSAGE_POST_DM_ACCESS_DIAGNOSTIC_SQL, [
+      conversationId,
+      userId,
+    ]);
+    const diagRow = diagRes.rows[0];
+    if (diagRow && diagRow.author_exists === false) {
+      throw buildMessagePostError("Session no longer valid", 401, "author_missing");
+    }
+    throw buildMessagePostError("Not a participant", 403, "conversation_participant");
   }
 
-  const insertRes = await client.query(
-    `INSERT INTO messages AS m (conversation_id, author_id, content, thread_id)
-   VALUES ($1, $2, $3, $4)
-   RETURNING ${MESSAGE_INSERT_RETURNING_AUTHOR},
-     '[]'::json AS attachments`,
-    [conversationId, userId, normalizedContent || null, threadId || null],
-  );
-  txPhases.t_insert = Date.now();
   const row = insertRes.rows[0];
 
   await insertMessageAttachments(client, row.id, userId, attachments);
