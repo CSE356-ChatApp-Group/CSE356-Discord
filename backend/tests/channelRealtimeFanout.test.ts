@@ -306,7 +306,9 @@ describe('channelRealtimeFanout', () => {
 
   it('publishChannelMessageCreated bridges active connected channel members without enumerating offline members', async () => {
     const prev = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevFallback = process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
     process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = 'true';
     try {
       redis.smembers.mockResolvedValueOnce(['a', 'b', 'offline-not-present']);
       query.mockResolvedValueOnce({ rows: [{ user_id: 'a' }, { user_id: 'b' }] });
@@ -327,6 +329,8 @@ describe('channelRealtimeFanout', () => {
     } finally {
       if (prev === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
       else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prev;
+      if (prevFallback === undefined) delete process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
+      else process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = prevFallback;
     }
   });
 
@@ -500,8 +504,10 @@ describe('channelRealtimeFanout', () => {
 
   it('publishChannelMessageCreated recent_connect ZSET includes active connected bootstrap-window users', async () => {
     const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevFallback = process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
     process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
     process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = 'true';
     const ch = 'chan-zset-bootstrap';
     try {
       // User 'a' is in channel ZSET; user 'b' is connected but not yet channel-subscribed.
@@ -522,13 +528,17 @@ describe('channelRealtimeFanout', () => {
     } finally {
       if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
       else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevFallback === undefined) delete process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
+      else process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = prevFallback;
     }
   });
 
   it('publishChannelMessageCreated recent_connect includes active connected users even after recent marker expiry', async () => {
     const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevFallback = process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
     process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
     process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = 'true';
     const ch = 'chan-active-user-only';
     try {
       redis.zrangebyscore.mockResolvedValueOnce([]);
@@ -547,6 +557,8 @@ describe('channelRealtimeFanout', () => {
     } finally {
       if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
       else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevFallback === undefined) delete process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
+      else process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = prevFallback;
     }
   });
 
@@ -668,5 +680,46 @@ describe('channelRealtimeFanout', () => {
       expect.objectContaining({ event: 'message:created' }),
       { recentTargets: expect.arrayContaining(['user:a']) },
     );
+  });
+
+  // Regression: d73822c made zsetsEmpty trigger the connected membership fallback
+  // on every message, causing 32% CPU regression. This test proves that empty
+  // ZSETs alone do NOT call the expensive SELECT DISTINCT community_members SQL
+  // query — the critical path that caused the regression.
+  it('does NOT run connected membership SQL when both ZSETs are empty (zsetsEmpty regression)', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = 'true';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-zsets-empty-no-sql';
+    try {
+      // Both bootstrap_pending and recent_connect ZSETs return empty — the
+      // condition that d73822c used to auto-trigger connected fallback.
+      redis.zrangebyscore.mockResolvedValueOnce([]); // bootstrap_pending
+      redis.zrangebyscore.mockResolvedValueOnce([]); // recent_connect
+
+      await publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-no-zsets-no-sql' },
+      });
+
+      // The key regression assertion: the expensive SELECT DISTINCT community_members
+      // SQL must NOT be called just because both ZSETs are empty.
+      // (smembers may fire depending on module-level config baked at require time,
+      // but the SQL is the CPU-costly path that caused the 32% regression.)
+      const sqlCalls = query.mock.calls.filter(
+        (c: string[]) => typeof c[0] === 'string' && c[0].includes('community_members'),
+      );
+      expect(sqlCalls.length).toBe(0);
+      // Only channel topic publish, no userfeed targets
+      expect(fanout.publish.mock.calls.map((c) => c[0])).toEqual([`channel:${ch}`]);
+      expect(enqueuePendingMessageForUsers).not.toHaveBeenCalled();
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevSkip === undefined) delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+      else process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = prevSkip;
+    }
   });
 });
