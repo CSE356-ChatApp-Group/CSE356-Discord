@@ -32,6 +32,8 @@
 
 set -euo pipefail
 
+DEPLOY_SUCCESS=0
+
 SHA=${1:?Usage: deploy-prod-multi.sh <sha> [--rollback] [--dry-run] [--fast-stabilize] [--emergency]}
 shift || true
 
@@ -236,8 +238,29 @@ restore_remote_vm_to_vm1_upstream() {
     done
     [ \"\$missing\" -eq 0 ]
   "
-  echo "✓ ${vm_label} restored to VM1 nginx upstream"
+   echo "✓ ${vm_label} restored to VM1 nginx upstream"
 }
+
+cleanup_on_exit() {
+  set +e
+  if [[ "${DEPLOY_SUCCESS}" -ne 1 ]]; then
+    echo ""
+    echo "↩ Exit trap: deploy did not complete successfully — restoring full VM1 nginx upstream..."
+    local full_csv
+    full_csv="$(build_remote_upstream_csv 2>/dev/null)"
+    if [[ -z "${full_csv}" ]]; then
+      echo "ERROR: failed to build full upstream CSV for restore"
+      return
+    fi
+    if rewrite_vm1_nginx_upstream "${full_csv}" "exit-trap: restore full upstream" 2>/dev/null; then
+      echo "↩ Restored full upstream to VM1 nginx (VM2 + VM3 re-added)"
+    else
+      echo "ERROR: exit trap failed to restore VM1 nginx upstream — manual fix needed"
+      echo "  Run on VM1: grep 'upstream app' /etc/nginx/sites-enabled/chatapp"
+    fi
+  fi
+}
+trap cleanup_on_exit EXIT
 
 verify_and_heal_vm_workers() {
   local host="$1"
@@ -842,6 +865,7 @@ fi
 
 echo ""
 if [ "$overall_ok" -eq 1 ]; then
+  DEPLOY_SUCCESS=1
   echo "======================================================================"
   echo "=== Deploy complete: ${SHA:0:12} live on all three VMs          ==="
   echo "======================================================================"
