@@ -65,6 +65,17 @@ const MEILI_WRITE_STREAM_BLOCK_MS = Math.max(
   100,
   Math.min(5000, parseInt(process.env.MEILI_WRITE_STREAM_BLOCK_MS || '1000', 10) || 1000),
 );
+const MEILI_WRITE_STREAM_COALESCE_MS = Math.max(
+  0,
+  Math.min(
+    5000,
+    parseInt(process.env.MEILI_WRITE_STREAM_COALESCE_MS || String(MEILI_WRITE_FLUSH_MS), 10) || MEILI_WRITE_FLUSH_MS,
+  ),
+);
+const MEILI_WRITE_STREAM_COALESCE_BLOCK_MS = Math.max(
+  10,
+  Math.min(1000, parseInt(process.env.MEILI_WRITE_STREAM_COALESCE_BLOCK_MS || '100', 10) || 100),
+);
 const MEILI_WRITE_STREAM_LOCK_TTL_MS = Math.max(
   5000,
   Math.min(60000, parseInt(process.env.MEILI_WRITE_STREAM_LOCK_TTL_MS || '15000', 10) || 15000),
@@ -379,7 +390,68 @@ async function readMeiliWriteStreamBatch(clientForStream: any, consumerName: str
   const first = res[0];
   const messages = Array.isArray(first?.[1]) ? first[1] : [];
   if (!messages.length) return;
-  await processMeiliWriteStreamMessages(clientForStream, messages);
+  await processMeiliWriteStreamMessages(
+    clientForStream,
+    await coalesceMeiliWriteStreamMessages(clientForStream, consumerName, messages),
+  );
+}
+
+async function readNewMeiliWriteStreamMessages(
+  clientForStream: any,
+  consumerName: string,
+  count: number,
+  blockMs: number,
+): Promise<Array<[string, string[]]>> {
+  const res = await clientForStream.xreadgroup(
+    'GROUP',
+    MEILI_WRITE_STREAM_GROUP,
+    consumerName,
+    'COUNT',
+    String(count),
+    'BLOCK',
+    String(blockMs),
+    'STREAMS',
+    MEILI_WRITE_STREAM_KEY,
+    '>',
+  );
+  if (!Array.isArray(res) || !res.length) return [];
+  const first = res[0];
+  const messages = Array.isArray(first?.[1]) ? first[1] : [];
+  return messages;
+}
+
+async function coalesceMeiliWriteStreamMessages(
+  clientForStream: any,
+  consumerName: string,
+  initialMessages: Array<[string, string[]]>,
+): Promise<Array<[string, string[]]>> {
+  if (
+    MEILI_WRITE_STREAM_COALESCE_MS <= 0 ||
+    initialMessages.length >= MEILI_WRITE_STREAM_READ_COUNT ||
+    streamConsumerStopping
+  ) {
+    return initialMessages;
+  }
+
+  const messages = initialMessages.slice();
+  const deadline = Date.now() + MEILI_WRITE_STREAM_COALESCE_MS;
+
+  while (messages.length < MEILI_WRITE_STREAM_READ_COUNT && !streamConsumerStopping) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+
+    const next = await readNewMeiliWriteStreamMessages(
+      clientForStream,
+      consumerName,
+      MEILI_WRITE_STREAM_READ_COUNT - messages.length,
+      Math.min(MEILI_WRITE_STREAM_COALESCE_BLOCK_MS, remainingMs),
+    );
+    if (next.length) {
+      messages.push(...next);
+    }
+  }
+
+  return messages;
 }
 
 async function runMeiliWriteStreamConsumerSlot(clientForStream: any, slot: number) {
@@ -443,6 +515,7 @@ function startMeiliWriteStreamConsumerIfEnabled() {
           group: MEILI_WRITE_STREAM_GROUP,
           slots: MEILI_WRITE_STREAM_CONSUMER_SLOTS,
           readCount: MEILI_WRITE_STREAM_READ_COUNT,
+          coalesceMs: MEILI_WRITE_STREAM_COALESCE_MS,
         },
         'meili: write stream consumer starting',
       );
