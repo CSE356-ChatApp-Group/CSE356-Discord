@@ -414,6 +414,55 @@ describe('channelRealtimeFanout', () => {
     }
   });
 
+  it('publishChannelMessageCreated with userfeed skip falls through to recent_connect when bootstrap_pending is empty', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+    const prevConnectedFallback = process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = 'true';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = 'false';
+    const ch = 'chan-bootstrap-pending-empty-recent-fallback';
+    try {
+      // bootstrap_pending ZSET returns empty (markers expired or cleared by progressive hydration)
+      redis.zrangebyscore.mockResolvedValueOnce([]);
+      // recent_connect ZSET still has the user (longer TTL)
+      redis.zrangebyscore.mockResolvedValueOnce(['a']);
+      redis.call.mockResolvedValueOnce([1]);
+
+      await publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-bootstrap-pending-empty-recent-fallback' },
+      });
+
+      // Should have queried both bootstrap_pending and recent_connect ZSETs
+      expect(redis.zrangebyscore).toHaveBeenCalledTimes(2);
+      expect(redis.zrangebyscore.mock.calls[0][0]).toBe(`channel:bootstrap_pending:${ch}`);
+      expect(redis.zrangebyscore.mock.calls[1][0]).toBe(`channel:recent_connect:${ch}`);
+      // Must NOT trigger expensive active-connected membership SQL
+      // (smembers may fire depending on INCLUDE_CONNECTED_FALLBACK config baked at require time)
+      expect(query).not.toHaveBeenCalled();
+      // Should publish to userfeed for the recently connected user found via fallback
+      const expectedChannels = [
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('a'),
+      ].sort();
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([...new Set(expectedChannels)]);
+      expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+        ['user:a'],
+        expect.objectContaining({ event: 'message:created' }),
+        { recentTargets: ['user:a'] },
+      );
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevSkip === undefined) delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+      else process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = prevSkip;
+      if (prevConnectedFallback === undefined) delete process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
+      else process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = prevConnectedFallback;
+    }
+  });
+
   it('publishChannelMessageCreated with userfeed skip fails open when bootstrap-pending filter errors', async () => {
     const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
     const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;

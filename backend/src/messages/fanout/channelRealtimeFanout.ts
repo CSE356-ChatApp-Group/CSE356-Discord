@@ -268,13 +268,29 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
         { path: 'channel_message_bootstrap_pending_subscribers' },
         bootstrapPendingTargets.length + 1,
       );
-      return {
-        allTargets: bootstrapPendingTargets,
-        recentTargets: bootstrapPendingTargets,
-        candidateCount: bootstrapPendingTargets.length + 1,
-        cacheResult: 'miss' as const,
-        pendingEnqueueTargets: bootstrapPendingTargets,
-      };
+      // When bootstrap_pending has targets, return immediately (fast path).
+      // When empty, fall through to the recent_connect ZSET lookup instead
+      // of returning zero targets — the markers may have been cleared by
+      // progressive hydration completing between prepare and publish, or the
+      // ZSET entries may have expired. The recent_connect ZSET has a longer
+      // window (5 min) and covers recently-bootstrapped users.
+      if (bootstrapPendingTargets.length > 0) {
+        return {
+          allTargets: bootstrapPendingTargets,
+          recentTargets: bootstrapPendingTargets,
+          candidateCount: bootstrapPendingTargets.length + 1,
+          cacheResult: 'miss' as const,
+          pendingEnqueueTargets: bootstrapPendingTargets,
+        };
+      }
+      wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'bootstrap_pending_empty_fallback' });
+      if (logger.isLevelEnabled('debug')) {
+        logger.debug(
+          { channelId },
+          'WS bootstrap_pending returned empty; falling through to recent_connect bridge',
+        );
+      }
+      // Fall through to recent_connect + active-connected lookup below.
     } catch (err) {
       // Fail open: if the new narrow marker path cannot answer, fall back to
       // the previous active/recent bridge rather than risk a missed recipient.
