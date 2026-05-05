@@ -11,6 +11,7 @@ const {
   wsReplayPendingEligibilityKey,
   WS_REPLAY_RECENT_USER_WINDOW_SECONDS,
 } = require('../../websocket/recentConnect');
+const { recentDisconnectKey } = require('../../websocket/presenceKeys');
 const { realtimePendingConfig } = require('../config/realtimePendingConfig');
 const {
   wsPendingReplayUserTrimmedTotal,
@@ -217,16 +218,21 @@ async function filterUsersEligibleForPendingReplay(
         leg.exists(wsReplayPendingEligibilityKey(uid));
         redisExistsByPathTotal?.inc?.({ path: 'pending_replay_legacy_marker' });
       }
+      leg.exists(recentDisconnectKey(uid));
+      redisExistsByPathTotal?.inc?.({ path: 'pending_replay_recent_disconnect_marker' });
     }
     const legRes = await leg.exec();
     let lj = 0;
     for (const uid of needLegacyProbe) {
       const exRecent = Number(legRes[lj++]?.[1] || 0) === 1;
       const exReplay = useReplayKey ? Number(legRes[lj++]?.[1] || 0) === 1 : false;
-      if (exRecent || exReplay) {
+      const exRecentDisconnect = Number(legRes[lj++]?.[1] || 0) === 1;
+      if (exRecent || exReplay || exRecentDisconnect) {
         eligible.push(uid);
         perClass.recent += 1;
-        if (conversationMarkerFallback) {
+        if (exRecentDisconnect) {
+          pendingReplaySecondProbeRecentUserTotal.inc({ mode: 'recent_disconnect' }, 1);
+        } else if (conversationMarkerFallback) {
           pendingReplaySecondProbeRecentUserTotal.inc({ mode: 'conversation_marker' }, 1);
         } else if (legacyFallback) {
           pendingReplaySecondProbeRecentUserTotal.inc({ mode: 'legacy_global' }, 1);

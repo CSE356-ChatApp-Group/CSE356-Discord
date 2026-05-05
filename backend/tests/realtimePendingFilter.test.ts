@@ -80,6 +80,11 @@ jest.mock('../src/websocket/recentConnect', () => ({
   WS_REPLAY_RECENT_USER_WINDOW_SECONDS: 30,
 }));
 
+jest.mock('../src/websocket/presenceKeys', () => ({
+  connectedUsersKey: () => 'presence:connected_users',
+  recentDisconnectKey: (id: string) => `ws:recent_disconnect:${id}`,
+}));
+
 describe('realtimePending recipient filter', () => {
   beforeEach(() => {
     jest.resetModules();
@@ -248,7 +253,7 @@ describe('realtimePending recipient filter', () => {
     classifyExec
       .mockResolvedValueOnce([[null, 0]])
       .mockResolvedValueOnce([[null, [0]]])
-      .mockResolvedValueOnce([[null, 0], [null, 0]]);
+      .mockResolvedValueOnce([[null, 0], [null, 0], [null, 0]]);
     const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
     await enqueuePendingMessageForUsers(['user:gone'], {
       event: 'message:created',
@@ -256,6 +261,30 @@ describe('realtimePending recipient filter', () => {
     });
     expect(offlineSkipMetric.inc).toHaveBeenCalledWith(1);
     expect(enqueueExec).not.toHaveBeenCalled();
+    expect(classifyExec).toHaveBeenCalledTimes(3);
+  });
+
+  it('enqueues recent class when unified and recent markers miss but recent_disconnect exists', async () => {
+    process.env.WS_PENDING_ELIGIBLE_LEGACY_FALLBACK = 'true';
+    classifyExec
+      .mockResolvedValueOnce([[null, 0]])
+      .mockResolvedValueOnce([[null, [0]]])
+      .mockResolvedValueOnce([[null, 0], [null, 0], [null, 1]]);
+    enqueueExec.mockResolvedValue([
+      [null, 'OK'],
+      [null, 1],
+      [null, 1],
+      [null, 0],
+      [null, 1],
+    ]);
+    const { enqueuePendingMessageForUsers } = require('../src/messages/pending/realtimePending');
+    await enqueuePendingMessageForUsers(['user:gap'], {
+      event: 'message:created',
+      data: { id: 'm-gap', channel_id: 'c1' },
+    });
+    expect(pendingClassMetric.inc).toHaveBeenCalledWith({ class: 'recent' }, 1);
+    expect(secondProbeRecentMetric.inc).toHaveBeenCalledWith({ mode: 'recent_disconnect' }, 1);
+    expect(enqueueExec).toHaveBeenCalled();
     expect(classifyExec).toHaveBeenCalledTimes(3);
   });
 
