@@ -113,28 +113,29 @@ describe("presence fanout_targets cache invalidation", () => {
     ).toHaveBeenCalledWith({ mode: "bulk" }, 1);
   });
 
-  it("bulk: <=512 unique keys triggers one unlink", async () => {
-    const ids = Array.from({ length: 512 }, (_, i) => uuid(i));
+  it("bulk: <=50 unique keys triggers one unlink", async () => {
+    const ids = Array.from({ length: 50 }, (_, i) => uuid(i));
     await invalidatePresenceFanoutTargetsBulk(ids);
     expect(redis.unlink).toHaveBeenCalledTimes(1);
-    expect(redis.unlink.mock.calls[0].length).toBe(512);
+    expect(redis.unlink.mock.calls[0].length).toBe(50);
     expect(
       metrics.presenceFanoutTargetsInvalidationTotal.inc,
     ).toHaveBeenCalledWith({ mode: "bulk", command: "unlink" }, 1);
   });
 
-  it("bulk: >512 keys triggers multiple unlink chunks", async () => {
-    const ids = Array.from({ length: 600 }, (_, i) => uuid(i));
+  it("bulk: >50 keys triggers multiple unlink chunks", async () => {
+    const ids = Array.from({ length: 110 }, (_, i) => uuid(i));
     await invalidatePresenceFanoutTargetsBulk(ids);
-    expect(redis.unlink).toHaveBeenCalledTimes(2);
-    expect(redis.unlink.mock.calls[0].length).toBe(512);
-    expect(redis.unlink.mock.calls[1].length).toBe(88);
+    expect(redis.unlink).toHaveBeenCalledTimes(3);
+    expect(redis.unlink.mock.calls[0].length).toBe(50);
+    expect(redis.unlink.mock.calls[1].length).toBe(50);
+    expect(redis.unlink.mock.calls[2].length).toBe(10);
     expect(
       metrics.presenceFanoutTargetsInvalidationTotal.inc,
-    ).toHaveBeenCalledTimes(2);
+    ).toHaveBeenCalledTimes(3);
     expect(
       metrics.presenceFanoutTargetsInvalidationKeysTotal.inc,
-    ).toHaveBeenCalledWith({ mode: "bulk" }, 600);
+    ).toHaveBeenCalledWith({ mode: "bulk" }, 110);
   });
 
   it("bulk: falls back to del when unlink is unavailable", async () => {
