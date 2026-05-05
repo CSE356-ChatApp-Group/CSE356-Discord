@@ -64,8 +64,10 @@ function getSearchStatementTimeoutMs() {
 
 function meiliFreshnessWindowMs(): number {
   const raw = parseInt(process.env.MEILI_FRESHNESS_WINDOW_MS || '600000', 10);
+  // 0 means disabled; positive values are clamped to [0, 3600000].
+  if (raw === 0) return 0;
   const value = Number.isFinite(raw) && raw > 0 ? raw : 600000;
-  return Math.min(Math.max(value, 60000), 3600000);
+  return Math.min(Math.max(value, 0), 3600000);
 }
 
 function meiliFreshnessCandidateCap(): number {

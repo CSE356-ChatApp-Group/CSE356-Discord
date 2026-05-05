@@ -167,8 +167,12 @@ function stopPresenceMirrorFlushInterval() {
   presenceMirrorFlushTimer = null;
 }
 
-/** Cap keys per Redis UNLINK/DEL to avoid multi-thousand-argument commands (main-thread stalls). */
-const PRESENCE_FANOUT_TARGETS_UNLINK_CHUNK = 512;
+/** Cap keys per Redis UNLINK/DEL to avoid multi-thousand-argument commands (main-thread stalls).
+ *  512 caused 15–43 ms Redis stalls per call; 50 keeps each call under ~4 ms. */
+const PRESENCE_FANOUT_TARGETS_UNLINK_CHUNK = (() => {
+  const raw = parseInt(process.env.PRESENCE_FANOUT_TARGETS_UNLINK_CHUNK || '50', 10);
+  return Number.isFinite(raw) && raw >= 1 ? Math.min(raw, 512) : 50;
+})();
 
 function redisSupportsUnlink(redisClient) {
   return typeof redisClient.unlink === 'function';

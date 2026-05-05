@@ -450,7 +450,8 @@ async function findFreshScopedSearchCandidateIds(
   const trimmed = String(q || '').trim();
   if (!trimmed || !isScopedSearch(opts)) return [];
 
-  // Skip freshness supplement for very short queries (< 3 chars: high recall, low latency trade-off)
+  // Skip freshness supplement when disabled (window=0) or for very short queries.
+  if (meiliFreshnessWindowMs() === 0) return [];
   if (trimmed.length < 3) {
     searchFreshnessSkippedShortQueryTotal.inc();
     return [];
@@ -527,14 +528,14 @@ async function findFreshScopedSearchCandidateIds(
         SELECT m0.id,
                m0.content,
                m0.content_tsv,
-               COALESCE(m0.updated_at, m0.created_at) AS freshness_at
+               m0.created_at AS freshness_at
         FROM messages m0
         INNER JOIN community_channels cc0
           ON cc0.id = m0.channel_id
         WHERE m0.deleted_at IS NULL
-          AND COALESCE(m0.updated_at, m0.created_at) >= NOW() - (${freshnessWindowMsPh}::int * interval '1 millisecond')
+          AND m0.created_at >= NOW() - (${freshnessWindowMsPh}::int * interval '1 millisecond')
           ${authorTimeFilters}
-        ORDER BY COALESCE(m0.updated_at, m0.created_at) DESC, m0.id DESC
+        ORDER BY m0.created_at DESC, m0.id DESC
         LIMIT ${freshnessCapPh}
       )
       SELECT scope_access.has_access AS "__scopeAccess",
@@ -562,7 +563,7 @@ async function findFreshScopedSearchCandidateIds(
         SELECT m0.id,
                m0.content,
                m0.content_tsv,
-               COALESCE(m0.updated_at, m0.created_at) AS freshness_at
+               m0.created_at AS freshness_at
         FROM messages m0
         INNER JOIN conversation_participants cp_gate
           ON cp_gate.conversation_id = m0.conversation_id
@@ -571,9 +572,9 @@ async function findFreshScopedSearchCandidateIds(
          AND cp_gate.left_at IS NULL
         WHERE m0.deleted_at IS NULL
           AND m0.conversation_id = ${scope.targetIdPh}
-          AND COALESCE(m0.updated_at, m0.created_at) >= NOW() - (${freshnessWindowMsPh}::int * interval '1 millisecond')
+          AND m0.created_at >= NOW() - (${freshnessWindowMsPh}::int * interval '1 millisecond')
           ${authorTimeFilters}
-        ORDER BY COALESCE(m0.updated_at, m0.created_at) DESC, m0.id DESC
+        ORDER BY m0.created_at DESC, m0.id DESC
         LIMIT ${freshnessCapPh}
       )
       SELECT scope_access.has_access AS "__scopeAccess",
