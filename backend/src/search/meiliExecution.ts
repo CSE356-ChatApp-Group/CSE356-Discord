@@ -128,13 +128,22 @@ function createMeiliSearchExecutor({
 
     // Freshness supplement is a normal part of the Meili path — it rescues
     // recently-written messages that haven't been indexed yet.  Do NOT count
-    // this as a fallback; the search succeeded via Meili + recheck.
+    // freshness-only hits as a success when ALL of Meili's own candidates
+    // failed strict filtering; that still represents a Meili miss and must
+    // fall back to Postgres so the full result set is correct.
 
     // Cache filtered rows for reuse
     const validRows = strictRows.filter((r: any) => r && r.id);
     const validRowsCount = validRows.length;
 
-    if (validRowsCount === 0 && ids.length > 0) {
+    // Count how many of the original Meili candidates (not freshness supplement)
+    // survived strict filtering.  Fallback triggers if none of them did.
+    const meiliIdsSet = new Set(ids.map(String));
+    const meiliCandidateValidCount = validRows.filter(
+      (r: any) => meiliIdsSet.has(String(r.id)),
+    ).length;
+
+    if ((validRowsCount === 0 || meiliCandidateValidCount === 0) && ids.length > 0) {
       meiliClient.incFallbackTotal();
       const totalMs = Date.now() - tAll;
       logger.warn(
