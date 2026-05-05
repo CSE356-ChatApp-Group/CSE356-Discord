@@ -60,6 +60,14 @@ function createMeiliSearchExecutor({
     const scopeLabel = resolvedSearchScope(opts);
 
     const tMeili = Date.now();
+    // Start freshness query in parallel with Meili search so both run concurrently.
+    // Only awaited below when Meili returns non-empty candidates.
+    // .catch() prevents unhandled-rejection leaks when Meili fails/returns empty
+    // and the promise is never awaited.
+    const freshnessPromise = findFreshScopedSearchCandidateIds(q, opts).catch((err) => {
+      logger.debug({ err }, 'search freshness query failed during parallel Meili path');
+      return [];
+    });
     let candidateResult: { ids: string[]; estimatedTotal: number };
     try {
       candidateResult = await meiliClient.searchMessageCandidates(q, opts);
@@ -92,7 +100,8 @@ function createMeiliSearchExecutor({
       throw createMeiliFallbackError('meili_empty_candidates');
     }
 
-    const freshnessIds = await findFreshScopedSearchCandidateIds(q, opts);
+    // Await the freshness query that was started in parallel with Meili.
+    const freshnessIds = await freshnessPromise;
     const mergedSet = new Set(ids || []);
     const freshnessArray = freshnessIds || [];
     for (const id of freshnessArray) {
