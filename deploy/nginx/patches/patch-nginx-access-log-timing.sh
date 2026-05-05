@@ -19,11 +19,16 @@ import tempfile
 cfg = Path("/etc/nginx/nginx.conf")
 text = orig = cfg.read_text(encoding="utf-8", errors="replace")
 
-if "log_format chatapp_timed" not in text:
+if "log_format chatapp_timed" not in text or "log_format chatapp_ws" not in text:
     fmt = """    log_format chatapp_timed '$remote_addr - $remote_user [$time_local] "$request" '
                     '$status $body_bytes_sent "$http_referer" '
                     '"$http_user_agent" '
                     'rt=$request_time urt=$upstream_response_time';
+    log_format chatapp_ws '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent rt=$request_time urt=$upstream_response_time '
+                          'uaddr=$upstream_addr ustatus=$upstream_status rid=$request_id '
+                          'upgrade="$http_upgrade" connection="$http_connection" '
+                          'xff="$http_x_forwarded_for" ua="$http_user_agent"';
 """
     m = re.search(r"http\s*\{", text)
     if not m:
@@ -51,15 +56,30 @@ if n != 1:
     )
     sys.exit(1)
 
-if text2 == orig:
-    print("nginx: already configured (chatapp_timed + access_log)")
+def ensure_ws_access_log(body: str) -> str:
+    pattern = re.compile(r"(location\s+/ws\s*\{)([^}]*)(\})", re.DOTALL)
+    m = pattern.search(body)
+    if not m:
+        print("ERROR: expected location /ws block in nginx.conf", file=sys.stderr)
+        sys.exit(1)
+    head, inner, tail = m.groups()
+    if "/var/log/nginx/ws_access.log chatapp_ws;" in inner:
+        return body
+    insertion = "\n            access_log         /var/log/nginx/ws_access.log chatapp_ws;"
+    replaced = f"{head}{insertion}{inner}{tail}"
+    return body[:m.start()] + replaced + body[m.end():]
+
+text3 = ensure_ws_access_log(text2)
+
+if text3 == orig:
+    print("nginx: already configured (chatapp_timed + chatapp_ws logs)")
 else:
     import os
 
     fd, tmp_path = tempfile.mkstemp(prefix=".nginx-conf-", dir=str(cfg.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-            tmp.write(text2)
+            tmp.write(text3)
         os.replace(tmp_path, str(cfg))
     finally:
         if os.path.exists(tmp_path):

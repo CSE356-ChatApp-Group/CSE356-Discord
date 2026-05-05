@@ -131,6 +131,30 @@ if ! sudo nginx -t 2>/tmp/chatapp_nginx_t.err; then
   sudo sed -i \
     "s|${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}|${CHATAPP_NGINX_PROXY_RETRY_LINE}|g" \
     "\$SITE"
+  if grep -q "unknown log format.*chatapp" /tmp/chatapp_nginx_t.err 2>/dev/null; then
+    echo "Preflight: adding missing WebSocket log format to /etc/nginx/nginx.conf..." >&2
+    if ! grep -q "log_format chatapp_ws" /etc/nginx/nginx.conf; then
+      sudo python3 - <<'PYEOF'
+import re
+cfg_path = "/etc/nginx/nginx.conf"
+text = open(cfg_path).read()
+if "log_format chatapp_ws" not in text:
+    fmt = """    log_format chatapp_ws '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                      '\$status \$body_bytes_sent rt=\$request_time urt=\$upstream_response_time '
+                      'uaddr=\$upstream_addr ustatus=\$upstream_status rid=\$request_id '
+                      'upgrade="\$http_upgrade" connection="\$http_connection" '
+                      'xff="\$http_x_forwarded_for" ua="\$http_user_agent"';
+"""
+    m = re.search(r"http\s*\{", text)
+    if not m:
+        raise RuntimeError("Could not find 'http {' in nginx.conf")
+    insert_pos = m.end()
+    text = text[:insert_pos] + "\n" + fmt + "\n" + text[insert_pos:]
+    with open(cfg_path, "w") as f:
+        f.write(text)
+PYEOF
+    fi
+  fi
   if ! sudo nginx -t; then
     echo "ERROR: nginx -t still failing after heal attempt; fix \$SITE manually." >&2
     exit 1
