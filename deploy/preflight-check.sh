@@ -155,6 +155,10 @@ if "log_format chatapp_ws" not in text:
 PYEOF
     fi
   fi
+  if grep -q "duplicate.*log_format" /tmp/chatapp_nginx_t.err 2>/dev/null; then
+    echo "Preflight: removing duplicate log_format entries from conf.d..." >&2
+    sudo sed -i '/^log_format chatapp_ws/,/;$/d' /etc/nginx/conf.d/*.conf 2>/dev/null || true
+  fi
   if ! sudo nginx -t; then
     echo "ERROR: nginx -t still failing after heal attempt; fix \$SITE manually." >&2
     exit 1
