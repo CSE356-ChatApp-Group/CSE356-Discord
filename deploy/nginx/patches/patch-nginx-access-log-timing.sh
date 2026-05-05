@@ -57,11 +57,60 @@ if n != 1:
     sys.exit(1)
 
 def ensure_ws_access_log(body: str) -> str:
+    # The /ws location block may live in a separate sites-available file rather
+    # than in nginx.conf itself (staging and prod both deploy it via staging.conf /
+    # chatapp-nginx-*.conf).  Check the canonical sites file first; if the
+    # ws_access.log directive is already present anywhere in the nginx config
+    # tree we can skip the nginx.conf patch entirely.
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["sudo", "grep", "-rl", "ws_access.log", "/etc/nginx/"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Already configured in some included file — nothing to do.
+            return body
+    except Exception:
+        pass
+
     pattern = re.compile(r"(location\s+/ws\s*\{)([^}]*)(\})", re.DOTALL)
     m = pattern.search(body)
     if not m:
-        print("ERROR: expected location /ws block in nginx.conf", file=sys.stderr)
-        sys.exit(1)
+        # /ws block is not in nginx.conf — it lives in a sites file that is
+        # deployed separately (staging.conf / chatapp-nginx.conf).  If we
+        # reached here the ws_access.log line is not anywhere yet; add it to
+        # the sites file if it exists, otherwise skip silently.
+        sites_candidates = [
+            "/etc/nginx/sites-available/chatapp",
+            "/etc/nginx/sites-enabled/chatapp",
+        ]
+        for sites_path in sites_candidates:
+            try:
+                sites_text = Path(sites_path).read_text(encoding="utf-8", errors="replace")
+                sm = pattern.search(sites_text)
+                if sm:
+                    if "/var/log/nginx/ws_access.log chatapp_ws;" in sm.group(2):
+                        return body  # already there
+                    head, inner, tail = sm.groups()
+                    insertion = "\n            access_log         /var/log/nginx/ws_access.log chatapp_ws;"
+                    replaced = f"{head}{insertion}{inner}{tail}"
+                    new_sites = sites_text[:sm.start()] + replaced + sites_text[sm.end():]
+                    import os, tempfile
+                    fd, tmp = tempfile.mkstemp(prefix=".nginx-sites-", dir="/etc/nginx/sites-available")
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                            fh.write(new_sites)
+                        os.replace(tmp, sites_path)
+                    finally:
+                        if os.path.exists(tmp):
+                            os.unlink(tmp)
+                    print(f"nginx: added ws_access.log to {sites_path}")
+                    return body
+            except FileNotFoundError:
+                continue
+        print("nginx: no /ws location block found — skipping ws_access.log setup")
+        return body
     head, inner, tail = m.groups()
     if "/var/log/nginx/ws_access.log chatapp_ws;" in inner:
         return body
