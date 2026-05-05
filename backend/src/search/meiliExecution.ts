@@ -126,9 +126,9 @@ function createMeiliSearchExecutor({
       );
     })();
 
-    if (freshnessSupplementUsed) {
-      meiliClient.incFallbackTotal();
-    }
+    // Freshness supplement is a normal part of the Meili path — it rescues
+    // recently-written messages that haven't been indexed yet.  Do NOT count
+    // this as a fallback; the search succeeded via Meili + recheck.
 
     // Cache filtered rows for reuse
     const validRows = strictRows.filter((r: any) => r && r.id);
