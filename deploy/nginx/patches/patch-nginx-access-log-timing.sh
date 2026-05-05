@@ -19,17 +19,40 @@ import tempfile
 cfg = Path("/etc/nginx/nginx.conf")
 text = orig = cfg.read_text(encoding="utf-8", errors="replace")
 
-if "log_format chatapp_timed" not in text or "log_format chatapp_ws" not in text:
-    fmt = """    log_format chatapp_timed '$remote_addr - $remote_user [$time_local] "$request" '
+def has_log_format_anywhere(name: str) -> bool:
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["grep", "-Rsl", f"log_format {name}", "/etc/nginx"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
+
+has_timed = "log_format chatapp_timed" in text or has_log_format_anywhere("chatapp_timed")
+has_ws = "log_format chatapp_ws" in text or has_log_format_anywhere("chatapp_ws")
+
+if not has_timed or not has_ws:
+    formats_to_add = []
+    if not has_timed:
+        formats_to_add.append(
+            """    log_format chatapp_timed '$remote_addr - $remote_user [$time_local] "$request" '
                     '$status $body_bytes_sent "$http_referer" '
                     '"$http_user_agent" '
-                    'rt=$request_time urt=$upstream_response_time';
-    log_format chatapp_ws '$remote_addr - $remote_user [$time_local] "$request" '
+                    'rt=$request_time urt=$upstream_response_time';"""
+        )
+    if not has_ws:
+        formats_to_add.append(
+            """    log_format chatapp_ws '$remote_addr - $remote_user [$time_local] "$request" '
                           '$status $body_bytes_sent rt=$request_time urt=$upstream_response_time '
                           'uaddr=$upstream_addr ustatus=$upstream_status rid=$request_id '
                           'upgrade="$http_upgrade" connection="$http_connection" '
-                          'xff="$http_x_forwarded_for" ua="$http_user_agent"';
-"""
+                          'xff="$http_x_forwarded_for" ua="$http_user_agent"';"""
+        )
+    fmt = "\n".join(formats_to_add) + "\n"
     m = re.search(r"http\s*\{", text)
     if not m:
         print("ERROR: no http { block in nginx.conf", file=sys.stderr)
