@@ -189,6 +189,7 @@ const {
   WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
   WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
   WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
+  WS_REDIS_SUBSCRIPTION_RELEASE_GRACE_MS,
   WS_HEARTBEAT_MISSED_PINGS_BEFORE_KILL,
 } = require("./serverConfig");
 const { createAppKeepaliveSender } = require("./wsAppKeepalive");
@@ -407,6 +408,7 @@ const {
   ready,
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
+  redisSubscriptionReleaseGraceMs: WS_REDIS_SUBSCRIPTION_RELEASE_GRACE_MS,
   markChannelRecentConnect,
   clearChannelBootstrapPending,
   invalidateRecentConnectTargetsCache,

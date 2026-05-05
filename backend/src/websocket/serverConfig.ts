@@ -97,6 +97,11 @@ const WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS =
   Number.isFinite(rawBootstrapDbConcurrencyWaitMs) && rawBootstrapDbConcurrencyWaitMs >= 0
     ? Math.min(2000, Math.floor(rawBootstrapDbConcurrencyWaitMs))
     : 300;
+const rawRedisSubscriptionReleaseGraceMs = envNumber('WS_REDIS_SUBSCRIPTION_RELEASE_GRACE_MS', 0);
+const WS_REDIS_SUBSCRIPTION_RELEASE_GRACE_MS =
+  Number.isFinite(rawRedisSubscriptionReleaseGraceMs) && rawRedisSubscriptionReleaseGraceMs >= 0
+    ? Math.min(300000, Math.floor(rawRedisSubscriptionReleaseGraceMs))
+    : 0;
 
 // Number of consecutive missed heartbeat pings before a socket is terminated.
 // Default 2 means a socket must miss two back-to-back pings (≥ 2× interval) to be killed,
@@ -138,5 +143,6 @@ module.exports = {
   WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS,
   WS_BOOTSTRAP_DB_MAX_IN_FLIGHT,
   WS_BOOTSTRAP_DB_CONCURRENCY_WAIT_MS,
+  WS_REDIS_SUBSCRIPTION_RELEASE_GRACE_MS,
   WS_HEARTBEAT_MISSED_PINGS_BEFORE_KILL,
 };

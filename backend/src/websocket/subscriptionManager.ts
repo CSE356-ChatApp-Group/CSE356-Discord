@@ -6,10 +6,40 @@ function createSubscriptionManager({
   ready,
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
+  redisSubscriptionReleaseGraceMs = 0,
   markChannelRecentConnect,
   clearChannelBootstrapPending = null,
   invalidateRecentConnectTargetsCache,
 }) {
+  const pendingRedisReleaseTimers = new Map();
+
+  function isGraceEligibleRedisTopic(redisChannel) {
+    return redisChannel.startsWith("channel:") || redisChannel.startsWith("conversation:");
+  }
+
+  function clearPendingRedisRelease(redisChannel) {
+    const timer = pendingRedisReleaseTimers.get(redisChannel);
+    if (!timer) return;
+    clearTimeout(timer);
+    pendingRedisReleaseTimers.delete(redisChannel);
+  }
+
+  function releaseRedisTopicMaybeWithGrace(redisChannel) {
+    if (!isGraceEligibleRedisTopic(redisChannel) || redisSubscriptionReleaseGraceMs <= 0) {
+      releaseRedisChannelSubscription(redisChannel);
+      return;
+    }
+    if (pendingRedisReleaseTimers.has(redisChannel)) return;
+
+    const timer = setTimeout(() => {
+      pendingRedisReleaseTimers.delete(redisChannel);
+      if ((channelClients.get(redisChannel)?.size || 0) > 0) return;
+      releaseRedisChannelSubscription(redisChannel);
+    }, redisSubscriptionReleaseGraceMs);
+    if (typeof timer.unref === "function") timer.unref();
+    pendingRedisReleaseTimers.set(redisChannel, timer);
+  }
+
   function subscribeCommunityClient(ws, communityId) {
     if (typeof communityId !== "string" || !communityId) return;
     if (!ws._communityIds) ws._communityIds = new Set();
@@ -55,6 +85,7 @@ function createSubscriptionManager({
       return;
     }
 
+    clearPendingRedisRelease(redisChannel);
     await ensureRedisChannelSubscribed(redisChannel);
 
     // Guard: socket may have closed during the Redis await above.
@@ -105,7 +136,7 @@ function createSubscriptionManager({
       channelClients.delete(redisChannel);
       // No local subscribers remain — release the Redis subscription so the
       // subscriber connection doesn't accumulate channels indefinitely.
-      releaseRedisChannelSubscription(redisChannel);
+      releaseRedisTopicMaybeWithGrace(redisChannel);
     }
   }
 

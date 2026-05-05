@@ -230,6 +230,119 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
   });
 });
 
+describe('subscriptionManager Redis release grace', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.runOnlyPendingTimers();
+    jest.useRealTimers();
+  });
+
+  function buildReleaseGraceHarness(graceMs: number) {
+    const ensureRedisChannelSubscribed = jest.fn().mockResolvedValue(undefined);
+    const releaseRedisChannelSubscription = jest.fn();
+    const channelClients = new Map();
+    const { subscribeClient, unsubscribeClient } = createSubscriptionManager({
+      localUserClients: new Map(),
+      channelClients,
+      communityClients: new Map(),
+      userIdFromTarget: (ch: string) => {
+        if (ch.startsWith('user:')) return ch.slice('user:'.length);
+        return null;
+      },
+      ready: jest.fn().mockResolvedValue(undefined),
+      ensureRedisChannelSubscribed,
+      releaseRedisChannelSubscription,
+      redisSubscriptionReleaseGraceMs: graceMs,
+      markChannelRecentConnect: jest.fn().mockResolvedValue(undefined),
+      invalidateRecentConnectTargetsCache: jest.fn().mockResolvedValue(undefined),
+    });
+    const wsFactory = () => ({
+      readyState: 1,
+      _subscriptions: new Set<string>(),
+      _userId: 'u1',
+      _explicitChannelUnsub: new Set<string>(),
+    });
+    return {
+      subscribeClient,
+      unsubscribeClient,
+      ensureRedisChannelSubscribed,
+      releaseRedisChannelSubscription,
+      wsFactory,
+    };
+  }
+
+  it('delays release when grace is enabled', async () => {
+    const {
+      subscribeClient,
+      unsubscribeClient,
+      releaseRedisChannelSubscription,
+      wsFactory,
+    } = buildReleaseGraceHarness(1000);
+    const ws = wsFactory();
+
+    await subscribeClient(ws as any, 'channel:abc');
+    await unsubscribeClient(ws as any, 'channel:abc');
+
+    expect(releaseRedisChannelSubscription).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(999);
+    expect(releaseRedisChannelSubscription).not.toHaveBeenCalled();
+  });
+
+  it('resubscribe cancels pending release for the same topic', async () => {
+    const {
+      subscribeClient,
+      unsubscribeClient,
+      releaseRedisChannelSubscription,
+      wsFactory,
+    } = buildReleaseGraceHarness(1000);
+    const ws1 = wsFactory();
+    const ws2 = wsFactory();
+
+    await subscribeClient(ws1 as any, 'conversation:abc');
+    await unsubscribeClient(ws1 as any, 'conversation:abc');
+    await subscribeClient(ws2 as any, 'conversation:abc');
+
+    jest.advanceTimersByTime(1001);
+    expect(releaseRedisChannelSubscription).not.toHaveBeenCalled();
+  });
+
+  it('releases after grace expires when no local subscribers return', async () => {
+    const {
+      subscribeClient,
+      unsubscribeClient,
+      releaseRedisChannelSubscription,
+      wsFactory,
+    } = buildReleaseGraceHarness(500);
+    const ws = wsFactory();
+
+    await subscribeClient(ws as any, 'channel:xyz');
+    await unsubscribeClient(ws as any, 'channel:xyz');
+    jest.advanceTimersByTime(500);
+
+    expect(releaseRedisChannelSubscription).toHaveBeenCalledTimes(1);
+    expect(releaseRedisChannelSubscription).toHaveBeenCalledWith('channel:xyz');
+  });
+
+  it('grace=0 preserves immediate release behavior', async () => {
+    const {
+      subscribeClient,
+      unsubscribeClient,
+      releaseRedisChannelSubscription,
+      wsFactory,
+    } = buildReleaseGraceHarness(0);
+    const ws = wsFactory();
+
+    await subscribeClient(ws as any, 'channel:immediate');
+    await unsubscribeClient(ws as any, 'channel:immediate');
+
+    expect(releaseRedisChannelSubscription).toHaveBeenCalledTimes(1);
+    expect(releaseRedisChannelSubscription).toHaveBeenCalledWith('channel:immediate');
+  });
+});
+
 describe('primeBootstrapChannelRecentConnect ZSCORE precheck', () => {
   const NOW = Date.now();
   const RECENT_SCORE = String(NOW);
