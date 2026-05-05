@@ -231,25 +231,28 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
     const communityJoinPayload = { userId: req.user.id, communityId };
     // WS clients subscribe to communities via `subscribeCommunityClient` (communityfeed
     // shards). Publishing to raw Redis `community:<id>` would not reach them.
-    await publishCommunityFeedMessage(communityId, {
-      event: "community:member_joined",
-      data: communityJoinPayload,
-    });
-    await publishCommunityFeedMessage(communityId, {
-      event: "community:joined",
-      data: communityJoinPayload,
-    });
-    await publishCommunityFeedMessage(communityId, {
-      event: "community:invite",
-      data: communityJoinPayload,
-    });
-    // GeneratedClient handleWsMessage matches community:invite | community:joined |
-    // community:member_added (not community:member_joined). Emit member_added so
-    // onInvite fires without relying on __wsInternal-only paths.
-    await publishCommunityFeedMessage(communityId, {
-      event: "community:member_added",
-      data: communityJoinPayload,
-    });
+    // Parallelise the four independent feed publishes to cut serial Redis round-trips.
+    await Promise.all([
+      publishCommunityFeedMessage(communityId, {
+        event: "community:member_joined",
+        data: communityJoinPayload,
+      }),
+      publishCommunityFeedMessage(communityId, {
+        event: "community:joined",
+        data: communityJoinPayload,
+      }),
+      publishCommunityFeedMessage(communityId, {
+        event: "community:invite",
+        data: communityJoinPayload,
+      }),
+      // GeneratedClient handleWsMessage matches community:invite | community:joined |
+      // community:member_added (not community:member_joined). Emit member_added so
+      // onInvite fires without relying on __wsInternal-only paths.
+      publishCommunityFeedMessage(communityId, {
+        event: "community:member_added",
+        data: communityJoinPayload,
+      }),
+    ]);
 
     res.json({ success: true });
   } catch (err) {
