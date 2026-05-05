@@ -137,6 +137,108 @@ ssh_vm() {
       "${PROD_USER}@${host}" "$@"
 }
 
+build_remote_upstream_csv() {
+  local exclude_internal="${1:-}"
+  local upstreams=()
+  local p
+  if [[ "${VM2_INTERNAL}" != "${exclude_internal}" ]]; then
+    for p in "${VMX_WORKER_PORTS[@]}"; do
+      upstreams+=("${VM2_INTERNAL}:${p}")
+    done
+  fi
+  if [[ "${VM3_INTERNAL}" != "${exclude_internal}" ]]; then
+    for p in "${VMX_WORKER_PORTS[@]}"; do
+      upstreams+=("${VM3_INTERNAL}:${p}")
+    done
+  fi
+  (IFS=,; echo "${upstreams[*]}")
+}
+
+rewrite_vm1_nginx_upstream() {
+  local extra_upstream_csv="${1:-}"
+  local context="${2:-vm1 upstream rewrite}"
+  ssh_vm "$VM1" "
+    set -euo pipefail
+    export SITE=/etc/nginx/sites-enabled/chatapp
+    export LOCAL_PORTS_CSV='$(IFS=,; echo "${VM1_WORKER_PORTS[*]}")'
+    export EXTRA_UPSTREAM_SERVERS_CSV='${extra_upstream_csv}'
+    TMP_SITE=\$(mktemp)
+    sudo cp \"\$SITE\" \"\$TMP_SITE\"
+    export TMP_SITE
+    python3 <<'PY'
+import os
+import re
+
+cfg_path = os.environ['TMP_SITE']
+local_ports = [p.strip() for p in os.environ['LOCAL_PORTS_CSV'].split(',') if p.strip()]
+extra_endpoints = [
+    ep.strip()
+    for ep in os.environ.get('EXTRA_UPSTREAM_SERVERS_CSV', '').split(',')
+    if ep.strip()
+]
+servers = ''.join(f'  server localhost:{port} max_fails=0;\\n' for port in local_ports)
+servers += ''.join(f'  server {ep} max_fails=0;\\n' for ep in extra_endpoints)
+block = (
+    'upstream app {\\n'
+    + servers
+    + '  keepalive 256;\\n'
+    + '  keepalive_requests 10000;\\n'
+    + '  keepalive_timeout 75s;\\n'
+    + '}'
+)
+text = open(cfg_path).read()
+text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
+if n != 1:
+    raise SystemExit(f'upstream app block not replaced (n={n})')
+open(cfg_path, 'w').write(text)
+PY
+    sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
+    rm -f \"\$TMP_SITE\"
+    sudo nginx -t >/dev/null
+    sudo systemctl reload nginx
+  " || {
+    echo "ERROR: ${context} failed."
+    return 1
+  }
+}
+
+drain_remote_vm_from_vm1_upstream() {
+  local vm_label="$1"
+  local vm_internal="$2"
+  local remaining_csv
+  remaining_csv="$(build_remote_upstream_csv "${vm_internal}")"
+  echo "=== Draining ${vm_label} remote workers from VM1 nginx upstream ==="
+  rewrite_vm1_nginx_upstream "${remaining_csv}" "drain ${vm_label} from VM1 nginx upstream"
+  ssh_vm "$VM1" "
+    set -euo pipefail
+    SITE=/etc/nginx/sites-enabled/chatapp
+    if grep -q 'server ${vm_internal}:' \"\$SITE\"; then
+      echo 'ERROR: ${vm_label} upstream entries still present after drain'
+      exit 1
+    fi
+  "
+  echo "✓ ${vm_label} removed from VM1 nginx upstream"
+}
+
+restore_remote_vm_to_vm1_upstream() {
+  local vm_label="$1"
+  local vm_internal="$2"
+  local full_csv
+  full_csv="$(build_remote_upstream_csv)"
+  echo "=== Restoring ${vm_label} remote workers to VM1 nginx upstream ==="
+  rewrite_vm1_nginx_upstream "${full_csv}" "restore ${vm_label} to VM1 nginx upstream"
+  ssh_vm "$VM1" "
+    set -euo pipefail
+    SITE=/etc/nginx/sites-enabled/chatapp
+    missing=0
+    for port in ${VMX_WORKER_PORTS[*]}; do
+      grep -q 'server ${vm_internal}:'\"\${port}\"' max_fails=0;' \"\$SITE\" || missing=1
+    done
+    [ \"\$missing\" -eq 0 ]
+  "
+  echo "✓ ${vm_label} restored to VM1 nginx upstream"
+}
+
 verify_and_heal_vm_workers() {
   local host="$1"
   local label="$2"
@@ -543,13 +645,13 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "  Release:      ${SHA:0:12} (from release-${SHA})"
   echo "  Phases:"
   echo "    Phase -1:  Pre-flight PostgreSQL check"
-  echo "    Phase  0:  Deploy to VM3 (6 workers: 4000-4005)"
-  echo "    Phase 0.5: Verify VM3 workers"
+  echo "    Phase  0:  Drain VM3 from VM1 nginx, then deploy VM3 (6 workers: 4000-4005)"
+  echo "    Phase 0.5: Verify VM3 workers, then rejoin VM3 to VM1 nginx"
   if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
     echo "    (CANARY) STOP after VM3 — DEPLOY_STOP_AFTER_VM3=1"
   fi
-  echo "    Phase  1:  Deploy to VM2 (6 workers: 4000-4005)"
-  echo "    Phase  2:  Verify VM2 workers"
+  echo "    Phase  1:  Drain VM2 from VM1 nginx, then deploy VM2 (6 workers: 4000-4005)"
+  echo "    Phase  2:  Verify VM2 workers, then rejoin VM2 to VM1 nginx"
   echo "    Phase  3:  Deploy to VM1 (4 workers: 4000-4003)"
   if [[ "${EMERGENCY_MODE}" == "true" ]]; then
     echo "    Phase  4:  [SKIPPED] nginx upstream re-injection check (--emergency)"
@@ -596,23 +698,23 @@ fi
 # (e.g. missing known_hosts in CI); default is always verify max_connections.
 run_preflight_db_check
 
-# ── Phase 0: Deploy to VM3 first (after pre-flight PostgreSQL check) ─────────
+# ── Phase 0: Drain VM3 from VM1 nginx, then deploy VM3 ───────────────────────
 # VM3 has no shared services: a *failed* deploy does not take down Redis/PgBouncer on VM1.
-# Rolling Node workers can briefly refuse ports VM1 nginx still lists. With
-# proxy_next_upstream_tries 0 (see deploy-common / prod-nginx-audit), nginx retries
-# across all healthy peers instead of stopping after two dead picks (tries=2 bug).
-# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
+# Remove VM3 from the shared VM1 nginx upstream before rolling its workers so
+# POST traffic never targets a restarting remote peer.
+drain_remote_vm_from_vm1_upstream "VM3" "${VM3_INTERNAL}"
 phase_deploy_workers_vm \
-  "=== Phase 0: Deploy to VM3 (workers only; brief client errors possible while rolling) ===" \
+  "=== Phase 0: Deploy to VM3 (workers only; drained from VM1 nginx during rollout) ===" \
   "$VM3" "$VM3_INTERNAL" "$VM3_PGBOUNCER_POOL_SIZE" "$VM3_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM3_PG_POOL_MAX_PER_INSTANCE"
 
-# ── Phase 0.5: Verify VM3 healthy ────────────────────────────────────────────
+# ── Phase 0.5: Verify VM3 healthy, then rejoin it to VM1 nginx ──────────────
 if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
   "=== Phase 0.5: Verify all 6 VM3 workers healthy ===" \
   "$VM3" "VM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
   echo "ERROR: One or more VM3 workers unhealthy — aborting before touching VM2/VM1."
   exit 1
 fi
+restore_remote_vm_to_vm1_upstream "VM3" "${VM3_INTERNAL}"
 
 if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
   echo ""
@@ -625,15 +727,16 @@ if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
   exit 0
 fi
 
-# ── Phase 1: Deploy to VM2 ───────────────────────────────────────────────────
-# Same rolling caveat as Phase 0 for VM2 upstreams; nginx tries=0 mitigates connect refused.
-# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
+# ── Phase 1: Drain VM2 from VM1 nginx, then deploy VM2 ───────────────────────
+# Remove VM2 from the shared VM1 nginx upstream before rolling its workers so
+# POST traffic never targets a restarting remote peer.
 echo ""
+drain_remote_vm_from_vm1_upstream "VM2" "${VM2_INTERNAL}"
 phase_deploy_workers_vm \
-  "=== Phase 1: Deploy to VM2 (workers only; brief client errors possible while rolling) ===" \
+  "=== Phase 1: Deploy to VM2 (workers only; drained from VM1 nginx during rollout) ===" \
   "$VM2" "$VM2_INTERNAL" "$VM2_PGBOUNCER_POOL_SIZE" "$VM2_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM2_PG_POOL_MAX_PER_INSTANCE"
 
-# ── Phase 2: Verify VM2 healthy before touching VM1 ──────────────────────────
+# ── Phase 2: Verify VM2 healthy, then rejoin it to VM1 nginx ─────────────────
 if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
   "=== Phase 2: Verify all 6 VM2 workers healthy ===" \
   "$VM2" "VM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
@@ -641,6 +744,7 @@ if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
   echo "       VM1/VM3 are still on their previous releases."
   exit 1
 fi
+restore_remote_vm_to_vm1_upstream "VM2" "${VM2_INTERNAL}"
 
 # ── Phase 3: Deploy to VM1 ───────────────────────────────────────────────────
 # Pass EXTRA_UPSTREAM_SERVERS_CSV so rewrite_nginx_upstream preserves VM2/VM3 entries throughout
