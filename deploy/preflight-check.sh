@@ -132,19 +132,29 @@ if ! sudo nginx -t 2>/tmp/chatapp_nginx_t.err; then
     "s|${CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY}|${CHATAPP_NGINX_PROXY_RETRY_LINE}|g" \
     "\$SITE"
   if grep -q "unknown log format.*chatapp" /tmp/chatapp_nginx_t.err 2>/dev/null; then
-    echo "Preflight: adding missing WebSocket log format to /etc/nginx/nginx.conf..." >&2
-    if ! grep -q "log_format chatapp_ws" /etc/nginx/nginx.conf; then
-      sudo python3 - <<'PYEOF'
+    echo "Preflight: adding missing chatapp log format(s) to /etc/nginx/nginx.conf..." >&2
+    sudo python3 - <<'PYEOF'
 import re
 cfg_path = "/etc/nginx/nginx.conf"
 text = open(cfg_path).read()
+formats_to_add = []
+if "log_format chatapp_timed" not in text:
+    formats_to_add.append(
+        """    log_format chatapp_timed '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                    '\$status \$body_bytes_sent "\$http_referer" '
+                    '"\$http_user_agent" '
+                    'rt=\$request_time urt=\$upstream_response_time';"""
+    )
 if "log_format chatapp_ws" not in text:
-    fmt = """    log_format chatapp_ws '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+    formats_to_add.append(
+        """    log_format chatapp_ws '\$remote_addr - \$remote_user [\$time_local] "\$request" '
                       '\$status \$body_bytes_sent rt=\$request_time urt=\$upstream_response_time '
                       'uaddr=\$upstream_addr ustatus=\$upstream_status rid=\$request_id '
                       'upgrade="\$http_upgrade" connection="\$http_connection" '
-                      'xff="\$http_x_forwarded_for" ua="\$http_user_agent"';
-"""
+                      'xff="\$http_x_forwarded_for" ua="\$http_user_agent"';"""
+    )
+if formats_to_add:
+    fmt = "\n".join(formats_to_add) + "\n"
     m = re.search(r"http\s*\{", text)
     if not m:
         raise RuntimeError("Could not find 'http {' in nginx.conf")
@@ -153,7 +163,6 @@ if "log_format chatapp_ws" not in text:
     with open(cfg_path, "w") as f:
         f.write(text)
 PYEOF
-    fi
   fi
   if grep -q "duplicate.*log_format" /tmp/chatapp_nginx_t.err 2>/dev/null; then
     echo "Preflight: removing duplicate log_format entries from conf.d..." >&2

@@ -23,8 +23,12 @@ def has_log_format_anywhere(name: str) -> bool:
     import subprocess
 
     try:
+        # Exclude backup files (.bak, .orig, .save, ~) — nginx never loads them
+        # but grep would match them and falsely report the format as "already configured".
         result = subprocess.run(
-            ["grep", "-Rsl", f"log_format {name}", "/etc/nginx"],
+            ["grep", "-Rsl", "--exclude=*.bak", "--exclude=*.orig",
+             "--exclude=*.save", "--exclude=*~",
+             f"log_format {name}", "/etc/nginx"],
             capture_output=True,
             text=True,
         )
