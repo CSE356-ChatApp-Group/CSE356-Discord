@@ -179,16 +179,16 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
 
     incrCommunityMemberCount(communityId).catch(() => {});
 
-    const [realtimeTargets, channelIds] = await Promise.all([
+    const [realtimeTargets, channelIds, { rows: memberRows }] = await Promise.all([
       listCommunityRealtimeTargets(communityId, req.user.id),
       getCommunityChannelIds(communityId),
+      query(
+        `SELECT user_id::text AS user_id
+           FROM community_members
+          WHERE community_id = $1`,
+        [communityId],
+      ),
     ]);
-    const { rows: memberRows } = await query(
-      `SELECT user_id::text AS user_id
-         FROM community_members
-        WHERE community_id = $1`,
-      [communityId],
-    );
     const affectedPresenceUserIds = [...new Set(
       memberRows
         .map((row) => row.user_id)
@@ -220,12 +220,13 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
           communityIds: [communityId],
         },
       }),
+      // Run in parallel with the invalidations above to save a serial Redis round-trip.
+      getPublicCommunitiesVersion().then(
+        (publicVersion) => invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {}),
+        () => {},
+      ),
     ]);
     invalidateWsAclCache(req.user.id, `community:${communityId}`);
-    {
-      const publicVersion = await getPublicCommunitiesVersion();
-      invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
-    }
     redis.del(membersCacheKey(communityId)).catch(() => {});
 
     const communityJoinPayload = { userId: req.user.id, communityId };

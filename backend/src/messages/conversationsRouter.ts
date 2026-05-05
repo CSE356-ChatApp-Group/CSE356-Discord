@@ -247,9 +247,13 @@ router.post('/',
         await upsertDirectConversationPair(client, conv.id, userLow, userHigh);
       }
 
-      const conversation = await loadConversationWithParticipants(client, conv.id);
       const invitedUserIds = allIds.filter(id => id !== req.user.id);
       await client.query('COMMIT');
+      // Release the connection (and advisory lock) before the participant JOIN
+      // query so the pool slot is freed sooner.
+      client.release();
+      client = null;
+      const conversation = await loadConversationWithParticipants({ query }, conv.id);
       await runCreatedConversationSideEffects({
         conversation,
         conversationId: conv.id,
