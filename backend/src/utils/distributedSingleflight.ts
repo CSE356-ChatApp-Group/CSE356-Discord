@@ -23,6 +23,7 @@ type JsonRedisLike = {
   set(...args: any[]): Promise<unknown>;
   setex(key: string, ttlSeconds: number, value: string): Promise<unknown>;
   del(...keys: string[]): Promise<unknown>;
+  pipeline(): { set(...args: any[]): any; exec(): Promise<any> };
   call?: (...args: (string | number | Buffer)[]) => Promise<unknown>;
   evalsha?: (sha: string, numKeys: number, ...args: any[]) => Promise<unknown>;
   eval?: (script: string, numKeys: number, ...args: any[]) => Promise<unknown>;
@@ -116,16 +117,25 @@ async function setJsonCacheWithStale(
     Math.max(ttl + 1, 2),
     maxStale,
   );
+  const writeStale = opts.writeStale !== false;
   try {
-    await redis.set(key, payload, 'EX', ttl);
-  } catch {
-    // non-fatal
-  }
-  if (opts.writeStale === false) {
-    return;
-  }
-  try {
-    await redis.set(staleCacheKey(key), payload, 'EX', staleTtl);
+    // Pipeline main + stale writes into a single Redis round-trip.
+    // Falls back to sequential writes if pipeline() is not available.
+    const pipe = redis.pipeline
+      ? redis.pipeline()
+      : null;
+    if (pipe) {
+      pipe.set(key, payload, 'EX', ttl);
+      if (writeStale) {
+        pipe.set(staleCacheKey(key), payload, 'EX', staleTtl);
+      }
+      await pipe.exec();
+    } else {
+      await redis.set(key, payload, 'EX', ttl);
+      if (writeStale) {
+        await redis.set(staleCacheKey(key), payload, 'EX', staleTtl);
+      }
+    }
   } catch {
     // non-fatal
   }

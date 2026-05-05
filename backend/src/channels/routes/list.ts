@@ -139,17 +139,23 @@ router.get('/',
                 }
               }
               // Opportunistic TTL repair for legacy channel:msg_count keys created without EX.
-              // Best-effort only; never block the response path.
-              const ttlRepair = redis.pipeline();
-              let ttlRepairOps = 0;
-              for (let i = 0; i < accessibleRows.length; i += 1) {
-                if (rawCounts[i] === null) continue;
-                ttlRepair.expire(countKeys[i], S.CHANNEL_MSG_COUNT_REDIS_TTL_SECS);
-                ttlRepairOps += 1;
-              }
-              if (ttlRepairOps > 0) {
-                ttlRepair.exec().catch(() => {});
-              }
+              // Deferred via setImmediate so it never blocks the HTTP response.
+              setImmediate(() => {
+                try {
+                  const ttlRepair = redis.pipeline();
+                  let ttlRepairOps = 0;
+                  for (let i = 0; i < accessibleRows.length; i += 1) {
+                    if (rawCounts[i] === null) continue;
+                    ttlRepair.expire(countKeys[i], S.CHANNEL_MSG_COUNT_REDIS_TTL_SECS);
+                    ttlRepairOps += 1;
+                  }
+                  if (ttlRepairOps > 0) {
+                    ttlRepair.exec().catch(() => {});
+                  }
+                } catch {
+                  // best-effort; never throw in setImmediate
+                }
+              });
             } catch (err) {
               logger.warn({ err }, 'Failed to fetch unread counts from Redis; defaulting to 0');
               for (const ch of accessibleRows) {

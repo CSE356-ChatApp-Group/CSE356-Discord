@@ -71,69 +71,32 @@ async function resolveParticipantIds(client, rawParticipants) {
 
   const uuidValues = uniqueValues.filter((value) => UUID_RE.test(value));
   const textValues = uniqueValues.filter((value) => !UUID_RE.test(value));
+  const lowerTextValues = [...new Set(textValues.map(v => v.toLowerCase()))];
   const byAny = new Map();
 
-  if (uuidValues.length) {
+  // Single query resolves all participant inputs — UUIDs by id, text values by
+  // exact username/email, and remaining by case-insensitive match — eliminating
+  // up to 2 extra DB round-trips on the DM / group-conversation creation path.
+  if (uuidValues.length || lowerTextValues.length) {
     const { rows } = await client.query(
       `SELECT id::text AS id, username, email
        FROM users
-       WHERE id = ANY($1::uuid[])`,
-      [uuidValues]
+       WHERE ($1::uuid[] IS NOT NULL AND id = ANY($1::uuid[]))
+          OR ($2::text[] IS NOT NULL AND (
+            username = ANY($2::text[])
+            OR email = ANY($2::text[])
+            OR lower(username) = ANY($3::text[])
+            OR lower(email) = ANY($3::text[])
+          ))`,
+      [
+        uuidValues.length ? uuidValues : null,
+        textValues.length ? textValues : null,
+        lowerTextValues.length ? lowerTextValues : null,
+      ]
     );
 
     rows.forEach((row) => {
       byAny.set(row.id, row.id);
-      if (row.username) {
-        byAny.set(row.username, row.id);
-        byAny.set(row.username.toLowerCase(), row.id);
-      }
-      if (row.email) {
-        byAny.set(row.email, row.id);
-        byAny.set(row.email.toLowerCase(), row.id);
-      }
-    });
-  }
-
-  let unresolvedTextValues = textValues.filter(
-    (value) => !byAny.has(value) && !byAny.has(value.toLowerCase())
-  );
-
-  if (unresolvedTextValues.length) {
-    const { rows } = await client.query(
-      `SELECT id::text AS id, username, email
-       FROM users
-       WHERE username = ANY($1::text[])
-          OR email = ANY($1::text[])`,
-      [unresolvedTextValues]
-    );
-
-    rows.forEach((row) => {
-      if (row.username) {
-        byAny.set(row.username, row.id);
-        byAny.set(row.username.toLowerCase(), row.id);
-      }
-      if (row.email) {
-        byAny.set(row.email, row.id);
-        byAny.set(row.email.toLowerCase(), row.id);
-      }
-    });
-
-    unresolvedTextValues = unresolvedTextValues.filter(
-      (value) => !byAny.has(value) && !byAny.has(value.toLowerCase())
-    );
-  }
-
-  if (unresolvedTextValues.length) {
-    const unresolvedLowerValues = [...new Set(unresolvedTextValues.map((value) => value.toLowerCase()))];
-    const { rows } = await client.query(
-      `SELECT id::text AS id, username, email
-       FROM users
-       WHERE lower(username) = ANY($1::text[])
-          OR lower(email) = ANY($1::text[])`,
-      [unresolvedLowerValues]
-    );
-
-    rows.forEach((row) => {
       if (row.username) {
         byAny.set(row.username, row.id);
         byAny.set(row.username.toLowerCase(), row.id);

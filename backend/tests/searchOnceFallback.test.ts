@@ -20,8 +20,6 @@ describe('search() – FTS zero → scoped literal', () => {
     mockQuery
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({
         rows: [{ tsquery_text: "'make' & 'foo'", tsquery_nodes: 2 }],
       })
@@ -66,7 +64,7 @@ describe('search() – FTS zero → scoped literal', () => {
 
     expect(out.hits).toHaveLength(1);
     expect(out.hits[0].content).toContain('That makes more');
-    expect(mockQuery).toHaveBeenCalledTimes(9);
+    expect(mockQuery).toHaveBeenCalledTimes(7);
 
     const traceCall = infoSpy.mock.calls.find((c) => c[1] === 'search_trace');
     expect(traceCall).toBeDefined();
@@ -93,8 +91,6 @@ describe('search() – FTS zero → scoped literal', () => {
     const pool = require('../src/db/pool');
     const mockQuery = jest.fn();
     mockQuery
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({
@@ -133,7 +129,7 @@ describe('search() – FTS zero → scoped literal', () => {
       offset: 0,
     });
 
-    expect(mockQuery).toHaveBeenCalledTimes(7);
+    expect(mockQuery).toHaveBeenCalledTimes(5);
     const traceCall = infoSpy.mock.calls.find((c) => c[1] === 'search_trace');
     expect(traceCall![0]).toMatchObject({
       fallback_used: false,
@@ -150,8 +146,6 @@ describe('search() – FTS zero → scoped literal', () => {
     const pool = require('../src/db/pool');
     const mockQuery = jest.fn();
     mockQuery
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({
@@ -212,8 +206,6 @@ describe('search() – FTS zero → scoped literal', () => {
     mockQuery
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({
         rows: [{ tsquery_text: "'script' & 'marker'", tsquery_nodes: 2 }],
       })
@@ -267,8 +259,6 @@ describe('search() – FTS zero → scoped literal', () => {
     mockQuery
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({
         rows: [{ tsquery_text: '', tsquery_nodes: 0 }],
       })
@@ -308,7 +298,7 @@ describe('search() – FTS zero → scoped literal', () => {
     });
 
     expect(out.hits.length).toBeGreaterThan(0);
-    expect(mockQuery).toHaveBeenCalledTimes(8);
+    expect(mockQuery).toHaveBeenCalledTimes(6);
     const traceCall = infoSpy.mock.calls.find((c) => c[1] === 'search_trace');
     expect(traceCall![0]).toMatchObject({
       tsquery_node_count: 0,

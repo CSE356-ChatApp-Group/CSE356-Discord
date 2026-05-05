@@ -1,6 +1,6 @@
 # Route Performance Audit — Full Stack Analysis
 
-**Date:** 2025-05-04  
+**Date:** 2025-05-04 (updated 2025-05-05)  
 **Scope:** Every API route, middleware stack, DB query pattern, Redis usage, WebSocket fanout pipeline  
 **Method:** Static code analysis of `backend/src/` against load-test baselines  
 
@@ -9,6 +9,15 @@
 ## Executive Summary
 
 The codebase is **already well-optimized** for a student chat app — you have merged access+insert SQL, channel-level insert serialization, singleflight dedup, list caches, read-replica routing, and overload shedding. The remaining wins are **architectural**, not micro-optimizations. Below are the highest-impact opportunities, ordered by estimated savings.
+
+### Changes Implemented (2025-05-05)
+
+| # | Change | Files | Savings |
+|---|--------|-------|---------|
+| A | Search `SET LOCAL` batching (3 → 1 query) | `backend/src/search/searchExecution.ts` | ~3–6ms per search request |
+| B | Cache write pipelining (2 → 1 Redis RT) | `backend/src/utils/distributedSingleflight.ts` | ~1–2ms per cache stampede resolution |
+| C | Channel list TTL repair deferred | `backend/src/channels/routes/list.ts` | ~0.5–1ms per channel list response |
+| D | Participant resolution (3 → 1 DB query) | `backend/src/messages/conversationsRouterRepo.ts` | ~5–15ms per DM/group creation |
 
 ---
 

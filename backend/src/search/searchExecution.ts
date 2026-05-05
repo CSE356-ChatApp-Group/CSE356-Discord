@@ -60,9 +60,13 @@ async function withSearchClientTransaction<T>(
     let rollbackErr: Error | null = null;
     try {
       await client.query('BEGIN READ ONLY');
-      await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
-      await client.query(`SET LOCAL work_mem = '64MB'`);
-      await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
+      // set_config(..., true) is equivalent to SET LOCAL — all three in one round-trip.
+      await client.query(
+        `SELECT set_config('statement_timeout', $1, true),
+                set_config('work_mem', '64MB', true),
+                set_config('max_parallel_workers_per_gather', '0', true)`,
+        [String(timeoutMs)],
+      );
       const out = await run(client);
       await client.query('COMMIT');
       return logAndReturn(acquireMs, tWork, out);
@@ -80,9 +84,13 @@ async function withSearchClientTransaction<T>(
   let rollbackErr: Error | null = null;
   try {
     await client.query('BEGIN');
-    await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
-    await client.query(`SET LOCAL work_mem = '64MB'`);
-    await client.query(`SET LOCAL max_parallel_workers_per_gather = 0`);
+    // set_config(..., true) is equivalent to SET LOCAL — all three in one round-trip.
+    await client.query(
+      `SELECT set_config('statement_timeout', $1, true),
+              set_config('work_mem', '64MB', true),
+              set_config('max_parallel_workers_per_gather', '0', true)`,
+      [String(timeoutMs)],
+    );
     const out = await run(client);
     await client.query('COMMIT');
     return logAndReturn(acquireMs, tWork, out);
