@@ -200,10 +200,6 @@ async function resolveActiveConnectedChannelUserTargets(
   channelId: string,
   alreadyTargeted: Set<string>,
 ) {
-  if (!CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK) {
-    return [];
-  }
-
   let connectedUserIds: string[] = [];
   try {
     const raw = await redis.smembers(connectedUsersKey());
@@ -311,10 +307,26 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
     return [];
   });
   const targetSet = new Set(recentTargets);
-  const activeConnectedTargets = await resolveActiveConnectedChannelUserTargets(channelId, targetSet);
-  for (const target of activeConnectedTargets) targetSet.add(target);
+
+  // Safety net: when both ZSET paths return empty AND skip-userfeed is active,
+  // the connected fallback is the last resort to reach users whose bootstrap
+  // hasn't completed or whose ZSET entries expired. Re-enable it with a tight
+  // probe cap to limit p95 impact — this only fires when ZSETs are empty.
+  const zsetsEmpty = targetSet.size === 0;
+  const shouldRunConnectedFallback = CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK
+    || (channelMessageSkipUserfeedPublishEnabled() && zsetsEmpty);
+
+  let connectedFallbackCount = 0;
+  if (shouldRunConnectedFallback) {
+    const activeConnectedTargets = await resolveActiveConnectedChannelUserTargets(channelId, targetSet);
+    connectedFallbackCount = activeConnectedTargets.length;
+    for (const target of activeConnectedTargets) targetSet.add(target);
+    if (zsetsEmpty && connectedFallbackCount > 0) {
+      wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'connected_fallback_zset_miss' });
+    }
+  }
   const activeTargets = [...targetSet];
-  const duplicateCandidateCount = recentTargets.length + activeConnectedTargets.length - activeTargets.length;
+  const duplicateCandidateCount = recentTargets.length + connectedFallbackCount - activeTargets.length;
   if (duplicateCandidateCount > 0) {
     wsRecipientDuplicateCandidatesTotal?.inc?.(
       { path: 'channel_message_active_subscribers' },
