@@ -68,6 +68,7 @@ server {
 
   # WebSocket proxy
   location /ws {
+    access_log /var/log/nginx/ws_access.log chatapp_ws;
     limit_req zone=external_ws burst=20 nodelay;
     limit_conn external_expensive_conns 5;
     proxy_pass http://app;
