@@ -91,15 +91,12 @@ const redisAuth = createStandaloneClient('auth', REDIS_AUTH_URL);
 
 // Dedicated subscriber – used by ws/fanout; cannot issue normal commands.
 //
-// Standalone: enableReadyCheck must be false because ioredis runs INFO as its
-// ready-check, but INFO is not allowed on a connection that is (or has
-// previously been) in subscriber mode, causing an immediate error.
-//
-// Cluster: node connections can have enableReadyCheck: true because ioredis
-// Cluster manages multiple connections and needs to be able to run CLUSTER
-// SLOTS / INFO on at least one of them to maintain the slot map. node-level
-// ready checks are safe during initial connection before the connection
-// enters subscriber mode.
+// enableReadyCheck must be false for BOTH standalone and cluster subscriber
+// connections. After a connection enters subscriber mode (SSUBSCRIBE/SUBSCRIBE),
+// Redis rejects INFO commands on that connection. ioredis would attempt to run
+// INFO as a ready-check on reconnect, hitting an error and stalling recovery.
+// Disabling enableReadyCheck skips that check and lets the reconnected subscriber
+// re-subscribe immediately.
 const SUB_STANDALONE_OPTIONS = {
   enableReadyCheck: false,
   maxRetriesPerRequest: null,
@@ -132,15 +129,24 @@ attachListeners(redisSub, 'subscriber');
 const REDIS_PUBSUB_EVENT: string = REDIS_IS_CLUSTER ? 'smessage' : 'message';
 
 function redisPubsubSubscribe(channel: string): Promise<unknown> {
-  return REDIS_IS_CLUSTER
-    ? redisSub.ssubscribe(channel)
-    : redisSub.subscribe(channel);
+  if (REDIS_IS_CLUSTER) {
+    return redisSub.ssubscribe(channel);
+  }
+  // Standalone mode: only allow subscriptions to shared shard feeds.
+  // Individual channel:<uuid> or user:<uuid> subscriptions are no-ops because
+  // logical delivery is already covered by the shard topics. This prevents
+  // the ioredis offline queue from batching thousands of channels into a
+  // single massive (and slow) SUBSCRIBE command.
+  if (channel.startsWith('userfeed:') || channel.startsWith('communityfeed:')) {
+    return redisSub.subscribe(channel);
+  }
+  return Promise.resolve();
 }
 
 function redisPubsubUnsubscribe(channel: string): void {
   if (REDIS_IS_CLUSTER) {
     redisSub.sunsubscribe(channel).catch(() => {});
-  } else {
+  } else if (channel.startsWith('userfeed:') || channel.startsWith('communityfeed:')) {
     redisSub.unsubscribe(channel).catch(() => {});
   }
 }
