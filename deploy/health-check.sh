@@ -7,7 +7,7 @@ set -euo pipefail
 
 PORT=${1:?Port required}
 BASE_URL=${2:-http://localhost:$PORT}
-MAX_ATTEMPTS=${HEALTH_MAX_ATTEMPTS:-15}
+MAX_ATTEMPTS=${HEALTH_MAX_ATTEMPTS:-45}
 SLEEP_SECONDS=${HEALTH_RETRY_DELAY_SECONDS:-2}
 
 echo "=== Health Check on $BASE_URL ==="

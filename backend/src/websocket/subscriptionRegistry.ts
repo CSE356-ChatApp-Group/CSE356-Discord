@@ -3,6 +3,7 @@ function createRedisSubscriptionRegistry({
   isRedisOperational,
 }) {
   const { redisPubsubSubscribe, redisPubsubUnsubscribe } = require('../db/redis');
+  const logger = require('../utils/logger');
   const redisSubscribed = new Set();
   const redisSubscribeInFlight = new Map();
 
@@ -18,9 +19,18 @@ function createRedisSubscriptionRegistry({
       throw new Error("Redis subscriber is not available");
     }
 
+    const start = Date.now();
     const op = Promise.resolve(redisPubsubSubscribe(redisChannel))
       .then(() => {
         redisSubscribed.add(redisChannel);
+        const elapsed = Date.now() - start;
+        if (elapsed > 1000) {
+          logger.warn({ redisChannel, elapsedMs: elapsed }, "Slow Redis subscription");
+        }
+      })
+      .catch((err) => {
+        logger.error({ err, redisChannel }, "Redis subscription failed");
+        throw err;
       })
       .finally(() => {
         redisSubscribeInFlight.delete(redisChannel);

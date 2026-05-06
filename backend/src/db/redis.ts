@@ -59,8 +59,10 @@ const CLUSTER_OPTIONS = {
 
 function attachListeners(client: any, name: string) {
   client.on('connect',      () => logger.info({ client: name }, 'Redis connected'));
+  client.on('ready',        () => logger.info({ client: name }, 'Redis ready'));
   client.on('reconnecting', () => logger.warn({ client: name }, 'Redis reconnecting'));
   client.on('error', (err: Error) => logger.error({ err, client: name }, 'Redis error'));
+  client.on('end',          () => logger.info({ client: name }, 'Redis connection ended'));
 }
 
 function createStandaloneClient(name: string, url: string) {
@@ -88,18 +90,33 @@ const redis = createMainClient('main');
 const redisAuth = createStandaloneClient('auth', REDIS_AUTH_URL);
 
 // Dedicated subscriber – used by ws/fanout; cannot issue normal commands.
-// enableReadyCheck must be false: ioredis runs INFO as its ready-check, but
-// INFO is not allowed on a connection that is (or has previously been) in
-// subscriber mode, causing an immediate error that transitions the client to
-// a broken state and prevents startup.
+//
+// Standalone: enableReadyCheck must be false because ioredis runs INFO as its
+// ready-check, but INFO is not allowed on a connection that is (or has
+// previously been) in subscriber mode, causing an immediate error.
+//
+// Cluster: node connections can have enableReadyCheck: true because ioredis
+// Cluster manages multiple connections and needs to be able to run CLUSTER
+// SLOTS / INFO on at least one of them to maintain the slot map. node-level
+// ready checks are safe during initial connection before the connection
+// enters subscriber mode.
 const SUB_STANDALONE_OPTIONS = {
   enableReadyCheck: false,
   maxRetriesPerRequest: null,
   retryStrategy: (times: number) => Math.min(times * 100, 3000),
 };
 
+const SUB_CLUSTER_NODE_OPTIONS = {
+  enableReadyCheck: true,
+  maxRetriesPerRequest: null,
+  retryStrategy: (times: number) => Math.min(times * 100, 3000),
+};
+
 const redisSub = REDIS_IS_CLUSTER
-  ? new Redis.Cluster(CLUSTER_NODES, { redisOptions: { ...SUB_STANDALONE_OPTIONS, ...clusterAuth }, clusterRetryStrategy: (times: number) => Math.min(times * 100, 3000) })
+  ? new Redis.Cluster(CLUSTER_NODES, {
+      redisOptions: { ...SUB_CLUSTER_NODE_OPTIONS, ...clusterAuth },
+      clusterRetryStrategy: (times: number) => Math.min(times * 100, 3000),
+    })
   : new Redis(REDIS_URL, SUB_STANDALONE_OPTIONS);
 attachListeners(redisSub, 'subscriber');
 
