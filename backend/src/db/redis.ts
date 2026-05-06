@@ -28,7 +28,8 @@ const REDIS_AUTH_URL = process.env.REDIS_AUTH_URL || REDIS_URL;
 
 // Comma-separated "host:port" list. When set, redis + redisSub run in cluster mode.
 // redisAuth always uses REDIS_AUTH_URL (standalone) regardless of this setting.
-const REDIS_CLUSTER_NODES = process.env.REDIS_CLUSTER_NODES || '';
+const REDIS_CLUSTER_NODES    = process.env.REDIS_CLUSTER_NODES    || '';
+const REDIS_CLUSTER_PASSWORD = process.env.REDIS_CLUSTER_PASSWORD || '';
 
 const REDIS_IS_CLUSTER = Boolean(REDIS_CLUSTER_NODES.trim());
 
@@ -43,6 +44,7 @@ function parseClusterNodes(nodesStr: string) {
 }
 
 const CLUSTER_NODES = REDIS_IS_CLUSTER ? parseClusterNodes(REDIS_CLUSTER_NODES) : [];
+const clusterAuth   = REDIS_CLUSTER_PASSWORD ? { password: REDIS_CLUSTER_PASSWORD } : {};
 
 const STANDALONE_OPTIONS = {
   enableReadyCheck: true,
@@ -51,7 +53,7 @@ const STANDALONE_OPTIONS = {
 };
 
 const CLUSTER_OPTIONS = {
-  redisOptions: STANDALONE_OPTIONS,
+  redisOptions: { ...STANDALONE_OPTIONS, ...clusterAuth },
   clusterRetryStrategy: (times: number) => Math.min(times * 100, 3000),
 };
 
@@ -97,7 +99,7 @@ const SUB_STANDALONE_OPTIONS = {
 };
 
 const redisSub = REDIS_IS_CLUSTER
-  ? new Redis.Cluster(CLUSTER_NODES, { redisOptions: SUB_STANDALONE_OPTIONS, clusterRetryStrategy: (times: number) => Math.min(times * 100, 3000) })
+  ? new Redis.Cluster(CLUSTER_NODES, { redisOptions: { ...SUB_STANDALONE_OPTIONS, ...clusterAuth }, clusterRetryStrategy: (times: number) => Math.min(times * 100, 3000) })
   : new Redis(REDIS_URL, SUB_STANDALONE_OPTIONS);
 attachListeners(redisSub, 'subscriber');
 
