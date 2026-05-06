@@ -2,6 +2,7 @@ function createRedisSubscriptionRegistry({
   redisSub,
   isRedisOperational,
 }) {
+  const { redisPubsubSubscribe, redisPubsubUnsubscribe } = require('../db/redis');
   const redisSubscribed = new Set();
   const redisSubscribeInFlight = new Map();
 
@@ -17,7 +18,7 @@ function createRedisSubscriptionRegistry({
       throw new Error("Redis subscriber is not available");
     }
 
-    const op = Promise.resolve(redisSub.subscribe(redisChannel))
+    const op = Promise.resolve(redisPubsubSubscribe(redisChannel))
       .then(() => {
         redisSubscribed.add(redisChannel);
       })
@@ -32,7 +33,7 @@ function createRedisSubscriptionRegistry({
   function releaseRedisChannelSubscription(redisChannel) {
     if (redisSubscribed.has(redisChannel) && isRedisOperational(redisSub)) {
       redisSubscribed.delete(redisChannel);
-      redisSub.unsubscribe(redisChannel).catch(() => {});
+      redisPubsubUnsubscribe(redisChannel);
     }
   }
 

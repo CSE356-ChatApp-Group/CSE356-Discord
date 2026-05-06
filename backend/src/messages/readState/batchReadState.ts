@@ -124,15 +124,21 @@ async function enqueueBatchReadStateUpdate(
   const targetId = channelId ?? conversationId;
   if (!targetId) return;
 
-  const dirtyKey = `${userId}|${targetId}`;
-  const pendingKey = `${RS_PENDING_KEY_PREFIX}${userId}:${targetId}`;
+  // Scope prefix co-locates the dirty key with the pending key's hash tag and
+  // the read_cursor_ts / read_db_lock keys used in the Lua CAS script.
+  const scope = channelId ? `ch:${channelId}` : `cv:${conversationId}`;
+  const dirtyKey = `${userId}|${scope}`;
+  // Hash tag {userId:scope} places cursor, lock, and pending on the same slot.
+  const pendingKey = `${RS_PENDING_KEY_PREFIX}{${userId}:${scope}}`;
 
   const createdAtStr = typeof messageCreatedAt === 'string'
     ? messageCreatedAt
     : (messageCreatedAt as Date).toISOString();
 
   try {
-    // MULTI keeps HSET + EXPIRE atomic so a key cannot exist without TTL if the transaction commits.
+    // MULTI keeps HSET + EXPIRE atomic so a key cannot exist without TTL.
+    // RS_DIRTY_SET (global key) is added separately so it can live on a
+    // different cluster slot than the per-user-pair pending key.
     await redis
       .multi()
       .hset(
@@ -142,9 +148,9 @@ async function enqueueBatchReadStateUpdate(
         'channel_id', channelId ?? '',
         'conversation_id', conversationId ?? '',
       )
-      .expire(pendingKey, RS_PENDING_TTL_SECS) // 24h TTL — prevents unbounded memory from inactive (user, target) pairs
-      .sadd(RS_DIRTY_SET, dirtyKey)
+      .expire(pendingKey, RS_PENDING_TTL_SECS)
       .exec();
+    await redis.sadd(RS_DIRTY_SET, dirtyKey);
   } catch (err: any) {
     logger.warn({ err, userId, channelId, conversationId, messageId }, 'batchReadState Redis enqueue failed');
   }
@@ -157,10 +163,11 @@ function batchReadStateRedisKeys(
 ) {
   const targetId = channelId ?? conversationId;
   if (!targetId) return null;
+  const scope = channelId ? `ch:${channelId}` : `cv:${conversationId}`;
   return {
     dirtySetKey: RS_DIRTY_SET,
-    dirtyKey: `${userId}|${targetId}`,
-    pendingKey: `${RS_PENDING_KEY_PREFIX}${userId}:${targetId}`,
+    dirtyKey: `${userId}|${scope}`,
+    pendingKey: `${RS_PENDING_KEY_PREFIX}{${userId}:${scope}}`,
     pendingTtlSeconds: RS_PENDING_TTL_SECS,
   };
 }
@@ -238,8 +245,11 @@ async function flushDirtyReadStatesToDB(): Promise<void> {
 
         const pipeline = redis.pipeline();
         for (const dirtyKey of batch) {
-          const [userId, targetId] = dirtyKey.split('|');
-          pipeline.hgetall(`${RS_PENDING_KEY_PREFIX}${userId}:${targetId}`);
+          // dirtyKey format: "userId|scope" where scope = "ch:channelId" or "cv:conversationId"
+          const pipeIdx = dirtyKey.indexOf('|');
+          const userId = pipeIdx > 0 ? dirtyKey.slice(0, pipeIdx) : dirtyKey;
+          const scope  = pipeIdx > 0 ? dirtyKey.slice(pipeIdx + 1) : '';
+          pipeline.hgetall(`${RS_PENDING_KEY_PREFIX}{${userId}:${scope}}`);
         }
 
         let results: [Error | null, Record<string, string> | null][];

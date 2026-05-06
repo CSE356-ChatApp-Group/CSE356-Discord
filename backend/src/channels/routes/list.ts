@@ -5,6 +5,7 @@ const { query: qv } = require('express-validator');
 const { query, queryRead } = require('../../db/pool');
 const redis = require('../../db/redis');
 const { redisBatchMget } = require('../../db/redisBatch');
+const { countKeyForChannel, userLastReadCountKey } = require('../../messages/channelMessageCounter');
 const logger = require('../../utils/logger');
 const { recordEndpointListCache } = require('../../utils/endpointCacheMetrics');
 const {
@@ -107,8 +108,8 @@ router.get('/',
           // Attach Redis-backed unread_message_count to each accessible channel
           if (accessibleRows.length > 0) {
             try {
-              const countKeys = accessibleRows.map((ch) => `channel:msg_count:${ch.id}`);
-              const readKeys = accessibleRows.map((ch) => `user:last_read_count:${ch.id}:${userId}`);
+              const countKeys = accessibleRows.map((ch) => countKeyForChannel(ch.id));
+              const readKeys = accessibleRows.map((ch) => userLastReadCountKey(ch.id, userId));
               const [rawCounts, rawReads] = await Promise.all([
                 redisBatchMget(redis, countKeys),
                 redisBatchMget(redis, readKeys),
