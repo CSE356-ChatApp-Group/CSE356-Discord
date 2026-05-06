@@ -379,9 +379,11 @@ async function setPresence(userId, status, awayMessage) {
     }
   }
 
-  // Under load, preserve explicit away/offline transitions and suppress noisy churn.
+  const statusChanged = previousStatus !== status;
+
   const shouldFanout =
     !overload.shouldThrottlePresenceFanout() ||
+    statusChanged ||
     status === "away" ||
     status === "offline";
 

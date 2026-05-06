@@ -189,6 +189,35 @@ describe('progressive websocket bootstrap ready', () => {
     expect(wsBootstrapProgressiveTotal.inc).toHaveBeenCalledWith({ result: 'hydration_complete' });
   });
 
+  it('does not wait for bootstrap preparation before sending progressive ready', async () => {
+    process.env.WS_BOOTSTRAP_PROGRESSIVE_READY = 'true';
+    const preparedChannels = deferred();
+    const hydration = deferred();
+    const { handleConnection, deps, wsBootstrapProgressiveTotal } = buildHarness({
+      prepareBootstrapWithRetry: jest.fn().mockReturnValue(preparedChannels.promise),
+      hydrateBootstrapWithMetrics: jest.fn().mockReturnValue(hydration.promise),
+    });
+    const ws = new FakeSocket();
+
+    await handleConnection(ws, { url: '/ws?token=t', headers: {} });
+    const ready = await waitForFrame(ws, (frame) => frame.event === 'ready');
+    expect(ready.data).toEqual(expect.objectContaining({
+      bootstrapComplete: false,
+      subscriptionsHydrated: false,
+      progressiveHydration: true,
+    }));
+    expect(deps.hydrateBootstrapWithMetrics).not.toHaveBeenCalled();
+
+    preparedChannels.resolve(['channel:one']);
+    await flush();
+    expect(deps.hydrateBootstrapWithMetrics).toHaveBeenCalledWith(ws, 'user-1', ['channel:one']);
+
+    hydration.resolve();
+    await waitForFrame(ws, (frame) => frame.type === 'bootstrap:complete');
+    expect(wsBootstrapProgressiveTotal.inc).toHaveBeenCalledWith({ result: 'ready_sent' });
+    expect(wsBootstrapProgressiveTotal.inc).toHaveBeenCalledWith({ result: 'hydration_complete' });
+  });
+
   it('logs and counts progressive background hydration failures', async () => {
     process.env.WS_BOOTSTRAP_PROGRESSIVE_READY = 'true';
     const { handleConnection, logger, wsBootstrapProgressiveTotal } = buildHarness({

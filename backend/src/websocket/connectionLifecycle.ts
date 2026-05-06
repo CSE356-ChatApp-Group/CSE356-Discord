@@ -372,8 +372,13 @@ function createConnectionLifecycle({
         logger.warn({ err, userId: user.id }, "WS auto-subscribe bootstrap failed");
       });
 
-    Promise.all([ws._bootstrapPromise, bootstrapSubscriptionsPromise])
-      .then(([, preparedChannels]) => {
+    const readyBarrierPromise = progressiveReady
+      ? Promise.resolve(ws._bootstrapPromise).then(() => [])
+      : Promise.all([ws._bootstrapPromise, bootstrapSubscriptionsPromise])
+          .then(([, preparedChannels]) => preparedChannels);
+
+    readyBarrierPromise
+      .then((preparedChannels) => {
         if (ws.readyState !== WebSocket.OPEN || ws._bootstrapReady !== true) {
           return;
         }
@@ -409,8 +414,12 @@ function createConnectionLifecycle({
               return;
             }
             wsBootstrapProgressiveTotal?.inc?.({ result: "ready_sent" });
-            const channels = Array.isArray(preparedChannels) ? preparedChannels : [];
-            ws._progressiveHydrationPromise = hydrateBootstrapWithMetrics(ws, user.id, channels)
+            ws._progressiveHydrationPromise = Promise.resolve(bootstrapSubscriptionsPromise)
+              .then((channels) => hydrateBootstrapWithMetrics(
+                ws,
+                user.id,
+                Array.isArray(channels) ? channels : [],
+              ))
               .then((result) => {
                 if (ws.readyState !== WebSocket.OPEN) return;
                 const hydrationSkipped = result?.status === "skipped";

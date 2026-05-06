@@ -85,6 +85,7 @@ const { setPresence, getBulkPresenceDetails, flushPresenceDbMirrorBatch } =
     flushPresenceDbMirrorBatch: () => Promise<void>;
   };
 const overload = require("../src/utils/overload") as {
+  shouldThrottlePresenceFanout: jest.Mock;
   shouldSkipPresenceMirror: jest.Mock;
 };
 
@@ -174,6 +175,31 @@ describe("presence fanout", () => {
     await setPresence("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "online");
 
     expect(pool.query).not.toHaveBeenCalled();
+    expect(publishUserFeedTargets).toHaveBeenCalledWith(
+      ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
+      {
+        event: "presence:updated",
+        data: {
+          userId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          status: "online",
+          awayMessage: null,
+        },
+      },
+    );
+  });
+
+  it("still fans out real online transitions while overload throttling is active", async () => {
+    overload.shouldThrottlePresenceFanout.mockReturnValueOnce(true);
+    redis.mget.mockResolvedValueOnce(["away", null]);
+    redis.get.mockResolvedValueOnce(
+      JSON.stringify({
+        v: 2,
+        u: ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
+      }),
+    );
+
+    await setPresence("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "online");
+
     expect(publishUserFeedTargets).toHaveBeenCalledWith(
       ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
       {
