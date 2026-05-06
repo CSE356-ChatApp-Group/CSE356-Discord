@@ -132,20 +132,7 @@ function createConnectionLifecycle({
       return;
     }
 
-    if (!tryAcquireReplaySlot()) {
-      wsReplayFailOpenTotal.inc({ reason: "semaphore_full" });
-      logger.warn(
-        {
-          userId: user.id,
-          inFlight: getReplayInFlightCount(),
-          maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
-        },
-        "WS reconnect replay skipped: semaphore slot unavailable at execution",
-      );
-      endReplayForIp(ws._clientIp);
-      return;
-    }
-
+    let replaySlotHeld = false;
     try {
       const replayStartedAt = Date.now();
       const replayAllowed = canRunReplayForUser(user.id);
@@ -163,12 +150,27 @@ function createConnectionLifecycle({
             }),
             "WS reconnect DB replay skipped because Redis pending replay produced messages");
         } else {
+          if (!tryAcquireReplaySlot()) {
+            wsReplayFailOpenTotal.inc({ reason: "semaphore_full" });
+            logger.warn(
+              {
+                userId: user.id,
+                inFlight: getReplayInFlightCount(),
+                maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+              },
+              "WS reconnect replay skipped: semaphore slot unavailable at execution",
+            );
+            return;
+          }
+          replaySlotHeld = true;
           await replayMissedMessagesToSocket(
             ws,
             user.id,
             recentDisconnect,
             replayUpperBoundMs,
           );
+          releaseReplaySlot();
+          replaySlotHeld = false;
         }
       } else {
         logWsHotInfo(() => ({
@@ -192,7 +194,9 @@ function createConnectionLifecycle({
     } catch (err) {
       logger.warn({ err, userId: user.id }, "WS reconnect replay failed");
     } finally {
-      releaseReplaySlot();
+      if (replaySlotHeld) {
+        releaseReplaySlot();
+      }
       endReplayForIp(ws._clientIp);
     }
   }

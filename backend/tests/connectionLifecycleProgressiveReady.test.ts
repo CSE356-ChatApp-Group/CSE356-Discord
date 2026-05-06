@@ -53,6 +53,15 @@ async function waitForFrame(ws, predicate) {
   });
 }
 
+async function waitUntil(predicate, timeoutMs = 500) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return;
+    await flush();
+  }
+  throw new Error('Timed out waiting for condition');
+}
+
 function buildHarness(overrides = {}) {
   const wsConnectionResultTotal = { inc: jest.fn() };
   const wsReplayFailOpenTotal = { inc: jest.fn() };
@@ -123,10 +132,13 @@ function buildHarness(overrides = {}) {
 
 describe('progressive websocket bootstrap ready', () => {
   const prevProgressive = process.env.WS_BOOTSTRAP_PROGRESSIVE_READY;
+  const prevSkipDbWhenPendingHit = process.env.WS_REPLAY_SKIP_DB_WHEN_PENDING_HIT;
 
   afterEach(() => {
     if (prevProgressive === undefined) delete process.env.WS_BOOTSTRAP_PROGRESSIVE_READY;
     else process.env.WS_BOOTSTRAP_PROGRESSIVE_READY = prevProgressive;
+    if (prevSkipDbWhenPendingHit === undefined) delete process.env.WS_REPLAY_SKIP_DB_WHEN_PENDING_HIT;
+    else process.env.WS_REPLAY_SKIP_DB_WHEN_PENDING_HIT = prevSkipDbWhenPendingHit;
   });
 
   it('keeps strict ready behavior when the flag is off', async () => {
@@ -256,6 +268,53 @@ describe('progressive websocket bootstrap ready', () => {
     expect(ws.sent.some((frame) => frame.event === 'ready')).toBe(true);
 
     replay.resolve();
+    await flush();
+  });
+
+  it('skips acquiring a replay slot when pending replay already satisfied reconnect delivery', async () => {
+    process.env.WS_BOOTSTRAP_PROGRESSIVE_READY = 'true';
+    process.env.WS_REPLAY_SKIP_DB_WHEN_PENDING_HIT = 'true';
+    const replayMissedMessagesToSocket = jest.fn().mockResolvedValue(undefined);
+    const tryAcquireReplaySlot = jest.fn().mockReturnValue(true);
+    const replayPendingMessagesToSocket = jest.fn().mockResolvedValue(3);
+    const { handleConnection, deps } = buildHarness({
+      consumeRecentDisconnect: jest.fn().mockResolvedValue({ disconnectedAt: Date.now() - 1000 }),
+      replayMissedMessagesToSocket,
+      replayPendingMessagesToSocket,
+      tryAcquireReplaySlot,
+    });
+    const ws = new FakeSocket();
+
+    await handleConnection(ws, { url: '/ws?token=t', headers: {} });
+    await waitForFrame(ws, (frame) => frame.event === 'ready');
+    await waitUntil(() => replayPendingMessagesToSocket.mock.calls.length > 0);
+
+    expect(replayPendingMessagesToSocket).toHaveBeenCalledWith(ws, 'user-1');
+    expect(replayMissedMessagesToSocket).not.toHaveBeenCalled();
+    expect(tryAcquireReplaySlot).not.toHaveBeenCalled();
+    expect(deps.releaseReplaySlot).not.toHaveBeenCalled();
+  });
+
+  it('releases the replay slot before waiting on pending drain', async () => {
+    process.env.WS_BOOTSTRAP_PROGRESSIVE_READY = 'true';
+    delete process.env.WS_REPLAY_SKIP_DB_WHEN_PENDING_HIT;
+    const pending = deferred();
+    const replayMissedMessagesToSocket = jest.fn().mockResolvedValue(undefined);
+    const { handleConnection, deps } = buildHarness({
+      consumeRecentDisconnect: jest.fn().mockResolvedValue({ disconnectedAt: Date.now() - 1000 }),
+      replayMissedMessagesToSocket,
+      replayPendingMessagesToSocket: jest.fn().mockReturnValue(pending.promise),
+    });
+    const ws = new FakeSocket();
+
+    await handleConnection(ws, { url: '/ws?token=t', headers: {} });
+    await waitForFrame(ws, (frame) => frame.event === 'ready');
+    await waitUntil(() => deps.releaseReplaySlot.mock.calls.length > 0);
+
+    expect(replayMissedMessagesToSocket).toHaveBeenCalled();
+    expect(deps.releaseReplaySlot).toHaveBeenCalledTimes(1);
+
+    pending.resolve(0);
     await flush();
   });
 });

@@ -93,6 +93,13 @@ VM3="${VM3:-${CHATAPP_INV_VM3_PUBLIC}}"
 VM1_INTERNAL="${VM1_INTERNAL:-${CHATAPP_INV_VM1_INTERNAL}}"
 VM2_INTERNAL="${VM2_INTERNAL:-${CHATAPP_INV_VM2_INTERNAL}}"
 VM3_INTERNAL="${VM3_INTERNAL:-${CHATAPP_INV_VM3_INTERNAL}}"
+WSVM1="${WSVM1:-${CHATAPP_INV_WSVM1_PUBLIC}}"
+WSVM2="${WSVM2:-${CHATAPP_INV_WSVM2_PUBLIC}}"
+WSVM1_INTERNAL="${WSVM1_INTERNAL:-${CHATAPP_INV_WSVM1_INTERNAL}}"
+WSVM2_INTERNAL="${WSVM2_INTERNAL:-${CHATAPP_INV_WSVM2_INTERNAL}}"
+WSVM1_WORKERS="${WSVM1_WORKERS:-${CHATAPP_INV_WSVM1_WORKERS}}"
+WSVM2_WORKERS="${WSVM2_WORKERS:-${CHATAPP_INV_WSVM2_WORKERS}}"
+WS_TIER_ENABLED="${WS_TIER_ENABLED:-${CHATAPP_INV_WS_TIER_ENABLED}}"
 DB_TARGET_MAX_CONNECTIONS="${DB_TARGET_MAX_CONNECTIONS:-450}"
 VM1_PGBOUNCER_POOL_SIZE="${VM1_PGBOUNCER_POOL_SIZE:-90}"
 VM2_PGBOUNCER_POOL_SIZE="${VM2_PGBOUNCER_POOL_SIZE:-135}"
@@ -118,6 +125,30 @@ REDIS_EXPORTER_SSH_HOST="${REDIS_EXPORTER_SSH_HOST:-$VM1}"
 # host's /opt/chatapp/shared/.env so systemd/nginx match (Phase 6 health checks use these lists).
 VM1_WORKER_PORTS=(4000 4001 4002 4003)
 VMX_WORKER_PORTS=(4000 4001 4002 4003 4004 4005)
+
+build_ws_upstream_csv() {
+  local upstreams=()
+  local p
+  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM1_INTERNAL}" ]] && [[ "${WSVM1_WORKERS}" -gt 0 ]]; then
+    for ((p=4000; p<4000 + WSVM1_WORKERS; p++)); do
+      upstreams+=("${WSVM1_INTERNAL}:${p}")
+    done
+  fi
+  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM2_INTERNAL}" ]] && [[ "${WSVM2_WORKERS}" -gt 0 ]]; then
+    for ((p=4000; p<4000 + WSVM2_WORKERS; p++)); do
+      upstreams+=("${WSVM2_INTERNAL}:${p}")
+    done
+  fi
+  if [[ "${#upstreams[@]}" -eq 0 ]]; then
+    for p in "${VMX_WORKER_PORTS[@]}"; do
+      upstreams+=("${VM2_INTERNAL}:${p}")
+    done
+    for p in "${VMX_WORKER_PORTS[@]}"; do
+      upstreams+=("${VM3_INTERNAL}:${p}")
+    done
+  fi
+  (IFS=,; echo "${upstreams[*]}")
+}
 
 # Extra OpenSSH options — mirrors deploy-prod.sh default
 DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-new}"
@@ -158,13 +189,17 @@ build_remote_upstream_csv() {
 
 rewrite_vm1_nginx_upstream() {
   local extra_upstream_csv="${1:-}"
-  local context="${2:-vm1 upstream rewrite}"
+  local ws_upstream_csv="${2:-}"
+  local context="${3:-vm1 upstream rewrite}"
+  if [[ -z "${ws_upstream_csv}" ]]; then
+    ws_upstream_csv="$(build_ws_upstream_csv)"
+  fi
   ssh_vm "$VM1" "
     set -euo pipefail
     export SITE=/etc/nginx/sites-enabled/chatapp
     export LOCAL_PORTS_CSV='$(IFS=,; echo "${VM1_WORKER_PORTS[*]}")'
     export EXTRA_UPSTREAM_SERVERS_CSV='${extra_upstream_csv}'
-    export WS_EXTRA_UPSTREAM_SERVERS_CSV='${extra_upstream_csv}'
+    export WS_EXTRA_UPSTREAM_SERVERS_CSV='${ws_upstream_csv}'
     TMP_SITE=\$(mktemp)
     sudo cp \"\$SITE\" \"\$TMP_SITE\"
     export TMP_SITE
@@ -245,9 +280,11 @@ drain_remote_vm_from_vm1_upstream() {
   local vm_label="$1"
   local vm_internal="$2"
   local remaining_csv
+  local ws_csv
   remaining_csv="$(build_remote_upstream_csv "${vm_internal}")"
+  ws_csv="$(build_ws_upstream_csv)"
   echo "=== Draining ${vm_label} remote workers from VM1 nginx upstream ==="
-  rewrite_vm1_nginx_upstream "${remaining_csv}" "drain ${vm_label} from VM1 nginx upstream"
+  rewrite_vm1_nginx_upstream "${remaining_csv}" "${ws_csv}" "drain ${vm_label} from VM1 nginx upstream"
   ssh_vm "$VM1" "
     set -euo pipefail
     SITE=/etc/nginx/sites-enabled/chatapp
@@ -263,9 +300,11 @@ restore_remote_vm_to_vm1_upstream() {
   local vm_label="$1"
   local vm_internal="$2"
   local full_csv
+  local ws_csv
   full_csv="$(build_remote_upstream_csv)"
+  ws_csv="$(build_ws_upstream_csv)"
   echo "=== Restoring ${vm_label} remote workers to VM1 nginx upstream ==="
-  rewrite_vm1_nginx_upstream "${full_csv}" "restore ${vm_label} to VM1 nginx upstream"
+  rewrite_vm1_nginx_upstream "${full_csv}" "${ws_csv}" "restore ${vm_label} to VM1 nginx upstream"
   ssh_vm "$VM1" "
     set -euo pipefail
     SITE=/etc/nginx/sites-enabled/chatapp
@@ -284,12 +323,14 @@ cleanup_on_exit() {
     echo ""
     echo "↩ Exit trap: deploy did not complete successfully — restoring full VM1 nginx upstream..."
     local full_csv
+    local ws_csv
     full_csv="$(build_remote_upstream_csv 2>/dev/null)"
+    ws_csv="$(build_ws_upstream_csv 2>/dev/null)"
     if [[ -z "${full_csv}" ]]; then
       echo "ERROR: failed to build full upstream CSV for restore"
       return
     fi
-    if rewrite_vm1_nginx_upstream "${full_csv}" "exit-trap: restore full upstream" 2>/dev/null; then
+    if rewrite_vm1_nginx_upstream "${full_csv}" "${ws_csv}" "exit-trap: restore full upstream" 2>/dev/null; then
       echo "↩ Restored full upstream to VM1 nginx (VM2 + VM3 re-added)"
     else
       echo "ERROR: exit trap failed to restore VM1 nginx upstream — manual fix needed"
@@ -377,7 +418,7 @@ run_vm_deploy() {
   if [[ "${host}" == "${VM1}" ]]; then
     skip_upstream_parity=""
     skip_ingress_post_deploy=""
-    ws_extra_upstream_csv="${extra_upstream_csv}"
+    ws_extra_upstream_csv="$(build_ws_upstream_csv)"
   fi
 
   PROD_HOST="$host" \

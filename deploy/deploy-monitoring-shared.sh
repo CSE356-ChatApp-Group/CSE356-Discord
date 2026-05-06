@@ -15,6 +15,10 @@
 #   9 vm3-host (optional)
 #  10 vm3-workers (optional)
 #  11 redis-host (optional; defaults to app-host in renderer)
+#  12 wsvm1-host (optional)
+#  13 wsvm1-workers (optional)
+#  14 wsvm2-host (optional)
+#  15 wsvm2-workers (optional)
 deploy_render_prometheus_host_config() {
   local template_path="${1:?template path required}"
   local output_path="${2:?output path required}"
@@ -27,6 +31,10 @@ deploy_render_prometheus_host_config() {
   local vm3_host="${9:-}"
   local vm3_workers="${10:-0}"
   local redis_host="${11:-}"
+  local wsvm1_host="${12:-}"
+  local wsvm1_workers="${13:-0}"
+  local wsvm2_host="${14:-}"
+  local wsvm2_workers="${15:-0}"
 
   local -a cmd
   cmd=(
@@ -43,6 +51,12 @@ deploy_render_prometheus_host_config() {
     fi
     if [ -n "${vm3_host}" ] && [ "${vm3_workers}" -gt 0 ]; then
       cmd+=(--vm3-host "${vm3_host}" --vm3-workers "${vm3_workers}")
+    fi
+    if [ -n "${wsvm1_host}" ] && [ "${wsvm1_workers}" -gt 0 ]; then
+      cmd+=(--wsvm1-host "${wsvm1_host}" --wsvm1-workers "${wsvm1_workers}")
+    fi
+    if [ -n "${wsvm2_host}" ] && [ "${wsvm2_workers}" -gt 0 ]; then
+      cmd+=(--wsvm2-host "${wsvm2_host}" --wsvm2-workers "${wsvm2_workers}")
     fi
   else
     cmd+=(--workers "${workers}")

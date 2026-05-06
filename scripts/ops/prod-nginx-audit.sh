@@ -9,11 +9,20 @@
 #   ./scripts/ops/prod-nginx-audit.sh
 #   PROD_USER=ubuntu PROD_HOST=130.245.136.44 ./scripts/ops/prod-nginx-audit.sh
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../deploy/inventory-defaults.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/../../deploy/inventory-defaults.sh"
 PROD_HOST="${PROD_HOST:-130.245.136.44}"
 PROD_USER="${PROD_USER:-ubuntu}"
 PRIMARY_VM1_HOST="130.245.136.44"
+WSVM1_INTERNAL="${WSVM1_INTERNAL:-${CHATAPP_INV_WSVM1_INTERNAL}}"
+WSVM2_INTERNAL="${WSVM2_INTERNAL:-${CHATAPP_INV_WSVM2_INTERNAL}}"
+WSVM1_WORKERS="${WSVM1_WORKERS:-${CHATAPP_INV_WSVM1_WORKERS}}"
+WSVM2_WORKERS="${WSVM2_WORKERS:-${CHATAPP_INV_WSVM2_WORKERS}}"
+WS_TIER_ENABLED="${WS_TIER_ENABLED:-${CHATAPP_INV_WS_TIER_ENABLED}}"
 
-ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" "PROD_HOST='${PROD_HOST}' PRIMARY_VM1_HOST='${PRIMARY_VM1_HOST}' bash" <<'REMOTE'
+ssh -o BatchMode=yes -o ConnectTimeout=15 "${PROD_USER}@${PROD_HOST}" "PROD_HOST='${PROD_HOST}' PRIMARY_VM1_HOST='${PRIMARY_VM1_HOST}' WSVM1_INTERNAL='${WSVM1_INTERNAL}' WSVM2_INTERNAL='${WSVM2_INTERNAL}' WSVM1_WORKERS='${WSVM1_WORKERS}' WSVM2_WORKERS='${WSVM2_WORKERS}' WS_TIER_ENABLED='${WS_TIER_ENABLED}' bash" <<'REMOTE'
 set -euo pipefail
 echo "=== $(date -u) (UTC) | $(hostname) ==="
 
@@ -138,6 +147,45 @@ if [[ "${PROD_HOST}" == "${PRIMARY_VM1_HOST}" ]]; then
     if ! grep -Fq '/var/log/nginx/ws_access.log chatapp_ws;' <<< "${WS_LOCATION}"; then
       echo "FAIL: /ws is missing dedicated websocket access_log"
       exit 1
+    fi
+    WS_EXPECTED_SERVERS=()
+    if [[ "${WS_TIER_ENABLED:-false}" == "true" ]] && [[ -n "${WSVM1_INTERNAL:-}" ]] && [[ "${WSVM1_WORKERS:-0}" -gt 0 ]]; then
+      for ((p=4000; p<4000 + WSVM1_WORKERS; p++)); do
+        WS_EXPECTED_SERVERS+=("${WSVM1_INTERNAL}:${p}")
+      done
+    fi
+    if [[ "${WS_TIER_ENABLED:-false}" == "true" ]] && [[ -n "${WSVM2_INTERNAL:-}" ]] && [[ "${WSVM2_WORKERS:-0}" -gt 0 ]]; then
+      for ((p=4000; p<4000 + WSVM2_WORKERS; p++)); do
+        WS_EXPECTED_SERVERS+=("${WSVM2_INTERNAL}:${p}")
+      done
+    fi
+    if [[ "${#WS_EXPECTED_SERVERS[@]}" -gt 0 ]]; then
+      WS_SERVER_LINES=$(echo "${WS_UPSTREAM}" | grep -oE 'server[[:space:]]+[^[:space:];]+' | awk '{print $2}')
+      for s in "${WS_EXPECTED_SERVERS[@]}"; do
+        if ! echo "${WS_SERVER_LINES}" | grep -qx "${s}"; then
+          echo "FAIL: upstream app_ws missing expected websocket server ${s}"
+          exit 1
+        fi
+      done
+      while IFS= read -r s; do
+        [[ -n "${s}" ]] || continue
+        found=0
+        for exp in "${WS_EXPECTED_SERVERS[@]}"; do
+          if [[ "${exp}" == "${s}" ]]; then
+            found=1
+            break
+          fi
+        done
+        if [[ "${found}" -ne 1 ]]; then
+          echo "FAIL: upstream app_ws has unexpected server ${s}"
+          exit 1
+        fi
+      done <<< "${WS_SERVER_LINES}"
+      if echo "${WS_SERVER_LINES}" | grep -q '^localhost:'; then
+        echo "FAIL: upstream app_ws should not include localhost workers when dedicated WSVMs are configured"
+        exit 1
+      fi
+      echo "OK: upstream app_ws matches dedicated websocket VMs only"
     fi
     echo "OK: /ws routes to app_ws with dedicated websocket logging"
   fi

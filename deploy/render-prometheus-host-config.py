@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expand prometheus-host.yml placeholders for the monitoring-VM Prometheus (scrapes all app VMs).
+"""Expand prometheus-host.yml placeholders for the monitoring-VM Prometheus (scrapes app + optional ws VMs).
 
 Replaces:
   __PROM_REDIS_HOST__            — private IP/hostname of the Redis VM for redis_exporter scrape
@@ -16,6 +16,10 @@ Multi-VM mode (three app VMs, per-VM PgBouncer architecture):
         --app-host VM1_IP --vm1-workers 4 \\
         --vm2-host VM2_IP --vm2-workers 6 \\
         --vm3-host VM3_IP --vm3-workers 6
+
+Optional dedicated websocket tier:
+        --wsvm1-host WSVM1_IP --wsvm1-workers 6 \\
+        --wsvm2-host WSVM2_IP --wsvm2-workers 6
 """
 from __future__ import annotations
 
@@ -121,6 +125,10 @@ def main() -> None:
     ap.add_argument("--vm2-workers", type=int, default=0, help="VM2 worker count (multi-VM mode)")
     ap.add_argument("--vm3-host", default="", help="VM3 private IP (multi-VM mode)")
     ap.add_argument("--vm3-workers", type=int, default=0, help="VM3 worker count (multi-VM mode)")
+    ap.add_argument("--wsvm1-host", default="", help="WSVM1 private IP (optional websocket tier)")
+    ap.add_argument("--wsvm1-workers", type=int, default=0, help="WSVM1 worker count")
+    ap.add_argument("--wsvm2-host", default="", help="WSVM2 private IP (optional websocket tier)")
+    ap.add_argument("--wsvm2-workers", type=int, default=0, help="WSVM2 worker count")
     ap.add_argument(
         "--omit-nginx-job",
         action="store_true",
@@ -150,6 +158,10 @@ def main() -> None:
             hosts_and_workers.append((args.vm2_host, args.vm2_workers, "vm2"))
         if args.vm3_host and args.vm3_workers > 0:
             hosts_and_workers.append((args.vm3_host, args.vm3_workers, "vm3"))
+        if args.wsvm1_host and args.wsvm1_workers > 0:
+            hosts_and_workers.append((args.wsvm1_host, args.wsvm1_workers, "wsvm1"))
+        if args.wsvm2_host and args.wsvm2_workers > 0:
+            hosts_and_workers.append((args.wsvm2_host, args.wsvm2_workers, "wsvm2"))
         api_config = _api_block_multi_vm(hosts_and_workers)
 
         # Build (host, label) pairs for node_exporter and pgbouncer
