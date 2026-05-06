@@ -185,6 +185,28 @@ if "ws_sticky_key" not in text:
         f.write(text)
 PYEOF
   fi
+  if sudo grep -q '^upstream app_ws {' "\$SITE" 2>/dev/null; then
+    current_ws_proxy=$(sudo sed -n '/location \/ws {/,/^}/p' "\$SITE" | grep -o 'proxy_pass http://[^;]*;' | head -n1 || true)
+    if [[ "\${current_ws_proxy}" != "proxy_pass http://app_ws;" ]]; then
+      echo "Preflight: forcing /ws to proxy_pass http://app_ws; in \$SITE..." >&2
+      sudo python3 - <<'PYEOF'
+import re
+site_path = "/etc/nginx/sites-available/chatapp"
+text = open(site_path).read()
+pattern = re.compile(r"(location\s+/ws\s*\{)([^}]*)(\})", re.DOTALL)
+m = pattern.search(text)
+if not m:
+    raise RuntimeError("Could not find location /ws block")
+head, inner, tail = m.groups()
+updated, n = re.subn(r"proxy_pass\s+http://[^;]+;", "proxy_pass http://app_ws;", inner, count=1)
+if n != 1:
+    raise RuntimeError("Could not rewrite /ws proxy_pass line")
+text = text[:m.start()] + head + updated + tail + text[m.end():]
+with open(site_path, "w") as f:
+    f.write(text)
+PYEOF
+    fi
+  fi
   if grep -q "duplicate.*log_format" /tmp/chatapp_nginx_t.err 2>/dev/null; then
     echo "Preflight: removing duplicate log_format entries from conf.d..." >&2
     sudo sed -i '/^log_format chatapp_ws/,/;$/d' /etc/nginx/conf.d/*.conf 2>/dev/null || true

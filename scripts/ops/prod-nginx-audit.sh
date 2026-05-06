@@ -43,6 +43,8 @@ fi
 
 SITE=/etc/nginx/sites-available/chatapp
 UPSTREAM=$(sudo sed -n '/^upstream app {/,/^}/p' "${SITE}")
+WS_UPSTREAM=$(sudo sed -n '/^upstream app_ws {/,/^}/p' "${SITE}" || true)
+WS_LOCATION=$(sudo sed -n '/location \/ws {/,/^}/p' "${SITE}" || true)
 
 if echo "$UPSTREAM" | grep -qE '^\s*least_conn\s*;'; then
   echo "OK: upstream uses least_conn"
@@ -121,6 +123,24 @@ if [[ "${PROD_HOST}" == "${PRIMARY_VM1_HOST}" ]]; then
     fi
   done
   echo "OK: VM1 local workers 4000-4003 are active"
+
+  if [[ -n "${WS_UPSTREAM}" ]]; then
+    echo "=== upstream app_ws block (sites-available/chatapp) ==="
+    printf '%s\n' "${WS_UPSTREAM}"
+    if ! grep -Fq 'hash $ws_sticky_key consistent;' <<< "${WS_UPSTREAM}"; then
+      echo "FAIL: upstream app_ws is missing sticky hash on \$ws_sticky_key"
+      exit 1
+    fi
+    if ! grep -Fq 'proxy_pass http://app_ws;' <<< "${WS_LOCATION}"; then
+      echo "FAIL: /ws is not routed to upstream app_ws"
+      exit 1
+    fi
+    if ! grep -Fq '/var/log/nginx/ws_access.log chatapp_ws;' <<< "${WS_LOCATION}"; then
+      echo "FAIL: /ws is missing dedicated websocket access_log"
+      exit 1
+    fi
+    echo "OK: /ws routes to app_ws with dedicated websocket logging"
+  fi
 else
   # VM2/VM3 workers-only: enforce local upstream matches active local units.
   LOCAL_UP=$(echo "${SERVER_LINES}" | grep -E '^localhost:' || true)
