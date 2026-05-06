@@ -107,7 +107,7 @@ const SUB_STANDALONE_OPTIONS = {
 };
 
 const SUB_CLUSTER_NODE_OPTIONS = {
-  enableReadyCheck: true,
+  enableReadyCheck: false,
   maxRetriesPerRequest: null,
   retryStrategy: (times: number) => Math.min(times * 100, 3000),
 };
