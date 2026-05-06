@@ -47,10 +47,25 @@ sudo install -d -m 0755 /etc/nginx/conf.d
 # (staging uses deploy/nginx/admission-control.conf + different zone names).
 sudo install -m 0644 "$(dirname "$0")/nginx/admission-control-production.conf" /etc/nginx/conf.d/admission-control.conf
 sudo tee /etc/nginx/sites-available/chatapp > /dev/null <<'EOF'
+map $arg_token $ws_sticky_key {
+  default $arg_token;
+  ""      $binary_remote_addr;
+}
+
 upstream app {
   # max_fails=0: never drain the upstream on 502/503 bursts (avoids no live upstreams).
   server localhost:4000 max_fails=0;
-  keepalive 32;
+  keepalive 256;
+  keepalive_requests 10000;
+  keepalive_timeout 75s;
+}
+
+upstream app_ws {
+  hash $ws_sticky_key consistent;
+  server localhost:4000 max_fails=0;
+  keepalive 256;
+  keepalive_requests 10000;
+  keepalive_timeout 75s;
 }
 
 server {
@@ -71,7 +86,7 @@ server {
     access_log /var/log/nginx/ws_access.log chatapp_ws;
     limit_req zone=external_ws burst=20 nodelay;
     limit_conn external_expensive_conns 5;
-    proxy_pass http://app;
+    proxy_pass http://app_ws;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";

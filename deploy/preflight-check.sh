@@ -164,6 +164,27 @@ if formats_to_add:
         f.write(text)
 PYEOF
   fi
+  if grep -q 'unknown "ws_sticky_key" variable' /tmp/chatapp_nginx_t.err 2>/dev/null; then
+    echo "Preflight: adding missing ws_sticky_key map to \$SITE..." >&2
+    sudo python3 - <<'PYEOF'
+import re
+site_path = "/etc/nginx/sites-available/chatapp"
+text = open(site_path).read()
+dollar = chr(36)
+if "ws_sticky_key" not in text:
+    map_block = (
+        f'map {dollar}arg_token {dollar}ws_sticky_key ' + '{\n'
+        + '  default ' + f'{dollar}arg_token;\n'
+        + '  ""      ' + f'{dollar}binary_remote_addr;\n'
+        + '}\n\n'
+    )
+    text, n = re.subn(r'(^\s*upstream app \{)', map_block + r'\1', text, count=1, flags=re.MULTILINE)
+    if n != 1:
+        raise RuntimeError("Could not insert ws_sticky_key map before upstream app")
+    with open(site_path, "w") as f:
+        f.write(text)
+PYEOF
+  fi
   if grep -q "duplicate.*log_format" /tmp/chatapp_nginx_t.err 2>/dev/null; then
     echo "Preflight: removing duplicate log_format entries from conf.d..." >&2
     sudo sed -i '/^log_format chatapp_ws/,/;$/d' /etc/nginx/conf.d/*.conf 2>/dev/null || true
