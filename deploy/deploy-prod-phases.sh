@@ -68,10 +68,20 @@ block = (
     + keepalive
     + '}'
 )
+ws_block = (
+    'upstream app_ws {\\n'
+    '  hash $ws_sticky_key consistent;\\n'
+    '  server localhost:%s max_fails=0;\\n' % newp
+    + keepalive
+    + '}'
+)
 text = open(cfg_path).read()
 text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
 if n != 1:
     raise SystemExit('step 9: upstream app block not replaced (n=%d)' % (n,))
+text, n_ws = re.subn(r'upstream app_ws \\{[^}]+\\}', ws_block, text, count=1, flags=re.DOTALL)
+if n_ws != 1:
+    raise SystemExit('step 9: upstream app_ws block not replaced (n=%d)' % (n_ws,))
 open(cfg_path, 'w').write(text)
 PY
       sudo sed -i 's/listen 80 default_server;/listen 80 default_server backlog=4096;/g' \"\$TMP_SITE\"

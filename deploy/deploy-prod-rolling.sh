@@ -21,6 +21,8 @@ rewrite_nginx_upstream() {
     export PORTS_CSV='${ports_csv}'
     export SITE='${CHATAPP_NGINX_SITE_PATH}'
     export EXTRA_UPSTREAM_SERVERS_CSV='${EXTRA_UPSTREAM_SERVERS_CSV:-}'
+    export LOCAL_WS_PORTS_CSV='${LOCAL_WS_PORTS_CSV:-${ports_csv}}'
+    export WS_EXTRA_UPSTREAM_SERVERS_CSV='${WS_EXTRA_UPSTREAM_SERVERS_CSV:-${EXTRA_UPSTREAM_SERVERS_CSV:-}}'
     TMP_SITE=\$(mktemp)
     sudo cp \"\$SITE\" \"\$TMP_SITE\"
     export TMP_SITE
@@ -32,6 +34,7 @@ cfg_path = os.environ['TMP_SITE']
 ports = [p.strip() for p in os.environ['PORTS_CSV'].split(',') if p.strip()]
 if not ports:
     raise SystemExit('no upstream ports provided')
+local_ws_ports = [p.strip() for p in os.environ.get('LOCAL_WS_PORTS_CSV', '').split(',') if p.strip()]
 
 # Keepalive tuning for throughput: larger pools and longer reuse reduce upstream
 # TCP churn and handshake overhead during sustained high request rates.
@@ -40,6 +43,7 @@ keepalive = '''  keepalive 256;
   keepalive_requests 10000;
   keepalive_timeout 75s;
 '''
+dollar = chr(36)
 if len(ports) == 1:
     servers = f'  server localhost:{ports[0]} max_fails=0;\\n'
     balance = ''
@@ -58,7 +62,7 @@ if extra_csv:
         if ep:
             servers += f'  server {ep} max_fails=0;\\n'
 
-block = (
+http_block = (
     'upstream app {\\n'
     + balance
     + servers
@@ -66,10 +70,31 @@ block = (
     + '}'
 )
 
+ws_servers = ''.join(f'  server localhost:{port} max_fails=0;\\n' for port in local_ws_ports)
+ws_extra_csv = os.environ.get('WS_EXTRA_UPSTREAM_SERVERS_CSV', '').strip()
+if ws_extra_csv:
+    for ep in ws_extra_csv.split(','):
+        ep = ep.strip()
+        if ep:
+            ws_servers += f'  server {ep} max_fails=0;\\n'
+if not ws_servers:
+    raise SystemExit('no websocket upstream servers provided')
+
+ws_block = (
+    'upstream app_ws {\\n'
+    + f'  hash {dollar}ws_sticky_key consistent;\\n'
+    + ws_servers
+    + keepalive
+    + '}'
+)
+
 text = open(cfg_path).read()
-text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
+text, n = re.subn(r'upstream app \\{[^}]+\\}', http_block, text, count=1, flags=re.DOTALL)
 if n != 1:
     raise SystemExit('upstream app block not replaced (n=%d)' % n)
+text, n_ws = re.subn(r'upstream app_ws \\{[^}]+\\}', ws_block, text, count=1, flags=re.DOTALL)
+if n_ws != 1:
+    raise SystemExit('upstream app_ws block not replaced (n=%d)' % n_ws)
 open(cfg_path, 'w').write(text)
 PY
     sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
@@ -278,11 +303,15 @@ gate_upstream_parity() {
     upstream=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\${cfg}\")
     ports_up=\$(echo \"\${upstream}\" | grep -oE 'localhost:[0-9]+|127\\.0\\.0\\.1:[0-9]+' | sed 's/.*://' | sort -u)
     [ -n \"\${ports_up}\" ] || { echo 'no upstream ports'; exit 1; }
+    ws_upstream=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\${cfg}\")
+    ws_ports_up=\$(echo \"\${ws_upstream}\" | grep -oE 'localhost:[0-9]+|127\\.0\\.0\\.1:[0-9]+' | sed 's/.*://' | sort -u)
+    [ -n \"\${ws_ports_up}\" ] || { echo 'no websocket upstream ports'; exit 1; }
     active_ports=\$(for p in \$(seq 4000 4007); do systemctl is-active --quiet chatapp@\${p} 2>/dev/null && echo \${p} || true; done | sort -u)
     [ -n \"\${active_ports}\" ] || { echo 'no active chatapp workers'; exit 1; }
     for p in ${TARGET_PORTS_CSV//,/ }; do
       systemctl is-active --quiet chatapp@\${p} || { echo \"inactive chatapp@\${p}\"; exit 1; }
       echo \"\${ports_up}\" | grep -qx \"\${p}\" || { echo \"upstream missing :\${p}\"; exit 1; }
+      echo \"\${ws_ports_up}\" | grep -qx \"\${p}\" || { echo \"ws upstream missing :\${p}\"; exit 1; }
       echo \"\${active_ports}\" | grep -qx \"\${p}\" || { echo \"unexpected inactive target :\${p}\"; exit 1; }
     done
     for p in \${ports_up}; do

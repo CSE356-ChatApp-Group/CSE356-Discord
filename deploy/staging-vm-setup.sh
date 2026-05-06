@@ -31,9 +31,24 @@ echo "5) Writing Nginx config (frontend static + backend proxy)..."
 sudo install -d -m 0755 /etc/nginx/conf.d
 sudo install -m 0644 "$(dirname "$0")/nginx/admission-control.conf" /etc/nginx/conf.d/admission-control.conf
 sudo tee /etc/nginx/sites-available/chatapp > /dev/null <<'NGINX'
+map $arg_token $ws_sticky_key {
+  default $arg_token;
+  ""      $binary_remote_addr;
+}
+
 upstream chatapp_upstream {
   server 127.0.0.1:4000;
-  keepalive 32;
+  keepalive 256;
+  keepalive_requests 10000;
+  keepalive_timeout 75s;
+}
+
+upstream chatapp_ws_upstream {
+  hash $ws_sticky_key consistent;
+  server 127.0.0.1:4000;
+  keepalive 256;
+  keepalive_requests 10000;
+  keepalive_timeout 75s;
 }
 
 server {
@@ -45,7 +60,7 @@ server {
     access_log /var/log/nginx/ws_access.log chatapp_ws;
     limit_req zone=external_ws burst=20 nodelay;
     limit_conn external_expensive_conns 5;
-    proxy_pass http://chatapp_upstream;
+    proxy_pass http://chatapp_ws_upstream;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
