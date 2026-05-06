@@ -507,7 +507,11 @@ sync_monitoring_stack() {
     "6" \
     "${VM3_INTERNAL}" \
     "6" \
-    "${PROM_REDIS_HOST}"
+    "${PROM_REDIS_HOST}" \
+    "${WSVM1_INTERNAL}" \
+    "${WSVM1_WORKERS}" \
+    "${WSVM2_INTERNAL}" \
+    "${WSVM2_WORKERS}"
   # shellcheck disable=SC2086
   push_monitoring_artifact "${PROM_BUILD}" "/tmp/prometheus-host.yml.deploy"
   rm -f "${PROM_BUILD}"
