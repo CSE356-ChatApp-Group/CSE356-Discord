@@ -836,7 +836,7 @@ else
   missing=0
   IFS=',' read -r -a expected_upstreams <<< \"\$EXPECTED_UPSTREAM_CSV\"
   for endpoint in \"\${expected_upstreams[@]}\"; do
-    grep -q \"server \${endpoint} \" \"\$SITE\" || missing=1
+    sudo grep -q \"server \${endpoint} \" \"\$SITE\" || missing=1
   done
   ws_missing=0
   ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
@@ -849,8 +849,8 @@ else
   fi
   echo 'Upstream entries missing - re-injecting...'
   TMP=\$(mktemp)
-  sudo cp \"\$SITE\" \"\$TMP\"
-  sudo env EXPECTED_UPSTREAM_CSV=\"\$EXPECTED_UPSTREAM_CSV\" TMP_SITE=\"\$TMP\" python3 - <<'PY'
+  cp \"\$SITE\" \"\$TMP\"
+  EXPECTED_UPSTREAM_CSV=\"\$EXPECTED_UPSTREAM_CSV\" TMP_SITE=\"\$TMP\" python3 - <<'PY'
 import os
 import re
 from pathlib import Path
