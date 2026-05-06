@@ -206,10 +206,12 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
 
     const communityJoinPayload = { userId: req.user.id, communityId };
 
-    // Merge all invalidations, subscriptions, and feed publishes into a single
-    // parallel batch to eliminate the sequential barrier between the two previous
-    // Promise.all blocks (~20-50ms savings on p95).
-    await Promise.allSettled([
+    // Respond immediately — the DB insert is committed, membership is established.
+    // All cache invalidations, WS directives, and feed publishes are best-effort
+    // side effects that don't affect the client's view of a successful join.
+    res.json({ success: true });
+
+    Promise.allSettled([
       // Cache & ACL invalidations
       invalidateCommunityChannelUserFanoutTargetsCache(communityId, channelIds),
       presenceService.invalidatePresenceFanoutTargetsBulk(affectedPresenceUserIds),
@@ -233,7 +235,7 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
           communityIds: [communityId],
         },
       }),
-      // Feed publishes (previously a separate sequential await)
+      // Feed publishes
       publishCommunityFeedMessage(communityId, {
         event: "community:member_joined",
         data: communityJoinPayload,
@@ -253,9 +255,7 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
         event: "community:member_added",
         data: communityJoinPayload,
       }),
-    ]);
-
-    res.json({ success: true });
+    ]).catch(() => {});
   } catch (err) {
     next(err);
   }

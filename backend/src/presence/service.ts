@@ -469,8 +469,13 @@ async function getPresence(userId) {
 }
 
 async function getPresenceDetails(userId) {
-  const status = await getPresence(userId);
-  const awayMessage = status === "away" ? await getAwayMessage(userId) : null;
+  const [[, statusVal], [, awayVal]] = await redis
+    .pipeline()
+    .get(presenceStatusKey(userId))
+    .get(awayMessageKey(userId))
+    .exec();
+  const status = statusVal || "offline";
+  const awayMessage = status === "away" ? (awayVal || null) : null;
   return { status, awayMessage };
 }
 

@@ -101,12 +101,26 @@ router.get('/', async (req, res, next) => {
            AND  cp.left_at IS NULL
          ORDER  BY COALESCE(c.last_message_at, c.updated_at) DESC
          LIMIT  200
+       ),
+       other_read_states AS (
+         SELECT DISTINCT ON (rs.conversation_id)
+                rs.conversation_id,
+                rs.last_read_message_id,
+                rs.last_read_at
+         FROM   read_states rs
+         JOIN   my_convos mc ON mc.conversation_id = rs.conversation_id
+         JOIN   conversation_participants cp_other
+                ON  cp_other.conversation_id = rs.conversation_id
+                AND cp_other.user_id = rs.user_id
+                AND cp_other.left_at IS NULL
+         WHERE  rs.user_id <> $1
+         ORDER  BY rs.conversation_id, rs.last_read_at DESC NULLS LAST
        )
        SELECT ${CONVERSATION_LIST_FIELDS},
               my_rs.last_read_message_id AS my_last_read_message_id,
               my_rs.last_read_at AS my_last_read_at,
-              latest_other_rs.last_read_message_id AS other_last_read_message_id,
-              latest_other_rs.last_read_at AS other_last_read_at,
+              ors.last_read_message_id AS other_last_read_message_id,
+              ors.last_read_at AS other_last_read_at,
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name,'avatarUrl',u.avatar_url))
                 AS participants
        FROM   my_convos mc
@@ -117,23 +131,9 @@ router.get('/', async (req, res, next) => {
        LEFT JOIN read_states my_rs
               ON my_rs.conversation_id = c.id
              AND my_rs.user_id = $1
-       LEFT JOIN LATERAL (
-         SELECT rs.last_read_message_id, rs.last_read_at
-         FROM read_states rs
-         WHERE rs.conversation_id = c.id
-           AND rs.user_id <> $1
-           AND EXISTS (
-             SELECT 1
-             FROM conversation_participants cp_other
-             WHERE cp_other.conversation_id = c.id
-               AND cp_other.user_id = rs.user_id
-               AND cp_other.left_at IS NULL
-           )
-         ORDER BY rs.last_read_at DESC NULLS LAST
-         LIMIT 1
-       ) latest_other_rs ON TRUE
+       LEFT JOIN other_read_states ors ON ors.conversation_id = c.id
        GROUP  BY c.id, my_rs.last_read_message_id, my_rs.last_read_at,
-                 latest_other_rs.last_read_message_id, latest_other_rs.last_read_at,
+                 ors.last_read_message_id, ors.last_read_at,
                  mc.sort_key
       HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
        ORDER  BY mc.sort_key DESC`,

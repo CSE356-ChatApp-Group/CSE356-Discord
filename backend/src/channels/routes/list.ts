@@ -2,7 +2,7 @@
  * GET / — list channels for a community (cached + singleflight).
  */
 const { query: qv } = require('express-validator');
-const { query, queryRead } = require('../../db/pool');
+const { query } = require('../../db/pool');
 const redis = require('../../db/redis');
 const { redisBatchMget } = require('../../db/redisBatch');
 const { countKeyForChannel, userLastReadCountKey } = require('../../messages/channelMessageCounter');
@@ -55,21 +55,10 @@ router.get('/',
         readFresh: async () => getJsonCache(redis, cacheKey),
         readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
         load: async () => {
-          // Access control must read from primary to avoid replica lag causing false 403s
-          // immediately after a user joins a community.
-          const { rows: memberRows } = await query(
-            'SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2 LIMIT 1',
-            [communityId, userId]
-          );
-          if (memberRows.length === 0) {
-            return { ok: false };
-          }
-
-          // Return all visible channel names. Private-channel metadata/content pointers
-          // are redacted for users who are not invited to that private channel.
-          // Fall back to primary if the replica returns 0 rows — this handles the
-          // replication lag window after community creation where the default channel
-          // exists on primary but hasn't replicated yet.
+          // Both queries run in parallel against primary:
+          // - member check must use primary to avoid false 403s after a recent join
+          // - channel list uses primary too, eliminating the replica timeout fallback
+          //   (PG_READ_QUERY_TIMEOUT_MS=750 could add 750ms tail latency via the old replica path)
           const channelListSql = `SELECT ${S.VISIBLE_CHANNEL_FIELDS},
                   vc.can_access,
                   CASE WHEN vc.can_access THEN vc.last_message_id ELSE NULL END AS last_message_id,
@@ -93,9 +82,15 @@ router.get('/',
                  AND rs.channel_id = vc.id
                  AND rs.user_id = $2
            ORDER  BY vc.position, vc.name`;
-          let { rows } = await queryRead(channelListSql, [communityId, userId]);
-          if (rows.length === 0) {
-            ({ rows } = await query(channelListSql, [communityId, userId]));
+          const [{ rows: memberRows }, { rows }] = await Promise.all([
+            query(
+              'SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2 LIMIT 1',
+              [communityId, userId],
+            ),
+            query(channelListSql, [communityId, userId]),
+          ]);
+          if (memberRows.length === 0) {
+            return { ok: false };
           }
 
           const accessibleRows = rows.filter((ch) => ch.id && ch.can_access);
