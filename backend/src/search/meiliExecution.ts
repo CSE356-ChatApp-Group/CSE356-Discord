@@ -56,13 +56,6 @@ function createMeiliSearchExecutor({
     const scopeLabel = resolvedSearchScope(opts);
 
     const tMeili = Date.now();
-    // Start freshness query in parallel with Meili search so both run concurrently.
-    // Awaited on the happy path (non-empty candidates) to supplement results, and
-    // on empty_candidates to attempt a rescue before falling back to Postgres FTS.
-    const freshnessPromise = findFreshScopedSearchCandidateIds(q, opts).catch((err: unknown) => {
-      logger.debug({ err }, 'search freshness query failed during parallel Meili path');
-      return [];
-    });
     let candidateResult: { ids: string[]; estimatedTotal: number };
     try {
       candidateResult = await meiliClient.searchMessageCandidates(q, opts);
@@ -80,9 +73,16 @@ function createMeiliSearchExecutor({
 
     if (ids.length === 0) {
       // Meili returned no candidates — try freshness rescue before falling back to
-      // full Postgres FTS. freshnessPromise was already running in parallel so this
-      // await adds no latency on the path where Meili succeeds.
-      const freshnessIds = await freshnessPromise;
+      // full Postgres FTS. Freshness is started here (not pre-emptively on every
+      // search) so it adds zero latency on the happy path. The sequential cost on
+      // this rare rescue path is acceptable given empty_candidates fires infrequently.
+      let freshnessIds: string[] = [];
+      try {
+        freshnessIds = await findFreshScopedSearchCandidateIds(q, opts);
+      } catch (err: unknown) {
+        logger.debug({ err }, 'search freshness rescue query failed');
+      }
+
       if (freshnessIds.length > 0) {
         const tRecheck = Date.now();
         const recheckMeta = buildRecheckFromCandidates(freshnessIds, q, opts);
@@ -109,7 +109,6 @@ function createMeiliSearchExecutor({
             pg_fresh_candidate_count: freshnessIds.length,
             postgres_rechecked_count: finalHits.length,
             freshness_rescued: true,
-            freshness_supplement_used: false,
             final_hit_count: finalHits.length,
             meili_ms: meiliMs,
             postgres_recheck_ms: recheckMs,
@@ -139,17 +138,11 @@ function createMeiliSearchExecutor({
       throw createMeiliFallbackError('meili_empty_candidates');
     }
 
-    // Await the freshness query that was started in parallel with Meili.
-    const freshnessIds = await freshnessPromise;
-    const mergedSet = new Set(ids || []);
-    const freshnessArray = freshnessIds || [];
-    for (const id of freshnessArray) {
-      mergedSet.add(id);
-    }
-    const mergedIds = Array.from(mergedSet);
-
+    // Happy path: Meili returned candidates. Recheck directly — no freshness supplement.
+    // Running freshness on every search added ~400ms to p95 with 0% cache hit rate;
+    // the supplement benefit (catching edits before re-indexing) doesn't justify the cost.
     const tRecheck = Date.now();
-    const recheckMeta = buildRecheckFromCandidates(mergedIds, q, opts);
+    const recheckMeta = buildRecheckFromCandidates(ids, q, opts);
     const rows = await runSearchQuery(recheckMeta.sql, recheckMeta.params);
     const recheckMs = Date.now() - tRecheck;
 
@@ -158,13 +151,6 @@ function createMeiliSearchExecutor({
       err.statusCode = 403;
       throw err;
     }
-
-    const freshnessSupplementUsed = (() => {
-      const idsSet = new Set(ids.map(String));
-      return rows.some(
-        (row: any) => row && row.id && !idsSet.has(String(row.id)),
-      );
-    })();
 
     // Meili is the full-text candidate generator.  Once it returns candidates,
     // Postgres rechecks only authorization, deletion, latest content, and
@@ -180,9 +166,7 @@ function createMeiliSearchExecutor({
         resolved_scope: scopeLabel,
         search_backend: 'meili',
         meili_candidate_count: ids.length,
-        pg_fresh_candidate_count: freshnessIds.length,
-        postgres_rechecked_count: rows.filter((r: any) => r && r.id).length,
-        freshness_supplement_used: freshnessSupplementUsed,
+        postgres_rechecked_count: finalHits.length,
         final_hit_count: finalHits.length,
         meili_ms: meiliMs,
         postgres_recheck_ms: recheckMs,

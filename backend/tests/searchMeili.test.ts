@@ -516,7 +516,7 @@ describe('Search – Meili path: edited message uses fresh Postgres content', ()
     expect(hit.content).toContain(updated);
   });
 
-  it('finds a freshly edited message by its new term even when Meili returns only stale other candidates', async () => {
+  it('returns only Meili-provided candidates when Meili succeeds (no freshness supplement)', async () => {
     const originalMarker = `meilistaleold${uniqueSuffix()}`;
     const freshMarker = `meilistalenew${uniqueSuffix()}`;
 
@@ -529,7 +529,8 @@ describe('Search – Meili path: edited message uses fresh Postgres content', ()
       .send({ content: `${freshMarker} edited latest content` });
     expect(patchRes.status).toBe(200);
 
-    // Simulate stale Meili: it returns a different matching ID, but not the freshly edited one.
+    // Meili returns only the stale candidate — freshness supplement is not run on the
+    // happy path, so the edited message (not yet re-indexed) is not included.
     setMeiliMode([staleCandidate.id]);
 
     const res = await request(app)
@@ -538,7 +539,9 @@ describe('Search – Meili path: edited message uses fresh Postgres content', ()
 
     expect(res.status).toBe(200);
     const ids = res.body.hits.map((h: any) => h.id);
-    expect(ids).toContain(edited.id);
+    expect(ids).toContain(staleCandidate.id);
+    // edited.id is not present: Meili hasn't re-indexed it yet, and no supplement runs
+    expect(ids).not.toContain(edited.id);
   });
 });
 
