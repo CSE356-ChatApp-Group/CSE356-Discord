@@ -332,8 +332,7 @@ run_vm_deploy() {
   local pgbouncer_pool="$3"
   local pgbouncer_max_db="$4"
   local pg_pool_max="$5"
-  local chatapp_instances="$6"
-  local extra_upstream_csv="${7:-}"
+  local extra_upstream_csv="${6:-}"
   local skip_upstream_parity="1"
   local skip_ingress_post_deploy="1"
   if [[ "${host}" == "${VM1}" ]]; then
@@ -341,8 +340,7 @@ run_vm_deploy() {
     skip_ingress_post_deploy=""
   fi
 
-  CHATAPP_INSTANCES="${chatapp_instances}" \
-    PROD_HOST="$host" \
+  PROD_HOST="$host" \
     PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
     EXTRA_UPSTREAM_SERVERS_CSV="${extra_upstream_csv}" \
     PGBOUNCER_POOL_SIZE="${pgbouncer_pool}" \
@@ -369,11 +367,9 @@ phase_deploy_workers_vm() {
   local pgbouncer_pool="$4"
   local pgbouncer_max_db="$5"
   local pg_pool_max="$6"
-  local chatapp_instances="$7"
-  local upstream_csv="${8:-}"
+  local upstream_csv="${7:-}"
   echo "${phase_label}"
-  run_vm_deploy "$host" "$bind_addr" "$pgbouncer_pool" "$pgbouncer_max_db" "$pg_pool_max" \
-    "$chatapp_instances" "$upstream_csv"
+  run_vm_deploy "$host" "$bind_addr" "$pgbouncer_pool" "$pgbouncer_max_db" "$pg_pool_max" "$upstream_csv"
 }
 
 phase_verify_workers_vm() {
@@ -732,8 +728,7 @@ run_preflight_db_check
 drain_remote_vm_from_vm1_upstream "VM3" "${VM3_INTERNAL}"
 phase_deploy_workers_vm \
   "=== Phase 0: Deploy to VM3 (workers only; drained from VM1 nginx during rollout) ===" \
-  "$VM3" "$VM3_INTERNAL" "$VM3_PGBOUNCER_POOL_SIZE" "$VM3_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM3_PG_POOL_MAX_PER_INSTANCE" \
-  "${#VMX_WORKER_PORTS[@]}"
+  "$VM3" "$VM3_INTERNAL" "$VM3_PGBOUNCER_POOL_SIZE" "$VM3_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM3_PG_POOL_MAX_PER_INSTANCE"
 
 # ── Phase 0.5: Verify VM3 healthy, then rejoin it to VM1 nginx ──────────────
 if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
@@ -762,8 +757,7 @@ echo ""
 drain_remote_vm_from_vm1_upstream "VM2" "${VM2_INTERNAL}"
 phase_deploy_workers_vm \
   "=== Phase 1: Deploy to VM2 (workers only; drained from VM1 nginx during rollout) ===" \
-  "$VM2" "$VM2_INTERNAL" "$VM2_PGBOUNCER_POOL_SIZE" "$VM2_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM2_PG_POOL_MAX_PER_INSTANCE" \
-  "${#VMX_WORKER_PORTS[@]}"
+  "$VM2" "$VM2_INTERNAL" "$VM2_PGBOUNCER_POOL_SIZE" "$VM2_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM2_PG_POOL_MAX_PER_INSTANCE"
 
 # ── Phase 2: Verify VM2 healthy, then rejoin it to VM1 nginx ─────────────────
 if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
@@ -783,8 +777,7 @@ restore_remote_vm_to_vm1_upstream "VM2" "${VM2_INTERNAL}"
 echo ""
 phase_deploy_workers_vm \
   "=== Phase 3: Deploy to VM1 (PgBouncer/MinIO/nginx) ===" \
-  "$VM1" "127.0.0.1" "$VM1_PGBOUNCER_POOL_SIZE" "$VM1_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM1_PG_POOL_MAX_PER_INSTANCE" \
-  "${#VM1_WORKER_PORTS[@]}" "$EXTRA_UPSTREAM_CSV"
+  "$VM1" "127.0.0.1" "$VM1_PGBOUNCER_POOL_SIZE" "$VM1_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM1_PG_POOL_MAX_PER_INSTANCE" "$EXTRA_UPSTREAM_CSV"
 
 # ── Phase 4: Ensure VM2+VM3 upstream entries survived the VM1 deploy ─────────
 # rewrite_nginx_upstream now preserves EXTRA_UPSTREAM_SERVERS_CSV entries, so this
