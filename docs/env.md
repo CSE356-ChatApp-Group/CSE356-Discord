@@ -100,7 +100,9 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `LOG_SERVICE_NAME` | Service name in logs / tracing |
 | `HTTP_COMPRESSION_ENABLED` | Enable Express gzip compression. Default on outside production, off in production because repo nginx already gzips API responses. |
 | `DATABASE_URL` | Postgres connection string |
-| `REDIS_URL` | Redis connection string |
+| `REDIS_URL` | Main Redis connection string |
+| `REDIS_AUTH_URL` | Auth-only Redis instance (JWT deny-list + auth rate-limit counters). Isolated from main fanout/cache noise. Falls back to `REDIS_URL`. |
+| `REDIS_SEARCH_URL` | Search-only Redis instance (Meilisearch stream operations and locks). Isolated from main client noise. Falls back to `REDIS_URL`. |
 | `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Signing secrets |
 | `JWT_ACCESS_TTL`, `JWT_REFRESH_TTL` | Token lifetimes |
 | `JWT_ACCESS_VERIFY_CACHE_TTL_MS` | Access-token verify cache TTL (default 15000) |

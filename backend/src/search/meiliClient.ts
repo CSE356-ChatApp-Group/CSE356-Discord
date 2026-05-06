@@ -18,7 +18,7 @@
 
 const logger = require('../utils/logger');
 const client = require('prom-client');
-const redis = require('../db/redis');
+const { redisSearch } = require('../db/redis');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -252,7 +252,7 @@ function parseStreamFields(fields: string[]) {
 }
 
 async function enqueueMeiliWriteStream(op: 'upsert' | 'delete', payload: Record<string, unknown>) {
-  await redis.xadd(
+  await redisSearch.xadd(
     MEILI_WRITE_STREAM_KEY,
     'MAXLEN',
     '~',
@@ -461,7 +461,7 @@ async function runMeiliWriteStreamConsumerSlot(clientForStream: any, slot: numbe
 
   while (!streamConsumerStopping) {
     try {
-      const acquired = await redis.set(lockKey, lockValue, 'PX', MEILI_WRITE_STREAM_LOCK_TTL_MS, 'NX');
+      const acquired = await redisSearch.set(lockKey, lockValue, 'PX', MEILI_WRITE_STREAM_LOCK_TTL_MS, 'NX');
       if (!acquired) {
         await new Promise((resolve) => setTimeout(resolve, Math.min(1000, MEILI_WRITE_STREAM_LOCK_TTL_MS / 3)));
         continue;
@@ -469,14 +469,14 @@ async function runMeiliWriteStreamConsumerSlot(clientForStream: any, slot: numbe
 
       try {
         while (!streamConsumerStopping) {
-          const current = await redis.get(lockKey).catch(() => null);
+          const current = await redisSearch.get(lockKey).catch(() => null);
           if (current !== lockValue) break;
-          await redis.pexpire(lockKey, MEILI_WRITE_STREAM_LOCK_TTL_MS);
+          await redisSearch.pexpire(lockKey, MEILI_WRITE_STREAM_LOCK_TTL_MS);
           await readMeiliWriteStreamBatch(clientForStream, consumerName);
         }
       } finally {
-        const current = await redis.get(lockKey).catch(() => null);
-        if (current === lockValue) await redis.del(lockKey).catch(() => {});
+        const current = await redisSearch.get(lockKey).catch(() => null);
+        if (current === lockValue) await redisSearch.del(lockKey).catch(() => {});
       }
     } catch (err: any) {
       if (!streamConsumerStopping) {
@@ -498,7 +498,7 @@ function startMeiliWriteStreamConsumerIfEnabled() {
 
   streamConsumerClients = Array.from(
     { length: MEILI_WRITE_STREAM_CONSUMER_SLOTS },
-    () => redis.duplicate(),
+    () => redisSearch.duplicate(),
   );
   for (const streamConsumerClient of streamConsumerClients) {
     streamConsumerClient.on('error', (err: any) => {

@@ -23,11 +23,12 @@
 const Redis  = require('ioredis');
 const logger = require('../utils/logger');
 
-const REDIS_URL      = process.env.REDIS_URL      || 'redis://localhost:6379';
-const REDIS_AUTH_URL = process.env.REDIS_AUTH_URL || REDIS_URL;
+const REDIS_URL       = process.env.REDIS_URL       || 'redis://localhost:6379';
+const REDIS_AUTH_URL  = process.env.REDIS_AUTH_URL  || REDIS_URL;
+const REDIS_SEARCH_URL = process.env.REDIS_SEARCH_URL || REDIS_URL;
 
 // Comma-separated "host:port" list. When set, redis + redisSub run in cluster mode.
-// redisAuth always uses REDIS_AUTH_URL (standalone) regardless of this setting.
+// redisAuth and redisSearch always use their respective URLs (standalone) regardless of this setting.
 const REDIS_CLUSTER_NODES    = process.env.REDIS_CLUSTER_NODES    || '';
 const REDIS_CLUSTER_PASSWORD = process.env.REDIS_CLUSTER_PASSWORD || '';
 
@@ -88,6 +89,10 @@ const redis = createMainClient('main');
 // checks are isolated from cluster rebalancing, slot redirects, and the heavy
 // fanout pipeline traffic on the main client.
 const redisAuth = createStandaloneClient('auth', REDIS_AUTH_URL);
+
+// Search-only client: Meilisearch stream operations and locks.
+// Always standalone via REDIS_SEARCH_URL — isolated from main client noise.
+const redisSearch = createStandaloneClient('search', REDIS_SEARCH_URL);
 
 // Dedicated subscriber – used by ws/fanout; cannot issue normal commands.
 //
@@ -155,12 +160,14 @@ async function closeRedisConnections() {
   await Promise.allSettled([
     redis.quit(),
     redisAuth.quit(),
+    redisSearch.quit(),
     redisSub.quit(),
   ]);
 }
 
 module.exports = redis;
 module.exports.redisAuth            = redisAuth;
+module.exports.redisSearch          = redisSearch;
 module.exports.redisSub             = redisSub;
 module.exports.REDIS_IS_CLUSTER     = REDIS_IS_CLUSTER;
 module.exports.REDIS_PUBSUB_EVENT   = REDIS_PUBSUB_EVENT;
