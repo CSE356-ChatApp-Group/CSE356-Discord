@@ -1,5 +1,35 @@
 const STRICT_TERM_MIN_LEN = 1;
 
+/**
+ * Normalize text for strict substring matching:
+ *   - lowercase
+ *   - strip diacritics (é→e, ñ→n, ç→c)
+ *   - remove apostrophes and hyphens (don't→dont, well-known→wellknown)
+ *   - collapse whitespace
+ *
+ * This bridges the gap between user queries (no accents/punctuation) and
+ * message content that may contain them. Used only for the Meili candidate
+ * strict-filter pass — NOT for tokenization or display.
+ */
+function normalizeForStrictMatch(s: string): string {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')       // strip combining diacritical marks
+    .replace(/[''\u2018\u2019`\u00B4-]/g, '') // remove apostrophes/hyphens
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Fully collapsed version: remove ALL non-alphanumeric characters.
+ * Used as a fallback check so "ofcourse" matches "of course".
+ * Only applied when the normalized (spaces-preserved) check fails.
+ */
+function collapseForStrictMatch(s: string): string {
+  return normalizeForStrictMatch(s).replace(/[^a-z0-9]/g, '');
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -144,8 +174,17 @@ function buildResult(rows: any[], q: string, offset: number, limit: number) {
 
 function messageMatchesAllStrictTerms(content: unknown, terms: string[]): boolean {
   if (!terms.length) return true;
-  const c = String(content || '').toLowerCase();
-  return terms.every((t) => c.includes(t));
+  const normalized = normalizeForStrictMatch(String(content || ''));
+  const collapsed = collapseForStrictMatch(String(content || ''));
+  return terms.every((t) => {
+    const nt = normalizeForStrictMatch(t);
+    if (normalized.includes(nt)) return true;
+    // Fallback: collapsed comparison catches "ofcourse" vs "of course",
+    // "dont" vs "don't" (already handled by normalize), etc.
+    const ct = collapseForStrictMatch(t);
+    if (ct.length >= 2 && collapsed.includes(ct)) return true;
+    return false;
+  });
 }
 
 module.exports = {
