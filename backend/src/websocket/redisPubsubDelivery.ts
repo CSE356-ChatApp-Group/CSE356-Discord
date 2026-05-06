@@ -11,6 +11,10 @@ const {
   wsFanoutRecoveryAsyncTotal,
   wsSocketSendTargetsBucket,
   wsPubsubReceiveLagMs,
+  wsPubsubMessagesTotal,
+  wsPubsubRecipientSlotsTotal,
+  wsUserfeedEnvelopeUsersTotal,
+  wsUserfeedLocalRecipientsTotal,
   wsDuplicateDeliverySuppressedTotal,
   wsDedupeEnqueueReservedTotal,
   wsDedupeSendConfirmedTotal,
@@ -21,6 +25,7 @@ const { getWorkerLabels } = require("./deliveryTrace");
 const {
   publishUserFeedTargets,
   isUserFeedEnvelope,
+  userFeedShardLabelForChannel,
   userIdFromTarget,
 } = require("./userFeed");
 const {
@@ -109,6 +114,19 @@ function createRedisPubsubDelivery(ctx) {
 
   function workerLabels() {
     return getWorkerLabels();
+  }
+
+  function observePubsubLagForPayload(topicPrefix, payload, pubsubReceiveMs) {
+    if (!isPlainJsonObject(payload) || pubsubReceiveMs == null) return;
+    const refMs = parsePayloadReferenceTimeMs(payload);
+    if (refMs == null) return;
+    const lagMs = pubsubReceiveMs - refMs;
+    if (lagMs < 0 || lagMs >= 3_600_000) return;
+    const wl = workerLabels();
+    wsPubsubReceiveLagMs?.observe?.(
+      { topic_prefix: topicPrefix, vm: wl.vm, worker: wl.worker },
+      lagMs,
+    );
   }
 
   function incWithWorker(metric, labels, count = 1) {
@@ -362,6 +380,11 @@ function createRedisPubsubDelivery(ctx) {
     const userIds = Array.from(userIdsSet);
     const dedupeBatchAllowSet = new Set();
     if (!userIds.length) return;
+    const shard = userFeedShardLabelForChannel(channel);
+    const wl = workerLabels();
+    wsPubsubMessagesTotal?.inc?.({ topic_prefix: "userfeed", shard, vm: wl.vm, worker: wl.worker });
+    wsUserfeedEnvelopeUsersTotal?.inc?.({ shard, vm: wl.vm, worker: wl.worker }, userIds.length);
+    observePubsubLagForPayload("userfeed", payload, pubsubReceiveMs);
 
     let recipientCount = 0;
     for (const userId of userIds) {
@@ -369,6 +392,11 @@ function createRedisPubsubDelivery(ctx) {
     }
     fanoutRecipientsHistogram.observe({ channel_type: "user" }, recipientCount);
     wsSocketSendTargetsBucket?.observe?.({ path: "userfeed" }, recipientCount);
+    wsPubsubRecipientSlotsTotal?.inc?.(
+      { topic_prefix: "userfeed", shard, vm: wl.vm, worker: wl.worker },
+      recipientCount,
+    );
+    wsUserfeedLocalRecipientsTotal?.inc?.({ shard, vm: wl.vm, worker: wl.worker }, recipientCount);
 
     if (recipientCount === 0 && !logger.isLevelEnabled("debug")) return;
 
@@ -478,13 +506,23 @@ function createRedisPubsubDelivery(ctx) {
     }
   }
 
-  function deliverCommunityFeedMessage(channel, routed) {
+  function deliverCommunityFeedMessage(channel, routed, pubsubReceiveMs: number | null = null) {
     const communityId = routed.__wsRoute.communityId;
     if (typeof communityId !== "string" || !communityId) return;
     const clients = communityClients.get(communityId);
     const recipientCount = clients ? clients.size : 0;
+    const wl = workerLabels();
     fanoutRecipientsHistogram.observe({ channel_type: "communityfeed" }, recipientCount);
     wsSocketSendTargetsBucket?.observe?.({ path: "communityfeed" }, recipientCount);
+    wsPubsubMessagesTotal?.inc?.(
+      { topic_prefix: "communityfeed", shard: "none", vm: wl.vm, worker: wl.worker },
+      1,
+    );
+    wsPubsubRecipientSlotsTotal?.inc?.(
+      { topic_prefix: "communityfeed", shard: "none", vm: wl.vm, worker: wl.worker },
+      recipientCount,
+    );
+    observePubsubLagForPayload("communityfeed", routed.payload, pubsubReceiveMs);
     if (!clients || recipientCount === 0) return;
 
     pruneNonOpenFromCommunitySubscribers(communityId, clients);
@@ -532,7 +570,7 @@ function createRedisPubsubDelivery(ctx) {
 
       if (COMMUNITY_FEED_SHARD_CHANNEL_SET.has(channel)) {
         if (isCommunityFeedEnvelope(parsed)) {
-          deliverCommunityFeedMessage(channel, parsed);
+          deliverCommunityFeedMessage(channel, parsed, pubsubReceiveMs);
         }
         return;
       }
@@ -540,8 +578,17 @@ function createRedisPubsubDelivery(ctx) {
       const channelType = extractChannelType(channel);
       const clients = recipientClientsForChannel(channel);
       const recipientCount = clients ? clients.size : 0;
+      const wl = workerLabels();
       fanoutRecipientsHistogram.observe(
         { channel_type: channelType },
+        recipientCount,
+      );
+      wsPubsubMessagesTotal?.inc?.(
+        { topic_prefix: channelType, shard: "none", vm: wl.vm, worker: wl.worker },
+        1,
+      );
+      wsPubsubRecipientSlotsTotal?.inc?.(
+        { topic_prefix: channelType, shard: "none", vm: wl.vm, worker: wl.worker },
         recipientCount,
       );
 
@@ -559,16 +606,7 @@ function createRedisPubsubDelivery(ctx) {
       }
 
       // Observe pubsub receive lag (created_at → receive time) for message events.
-      if (isPlainJsonObject(parsed)) {
-        const refMs = parsePayloadReferenceTimeMs(parsed);
-        if (refMs != null) {
-          const lagMs = pubsubReceiveMs - refMs;
-          if (lagMs >= 0 && lagMs < 3_600_000) {
-            const wl = getWorkerLabels();
-            wsPubsubReceiveLagMs?.observe?.({ topic_prefix: channelType, vm: wl.vm, worker: wl.worker }, lagMs);
-          }
-        }
-      }
+      observePubsubLagForPayload(channelType, parsed, pubsubReceiveMs);
 
     if (channelType === "conversation" && logger.isLevelEnabled("debug")) {
       if (isMessageEvent) {

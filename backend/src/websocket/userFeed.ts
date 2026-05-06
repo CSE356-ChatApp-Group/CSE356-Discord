@@ -1,5 +1,10 @@
 
 const fanout = require('./fanout');
+const {
+  wsUserfeedPublishCallsTotal,
+  wsUserfeedPublishTargetsTotal,
+} = require('../utils/metrics');
+const { getWorkerLabels } = require('./deliveryTrace');
 
 const rawUserFeedShardCount = Number(process.env.USER_FEED_SHARD_COUNT || '64');
 const USER_FEED_SHARD_COUNT =
@@ -65,6 +70,12 @@ function userFeedRedisChannelForUserId(userId) {
   return `userfeed:${userFeedShardForUserId(userId)}`;
 }
 
+function userFeedShardLabelForChannel(channel) {
+  if (typeof channel !== 'string') return 'unknown';
+  const match = /^userfeed:(\d+)$/.exec(channel.trim());
+  return match ? match[1] : 'unknown';
+}
+
 function allUserFeedRedisChannels() {
   return Array.from(
     { length: USER_FEED_SHARD_COUNT },
@@ -121,6 +132,15 @@ async function publishUserFeedTargets(userTargets, payload) {
     channel: shardChannel,
     payload: userFeedEnvelope(shardUserIds, payload),
   }));
+  const labels = getWorkerLabels();
+  for (const [shardChannel, shardUserIds] of shardGroups.entries()) {
+    const shard = userFeedShardLabelForChannel(shardChannel);
+    wsUserfeedPublishCallsTotal?.inc?.({ shard, vm: labels.vm, worker: labels.worker });
+    wsUserfeedPublishTargetsTotal?.inc?.(
+      { shard, vm: labels.vm, worker: labels.worker },
+      shardUserIds.length,
+    );
+  }
   await fanout.publishBatch(batch);
 }
 
@@ -147,5 +167,6 @@ module.exports = {
   splitUserTargets,
   userFeedEnvelope,
   userFeedRedisChannelForUserId,
+  userFeedShardLabelForChannel,
   userIdFromTarget,
 };

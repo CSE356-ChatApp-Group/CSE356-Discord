@@ -20,7 +20,7 @@ Subscribers use these **topic strings** (not the same as persistence keys):
 | `conversation:<uuid>` | DM / conversation realtime |
 | `community:<uuid>` | Community-scoped signals |
 | `user:<uuid>` | Per-user delivery (legacy / targeted); WS subscribe |
-| `userfeed:<0–N-1>` | Sharded user feeds (`USER_FEED_SHARD_COUNT`, `userFeed.ts`) |
+| `userfeed:<0–N-1>` | Sharded user feeds (`USER_FEED_SHARD_COUNT`, `userFeed.ts`). Workers now subscribe lazily: a worker owns only the `userfeed` shards needed by its currently connected `user:<id>` sockets, and releases them when the last local owner disconnects. |
 
 ---
 

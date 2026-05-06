@@ -19,6 +19,7 @@ jest.mock('../src/utils/distributedSingleflight', () => {
 const { parseChannelKey } = require('../src/websocket/channelKeyParse');
 const { createBootstrapSubscriptionsHelpers } = require('../src/websocket/bootstrapSubscriptions');
 const { createSubscriptionManager } = require('../src/websocket/subscriptionManager');
+const { userFeedRedisChannelForUserId } = require('../src/websocket/userFeed');
 
 describe('WS bootstrap recent-connect hybrid', () => {
   function metricStub() {
@@ -56,6 +57,7 @@ describe('WS bootstrap recent-connect hybrid', () => {
       channelClients: new Map(),
       communityClients: new Map(),
       userIdFromTarget: (ch: string) => (ch.startsWith('user:') ? ch.slice('user:'.length) : null),
+      userFeedRedisChannelForUserId,
       ready: jest.fn().mockResolvedValue(undefined),
       ensureRedisChannelSubscribed,
       releaseRedisChannelSubscription: jest.fn(),
@@ -177,6 +179,7 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
         if (ch.startsWith('user:')) return ch.slice('user:'.length);
         return null;
       },
+      userFeedRedisChannelForUserId,
       ready: jest.fn().mockResolvedValue(undefined),
       ensureRedisChannelSubscribed,
       releaseRedisChannelSubscription: jest.fn(),
@@ -208,6 +211,7 @@ describe('subscriptionManager subscribeClient recent-connect', () => {
       channelClients: new Map(),
       communityClients: new Map(),
       userIdFromTarget: (ch: string) => (ch.startsWith('user:') ? ch.slice('user:'.length) : null),
+      userFeedRedisChannelForUserId,
       ready: jest.fn().mockResolvedValue(undefined),
       ensureRedisChannelSubscribed: jest.fn().mockResolvedValue(undefined),
       releaseRedisChannelSubscription: jest.fn(),
@@ -252,6 +256,7 @@ describe('subscriptionManager Redis release grace', () => {
         if (ch.startsWith('user:')) return ch.slice('user:'.length);
         return null;
       },
+      userFeedRedisChannelForUserId,
       ready: jest.fn().mockResolvedValue(undefined),
       ensureRedisChannelSubscribed,
       releaseRedisChannelSubscription,
@@ -340,6 +345,66 @@ describe('subscriptionManager Redis release grace', () => {
 
     expect(releaseRedisChannelSubscription).toHaveBeenCalledTimes(1);
     expect(releaseRedisChannelSubscription).toHaveBeenCalledWith('channel:immediate');
+  });
+
+  it('subscribes and releases only the owned userfeed shard for user topics', async () => {
+    const ensureRedisChannelSubscribed = jest.fn().mockResolvedValue(undefined);
+    const releaseRedisChannelSubscription = jest.fn();
+    const localUserClients = new Map();
+    const { subscribeClient, unsubscribeClient } = createSubscriptionManager({
+      localUserClients,
+      channelClients: new Map(),
+      communityClients: new Map(),
+      userIdFromTarget: (ch: string) => (ch.startsWith('user:') ? ch.slice('user:'.length) : null),
+      userFeedRedisChannelForUserId,
+      ready: jest.fn().mockResolvedValue(undefined),
+      ensureRedisChannelSubscribed,
+      releaseRedisChannelSubscription,
+      markChannelRecentConnect: jest.fn().mockResolvedValue(undefined),
+      invalidateRecentConnectTargetsCache: jest.fn().mockResolvedValue(undefined),
+    });
+    const wsA = { readyState: 1, _subscriptions: new Set<string>(), _userId: 'uA' };
+    const wsB = { readyState: 1, _subscriptions: new Set<string>(), _userId: 'uB' };
+    const shard = userFeedRedisChannelForUserId('uA');
+
+    await subscribeClient(wsA as any, 'user:uA');
+    await subscribeClient(wsB as any, 'user:uA');
+
+    expect(ensureRedisChannelSubscribed).toHaveBeenCalledTimes(2);
+    expect(ensureRedisChannelSubscribed).toHaveBeenNthCalledWith(1, shard);
+    expect(ensureRedisChannelSubscribed).toHaveBeenNthCalledWith(2, shard);
+    expect(localUserClients.get('uA')?.size).toBe(2);
+
+    await unsubscribeClient(wsA as any, 'user:uA');
+    expect(releaseRedisChannelSubscription).not.toHaveBeenCalled();
+
+    await unsubscribeClient(wsB as any, 'user:uA');
+    expect(releaseRedisChannelSubscription).toHaveBeenCalledTimes(1);
+    expect(releaseRedisChannelSubscription).toHaveBeenCalledWith(shard);
+  });
+
+  it('does not subscribe a closed socket to a userfeed shard owner set', async () => {
+    const localUserClients = new Map();
+    const { subscribeClient } = createSubscriptionManager({
+      localUserClients,
+      channelClients: new Map(),
+      communityClients: new Map(),
+      userIdFromTarget: (ch: string) => (ch.startsWith('user:') ? ch.slice('user:'.length) : null),
+      userFeedRedisChannelForUserId,
+      ready: jest.fn().mockResolvedValue(undefined),
+      ensureRedisChannelSubscribed: jest.fn().mockImplementation(async () => {
+        /* simulate await boundary */
+      }),
+      releaseRedisChannelSubscription: jest.fn(),
+      markChannelRecentConnect: jest.fn().mockResolvedValue(undefined),
+      invalidateRecentConnectTargetsCache: jest.fn().mockResolvedValue(undefined),
+    });
+    const ws = { readyState: 3, _subscriptions: new Set<string>(), _userId: 'uZ' };
+
+    await subscribeClient(ws as any, 'user:uZ');
+
+    expect(localUserClients.has('uZ')).toBe(false);
+    expect(ws._subscriptions.size).toBe(0);
   });
 });
 

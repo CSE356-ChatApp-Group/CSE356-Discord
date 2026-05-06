@@ -22,3 +22,4 @@ Maintenance index and canonical env/topology docs: [`README.md`](../README.md).
 ## Observability
 
 - `presence_fanout_recipients`, `ws_backpressure_events_total`, `ws_connection_result_total` — alert on sustained drops/kills before adding capacity.
+- For Redis/pubsub hotspotting specifically, look at `ws_pubsub_receive_lag_ms`, `ws_pubsub_messages_total`, `ws_pubsub_recipient_slots_total`, `ws_userfeed_publish_targets_total`, `ws_userfeed_envelope_users_total`, and `ws_userfeed_local_recipients_total` (documented in [`docs/operations-monitoring.md`](../operations-monitoring.md)).

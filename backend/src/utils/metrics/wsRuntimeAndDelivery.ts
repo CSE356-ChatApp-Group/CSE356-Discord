@@ -763,6 +763,62 @@ const wsPubsubReceiveLagMs = new client.Histogram({
   buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
 });
 
+/** Pub/Sub messages received by this worker before local socket fanout. */
+const wsPubsubMessagesTotal = new client.Counter({
+  name: 'ws_pubsub_messages_total',
+  help: 'Redis pubsub messages received on this worker before local websocket fanout',
+  labelNames: ['topic_prefix', 'shard', 'vm', 'worker'],
+});
+
+/** Recipient slots discovered locally when a pub/sub message arrived on this worker. */
+const wsPubsubRecipientSlotsTotal = new client.Counter({
+  name: 'ws_pubsub_recipient_slots_total',
+  help: 'Local recipient slots observed on pubsub receipt before websocket enqueue/send',
+  labelNames: ['topic_prefix', 'shard', 'vm', 'worker'],
+});
+
+/** Number of logical user IDs carried inside received userfeed envelopes. */
+const wsUserfeedEnvelopeUsersTotal = new client.Counter({
+  name: 'ws_userfeed_envelope_users_total',
+  help: 'Logical user IDs carried inside received userfeed envelopes',
+  labelNames: ['shard', 'vm', 'worker'],
+});
+
+/** Number of local websocket recipient slots served from received userfeed envelopes. */
+const wsUserfeedLocalRecipientsTotal = new client.Counter({
+  name: 'ws_userfeed_local_recipients_total',
+  help: 'Local websocket recipient slots served from received userfeed envelopes',
+  labelNames: ['shard', 'vm', 'worker'],
+});
+
+/** Number of userfeed shard publishes initiated by this worker. */
+const wsUserfeedPublishCallsTotal = new client.Counter({
+  name: 'ws_userfeed_publish_calls_total',
+  help: 'Userfeed shard publish calls initiated by this worker',
+  labelNames: ['shard', 'vm', 'worker'],
+});
+
+/** Number of logical user targets published into userfeed shards by this worker. */
+const wsUserfeedPublishTargetsTotal = new client.Counter({
+  name: 'ws_userfeed_publish_targets_total',
+  help: 'Logical user targets published into userfeed shards by this worker',
+  labelNames: ['shard', 'vm', 'worker'],
+});
+
+/** Number of userfeed shards currently owned/subscribed by this worker. */
+const wsUserfeedOwnedShardsGauge = new client.Gauge({
+  name: 'ws_userfeed_owned_shards',
+  help: 'Current number of userfeed shards subscribed by this worker due to local user ownership',
+  labelNames: ['vm', 'worker'],
+});
+
+/** Userfeed shard subscription lifecycle events for this worker. */
+const wsUserfeedShardSubscriptionTotal = new client.Counter({
+  name: 'ws_userfeed_shard_subscription_total',
+  help: 'Userfeed shard subscription lifecycle events on this worker',
+  labelNames: ['action', 'shard', 'vm', 'worker'],
+});
+
 /** Target lookup duration for realtime fanout by path and cache result with vm/worker for per-node triage. */
 const wsTargetLookupDurationMs = new client.Histogram({
   name: 'ws_target_lookup_duration_ms',
@@ -865,5 +921,13 @@ module.exports = {
   wsSocketQueueDepthHistogram,
   wsSocketSendDurationMs,
   wsPubsubReceiveLagMs,
+  wsPubsubMessagesTotal,
+  wsPubsubRecipientSlotsTotal,
+  wsUserfeedEnvelopeUsersTotal,
+  wsUserfeedLocalRecipientsTotal,
+  wsUserfeedPublishCallsTotal,
+  wsUserfeedPublishTargetsTotal,
+  wsUserfeedOwnedShardsGauge,
+  wsUserfeedShardSubscriptionTotal,
   wsTargetLookupDurationMs,
 };

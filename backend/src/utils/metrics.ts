@@ -177,6 +177,14 @@ const {
   wsBootstrapDbQueryDurationMs,
   wsBootstrapHydrationStepDurationMs,
   wsPartialDeliveryMissingReasonTotal,
+  wsPubsubMessagesTotal,
+  wsPubsubRecipientSlotsTotal,
+  wsUserfeedEnvelopeUsersTotal,
+  wsUserfeedLocalRecipientsTotal,
+  wsUserfeedPublishCallsTotal,
+  wsUserfeedPublishTargetsTotal,
+  wsUserfeedOwnedShardsGauge,
+  wsUserfeedShardSubscriptionTotal,
 } = require('./metrics/wsRuntimeAndDelivery');
 const {
   messagePostAccessDeniedTotal,
@@ -906,4 +914,12 @@ module.exports = {
   wsBootstrapReplicaFallbackTotal,
   wsBootstrapHydrationStepDurationMs,
   wsPartialDeliveryMissingReasonTotal,
+  wsPubsubMessagesTotal,
+  wsPubsubRecipientSlotsTotal,
+  wsUserfeedEnvelopeUsersTotal,
+  wsUserfeedLocalRecipientsTotal,
+  wsUserfeedPublishCallsTotal,
+  wsUserfeedPublishTargetsTotal,
+  wsUserfeedOwnedShardsGauge,
+  wsUserfeedShardSubscriptionTotal,
 };

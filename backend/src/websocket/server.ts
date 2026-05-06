@@ -91,6 +91,7 @@ const { clientIpFromReq } = require("../middleware/wsUpgradeLimiter");
 const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
 const {
   allUserFeedRedisChannels,
+  userFeedRedisChannelForUserId,
   userIdFromTarget,
 } = require("./userFeed");
 const { resolvedWsRuntimeConfig } = require("./profile");
@@ -157,6 +158,8 @@ const {
   wsDeliverySlowTraceTotal,
   wsSocketQueueDepthHistogram,
   wsSocketSendDurationMs,
+  wsUserfeedOwnedShardsGauge,
+  wsUserfeedShardSubscriptionTotal,
 } = require("../utils/metrics");
 const {
   IDLE_TTL_SECONDS,
@@ -313,7 +316,6 @@ const {
 });
 const { ready } = createStartupSubscriptionsLifecycle({
   ensureRedisChannelSubscribed,
-  userFeedShardChannels: USER_FEED_SHARD_CHANNELS,
   communityFeedShardChannels: COMMUNITY_FEED_SHARD_CHANNELS,
   logWsHotInfo,
 });
@@ -405,6 +407,7 @@ const {
   channelClients,
   communityClients,
   userIdFromTarget,
+  userFeedRedisChannelForUserId,
   ready,
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
@@ -412,6 +415,9 @@ const {
   markChannelRecentConnect,
   clearChannelBootstrapPending,
   invalidateRecentConnectTargetsCache,
+  wsUserfeedOwnedShardsGauge,
+  wsUserfeedShardSubscriptionTotal,
+  getWorkerLabels: require("./deliveryTrace").getWorkerLabels,
 });
 const { parseChannelKey, isAllowedChannel } = createChannelAclHelpers({
   query,
