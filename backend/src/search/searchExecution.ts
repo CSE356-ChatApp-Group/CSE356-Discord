@@ -67,7 +67,7 @@ async function withSearchClientTransaction<T>(
       // set_config(..., true) is equivalent to SET LOCAL — all three in one round-trip.
       await client.query(
         `SELECT set_config('statement_timeout', $1, true),
-                set_config('work_mem', '64MB', true),
+                set_config('work_mem', '32MB', true),
                 set_config('max_parallel_workers_per_gather', '0', true)`,
         [String(timeoutMs)],
       );
@@ -95,7 +95,7 @@ async function withSearchClientTransaction<T>(
     // set_config(..., true) is equivalent to SET LOCAL — all three in one round-trip.
     await client.query(
       `SELECT set_config('statement_timeout', $1, true),
-              set_config('work_mem', '64MB', true),
+              set_config('work_mem', '32MB', true),
               set_config('max_parallel_workers_per_gather', '0', true)`,
       [String(timeoutMs)],
     );

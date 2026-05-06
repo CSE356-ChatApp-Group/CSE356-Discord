@@ -57,10 +57,9 @@ function createMeiliSearchExecutor({
 
     const tMeili = Date.now();
     // Start freshness query in parallel with Meili search so both run concurrently.
-    // Only awaited below when Meili returns non-empty candidates.
-    // .catch() prevents unhandled-rejection leaks when Meili fails/returns empty
-    // and the promise is never awaited.
-    const freshnessPromise = findFreshScopedSearchCandidateIds(q, opts).catch((err) => {
+    // Awaited on the happy path (non-empty candidates) to supplement results, and
+    // on empty_candidates to attempt a rescue before falling back to Postgres FTS.
+    const freshnessPromise = findFreshScopedSearchCandidateIds(q, opts).catch((err: unknown) => {
       logger.debug({ err }, 'search freshness query failed during parallel Meili path');
       return [];
     });
@@ -80,6 +79,49 @@ function createMeiliSearchExecutor({
     const { ids } = candidateResult;
 
     if (ids.length === 0) {
+      // Meili returned no candidates — try freshness rescue before falling back to
+      // full Postgres FTS. freshnessPromise was already running in parallel so this
+      // await adds no latency on the path where Meili succeeds.
+      const freshnessIds = await freshnessPromise;
+      if (freshnessIds.length > 0) {
+        const tRecheck = Date.now();
+        const recheckMeta = buildRecheckFromCandidates(freshnessIds, q, opts);
+        const rows = await runSearchQuery(recheckMeta.sql, recheckMeta.params);
+        const recheckMs = Date.now() - tRecheck;
+
+        if (rows[0]?.__scopeAccess === false) {
+          const err: any = new Error('Access denied');
+          err.statusCode = 403;
+          throw err;
+        }
+
+        const finalHits = rows.filter((r: any) => r && r.id);
+        const totalMs = Date.now() - tAll;
+
+        logger.info(
+          {
+            search_trace: true,
+            requestId,
+            query: q,
+            resolved_scope: scopeLabel,
+            search_backend: 'meili',
+            meili_candidate_count: 0,
+            pg_fresh_candidate_count: freshnessIds.length,
+            postgres_rechecked_count: finalHits.length,
+            freshness_rescued: true,
+            freshness_supplement_used: false,
+            final_hit_count: finalHits.length,
+            meili_ms: meiliMs,
+            postgres_recheck_ms: recheckMs,
+            fallback_to_postgres: false,
+            total_ms: totalMs,
+          },
+          'search_trace',
+        );
+
+        return buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+      }
+
       const totalMs = Date.now() - tAll;
       meiliClient.incFallbackTotal('empty_candidates');
       logger.warn(
@@ -88,6 +130,7 @@ function createMeiliSearchExecutor({
           query: q,
           resolved_scope: scopeLabel,
           meili_candidate_count: 0,
+          pg_fresh_candidate_count: 0,
           meili_ms: meiliMs,
           total_ms: totalMs,
         },

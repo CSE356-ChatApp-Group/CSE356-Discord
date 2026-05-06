@@ -684,6 +684,15 @@ async function setupIndex(): Promise<void> {
     },
     timeoutMs: 5000,
   });
+
+  // Align Meili's tokenization with Postgres websearch_to_tsquery('english', ...).
+  // Postgres drops English stop words before building its tsvector; without this,
+  // matchingStrategy:'all' fails when the user query contains stop words.
+  await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/settings/stop-words`, {
+    method: 'PUT',
+    body: Array.from(ENGLISH_STOP_WORDS),
+    timeoutMs: 5000,
+  });
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────

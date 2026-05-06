@@ -597,7 +597,7 @@ async function findFreshScopedSearchCandidateIds(
     return [];
   }
 
-  const rows = await runSearchQuery(sql, params, { forcePrimary: true });
+  const rows = await runSearchQuery(sql, params, { forcePrimary: false });
   if (rows[0]?.__scopeAccess === false) {
     const err: any = new Error('Access denied');
     err.statusCode = 403;

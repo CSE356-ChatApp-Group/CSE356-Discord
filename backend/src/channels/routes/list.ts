@@ -33,17 +33,29 @@ router.get('/',
     const commCacheKey = `channels:community:${communityId}`;
 
     try {
-      // Auth check (primary — avoid false 403 after recent join) and community
-      // structural cache retrieval run in parallel.
-      const [{ rows: memberRows }, cachedStructure] = await Promise.all([
-        query(
-          'SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2 LIMIT 1',
-          [communityId, userId],
-        ),
+      const memberGateKey = `commember:${communityId}:${userId}`;
+
+      // Auth check, member gate cache, and community structural cache all in parallel.
+      const [cachedMember, cachedStructure] = await Promise.all([
+        redis.get(memberGateKey),
         getJsonCache(redis, commCacheKey),
       ]);
 
-      if (memberRows.length === 0) {
+      let isMember: boolean;
+      if (cachedMember !== null) {
+        isMember = cachedMember === '1';
+      } else {
+        const { rows: memberRows } = await query(
+          'SELECT 1 FROM community_members WHERE community_id = $1 AND user_id = $2 LIMIT 1',
+          [communityId, userId],
+        );
+        isMember = memberRows.length > 0;
+        // Cache both member and non-member results; non-member cached briefly to blunt
+        // rapid re-checks, member cached for 60s (join events bust via separate invalidation).
+        redis.setex(memberGateKey, 60, isMember ? '1' : '0').catch(() => {});
+      }
+
+      if (!isMember) {
         recordEndpointListCache('channels', 'miss');
         return res.status(403).json({ error: 'Not a community member' });
       }

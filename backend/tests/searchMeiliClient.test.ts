@@ -112,4 +112,31 @@ describe('meiliClient search request semantics', () => {
     expect(typoCall).toBeDefined();
     expect(JSON.parse(typoCall[1].body)).toEqual({ enabled: false });
   });
+
+  it('configures English stop words in the index to align with websearch_to_tsquery', async () => {
+    (global as any).fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({}),
+      text: async () => '',
+    });
+
+    const { setupIndex } = require('../src/search/meiliClient');
+    await setupIndex();
+
+    const stopWordsCall = (global as any).fetch.mock.calls.find(([url]: [string]) => (
+      url.endsWith('/indexes/messages/settings/stop-words')
+    ));
+    expect(stopWordsCall).toBeDefined();
+    const body = JSON.parse(stopWordsCall[1].body);
+    expect(Array.isArray(body)).toBe(true);
+    // Verify a representative sample of stop words are included
+    expect(body).toContain('the');
+    expect(body).toContain('that');
+    expect(body).toContain('this');
+    expect(body).toContain('been');
+    expect(body).toContain('more');
+    expect(body).toContain('just');
+    expect(body).toContain('into');
+  });
 });
