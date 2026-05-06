@@ -19,25 +19,8 @@ import tempfile
 cfg = Path("/etc/nginx/nginx.conf")
 text = orig = cfg.read_text(encoding="utf-8", errors="replace")
 
-def has_log_format_anywhere(name: str) -> bool:
-    import subprocess
-
-    try:
-        # Exclude backup files (.bak, .orig, .save, ~) — nginx never loads them
-        # but grep would match them and falsely report the format as "already configured".
-        result = subprocess.run(
-            ["grep", "-Rsl", "--exclude=*.bak", "--exclude=*.orig",
-             "--exclude=*.save", "--exclude=*~",
-             f"log_format {name}", "/etc/nginx"],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0 and bool(result.stdout.strip())
-    except Exception:
-        return False
-
-has_timed = "log_format chatapp_timed" in text or has_log_format_anywhere("chatapp_timed")
-has_ws = "log_format chatapp_ws" in text or has_log_format_anywhere("chatapp_ws")
+has_timed = "log_format chatapp_timed" in text
+has_ws = "log_format chatapp_ws" in text
 
 if not has_timed or not has_ws:
     formats_to_add = []

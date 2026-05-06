@@ -164,6 +164,7 @@ rewrite_vm1_nginx_upstream() {
     export SITE=/etc/nginx/sites-enabled/chatapp
     export LOCAL_PORTS_CSV='$(IFS=,; echo "${VM1_WORKER_PORTS[*]}")'
     export EXTRA_UPSTREAM_SERVERS_CSV='${extra_upstream_csv}'
+    export WS_EXTRA_UPSTREAM_SERVERS_CSV='${extra_upstream_csv}'
     TMP_SITE=\$(mktemp)
     sudo cp \"\$SITE\" \"\$TMP_SITE\"
     export TMP_SITE
@@ -180,18 +181,44 @@ extra_endpoints = [
 ]
 servers = ''.join(f'  server localhost:{port} max_fails=0;\\n' for port in local_ports)
 servers += ''.join(f'  server {ep} max_fails=0;\\n' for ep in extra_endpoints)
-block = (
-    'upstream app {\\n'
-    + servers
-    + '  keepalive 256;\\n'
+keepalive = (
+    '  keepalive 256;\\n'
     + '  keepalive_requests 10000;\\n'
     + '  keepalive_timeout 75s;\\n'
+)
+dollar = chr(36)
+http_block = (
+    'upstream app {\\n'
+    + servers
+    + keepalive
+    + '}'
+)
+ws_endpoints = [
+    ep.strip()
+    for ep in os.environ.get('WS_EXTRA_UPSTREAM_SERVERS_CSV', '').split(',')
+    if ep.strip()
+]
+ws_servers = ''.join(f'  server {ep} max_fails=0;\\n' for ep in ws_endpoints)
+if not ws_servers:
+    ws_servers = ''.join(f'  server localhost:{port} max_fails=0;\\n' for port in local_ports)
+ws_block = (
+    'upstream app_ws {\\n'
+    + f'  hash {dollar}ws_sticky_key consistent;\\n'
+    + ws_servers
+    + keepalive
     + '}'
 )
 text = open(cfg_path).read()
-text, n = re.subn(r'upstream app \\{[^}]+\\}', block, text, count=1, flags=re.DOTALL)
+text, n = re.subn(r'upstream app \\{[^}]+\\}', http_block, text, count=1, flags=re.DOTALL)
 if n != 1:
     raise SystemExit(f'upstream app block not replaced (n={n})')
+text, n_ws = re.subn(r'upstream app_ws \\{[^}]+\\}', ws_block, text, count=1, flags=re.DOTALL)
+if n_ws == 0:
+    text, n_insert = re.subn(r'(upstream app \\{[^}]+\\}\\n+)', r'\\1' + ws_block + '\\n', text, count=1, flags=re.DOTALL)
+    if n_insert != 1:
+        raise SystemExit(f'upstream app_ws block missing and bootstrap insert failed (n={n_insert})')
+elif n_ws != 1:
+    raise SystemExit(f'upstream app_ws block not replaced (n={n_ws})')
 open(cfg_path, 'w').write(text)
 PY
     sudo install -m 644 \"\$TMP_SITE\" \"\$SITE\"
@@ -335,14 +362,19 @@ run_vm_deploy() {
   local extra_upstream_csv="${6:-}"
   local skip_upstream_parity="1"
   local skip_ingress_post_deploy="1"
+  local local_ws_ports_csv=""
+  local ws_extra_upstream_csv=""
   if [[ "${host}" == "${VM1}" ]]; then
     skip_upstream_parity=""
     skip_ingress_post_deploy=""
+    ws_extra_upstream_csv="${extra_upstream_csv}"
   fi
 
   PROD_HOST="$host" \
     PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
     EXTRA_UPSTREAM_SERVERS_CSV="${extra_upstream_csv}" \
+    LOCAL_WS_PORTS_CSV="${local_ws_ports_csv}" \
+    WS_EXTRA_UPSTREAM_SERVERS_CSV="${ws_extra_upstream_csv}" \
     PGBOUNCER_POOL_SIZE="${pgbouncer_pool}" \
     PGBOUNCER_MAX_DB_CONNECTIONS="${pgbouncer_max_db}" \
     PGBOUNCER_MIN_POOL_SIZE="${PGBOUNCER_MIN_POOL_SIZE}" \
@@ -796,8 +828,13 @@ else
   for endpoint in \"\${expected_upstreams[@]}\"; do
     grep -q \"server \${endpoint} \" \"\$SITE\" || missing=1
   done
-  if [ \"\$missing\" = \"0\" ]; then
-    echo 'VM2+VM3 upstream entries intact - no action needed'
+  ws_missing=0
+  ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
+  for endpoint in \"\${expected_upstreams[@]}\"; do
+    printf '%s\n' \"\$ws_block\" | grep -q \"server \${endpoint} \" || ws_missing=1
+  done
+  if [ \"\$missing\" = \"0\" ] && [ \"\$ws_missing\" = \"0\" ]; then
+    echo 'VM2+VM3 upstream entries intact for HTTP + WS - no action needed'
     exit 0
   fi
   echo 'Upstream entries missing - re-injecting...'
@@ -830,6 +867,20 @@ def inject(m):
 text, n = re.subn(r'upstream app \{[^}]+\}', inject, text, count=1, flags=re.DOTALL)
 if n != 1:
     raise SystemExit('upstream app block not found')
+def replace_ws(m):
+    block = m.group(0)
+    keepalive = re.search(r'(  keepalive \d+;\n  keepalive_requests \d+;\n  keepalive_timeout [^;]+;\n)', block)
+    keepalive_text = keepalive.group(1) if keepalive else '  keepalive 256;\\n  keepalive_requests 10000;\\n  keepalive_timeout 75s;\\n'
+    dollar = chr(36)
+    return f'upstream app_ws {{\\n  hash {dollar}ws_sticky_key consistent;\\n' + extra_servers + keepalive_text + '}'
+text, n_ws = re.subn(r'upstream app_ws \{[^}]+\}', replace_ws, text, count=1, flags=re.DOTALL)
+if n_ws == 0:
+    ws_block = replace_ws(type('Match', (), {'group': lambda self, _idx=0: ''})())
+    text, n_insert = re.subn(r'(upstream app \{[^}]+\}\n+)', r'\1' + ws_block + '\n', text, count=1, flags=re.DOTALL)
+    if n_insert != 1:
+        raise SystemExit('upstream app_ws block not found and bootstrap insert failed')
+elif n_ws != 1:
+    raise SystemExit('upstream app_ws block not found')
 site.write_text(text)
 PY
   sudo install -m 644 \"\$TMP\" \"\$SITE\"
