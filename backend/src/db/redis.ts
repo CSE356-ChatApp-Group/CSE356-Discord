@@ -19,32 +19,32 @@
  *   to the standalone instance at REDIS_AUTH_URL.
  */
 
+const Redis = require("ioredis");
+const logger = require("../utils/logger");
 
-const Redis  = require('ioredis');
-const logger = require('../utils/logger');
-
-const REDIS_URL      = process.env.REDIS_URL      || 'redis://localhost:6379';
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const REDIS_AUTH_URL = process.env.REDIS_AUTH_URL || REDIS_URL;
 
 // Comma-separated "host:port" list. When set, redis + redisSub run in cluster mode.
 // redisAuth always uses REDIS_AUTH_URL (standalone) regardless of this setting.
-const REDIS_CLUSTER_NODES    = process.env.REDIS_CLUSTER_NODES    || '';
-const REDIS_CLUSTER_PASSWORD = process.env.REDIS_CLUSTER_PASSWORD || '';
+const REDIS_CLUSTER_NODES = process.env.REDIS_CLUSTER_NODES || "";
 
 const REDIS_IS_CLUSTER = Boolean(REDIS_CLUSTER_NODES.trim());
 
 function parseClusterNodes(nodesStr: string) {
-  return nodesStr.split(',').map((s) => {
+  return nodesStr.split(",").map((s) => {
     const trimmed = s.trim();
-    const colonIdx = trimmed.lastIndexOf(':');
+    const colonIdx = trimmed.lastIndexOf(":");
     const host = colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed;
-    const port  = colonIdx > 0 ? parseInt(trimmed.slice(colonIdx + 1), 10) : 7001;
+    const port =
+      colonIdx > 0 ? parseInt(trimmed.slice(colonIdx + 1), 10) : 7001;
     return { host, port };
   });
 }
 
-const CLUSTER_NODES = REDIS_IS_CLUSTER ? parseClusterNodes(REDIS_CLUSTER_NODES) : [];
-const clusterAuth   = REDIS_CLUSTER_PASSWORD ? { password: REDIS_CLUSTER_PASSWORD } : {};
+const CLUSTER_NODES = REDIS_IS_CLUSTER
+  ? parseClusterNodes(REDIS_CLUSTER_NODES)
+  : [];
 
 const STANDALONE_OPTIONS = {
   enableReadyCheck: true,
@@ -53,16 +53,22 @@ const STANDALONE_OPTIONS = {
 };
 
 const CLUSTER_OPTIONS = {
-  redisOptions: { ...STANDALONE_OPTIONS, ...clusterAuth },
+  redisOptions: STANDALONE_OPTIONS,
   clusterRetryStrategy: (times: number) => Math.min(times * 100, 3000),
 };
 
 function attachListeners(client: any, name: string) {
-  client.on('connect',      () => logger.info({ client: name }, 'Redis connected'));
-  client.on('ready',        () => logger.info({ client: name }, 'Redis ready'));
-  client.on('reconnecting', () => logger.warn({ client: name }, 'Redis reconnecting'));
-  client.on('error', (err: Error) => logger.error({ err, client: name }, 'Redis error'));
-  client.on('end',          () => logger.info({ client: name }, 'Redis connection ended'));
+  client.on("connect", () => logger.info({ client: name }, "Redis connected"));
+  client.on("ready", () => logger.info({ client: name }, "Redis ready"));
+  client.on("reconnecting", () =>
+    logger.warn({ client: name }, "Redis reconnecting"),
+  );
+  client.on("error", (err: Error) =>
+    logger.error({ err, client: name }, "Redis error"),
+  );
+  client.on("end", () =>
+    logger.info({ client: name }, "Redis connection ended"),
+  );
 }
 
 function createStandaloneClient(name: string, url: string) {
@@ -81,13 +87,13 @@ function createMainClient(name: string) {
 
 // General-purpose client: fanout, presence, caches.
 // Cluster when REDIS_CLUSTER_NODES is set, standalone otherwise.
-const redis = createMainClient('main');
+const redis = createMainClient("main");
 
 // Auth-only client: JWT deny-list + auth rate-limit counters.
 // Always standalone via REDIS_AUTH_URL — never a cluster client — so auth
 // checks are isolated from cluster rebalancing, slot redirects, and the heavy
 // fanout pipeline traffic on the main client.
-const redisAuth = createStandaloneClient('auth', REDIS_AUTH_URL);
+const redisAuth = createStandaloneClient("auth", REDIS_AUTH_URL);
 
 // Dedicated subscriber – used by ws/fanout; cannot issue normal commands.
 //
@@ -114,11 +120,11 @@ const SUB_CLUSTER_NODE_OPTIONS = {
 
 const redisSub = REDIS_IS_CLUSTER
   ? new Redis.Cluster(CLUSTER_NODES, {
-      redisOptions: { ...SUB_CLUSTER_NODE_OPTIONS, ...clusterAuth },
+      redisOptions: SUB_STANDALONE_OPTIONS,
       clusterRetryStrategy: (times: number) => Math.min(times * 100, 3000),
     })
   : new Redis(REDIS_URL, SUB_STANDALONE_OPTIONS);
-attachListeners(redisSub, 'subscriber');
+attachListeners(redisSub, "subscriber");
 
 // ---------------------------------------------------------------------------
 // Pub/Sub helpers
@@ -129,7 +135,7 @@ attachListeners(redisSub, 'subscriber');
 // ---------------------------------------------------------------------------
 
 /** Event name emitted on redisSub when a message arrives. */
-const REDIS_PUBSUB_EVENT: string = REDIS_IS_CLUSTER ? 'smessage' : 'message';
+const REDIS_PUBSUB_EVENT: string = REDIS_IS_CLUSTER ? "smessage" : "message";
 
 function redisPubsubSubscribe(channel: string): Promise<unknown> {
   return REDIS_IS_CLUSTER
@@ -146,18 +152,14 @@ function redisPubsubUnsubscribe(channel: string): void {
 }
 
 async function closeRedisConnections() {
-  await Promise.allSettled([
-    redis.quit(),
-    redisAuth.quit(),
-    redisSub.quit(),
-  ]);
+  await Promise.allSettled([redis.quit(), redisAuth.quit(), redisSub.quit()]);
 }
 
 module.exports = redis;
-module.exports.redisAuth            = redisAuth;
-module.exports.redisSub             = redisSub;
-module.exports.REDIS_IS_CLUSTER     = REDIS_IS_CLUSTER;
-module.exports.REDIS_PUBSUB_EVENT   = REDIS_PUBSUB_EVENT;
+module.exports.redisAuth = redisAuth;
+module.exports.redisSub = redisSub;
+module.exports.REDIS_IS_CLUSTER = REDIS_IS_CLUSTER;
+module.exports.REDIS_PUBSUB_EVENT = REDIS_PUBSUB_EVENT;
 module.exports.redisPubsubSubscribe = redisPubsubSubscribe;
 module.exports.redisPubsubUnsubscribe = redisPubsubUnsubscribe;
 module.exports.closeRedisConnections = closeRedisConnections;
