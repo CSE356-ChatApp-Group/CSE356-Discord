@@ -11,6 +11,9 @@ const {
   SEARCH_USE_READ_REPLICA,
   getSearchStatementTimeoutMs,
 } = require('./searchQueryEnv');
+const {
+  searchDbBackendTotal,
+} = require('../utils/metrics/searchPerformance');
 
 async function runSearchQuery(
   sql: string,
@@ -53,6 +56,7 @@ async function withSearchClientTransaction<T>(
   };
 
   if (readPool) {
+    const backend = 'replica';
     const tConn = Date.now();
     const client = await readPool.connect();
     const acquireMs = Date.now() - tConn;
@@ -69,8 +73,11 @@ async function withSearchClientTransaction<T>(
       );
       const out = await run(client);
       await client.query('COMMIT');
+      searchDbBackendTotal.inc({ kind, backend, result: 'success' });
+      baseLogMeta.backend = backend;
       return logAndReturn(acquireMs, tWork, out);
     } catch (err) {
+      searchDbBackendTotal.inc({ kind, backend, result: 'error' });
       await client.query('ROLLBACK').catch((e: any) => { rollbackErr = e; });
       throw err;
     } finally {
@@ -79,6 +86,7 @@ async function withSearchClientTransaction<T>(
     }
   }
 
+  const backend = 'primary';
   const { client, acquireMs } = await getClientTimed();
   const tWork = Date.now();
   let rollbackErr: Error | null = null;
@@ -93,8 +101,11 @@ async function withSearchClientTransaction<T>(
     );
     const out = await run(client);
     await client.query('COMMIT');
+    searchDbBackendTotal.inc({ kind, backend, result: 'success' });
+    baseLogMeta.backend = backend;
     return logAndReturn(acquireMs, tWork, out);
   } catch (err) {
+    searchDbBackendTotal.inc({ kind, backend, result: 'error' });
     await client.query('ROLLBACK').catch((e: any) => { rollbackErr = e; });
     throw err;
   } finally {

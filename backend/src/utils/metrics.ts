@@ -38,6 +38,7 @@ const {
 } = require('./metrics/sideEffectAndAuth');
 const {
   searchReplicaRetryTotal,
+  searchDbBackendTotal,
   searchResultsReturnedHistogram,
   searchThrottledTotal,
   searchQueryDurationMs,
@@ -845,6 +846,7 @@ module.exports = {
   messageCacheBustFailuresTotal,
   messageCacheBustWallDurationMs,
   searchReplicaRetryTotal,
+  searchDbBackendTotal,
   searchResultsReturnedHistogram,
   searchThrottledTotal,
   searchQueryDurationMs,

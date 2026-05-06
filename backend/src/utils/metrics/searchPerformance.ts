@@ -11,6 +11,12 @@ const searchReplicaRetryTotal = new client.Counter({
   labelNames: ['scope', 'reason'],
 });
 
+const searchDbBackendTotal = new client.Counter({
+  name: 'search_db_backend_total',
+  help: 'Search DB transactions by backend and outcome',
+  labelNames: ['kind', 'backend', 'result'],
+});
+
 /** Number of results returned per search query (histogram for distribution visibility). */
 const searchResultsReturnedHistogram = new client.Histogram({
   name: 'search_results_returned',
@@ -91,6 +97,7 @@ const searchFreshnessSkippedShortQueryTotal = new client.Counter({
 
 module.exports = {
   searchReplicaRetryTotal,
+  searchDbBackendTotal,
   searchResultsReturnedHistogram,
   searchThrottledTotal,
   searchQueryDurationMs,

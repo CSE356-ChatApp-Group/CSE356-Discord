@@ -2,10 +2,14 @@ function createSearchRetryPolicy({
   logger,
   searchUseReadReplica,
   hasReadPool,
+  retryEmptyResultOnPrimary,
+  searchReplicaRetryTotal,
 }: {
   logger: any;
   searchUseReadReplica: boolean;
   hasReadPool: boolean;
+  retryEmptyResultOnPrimary: boolean;
+  searchReplicaRetryTotal: any;
 }) {
   function shouldRetrySearchOnPrimary(
     forcePrimary: boolean,
@@ -18,15 +22,23 @@ function createSearchRetryPolicy({
     if (err?.code === '25P02') return true;
     // pg-pool query_timeout fired on replica (no PG error code) — retry on primary.
     if (!err?.code && err?.message === 'Query read timeout') return true;
-    return Array.isArray(result?.hits) && result!.hits.length === 0;
+    return retryEmptyResultOnPrimary && Array.isArray(result?.hits) && result!.hits.length === 0;
   }
 
-  function logPrimaryRetry(query: string, opts: Record<string, any>, reason: string) {
+  function logPrimaryRetry(
+    query: string,
+    opts: Record<string, any>,
+    reason: string,
+    metricReason: string,
+  ) {
+    const scope = opts.communityId ? 'community' : (opts.conversationId ? 'conversation' : 'none');
+    searchReplicaRetryTotal.inc({ scope, reason: metricReason });
     logger.info(
       {
         query,
         communityId: opts.communityId,
         conversationId: opts.conversationId,
+        retry_reason: metricReason,
       },
       reason,
     );

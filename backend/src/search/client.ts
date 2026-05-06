@@ -22,6 +22,7 @@ const logger = require('../utils/logger');
 const meiliClient = require('./meiliClient');
 const redis = require('../db/redis');
 const {
+  searchReplicaRetryTotal,
   searchFreshnessQueryDurationMs,
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
@@ -54,6 +55,7 @@ const {
 } = require('./searchTracing');
 const {
   SEARCH_USE_READ_REPLICA,
+  SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
   ftsRecentCandidateCapDeep,
@@ -626,6 +628,8 @@ const {
   logger,
   searchUseReadReplica: SEARCH_USE_READ_REPLICA,
   hasReadPool: Boolean(db.readPool),
+  retryEmptyResultOnPrimary: SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED,
+  searchReplicaRetryTotal,
 });
 
 /**
@@ -884,16 +888,26 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       trimmed,
       opts,
       'search: replica returned empty result set, retrying on primary',
+      'empty_result',
     );
     return await searchOnce(trimmed, opts, true);
   } catch (err) {
     if (!shouldRetrySearchOnPrimary(initialForcePrimary, null, err)) {
       throw err;
     }
+    const metricReason =
+      err?.statusCode === 403
+        ? 'access_check'
+        : err?.code === '25P02'
+          ? 'aborted_transaction'
+          : (!err?.code && err?.message === 'Query read timeout')
+            ? 'query_timeout'
+            : 'other_error';
     logPrimaryRetry(
       trimmed,
       opts,
       'search: replica access check may be stale, retrying on primary',
+      metricReason,
     );
     return searchOnce(trimmed, opts, true);
   }

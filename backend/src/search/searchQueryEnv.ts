@@ -7,6 +7,11 @@ const overload = require('../utils/overload');
 const SEARCH_USE_READ_REPLICA =
   String(process.env.SEARCH_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
 
+const SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED =
+  String(process.env.SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED ?? 'true')
+    .trim()
+    .toLowerCase() !== 'false';
+
 /**
  * Max recent messages scanned per scope before applying literal substring
  * (scoped total candidate set). Evaluated per query (not at module load).
@@ -95,6 +100,7 @@ function meiliFreshnessCandidateCap(): number {
 
 module.exports = {
   SEARCH_USE_READ_REPLICA,
+  SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
   ftsRecentCandidateCapDeep,
