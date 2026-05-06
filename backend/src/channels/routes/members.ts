@@ -5,11 +5,9 @@ const { body, param } = require('express-validator');
 const { queryRead, getClient } = require('../../db/pool');
 const sideEffects = require('../../messages/sideEffects');
 const redis = require('../../db/redis');
-const { redisBatchUnlink } = require('../../db/redisBatch');
 const logger = require('../../utils/logger');
 const { publishUserFeedTargets } = require('../../websocket/userFeed');
 const { invalidateWsAclCache, invalidateWsBootstrapCaches } = require('../../websocket/server');
-const { staleCacheKey } = require('../../utils/distributedSingleflight');
 const { raceChannelAccess } = require('../../messages/channelAccessCache');
 const { invalidateChannelUserFanoutTargetsCache } = require('../../messages/fanout/channelRealtimeFanout');
 const { markChannelBootstrapPending } = require('../../websocket/recentConnect');
@@ -154,11 +152,8 @@ router.post('/:id/members',
             );
           }
         });
-        const keys = insertedUserIds.flatMap((userId) => {
-          const key = `channels:list:${channel.community_id}:${userId}`;
-          return [key, staleCacheKey(key)];
-        });
-        redisBatchUnlink(redis, keys).catch(() => {});
+        // No channel-list cache bust needed: private-channel access is always
+        // checked fresh from channel_members on each request (not cached).
       }
       for (const { user_id } of insertedRows) {
         // Expire the WS ACL cache so subsequent subscribe attempts are checked fresh.

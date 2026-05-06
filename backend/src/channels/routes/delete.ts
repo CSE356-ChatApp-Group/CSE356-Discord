@@ -43,7 +43,7 @@ router.delete('/:id', param('id').isUUID(), async (req, res, next) => {
       });
       // Remove unread-counter helpers for deleted channel to avoid stale key buildup.
       redis.del(countKeyForChannel(rows[0].id)).catch(() => {});
-      S.bustChannelListCache(communityId).catch(() => {});
+      S.bustCommunityChannelCache(communityId).catch(() => {});
     }
     res.json({ success: true });
   } catch (err) { next(err); }

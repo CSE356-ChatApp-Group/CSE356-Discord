@@ -50,11 +50,10 @@ router.post('/',
       await client.query('COMMIT');
       client.release();
       client = null;
-      await S.bustChannelListCacheForUser(communityId, req.user.id);
       const affectedUserIds = await S.listCommunityUserIds(communityId);
       await invalidateWsBootstrapCaches(affectedUserIds);
       await S.publishChannelLifecycleEvent(communityId, 'channel:created', channel);
-      S.bustChannelListCache(communityId).catch(() => {});
+      S.bustCommunityChannelCache(communityId).catch(() => {});
       res.status(201).json({ channel });
     } catch (err) {
       if (client) {

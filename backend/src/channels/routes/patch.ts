@@ -86,7 +86,7 @@ router.patch('/:id',
       ]);
       await evictUnauthorizedChannelSubscribers(updatedChannel.id);
       await S.publishChannelLifecycleEvent(updatedChannel.community_id, 'channel:updated', updatedChannel);
-      S.bustChannelListCache(updatedChannel.community_id).catch(() => {});
+      S.bustCommunityChannelCache(updatedChannel.community_id).catch(() => {});
       res.json({ channel: updatedChannel });
     } catch (err) {
       if (client) {

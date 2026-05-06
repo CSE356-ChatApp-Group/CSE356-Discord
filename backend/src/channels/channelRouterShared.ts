@@ -277,6 +277,15 @@ async function bustChannelListCacheForUser(communityId, userId) {
   }
 }
 
+async function bustCommunityChannelCache(communityId: string) {
+  try {
+    const key = `channels:community:${communityId}`;
+    await redis.del(key, staleCacheKey(key));
+  } catch (err) {
+    logger.warn({ err, communityId }, 'channels:community cache bust failed');
+  }
+}
+
 /** Same idea as communities/messages list: load tests pin many VUs to one reader user. */
 const _channelsListTtl = parseInt(process.env.CHANNELS_LIST_CACHE_TTL_SECS || '60', 10);
 const CHANNELS_LIST_CACHE_TTL_SECS =
@@ -285,6 +294,7 @@ const _channelMsgCountTtl = parseInt(process.env.CHANNEL_MSG_COUNT_REDIS_TTL_SEC
 const CHANNEL_MSG_COUNT_REDIS_TTL_SECS =
   Number.isFinite(_channelMsgCountTtl) && _channelMsgCountTtl > 0 ? _channelMsgCountTtl : 2_592_000;
 const channelsListInflight = new Map();
+const communityChannelsInflight = new Map();
 module.exports = {
   CHANNEL_RETURNING_FIELDS,
   CHANNEL_SELECT_FIELDS,
@@ -303,7 +313,9 @@ module.exports = {
   publishChannelLifecycleEvent,
   bustChannelListCache,
   bustChannelListCacheForUser,
+  bustCommunityChannelCache,
   CHANNELS_LIST_CACHE_TTL_SECS,
   CHANNEL_MSG_COUNT_REDIS_TTL_SECS,
   channelsListInflight,
+  communityChannelsInflight,
 };
