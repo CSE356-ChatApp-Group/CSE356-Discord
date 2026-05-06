@@ -27,9 +27,6 @@ describe('search() – FTS zero → scoped literal', () => {
         rows: [{ __scopeAccess: true }],
       })
       .mockResolvedValueOnce({
-        rows: [{ __scopeAccess: true }],
-      })
-      .mockResolvedValueOnce({
         rows: [
           {
             __scopeAccess: true,
@@ -64,7 +61,7 @@ describe('search() – FTS zero → scoped literal', () => {
 
     expect(out.hits).toHaveLength(1);
     expect(out.hits[0].content).toContain('That makes more');
-    expect(mockQuery).toHaveBeenCalledTimes(7);
+    expect(mockQuery).toHaveBeenCalledTimes(6);
 
     const traceCall = infoSpy.mock.calls.find((c) => c[1] === 'search_trace');
     expect(traceCall).toBeDefined();
@@ -138,7 +135,7 @@ describe('search() – FTS zero → scoped literal', () => {
     });
   });
 
-  it('retries FTS with deeper candidate cap before literal fallback', async () => {
+  it('does not repeat the deep FTS query before literal fallback', async () => {
     jest.resetModules();
     const logger = require('../src/utils/logger');
     const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => {});
@@ -188,14 +185,16 @@ describe('search() – FTS zero → scoped literal', () => {
     });
 
     expect(out.hits).toHaveLength(1);
+    expect(mockQuery).toHaveBeenCalledTimes(6);
     const traceCall = infoSpy.mock.calls.find((c) => c[1] === 'search_trace');
     expect(traceCall).toBeDefined();
     expect(traceCall![0]).toMatchObject({
-      fallback_used: false,
-      fts_deep_used: true,
-      deep_fts_hit_count: 1,
-      deep_strict_fts_hit_count: 1,
+      fallback_used: true,
+      fallback_hit_count: 1,
+      fts_deep_used: false,
     });
+    expect(traceCall![0]).not.toHaveProperty('deep_fts_hit_count');
+    expect(traceCall![0]).not.toHaveProperty('deep_strict_fts_hit_count');
   });
 
   it('formats safe inline highlights when FTS rows omit ts_headline output', async () => {

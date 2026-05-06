@@ -677,9 +677,9 @@ async function searchOnce(
 
     // Run tsquery metadata + FTS candidate query concurrently to eliminate
     // one serial DB round-trip (~30-80ms savings on cold paths).
-    // Use the deep candidate cap from the start to avoid a second transaction
-    // when shallow FTS returns 0 hits — scanning 3000 vs 800 candidates is
-    // negligible compared to an entire extra BEGIN/set_config/query/COMMIT cycle.
+    // Use the deep candidate cap from the start to avoid a second FTS query when
+    // shallow FTS returns 0 hits — scanning 3000 vs 800 candidates is negligible
+    // compared to repeating the same scoped candidate query.
     const ftsMeta = buildFtsParts(trimmed, opts, ftsRecentCandidateCapDeep());
     const [tsqueryMetaRes, ftsRes] = await Promise.all([
       timedQuery(
@@ -735,63 +735,6 @@ async function searchOnce(
       return buildResult(strictFtsHits, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
     }
 
-    let deepFtsUsed = false;
-    let deepFtsHitCount = 0;
-    let deepStrictFtsHitCount = 0;
-    let deepCommunityFtsCandidateCount: number | undefined;
-    let effectiveStrictFtsHits = strictFtsHits;
-
-    if (strictFtsHitCount === 0 && !weakTsquery) {
-      const deepFtsMeta = buildFtsParts(trimmed, opts, ftsRecentCandidateCapDeep());
-      const deepFtsRes = await timedQuery(deepFtsMeta.sql, deepFtsMeta.params);
-      throwIfScopeDenied(deepFtsRes.rows);
-      const deepFtsHits = deepFtsRes.rows.filter((row: any) => row && row.id);
-      const deepStrictHits = strictMultiWord
-        ? deepFtsHits.filter((row: any) => messageMatchesAllStrictTerms(row?.content, strictTerms))
-        : deepFtsHits;
-      deepFtsHitCount = deepFtsHits.length;
-      deepStrictFtsHitCount = deepStrictHits.length;
-      deepCommunityFtsCandidateCount =
-        scopeLabel === 'community'
-          ? deepFtsRes.rows.find((r: any) => r && r.fts_candidate_count != null)?.fts_candidate_count
-          : undefined;
-      deepFtsUsed = true;
-
-      if (deepStrictHits.length > 0) {
-        effectiveStrictFtsHits = deepStrictHits;
-      }
-    }
-
-    if (effectiveStrictFtsHits.length > 0 && !weakTsquery) {
-      const totalMs = Date.now() - tSearchStart;
-      const basePayload = buildBaseSearchTracePayload({
-        requestId,
-        query: trimmed,
-        scopeLabel,
-        tsqueryText,
-        tsqueryNodes,
-        ftsHitCount,
-        strictTermCount: strictTerms.length,
-        strictFtsHitCount: effectiveStrictFtsHits.length,
-        queryMs: queryMsAccum,
-        totalMs,
-      });
-      logSearchTrace({
-        ...basePayload,
-        fallback_used: false,
-        fallback_hit_count: 0,
-        fts_deep_used: deepFtsUsed,
-        deep_fts_hit_count: deepFtsHitCount,
-        deep_strict_fts_hit_count: deepStrictFtsHitCount,
-        ...buildCommunityTraceFields(
-          scopeLabel,
-          deepFtsUsed ? deepCommunityFtsCandidateCount : communityFtsCandidateCount,
-          effectiveStrictFtsHits.length,
-        ),
-      });
-      return buildResult(effectiveStrictFtsHits, ftsMeta.q, ftsMeta.offset, ftsMeta.limit);
-    }
-
     const literalMeta = buildScopedLiteralParts(
       trimmed,
       opts,
@@ -802,7 +745,7 @@ async function searchOnce(
     throwIfScopeDenied(literalRes.rows);
     const fallbackHits = literalRes.rows.filter((row: any) => row && row.id);
     const combinedHits = weakTsquery || strictMultiWord
-      ? mergeSearchRowsPreferLiteral(fallbackHits, effectiveStrictFtsHits, limit, offset)
+      ? mergeSearchRowsPreferLiteral(fallbackHits, strictFtsHits, limit, offset)
       : fallbackHits;
     const totalMs = Date.now() - tSearchStart;
     const basePayload = buildBaseSearchTracePayload({
@@ -822,12 +765,10 @@ async function searchOnce(
       fallback_used: true,
       fallback_hit_count: fallbackHits.length,
       weak_tsquery: weakTsquery,
-      fts_deep_used: deepFtsUsed,
-      deep_fts_hit_count: deepFtsHitCount,
-      deep_strict_fts_hit_count: deepStrictFtsHitCount,
+      fts_deep_used: false,
       ...buildCommunityTraceFields(
         scopeLabel,
-        deepFtsUsed ? deepCommunityFtsCandidateCount : communityFtsCandidateCount,
+        communityFtsCandidateCount,
         combinedHits.length,
       ),
     });
@@ -870,7 +811,7 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
       } else if (err?.statusCode === 403) {
         throw err;
       } else {
-        meiliClient.incFallbackTotal();
+        meiliClient.incFallbackTotal('recheck_error');
         logger.warn(
           { err: { message: err?.message }, query: trimmed },
           'search: meili recheck error, falling back to postgres',

@@ -9,12 +9,8 @@ function createMeiliSearchExecutor({
   buildFilters,
   SELECT_COLS,
   FROM_CLAUSE,
-  tokenizeStrictSearchTerms,
-  messageMatchesAllStrictTerms,
   buildResult,
   createMeiliFallbackError,
-  searchUseReadReplica,
-  searchOnce,
 }) {
   function buildRecheckFromCandidates(
     ids: string[],
@@ -120,67 +116,17 @@ function createMeiliSearchExecutor({
       throw err;
     }
 
-    const terms = tokenizeStrictSearchTerms(q);
-    let strictRows = rows;
-    if (terms.length > 0) {
-      strictRows = rows.filter(
-        (r: any) => r && r.id && messageMatchesAllStrictTerms(r.content, terms),
-      );
-    }
-
     const freshnessSupplementUsed = (() => {
       const idsSet = new Set(ids.map(String));
-      return strictRows.some(
+      return rows.some(
         (row: any) => row && row.id && !idsSet.has(String(row.id)),
       );
     })();
 
-    // Freshness supplement is a normal part of the Meili path — it rescues
-    // recently-written messages that haven't been indexed yet.  Do NOT count
-    // freshness-only hits as a success when ALL of Meili's own candidates
-    // failed strict filtering; that still represents a Meili miss and must
-    // fall back to Postgres so the full result set is correct.
-
-    // Cache filtered rows for reuse
-    const validRows = strictRows.filter((r: any) => r && r.id);
-    const validRowsCount = validRows.length;
-
-    // Count how many of the original Meili candidates (not freshness supplement)
-    // survived strict filtering.  Fallback triggers if none of them did.
-    const meiliIdsSet = new Set(ids.map(String));
-    const meiliCandidateValidCount = validRows.filter(
-      (r: any) => meiliIdsSet.has(String(r.id)),
-    ).length;
-
-    if ((validRowsCount === 0 || meiliCandidateValidCount === 0) && ids.length > 0) {
-      meiliClient.incFallbackTotal('strict_token_mismatch');
-      const totalMs = Date.now() - tAll;
-      logger.warn(
-        {
-          search_trace: true,
-          requestId,
-          query: q,
-          resolved_scope: scopeLabel,
-          search_backend: 'meili',
-          meili_candidate_count: ids.length,
-          pg_fresh_candidate_count: freshnessIds.length,
-          postgres_rechecked_count: rows.filter((r: any) => r && r.id).length,
-          freshness_supplement_used: freshnessSupplementUsed,
-          strict_term_count: terms.length,
-          strict_pass_count: 0,
-          reason: 'meili_strict_token_mismatch_fallback_postgres',
-          meili_ms: meiliMs,
-          postgres_recheck_ms: recheckMs,
-          fallback_to_postgres: true,
-          total_ms: totalMs,
-        },
-        'search_trace',
-      );
-      const initialForcePrimary = !searchUseReadReplica;
-      return searchOnce(q, opts, initialForcePrimary);
-    }
-
-    const finalHits = validRows;
+    // Meili is the full-text candidate generator.  Once it returns candidates,
+    // Postgres rechecks only authorization, deletion, latest content, and
+    // request filters; it must not re-interpret FTS hits as exact substrings.
+    const finalHits = rows.filter((r: any) => r && r.id);
     const totalMs = Date.now() - tAll;
 
     logger.info(
@@ -194,8 +140,6 @@ function createMeiliSearchExecutor({
         pg_fresh_candidate_count: freshnessIds.length,
         postgres_rechecked_count: rows.filter((r: any) => r && r.id).length,
         freshness_supplement_used: freshnessSupplementUsed,
-        strict_term_count: terms.length,
-        strict_pass_count: finalHits.length,
         final_hit_count: finalHits.length,
         meili_ms: meiliMs,
         postgres_recheck_ms: recheckMs,
@@ -205,7 +149,7 @@ function createMeiliSearchExecutor({
       'search_trace',
     );
 
-    return buildResult(strictRows, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+    return buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
   }
 
   return {

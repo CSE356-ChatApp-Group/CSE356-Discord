@@ -395,6 +395,46 @@ describe('Search – Meili path: author + time filters enforced in Postgres', ()
     expect(ids).toContain(ownerMsgId);
     expect(ids).not.toContain(otherMsgId);
   });
+
+  it('after and before filters restrict Meili candidates in Postgres recheck', async () => {
+    const timeMarker = `meilitimerange${uniqueSuffix()}`;
+    const oldMsg = await sendMessage(ownerToken, channelId, `${timeMarker} old`);
+    const newMsg = await sendMessage(ownerToken, channelId, `${timeMarker} new`);
+    const oldCreatedAt = new Date(Date.now() - 10 * 60 * 1000);
+    const newCreatedAt = new Date(Date.now() - 60 * 1000);
+    const split = new Date(Date.now() - 5 * 60 * 1000);
+
+    await pool.query(
+      `UPDATE messages SET created_at = $2, updated_at = $2 WHERE id = $1`,
+      [oldMsg.id, oldCreatedAt],
+    );
+    await pool.query(
+      `UPDATE messages SET created_at = $2, updated_at = $2 WHERE id = $1`,
+      [newMsg.id, newCreatedAt],
+    );
+
+    setMeiliMode([oldMsg.id, newMsg.id]);
+
+    const afterRes = await request(app)
+      .get(
+        `/api/v1/search?q=${timeMarker}&communityId=${communityId}&after=${encodeURIComponent(split.toISOString())}`,
+      )
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    expect(afterRes.status).toBe(200);
+    expect(afterRes.body.hits.map((h: any) => h.id)).toEqual([newMsg.id]);
+
+    setMeiliMode([oldMsg.id, newMsg.id]);
+
+    const beforeRes = await request(app)
+      .get(
+        `/api/v1/search?q=${timeMarker}&communityId=${communityId}&before=${encodeURIComponent(split.toISOString())}`,
+      )
+      .set('Authorization', `Bearer ${ownerToken}`);
+
+    expect(beforeRes.status).toBe(200);
+    expect(beforeRes.body.hits.map((h: any) => h.id)).toEqual([oldMsg.id]);
+  });
 });
 
 describe('Search – Meili path: results are newest-first', () => {
@@ -545,13 +585,13 @@ describe('Search – Meili path: Meili error falls back to Postgres', () => {
   });
 });
 
-describe('Search – Meili path: strict token AND + Postgres fallback', () => {
-  it('falls back to Postgres when Meili candidates lack every query term', async () => {
-    const owner = await createAuthenticatedUser('meili-strict-fallback-owner');
+describe('Search – Meili path: Meili-first candidate recheck', () => {
+  it('returns Meili candidates after Postgres recheck even when strict substring terms do not all match', async () => {
+    const owner = await createAuthenticatedUser('meili-strict-candidate-owner');
     const community = await createCommunity(owner.accessToken);
     const channel = await createChannel(owner.accessToken, community.id);
 
-    const partial = await sendMessage(
+    const candidate = await sendMessage(
       owner.accessToken,
       channel.id,
       'strictalpha strictbeta partialonly',
@@ -562,7 +602,7 @@ describe('Search – Meili path: strict token AND + Postgres fallback', () => {
       'strictalpha strictbeta strictgamma fullphrase',
     );
 
-    setMeiliMode([partial.id]);
+    setMeiliMode([candidate.id]);
 
     const res = await request(app)
       .get(
@@ -571,8 +611,9 @@ describe('Search – Meili path: strict token AND + Postgres fallback', () => {
       .set('Authorization', `Bearer ${owner.accessToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.hits.some((h: any) => String(h.content || '').includes('strictgamma'))).toBe(true);
-    expect(mockIncFallbackTotal).toHaveBeenCalled();
+    const ids = res.body.hits.map((h: any) => h.id);
+    expect(ids).toContain(candidate.id);
+    expect(mockIncFallbackTotal).not.toHaveBeenCalledWith('strict_token_mismatch');
   });
 
   it('returns Meili-backed rows when every term appears in Postgres-rechecked content', async () => {
@@ -617,6 +658,6 @@ describe('Search – Meili path: strict token AND + Postgres fallback', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.hits.some((h: any) => h.id === msg.id)).toBe(false);
-    expect(mockIncFallbackTotal).toHaveBeenCalled();
+    expect(mockIncFallbackTotal).not.toHaveBeenCalledWith('strict_token_mismatch');
   });
 });
