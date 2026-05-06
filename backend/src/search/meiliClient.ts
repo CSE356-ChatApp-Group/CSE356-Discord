@@ -542,6 +542,41 @@ async function stopMeiliWriteStreamConsumer() {
   );
 }
 
+// ── Query normalisation ───────────────────────────────────────────────────────
+
+// Postgres websearch_to_tsquery('english', ...) silently drops these words
+// before building its tsquery.  Sending them to Meili with matchingStrategy:'all'
+// means Meili requires terms that the message may not contain literally, producing
+// empty-candidate fallbacks for queries that Postgres FTS resolves fine.
+// Stripping the same set here keeps the two engines aligned.
+const ENGLISH_STOP_WORDS = new Set([
+  'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves',
+  'you', 'your', 'yours', 'yourself', 'yourselves',
+  'he', 'him', 'his', 'himself', 'she', 'her', 'hers', 'herself',
+  'it', 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves',
+  'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those',
+  'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing',
+  'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as',
+  'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about',
+  'against', 'between', 'into', 'through', 'during', 'before',
+  'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in',
+  'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then',
+  'once', 'here', 'there', 'when', 'where', 'why', 'how',
+  'all', 'both', 'each', 'few', 'more', 'most', 'other', 'some',
+  'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
+  'than', 'too', 'very', 'just', 'now', 'can', 'will', 'should',
+  's', 't', 'd', 'll', 'm', 'o', 're', 've', 'y',
+]);
+
+function stripEnglishStopWords(q: string): string {
+  const trimmed = q.trim();
+  const kept = trimmed.split(/\s+/).filter(
+    (tok) => tok.length > 0 && !ENGLISH_STOP_WORDS.has(tok.toLowerCase()),
+  );
+  return kept.length > 0 ? kept.join(' ') : trimmed;
+}
+
 // ── Internal HTTP helper ──────────────────────────────────────────────────────
 
 async function meiliFetch(
@@ -799,7 +834,7 @@ async function searchMessageCandidates(
   }
 
   const body: Record<string, unknown> = {
-    q: q || '',
+    q: stripEnglishStopWords(q || ''),
     matchingStrategy: 'all',
     sort: ['createdAt:desc'],
     limit: candidateLimit,

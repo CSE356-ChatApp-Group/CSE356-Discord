@@ -49,6 +49,52 @@ describe('meiliClient search request semantics', () => {
     });
   });
 
+  it('strips English stop words from the Meili query to align with websearch_to_tsquery', async () => {
+    (global as any).fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ hits: [], estimatedTotalHits: 0 }),
+    });
+
+    const { searchMessageCandidates } = require('../src/search/meiliClient');
+
+    const cases: [string, string][] = [
+      ['hate that word',       'hate word'],       // "that" is stop word
+      ['been holding this',    'holding'],          // "been" + "this" are stop words
+      ['more utility spells',  'utility spells'],   // "more" is stop word
+      ['mention their name',   'mention name'],     // "their" is stop word
+      ['always just imagined', 'always imagined'],  // "just" is stop word
+      ['into kuchisake onna',  'kuchisake onna'],   // "into" is stop word
+      ['keep learning more',   'keep learning'],    // "more" is stop word
+      ['alpha beta gamma',     'alpha beta gamma'], // no stop words — unchanged
+    ];
+
+    for (const [input, expected] of cases) {
+      (global as any).fetch.mockClear();
+      await searchMessageCandidates(input, {
+        communityId: '00000000-0000-4000-8000-000000000010',
+      });
+      const body = JSON.parse((global as any).fetch.mock.calls[0][1].body);
+      expect(body.q).toBe(expected);
+    }
+  });
+
+  it('falls back to original query when all tokens are stop words', async () => {
+    (global as any).fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ hits: [], estimatedTotalHits: 0 }),
+    });
+
+    const { searchMessageCandidates } = require('../src/search/meiliClient');
+    await searchMessageCandidates('is the a', {
+      communityId: '00000000-0000-4000-8000-000000000010',
+    });
+
+    const body = JSON.parse((global as any).fetch.mock.calls[0][1].body);
+    expect(body.q).toBe('is the a');
+  });
+
   it('configures the index without typo-tolerant content candidates', async () => {
     (global as any).fetch = jest.fn().mockResolvedValue({
       ok: true,
