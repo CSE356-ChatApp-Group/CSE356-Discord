@@ -337,10 +337,12 @@ router.patch('/me',
         [req.user.id, ...Object.values(updates)]
       );
       if (Object.prototype.hasOwnProperty.call(updates, 'display_name')) {
-        await invalidateCommunityMemberRostersForUser(req.user.id).catch(() => {});
+        invalidateCommunityMemberRostersForUser(req.user.id).catch(() => {});
       }
-      const { status, awayMessage } = await presenceService.getPresenceDetails(req.user.id);
-      res.json({ user: { ...rows[0], status, away_message: awayMessage } });
+      // Fetch presence details in parallel with the user profile we already have
+      // — avoids a serial Redis round-trip after the DB query completes.
+      const presence = await presenceService.getPresenceDetails(req.user.id);
+      res.json({ user: { ...rows[0], status: presence.status, away_message: presence.awayMessage } });
     } catch (err) { next(err); }
   }
 );

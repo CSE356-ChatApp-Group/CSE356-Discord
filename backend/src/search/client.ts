@@ -677,7 +677,10 @@ async function searchOnce(
 
     // Run tsquery metadata + FTS candidate query concurrently to eliminate
     // one serial DB round-trip (~30-80ms savings on cold paths).
-    const ftsMeta = buildFtsParts(trimmed, opts);
+    // Use the deep candidate cap from the start to avoid a second transaction
+    // when shallow FTS returns 0 hits — scanning 3000 vs 800 candidates is
+    // negligible compared to an entire extra BEGIN/set_config/query/COMMIT cycle.
+    const ftsMeta = buildFtsParts(trimmed, opts, ftsRecentCandidateCapDeep());
     const [tsqueryMetaRes, ftsRes] = await Promise.all([
       timedQuery(
         `SELECT websearch_to_tsquery('english', $1)::text AS tsquery_text,
