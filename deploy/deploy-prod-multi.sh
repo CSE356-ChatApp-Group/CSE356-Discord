@@ -288,7 +288,8 @@ drain_remote_vm_from_vm1_upstream() {
   ssh_vm "$VM1" "
     set -euo pipefail
     SITE=/etc/nginx/sites-enabled/chatapp
-    if grep -q 'server ${vm_internal}:' \"\$SITE\"; then
+    upstream_block=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\$SITE\")
+    if printf '%s\n' \"\$upstream_block\" | grep -q 'server ${vm_internal}:'; then
       echo 'ERROR: ${vm_label} upstream entries still present after drain'
       exit 1
     fi
@@ -308,9 +309,10 @@ restore_remote_vm_to_vm1_upstream() {
   ssh_vm "$VM1" "
     set -euo pipefail
     SITE=/etc/nginx/sites-enabled/chatapp
+    upstream_block=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\$SITE\")
     missing=0
     for port in ${VMX_WORKER_PORTS[*]}; do
-      grep -q 'server ${vm_internal}:'\"\${port}\"' max_fails=0;' \"\$SITE\" || missing=1
+      printf '%s\n' \"\$upstream_block\" | grep -q 'server ${vm_internal}:'\"\${port}\"' max_fails=0;' || missing=1
     done
     [ \"\$missing\" -eq 0 ]
   "
@@ -873,15 +875,18 @@ else
   ssh_vm "$VM1" "
   set -euo pipefail
   SITE=/etc/nginx/sites-enabled/chatapp
-  EXPECTED_UPSTREAM_CSV='${EXTRA_UPSTREAM_CSV}'
+  EXPECTED_HTTP_UPSTREAM_CSV='${EXTRA_UPSTREAM_CSV}'
+  EXPECTED_WS_UPSTREAM_CSV='$(build_ws_upstream_csv)'
   missing=0
-  IFS=',' read -r -a expected_upstreams <<< \"\$EXPECTED_UPSTREAM_CSV\"
-  for endpoint in \"\${expected_upstreams[@]}\"; do
-    sudo grep -q \"server \${endpoint} \" \"\$SITE\" || missing=1
+  http_block=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\$SITE\")
+  IFS=',' read -r -a expected_http_upstreams <<< \"\$EXPECTED_HTTP_UPSTREAM_CSV\"
+  for endpoint in \"\${expected_http_upstreams[@]}\"; do
+    printf '%s\n' \"\$http_block\" | grep -q \"server \${endpoint} \" || missing=1
   done
   ws_missing=0
+  IFS=',' read -r -a expected_ws_upstreams <<< \"\$EXPECTED_WS_UPSTREAM_CSV\"
   ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
-  for endpoint in \"\${expected_upstreams[@]}\"; do
+  for endpoint in \"\${expected_ws_upstreams[@]}\"; do
     printf '%s\n' \"\$ws_block\" | grep -q \"server \${endpoint} \" || ws_missing=1
   done
   if [ \"\$missing\" = \"0\" ] && [ \"\$ws_missing\" = \"0\" ]; then
@@ -891,7 +896,7 @@ else
   echo 'Upstream entries missing - re-injecting...'
   TMP=\$(mktemp)
   cp \"\$SITE\" \"\$TMP\"
-  EXPECTED_UPSTREAM_CSV=\"\$EXPECTED_UPSTREAM_CSV\" TMP_SITE=\"\$TMP\" python3 - <<'PY'
+  EXPECTED_HTTP_UPSTREAM_CSV=\"\$EXPECTED_HTTP_UPSTREAM_CSV\" EXPECTED_WS_UPSTREAM_CSV=\"\$EXPECTED_WS_UPSTREAM_CSV\" TMP_SITE=\"\$TMP\" python3 - <<'PY'
 import os
 import re
 from pathlib import Path
@@ -910,21 +915,30 @@ if 'ws_sticky_key' not in text:
     if n_map != 1:
         raise SystemExit('ws_sticky_key map missing and bootstrap insert failed')
 
-expected = [
+expected_http = [
     endpoint.strip()
-    for endpoint in os.environ['EXPECTED_UPSTREAM_CSV'].split(',')
+    for endpoint in os.environ['EXPECTED_HTTP_UPSTREAM_CSV'].split(',')
     if endpoint.strip()
 ]
-extra_servers = ''.join(
+expected_ws = [
+    endpoint.strip()
+    for endpoint in os.environ['EXPECTED_WS_UPSTREAM_CSV'].split(',')
+    if endpoint.strip()
+]
+http_extra_servers = ''.join(
     f'  server {endpoint} max_fails=0;\\n'
-    for endpoint in expected
+    for endpoint in expected_http
+)
+ws_extra_servers = ''.join(
+    f'  server {endpoint} max_fails=0;\\n'
+    for endpoint in expected_ws
 )
 
 def inject(m):
     block = m.group(0)
-    if all(endpoint in block for endpoint in expected):
+    if all(endpoint in block for endpoint in expected_http):
         return block
-    return re.sub(r'(  keepalive \d+;)', extra_servers + r'\1', block, count=1)
+    return re.sub(r'(  keepalive \d+;)', http_extra_servers + r'\1', block, count=1)
 
 text, n = re.subn(r'upstream app \{[^}]+\}', inject, text, count=1, flags=re.DOTALL)
 if n != 1:
@@ -933,7 +947,7 @@ def replace_ws(m):
     block = m.group(0)
     keepalive = re.search(r'(  keepalive \d+;\n  keepalive_requests \d+;\n  keepalive_timeout [^;]+;\n)', block)
     keepalive_text = keepalive.group(1) if keepalive else '  keepalive 256;\\n  keepalive_requests 10000;\\n  keepalive_timeout 75s;\\n'
-    return f'upstream app_ws {{\\n  hash {dollar}ws_sticky_key consistent;\\n' + extra_servers + keepalive_text + '}'
+    return f'upstream app_ws {{\\n  hash {dollar}ws_sticky_key consistent;\\n' + ws_extra_servers + keepalive_text + '}'
 text, n_ws = re.subn(r'upstream app_ws \{[^}]+\}', replace_ws, text, count=1, flags=re.DOTALL)
 if n_ws == 0:
     ws_block = replace_ws(type('Match', (), {'group': lambda self, _idx=0: ''})())
