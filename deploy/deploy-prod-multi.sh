@@ -97,6 +97,8 @@ WSVM1="${WSVM1:-${CHATAPP_INV_WSVM1_PUBLIC}}"
 WSVM2="${WSVM2:-${CHATAPP_INV_WSVM2_PUBLIC}}"
 WSVM1_INTERNAL="${WSVM1_INTERNAL:-${CHATAPP_INV_WSVM1_INTERNAL}}"
 WSVM2_INTERNAL="${WSVM2_INTERNAL:-${CHATAPP_INV_WSVM2_INTERNAL}}"
+WSVM1_USER="${WSVM1_USER:-${CHATAPP_INV_WSVM1_USER}}"
+WSVM2_USER="${WSVM2_USER:-${CHATAPP_INV_WSVM2_USER}}"
 WSVM1_WORKERS="${WSVM1_WORKERS:-${CHATAPP_INV_WSVM1_WORKERS}}"
 WSVM2_WORKERS="${WSVM2_WORKERS:-${CHATAPP_INV_WSVM2_WORKERS}}"
 WS_TIER_ENABLED="${WS_TIER_ENABLED:-${CHATAPP_INV_WS_TIER_ENABLED}}"
@@ -168,6 +170,43 @@ ssh_vm() {
       -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${host}" "$@"
+}
+
+monitoring_host_user() {
+  local host="${1:?host required}"
+  case "${host}" in
+    "${WSVM1}")
+      printf '%s\n' "${WSVM1_USER}"
+      ;;
+    "${WSVM2}")
+      printf '%s\n' "${WSVM2_USER}"
+      ;;
+    *)
+      printf '%s\n' "${PROD_USER}"
+      ;;
+  esac
+}
+
+ssh_monitoring_host() {
+  local host="${1:?host required}"
+  shift
+  local user
+  user="$(monitoring_host_user "${host}")"
+  # shellcheck disable=SC2086
+  ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+      -o ControlMaster=auto -o ControlPath="/tmp/ssh-chatapp-multi-%r@${host}:%p" \
+      -o ControlPersist=10m \
+      ${DEPLOY_SSH_EXTRA_OPTS} \
+      "${user}@${host}" "$@"
+}
+
+scp_to_monitoring_host() {
+  local host="${1:?host required}"
+  local local_path="${2:?local path required}"
+  local remote_path="${3:?remote path required}"
+  local user
+  user="$(monitoring_host_user "${host}")"
+  chatapp_scp_to_multi_vm "${host}" "${local_path}" "${user}@${host}:${remote_path}"
 }
 
 build_remote_upstream_csv() {
@@ -573,39 +612,128 @@ sync_monitoring_stack() {
     fi
     WEBHOOK_BYTES=\$(sudo docker exec \"\$AM_NAME\" sh -lc 'wc -c < /alertmanager/secrets/discord_webhook_url 2>/dev/null || echo 0')
     [ \"\${WEBHOOK_BYTES:-0}\" -lt 32 ] && echo 'ERROR: Alertmanager webhook secret not wired' && exit 1
-    echo 'Monitoring VM sync complete - Prometheus scraping VM1(4)+VM2(6)+VM3(6) workers'
+    echo 'Monitoring VM sync complete - Prometheus scraping VM1(4)+VM2(6)+VM3(6)+WSVM1(6)+WSVM2(6) workers'
   " || echo "WARN: Monitoring VM sync had errors (non-fatal - app deploy succeeded)"
   echo "✓ Monitoring stack updated on monitoring VM (${MONITORING_VM_HOST})"
   echo ""
 }
 
+sync_monitoring_remote_host() {
+  local host="${1:?host required}"
+  local edge_enabled="${2:-0}"
+  local ports_csv="${3:?ports csv required}"
+  local label="${4:-${host}}"
+  local compose_cmd
+  compose_cmd="$(deploy_monitoring_remote_compose_up_cmd "/opt/chatapp-monitoring/remote-compose.yml" "${edge_enabled}")"
+
+  ssh_monitoring_host "${host}" "
+    set -euo pipefail
+    IFS=',' read -r -a _ports <<< \"${ports_csv}\"
+    for p in \"\${_ports[@]}\"; do
+      if ! sudo ufw status | grep -qE \"^[[:space:]]*[0-9]+\\\\][[:space:]]+\${p}/tcp[[:space:]]+ALLOW IN[[:space:]]+${MONITORING_VM_SCRAPE_SOURCE}\"; then
+        sudo ufw allow proto tcp from ${MONITORING_VM_SCRAPE_SOURCE} to any port \"\$p\" comment 'monitoring scrape' >/dev/null || true
+      fi
+    done
+  " || echo "WARN: failed to apply UFW scrape rules on ${label}"
+
+  scp_to_monitoring_host "${host}" "${SCRIPT_DIR}/../infrastructure/monitoring/remote-compose.yml" "/tmp/remote-compose.yml.deploy" || true
+  scp_to_monitoring_host "${host}" "${SCRIPT_DIR}/../infrastructure/monitoring/promtail-host-config.yml" "/tmp/promtail-host-config.yml.deploy" || true
+  scp_to_monitoring_host "${host}" "${SCRIPT_DIR}/../scripts/ops/synthetic-probe.sh" "/tmp/synthetic-probe.sh.deploy" || true
+  scp_to_monitoring_host "${host}" "${SCRIPT_DIR}/pgbouncer-exporter.py" "/tmp/pgbouncer-exporter.py.deploy" || true
+
+  ssh_monitoring_host "${host}" "
+    set -euo pipefail
+    if [ -f /tmp/remote-compose.yml.deploy ] || [ -f /tmp/promtail-host-config.yml.deploy ] || [ -f /tmp/synthetic-probe.sh.deploy ] || [ -f /tmp/pgbouncer-exporter.py.deploy ]; then
+      sudo mkdir -p /opt/chatapp-monitoring
+    fi
+    sudo mkdir -p /opt/chatapp-monitoring/node_exporter_textfile
+    sudo chown \$(id -un):\$(id -gn) /opt/chatapp-monitoring/node_exporter_textfile
+    if [ -f /tmp/synthetic-probe.sh.deploy ]; then
+      sudo install -m 755 /tmp/synthetic-probe.sh.deploy /opt/chatapp-monitoring/synthetic-probe.sh
+      rm -f /tmp/synthetic-probe.sh.deploy
+    fi
+    if [ -x /opt/chatapp-monitoring/synthetic-probe.sh ]; then
+      (
+        crontab -l 2>/dev/null | grep -v '/opt/chatapp-monitoring/synthetic-probe.sh' || true
+        echo '*/2 * * * * TEXTFILE_DIR=/opt/chatapp-monitoring/node_exporter_textfile CURL_MAX_TIME=12 /opt/chatapp-monitoring/synthetic-probe.sh >/dev/null 2>&1'
+      ) | crontab -
+    fi
+    if [ -f /tmp/remote-compose.yml.deploy ]; then
+      sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
+      rm -f /tmp/remote-compose.yml.deploy
+    fi
+    if [ -f /tmp/promtail-host-config.yml.deploy ]; then
+      sudo cp /tmp/promtail-host-config.yml.deploy /opt/chatapp-monitoring/promtail-host-config.yml
+      rm -f /tmp/promtail-host-config.yml.deploy
+    fi
+    if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
+      ${compose_cmd} >/dev/null
+    fi
+    if [ -f /tmp/pgbouncer-exporter.py.deploy ]; then
+      sudo install -m 755 /tmp/pgbouncer-exporter.py.deploy /opt/chatapp-monitoring/pgbouncer-exporter.py
+      rm -f /tmp/pgbouncer-exporter.py.deploy
+    fi
+    if [ -f /opt/chatapp-monitoring/pgbouncer-exporter.py ]; then
+      sudo tee /etc/systemd/system/pgbouncer-exporter.service > /dev/null <<'UNIT'
+[Unit]
+Description=PgBouncer Prometheus exporter
+After=network.target pgbouncer.service
+Wants=pgbouncer.service
+
+[Service]
+Type=simple
+User=nobody
+ExecStart=/usr/bin/python3 /opt/chatapp-monitoring/pgbouncer-exporter.py --listen 0.0.0.0:9126 --pgbouncer 127.0.0.1:6432
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+      sudo systemctl daemon-reload
+      sudo systemctl enable pgbouncer-exporter 2>/dev/null || true
+      sudo systemctl restart pgbouncer-exporter
+    fi
+  " || echo "WARN: monitoring host refresh failed on ${label}"
+}
+
 sync_monitoring_post_steps() {
-  echo "Ensuring UFW scrape rules on app VMs (source ${MONITORING_VM_SCRAPE_SOURCE})..."
-  for vm in "$VM1" "$VM2" "$VM3"; do
+  echo "Ensuring UFW scrape rules and host exporters on monitored VMs (source ${MONITORING_VM_SCRAPE_SOURCE})..."
+
+  ports=("${VM1_WORKER_PORTS[@]}" 9100 9126 9113)
+  if [ "${PROM_REDIS_HOST}" = "${VM1_INTERNAL}" ]; then
+    ports+=(9121)
+  fi
+  ports_csv=$(IFS=,; echo "${ports[*]}")
+  sync_monitoring_remote_host "${VM1}" "1" "${ports_csv}" "vm1"
+
+  ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
+  if [ "${PROM_REDIS_HOST}" = "${VM2_INTERNAL}" ]; then
+    ports+=(9121)
+  fi
+  ports_csv=$(IFS=,; echo "${ports[*]}")
+  sync_monitoring_remote_host "${VM2}" "0" "${ports_csv}" "vm2"
+
+  ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
+  if [ "${PROM_REDIS_HOST}" = "${VM3_INTERNAL}" ]; then
+    ports+=(9121)
+  fi
+  ports_csv=$(IFS=,; echo "${ports[*]}")
+  sync_monitoring_remote_host "${VM3}" "0" "${ports_csv}" "vm3"
+
+  if [ -n "${WSVM1}" ] && [ -n "${WSVM1_INTERNAL}" ] && [ "${WSVM1_WORKERS}" -gt 0 ]; then
     ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
-    if [ "$vm" = "$VM1" ]; then
-      ports=("${VM1_WORKER_PORTS[@]}" 9100 9126 9113)
-    fi
-    if [ "${PROM_REDIS_HOST}" = "${VM1_INTERNAL}" ] && [ "$vm" = "$VM1" ]; then
-      ports+=(9121)
-    fi
-    if [ "${PROM_REDIS_HOST}" = "${VM2_INTERNAL}" ] && [ "$vm" = "$VM2" ]; then
-      ports+=(9121)
-    fi
-    if [ "${PROM_REDIS_HOST}" = "${VM3_INTERNAL}" ] && [ "$vm" = "$VM3" ]; then
-      ports+=(9121)
-    fi
     ports_csv=$(IFS=,; echo "${ports[*]}")
-    ssh_vm "$vm" "
-      set -euo pipefail
-      IFS=',' read -r -a _ports <<< \"${ports_csv}\"
-      for p in \"\${_ports[@]}\"; do
-        if ! sudo ufw status | grep -qE \"^[[:space:]]*[0-9]+\\\\][[:space:]]+\${p}/tcp[[:space:]]+ALLOW IN[[:space:]]+${MONITORING_VM_SCRAPE_SOURCE}\"; then
-          sudo ufw allow proto tcp from ${MONITORING_VM_SCRAPE_SOURCE} to any port \"\$p\" comment 'monitoring scrape' >/dev/null || true
-        fi
-      done
-    " || echo "WARN: failed to apply UFW scrape rules on ${vm}"
-  done
+    sync_monitoring_remote_host "${WSVM1}" "0" "${ports_csv}" "wsvm1"
+  fi
+
+  if [ -n "${WSVM2}" ] && [ -n "${WSVM2_INTERNAL}" ] && [ "${WSVM2_WORKERS}" -gt 0 ]; then
+    ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
+    ports_csv=$(IFS=,; echo "${ports[*]}")
+    sync_monitoring_remote_host "${WSVM2}" "0" "${ports_csv}" "wsvm2"
+  fi
 
   if [ "${PROM_REDIS_HOST}" != "${VM1_INTERNAL}" ]; then
     ssh_vm "$VM1" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
@@ -649,24 +777,6 @@ sync_monitoring_post_steps() {
       echo 'WARN: monitoring VM cannot reach ${PROM_REDIS_HOST}:9121 (check firewall/security groups)'
     fi
   " || true
-
-  echo "Syncing app-VM remote-compose (node-exporter / promtail / edge nginx-exporter)..."
-  _rc_local="${SCRIPT_DIR}/../infrastructure/monitoring/remote-compose.yml"
-  for vm in "$VM1" "$VM2" "$VM3"; do
-    _compose_cmd="$(deploy_monitoring_remote_compose_up_cmd "/opt/chatapp-monitoring/remote-compose.yml" "$([ "$vm" = "$VM1" ] && echo 1 || echo 0)")"
-    chatapp_scp_to_multi_vm "$vm" "${_rc_local}" "${PROD_USER}@${vm}:/tmp/remote-compose.yml.deploy" || true
-    ssh_vm "$vm" "
-      set -euo pipefail
-      if [ -f /tmp/remote-compose.yml.deploy ]; then
-        sudo mkdir -p /opt/chatapp-monitoring
-        sudo cp /tmp/remote-compose.yml.deploy /opt/chatapp-monitoring/remote-compose.yml
-        rm -f /tmp/remote-compose.yml.deploy
-      fi
-      if [ -f /opt/chatapp-monitoring/remote-compose.yml ]; then
-        ${_compose_cmd}
-      fi
-    " || echo "WARN: remote-compose refresh failed on ${vm}"
-  done
 }
 
 run_preflight_db_check() {
