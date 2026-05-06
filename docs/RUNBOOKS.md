@@ -33,10 +33,11 @@ Use this when enabling Meilisearch-backed search or when search quality/latency 
    - promote the same pattern to prod
 6. Watch these metrics during rollout or regression triage:
    - `meili_search_duration_ms`
-   - `meili_search_fallback_total`
+   - `meili_search_fallback_total{reason=...}` — `unavailable` means Meili timed out/errored; `empty_candidates` means Meili found nothing; `strict_token_mismatch` means Meili returned candidates that Postgres rejected under the app's exact all-term contract; `recheck_error` means the Postgres recheck failed before the normal fallback.
    - `meili_index_failures_total`
    - `meili_candidate_count`
-7. If search traffic is fine but message writes start logging Meili indexing warnings, keep `SEARCH_BACKEND=postgres` and decide separately whether to leave `MEILI_ENABLED=true` for warm indexing or disable it too.
+7. If `strict_token_mismatch` rises after deploy, rerun `npm --prefix /opt/chatapp/current/backend run meili:setup-index` from an app host so the index has the current exact matching settings (`matchingStrategy=all` at query time, typo tolerance disabled on the content-only index).
+8. If search traffic is fine but message writes start logging Meili indexing warnings, keep `SEARCH_BACKEND=postgres` and decide separately whether to leave `MEILI_ENABLED=true` for warm indexing or disable it too.
 
 ## ChatAppSyntheticProbeFailed
 

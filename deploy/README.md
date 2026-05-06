@@ -545,7 +545,7 @@ Expected behavior on the read path:
 
 1. Deploy **write-only warm-up** to prod: `MEILI_ENABLED=true`, `SEARCH_BACKEND=postgres`.
 2. Confirm `npm --prefix backend run meili:health -- --json` passes on a prod app VM.
-3. Watch `meili_index_failures_total`, `meili_search_fallback_total`, and `meili_search_duration_ms` in Grafana/Prometheus.
+3. Watch `meili_index_failures_total`, `meili_search_fallback_total{reason=...}`, and `meili_search_duration_ms` in Grafana/Prometheus. A healthy cutover should not show sustained `strict_token_mismatch`; if it does, rerun `npm --prefix /opt/chatapp/current/backend run meili:setup-index` so the index has the current exact matching settings.
 4. Only then switch prod to `SEARCH_BACKEND=meili` and run a normal prod deploy.
 
 ### Rollback

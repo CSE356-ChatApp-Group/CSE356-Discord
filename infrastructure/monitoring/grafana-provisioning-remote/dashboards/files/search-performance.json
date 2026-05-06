@@ -763,8 +763,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(meili_search_fallback_total{job=\"chatapp-api\",vm=~\"$vm\"}[5m]))",
-          "legendFormat": "fallback",
+          "expr": "sum by (reason) (rate(meili_search_fallback_total{job=\"chatapp-api\",vm=~\"$vm\"}[5m]))",
+          "legendFormat": "{{reason}}",
           "refId": "A"
         }
       ],

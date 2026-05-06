@@ -73,7 +73,7 @@ function createMeiliSearchExecutor({
       candidateResult = await meiliClient.searchMessageCandidates(q, opts);
     } catch (err: any) {
       const meiliMs = Date.now() - tMeili;
-      meiliClient.incFallbackTotal();
+      meiliClient.incFallbackTotal('unavailable');
       logger.warn(
         { err: { message: err?.message }, requestId, query: q, meili_ms: meiliMs },
         'search: meili candidate fetch failed, falling back to postgres',
@@ -85,7 +85,7 @@ function createMeiliSearchExecutor({
 
     if (ids.length === 0) {
       const totalMs = Date.now() - tAll;
-      meiliClient.incFallbackTotal();
+      meiliClient.incFallbackTotal('empty_candidates');
       logger.warn(
         {
           requestId,
@@ -153,7 +153,7 @@ function createMeiliSearchExecutor({
     ).length;
 
     if ((validRowsCount === 0 || meiliCandidateValidCount === 0) && ids.length > 0) {
-      meiliClient.incFallbackTotal();
+      meiliClient.incFallbackTotal('strict_token_mismatch');
       const totalMs = Date.now() - tAll;
       logger.warn(
         {

@@ -123,7 +123,8 @@ const meiliIndexFailuresTotal = new client.Counter({
 
 const meiliSearchFallbackTotal = new client.Counter({
   name: 'meili_search_fallback_total',
-  help: 'Searches that fell back to Postgres because Meilisearch failed or timed out',
+  help: 'Searches that fell back to Postgres from the Meilisearch candidate path',
+  labelNames: ['reason'],
 });
 
 const meiliCandidateCount = new client.Histogram({
@@ -638,13 +639,13 @@ async function setupIndex(): Promise<void> {
     timeoutMs: 5000,
   });
 
-  // Stricter typo behavior than Meili defaults — still a candidate generator; the
-  // app applies strict token AND on Postgres-rechecked rows before returning.
+  // Match the API's exact search contract. Meili is only a candidate generator,
+  // and Postgres recheck requires every query term to survive strict filtering;
+  // fuzzy Meili candidates otherwise create expensive false-positive fallbacks.
   await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/settings/typo-tolerance`, {
     method: 'PATCH',
     body: {
-      enabled: true,
-      minWordSizeForTypos: { oneTypo: 6, twoTypos: 12 },
+      enabled: false,
     },
     timeoutMs: 5000,
   });
@@ -799,6 +800,7 @@ async function searchMessageCandidates(
 
   const body: Record<string, unknown> = {
     q: q || '',
+    matchingStrategy: 'all',
     sort: ['createdAt:desc'],
     limit: candidateLimit,
     offset: 0,
@@ -832,8 +834,8 @@ async function searchMessageCandidates(
   return { ids: hits, estimatedTotal: data?.estimatedTotalHits ?? 0 };
 }
 
-function incFallbackTotal() {
-  meiliSearchFallbackTotal.inc();
+function incFallbackTotal(reason = 'unknown') {
+  meiliSearchFallbackTotal.inc({ reason });
 }
 
 module.exports = {

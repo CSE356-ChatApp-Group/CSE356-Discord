@@ -121,7 +121,7 @@ fi
 if [[ "${PROD_HOST}" == "${PRIMARY_VM1_HOST}" ]]; then
   # VM1 (shared ingress): enforce full 14-worker cross-VM topology.
   for s in "${EXPECTED_SERVERS[@]}"; do
-    if ! echo "${SERVER_LINES}" | grep -qx "${s}"; then
+    if ! echo "${SERVER_LINES}" | grep -Fqx "${s}"; then
       echo "FAIL: upstream app missing expected server ${s}"
       exit 1
     fi
