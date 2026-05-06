@@ -169,6 +169,22 @@ describe('messages mode: DB query scope', () => {
     expect(topics).toContain('conversation:conv-1');
   });
 
+  it('does not subscribe any delivery topics for a newly registered user with no memberships', async () => {
+    const subscribeClientMock = jest.fn().mockResolvedValue(undefined);
+    const { helpers } = buildHarness({
+      autoSubscribeMode: 'messages',
+      queryResponses: [
+        { rows: [] }, // conversations
+        { rows: [] }, // channels
+      ],
+      subscribeClient: subscribeClientMock,
+    });
+    const ws = fakeWs();
+    await helpers.bootstrapWithRetry(ws, 'new-user-1');
+
+    expect(subscribeClientMock).not.toHaveBeenCalled();
+  });
+
   it('fires all 3 queries in full mode', async () => {
     const { query, helpers } = buildHarness({
       autoSubscribeMode: 'full',

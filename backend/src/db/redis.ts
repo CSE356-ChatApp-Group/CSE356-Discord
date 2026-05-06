@@ -127,7 +127,6 @@ attachListeners(redisSub, 'subscriber');
 //
 // Cluster mode uses sharded pub/sub (SSUBSCRIBE / SPUBLISH / "smessage" event)
 // so each channel maps to exactly one shard — hot channels don't saturate
-// every node. Standalone keeps classic SUBSCRIBE / PUBLISH / "message".
 // ---------------------------------------------------------------------------
 
 /** Event name emitted on redisSub when a message arrives. */
@@ -137,12 +136,14 @@ function redisPubsubSubscribe(channel: string): Promise<unknown> {
   if (REDIS_IS_CLUSTER) {
     return redisSub.ssubscribe(channel);
   }
-  // Standalone mode: only allow subscriptions to shared shard feeds.
-  // Individual channel:<uuid> or user:<uuid> subscriptions are no-ops because
-  // logical delivery is already covered by the shard topics. This prevents
-  // the ioredis offline queue from batching thousands of channels into a
-  // single massive (and slow) SUBSCRIBE command.
-  if (channel.startsWith('userfeed:') || channel.startsWith('communityfeed:')) {
+  // Standalone mode: user/community fanout is backed by shared shard feeds,
+  // but channel/conversation fanout still publishes on the direct topic.
+  if (
+    channel.startsWith('userfeed:')
+    || channel.startsWith('communityfeed:')
+    || channel.startsWith('channel:')
+    || channel.startsWith('conversation:')
+  ) {
     return redisSub.subscribe(channel);
   }
   return Promise.resolve();
@@ -151,7 +152,12 @@ function redisPubsubSubscribe(channel: string): Promise<unknown> {
 function redisPubsubUnsubscribe(channel: string): void {
   if (REDIS_IS_CLUSTER) {
     redisSub.sunsubscribe(channel).catch(() => {});
-  } else if (channel.startsWith('userfeed:') || channel.startsWith('communityfeed:')) {
+  } else if (
+    channel.startsWith('userfeed:')
+    || channel.startsWith('communityfeed:')
+    || channel.startsWith('channel:')
+    || channel.startsWith('conversation:')
+  ) {
     redisSub.unsubscribe(channel).catch(() => {});
   }
 }
