@@ -1,13 +1,9 @@
 /**
  * Helpers for Redis commands that accept a variable number of keys/members.
- * In cluster mode, multi-key commands (MGET, UNLINK key1 key2 …) are only
- * valid when every key maps to the same hash slot. Since callers pass
- * arbitrary keys, we always use per-key commands in a single pipeline so
- * the cluster client can route each command to the correct shard while
- * still batching the round-trips.
+ * Chunking prevents blocking the Redis thread with massive argument arrays,
+ * while pipelining batches all chunks into a single network round-trip.
  *
- * The chunkSize parameter is kept for API compatibility but is no longer used
- * for MGET / UNLINK (individual commands need no chunking).
+ * Default chunk size is 100. Override per call via the last argument.
  */
 
 const DEFAULT_CHUNK = 100;
@@ -27,17 +23,18 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 /**
- * Bulk-delete keys using UNLINK (one command per key so cluster routing works).
+ * Bulk-delete keys using UNLINK.
  */
 async function redisBatchUnlink(
   client: any,
   keys: string[],
-  _chunkSize = DEFAULT_CHUNK,
+  chunkSize = DEFAULT_CHUNK,
 ): Promise<void> {
   if (!keys.length) return;
+  const size = normalizeChunkSize(chunkSize);
   const pipeline = client.pipeline();
-  for (const key of keys) {
-    pipeline.unlink(key);
+  for (const c of chunk(keys, size)) {
+    pipeline.unlink(...c);
   }
   const results = await pipeline.exec();
   for (const [err] of results) {
@@ -46,24 +43,30 @@ async function redisBatchUnlink(
 }
 
 /**
- * Batch GET across many keys. Returns values in the same order as `keys`.
- * Uses individual GET commands so cross-slot keys work in cluster mode.
+ * Batch MGET across many keys. Returns values in the same order as `keys`.
  */
 async function redisBatchMget(
   client: any,
   keys: string[],
-  _chunkSize = DEFAULT_CHUNK,
+  chunkSize = DEFAULT_CHUNK,
 ): Promise<(string | null)[]> {
   if (!keys.length) return [];
+  const size = normalizeChunkSize(chunkSize);
+  const keyChunks = chunk(keys, size);
   const pipeline = client.pipeline();
-  for (const key of keys) {
-    pipeline.get(key);
+  for (const c of keyChunks) {
+    pipeline.mget(...c);
   }
+
   const results = await pipeline.exec();
   const out: (string | null)[] = [];
-  for (const [err, value] of results) {
+  for (let i = 0; i < results.length; i += 1) {
+    const [err, res] = results[i];
     if (err) throw err;
-    out.push(typeof value === 'string' ? value : null);
+    if (!Array.isArray(res) || res.length !== keyChunks[i].length) {
+      throw new Error('redisBatchMget: unexpected pipeline result shape');
+    }
+    out.push(...res);
   }
   return out;
 }

@@ -28,20 +28,18 @@ function channelRecentZsetEnabled() {
   return process.env.CHANNEL_RECENT_ZSET_ENABLED !== 'false';
 }
 
-// Hash tag {userId} ensures all three keys for the same user land on the same
-// cluster slot, which is required for the MULTI/EXEC in markWsRecentConnect.
 function wsRecentConnectKey(userId: string) {
-  return `ws:recent_connect:{${userId}}`;
+  return `ws:recent_connect:${userId}`;
 }
 
 /** Refreshed on each WS connect — used with `WS_REPLAY_PENDING_ONLY_ACTIVE` to avoid Redis pending mailboxes for long-offline users. */
 function wsReplayPendingEligibilityKey(userId: string) {
-  return `ws:replay_pending_eligible:{${userId}}`;
+  return `ws:replay_pending_eligible:${userId}`;
 }
 
 /** Single key for pending-replay classification EXISTS (replaces dual read on recent + replay keys). TTL = max(recent, replay) when replay window is enabled. */
 function wsPendingEligibleKey(userId: string) {
-  return `ws:pending_eligible:{${userId}}`;
+  return `ws:pending_eligible:${userId}`;
 }
 
 function pendingEligibleTtlSeconds() {

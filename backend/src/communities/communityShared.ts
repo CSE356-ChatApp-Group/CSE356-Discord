@@ -367,7 +367,7 @@ async function cleanupCommunityUnreadCounterKeys(communityId) {
       [communityId],
     );
     if (!rows.length) return;
-    const channelKeys = rows.map((row) => `channel:msg_count:{${row.id}}`);
+    const channelKeys = rows.map((row) => `channel:msg_count:${row.id}`);
     await redisBatchUnlink(redis, channelKeys);
   } catch {
     // Best-effort cleanup; never block community deletion.

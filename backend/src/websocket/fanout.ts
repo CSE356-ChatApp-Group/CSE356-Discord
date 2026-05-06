@@ -10,7 +10,6 @@
 
 
 const redis = require('../db/redis');
-const { REDIS_IS_CLUSTER } = require('../db/redis');
 const logger = require('../utils/logger');
 const { redisFanoutPublishFailuresTotal } = require('../utils/metrics');
 const {
@@ -63,13 +62,7 @@ async function execPublishPipeline(serials) {
   if (!serials.length) return;
   const pipe = redis.pipeline();
   for (const { channel, body } of serials) {
-    // Cluster: sharded pub/sub routes each channel to its owning shard.
-    // Standalone: classic broadcast publish.
-    if (REDIS_IS_CLUSTER) {
-      pipe.spublish(channel, body);
-    } else {
-      pipe.publish(channel, body);
-    }
+    pipe.publish(channel, body);
   }
   const results = await pipe.exec();
   const list = Array.isArray(results) ? results : [];

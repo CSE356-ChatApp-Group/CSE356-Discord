@@ -46,17 +46,15 @@ const readReceiptRecentByMessage = new Map();
 const readReceiptScopeCursorByTarget = new Map();
 const readReceiptScopeDebounceByTarget = new Map();
 
-// Hash tags co-locate cursor, lock, and pending keys for the same (user, target)
-// pair on the same cluster slot, which is required for the 3-key Lua script.
 function readCursorTsKey(userId: string, channelId: string | null, conversationId: string | null) {
-  if (channelId) return `read_cursor_ts:{${userId}:ch:${channelId}}`;
-  if (conversationId) return `read_cursor_ts:{${userId}:cv:${conversationId}}`;
+  if (channelId) return `read_cursor_ts:${userId}:ch:${channelId}`;
+  if (conversationId) return `read_cursor_ts:${userId}:cv:${conversationId}`;
   throw new Error("read cursor scope required");
 }
 
 function readDbLockKey(userId: string, channelId: string | null, conversationId: string | null) {
-  if (channelId) return `read_db_lock:{${userId}:ch:${channelId}}`;
-  if (conversationId) return `read_db_lock:{${userId}:cv:${conversationId}}`;
+  if (channelId) return `read_db_lock:${userId}:ch:${channelId}`;
+  if (conversationId) return `read_db_lock:${userId}:cv:${conversationId}`;
   throw new Error("read db lock scope required");
 }
 
@@ -374,20 +372,18 @@ async function advanceReadStateCursor({
     if (!batchKeys) {
       return { applied: null, didAdvanceCursor: false };
     }
-    // 3 keys only — rs:dirty is handled by the caller after result 2
-    // so that the key can live on a different cluster slot than the
-    // per-user-pair cursor/lock/pending keys.
     const rawCas = await redisEvalSha(
       redis,
       REDIS_LUA_IDS.READ_RECEIPT_CURSOR_ADVANCE,
-      3,
+      4,
       cursorKey,
       dbLockKey,
       batchKeys.pendingKey,
+      batchKeys.dirtySetKey,
       newTs,
       String(READ_CURSOR_TS_TTL_SECS),
       String(READ_DB_LOCK_TTL_MS),
-      batchKeys.dirtyKey, // ARGV[4] — unused in Lua, kept for arg-position compat
+      batchKeys.dirtyKey,
       messageId,
       messageCreatedAtStr,
       channelId ?? "",
@@ -431,14 +427,6 @@ async function advanceReadStateCursor({
       didAdvanceCursor: true,
       casResult: 1,
     };
-  }
-
-  // casResult === 2: Lua wrote the pending hash; now signal the background flusher
-  // by adding to rs:dirty. Done separately from the Lua so rs:dirty can live on
-  // a different cluster slot than the per-user-pair keys. Best-effort: if this
-  // SADD fails the pending hash will be picked up by the reconciliation scan.
-  if (casResult === 2 && batchKeys) {
-    redis.sadd(batchKeys.dirtySetKey, batchKeys.dirtyKey).catch(() => {});
   }
 
   // casResult === 2: the same Redis script already enqueued the dirty read-state

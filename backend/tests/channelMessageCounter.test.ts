@@ -63,8 +63,8 @@ describe('channelMessageCounter', () => {
 
     await incrementChannelMessageCount('chan-hot');
 
-    expect(redis.incr).toHaveBeenCalledWith('channel:msg_count:{chan-hot}');
-    expect(redis.expire).toHaveBeenCalledWith('channel:msg_count:{chan-hot}', 2_592_000);
+    expect(redis.incr).toHaveBeenCalledWith('channel:msg_count:chan-hot');
+    expect(redis.expire).toHaveBeenCalledWith('channel:msg_count:chan-hot', 2_592_000);
     expect(sideEffects.enqueueFanoutJob).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
   });
@@ -74,7 +74,7 @@ describe('channelMessageCounter', () => {
     redis.set.mockImplementation(async (key: string, ...args: any[]) => {
       if (key === 'channel:msg_count:reconcile:cooldown:chan-cold') return 'OK';
       if (key === 'channel:msg_count:reconcile:lock:chan-cold') return 'OK';
-      if (key === 'channel:msg_count:{chan-cold}') return 'OK';
+      if (key === 'channel:msg_count:chan-cold') return 'OK';
       return null;
     });
     query.mockResolvedValue({ rows: [{ cnt: 37 }] });
@@ -87,13 +87,13 @@ describe('channelMessageCounter', () => {
       'SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL',
       ['chan-cold'],
     );
-    expect(redis.set).toHaveBeenCalledWith('channel:msg_count:{chan-cold}', '37', 'EX', 2_592_000);
+    expect(redis.set).toHaveBeenCalledWith('channel:msg_count:chan-cold', '37', 'EX', 2_592_000);
   });
 
   it('clamps missing-key decrement and schedules reconciliation', async () => {
     redis.decr.mockResolvedValue(-1);
     redis.set.mockImplementation(async (key: string, ...args: any[]) => {
-      if (key === 'channel:msg_count:{chan-del}') return 'OK';
+      if (key === 'channel:msg_count:chan-del') return 'OK';
       if (key === 'channel:msg_count:reconcile:cooldown:chan-del') return 'OK';
       if (key === 'channel:msg_count:reconcile:lock:chan-del') return 'OK';
       return null;
@@ -103,7 +103,7 @@ describe('channelMessageCounter', () => {
     await decrementChannelMessageCount('chan-del');
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(redis.set).toHaveBeenCalledWith('channel:msg_count:{chan-del}', '0', 'EX', 2_592_000);
+    expect(redis.set).toHaveBeenCalledWith('channel:msg_count:chan-del', '0', 'EX', 2_592_000);
     expect(query).toHaveBeenCalledWith(
       'SELECT COUNT(*)::int AS cnt FROM messages WHERE channel_id = $1 AND deleted_at IS NULL',
       ['chan-del'],

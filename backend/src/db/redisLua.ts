@@ -70,21 +70,7 @@ async function loadRedisLuaScript(redis: RedisWithScripts, id: string): Promise<
   }
   let sha: string;
   try {
-    // In cluster mode, SCRIPT LOAD must reach every master node — otherwise
-    // EVALSHA hits NOSCRIPT on nodes that haven't loaded the script.
-    // ioredis Cluster exposes nodes('master') returning per-node clients.
-    const masterNodes: RedisWithScripts[] =
-      typeof (redis as any).nodes === 'function'
-        ? (redis as any).nodes('master')
-        : [];
-    if (masterNodes.length > 0) {
-      const shas = await Promise.all(
-        masterNodes.map((node) => node.call!('SCRIPT', 'LOAD', body)),
-      );
-      sha = String(shas[0]);
-    } else {
-      sha = String(await redis.call('SCRIPT', 'LOAD', body));
-    }
+    sha = String(await redis.call('SCRIPT', 'LOAD', body));
   } catch (err) {
     metricSafeInc(redisLuaScriptLoadTotal, { script_id: id, result: 'error' });
     throw err;

@@ -16,7 +16,7 @@ describe('read receipt scope cache merged with Redis cursor', () => {
   it('raises in-process cursor to max(messageTs, read_cursor_ts) on CAS-0 merge', async () => {
     const userId = randomUUID();
     const channelId = randomUUID();
-    const cursorKey = `read_cursor_ts:{${userId}:ch:${channelId}}`;
+    const cursorKey = `read_cursor_ts:${userId}:ch:${channelId}`;
     await redis.set(cursorKey, '5000', 'EX', 60);
     await rememberReadReceiptScopeCursorMergedWithRedis({
       userId,
