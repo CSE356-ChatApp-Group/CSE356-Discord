@@ -801,7 +801,9 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   const trimmed = String(q || '').trim();
 
   // Meili path: attempt Meili-backed candidate generation with Postgres recheck.
-  // Falls back to Postgres on any Meili error.
+  // Only candidate-generation misses/errors fall back to full Postgres search.
+  // Once Meili produced candidates, a Postgres recheck failure should not launch
+  // the more expensive full FTS path and amplify the tail.
   if (meiliClient.isSearchBackend()) {
     try {
       return await searchWithMeiliBackend(trimmed, opts);
@@ -814,8 +816,13 @@ async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
         meiliClient.incFallbackTotal('recheck_error');
         logger.warn(
           { err: { message: err?.message }, query: trimmed },
-          'search: meili recheck error, falling back to postgres',
+          'search: meili recheck error, returning busy without postgres fallback',
         );
+        const busyErr: any = new Error('Search temporarily busy; please retry.');
+        busyErr.statusCode = 503;
+        busyErr.code = 'SEARCH_RECHECK_BUSY';
+        busyErr.cause = err;
+        throw busyErr;
       }
     }
   }

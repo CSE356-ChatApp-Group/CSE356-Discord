@@ -29,6 +29,13 @@ const MEILI_CANDIDATE_LIMIT = Math.max(
   50,
   parseInt(process.env.MEILI_CANDIDATE_LIMIT || '200', 10) || 200,
 );
+const MEILI_CANDIDATE_MIN_LIMIT = Math.max(
+  50,
+  Math.min(
+    MEILI_CANDIDATE_LIMIT,
+    parseInt(process.env.MEILI_CANDIDATE_MIN_LIMIT || '100', 10) || 100,
+  ),
+);
 const MEILI_TIMEOUT_MS = Math.min(
   5000,
   Math.max(500, parseInt(process.env.MEILI_TIMEOUT_MS || '2000', 10) || 2000),
@@ -821,8 +828,14 @@ async function searchMessageCandidates(
 
   const userOffset = Number(opts.offset) || 0;
   const userLimit  = Number(opts.limit)  || 20;
-  // Request enough candidates to cover the requested page plus a buffer.
-  const candidateLimit = Math.max(MEILI_CANDIDATE_LIMIT, userOffset + userLimit);
+  // Request enough candidates to cover the requested page plus an access-control
+  // overfetch buffer. MEILI_CANDIDATE_LIMIT is a ceiling, not a per-query floor:
+  // after strict substring filtering was removed, asking Meili for 1000 IDs on
+  // every default page became unnecessary tail work.
+  const candidateLimit = Math.min(
+    MEILI_CANDIDATE_LIMIT,
+    Math.max(MEILI_CANDIDATE_MIN_LIMIT, userOffset + userLimit * 5),
+  );
 
   const filters: string[] = [];
   if (opts.communityId) {
