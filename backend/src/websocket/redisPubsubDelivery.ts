@@ -484,8 +484,15 @@ function createRedisPubsubDelivery(ctx) {
           continue;
         }
         if (internalSubscribeCommunities) {
-          for (const communityId of internalSubscribeCommunities) {
-            subscribeCommunityClient(ws, communityId);
+          const results = await Promise.allSettled(
+            internalSubscribeCommunities.map((communityId) => subscribeCommunityClient(ws, communityId)),
+          );
+          const failed = results.find((r) => r.status === "rejected");
+          if (failed && failed.status === "rejected") {
+            logger.warn(
+              { err: failed.reason, userId, communityCount: internalSubscribeCommunities.length },
+              "WS internal community auto-subscribe command failed",
+            );
           }
           if (ws.readyState === WebSocket.OPEN) {
             sendReliablePayloadToSocket(ws, logicalChannel, payload, null, {

@@ -7,20 +7,18 @@ jest.mock('../src/utils/logger', () => ({
 const { createStartupSubscriptionsLifecycle } = require('../src/websocket/startupSubscriptions');
 
 describe('startup Redis subscriptions', () => {
-  it('subscribes the worker-owned userfeed topic plus fixed community shard feeds on startup', async () => {
+  it('subscribes only the worker-owned userfeed topic on startup', async () => {
     const ensureRedisChannelSubscribed = jest.fn().mockResolvedValue(undefined);
-    const communityFeedShardChannels = Array.from({ length: 64 }, (_unused, idx) => `communityfeed:${idx}`);
     const workerUserFeedChannel = 'userfeed_worker:vm2:4001';
     const { ready } = createStartupSubscriptionsLifecycle({
       ensureRedisChannelSubscribed,
-      communityFeedShardChannels,
       workerUserFeedChannel,
       logWsHotInfo: jest.fn(),
     });
 
     await ready();
 
-    const expected = new Set([workerUserFeedChannel, ...communityFeedShardChannels]);
+    const expected = new Set([workerUserFeedChannel]);
     const deadline = Date.now() + 1000;
     while (ensureRedisChannelSubscribed.mock.calls.length < expected.size && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));

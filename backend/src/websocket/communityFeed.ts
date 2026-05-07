@@ -27,6 +27,12 @@ function communityFeedRedisChannelForCommunityId(communityId: string): string {
   return `communityfeed:${communityFeedShardForCommunityId(communityId)}`;
 }
 
+function communityFeedShardLabelForChannel(channel: string): string {
+  if (typeof channel !== 'string') return 'unknown';
+  const match = /^communityfeed:(\d+)$/.exec(channel.trim());
+  return match ? match[1] : 'unknown';
+}
+
 function allCommunityFeedRedisChannels(): string[] {
   return Array.from(
     { length: COMMUNITY_FEED_SHARD_COUNT },
@@ -70,6 +76,7 @@ module.exports = {
   COMMUNITY_FEED_SHARD_COUNT,
   allCommunityFeedRedisChannels,
   communityFeedRedisChannelForCommunityId,
+  communityFeedShardLabelForChannel,
   publishCommunityFeedMessage,
   isCommunityFeedEnvelope,
 };

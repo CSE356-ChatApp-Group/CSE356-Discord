@@ -98,6 +98,7 @@ const {
 } = require("./userFeed");
 const { resolvedWsRuntimeConfig } = require("./profile");
 const { allCommunityFeedRedisChannels } = require("./communityFeed");
+const { communityFeedRedisChannelForCommunityId } = require("./communityFeed");
 const { createWsHotLogger } = require("./hotLog");
 const { createReplayAdmissionState } = require("./replayAdmissionState");
 const { createWsAclCacheStore } = require("./aclCacheStore");
@@ -428,6 +429,7 @@ const {
   communityClients,
   userIdFromTarget,
   userFeedRedisChannelForUserId,
+  communityFeedRedisChannelForCommunityId,
   ready,
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,

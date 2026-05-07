@@ -374,7 +374,7 @@ function createBootstrapSubscriptionsHelpers({
   async function subscribeBootstrapChannel(ws, channel) {
     if (typeof channel === "string" && channel.startsWith("community:")) {
       const parsed = parseChannelKey(channel);
-      if (parsed?.type === "community") subscribeCommunityClient(ws, parsed.id);
+      if (parsed?.type === "community") await subscribeCommunityClient(ws, parsed.id);
       return;
     }
     await subscribeClient(ws, channel);
@@ -440,14 +440,18 @@ function createBootstrapSubscriptionsHelpers({
       wsBootstrapHydrationStepDurationMs?.observe?.({ step: "delivery" }, Date.now() - stepStart);
     }
 
-    // Step 2: Community channels — subscribeCommunityClient is synchronous in-memory;
-    // no fanout yield or async batching needed.
+    // Step 2: Community channels — these now lazily acquire the owning
+    // communityfeed shard subscription only when this worker actually needs it.
     if (communityChannels.length > 0 && ws.readyState === 1) {
       const stepStart = Date.now();
-      for (const channel of communityChannels) {
-        const parsed = parseChannelKey(channel);
-        if (parsed?.type === "community") subscribeCommunityClient(ws, parsed.id);
-      }
+      await Promise.allSettled(
+        communityChannels.map(async (channel) => {
+          const parsed = parseChannelKey(channel);
+          if (parsed?.type === "community") {
+            await subscribeCommunityClient(ws, parsed.id);
+          }
+        }),
+      );
       wsBootstrapHydrationStepDurationMs?.observe?.({ step: "community" }, Date.now() - stepStart);
     }
   }

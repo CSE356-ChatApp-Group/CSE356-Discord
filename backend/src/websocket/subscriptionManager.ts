@@ -4,6 +4,7 @@ function createSubscriptionManager({
   communityClients,
   userIdFromTarget,
   userFeedRedisChannelForUserId,
+  communityFeedRedisChannelForCommunityId,
   ready,
   ensureRedisChannelSubscribed,
   releaseRedisChannelSubscription,
@@ -17,6 +18,7 @@ function createSubscriptionManager({
 }) {
   const pendingRedisReleaseTimers = new Map();
   const localUserFeedShardRefCounts = new Map();
+  const localCommunityFeedShardRefCounts = new Map();
 
   function isGraceEligibleRedisTopic(redisChannel) {
     return redisChannel.startsWith("channel:") || redisChannel.startsWith("conversation:");
@@ -70,6 +72,21 @@ function createSubscriptionManager({
     return false;
   }
 
+  function incrementOwnedCommunityfeedShard(redisChannel) {
+    const nextCount = (localCommunityFeedShardRefCounts.get(redisChannel) || 0) + 1;
+    localCommunityFeedShardRefCounts.set(redisChannel, nextCount);
+  }
+
+  function decrementOwnedCommunityfeedShard(redisChannel) {
+    const current = localCommunityFeedShardRefCounts.get(redisChannel) || 0;
+    if (current <= 1) {
+      localCommunityFeedShardRefCounts.delete(redisChannel);
+      return true;
+    }
+    localCommunityFeedShardRefCounts.set(redisChannel, current - 1);
+    return false;
+  }
+
   function clearPendingRedisRelease(redisChannel) {
     const timer = pendingRedisReleaseTimers.get(redisChannel);
     if (!timer) return;
@@ -93,8 +110,13 @@ function createSubscriptionManager({
     pendingRedisReleaseTimers.set(redisChannel, timer);
   }
 
-  function subscribeCommunityClient(ws, communityId) {
+  async function subscribeCommunityClient(ws, communityId) {
     if (typeof communityId !== "string" || !communityId) return;
+    await ready();
+    const communityFeedShardChannel = communityFeedRedisChannelForCommunityId(communityId);
+    clearPendingRedisRelease(communityFeedShardChannel);
+    await ensureRedisChannelSubscribed(communityFeedShardChannel);
+    if (ws.readyState !== 1 /* WebSocket.OPEN */) return;
     if (!ws._communityIds) ws._communityIds = new Set();
     if (ws._communityIds.has(communityId)) return;
     ws._communityIds.add(communityId);
@@ -102,6 +124,7 @@ function createSubscriptionManager({
       communityClients.set(communityId, new Set());
     }
     communityClients.get(communityId).add(ws);
+    incrementOwnedCommunityfeedShard(communityFeedShardChannel);
   }
 
   function unsubscribeCommunityClient(ws, communityId) {
@@ -111,6 +134,11 @@ function createSubscriptionManager({
     clients?.delete(ws);
     if ((clients?.size || 0) === 0) {
       communityClients.delete(communityId);
+    }
+    const communityFeedShardChannel = communityFeedRedisChannelForCommunityId(communityId);
+    const shouldRelease = decrementOwnedCommunityfeedShard(communityFeedShardChannel);
+    if (shouldRelease) {
+      releaseRedisChannelSubscription(communityFeedShardChannel);
     }
   }
 
