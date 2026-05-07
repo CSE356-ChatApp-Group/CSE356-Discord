@@ -204,25 +204,10 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
       );
     });
 
-    const communityJoinPayload = { userId: req.user.id, communityId };
-
-    // Respond immediately — the DB insert is committed, membership is established.
-    // All cache invalidations, WS directives, and feed publishes are best-effort
-    // side effects that don't affect the client's view of a successful join.
-    res.json({ success: true });
-
-    Promise.allSettled([
-      // Cache & ACL invalidations
+    await Promise.allSettled([
       invalidateCommunityChannelUserFanoutTargetsCache(communityId, channelIds),
       presenceService.invalidatePresenceFanoutTargetsBulk(affectedPresenceUserIds),
       invalidateWsBootstrapCache(req.user.id),
-      invalidateWsAclCache(req.user.id, `community:${communityId}`),
-      redis.del(membersCacheKey(communityId)).catch(() => {}),
-      getPublicCommunitiesVersion().then(
-        (publicVersion) => invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {}),
-        () => {},
-      ),
-      // WS subscription directives
       publishUserFeedTargets([req.user.id], {
         __wsInternal: {
           kind: "subscribe_channels",
@@ -235,7 +220,20 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
           communityIds: [communityId],
         },
       }),
-      // Feed publishes
+      // Run in parallel with the invalidations above to save a serial Redis round-trip.
+      getPublicCommunitiesVersion().then(
+        (publicVersion) => invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {}),
+        () => {},
+      ),
+    ]);
+    invalidateWsAclCache(req.user.id, `community:${communityId}`);
+    redis.del(membersCacheKey(communityId)).catch(() => {});
+
+    const communityJoinPayload = { userId: req.user.id, communityId };
+    // WS clients subscribe to communities via `subscribeCommunityClient` (communityfeed
+    // shards). Publishing to raw Redis `community:<id>` would not reach them.
+    // Parallelise the four independent feed publishes to cut serial Redis round-trips.
+    await Promise.all([
       publishCommunityFeedMessage(communityId, {
         event: "community:member_joined",
         data: communityJoinPayload,
@@ -255,7 +253,9 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
         event: "community:member_added",
         data: communityJoinPayload,
       }),
-    ]).catch(() => {});
+    ]);
+
+    res.json({ success: true });
   } catch (err) {
     next(err);
   }
