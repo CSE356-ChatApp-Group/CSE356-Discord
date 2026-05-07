@@ -470,7 +470,10 @@ async function resolveDirectActiveChannelUserTargets(channelId: string) {
     candidateCount: candidateTargets.length,
     cacheResult: targetLookup.cacheResult,
     pendingEnqueueTargets: Array.from(new Set([...recentCandidateTargets, ...activeTargets])),
-    skipChannelTopic: true,
+    // Active-user presence is an optimization signal, not a correctness proof.
+    // Keep the canonical channel publish so already-subscribed sockets still
+    // receive messages if presence:connected_users is briefly stale under load.
+    skipChannelTopic: false,
   };
 }
 
