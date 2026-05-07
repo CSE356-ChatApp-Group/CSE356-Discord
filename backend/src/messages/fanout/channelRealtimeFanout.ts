@@ -101,6 +101,11 @@ function isChannelMessageLiveEvent(envelope: Record<string, unknown>) {
 }
 
 async function resolveRecentChannelUserTargets(channelId: string, cap: number) {
+  const targets = await resolveRecentChannelUserTargetsRaw(channelId, cap);
+  return filterActiveConnectedUserTargets(targets, 'channel_message_active_subscribers');
+}
+
+async function resolveRecentChannelUserTargetsRaw(channelId: string, cap: number) {
   if (!channelRecentZsetEnabled()) {
     return [];
   }
@@ -118,7 +123,7 @@ async function resolveRecentChannelUserTargets(channelId: string, cap: number) {
         .map((userId) => `user:${userId}`),
     ),
   );
-  return filterActiveConnectedUserTargets(targets, 'channel_message_active_subscribers');
+  return targets;
 }
 
 async function filterActiveConnectedUserTargets(targets: string[], path: string) {
@@ -175,6 +180,11 @@ async function filterActiveConnectedUserTargets(targets: string[], path: string)
 }
 
 async function resolveBootstrapPendingChannelUserTargets(channelId: string, cap: number) {
+  const targets = await resolveBootstrapPendingChannelUserTargetsRaw(channelId, cap);
+  return filterActiveConnectedUserTargets(targets, 'channel_message_bootstrap_pending_subscribers');
+}
+
+async function resolveBootstrapPendingChannelUserTargetsRaw(channelId: string, cap: number) {
   if (!channelRecentZsetEnabled()) {
     throw new Error('channel recent ZSETs disabled; bootstrap-pending bridge unavailable');
   }
@@ -193,7 +203,7 @@ async function resolveBootstrapPendingChannelUserTargets(channelId: string, cap:
         .map((userId) => `user:${userId}`),
     ),
   );
-  return filterActiveConnectedUserTargets(targets, 'channel_message_bootstrap_pending_subscribers');
+  return targets;
 }
 
 async function resolveActiveConnectedChannelUserTargets(
@@ -251,9 +261,13 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
   const startedAt = process.hrtime.bigint();
   if (channelMessageSkipUserfeedPublishEnabled()) {
     try {
-      const bootstrapPendingTargets = await resolveBootstrapPendingChannelUserTargets(
+      const bootstrapPendingCandidateTargets = await resolveBootstrapPendingChannelUserTargetsRaw(
         channelId,
         CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
+      );
+      const bootstrapPendingTargets = await filterActiveConnectedUserTargets(
+        bootstrapPendingCandidateTargets,
+        'channel_message_bootstrap_pending_subscribers',
       );
       const bootstrapPendingLookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
       fanoutPublishDurationMs.observe(
@@ -274,9 +288,9 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
         return {
           allTargets: bootstrapPendingTargets,
           recentTargets: bootstrapPendingTargets,
-          candidateCount: bootstrapPendingTargets.length + 1,
+          candidateCount: bootstrapPendingCandidateTargets.length + 1,
           cacheResult: 'miss' as const,
-          pendingEnqueueTargets: bootstrapPendingTargets,
+          pendingEnqueueTargets: bootstrapPendingCandidateTargets,
         };
       }
       wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'bootstrap_pending_empty_fallback' });
@@ -298,7 +312,7 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
     }
   }
 
-  const recentTargets = await resolveRecentChannelUserTargets(
+  const recentCandidateTargets = await resolveRecentChannelUserTargetsRaw(
     channelId,
     CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
   ).catch((err) => {
@@ -306,6 +320,10 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
     logger.warn({ err, channelId }, 'Failed to resolve recent channel message bridge targets');
     return [];
   });
+  const recentTargets = await filterActiveConnectedUserTargets(
+    recentCandidateTargets,
+    'channel_message_active_subscribers',
+  );
   const targetSet = new Set(recentTargets);
 
   // Connected fallback only runs when explicitly enabled via config flag.
@@ -381,9 +399,9 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
   return {
     allTargets: activeTargets,
     recentTargets: activeTargets,
-    candidateCount: activeTargets.length + 1,
+    candidateCount: recentCandidateTargets.length + connectedFallbackCount + 1,
     cacheResult: 'miss' as const,
-    pendingEnqueueTargets: activeTargets,
+    pendingEnqueueTargets: Array.from(new Set([...recentCandidateTargets, ...activeTargets])),
   };
 }
 
@@ -501,17 +519,21 @@ async function publishChannelMessageRecentUserBridge(
     return { targetCount: 0 };
   }
 
-  const targets = await resolveRecentChannelUserTargets(
+  const candidateTargets = await resolveRecentChannelUserTargetsRaw(
     channelId,
     CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
+  );
+  const targets = await filterActiveConnectedUserTargets(
+    candidateTargets,
+    'channel_message_immediate_recent_bridge_user_topics',
   );
   if (!targets.length) {
     return { targetCount: 0 };
   }
 
-  enqueuePendingMessageForUsers(targets, envelope, { recentTargets: targets }).catch((err) => {
+  enqueuePendingMessageForUsers(candidateTargets, envelope, { recentTargets: targets }).catch((err) => {
     logger.warn(
-      { err, channelId, targetCount: targets.length },
+      { err, channelId, targetCount: candidateTargets.length },
       'Failed to enqueue immediate recent-connect bridge pending replay pointers',
     );
   });

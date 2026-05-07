@@ -378,7 +378,7 @@ describe('channelRealtimeFanout', () => {
       expect(redis.zrangebyscore.mock.calls[0][0]).toBe(`channel:bootstrap_pending:${ch}`);
       expect(redis.call).toHaveBeenCalledWith('SMISMEMBER', 'presence:connected_users', 'a', 'b');
       expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
-        ['user:a'],
+        ['user:a', 'user:b'],
         expect.objectContaining({ event: 'message:created' }),
         { recentTargets: ['user:a'] },
       );
@@ -575,7 +575,7 @@ describe('channelRealtimeFanout', () => {
       await publishPrivateChannelMessageCreated(ch, { event: 'message:created', data: { id: 'm-active-filter' } });
       expect(redis.call).toHaveBeenCalledWith('SMISMEMBER', 'presence:connected_users', 'a', 'b');
       expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
-        ['user:a'],
+        ['user:a', 'user:b'],
         expect.objectContaining({ event: 'message:created' }),
         { recentTargets: ['user:a'] },
       );
