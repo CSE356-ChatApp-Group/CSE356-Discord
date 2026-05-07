@@ -92,7 +92,10 @@ const { isPrivateOrInternalNetwork } = require("../utils/trustedClientIp");
 const {
   allUserFeedRedisChannels,
   userIdFromTarget,
+  userFeedWorkerChannelForLabels,
+  userFeedWorkerOwnerId,
 } = require("./userFeed");
+const { getWorkerLabels } = require("./deliveryTrace");
 const { resolvedWsRuntimeConfig } = require("./profile");
 const { allCommunityFeedRedisChannels } = require("./communityFeed");
 const { communityFeedRedisChannelForCommunityId } = require("./communityFeed");
@@ -300,6 +303,15 @@ const channelClients = new Map(); // key → Set<WebSocket>
 const localUserClients = new Map(); // userId → Set<WebSocket>
 // Sharded community feed membership. Keyed by communityId (without prefix).
 const communityClients = new Map(); // communityId → Set<WebSocket>
+const CURRENT_WORKER_LABELS = getWorkerLabels();
+const CURRENT_WORKER_OWNER_ID = userFeedWorkerOwnerId(
+  CURRENT_WORKER_LABELS.vm,
+  CURRENT_WORKER_LABELS.worker,
+);
+const CURRENT_WORKER_USERFEED_CHANNEL = userFeedWorkerChannelForLabels(
+  CURRENT_WORKER_LABELS.vm,
+  CURRENT_WORKER_LABELS.worker,
+);
 
 const USER_FEED_SHARD_CHANNELS = allUserFeedRedisChannels();
 const USER_FEED_SHARD_CHANNEL_SET = new Set(USER_FEED_SHARD_CHANNELS);
@@ -315,7 +327,7 @@ const {
 const { ready } = createStartupSubscriptionsLifecycle({
   ensureRedisChannelSubscribed,
   userFeedShardChannels: USER_FEED_SHARD_CHANNELS,
-  communityFeedShardChannels: COMMUNITY_FEED_SHARD_CHANNELS,
+  workerUserFeedChannel: CURRENT_WORKER_USERFEED_CHANNEL,
   logWsHotInfo,
 });
 
@@ -335,6 +347,8 @@ const {
   connectionStatusHashKey,
   connectionActivityKey,
   connectionAliveKey,
+  connectionOwnerKey,
+  workerOwnerHashKey,
   connectedUsersKey,
   recentDisconnectKey,
   reconnectWindowLabel,
@@ -372,6 +386,8 @@ const {
   redis,
   connectionAliveKey,
   connectionActivityKey,
+  connectionOwnerKey,
+  currentWorkerOwnerId: () => CURRENT_WORKER_OWNER_ID,
   CONNECTION_ALIVE_TTL_SECONDS,
   IDLE_TTL_SECONDS,
 });
@@ -390,10 +406,13 @@ const {
   connectionStatusHashKey,
   connectionActivityKey,
   connectionAliveKey,
+  connectionOwnerKey,
+  workerOwnerHashKey,
   connectedUsersKey,
   presenceSweeperDebounceMs: PRESENCE_SWEEPER_DEBOUNCE_MS,
   presenceDisconnectDebounceMs: PRESENCE_DISCONNECT_DEBOUNCE_MS,
   connectionAliveKeyTtlSeconds: CONNECTION_ALIVE_TTL_SECONDS,
+  currentWorkerOwnerId: () => CURRENT_WORKER_OWNER_ID,
 });
 
 const {

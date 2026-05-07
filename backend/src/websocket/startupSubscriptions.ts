@@ -12,17 +12,21 @@ function debugLog(msg) {
 
 function createStartupSubscriptionsLifecycle({
   ensureRedisChannelSubscribed,
+  userFeedShardChannels = [],
   workerUserFeedChannel = null,
   logWsHotInfo,
 }) {
   let wsStartupPromise = null;
 
   async function ensureShardSubscriptions() {
-    const channels = [];
+    const channels = Array.isArray(userFeedShardChannels)
+      ? userFeedShardChannels.filter((channel) => typeof channel === "string" && channel)
+      : [];
     if (workerUserFeedChannel) {
       channels.unshift(workerUserFeedChannel);
     }
-    const total = channels.length;
+    const uniqueChannels = Array.from(new Set(channels));
+    const total = uniqueChannels.length;
     let completed = 0;
 
     debugLog(`Starting ${total} shard subscriptions in background...`);
@@ -30,7 +34,7 @@ function createStartupSubscriptionsLifecycle({
 
     try {
       await runWithConcurrencyLimit(
-        channels.map((redisChannel) => async () => {
+        uniqueChannels.map((redisChannel) => async () => {
           try {
             // Per-channel timeout of 10s
             await Promise.race([
@@ -58,6 +62,7 @@ function createStartupSubscriptionsLifecycle({
     logWsHotInfo(
       () => ({
         workerUserFeedChannel,
+        userFeedShardCount: uniqueChannels.filter((channel) => channel.startsWith("userfeed:")).length,
         successful: completed,
       }),
       "WS startup shard subscriptions initialized",
