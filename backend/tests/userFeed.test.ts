@@ -18,6 +18,18 @@ jest.mock('../src/db/redis', () => ({
         ops.push(key);
         return this;
       }),
+      smembers: jest.fn(function smembers(this: any, key: string) {
+        ops.push(`smembers:${key}`);
+        return this;
+      }),
+      exists: jest.fn(function exists(this: any, key: string) {
+        ops.push(`exists:${key}`);
+        return this;
+      }),
+      get: jest.fn(function get(this: any, key: string) {
+        ops.push(`get:${key}`);
+        return this;
+      }),
       exec: jest.fn(async () => ops.map(() => [{}, []])),
     };
   }),
@@ -32,7 +44,11 @@ const {
   userFeedRedisChannelForUserId,
   userFeedWorkerChannelForOwner,
 } = require('../src/websocket/userFeed') as {
-  publishUserFeedTargets: (targets: string[], payload: Record<string, unknown>) => Promise<void>;
+  publishUserFeedTargets: (
+    targets: string[],
+    payload: Record<string, unknown>,
+    options?: { preferLiveOwners?: boolean },
+  ) => Promise<void>;
   runWithConcurrencyLimit: (jobs: Array<() => Promise<void>>, limit: number) => Promise<void>;
   splitUserTargets: (targets: string[]) => { userIds: string[]; passthroughTargets: string[] };
   userFeedRedisChannelForUserId: (userId: string) => string;
@@ -71,6 +87,18 @@ describe('userFeed', () => {
       return {
         hkeys: jest.fn(function hkeys(this: any, key: string) {
           ops.push(key);
+          return this;
+        }),
+        smembers: jest.fn(function smembers(this: any, key: string) {
+          ops.push(`smembers:${key}`);
+          return this;
+        }),
+        exists: jest.fn(function exists(this: any, key: string) {
+          ops.push(`exists:${key}`);
+          return this;
+        }),
+        get: jest.fn(function get(this: any, key: string) {
+          ops.push(`get:${key}`);
           return this;
         }),
         exec: jest.fn(async () => ops.map(() => [{}, []])),
@@ -123,20 +151,43 @@ describe('userFeed', () => {
   });
 
   it('publishUserFeedTargets prefers worker-owned channels and falls back to shard feeds', async () => {
-    redis.pipeline.mockImplementationOnce(() => {
-      const keys: string[] = [];
-      return {
-        hkeys: jest.fn(function hkeys(this: any, key: string) {
-          keys.push(key);
-          return this;
-        }),
-        exec: jest.fn(async () => keys.map((key) => {
-          if (key.includes('alpha')) return [{}, ['vm2:4001']];
-          if (key.includes('beta')) return [{}, ['vm2:4001', 'vm3:4004']];
-          return [{}, []];
-        })),
-      };
-    });
+    redis.pipeline
+      .mockImplementationOnce(() => {
+        const ops: string[] = [];
+        return {
+          smembers: jest.fn(function smembers(this: any, key: string) {
+            ops.push(key);
+            return this;
+          }),
+          exec: jest.fn(async () => ops.map((key) => {
+            if (key.includes('alpha')) return [{}, ['c1']];
+            if (key.includes('beta')) return [{}, ['c2', 'c3']];
+            return [{}, []];
+          })),
+        };
+      })
+      .mockImplementationOnce(() => {
+        const ops: string[] = [];
+        return {
+          exists: jest.fn(function exists(this: any, key: string) {
+            ops.push(`exists:${key}`);
+            return this;
+          }),
+          get: jest.fn(function get(this: any, key: string) {
+            ops.push(`get:${key}`);
+            return this;
+          }),
+          exec: jest.fn(async () => ops.map((key) => {
+            if (key.startsWith('exists:') && key.includes('alpha') && key.includes(':alive')) return [{}, 1];
+            if (key.startsWith('get:') && key.includes('alpha') && key.includes(':owner')) return [{}, 'vm2:4001'];
+            if (key.startsWith('exists:') && key.includes('beta') && key.includes('c2:alive')) return [{}, 1];
+            if (key.startsWith('get:') && key.includes('beta') && key.includes('c2:owner')) return [{}, 'vm2:4001'];
+            if (key.startsWith('exists:') && key.includes('beta') && key.includes('c3:alive')) return [{}, 1];
+            if (key.startsWith('get:') && key.includes('beta') && key.includes('c3:owner')) return [{}, 'vm3:4004'];
+            return [{}, null];
+          })),
+        };
+      });
 
     await publishUserFeedTargets(['user:alpha', 'user:beta', 'user:gamma'], {
       event: 'message:created',
@@ -152,6 +203,110 @@ describe('userFeed', () => {
     expect(groups.get(userFeedWorkerChannelForOwner('vm2:4001'))).toEqual(['alpha', 'beta']);
     expect(groups.get(userFeedWorkerChannelForOwner('vm3:4004'))).toEqual(['beta']);
     expect(groups.get(userFeedRedisChannelForUserId('gamma'))).toEqual(['gamma']);
+  });
+
+  it('publishUserFeedTargets can prefer only live worker owners for exact direct fanout', async () => {
+    redis.pipeline
+      .mockImplementationOnce(() => {
+        const ops: string[] = [];
+        return {
+          smembers: jest.fn(function smembers(this: any, key: string) {
+            ops.push(key);
+            return this;
+          }),
+          exec: jest.fn(async () => ops.map((key) => {
+            if (key.includes('alpha')) return [{}, ['c1']];
+            if (key.includes('beta')) return [{}, ['c2']];
+            return [{}, []];
+          })),
+        };
+      })
+      .mockImplementationOnce(() => {
+        const ops: string[] = [];
+        return {
+          exists: jest.fn(function exists(this: any, key: string) {
+            ops.push(`exists:${key}`);
+            return this;
+          }),
+          get: jest.fn(function get(this: any, key: string) {
+            ops.push(`get:${key}`);
+            return this;
+          }),
+          exec: jest.fn(async () => ops.map((key) => {
+            if (key.startsWith('exists:') && key.includes('alpha') && key.includes(':alive')) return [{}, 1];
+            if (key.startsWith('get:') && key.includes('alpha') && key.includes(':owner')) return [{}, 'vm2:4005'];
+            if (key.startsWith('exists:') && key.includes('beta') && key.includes(':alive')) return [{}, 0];
+            if (key.startsWith('get:') && key.includes('beta') && key.includes(':owner')) return [{}, 'vm3:4004'];
+            return [{}, null];
+          })),
+        };
+      });
+
+    await publishUserFeedTargets(['user:alpha', 'user:beta'], {
+      event: 'message:created',
+      data: { id: 'm-live-worker' },
+    }, {
+      preferLiveOwners: true,
+    });
+
+    expect(fanout.publishBatch).toHaveBeenCalledTimes(1);
+    const batch = fanout.publishBatch.mock.calls[0][0] as Array<{
+      channel: string;
+      payload: { __wsRoute: { userIds: string[] } };
+    }>;
+    const groups = new Map(batch.map((entry) => [entry.channel, entry.payload.__wsRoute.userIds]));
+    expect(groups.get(userFeedWorkerChannelForOwner('vm2:4005'))).toEqual(['alpha']);
+    expect(groups.get(userFeedRedisChannelForUserId('beta'))).toEqual(['beta']);
+    expect(groups.has(userFeedWorkerChannelForOwner('vm3:4004'))).toBe(false);
+  });
+
+  it('publishUserFeedTargets automatically prefers live owners for small fanouts', async () => {
+    redis.pipeline
+      .mockImplementationOnce(() => {
+        const ops: string[] = [];
+        return {
+          smembers: jest.fn(function smembers(this: any, key: string) {
+            ops.push(key);
+            return this;
+          }),
+          exec: jest.fn(async () => ops.map((key) => {
+            if (key.includes('alpha')) return [{}, ['c1']];
+            return [{}, []];
+          })),
+        };
+      })
+      .mockImplementationOnce(() => {
+        const ops: string[] = [];
+        return {
+          exists: jest.fn(function exists(this: any, key: string) {
+            ops.push(`exists:${key}`);
+            return this;
+          }),
+          get: jest.fn(function get(this: any, key: string) {
+            ops.push(`get:${key}`);
+            return this;
+          }),
+          exec: jest.fn(async () => ops.map((key) => {
+            if (key.startsWith('exists:') && key.includes('alpha') && key.includes(':alive')) return [{}, 1];
+            if (key.startsWith('get:') && key.includes('alpha') && key.includes(':owner')) return [{}, 'vm1:4002'];
+            return [{}, null];
+          })),
+        };
+      });
+
+    await publishUserFeedTargets(['user:alpha'], {
+      event: 'presence:updated',
+      data: { userId: 'alpha', status: 'away' },
+    });
+
+    expect(fanout.publishBatch).toHaveBeenCalledTimes(1);
+    const batch = fanout.publishBatch.mock.calls[0][0] as Array<{
+      channel: string;
+      payload: { __wsRoute: { userIds: string[] } };
+    }>;
+    expect(batch).toHaveLength(1);
+    expect(batch[0].channel).toBe(userFeedWorkerChannelForOwner('vm1:4002'));
+    expect(batch[0].payload.__wsRoute.userIds).toEqual(['alpha']);
   });
 
   it('runWithConcurrencyLimit never exceeds the limit', async () => {

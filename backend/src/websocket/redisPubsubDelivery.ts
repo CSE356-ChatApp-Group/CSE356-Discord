@@ -371,6 +371,48 @@ function createRedisPubsubDelivery(ctx) {
     return true;
   }
 
+  function schedulePendingReplayAfterUserfeedMiss(channel, payload, userIds) {
+    if (!enqueuePendingMessageForUsers || !Array.isArray(userIds) || userIds.length === 0) {
+      return false;
+    }
+    const deduped = Array.from(new Set(userIds.filter((value) => typeof value === "string" && value)));
+    if (!deduped.length || payload === null || typeof payload !== "object") return false;
+    const event = payload?.event;
+    if (typeof event !== "string" || !event.startsWith("message:")) return false;
+    setImmediate(() => {
+      enqueuePendingMessageForUsers(deduped, payload, {
+        recentTargets: deduped.map((userId) => `user:${userId}`),
+      }).catch((err) => {
+        logger.warn(
+          { err, channel, userIdCount: deduped.length },
+          "WS pending replay enqueue after userfeed miss failed",
+        );
+      });
+    });
+    return true;
+  }
+
+  function schedulePendingReplayAfterTopicSocketMiss(channel, payload, userIds) {
+    if (!enqueuePendingMessageForUsers || !Array.isArray(userIds) || userIds.length === 0) {
+      return false;
+    }
+    const deduped = Array.from(new Set(userIds.filter((value) => typeof value === "string" && value)));
+    if (!deduped.length || payload === null || typeof payload !== "object") return false;
+    const event = payload?.event;
+    if (typeof event !== "string" || !event.startsWith("message:")) return false;
+    setImmediate(() => {
+      enqueuePendingMessageForUsers(deduped, payload, {
+        recentTargets: deduped.map((userId) => `user:${userId}`),
+      }).catch((err) => {
+        logger.warn(
+          { err, channel, userIdCount: deduped.length },
+          "WS pending replay enqueue after channel-topic socket miss failed",
+        );
+      });
+    });
+    return true;
+  }
+
   async function deliverUserFeedMessage(channel, routed, pubsubReceiveMs: number | null = null) {
     const payload = routed.payload;
     const userIdsRaw = routed.__wsRoute.userIds || [];
@@ -400,7 +442,10 @@ function createRedisPubsubDelivery(ctx) {
     );
     wsUserfeedLocalRecipientsTotal?.inc?.({ shard: routeLabel, vm: wl.vm, worker: wl.worker }, recipientCount);
 
-    if (recipientCount === 0 && !logger.isLevelEnabled("debug")) return;
+    if (recipientCount === 0) {
+      schedulePendingReplayAfterUserfeedMiss(channel, payload, userIds);
+      if (!logger.isLevelEnabled("debug")) return;
+    }
 
     const internalCommand = extractInternalUserFeedCommand(payload);
     const internalSubscribeChannels = internalCommand?.kind === "subscribe_channels"
@@ -453,12 +498,20 @@ function createRedisPubsubDelivery(ctx) {
 
     if (recipientCount === 0) return;
 
+    const usersWithoutOpenClients = new Set();
+
     for (const userId of userIds) {
       const clients = localUserClients.get(userId);
-      if (!clients || clients.size === 0) continue;
+      if (!clients || clients.size === 0) {
+        usersWithoutOpenClients.add(userId);
+        continue;
+      }
       const logicalChannel = `user:${userId}`;
       pruneNonOpenSocketsFromLocalTopicSubscribers(logicalChannel, clients);
-      if (!clients.size) continue;
+      if (!clients.size) {
+        usersWithoutOpenClients.add(userId);
+        continue;
+      }
       const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
       for (const ws of clients) {
         if (internalSubscribeChannels) {
@@ -512,6 +565,10 @@ function createRedisPubsubDelivery(ctx) {
           pubsubReceiveMs,
         });
       }
+    }
+
+    if (usersWithoutOpenClients.size > 0) {
+      schedulePendingReplayAfterUserfeedMiss(channel, payload, Array.from(usersWithoutOpenClients));
     }
   }
 
@@ -659,9 +716,13 @@ function createRedisPubsubDelivery(ctx) {
     const openRecipientSlots = clients.size;
     const preparedPayload = prepareSocketPayload(channel, parsed, message);
     let deliveredCount = 0;
-    const reasonCounts = {};
+    const reasonCounts: Record<string, number> = {};
+    const socketMissUserIds = new Set();
     const dedupeBatchAllowSet = new Set();
       for (const ws of clients) {
+        const notOpenBefore = Number(reasonCounts.not_open || 0);
+        const waiterOverflowBefore = Number(reasonCounts.waiters_overflow_terminated || 0);
+        const backpressureKillBefore = Number(reasonCounts.backpressure_kill || 0);
         if (sendReliablePayloadToSocket(ws, channel, parsed, message, {
           preparedPayload,
           debugReasonCounts: reasonCounts,
@@ -670,6 +731,14 @@ function createRedisPubsubDelivery(ctx) {
           pubsubReceiveMs,
         })) {
           deliveredCount += 1;
+        } else {
+          const rawSocketMissCount =
+            (Number(reasonCounts.not_open || 0) - notOpenBefore)
+            + (Number(reasonCounts.waiters_overflow_terminated || 0) - waiterOverflowBefore)
+            + (Number(reasonCounts.backpressure_kill || 0) - backpressureKillBefore);
+          if (rawSocketMissCount > 0 && typeof ws?._userId === "string" && ws._userId) {
+            socketMissUserIds.add(ws._userId);
+          }
         }
       }
 
@@ -677,6 +746,9 @@ function createRedisPubsubDelivery(ctx) {
         isMessageEvent
         && (channelType === "channel" || channelType === "conversation");
       if (isReliableChannelMsg) {
+        if (socketMissUserIds.size > 0) {
+          schedulePendingReplayAfterTopicSocketMiss(channel, parsed, Array.from(socketMissUserIds));
+        }
         const hasPartialRisk =
           deliveredCount < openRecipientSlots && hasDeliveryRiskReason(reasonCounts);
         const recoveredFromStaleTopicMap =

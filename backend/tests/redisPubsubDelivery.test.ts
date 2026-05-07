@@ -145,6 +145,7 @@ describe('redisPubsubDelivery', () => {
 
   it('still attributes realtime delivery blocks for non-deduped misses', async () => {
     const partialMetric = { inc: jest.fn() };
+    const enqueuePendingMessageForUsers = jest.fn(() => Promise.resolve());
     const sendPayloadToSocket = jest.fn((_ws: any, _logicalChannel: any, _parsed: any, _rawMessage: any, opts: any) => {
       opts.debugReasonCounts.not_open = 1;
       return false;
@@ -152,11 +153,14 @@ describe('redisPubsubDelivery', () => {
 
     const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
       wsPartialDeliveryMissingReasonTotal: partialMetric,
+      enqueuePendingMessageForUsers,
     }));
     await deliverPubsubMessage(
       'channel:chan-1',
       JSON.stringify({ event: 'message:created', data: { id: 'msg-2' } }),
     );
+
+    await new Promise((resolve) => setImmediate(resolve));
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -170,15 +174,21 @@ describe('redisPubsubDelivery', () => {
       { reason: 'topic_message_send_blocked' },
     );
     expect(partialMetric.inc).toHaveBeenCalledWith({ reason: 'socket_not_open' }, 1);
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      ['user-1'],
+      expect.objectContaining({ event: 'message:created' }),
+      { recentTargets: ['user:user-1'] },
+    );
   });
 
   it('increments partial delivery reason metrics for real partial misses', async () => {
     const partialMetric = { inc: jest.fn() };
     const openA = { readyState: 1, _userId: 'user-1' };
     const openB = { readyState: 1, _userId: 'user-2' };
+    const enqueuePendingMessageForUsers = jest.fn(() => Promise.resolve());
     const sendPayloadToSocket = jest.fn((_ws: any, _logicalChannel: any, _parsed: any, _rawMessage: any, opts: any) => {
       if (_ws === openA) return true;
-      opts.debugReasonCounts.logical_suppressed = 1;
+      opts.debugReasonCounts.not_open = 1;
       return false;
     });
 
@@ -187,16 +197,24 @@ describe('redisPubsubDelivery', () => {
         ['channel:chan-1', new Set([openA, openB])],
       ]),
       wsPartialDeliveryMissingReasonTotal: partialMetric,
+      enqueuePendingMessageForUsers,
     }));
     await deliverPubsubMessage(
       'channel:chan-1',
       JSON.stringify({ event: 'message:created', data: { id: 'msg-3' } }),
     );
 
+    await new Promise((resolve) => setImmediate(resolve));
+
     expect(realtimeMissAttributionTotal.inc).toHaveBeenCalledWith(
       { reason: 'topic_message_partial_delivery' },
     );
-    expect(partialMetric.inc).toHaveBeenCalledWith({ reason: 'not_subscribed' }, 1);
+    expect(partialMetric.inc).toHaveBeenCalledWith({ reason: 'socket_not_open' }, 1);
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      ['user-2'],
+      expect.objectContaining({ event: 'message:created' }),
+      { recentTargets: ['user:user-2'] },
+    );
   });
 
   it('records dedupe-only partial topic slots as duplicate suppression, not missing delivery', async () => {
@@ -442,6 +460,76 @@ describe('redisPubsubDelivery', () => {
       ['user-stale'],
       expect.objectContaining({ event: 'message:created' }),
       {},
+    );
+  });
+
+  it('seeds pending replay when a worker-targeted userfeed message has no local clients', async () => {
+    const enqueuePendingMessageForUsers = jest.fn(() => Promise.resolve());
+    const sendPayloadToSocket = jest.fn(() => true);
+    const { isUserFeedEnvelope } = require('../src/websocket/userFeed') as {
+      isUserFeedEnvelope: jest.Mock;
+    };
+    isUserFeedEnvelope.mockReturnValueOnce(true);
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      localUserClients: new Map(),
+      enqueuePendingMessageForUsers,
+    }));
+
+    await deliverPubsubMessage(
+      'userfeed_worker:vm3:4005',
+      JSON.stringify({
+        __wsRoute: { kind: 'users', userIds: ['alpha'] },
+        payload: { event: 'message:created', data: { id: 'm-userfeed-miss' } },
+      }),
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sendPayloadToSocket).not.toHaveBeenCalled();
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      ['alpha'],
+      expect.objectContaining({ event: 'message:created' }),
+      { recentTargets: ['user:alpha'] },
+    );
+  });
+
+  it('seeds pending replay when all local sockets for a userfeed recipient are already closed', async () => {
+    const stale = { readyState: 3, _userId: 'alpha' };
+    const clients = new Set([stale]);
+    const unsubscribeClient = jest.fn((ws) => {
+      clients.delete(ws);
+      return Promise.resolve();
+    });
+    const enqueuePendingMessageForUsers = jest.fn(() => Promise.resolve());
+    const sendPayloadToSocket = jest.fn(() => true);
+    const { isUserFeedEnvelope } = require('../src/websocket/userFeed') as {
+      isUserFeedEnvelope: jest.Mock;
+    };
+    isUserFeedEnvelope.mockReturnValueOnce(true);
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      localUserClients: new Map([['alpha', clients]]),
+      unsubscribeClient,
+      enqueuePendingMessageForUsers,
+    }));
+
+    await deliverPubsubMessage(
+      'userfeed_worker:vm3:4005',
+      JSON.stringify({
+        __wsRoute: { kind: 'users', userIds: ['alpha'] },
+        payload: { event: 'message:created', data: { id: 'm-userfeed-pruned' } },
+      }),
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(unsubscribeClient).toHaveBeenCalledWith(stale, 'user:alpha');
+    expect(sendPayloadToSocket).not.toHaveBeenCalled();
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      ['alpha'],
+      expect.objectContaining({ event: 'message:created' }),
+      { recentTargets: ['user:alpha'] },
     );
   });
 });

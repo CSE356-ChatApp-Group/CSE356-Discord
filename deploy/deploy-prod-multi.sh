@@ -556,6 +556,7 @@ run_vm_deploy() {
   local pgbouncer_max_db="$4"
   local pg_pool_max="$5"
   local extra_upstream_csv="${6:-}"
+  local run_db_migrations="${7:-0}"
   local skip_upstream_parity="1"
   local skip_ingress_post_deploy="1"
   local local_ws_ports_csv=""
@@ -590,6 +591,7 @@ run_vm_deploy() {
     SKIP_MONITORING_SYNC=1 \
     SKIP_INGRESS_POST_DEPLOY="${skip_ingress_post_deploy}" \
     FAST_ROLLBACK="${FAST_ROLLBACK_MODE}" \
+    RUN_DB_MIGRATIONS="${run_db_migrations}" \
     WS_TIER_ENABLED="${WS_TIER_ENABLED}" \
     WSVM1_INTERNAL="${WSVM1_INTERNAL}" \
     WSVM2_INTERNAL="${WSVM2_INTERNAL}" \
@@ -608,8 +610,9 @@ phase_deploy_workers_vm() {
   local pgbouncer_max_db="$5"
   local pg_pool_max="$6"
   local upstream_csv="${7:-}"
+  local run_db_migrations="${8:-0}"
   echo "${phase_label}"
-  run_vm_deploy "$host" "$bind_addr" "$pgbouncer_pool" "$pgbouncer_max_db" "$pg_pool_max" "$upstream_csv"
+  run_vm_deploy "$host" "$bind_addr" "$pgbouncer_pool" "$pgbouncer_max_db" "$pg_pool_max" "$upstream_csv" "$run_db_migrations"
 }
 
 phase_verify_workers_vm() {
@@ -1138,7 +1141,7 @@ run_ws_ssh_preflight
 drain_remote_vm_from_vm1_upstream "VM3" "${VM3_INTERNAL}"
 phase_deploy_workers_vm \
   "=== Phase 0: Deploy to VM3 (workers only; drained from VM1 nginx during rollout) ===" \
-  "$VM3" "$VM3_INTERNAL" "$VM3_PGBOUNCER_POOL_SIZE" "$VM3_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM3_PG_POOL_MAX_PER_INSTANCE"
+  "$VM3" "$VM3_INTERNAL" "$VM3_PGBOUNCER_POOL_SIZE" "$VM3_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM3_PG_POOL_MAX_PER_INSTANCE" "" "1"
 
 # ── Phase 0.5: Verify VM3 healthy, then rejoin it to VM1 nginx ──────────────
 if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
@@ -1167,7 +1170,7 @@ echo ""
 drain_remote_vm_from_vm1_upstream "VM2" "${VM2_INTERNAL}"
 phase_deploy_workers_vm \
   "=== Phase 1: Deploy to VM2 (workers only; drained from VM1 nginx during rollout) ===" \
-  "$VM2" "$VM2_INTERNAL" "$VM2_PGBOUNCER_POOL_SIZE" "$VM2_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM2_PG_POOL_MAX_PER_INSTANCE"
+  "$VM2" "$VM2_INTERNAL" "$VM2_PGBOUNCER_POOL_SIZE" "$VM2_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM2_PG_POOL_MAX_PER_INSTANCE" "" "0"
 
 # ── Phase 2: Verify VM2 healthy, then rejoin it to VM1 nginx ─────────────────
 if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
@@ -1186,7 +1189,7 @@ if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
   drain_ws_vm_from_vm1_app_ws "WSVM3" "${WSVM3_INTERNAL}"
   phase_deploy_workers_vm \
     "=== Phase 3a: Deploy to WSVM3 (dedicated websocket tier; drained from app_ws during rollout) ===" \
-    "$WSVM3" "$WSVM3_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE"
+    "$WSVM3" "$WSVM3_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE" "" "0"
   if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
     "=== Phase 3a.5: Verify all 6 WSVM3 workers healthy ===" \
     "$WSVM3" "WSVM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
@@ -1199,7 +1202,7 @@ if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
   drain_ws_vm_from_vm1_app_ws "WSVM2" "${WSVM2_INTERNAL}"
   phase_deploy_workers_vm \
     "=== Phase 3b: Deploy to WSVM2 (dedicated websocket tier; drained from app_ws during rollout) ===" \
-    "$WSVM2" "$WSVM2_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE"
+    "$WSVM2" "$WSVM2_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE" "" "0"
   if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
     "=== Phase 3b.5: Verify all 6 WSVM2 workers healthy ===" \
     "$WSVM2" "WSVM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
@@ -1212,7 +1215,7 @@ if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
   drain_ws_vm_from_vm1_app_ws "WSVM1" "${WSVM1_INTERNAL}"
   phase_deploy_workers_vm \
     "=== Phase 3c: Deploy to WSVM1 (dedicated websocket tier; drained from app_ws during rollout) ===" \
-    "$WSVM1" "$WSVM1_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE"
+    "$WSVM1" "$WSVM1_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE" "" "0"
   if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
     "=== Phase 3c.5: Verify all 6 WSVM1 workers healthy ===" \
     "$WSVM1" "WSVM1" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
@@ -1231,7 +1234,7 @@ fi
 echo ""
 phase_deploy_workers_vm \
   "=== Phase 4: Deploy to VM1 (PgBouncer/MinIO/nginx) ===" \
-  "$VM1" "127.0.0.1" "$VM1_PGBOUNCER_POOL_SIZE" "$VM1_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM1_PG_POOL_MAX_PER_INSTANCE" "$EXTRA_UPSTREAM_CSV"
+  "$VM1" "127.0.0.1" "$VM1_PGBOUNCER_POOL_SIZE" "$VM1_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM1_PG_POOL_MAX_PER_INSTANCE" "$EXTRA_UPSTREAM_CSV" "0"
 
 # ── Phase 5: Ensure VM2+VM3 upstream entries survived the VM1 deploy ─────────
 # rewrite_nginx_upstream now preserves EXTRA_UPSTREAM_SERVERS_CSV entries, so this

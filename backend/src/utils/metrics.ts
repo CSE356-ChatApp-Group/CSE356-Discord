@@ -623,6 +623,7 @@ const overloadStageGauge = new client.Gauge({
     channelMessageFanoutRecipientTotal.inc({ segment: 'candidate' }, 0);
     channelMessageFanoutRecipientTotal.inc({ segment: 'inline_user_topic' }, 0);
     channelMessageFanoutRecipientTotal.inc({ segment: 'deferred_user_topic' }, 0);
+    channelMessageFanoutRecipientTotal.inc({ segment: 'channel_topic_skipped' }, 0);
     realtimeMissAttributionTotal.inc({ reason: 'channel_user_topic_deferred_not_recent' }, 0);
     realtimeMissAttributionTotal.inc({ reason: 'topic_message_send_blocked' }, 0);
     realtimeMissAttributionTotal.inc({ reason: 'topic_message_partial_delivery' }, 0);
