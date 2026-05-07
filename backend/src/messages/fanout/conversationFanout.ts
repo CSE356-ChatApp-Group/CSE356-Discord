@@ -17,7 +17,10 @@ const {
   wrapFanoutPayload,
   fanoutPublishedAt,
 } = require("../realtimePayload");
-const { invalidateConversationsListCaches } = require("../conversationsRouterListCache");
+// conversationsRouterListCache invalidation for per-message fanout removed — it caused
+// 0% cache hit rate at high message rates (68 msg/s → 136-340 invalidations/s).
+// Structural invalidations (create/delete conversation, participant changes) remain in
+// conversationsRouter.ts and conversationSideEffects.ts.
 const { enqueuePendingMessageForUsers } = require("../pending/realtimePending");
 const {
   publishUserFeedTargets,
@@ -241,11 +244,10 @@ async function publishConversationEventNow(
 
   if (event === "read:updated") return undefined;
 
-  if (userIds.length > 0) {
-    // Bust fresh + stale singleflight keys (not just conversations:list — see conversationsRouterListCache).
-    // Best-effort: never block WebSocket delivery on list-cache Redis.
-    void invalidateConversationsListCaches(userIds).catch(() => {});
-  }
+  // Per-message list cache invalidation removed. At 68 msg/s the invalidation rate
+  // (136-340/s) kept the cache permanently cold (0% hit rate). Structural changes
+  // (create/delete conversation, participant join/leave) still invalidate via
+  // conversationsRouter.ts and conversationSideEffects.ts.
 
   return fanoutPublishedAt(payload);
 }
