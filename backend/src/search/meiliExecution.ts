@@ -26,6 +26,13 @@ function createMeiliSearchExecutor({
     SEARCH_RECHECK_USE_READ_REPLICA,
     meiliEmptyCandidatesFallbackEnabled,
   } = require('./searchQueryEnv');
+  const {
+    stripEnglishStopWords,
+  } = require('./stopWords');
+
+  function tokenizeMeiliRecheckTerms(q: string) {
+    return tokenizeStrictSearchTerms(stripEnglishStopWords(q));
+  }
 
   function buildRecheckFromCandidates(
     ids: string[],
@@ -116,7 +123,7 @@ function createMeiliSearchExecutor({
           throw err;
         }
 
-        const strictTerms = tokenizeStrictSearchTerms(q);
+        const strictTerms = tokenizeMeiliRecheckTerms(q);
         const recheckedRows = rows.filter((r: any) => r && r.id);
         const finalHits = strictTerms.length > 0
           ? recheckedRows.filter((r: any) => messageMatchesAllStrictTerms(r.content, strictTerms))
@@ -215,7 +222,7 @@ function createMeiliSearchExecutor({
     // Meili is a candidate generator. Postgres has now fetched the latest
     // content, so enforce the API's exact all-term contract before returning.
     const recheckedRows = rows.filter((r: any) => r && r.id);
-    const strictTerms = tokenizeStrictSearchTerms(q);
+    const strictTerms = tokenizeMeiliRecheckTerms(q);
     const strictHits = strictTerms.length > 0
       ? recheckedRows.filter((r: any) => messageMatchesAllStrictTerms(r.content, strictTerms))
       : recheckedRows;

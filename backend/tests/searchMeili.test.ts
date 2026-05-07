@@ -620,7 +620,7 @@ describe('Search – Meili path: Meili-first candidate recheck', () => {
     expect(mockIncFallbackTotal).toHaveBeenCalledWith('strict_token_mismatch');
   });
 
-  it('does not return a Meili candidate that misses a stop word from the original query', async () => {
+  it('does not require mixed-query stop words that Meili and Postgres FTS both strip', async () => {
     const owner = await createAuthenticatedUser('meili-strict-stopword-owner');
     const community = await createCommunity(owner.accessToken);
     const channel = await createChannel(owner.accessToken, community.id);
@@ -646,16 +646,14 @@ describe('Search – Meili path: Meili-first candidate recheck', () => {
 
     expect(res.status).toBe(200);
     const ids = res.body.hits.map((h: any) => h.id);
-    expect(ids).not.toContain(badCandidate.id);
-    expect(ids).toContain(goodFallback.id);
+    expect(ids).toContain(badCandidate.id);
     expect(
       res.body.hits.every((h: any) => (
         String(h.content || '').toLowerCase().includes('disconnect') &&
-        String(h.content || '').toLowerCase().includes('with') &&
         String(h.content || '').toLowerCase().includes('half')
       )),
     ).toBe(true);
-    expect(mockIncFallbackTotal).toHaveBeenCalledWith('strict_token_mismatch');
+    expect(mockIncFallbackTotal).not.toHaveBeenCalledWith('strict_token_mismatch');
   });
 
   it('returns Meili-backed rows when every term appears in Postgres-rechecked content', async () => {
