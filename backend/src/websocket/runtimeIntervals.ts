@@ -11,26 +11,32 @@ function createRuntimeIntervals({
 }) {
   const missThreshold = Math.max(1, Math.floor(wsHeartbeatMissedPingsBeforeKill));
 
+  const HEARTBEAT_BATCH_SIZE = 50;
+
   const heartbeatInterval = setInterval(() => {
-    wss.clients.forEach((ws) => {
-      if (!ws.isAlive) {
-        // Increment consecutive-miss counter; only terminate after missThreshold.
-        // This gives transient network blips and backgrounded tabs one extra interval
-        // to recover before being killed.
-        ws._missedPings = (ws._missedPings || 0) + 1;
-        if (ws._missedPings >= missThreshold) {
-          noteRecentDisconnectForSocket(ws, 1006, "heartbeat_timeout");
-          ws.terminate();
-          return; // skip ping on an already-terminated socket
+    const clients = [...wss.clients];
+    let i = 0;
+    function processBatch() {
+      const end = Math.min(i + HEARTBEAT_BATCH_SIZE, clients.length);
+      for (; i < end; i++) {
+        const ws = clients[i];
+        if (!ws.isAlive) {
+          ws._missedPings = (ws._missedPings || 0) + 1;
+          if (ws._missedPings >= missThreshold) {
+            noteRecentDisconnectForSocket(ws, 1006, "heartbeat_timeout");
+            ws.terminate();
+            continue;
+          }
+        } else {
+          ws._missedPings = 0;
         }
-      } else {
-        // Pong received since last tick — reset miss counter.
-        ws._missedPings = 0;
+        ws.isAlive = false;
+        ws.ping();
+        maybeSendAppKeepaliveFrame(ws);
       }
-      ws.isAlive = false;
-      ws.ping();
-      maybeSendAppKeepaliveFrame(ws);
-    });
+      if (i < clients.length) setImmediate(processBatch);
+    }
+    setImmediate(processBatch);
   }, wsHeartbeatIntervalMs);
 
   const presenceSweepInterval = setInterval(() => {
