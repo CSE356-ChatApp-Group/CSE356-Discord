@@ -48,15 +48,9 @@ describe('Search - Meili candidate recheck errors', () => {
     jest.spyOn(logger, 'warn').mockImplementation(() => {});
 
     const pool = require('../src/db/pool');
-    const mockQuery = jest.fn()
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({})
-      .mockRejectedValueOnce(new Error('Query read timeout'))
-      .mockResolvedValueOnce({});
-    jest.spyOn(pool, 'getClientTimed').mockResolvedValue({
-      client: { query: mockQuery, release: jest.fn() },
-      acquireMs: 0,
-    });
+    const mockQuery = jest
+      .spyOn(pool, 'query')
+      .mockRejectedValueOnce(new Error('Query read timeout'));
 
     const { search } = require('../src/search/client');
 
@@ -72,6 +66,6 @@ describe('Search - Meili candidate recheck errors', () => {
 
     const meiliClient = require('../src/search/meiliClient');
     expect(meiliClient.incFallbackTotal).toHaveBeenCalledWith('recheck_error');
-    expect(mockQuery).toHaveBeenCalledTimes(4);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 });

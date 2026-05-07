@@ -64,6 +64,7 @@ const {
 } = require('./searchQueryEnv');
 const {
   runSearchQuery,
+  runSearchReadOnlyQuery,
   runSearchTransaction,
 } = require('./searchExecution');
 
@@ -782,6 +783,7 @@ const { searchWithMeiliBackend } = createMeiliSearchExecutor({
   meiliClient,
   logger,
   runSearchQuery,
+  runSearchReadOnlyQuery,
   findFreshScopedSearchCandidateIds,
   resolvedSearchScope,
   buildScopedAccessParts,

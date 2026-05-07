@@ -2,6 +2,7 @@ function createMeiliSearchExecutor({
   meiliClient,
   logger,
   runSearchQuery,
+  runSearchReadOnlyQuery,
   findFreshScopedSearchCandidateIds,
   resolvedSearchScope,
   buildScopedAccessParts,
@@ -86,7 +87,7 @@ function createMeiliSearchExecutor({
       if (freshnessIds.length > 0) {
         const tRecheck = Date.now();
         const recheckMeta = buildRecheckFromCandidates(freshnessIds, q, opts);
-        const rows = await runSearchQuery(recheckMeta.sql, recheckMeta.params);
+        const rows = await runMeiliRecheckQuery(recheckMeta.sql, recheckMeta.params);
         const recheckMs = Date.now() - tRecheck;
 
         if (rows[0]?.__scopeAccess === false) {
@@ -143,7 +144,7 @@ function createMeiliSearchExecutor({
     // the supplement benefit (catching edits before re-indexing) doesn't justify the cost.
     const tRecheck = Date.now();
     const recheckMeta = buildRecheckFromCandidates(ids, q, opts);
-    const rows = await runSearchQuery(recheckMeta.sql, recheckMeta.params);
+    const rows = await runMeiliRecheckQuery(recheckMeta.sql, recheckMeta.params);
     const recheckMs = Date.now() - tRecheck;
 
     if (rows[0]?.__scopeAccess === false) {
@@ -177,6 +178,11 @@ function createMeiliSearchExecutor({
     );
 
     return buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+  }
+
+  function runMeiliRecheckQuery(sql: string, params: any[]) {
+    const queryRunner = runSearchReadOnlyQuery || runSearchQuery;
+    return queryRunner(sql, params, { kind: 'meili_recheck_query' });
   }
 
   return {

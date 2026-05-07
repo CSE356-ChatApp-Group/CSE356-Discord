@@ -35,6 +35,37 @@ async function runSearchQuery(
   );
 }
 
+async function runSearchReadOnlyQuery(
+  sql: string,
+  params: any[],
+  options: { forcePrimary?: boolean; kind?: string } = {},
+) {
+  const kind = options.kind || 'search_readonly_query';
+  const useReadPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA && db.readPool;
+  const backend = useReadPool ? 'replica' : 'primary';
+  const tAll = Date.now();
+  const tWork = Date.now();
+  try {
+    const result = useReadPool
+      ? await db.readPool.query(sql, params)
+      : await db.query(sql, params);
+    const rows = result.rows;
+    const queryMs = Date.now() - tWork;
+    const totalMs = Date.now() - tAll;
+    searchDbBackendTotal.inc({ kind, backend, result: 'success' });
+    logSearchDbTiming(kind, 0, queryMs, totalMs, {
+      backend,
+      sqlLength: sql.length,
+      paramCount: params.length,
+      rowCount: rows.length,
+    });
+    return rows;
+  } catch (err) {
+    searchDbBackendTotal.inc({ kind, backend, result: 'error' });
+    throw err;
+  }
+}
+
 async function withSearchClientTransaction<T>(
   kind: string,
   options: { forcePrimary?: boolean },
@@ -127,6 +158,7 @@ async function runSearchTransaction(
 
 module.exports = {
   runSearchQuery,
+  runSearchReadOnlyQuery,
   withSearchClientTransaction,
   runSearchTransaction,
 };
