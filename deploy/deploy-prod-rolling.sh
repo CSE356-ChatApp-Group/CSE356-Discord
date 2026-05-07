@@ -20,6 +20,7 @@ rewrite_nginx_upstream() {
     set -euo pipefail
     export PORTS_CSV='${ports_csv}'
     export SITE='${CHATAPP_NGINX_SITE_PATH}'
+    export WS_TIER_ENABLED='${WS_TIER_ENABLED:-false}'
     export EXTRA_UPSTREAM_SERVERS_CSV='${EXTRA_UPSTREAM_SERVERS_CSV:-}'
     export LOCAL_WS_PORTS_CSV='${LOCAL_WS_PORTS_CSV:-${ports_csv}}'
     export WS_EXTRA_UPSTREAM_SERVERS_CSV='${WS_EXTRA_UPSTREAM_SERVERS_CSV:-${EXTRA_UPSTREAM_SERVERS_CSV:-}}'
@@ -34,7 +35,11 @@ cfg_path = os.environ['TMP_SITE']
 ports = [p.strip() for p in os.environ['PORTS_CSV'].split(',') if p.strip()]
 if not ports:
     raise SystemExit('no upstream ports provided')
-local_ws_ports = [p.strip() for p in os.environ.get('LOCAL_WS_PORTS_CSV', '').split(',') if p.strip()]
+local_ws_ports_csv = os.environ.get('LOCAL_WS_PORTS_CSV', '').strip()
+if local_ws_ports_csv == '__none__':
+    local_ws_ports = []
+else:
+    local_ws_ports = [p.strip() for p in local_ws_ports_csv.split(',') if p.strip()]
 
 # Keepalive tuning for throughput: larger pools and longer reuse reduce upstream
 # TCP churn and handshake overhead during sustained high request rates.
@@ -313,19 +318,24 @@ gate_upstream_parity() {
   if ! ssh_prod "
     set -euo pipefail
     cfg=/etc/nginx/sites-available/chatapp
+    ws_tier_enabled='${WS_TIER_ENABLED:-false}'
     [ -f \"\${cfg}\" ] || { echo 'missing nginx site config'; exit 1; }
     upstream=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\${cfg}\")
     ports_up=\$(echo \"\${upstream}\" | grep -oE 'localhost:[0-9]+|127\\.0\\.0\\.1:[0-9]+' | sed 's/.*://' | sort -u)
     [ -n \"\${ports_up}\" ] || { echo 'no upstream ports'; exit 1; }
     ws_upstream=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\${cfg}\")
     ws_ports_up=\$(echo \"\${ws_upstream}\" | grep -oE 'localhost:[0-9]+|127\\.0\\.0\\.1:[0-9]+' | sed 's/.*://' | sort -u)
-    [ -n \"\${ws_ports_up}\" ] || { echo 'no websocket upstream ports'; exit 1; }
+    if [ \"\${ws_tier_enabled}\" != \"true\" ]; then
+      [ -n \"\${ws_ports_up}\" ] || { echo 'no websocket upstream ports'; exit 1; }
+    fi
     active_ports=\$(for p in \$(seq 4000 4007); do systemctl is-active --quiet chatapp@\${p} 2>/dev/null && echo \${p} || true; done | sort -u)
     [ -n \"\${active_ports}\" ] || { echo 'no active chatapp workers'; exit 1; }
     for p in ${TARGET_PORTS_CSV//,/ }; do
       systemctl is-active --quiet chatapp@\${p} || { echo \"inactive chatapp@\${p}\"; exit 1; }
       echo \"\${ports_up}\" | grep -qx \"\${p}\" || { echo \"upstream missing :\${p}\"; exit 1; }
-      echo \"\${ws_ports_up}\" | grep -qx \"\${p}\" || { echo \"ws upstream missing :\${p}\"; exit 1; }
+      if [ \"\${ws_tier_enabled}\" != \"true\" ]; then
+        echo \"\${ws_ports_up}\" | grep -qx \"\${p}\" || { echo \"ws upstream missing :\${p}\"; exit 1; }
+      fi
       echo \"\${active_ports}\" | grep -qx \"\${p}\" || { echo \"unexpected inactive target :\${p}\"; exit 1; }
     done
     for p in \${ports_up}; do

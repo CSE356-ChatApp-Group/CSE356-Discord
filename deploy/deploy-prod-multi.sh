@@ -102,6 +102,12 @@ WSVM2_USER="${WSVM2_USER:-${CHATAPP_INV_WSVM2_USER}}"
 WSVM1_WORKERS="${WSVM1_WORKERS:-${CHATAPP_INV_WSVM1_WORKERS}}"
 WSVM2_WORKERS="${WSVM2_WORKERS:-${CHATAPP_INV_WSVM2_WORKERS}}"
 WS_TIER_ENABLED="${WS_TIER_ENABLED:-${CHATAPP_INV_WS_TIER_ENABLED}}"
+if [[ "${CHATAPP_INV_WS_TIER_ENABLED}" == "true" ]] && [[ "${WS_TIER_ENABLED}" != "true" ]] && [[ "${ALLOW_WS_TIER_DISABLE:-0}" != "1" ]]; then
+  echo "ERROR: inventory enables the dedicated websocket tier, but WS_TIER_ENABLED=${WS_TIER_ENABLED}." >&2
+  echo "       Refusing to silently fall back to the shared websocket pool." >&2
+  echo "       If you intentionally want to disable the ws tier for one deploy, rerun with ALLOW_WS_TIER_DISABLE=1." >&2
+  exit 1
+fi
 DB_TARGET_MAX_CONNECTIONS="${DB_TARGET_MAX_CONNECTIONS:-450}"
 VM1_PGBOUNCER_POOL_SIZE="${VM1_PGBOUNCER_POOL_SIZE:-90}"
 VM2_PGBOUNCER_POOL_SIZE="${VM2_PGBOUNCER_POOL_SIZE:-135}"
@@ -141,7 +147,13 @@ build_ws_upstream_csv() {
       upstreams+=("${WSVM2_INTERNAL}:${p}")
     done
   fi
-  if [[ "${#upstreams[@]}" -eq 0 ]]; then
+  if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+    if [[ "${#upstreams[@]}" -eq 0 ]]; then
+      echo "ERROR: websocket tier is enabled, but no dedicated websocket upstreams were built." >&2
+      echo "       Check WSVM1/WSVM2 private IPs and worker counts in deploy/inventory-defaults.sh or deploy env." >&2
+      return 1
+    fi
+  elif [[ "${#upstreams[@]}" -eq 0 ]]; then
     for p in "${VMX_WORKER_PORTS[@]}"; do
       upstreams+=("${VM2_INTERNAL}:${p}")
     done
@@ -151,6 +163,11 @@ build_ws_upstream_csv() {
   fi
   (IFS=,; echo "${upstreams[*]}")
 }
+
+if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+  EXPECTED_DEDICATED_WS_CSV="$(build_ws_upstream_csv)" || exit 1
+  echo "Using dedicated websocket upstreams: ${EXPECTED_DEDICATED_WS_CSV}"
+fi
 
 # Extra OpenSSH options — mirrors deploy-prod.sh default
 DEPLOY_SSH_EXTRA_OPTS="${DEPLOY_SSH_EXTRA_OPTS:--o StrictHostKeyChecking=accept-new}"
@@ -460,6 +477,9 @@ run_vm_deploy() {
     skip_upstream_parity=""
     skip_ingress_post_deploy=""
     ws_extra_upstream_csv="$(build_ws_upstream_csv)"
+    if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+      local_ws_ports_csv="__none__"
+    fi
   fi
 
   PROD_HOST="$host" \
@@ -481,6 +501,11 @@ run_vm_deploy() {
     SKIP_MONITORING_SYNC=1 \
     SKIP_INGRESS_POST_DEPLOY="${skip_ingress_post_deploy}" \
     FAST_ROLLBACK="${FAST_ROLLBACK_MODE}" \
+    WS_TIER_ENABLED="${WS_TIER_ENABLED}" \
+    WSVM1_INTERNAL="${WSVM1_INTERNAL}" \
+    WSVM2_INTERNAL="${WSVM2_INTERNAL}" \
+    WSVM1_WORKERS="${WSVM1_WORKERS}" \
+    WSVM2_WORKERS="${WSVM2_WORKERS}" \
     bash "${SCRIPT_DIR}/deploy-prod.sh" "${DEPLOY_ARGS[@]}"
 }
 
