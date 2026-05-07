@@ -474,7 +474,6 @@ run_vm_deploy() {
   local local_ws_ports_csv=""
   local ws_extra_upstream_csv=""
   if [[ "${host}" == "${VM1}" ]]; then
-    skip_upstream_parity=""
     skip_ingress_post_deploy=""
     ws_extra_upstream_csv="$(build_ws_upstream_csv)"
     if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
@@ -1002,8 +1001,9 @@ restore_remote_vm_to_vm1_upstream "VM2" "${VM2_INTERNAL}"
 
 # ── Phase 3: Deploy to VM1 ───────────────────────────────────────────────────
 # Pass EXTRA_UPSTREAM_SERVERS_CSV so rewrite_nginx_upstream preserves VM2/VM3 entries throughout
-# the rolling restart.  SKIP_UPSTREAM_PARITY_CHECK is NOT set here — the gate runs
-# normally and verifies VM1 localhost workers are active and in upstream.
+# the rolling restart.  The single-host upstream parity gate is skipped here because
+# VM1 nginx intentionally contains remote HTTP peers and dedicated websocket peers;
+# same-release/all-worker health plus Phase 4 and the prod nginx audit validate topology.
 # SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
 echo ""
 phase_deploy_workers_vm \
