@@ -567,6 +567,7 @@ const overloadStageGauge = new client.Gauge({
     fanoutRecentConnectZsetSize.observe(0);
     wsBootstrapListCacheTotal.inc({ result: 'hit' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'miss' }, 0);
+    wsBootstrapListCacheTotal.inc({ result: 'stale' }, 0);
     wsBootstrapListCacheTotal.inc({ result: 'coalesced' }, 0);
     wsBootstrapBlockedTotal.inc({ reason: 'concurrency_cap' }, 0);
     wsBootstrapBlockedTotal.inc({ reason: 'concurrency_wait_timeout' }, 0);

@@ -44,7 +44,9 @@ function metricStub() {
 function buildHarness(opts: {
   autoSubscribeMode?: string;
   queryResponses?: Array<{ rows: Array<{ id: string }> }>;
+  queryMock?: jest.Mock;
   getJsonCache?: jest.Mock;
+  setJsonCacheWithStale?: jest.Mock;
   wsBootstrapDbQueryDurationMs?: ReturnType<typeof metricStub>;
   wsBootstrapHydrationStepDurationMs?: ReturnType<typeof metricStub>;
   subscribeClient?: jest.Mock;
@@ -53,7 +55,9 @@ function buildHarness(opts: {
   const {
     autoSubscribeMode = 'messages',
     queryResponses = [],
+    queryMock,
     getJsonCache = jest.fn().mockResolvedValue(null),
+    setJsonCacheWithStale = jest.fn().mockResolvedValue(undefined),
     wsBootstrapDbQueryDurationMs: dbMetric = metricStub(),
     wsBootstrapHydrationStepDurationMs: stepMetric = metricStub(),
     subscribeClient: subscribeClientMock = jest.fn().mockResolvedValue(undefined),
@@ -71,11 +75,13 @@ function buildHarness(opts: {
     }),
   };
 
-  const query = jest.fn();
-  for (const r of queryResponses) {
-    query.mockResolvedValueOnce(r);
+  const query = queryMock || jest.fn();
+  if (!queryMock) {
+    for (const r of queryResponses) {
+      query.mockResolvedValueOnce(r);
+    }
+    query.mockResolvedValue({ rows: [] });
   }
-  query.mockResolvedValue({ rows: [] });
 
   const helpers = createBootstrapSubscriptionsHelpers({
     redis,
@@ -84,7 +90,7 @@ function buildHarness(opts: {
     logger: { warn: jest.fn() },
     staleCacheKey: (k: string) => `stale:${k}`,
     getJsonCache,
-    setJsonCacheWithStale: jest.fn().mockResolvedValue(undefined),
+    setJsonCacheWithStale,
     withDistributedSingleflight: jest.requireMock('../src/utils/distributedSingleflight')
       .withDistributedSingleflight,
     wsBootstrapIngressKey: (uid: string, scope: string) => `ingress:${uid}:${scope}`,
@@ -112,7 +118,16 @@ function buildHarness(opts: {
     WS_BOOTSTRAP_BATCH_SIZE: 96,
   });
 
-  return { query, redis, helpers, dbMetric, stepMetric, subscribeClientMock, subscribeCommunityClientMock };
+  return {
+    query,
+    redis,
+    helpers,
+    dbMetric,
+    stepMetric,
+    setJsonCacheWithStale,
+    subscribeClientMock,
+    subscribeCommunityClientMock,
+  };
 }
 
 function fakeWs() {
@@ -360,6 +375,36 @@ describe('cache invalidation', () => {
     const ws = fakeWs();
     await helpers.bootstrapWithRetry(ws, 'user-1');
     expect(query).not.toHaveBeenCalled();
+  });
+
+  it('serves stale messages-scope cache immediately while refreshing in the background', async () => {
+    let releaseQuery: ((value: { rows: Array<{ id: string }> }) => void) | null = null;
+    const pendingQuery = new Promise<{ rows: Array<{ id: string }> }>((resolve) => {
+      releaseQuery = resolve;
+    });
+    const queryMock = jest.fn().mockReturnValue(pendingQuery);
+    const subscribeClientMock = jest.fn().mockResolvedValue(undefined);
+    const getJsonCache = jest
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(['channel:stale-ch', 'conversation:stale-conv']);
+
+    const { helpers } = buildHarness({
+      autoSubscribeMode: 'messages',
+      getJsonCache,
+      queryMock,
+      subscribeClient: subscribeClientMock,
+    });
+
+    const ws = fakeWs();
+    await helpers.bootstrapWithRetry(ws, 'user-1');
+
+    const topics = subscribeClientMock.mock.calls.map((c) => c[1]);
+    expect(topics).toEqual(['channel:stale-ch', 'conversation:stale-conv']);
+    expect(queryMock).toHaveBeenCalledTimes(2);
+
+    releaseQuery?.({ rows: [] });
+    await Promise.resolve();
   });
 });
 

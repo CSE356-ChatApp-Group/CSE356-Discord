@@ -91,6 +91,17 @@ function createBootstrapSubscriptionsHelpers({
     return `ws:bootstrap:${userId}:${scope}`;
   }
 
+  function sanitizeBootstrapChannels(value) {
+    return Array.isArray(value)
+      ? value.filter((entry) => typeof entry === "string")
+      : null;
+  }
+
+  function observeBootstrapListCache(result, channels) {
+    wsBootstrapListCacheTotal.inc({ result });
+    wsBootstrapChannelsHistogram.observe(channels.length);
+  }
+
   function shouldFallbackBootstrapReadToPrimary(err) {
     const code = String(err?.code || "");
     const msg = String(err?.message || "").toLowerCase();
@@ -161,21 +172,117 @@ function createBootstrapSubscriptionsHelpers({
     return resolvedWsRuntimeConfig().autoSubscribeMode;
   }
 
+  async function loadBootstrapChannelsFromDb(userId, scope, cacheKey) {
+    await tryAcquireBootstrapDbSlot();
+    try {
+      wsBootstrapDbTotal.inc();
+
+      function timedQuery(phase, fn) {
+        if (!wsBootstrapDbQueryDurationMs) return fn();
+        const start = Date.now();
+        return Promise.resolve(fn()).then((result) => {
+          wsBootstrapDbQueryDurationMs.observe({ phase }, Date.now() - start);
+          return result;
+        });
+      }
+
+      const [conversationRes, communityRes, channelRes] = await Promise.all([
+        scope === "user_only"
+          ? Promise.resolve({ rows: [] })
+          : timedQuery("conversations", () => bootstrapListQuery(
+            "conversations",
+            `SELECT conversation_id::text AS id
+               FROM conversation_participants
+               WHERE user_id = $1 AND left_at IS NULL`,
+            [userId],
+          )),
+        // Skip community query in messages scope: community:* topics are not needed
+        // for message:created delivery — subscribeClient covers channel/conversation fanout.
+        scope === "user_only" || scope === "messages"
+          ? Promise.resolve({ rows: [] })
+          : timedQuery("communities", () => bootstrapListQuery(
+            "communities",
+            `SELECT community_id::text AS id
+               FROM community_members
+               WHERE user_id = $1`,
+            [userId],
+          )),
+        scope === "user_only"
+          ? Promise.resolve({ rows: [] })
+          : timedQuery("channels", () => bootstrapListQuery(
+            "channels",
+            `SELECT c.id::text AS id
+               FROM channels c
+               JOIN community_members cm
+                 ON cm.community_id = c.community_id
+                AND cm.user_id = $1
+               LEFT JOIN channel_members chm
+                 ON chm.channel_id = c.id
+                AND chm.user_id = $1
+               WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
+            [userId],
+          )),
+      ]);
+
+      const channels = [
+        ...channelRes.rows.map((row) => `channel:${row.id}`),
+        ...conversationRes.rows.map((row) => `conversation:${row.id}`),
+        ...communityRes.rows.map((row) => `community:${row.id}`),
+      ];
+      wsBootstrapChannelsHistogram.observe(channels.length);
+      await setJsonCacheWithStale(redis, cacheKey, channels, WS_BOOTSTRAP_CACHE_TTL_SECONDS, {
+        staleMultiplier: 1.5,
+        maxStaleTtlSeconds: 600,
+      });
+      return channels;
+    } finally {
+      releaseBootstrapDbSlot();
+    }
+  }
+
+  function refreshBootstrapChannelsInBackground(userId, scope, cacheKey) {
+    if (wsBootstrapListInFlight.has(cacheKey)) return;
+    const refresh = withDistributedSingleflight({
+      redis,
+      cacheKey,
+      inflight: wsBootstrapListInFlight,
+      readFresh: async () => {
+        const parsed = await getJsonCache(redis, cacheKey);
+        return sanitizeBootstrapChannels(parsed);
+      },
+      readStale: async () => null,
+      load: () => loadBootstrapChannelsFromDb(userId, scope, cacheKey),
+    });
+    refresh.catch((err) => {
+      logger.warn(
+        { err, userId, scope },
+        "WS bootstrap stale cache background refresh failed",
+      );
+    });
+  }
+
   async function listAutoSubscriptionChannels(userId, mode = "full") {
     const scope = mode === "full" ? "full" : (mode === "user_only" ? "user_only" : "messages");
     const cacheKey = wsBootstrapCacheKey(userId, scope);
-    const cached = await getJsonCache(redis, cacheKey);
-    if (Array.isArray(cached)) {
-      wsBootstrapListCacheTotal.inc({ result: "hit" });
-      wsBootstrapChannelsHistogram.observe(cached.length);
-      return cached.filter((value) => typeof value === "string");
+    const cached = sanitizeBootstrapChannels(await getJsonCache(redis, cacheKey));
+    if (cached) {
+      observeBootstrapListCache("hit", cached);
+      return cached;
+    }
+
+    const stale = sanitizeBootstrapChannels(await getJsonCache(redis, staleCacheKey(cacheKey)));
+    if (stale) {
+      observeBootstrapListCache("stale", stale);
+      refreshBootstrapChannelsInBackground(userId, scope, cacheKey);
+      return stale;
     }
 
     if (wsBootstrapListInFlight.has(cacheKey)) {
       wsBootstrapListCacheTotal.inc({ result: "coalesced" });
       const channels = await wsBootstrapListInFlight.get(cacheKey);
-      wsBootstrapChannelsHistogram.observe(channels.length);
-      return channels;
+      const sanitized = sanitizeBootstrapChannels(channels) || [];
+      wsBootstrapChannelsHistogram.observe(sanitized.length);
+      return sanitized;
     }
 
     wsBootstrapListCacheTotal.inc({ result: "miss" });
@@ -185,74 +292,13 @@ function createBootstrapSubscriptionsHelpers({
       inflight: wsBootstrapListInFlight,
       readFresh: async () => {
         const parsed = await getJsonCache(redis, cacheKey);
-        return Array.isArray(parsed) ? parsed : null;
+        return sanitizeBootstrapChannels(parsed);
       },
       readStale: async () => {
         const parsed = await getJsonCache(redis, staleCacheKey(cacheKey));
-        return Array.isArray(parsed) ? parsed : null;
+        return sanitizeBootstrapChannels(parsed);
       },
-      load: async () => {
-        wsBootstrapDbTotal.inc();
-
-        function timedQuery(phase, fn) {
-          if (!wsBootstrapDbQueryDurationMs) return fn();
-          const start = Date.now();
-          return Promise.resolve(fn()).then((result) => {
-            wsBootstrapDbQueryDurationMs.observe({ phase }, Date.now() - start);
-            return result;
-          });
-        }
-
-        const [conversationRes, communityRes, channelRes] = await Promise.all([
-          scope === "user_only"
-            ? Promise.resolve({ rows: [] })
-            : timedQuery("conversations", () => bootstrapListQuery(
-              "conversations",
-              `SELECT conversation_id::text AS id
-               FROM conversation_participants
-               WHERE user_id = $1 AND left_at IS NULL`,
-              [userId],
-            )),
-          // Skip community query in messages scope: community:* topics are not needed
-          // for message:created delivery — subscribeClient covers channel/conversation fanout.
-          scope === "user_only" || scope === "messages"
-            ? Promise.resolve({ rows: [] })
-            : timedQuery("communities", () => bootstrapListQuery(
-              "communities",
-              `SELECT community_id::text AS id
-               FROM community_members
-               WHERE user_id = $1`,
-              [userId],
-            )),
-          scope === "user_only"
-            ? Promise.resolve({ rows: [] })
-            : timedQuery("channels", () => bootstrapListQuery(
-              "channels",
-              `SELECT c.id::text AS id
-               FROM channels c
-               JOIN community_members cm
-                 ON cm.community_id = c.community_id
-                AND cm.user_id = $1
-               LEFT JOIN channel_members chm
-                 ON chm.channel_id = c.id
-                AND chm.user_id = $1
-               WHERE c.is_private = FALSE OR chm.user_id IS NOT NULL`,
-              [userId],
-            )),
-        ]);
-
-        const channels = [
-          ...channelRes.rows.map((row) => `channel:${row.id}`),
-          ...conversationRes.rows.map((row) => `conversation:${row.id}`),
-          ...communityRes.rows.map((row) => `community:${row.id}`),
-        ];
-        wsBootstrapChannelsHistogram.observe(channels.length);
-        await setJsonCacheWithStale(redis, cacheKey, channels, WS_BOOTSTRAP_CACHE_TTL_SECONDS, {
-          staleMultiplier: 1.5,
-          maxStaleTtlSeconds: 600,
-        });
-        return channels;
-      },
+      load: () => loadBootstrapChannelsFromDb(userId, scope, cacheKey),
     });
   }
 
@@ -353,11 +399,9 @@ function createBootstrapSubscriptionsHelpers({
       return channels;
     }
 
-    await tryAcquireBootstrapDbSlot();
     const loadPromise = listAutoSubscriptionChannels(userId, mode)
       .finally(() => {
         wsBootstrapIngressInFlight.delete(userId);
-        releaseBootstrapDbSlot();
       });
     wsBootstrapIngressInFlight.set(userId, loadPromise);
 
