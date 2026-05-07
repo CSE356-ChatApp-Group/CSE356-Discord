@@ -113,7 +113,7 @@ router.patch(
       const publicVersion = await C.getPublicCommunitiesVersion();
 
       await Promise.allSettled([
-        C.invalidateCommunitiesCaches([req.params.userId], publicVersion),
+        C.invalidateCommunitiesCaches([req.params.userId], publicVersion, 'membership_change'),
         redis.del(C.membersCacheKey(req.params.id)),
         fanout.publish(`community:${req.params.id}`, {
           event: "community:role_updated",

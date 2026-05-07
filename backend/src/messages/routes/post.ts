@@ -309,21 +309,23 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
         const hydrateWallMs = Math.max(0, tAfterHydrateMark - tHydrateStart);
 
         // --- POST /messages: list cache bust (bounded) ---
-        // Start cache bust as soon as hydration is ready and overlap it with realtime fanout.
+        // Invalidate Redis first-page GET /messages JSON (epoch bump + key DEL) so REST
+        // read-after-write sees the new row without waiting for TTL. Still emits
+        // endpoint_list_cache_invalidations_total{reason="message_list_volatile"} — structural
+        // conversation/channel lists are unrelated (see conversationsRouterListCache).
         let cacheBustStartMs = 0;
         let cacheBustEndMs = 0;
         const cacheBustPromise = tracer.startActiveSpan('cache.bust', async (span: any) => {
           cacheBustStartMs = Date.now();
           try {
             return await withBoundedPostInsertTimeout(
-              "cache_bust",
-              bustMessagesCacheSafe({ channelId, conversationId }),
+              'cache_bust',
+              bustMessagesCacheSafe({
+                ...(channelId ? { channelId } : {}),
+                ...(conversationId ? { conversationId } : {}),
+              }),
               MESSAGE_POST_CACHE_BUST_TIMEOUT_MS,
             );
-          } catch (err: any) {
-            span.setStatus({ code: SpanStatusCode.ERROR, message: String(err?.message || '') });
-            span.recordException(err);
-            throw err;
           } finally {
             cacheBustEndMs = Date.now();
             span.end();

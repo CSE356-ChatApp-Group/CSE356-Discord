@@ -27,10 +27,10 @@ async function bustMessagesCacheSafe(opts: {
   try {
     if (channelId) {
       await bustChannelMessagesCache(redis, channelId);
-      recordEndpointListCacheInvalidation("messages_channel", "write");
+      recordEndpointListCacheInvalidation("messages_channel", "message_list_volatile");
     } else if (conversationId) {
       await bustConversationMessagesCache(redis, conversationId);
-      recordEndpointListCacheInvalidation("messages_conversation", "write");
+      recordEndpointListCacheInvalidation("messages_conversation", "message_list_volatile");
     }
   } catch (err) {
     messageCacheBustFailuresTotal.inc({

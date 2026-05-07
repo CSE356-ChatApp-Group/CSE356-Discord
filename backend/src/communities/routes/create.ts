@@ -100,7 +100,7 @@ router.post(
         await C.bumpPublicCommunitiesVersion();
       }
       const publicVersion = await C.getPublicCommunitiesVersion();
-      C.invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {});
+      C.invalidateCommunitiesCaches([req.user.id], publicVersion, 'structural_community_change').catch(() => {});
       // Redundant id fields: harness / generated clients sometimes read `body.id`
       // or `body.communityId` instead of `body.community.id`, producing `/communities//join`.
       res.status(201).json({

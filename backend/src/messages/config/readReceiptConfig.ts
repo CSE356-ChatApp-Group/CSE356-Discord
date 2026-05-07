@@ -31,13 +31,11 @@ const READ_RECEIPT_SCOPE_DEBOUNCE_MS = Math.min(
 );
 const READ_RECEIPT_FANOUT_ENABLED =
   String(process.env.READ_RECEIPT_FANOUT_ENABLED || 'true').toLowerCase() === 'true';
-/** When true, each advancing channel read receipt deletes `channels:list:{community}:{user}` so the next GET reflects unread immediately. Default false: rely on WS `read:updated` + TTL (see `channels/routes/list.ts`). Set `1`/`true` only if you need strict REST freshness without WS. */
-const READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE = (() => {
-  const raw = process.env.READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE;
-  if (raw === undefined || raw === '') return false;
-  const v = String(raw).toLowerCase();
-  return v === '1' || v === 'true' || v === 'yes';
-})();
+/**
+ * Deprecated: structural `channels:list:{community}:{user}` bust on read receipts was removed from
+ * `readReceiptHttpCore.ts` to stop cold-list churn (TTL + WS `read:updated` remain). Env is ignored.
+ */
+const READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE = false;
 const READ_RECEIPT_CHANNEL_FANOUT_ASYNC = (() => {
   const raw = process.env.READ_RECEIPT_CHANNEL_FANOUT_ASYNC;
   if (raw === undefined || raw === '') return true;

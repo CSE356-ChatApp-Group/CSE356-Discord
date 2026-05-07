@@ -43,7 +43,7 @@ async function runExistingDmSideEffects({
   await Promise.allSettled([
     invalidateConversationFanoutTargetsCache(existingId),
     invalidateWsBootstrapCaches(pairIds),
-    invalidateConversationsListCaches(pairIds),
+    invalidateConversationsListCaches(pairIds, 'membership_change'),
   ]);
   await publishConversationSubscribeChannels(
     pairIds,
@@ -69,7 +69,7 @@ async function runCreatedConversationSideEffects({
     invalidateConversationFanoutTargetsCache(conversationId),
     presenceService.invalidatePresenceFanoutTargetsBulk(allIds),
     invalidateWsBootstrapCaches(allIds),
-    invalidateConversationsListCaches(allIds),
+    invalidateConversationsListCaches(allIds, 'structural_conversation_change'),
   ]);
 
   if (!conversation) return;

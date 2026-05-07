@@ -74,6 +74,7 @@ router.delete("/:id/leave", param("id").isUUID(), async (req, res, next) => {
       C.invalidateCommunitiesCaches(
         [req.user.id, ...remainingMembers.map((member) => member.user_id)],
         publicVersion,
+        'membership_change',
       ),
       redis.del(C.membersCacheKey(req.params.id)),
       fanout.publish(`community:${req.params.id}`, {

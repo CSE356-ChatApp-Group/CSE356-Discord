@@ -33,7 +33,6 @@ const sideEffects = require("../sideEffects");
 const {
   READ_RECEIPT_DEFER_POOL_WAITING,
   READ_RECEIPT_FANOUT_ENABLED,
-  READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE,
   READ_RECEIPT_CHANNEL_FANOUT_ASYNC,
   hasConfirmedRecentMessageRead,
   rememberConfirmedMessageRead,
@@ -275,14 +274,10 @@ async function executeReadReceiptMark(
     return { status: 200, body: { success: true } };
   }
 
-  const needsCommunityId =
-    READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
-    READ_RECEIPT_FANOUT_ENABLED &&
-    !dropReadReceiptFanout;
   const target = await observeReadPhase("target_lookup", () =>
     loadMessageTargetForUser(messageId, userId, {
       preferCache: true,
-      includeCommunityId: needsCommunityId,
+      includeCommunityId: false,
       msgTargetMetricsCaller: 'read_receipt',
       targetLookupLogContext: {
         kind: READ_RECEIPT_TARGET_LOOKUP_CALLER,
@@ -401,7 +396,6 @@ async function executeReadReceiptMark(
     return { status: 200, body: { success: true } };
   }
 
-  const communityIdForCache = target.community_id;
   if (channel_id) {
     await observeReadPhase("watermark_cache", async () => {
       try {
@@ -412,14 +406,6 @@ async function executeReadReceiptMark(
           REDIS_LUA_IDS.READ_RECEIPT_RESET_UNREAD_WATERMARK,
         );
         const pipeline = redis.pipeline();
-        if (
-          READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
-          READ_RECEIPT_FANOUT_ENABLED &&
-          !dropReadReceiptFanout &&
-          communityIdForCache
-        ) {
-          pipeline.del(`channels:list:${communityIdForCache}:${uid}`);
-        }
         pipeline.evalsha(
           wmSha,
           2,
@@ -434,15 +420,6 @@ async function executeReadReceiptMark(
           "Failed to update read watermark/cache in Redis",
         );
       }
-    });
-  } else if (
-    READ_RECEIPT_INVALIDATE_CHANNELS_LIST_CACHE &&
-    READ_RECEIPT_FANOUT_ENABLED &&
-    !dropReadReceiptFanout &&
-    communityIdForCache
-  ) {
-    await observeReadPhase("watermark_cache", async () => {
-      await redis.del(`channels:list:${communityIdForCache}:${uid}`).catch(() => {});
     });
   }
 

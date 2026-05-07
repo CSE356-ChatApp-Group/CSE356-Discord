@@ -85,6 +85,7 @@ router.delete(
         C.invalidateCommunitiesCaches(
           memberRows.map((r) => r.user_id),
           publicVersion,
+          'structural_community_change',
         ),
         redis.del(C.membersCacheKey(req.params.id)),
         fanout.publish(`community:${req.params.id}`, {

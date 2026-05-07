@@ -5,6 +5,7 @@
 const redis = require("../db/redis");
 const { redisBatchUnlink } = require("../db/redisBatch");
 const { staleCacheKey } = require("../utils/distributedSingleflight");
+const { recordEndpointListCacheInvalidation } = require("../utils/endpointCacheMetrics");
 const {
   PUBLIC_COMMUNITIES_VERSION_KEY,
   communitiesCacheKey,
@@ -51,7 +52,7 @@ async function redisExpireBestEffort(key, ttlSec) {
   }
 }
 
-async function invalidateCommunitiesCaches(userIds, publicVersion = "0") {
+async function invalidateCommunitiesCaches(userIds, publicVersion = "0", reason: string = "membership_change") {
   const normalizedUserIds = [
     ...new Set(
       (Array.isArray(userIds) ? userIds : []).filter(
@@ -68,6 +69,7 @@ async function invalidateCommunitiesCaches(userIds, publicVersion = "0") {
     ),
   ];
   if (keys.length > 0) {
+    recordEndpointListCacheInvalidation("communities", reason);
     await redisBatchUnlink(redis, keys);
   }
   await Promise.allSettled(

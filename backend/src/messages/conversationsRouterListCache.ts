@@ -5,8 +5,10 @@
 const redis = require('../db/redis');
 const { redisBatchUnlink } = require('../db/redisBatch');
 const { staleCacheKey } = require('../utils/distributedSingleflight');
+const { recordEndpointListCacheInvalidation } = require('../utils/endpointCacheMetrics');
 
-// Aligns with CHANNELS_LIST_CACHE_TTL_SECS pattern (channelRouterShared.ts). Fanout invalidates on DM activity.
+// Aligns with CHANNELS_LIST_CACHE_TTL_SECS pattern (channelRouterShared.ts).
+// Structural bust only from conversation routes / side effects — not per-message fanout.
 const _convListTtl = parseInt(process.env.CONVERSATIONS_LIST_CACHE_TTL_SECS || '60', 10);
 const CONVERSATIONS_CACHE_TTL_SECS =
   Number.isFinite(_convListTtl) && _convListTtl > 0 ? _convListTtl : 60;
@@ -15,16 +17,22 @@ function conversationsCacheKey(userId: string) {
   return `conversations:list:${userId}`;
 }
 
-async function invalidateConversationsListCaches(userIds) {
-  const keys = [...new Set(
+// TODO(last-message-preview): New messages no longer bust this key; previews/unreads may lag until
+// TTL unless clients rely on WS overlays or a future narrow invalidation hook.
+
+async function invalidateConversationsListCaches(userIds, reason: string = 'structural_conversation_change') {
+  const normalized = [...new Set(
     (Array.isArray(userIds) ? userIds : [])
       .filter((userId) => typeof userId === 'string' && userId)
-      .flatMap((userId) => {
-        const key = conversationsCacheKey(userId);
-        return [key, staleCacheKey(key)];
-      })
+  )];
+  const keys = [...new Set(
+    normalized.flatMap((userId) => {
+      const key = conversationsCacheKey(userId);
+      return [key, staleCacheKey(key)];
+    })
   )];
   if (!keys.length) return;
+  recordEndpointListCacheInvalidation('conversations', reason);
   await redisBatchUnlink(redis, keys);
 }
 

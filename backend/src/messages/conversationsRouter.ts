@@ -368,7 +368,7 @@ router.patch(
             'conversation:updated',
             { conversation: conv, conversationId: id }
           ),
-          invalidateConversationsListCaches(participantIds),
+          invalidateConversationsListCaches(participantIds, 'structural_conversation_change'),
         ]);
         res.json({ conversation: conv });
       } finally {
@@ -464,7 +464,10 @@ async function addParticipantsHandler(req, res, next) {
         invalidateWsBootstrapCaches(participantIdsToAdd),
         // Invalidate conversation list cache for newly added AND existing
         // participants so everyone sees the updated participant list immediately.
-        invalidateConversationsListCaches([...participantIdsToAdd, ...currentParticipantIds]),
+        invalidateConversationsListCaches(
+          [...participantIdsToAdd, ...currentParticipantIds],
+          'membership_change',
+        ),
       ]);
     }
 
@@ -569,13 +572,13 @@ router.post('/:id/leave', param('id').isUUID(), async (req, res, next) => {
       /* non-fatal */
     }
     try {
-      await invalidateConversationsListCaches([req.user.id]);
+      await invalidateConversationsListCaches([req.user.id], 'membership_change');
     } catch {
       /* non-fatal */
     }
     if (!shouldDelete && activeParticipantIds.length > 0) {
       await Promise.allSettled([
-        invalidateConversationsListCaches(activeParticipantIds),
+        invalidateConversationsListCaches(activeParticipantIds, 'membership_change'),
       ]);
     }
 

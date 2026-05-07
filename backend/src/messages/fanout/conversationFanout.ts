@@ -17,10 +17,9 @@ const {
   wrapFanoutPayload,
   fanoutPublishedAt,
 } = require("../realtimePayload");
-// conversationsRouterListCache invalidation for per-message fanout removed — it caused
-// 0% cache hit rate at high message rates (68 msg/s → 136-340 invalidations/s).
-// Structural invalidations (create/delete conversation, participant changes) remain in
-// conversationsRouter.ts and conversationSideEffects.ts.
+// Per-message `conversations:list` Redis bust removed — it caused 0% cache hit rate at high
+// message rates (68 msg/s → 136-340 invalidations/s). Structural busts (create/delete
+// conversation, participant changes) remain in conversationsRouter + conversationSideEffects.
 const { enqueuePendingMessageForUsers } = require("../pending/realtimePending");
 const {
   publishUserFeedTargets,

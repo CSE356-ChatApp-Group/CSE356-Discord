@@ -18,6 +18,7 @@ const {
 } = require('../utils/distributedSingleflight');
 const { raceChannelAccess } = require('../messages/channelAccessCache');
 const { getChannelLastMessageMetaMapFromRedis } = require('../messages/repointLastMessage');
+const { recordEndpointListCacheInvalidation } = require('../utils/endpointCacheMetrics');
 
 const CHANNEL_RETURNING_FIELDS = `
   id,
@@ -251,13 +252,14 @@ async function publishChannelLifecycleEvent(communityId, event, data) {
  * Bust channels:list cache for every member of a community.
  * Fire-and-forget — runs after the response has been sent.
  */
-async function bustChannelListCache(communityId) {
+async function bustChannelListCache(communityId, reason: string = 'structural_channel_change') {
   try {
     const { rows } = await queryRead(
       'SELECT user_id::text FROM community_members WHERE community_id = $1',
       [communityId]
     );
     if (!rows.length) return;
+    recordEndpointListCacheInvalidation('channels', reason);
     const keys = rows.flatMap((r) => {
       const key = `channels:list:${communityId}:${r.user_id}`;
       return [key, staleCacheKey(key)];
@@ -268,8 +270,9 @@ async function bustChannelListCache(communityId) {
   }
 }
 
-async function bustChannelListCacheForUser(communityId, userId) {
+async function bustChannelListCacheForUser(communityId, userId, reason: string = 'membership_change') {
   try {
+    recordEndpointListCacheInvalidation('channels', reason);
     const key = `channels:list:${communityId}:${userId}`;
     await redis.del(key, staleCacheKey(key));
   } catch (err) {
@@ -277,8 +280,9 @@ async function bustChannelListCacheForUser(communityId, userId) {
   }
 }
 
-async function bustCommunityChannelCache(communityId: string) {
+async function bustCommunityChannelCache(communityId: string, reason: string = 'structural_channel_change') {
   try {
+    recordEndpointListCacheInvalidation('channels', reason);
     const key = `channels:community:${communityId}`;
     await redis.del(key, staleCacheKey(key));
   } catch (err) {

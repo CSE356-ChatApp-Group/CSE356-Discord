@@ -222,7 +222,8 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
       }),
       // Run in parallel with the invalidations above to save a serial Redis round-trip.
       getPublicCommunitiesVersion().then(
-        (publicVersion) => invalidateCommunitiesCaches([req.user.id], publicVersion).catch(() => {}),
+        (publicVersion) =>
+          invalidateCommunitiesCaches([req.user.id], publicVersion, 'membership_change').catch(() => {}),
         () => {},
       ),
     ]);

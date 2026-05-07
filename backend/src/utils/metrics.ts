@@ -532,8 +532,38 @@ const overloadStageGauge = new client.Gauge({
     messageListCacheStoreSkippedTotal.inc({ scope: 'conversation', reason: 'epoch_changed' }, 0);
     endpointListCacheBypassTotal.inc({ endpoint: 'messages_channel', reason: 'pagination' }, 0);
     endpointListCacheBypassTotal.inc({ endpoint: 'messages_conversation', reason: 'pagination' }, 0);
-    endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_channel', reason: 'write' }, 0);
-    endpointListCacheInvalidationsTotal.inc({ endpoint: 'messages_conversation', reason: 'write' }, 0);
+    endpointListCacheInvalidationsTotal.inc(
+      { endpoint: 'messages_channel', reason: 'message_list_volatile' },
+      0,
+    );
+    endpointListCacheInvalidationsTotal.inc(
+      { endpoint: 'messages_conversation', reason: 'message_list_volatile' },
+      0,
+    );
+    endpointListCacheInvalidationsTotal.inc(
+      { endpoint: 'conversations', reason: 'structural_conversation_change' },
+      0,
+    );
+    endpointListCacheInvalidationsTotal.inc(
+      { endpoint: 'conversations', reason: 'membership_change' },
+      0,
+    );
+    endpointListCacheInvalidationsTotal.inc(
+      { endpoint: 'channels', reason: 'structural_channel_change' },
+      0,
+    );
+    endpointListCacheInvalidationsTotal.inc(
+      { endpoint: 'channels', reason: 'membership_change' },
+      0,
+    );
+    endpointListCacheInvalidationsTotal.inc(
+      { endpoint: 'communities', reason: 'structural_community_change' },
+      0,
+    );
+    endpointListCacheInvalidationsTotal.inc(
+      { endpoint: 'communities', reason: 'membership_change' },
+      0,
+    );
     messagesListAccessCacheHitTotal.inc({ path: 'channel_latest' }, 0);
     messagesListAccessCacheHitTotal.inc({ path: 'channel_paginated' }, 0);
     channelAccessCacheTotal.inc({ result: 'hit' }, 0);
