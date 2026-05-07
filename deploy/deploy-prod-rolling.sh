@@ -16,6 +16,10 @@ csv_has_port() {
 rewrite_nginx_upstream() {
   local ports_csv="${1:?ports csv required}"
   local context="${2:-upstream rewrite}"
+  if [ "${SKIP_INGRESS_POST_DEPLOY:-0}" = "1" ]; then
+    echo "Skipping local nginx upstream rewrite (${context}) on worker-only host"
+    return 0
+  fi
   ssh_prod "
     set -euo pipefail
     export PORTS_CSV='${ports_csv}'
