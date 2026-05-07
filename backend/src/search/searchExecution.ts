@@ -41,14 +41,29 @@ async function runSearchReadOnlyQuery(
   options: { forcePrimary?: boolean; kind?: string } = {},
 ) {
   const kind = options.kind || 'search_readonly_query';
-  const useReadPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA && db.readPool;
-  const backend = useReadPool ? 'replica' : 'primary';
+  const useSearchReadPool = !options.forcePrimary && SEARCH_USE_READ_REPLICA && db.searchReadPool;
+  const backend = useSearchReadPool ? 'replica' : 'primary';
   const tAll = Date.now();
+
+  if (!useSearchReadPool) {
+    return withSearchClientTransaction(
+      kind,
+      options,
+      async (client) => {
+        const { rows } = await client.query(sql, params);
+        return rows;
+      },
+      {
+        sqlLength: sql.length,
+        paramCount: params.length,
+      },
+      (rows: any[]) => ({ rowCount: rows.length }),
+    );
+  }
+
   const tWork = Date.now();
   try {
-    const result = useReadPool
-      ? await db.readPool.query(sql, params)
-      : await db.query(sql, params);
+    const result = await db.searchReadPool.query(sql, params);
     const rows = result.rows;
     const queryMs = Date.now() - tWork;
     const totalMs = Date.now() - tAll;

@@ -119,6 +119,8 @@ describe('conversation list/read consistency', () => {
     expect(res.status).toBe(200);
     expect(pool.queryRead).toHaveBeenCalledTimes(1);
     expect(pool.query).not.toHaveBeenCalled();
+    expect(String(pool.queryRead.mock.calls[0][0])).not.toContain('other_read_states');
+    expect(String(pool.queryRead.mock.calls[0][0])).not.toContain('other_last_read_message_id');
     expect(res.body.conversations).toHaveLength(1);
     expect(res.body.conversations[0].id).toBe('conv-1');
   });
@@ -135,6 +137,8 @@ describe('conversation list/read consistency', () => {
         last_message_id: null,
         last_message_author_id: null,
         last_message_at: null,
+        my_last_read_message_id: 'msg-self',
+        other_last_read_message_id: 'msg-other',
         participants: [{ id: 'user-2', username: 'other', displayName: 'Other' }],
       }],
     });
@@ -145,6 +149,8 @@ describe('conversation list/read consistency', () => {
     expect(res.status).toBe(200);
     expect(pool.queryRead).toHaveBeenCalledTimes(1);
     expect(pool.query).not.toHaveBeenCalled();
+    expect(String(pool.queryRead.mock.calls[0][0])).toContain('other_last_read_message_id');
     expect(res.body.conversation.id).toBe('conv-2');
+    expect(res.body.conversation.other_last_read_message_id).toBe('msg-other');
   });
 });

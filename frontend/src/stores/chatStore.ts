@@ -726,8 +726,26 @@ export const useChatStore = create<ChatState>()((set, get) => {
         unread_message_count: 0,
       }),
     }));
+    const hydrateConversationDetail = api.get(`/conversations/${conv.id}`).then(({ conversation }) => {
+      if (!conversation?.id) return;
+      set(s => ({
+        conversations: patchConversationRowById(s.conversations, conv.id, conversation),
+        activeConv:
+          s.activeConv?.id === conv.id
+            ? {
+                ...s.activeConv,
+                ...conversation,
+              }
+            : s.activeConv,
+      }));
+    }).catch(() => {});
     if (shouldFetchLatestMessages(get(), conv.id)) {
-      await get().fetchMessages({ conversationId: conv.id });
+      await Promise.all([
+        get().fetchMessages({ conversationId: conv.id }),
+        hydrateConversationDetail,
+      ]);
+    } else {
+      await hydrateConversationDetail;
     }
     wsManager.subscribe(`conversation:${conv.id}`, get()._handleWsEvent);
     const msgs = get().messages[conv.id];

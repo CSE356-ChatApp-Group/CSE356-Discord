@@ -13,6 +13,14 @@ function createMeiliSearchExecutor({
   buildResult,
   createMeiliFallbackError,
 }) {
+  const {
+    meiliRecheckDurationMs,
+    searchFreshnessRescueWallDurationMs,
+  } = require('../utils/metrics/searchPerformance');
+  const {
+    SEARCH_RECHECK_USE_READ_REPLICA,
+  } = require('./searchQueryEnv');
+
   function buildRecheckFromCandidates(
     ids: string[],
     q: string,
@@ -78,6 +86,7 @@ function createMeiliSearchExecutor({
       // search) so it adds zero latency on the happy path. The sequential cost on
       // this rare rescue path is acceptable given empty_candidates fires infrequently.
       let freshnessIds: string[] = [];
+      const tFreshnessRescue = Date.now();
       try {
         freshnessIds = await findFreshScopedSearchCandidateIds(q, opts);
       } catch (err: unknown) {
@@ -89,6 +98,7 @@ function createMeiliSearchExecutor({
         const recheckMeta = buildRecheckFromCandidates(freshnessIds, q, opts);
         const rows = await runMeiliRecheckQuery(recheckMeta.sql, recheckMeta.params);
         const recheckMs = Date.now() - tRecheck;
+        meiliRecheckDurationMs.observe({ source: 'freshness', backend: recheckBackendLabel() }, recheckMs);
 
         if (rows[0]?.__scopeAccess === false) {
           const err: any = new Error('Access denied');
@@ -98,6 +108,10 @@ function createMeiliSearchExecutor({
 
         const finalHits = rows.filter((r: any) => r && r.id);
         const totalMs = Date.now() - tAll;
+        searchFreshnessRescueWallDurationMs.observe(
+          { result: 'rescued' },
+          Date.now() - tFreshnessRescue,
+        );
 
         logger.info(
           {
@@ -123,6 +137,10 @@ function createMeiliSearchExecutor({
       }
 
       const totalMs = Date.now() - tAll;
+      searchFreshnessRescueWallDurationMs.observe(
+        { result: 'empty' },
+        Date.now() - tFreshnessRescue,
+      );
       meiliClient.incFallbackTotal('empty_candidates');
       logger.warn(
         {
@@ -146,6 +164,7 @@ function createMeiliSearchExecutor({
     const recheckMeta = buildRecheckFromCandidates(ids, q, opts);
     const rows = await runMeiliRecheckQuery(recheckMeta.sql, recheckMeta.params);
     const recheckMs = Date.now() - tRecheck;
+    meiliRecheckDurationMs.observe({ source: 'meili', backend: recheckBackendLabel() }, recheckMs);
 
     if (rows[0]?.__scopeAccess === false) {
       const err: any = new Error('Access denied');
@@ -181,8 +200,17 @@ function createMeiliSearchExecutor({
   }
 
   function runMeiliRecheckQuery(sql: string, params: any[]) {
-    const queryRunner = runSearchReadOnlyQuery || runSearchQuery;
-    return queryRunner(sql, params, { kind: 'meili_recheck_query' });
+    if (runSearchReadOnlyQuery) {
+      return runSearchReadOnlyQuery(sql, params, {
+        kind: 'meili_recheck_query',
+        forcePrimary: !SEARCH_RECHECK_USE_READ_REPLICA,
+      });
+    }
+    return runSearchQuery(sql, params, { forcePrimary: !SEARCH_RECHECK_USE_READ_REPLICA });
+  }
+
+  function recheckBackendLabel() {
+    return SEARCH_RECHECK_USE_READ_REPLICA ? 'read' : 'primary';
   }
 
   return {

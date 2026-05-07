@@ -76,6 +76,30 @@ const searchFreshnessQueryDurationMs = new client.Histogram({
   buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
 });
 
+/** End-to-end wall time for the Meili empty-candidate freshness rescue path. */
+const searchFreshnessRescueWallDurationMs = new client.Histogram({
+  name: 'search_freshness_rescue_wall_duration_ms',
+  help: 'Wall-clock duration for Meili empty-candidate freshness rescue attempts',
+  labelNames: ['result'],
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Postgres recheck duration after Meili/freshness returns candidate message IDs. */
+const meiliRecheckDurationMs = new client.Histogram({
+  name: 'meili_recheck_duration_ms',
+  help: 'Postgres access/deleted/latest-content recheck duration for Meili candidate IDs',
+  labelNames: ['source', 'backend'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+});
+
+/** Search route overhead outside the main search client call. */
+const searchHandlerOverheadMs = new client.Histogram({
+  name: 'search_handler_overhead_ms',
+  help: 'GET /search route wall time outside searchClient.search execution',
+  labelNames: ['scope', 'status'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+});
+
 /** Cache hits for Meili freshness candidate results in Redis (incremented per hit). */
 const searchFreshnessCacheHitsTotal = new client.Counter({
   name: 'search_freshness_cache_hits_total',
@@ -106,6 +130,9 @@ module.exports = {
   messageCacheBustFailuresTotal,
   messageCacheBustWallDurationMs,
   searchFreshnessQueryDurationMs,
+  searchFreshnessRescueWallDurationMs,
+  meiliRecheckDurationMs,
+  searchHandlerOverheadMs,
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,

@@ -19,6 +19,7 @@ const { invalidateConversationFanoutTargetsCache } = require('./fanout/conversat
 const { publishConversationEvents } = require('./conversationsRouterPublish');
 const { recordEndpointListCache } = require('../utils/endpointCacheMetrics');
 const logger = require('../utils/logger');
+const { sideEffectJobDurationMs } = require('../utils/metrics');
 const {
   staleCacheKey,
   getJsonCache,
@@ -65,6 +66,27 @@ const {
 const router = express.Router();
 router.use(authenticate);
 
+function scheduleConversationSideEffect(name: string, run: () => Promise<unknown>) {
+  setImmediate(() => {
+    const startedAt = Date.now();
+    Promise.resolve()
+      .then(run)
+      .then(() => {
+        sideEffectJobDurationMs.observe(
+          { queue: 'conversations', name, status: 'success' },
+          Date.now() - startedAt,
+        );
+      })
+      .catch((err) => {
+        sideEffectJobDurationMs.observe(
+          { queue: 'conversations', name, status: 'error' },
+          Date.now() - startedAt,
+        );
+        logger.warn({ err, sideEffectName: name }, 'conversation side effect failed');
+      });
+  });
+}
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   const cacheKey = conversationsCacheKey(req.user.id);
@@ -91,8 +113,9 @@ router.get('/', async (req, res, next) => {
     readFresh: async () => getJsonCache(redis, cacheKey),
     readStale: async () => getJsonCache(redis, staleCacheKey(cacheKey)),
     load: async () => {
+      const tLoad = Date.now();
       const { rows } = await queryRead(
-        `WITH my_convos AS (
+        `WITH my_convos AS MATERIALIZED (
          SELECT cp.conversation_id,
                 COALESCE(c.last_message_at, c.updated_at) AS sort_key
          FROM   conversation_participants cp
@@ -101,26 +124,10 @@ router.get('/', async (req, res, next) => {
            AND  cp.left_at IS NULL
          ORDER  BY COALESCE(c.last_message_at, c.updated_at) DESC
          LIMIT  200
-       ),
-       other_read_states AS (
-         SELECT DISTINCT ON (rs.conversation_id)
-                rs.conversation_id,
-                rs.last_read_message_id,
-                rs.last_read_at
-         FROM   read_states rs
-         JOIN   my_convos mc ON mc.conversation_id = rs.conversation_id
-         JOIN   conversation_participants cp_other
-                ON  cp_other.conversation_id = rs.conversation_id
-                AND cp_other.user_id = rs.user_id
-                AND cp_other.left_at IS NULL
-         WHERE  rs.user_id <> $1
-         ORDER  BY rs.conversation_id, rs.last_read_at DESC NULLS LAST
        )
        SELECT ${CONVERSATION_LIST_FIELDS},
               my_rs.last_read_message_id AS my_last_read_message_id,
               my_rs.last_read_at AS my_last_read_at,
-              ors.last_read_message_id AS other_last_read_message_id,
-              ors.last_read_at AS other_last_read_at,
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name,'avatarUrl',u.avatar_url))
                 AS participants
        FROM   my_convos mc
@@ -131,17 +138,24 @@ router.get('/', async (req, res, next) => {
        LEFT JOIN read_states my_rs
               ON my_rs.conversation_id = c.id
              AND my_rs.user_id = $1
-       LEFT JOIN other_read_states ors ON ors.conversation_id = c.id
        GROUP  BY c.id, my_rs.last_read_message_id, my_rs.last_read_at,
-                 ors.last_read_message_id, ors.last_read_at,
                  mc.sort_key
       HAVING c.is_group = TRUE OR COUNT(cp2.user_id) > 1
        ORDER  BY mc.sort_key DESC`,
         [req.user.id]
       );
+      const dbMs = Date.now() - tLoad;
+      const tRedis = Date.now();
       const latestByConversation = await getConversationLastMessageMetaMapFromRedis(
         rows.map((row) => row.id),
       );
+      const redisMs = Date.now() - tRedis;
+      if (dbMs + redisMs > 300) {
+        logger.warn(
+          { conv_db_ms: dbMs, conv_redis_ms: redisMs, conv_count: rows.length },
+          'conversations list load slow',
+        );
+      }
       applyConversationLastMessageMetadata(rows, latestByConversation);
       sortConversationRowsByLatest(rows);
       const payload = { conversations: rows };
@@ -164,6 +178,7 @@ router.post('/',
   body('participants').optional().isArray({ min: 1 }),
   body('name').optional().isString(),
   async (req, res, next) => {
+    const tRouteStart = Date.now();
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
@@ -175,7 +190,9 @@ router.post('/',
 
       // Resolve participants using a read query BEFORE acquiring a transaction
       // client — saves ~10-30ms of pool acquisition + BEGIN for the DM fast path.
+      const tResolve = Date.now();
       const resolvedParticipants = await resolveParticipantIds({ query: queryRead }, providedParticipants);
+      const resolveMs = Date.now() - tResolve;
       if (!resolvedParticipants) {
         return res.status(400).json({ error: 'One or more participants were not found' });
       }
@@ -201,14 +218,19 @@ router.post('/',
           const existing = await loadConversationWithParticipants({ query: queryRead }, cachedId);
           if (existing) {
             const pairIds = [req.user.id, otherId].filter(Boolean);
-            await runExistingDmSideEffects({ existingId: cachedId, pairIds });
+            scheduleConversationSideEffect('existing_dm', () =>
+              runExistingDmSideEffects({ existingId: cachedId, pairIds }),
+            );
             return res.json({ conversation: existing, created: false });
           }
           // Cache stale – fall through to transactional DB lookup.
         }
       }
 
+      const tAcquire = Date.now();
       client = await getClient();
+      const acquireMs = Date.now() - tAcquire;
+      const tTransaction = Date.now();
       await client.query('BEGIN');
 
       // Re-validate participants inside the transaction for group DMs (where
@@ -244,7 +266,9 @@ router.post('/',
           const existing = await loadConversationWithParticipants(client, existingId);
           await client.query('COMMIT');
           const pairIds = [req.user.id, otherId].filter(Boolean);
-          await runExistingDmSideEffects({ existingId, pairIds });
+          scheduleConversationSideEffect('existing_dm', () =>
+            runExistingDmSideEffects({ existingId, pairIds }),
+          );
           return res.json({ conversation: existing, created: false });
         }
       }
@@ -264,19 +288,39 @@ router.post('/',
       }
 
       const invitedUserIds = allIds.filter(id => id !== req.user.id);
+      const tHydrate = Date.now();
+      const conversation = await loadConversationWithParticipants(client, conv.id);
+      const hydrateMs = Date.now() - tHydrate;
       await client.query('COMMIT');
-      // Release the connection (and advisory lock) before the participant JOIN
-      // query so the pool slot is freed sooner.
       client.release();
       client = null;
-      const conversation = await loadConversationWithParticipants({ query }, conv.id);
-      await runCreatedConversationSideEffects({
-        conversation,
-        conversationId: conv.id,
-        allIds,
-        invitedUserIds,
-        invitedBy: req.user.id,
-      });
+      const transactionMs = Date.now() - tTransaction;
+      const totalMs = Date.now() - tRouteStart;
+      if (totalMs > 300) {
+        logger.warn(
+          {
+            conversation_create_slow: true,
+            requestId: req.id,
+            resolve_ms: resolveMs,
+            acquire_ms: acquireMs,
+            tx_ms: transactionMs,
+            hydrate_ms: hydrateMs,
+            participant_count: allIds.length,
+            is_group: isGroup,
+            total_ms: totalMs,
+          },
+          'conversation create slow',
+        );
+      }
+      scheduleConversationSideEffect('created_conversation', () =>
+        runCreatedConversationSideEffects({
+          conversation,
+          conversationId: conv.id,
+          allIds,
+          invitedUserIds,
+          invitedBy: req.user.id,
+        }),
+      );
 
       res.status(201).json({ conversation: conversation || conv, created: true });
     } catch (err) {
@@ -301,7 +345,9 @@ router.post('/',
               );
             if (existingId) {
               const existing = await loadConversationWithParticipants(recoveryClient, existingId);
-              await runExistingDmSideEffects({ existingId, pairIds: directPairMemberIds });
+              scheduleConversationSideEffect('existing_dm_recovery', () =>
+                runExistingDmSideEffects({ existingId, pairIds: directPairMemberIds }),
+              );
               return res.json({ conversation: existing, created: false });
             }
           } finally {
@@ -321,6 +367,10 @@ router.get('/:id', async (req, res, next) => {
   try {
     const { rows } = await queryRead(
       `SELECT ${CONVERSATION_FIELDS},
+              my_rs.last_read_message_id AS my_last_read_message_id,
+              my_rs.last_read_at AS my_last_read_at,
+              other_rs.last_read_message_id AS other_last_read_message_id,
+              other_rs.last_read_at AS other_last_read_at,
               json_agg(json_build_object('id',u.id,'username',u.username,'displayName',u.display_name))
                 AS participants
        FROM conversations c
@@ -330,8 +380,28 @@ router.get('/:id', async (req, res, next) => {
        JOIN conversation_participants cp ON cp.conversation_id = c.id
                                         AND cp.left_at IS NULL
        JOIN users u ON u.id = cp.user_id
+       LEFT JOIN read_states my_rs
+              ON my_rs.conversation_id = c.id
+             AND my_rs.user_id = $2
+       LEFT JOIN LATERAL (
+         SELECT rs.last_read_message_id, rs.last_read_at
+         FROM read_states rs
+         WHERE rs.conversation_id = c.id
+           AND rs.user_id <> $2
+           AND EXISTS (
+             SELECT 1
+             FROM conversation_participants cp_other
+             WHERE cp_other.conversation_id = rs.conversation_id
+               AND cp_other.user_id = rs.user_id
+               AND cp_other.left_at IS NULL
+           )
+         ORDER BY rs.last_read_at DESC NULLS LAST
+         LIMIT 1
+       ) other_rs ON TRUE
        WHERE c.id = $1
-       GROUP BY c.id`,
+       GROUP BY c.id,
+                my_rs.last_read_message_id, my_rs.last_read_at,
+                other_rs.last_read_message_id, other_rs.last_read_at`,
       [req.params.id, req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
@@ -473,23 +543,6 @@ async function addParticipantsHandler(req, res, next) {
       : currentParticipantIds;
 
     await client.query('COMMIT');
-    if (participantIdsToAdd.length > 0) {
-      await Promise.allSettled([
-        invalidateConversationFanoutTargetsCache(req.params.id),
-        presenceService.invalidatePresenceFanoutTargetsBulk(activeParticipantIds),
-        invalidateWsBootstrapCaches(participantIdsToAdd),
-        // Invalidate conversation list cache for newly added AND existing
-        // participants so everyone sees the updated participant list immediately.
-        invalidateConversationsListCaches([...participantIdsToAdd, ...currentParticipantIds]),
-      ]);
-    }
-
-    await publishGroupDmJoinMessagesIfAny({
-      joinedGroupMessages,
-      conversationId: req.params.id,
-      activeParticipantIds,
-    });
-
     const sharedEventData = {
       conversation,
       conversationId: req.params.id,
@@ -497,11 +550,30 @@ async function addParticipantsHandler(req, res, next) {
       invitedBy: req.user.id,
     };
 
-    await publishGroupDmInviteSideEffects({
-      conversationId: req.params.id,
-      currentParticipantIds,
-      participantIdsToAdd,
-      sharedEventData,
+    scheduleConversationSideEffect('conversation_invite', async () => {
+      if (participantIdsToAdd.length > 0) {
+        await Promise.allSettled([
+          invalidateConversationFanoutTargetsCache(req.params.id),
+          presenceService.invalidatePresenceFanoutTargetsBulk(activeParticipantIds),
+          invalidateWsBootstrapCaches(participantIdsToAdd),
+          // Invalidate conversation list cache for newly added AND existing
+          // participants so everyone sees the updated participant list shortly after the durable write.
+          invalidateConversationsListCaches([...participantIdsToAdd, ...currentParticipantIds]),
+        ]);
+      }
+
+      await publishGroupDmJoinMessagesIfAny({
+        joinedGroupMessages,
+        conversationId: req.params.id,
+        activeParticipantIds,
+      });
+
+      await publishGroupDmInviteSideEffects({
+        conversationId: req.params.id,
+        currentParticipantIds,
+        participantIdsToAdd,
+        sharedEventData,
+      });
     });
 
     res.json({ conversation, addedParticipantIds: participantIdsToAdd });

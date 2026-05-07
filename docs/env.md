@@ -301,7 +301,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | **Search (Postgres FTS)** | |
 | `SEARCH_STATEMENT_TIMEOUT_MS` | `SET LOCAL statement_timeout` (ms) for each search transaction. Parsed value is **clamped to 1500–2000 ms** in code (`search/client.ts`) regardless of higher env values. |
 | `SEARCH_MAX_LIMIT`, `SEARCH_MAX_OFFSET` | Cap `limit` (default **50**, max **100**) and `offset` (default **500**, max **2000**) on `GET /search` (`search/helpers.ts`). |
-| `SEARCH_USE_READ_REPLICA` | When **`true`**, search runs inside **`BEGIN READ ONLY`** on **`PG_READ_REPLICA_URL`** (same pool as `queryRead`). |
+| `SEARCH_USE_READ_REPLICA`, `PG_SEARCH_READ_POOL_MAX`, `SEARCH_RECHECK_USE_READ_REPLICA` | When **`SEARCH_USE_READ_REPLICA=true`**, search has a dedicated read-replica pool on **`PG_READ_REPLICA_URL`**. That pool sets `statement_timeout`, `work_mem=32MB`, and `max_parallel_workers_per_gather=0` at connection startup so search does not mutate the shared `queryRead()` replica session. `PG_SEARCH_READ_POOL_MAX` defaults to **4** per worker. Meili candidate rechecks use primary by default for lower tail latency; set **`SEARCH_RECHECK_USE_READ_REPLICA=true`** only when the replica is proven stable for this tiny recheck query. |
 | `SEARCH_FTS_RECENT_CANDIDATES_LIMIT` | Caps FTS candidate rows in the hot path (default **800**). |
 | `STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT`, `STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT` | Aliases for the bounded literal-rescue scan (default **1500**, clamp **1000–2000**). |
 | `STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT_DEEP`, `SEARCH_LITERAL_RECENT_CANDIDATES_LIMIT_DEEP` | Deeper literal scan cap (default **3000**, clamp **2000–4000**). |

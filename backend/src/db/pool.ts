@@ -224,7 +224,16 @@ pool.on('error', (err) => {
 const READ_REPLICA_URL = process.env.PG_READ_REPLICA_URL || '';
 const READ_POOL_MAX = parseInt(process.env.PG_READ_POOL_MAX || '15', 10);
 const READ_QUERY_TIMEOUT_MS = parseInt(process.env.PG_READ_QUERY_TIMEOUT_MS || '0', 10);
+const SEARCH_READ_POOL_MAX = parseInt(
+  process.env.PG_SEARCH_READ_POOL_MAX || '4',
+  10,
+);
+const SEARCH_STATEMENT_TIMEOUT_MS = Math.min(
+  2000,
+  Math.max(1500, parseInt(process.env.SEARCH_STATEMENT_TIMEOUT_MS || '2000', 10) || 2000),
+);
 let readPool = null;
+let searchReadPool = null;
 if (READ_REPLICA_URL) {
   readPool = new Pool({
     connectionString: READ_REPLICA_URL,
@@ -241,6 +250,27 @@ if (READ_REPLICA_URL) {
     logger.error({ err }, 'pg read-replica pool background client error');
   });
   logger.info('PG_READ_REPLICA_URL set — queryRead() enabled for eligible SELECTs');
+
+  searchReadPool = new Pool({
+    connectionString: READ_REPLICA_URL,
+    max: Number.isFinite(SEARCH_READ_POOL_MAX) && SEARCH_READ_POOL_MAX > 0 ? SEARCH_READ_POOL_MAX : 4,
+    connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
+    idleTimeoutMillis: IDLE_TIMEOUT_MS,
+    query_timeout: SEARCH_STATEMENT_TIMEOUT_MS + 250,
+    keepAlive: false,
+    application_name: `${APPLICATION_NAME}-search-read`,
+    options: `-c statement_timeout=${SEARCH_STATEMENT_TIMEOUT_MS} -c work_mem=32MB -c max_parallel_workers_per_gather=0`,
+  });
+  searchReadPool.on('error', (err) => {
+    logger.error({ err }, 'pg search read-replica pool background client error');
+  });
+  logger.info(
+    {
+      statementTimeoutMs: SEARCH_STATEMENT_TIMEOUT_MS,
+      max: Number.isFinite(SEARCH_READ_POOL_MAX) && SEARCH_READ_POOL_MAX > 0 ? SEARCH_READ_POOL_MAX : 4,
+    },
+    'PG_READ_REPLICA_URL set — dedicated search read pool enabled',
+  );
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -559,6 +589,7 @@ async function withTransaction(callback, opts?: { onCheckout?: (acquireMs: numbe
 module.exports = {
   pool,
   readPool,
+  searchReadPool,
   query,
   queryRead,
   getClient,

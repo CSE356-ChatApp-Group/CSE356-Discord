@@ -1366,6 +1366,33 @@ describe('search filters', () => {
     expect(requestedPath).not.toContain('channelId=ch-1');
   });
 
+  it('hydrates active conversation read-marker detail on selection', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/conversations/conv-1') {
+        return Promise.resolve({
+          conversation: {
+            id: 'conv-1',
+            name: 'DM',
+            other_last_read_message_id: 'msg-other',
+            otherLastReadMessageId: 'msg-other',
+          },
+        });
+      }
+      throw new Error(`Unexpected GET ${path}`);
+    });
+
+    useChatStore.setState({
+      conversations: [{ id: 'conv-1', name: 'DM', my_last_read_message_id: 'msg-1' }],
+      messages: { 'conv-1': [{ id: 'msg-1', conversation_id: 'conv-1' }] },
+      messagePagination: { 'conv-1': { hasOlder: false, hasNewer: false } },
+    } as any);
+
+    await useChatStore.getState().selectConversation({ id: 'conv-1', name: 'DM' } as any);
+
+    expect(apiGet).toHaveBeenCalledWith('/conversations/conv-1');
+    expect(useChatStore.getState().activeConv?.other_last_read_message_id).toBe('msg-other');
+  });
+
   it('includes a single-character text query instead of dropping it in favor of filters', async () => {
     apiGet.mockResolvedValue({ hits: [] });
 

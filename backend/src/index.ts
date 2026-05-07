@@ -14,7 +14,7 @@ const app = require("./app");
 const wsServer = require("./websocket/server");
 const { allowWsUpgrade } = require("./middleware/wsUpgradeLimiter");
 const logger = require("./utils/logger");
-const { pool, readPool, query: dbQuery, poolStats } = require("./db/pool");
+const { pool, readPool, searchReadPool, query: dbQuery, poolStats } = require("./db/pool");
 const {
   startMessageIngestConsumerIfEnabled,
   stopMessageIngestConsumer,
@@ -156,6 +156,7 @@ async function shutdown(signal, err = null) {
   await Promise.allSettled([
     pool.end(),
     readPool ? readPool.end() : Promise.resolve(),
+    searchReadPool ? searchReadPool.end() : Promise.resolve(),
     redis.closeRedisConnections(),
   ]);
 

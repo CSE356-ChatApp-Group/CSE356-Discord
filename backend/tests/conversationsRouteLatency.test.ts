@@ -104,6 +104,14 @@ jest.mock('../src/messages/conversationsRouterRepo', () => ({
 const { getClient } = require('../src/db/pool') as {
   getClient: jest.Mock;
 };
+const {
+  publishConversationInviteNotifications,
+} = require('../src/messages/conversationsRouterPublish') as {
+  publishConversationInviteNotifications: jest.Mock;
+};
+const { publishUserFeedTargets } = require('../src/websocket/userFeed') as {
+  publishUserFeedTargets: jest.Mock;
+};
 
 function buildApp() {
   const router = require('../src/messages/conversationsRouter');
@@ -140,10 +148,9 @@ describe('conversations route side-effect latency', () => {
     console.info(`[latency-test] invite elapsedMs=${elapsedMs}`);
 
     expect(res.status).toBe(200);
-    // Old serial shape for this flow under the same delay budget:
-    // participant_added (120) + 2x join messages (240) + subscribe (120) + invite (120) ~= 600ms.
-    // Current path parallelizes join fanout and subscribe+invite.
-    expect(elapsedMs).toBeLessThan(420);
+    expect(elapsedMs).toBeLessThan(SIDE_EFFECT_DELAY_MS);
+    await sleep(SIDE_EFFECT_DELAY_MS * 3);
+    expect(publishConversationInviteNotifications).toHaveBeenCalled();
   });
 
   it('keeps conversation create latency bounded by parallel subscribe+invite', async () => {
@@ -179,8 +186,8 @@ describe('conversations route side-effect latency', () => {
     console.info(`[latency-test] create elapsedMs=${elapsedMs}`);
 
     expect(res.status).toBe(201);
-    // Old serial shape: subscribe (120) + invite (120) after invalidations; now these run in parallel.
-    expect(elapsedMs).toBeLessThan(220);
+    expect(elapsedMs).toBeLessThan(SIDE_EFFECT_DELAY_MS);
+    await sleep(SIDE_EFFECT_DELAY_MS * 2);
+    expect(publishUserFeedTargets).toHaveBeenCalled();
   });
 });
-

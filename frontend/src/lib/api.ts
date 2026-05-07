@@ -236,7 +236,9 @@ export const api = {
     // bypass this cache so repeated queries do not briefly reuse an empty result
     // after the underlying chat history changes.
     const skipRecentCache = path.startsWith('/messages') || path.startsWith('/search');
-    const skipInflightDedup = path.startsWith('/search');
+    // Search still bypasses the short response cache for freshness, but identical
+    // in-flight submits share one request so double-clicks cannot create duplicate load.
+    const skipInflightDedup = false;
 
     if (!skipRecentCache) {
       const cached = _recentGets.get(path);

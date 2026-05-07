@@ -6,6 +6,7 @@ const overload = require('../../utils/overload');
 const logger = require('../../utils/logger');
 const searchClient = require('../client');
 const { searchInstanceMeta, clampSearchPaging } = require('../helpers');
+const { searchHandlerOverheadMs } = require('../../utils/metrics/searchPerformance');
 
 module.exports = function registerGetRoutes(router) {
   router.get('/', async (req, res, next) => {
@@ -91,6 +92,7 @@ module.exports = function registerGetRoutes(router) {
       const { limit: clampedLimit, offset: clampedOffset } = clampSearchPaging(limit, offset);
       const adjustedLimit = overload.searchLimit(clampedLimit);
       const effectiveScope = communityId ? 'community' : conversationId ? 'conversation' : 'unknown';
+      const searchStartMs = Date.now();
       const results = await searchClient.search(normalizedQuery, {
         communityId,
         conversationId,
@@ -102,6 +104,7 @@ module.exports = function registerGetRoutes(router) {
         offset: clampedOffset,
         requestId: req.id,
       });
+      const searchClientMs = Date.now() - searchStartMs;
       if ((results?.hits?.length || 0) === 0) {
         logger.info(
           {
@@ -128,6 +131,10 @@ module.exports = function registerGetRoutes(router) {
       }
 
       const durationMs = Date.now() - startMs;
+      searchHandlerOverheadMs.observe(
+        { scope: effectiveScope, status: 'success' },
+        Math.max(0, durationMs - searchClientMs),
+      );
       const queryMeta = {
         queryLength: normalizedQuery.length,
         hasQueryText: Boolean(normalizedQuery),
@@ -161,6 +168,7 @@ module.exports = function registerGetRoutes(router) {
       res.json(results);
     } catch (err: any) {
       const durationMs = Date.now() - startMs;
+      searchHandlerOverheadMs.observe({ scope: 'unknown', status: 'error' }, durationMs);
       if (err?.statusCode === 403) {
         logger.debug({ durationMs }, 'search: access denied');
         return res.status(403).json({ error: 'Access denied' });
