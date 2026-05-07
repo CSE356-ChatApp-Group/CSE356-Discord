@@ -191,10 +191,7 @@ PY
         rewrite_nginx_upstream "${_ROLL_EXCL_CSV}" "remove :${roll_port} before roll" || {
           echo "ERROR: failed to remove :${roll_port} from nginx"; rollback_cutover; exit 1
         }
-        # Brief drain: nginx reload is graceful but old worker processes may still hold keepalive
-        # connections to the now-removed upstream.  2s is enough for those connections to drain
-        # before SIGTERM is sent.
-        sleep 2
+        nginx_drain_after_upstream_removal "before restarting :${roll_port}"
 
         # 3. Restart worker on new release (shared safe restart helper).
         if ! restart_worker_on_release "${roll_port}"; then

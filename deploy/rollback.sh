@@ -67,7 +67,7 @@ do_fast_rollback() {
         echo "ERROR: could not remove :${roll_port} from nginx during rollback"
         exit 1
       }
-      sleep 2  # drain: let nginx old-worker keepalive connections clear before SIGTERM
+      nginx_drain_after_upstream_removal "rollback before restarting :${roll_port}"
     fi
 
     # Point systemd dropin at rollback release and restart

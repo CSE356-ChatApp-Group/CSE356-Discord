@@ -237,6 +237,11 @@ ALL_WORKER_HEALTH_PASSES="${ALL_WORKER_HEALTH_PASSES:-3}"
 # 8s: matches WS_APP_KEEPALIVE_INTERVAL_MS so all clients reconnect within one keepalive cycle.
 # (Was 15s — reduced to shave ~20s off a 5-worker rolling deploy.)
 WORKER_SETTLE_SECS="${WORKER_SETTLE_SECS:-10}"
+# Nginx reloads are graceful: old worker processes can keep serving existing
+# keepalive clients with the previous upstream list until worker_shutdown_timeout.
+# Wait before stopping a removed worker so old nginx workers cannot route to a
+# port that has already been restarted.
+NGINX_RELOAD_DRAIN_SECS="${NGINX_RELOAD_DRAIN_SECS:-20}"
 # PgBouncer helper scripts: never scp to /tmp — root-owned leftovers from manual
 # `sudo` runs cause "Permission denied" for the deploy user (ubuntu).
 DEPLOY_REMOTE_HELPER_DIR="${DEPLOY_REMOTE_HELPER_DIR:-chatapp-deploy-helpers}"
@@ -916,6 +921,7 @@ if [ "${ROLLING_RESTART:-false}" = "true" ]; then
     echo "ERROR: failed to remove :${NEW_PORT} from nginx for rolling restart"
     exit 1
   }
+  nginx_drain_after_upstream_removal "before restarting first worker :${NEW_PORT}"
   NGINX_CANDIDATE_PIN_ACTIVE=1
   echo "✓ :${NEW_PORT} removed from nginx (${_ROLL_PRE_REMAINING_CSV} still serving)"
 fi

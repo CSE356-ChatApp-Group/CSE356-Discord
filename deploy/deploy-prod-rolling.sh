@@ -130,6 +130,26 @@ PY
   }
 }
 
+nginx_drain_after_upstream_removal() {
+  local context="${1:-before worker restart}"
+  local drain_secs="${NGINX_RELOAD_DRAIN_SECS:-20}"
+
+  if [ "${SKIP_INGRESS_POST_DEPLOY:-0}" = "1" ]; then
+    return 0
+  fi
+  if ! [[ "${drain_secs}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: NGINX_RELOAD_DRAIN_SECS must be an integer (got '${drain_secs}')"
+    return 1
+  fi
+  if [ "${drain_secs}" -le 0 ]; then
+    echo "  Nginx drain disabled (${context})"
+    return 0
+  fi
+
+  echo "  Draining nginx old workers ${drain_secs}s (${context})..."
+  sleep "${drain_secs}"
+}
+
 stop_chatapp_port() {
   local p="${1:?port required}"
   ssh_prod "sudo systemctl stop chatapp@${p} 2>/dev/null || true"
