@@ -113,6 +113,7 @@ describe('channelRealtimeFanout', () => {
   beforeEach(() => {
     process.env.CHANNEL_RECENT_ZSET_ENABLED = 'false';
     process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_DIRECT_ACTIVE_USER_MAX = '0';
   });
 
   afterEach(() => {
@@ -175,6 +176,7 @@ describe('channelRealtimeFanout', () => {
     delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
     delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
     delete process.env.CHANNEL_RECENT_ZSET_ENABLED;
+    delete process.env.CHANNEL_MESSAGE_DIRECT_ACTIVE_USER_MAX;
   });
 
   it('getChannelUserFanoutTargetKeys returns distinct user: keys from query rows', async () => {
