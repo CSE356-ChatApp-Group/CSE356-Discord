@@ -305,6 +305,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `SEARCH_FTS_RECENT_CANDIDATES_LIMIT` | Caps FTS candidate rows in the hot path (default **800**). |
 | `STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT`, `STOPWORD_LITERAL_RECENT_PER_CHANNEL_LIMIT` | Aliases for the bounded literal-rescue scan (default **1500**, clamp **1000–2000**). |
 | `STOPWORD_LITERAL_RECENT_CANDIDATES_LIMIT_DEEP`, `SEARCH_LITERAL_RECENT_CANDIDATES_LIMIT_DEEP` | Deeper literal scan cap (default **3000**, clamp **2000–4000**). |
+| `SEARCH_STRICT_LITERAL_RECENT_CANDIDATES_LIMIT` | Shallower Meili strict-token mismatch literal rescue cap (default **1000**, clamp **500–1500**). This rare path runs after Meili returns candidates that fail the API's exact all-term check, so it is intentionally cheaper than the full Postgres fallback. |
 | **Search (Meilisearch)** | |
 | `SEARCH_BACKEND` | Set to **`meili`** (with **`MEILI_ENABLED=true`**) to use Meilisearch for search (`meiliClient.ts`). |
 | `MEILI_ENABLED`, `MEILI_HOST`, `MEILI_MASTER_KEY`, `MEILI_INDEX_MESSAGES` | Meilisearch toggle, base URL, API key, index name. Meili is an exact candidate layer for this API: runtime searches use `matchingStrategy=all`, and `meili:setup-index` disables typo tolerance so Postgres strict recheck is not fed fuzzy/partial candidates that routinely fall back. |

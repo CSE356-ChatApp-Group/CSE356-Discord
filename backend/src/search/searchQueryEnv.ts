@@ -47,6 +47,21 @@ function literalRecentCandidateCapDeep(): number {
 }
 
 /**
+ * Meili strict-token mismatch fallback is a correctness rescue after Meili has
+ * already returned candidates that failed the exact all-term check. Keep it
+ * shallower than the full Postgres fallback so a rare rescue does not spend the
+ * whole search timeout budget under load.
+ */
+function literalStrictMismatchCandidateCap(): number {
+  const raw = parseInt(
+    process.env.SEARCH_STRICT_LITERAL_RECENT_CANDIDATES_LIMIT || '1000',
+    10,
+  );
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 1000;
+  return Math.min(Math.max(v, 500), 1500);
+}
+
+/**
  * Deeper bounded scan for FTS candidate generation when initial FTS returns
  * no strict hits. This reduces false empties from hot-path candidate windows
  * while still keeping the query bounded.
@@ -114,6 +129,7 @@ module.exports = {
   SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
+  literalStrictMismatchCandidateCap,
   ftsRecentCandidateCapDeep,
   getSearchStatementTimeoutMs,
   meiliFreshnessWindowMs,

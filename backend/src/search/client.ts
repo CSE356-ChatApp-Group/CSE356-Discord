@@ -58,6 +58,7 @@ const {
   SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
+  literalStrictMismatchCandidateCap,
   ftsRecentCandidateCapDeep,
   meiliFreshnessWindowMs,
   meiliFreshnessCandidateCap,
@@ -794,7 +795,7 @@ async function searchStrictLiteralFallback(
     trimmed,
     opts,
     strictTerms,
-    literalRecentCandidateCapDeep(),
+    literalStrictMismatchCandidateCap(),
   );
   const rows = await runSearchQuery(literalMeta.sql, literalMeta.params, { forcePrimary });
   throwIfScopeDenied(rows);
