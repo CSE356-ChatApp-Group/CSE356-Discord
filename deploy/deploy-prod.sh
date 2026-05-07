@@ -310,8 +310,15 @@ for ((idx=0; idx<CHATAPP_INSTANCES; idx++)); do
   TARGET_PORTS+=( "$((BASE_APP_PORT + idx))" )
 done
 
+WORKER_ONLY_HOST=0
+if [ "${SKIP_INGRESS_POST_DEPLOY:-0}" = "1" ]; then
+  WORKER_ONLY_HOST=1
+fi
+
 # First server port inside `upstream app` only (avoids accidental matches elsewhere and
 # duplicate-line collapse where a naive grep | head picked an arbitrary port).
+CURRENT_UPSTREAM_PORT=""
+if [ "${WORKER_ONLY_HOST}" -ne 1 ]; then
 CURRENT_UPSTREAM_PORT=$(ssh_prod "SITE='${CHATAPP_NGINX_SITE_PATH}' python3 <<'PY'
 import os
 import re
@@ -328,12 +335,13 @@ if not m:
 ports = re.findall(r'server\\s+(?:127\\.0\\.0\\.1|localhost):(\\d+)', m.group(1))
 print(ports[0] if ports else '')
 PY" || true)
+fi
 if [[ -z "${CURRENT_UPSTREAM_PORT}" ]]; then
   CURRENT_UPSTREAM_PORT="${TARGET_PORTS[0]}"
 fi
 
 if [ "${CHATAPP_INSTANCES}" -ge 3 ]; then
-  if ! printf '%s\n' "${TARGET_PORTS[@]}" | grep -qx "${CURRENT_UPSTREAM_PORT}"; then
+  if [ "${WORKER_ONLY_HOST}" -ne 1 ] && ! printf '%s\n' "${TARGET_PORTS[@]}" | grep -qx "${CURRENT_UPSTREAM_PORT}"; then
     echo "ERROR: Unexpected upstream port '${CURRENT_UPSTREAM_PORT}' in nginx config."
     exit 1
   fi
@@ -346,7 +354,10 @@ if [ "${CHATAPP_INSTANCES}" -ge 3 ]; then
   ROLLING_RESTART=true
 else
   ROLLING_RESTART=false
-  if [[ "${CURRENT_UPSTREAM_PORT}" == "4000" ]]; then
+  if [ "${WORKER_ONLY_HOST}" -eq 1 ]; then
+    OLD_PORT=4000
+    NEW_PORT=4001
+  elif [[ "${CURRENT_UPSTREAM_PORT}" == "4000" ]]; then
     OLD_PORT=4000
     NEW_PORT=4001
   elif [[ "${CURRENT_UPSTREAM_PORT}" == "4001" ]]; then
@@ -944,22 +955,26 @@ ssh_prod "/tmp/smoke-test.sh ${NEW_PORT} http://127.0.0.1:${NEW_PORT}" || {
 }
 echo "✓ Smoke tests passed"
 
-echo "8b. Candidate WebSocket message round-trip..."
-ssh_prod "
-  set -euo pipefail
-  RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
-  export API_CONTRACT_BASE_URL=http://127.0.0.1:$NEW_PORT/api/v1
-  export API_CONTRACT_WS_URL=ws://127.0.0.1:$NEW_PORT/ws
-  cp /tmp/candidate-ws-smoke.cjs \"\$RELEASE_PATH/backend/candidate-ws-smoke.cjs\"
-  cd \"\$RELEASE_PATH/backend\" && node ./candidate-ws-smoke.cjs
-  rm -f \"\$RELEASE_PATH/backend/candidate-ws-smoke.cjs\"
-" || {
-  echo "ERROR: Candidate WS smoke failed. Stopping candidate."
-  stop_chatapp_port "$NEW_PORT"
-  exit 1
-}
-echo "✓ Candidate WS smoke passed"
-deploy_log_phase "candidate WS smoke OK"
+if [ "${WORKER_ONLY_HOST}" -eq 1 ]; then
+  echo "8b. Candidate WebSocket message round-trip skipped (worker-only host)"
+else
+  echo "8b. Candidate WebSocket message round-trip..."
+  ssh_prod "
+    set -euo pipefail
+    RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
+    export API_CONTRACT_BASE_URL=http://127.0.0.1:$NEW_PORT/api/v1
+    export API_CONTRACT_WS_URL=ws://127.0.0.1:$NEW_PORT/ws
+    cp /tmp/candidate-ws-smoke.cjs \"\$RELEASE_PATH/backend/candidate-ws-smoke.cjs\"
+    cd \"\$RELEASE_PATH/backend\" && node ./candidate-ws-smoke.cjs
+    rm -f \"\$RELEASE_PATH/backend/candidate-ws-smoke.cjs\"
+  " || {
+    echo "ERROR: Candidate WS smoke failed. Stopping candidate."
+    stop_chatapp_port "$NEW_PORT"
+    exit 1
+  }
+  echo "✓ Candidate WS smoke passed"
+  deploy_log_phase "candidate WS smoke OK"
+fi
 
 # 8b.5. Rolling restart: re-add validated first-rolled worker to nginx before rolling the rest.
 # At this point NEW_PORT has passed HC + smoke on the new release (isolated from traffic).

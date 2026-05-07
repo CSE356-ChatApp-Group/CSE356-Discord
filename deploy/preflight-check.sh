@@ -112,14 +112,15 @@ echo "Checking remote runtime prerequisites, nginx config, and health route..."
 set -euo pipefail
 command -v node >/dev/null
 command -v npm >/dev/null
-command -v nginx >/dev/null
 [ -d /opt/chatapp/releases ]
 [ -d /opt/chatapp/shared ]
 [ -f /opt/chatapp/shared/.env ]
-[ -f "${CHATAPP_NGINX_SITE_PATH}" ]
-grep -q "/health" "${CHATAPP_NGINX_SITE_PATH}"
-SITE=${CHATAPP_NGINX_SITE_PATH}
-if ! sudo nginx -t 2>/tmp/chatapp_nginx_t.err; then
+if [[ "${SKIP_INGRESS_POST_DEPLOY:-0}" != "1" ]]; then
+  command -v nginx >/dev/null
+  [ -f "${CHATAPP_NGINX_SITE_PATH}" ]
+  grep -q "/health" "${CHATAPP_NGINX_SITE_PATH}"
+  SITE=${CHATAPP_NGINX_SITE_PATH}
+  if ! sudo nginx -t 2>/tmp/chatapp_nginx_t.err; then
   cat /tmp/chatapp_nginx_t.err >&2 || true
   # One-shot heal: standalone proxy_next_upstream_non_idempotent is invalid on stock nginx;
   # POST retry uses the non_idempotent keyword on proxy_next_upstream (idempotent sed).
@@ -216,6 +217,9 @@ PYEOF
     exit 1
   fi
   echo "Preflight: nginx config healed (reload happens during deploy)." >&2
+  fi
+else
+  echo "Preflight: skipping local nginx/site checks (worker-only host)." >&2
 fi
 REMOTE_BASE
   if [[ "$ENVIRONMENT" == "prod" ]]; then
