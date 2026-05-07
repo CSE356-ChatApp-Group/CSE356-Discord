@@ -12,9 +12,20 @@ function createRuntimeIntervals({
   const missThreshold = Math.max(1, Math.floor(wsHeartbeatMissedPingsBeforeKill));
 
   const HEARTBEAT_BATCH_SIZE = 50;
+  function snapshotClients() {
+    if (wss.clients && typeof wss.clients[Symbol.iterator] === "function") {
+      return [...wss.clients];
+    }
+
+    const clients = [];
+    if (wss.clients && typeof wss.clients.forEach === "function") {
+      wss.clients.forEach((ws) => clients.push(ws));
+    }
+    return clients;
+  }
 
   const heartbeatInterval = setInterval(() => {
-    const clients = [...wss.clients];
+    const clients = snapshotClients();
     let i = 0;
     function processBatch() {
       const end = Math.min(i + HEARTBEAT_BATCH_SIZE, clients.length);
@@ -36,7 +47,7 @@ function createRuntimeIntervals({
       }
       if (i < clients.length) setImmediate(processBatch);
     }
-    setImmediate(processBatch);
+    processBatch();
   }, wsHeartbeatIntervalMs);
 
   const presenceSweepInterval = setInterval(() => {
