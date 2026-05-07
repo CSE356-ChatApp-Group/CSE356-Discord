@@ -589,7 +589,7 @@ describe('Search – Meili path: Meili error falls back to Postgres', () => {
 });
 
 describe('Search – Meili path: Meili-first candidate recheck', () => {
-  it('returns Meili candidates after Postgres recheck even when strict substring terms do not all match', async () => {
+  it('falls back to Postgres when all Meili candidates fail the strict all-term check', async () => {
     const owner = await createAuthenticatedUser('meili-strict-candidate-owner');
     const community = await createCommunity(owner.accessToken);
     const channel = await createChannel(owner.accessToken, community.id);
@@ -615,8 +615,47 @@ describe('Search – Meili path: Meili-first candidate recheck', () => {
 
     expect(res.status).toBe(200);
     const ids = res.body.hits.map((h: any) => h.id);
-    expect(ids).toContain(candidate.id);
-    expect(mockIncFallbackTotal).not.toHaveBeenCalledWith('strict_token_mismatch');
+    expect(ids).not.toContain(candidate.id);
+    expect(res.body.hits.some((h: any) => String(h.content || '').includes('fullphrase'))).toBe(true);
+    expect(mockIncFallbackTotal).toHaveBeenCalledWith('strict_token_mismatch');
+  });
+
+  it('does not return a Meili candidate that misses a stop word from the original query', async () => {
+    const owner = await createAuthenticatedUser('meili-strict-stopword-owner');
+    const community = await createCommunity(owner.accessToken);
+    const channel = await createChannel(owner.accessToken, community.id);
+
+    const badCandidate = await sendMessage(
+      owner.accessToken,
+      channel.id,
+      'disconnect around half',
+    );
+    const goodFallback = await sendMessage(
+      owner.accessToken,
+      channel.id,
+      'disconnect with half',
+    );
+
+    setMeiliMode([badCandidate.id]);
+
+    const res = await request(app)
+      .get(
+        `/api/v1/search?q=${encodeURIComponent('disconnect with half')}&communityId=${community.id}`,
+      )
+      .set('Authorization', `Bearer ${owner.accessToken}`);
+
+    expect(res.status).toBe(200);
+    const ids = res.body.hits.map((h: any) => h.id);
+    expect(ids).not.toContain(badCandidate.id);
+    expect(ids).toContain(goodFallback.id);
+    expect(
+      res.body.hits.every((h: any) => (
+        String(h.content || '').toLowerCase().includes('disconnect') &&
+        String(h.content || '').toLowerCase().includes('with') &&
+        String(h.content || '').toLowerCase().includes('half')
+      )),
+    ).toBe(true);
+    expect(mockIncFallbackTotal).toHaveBeenCalledWith('strict_token_mismatch');
   });
 
   it('returns Meili-backed rows when every term appears in Postgres-rechecked content', async () => {

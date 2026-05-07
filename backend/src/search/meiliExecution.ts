@@ -10,8 +10,12 @@ function createMeiliSearchExecutor({
   buildFilters,
   SELECT_COLS,
   FROM_CLAUSE,
+  tokenizeStrictSearchTerms,
+  messageMatchesAllStrictTerms,
   buildResult,
   createMeiliFallbackError,
+  searchUseReadReplica,
+  searchOnce,
 }) {
   const {
     meiliRecheckDurationMs,
@@ -25,6 +29,7 @@ function createMeiliSearchExecutor({
     ids: string[],
     q: string,
     opts: Record<string, any>,
+    options: { pageInSql?: boolean } = {},
   ) {
     const params: any[] = [];
     const scope = buildScopedAccessParts(params, opts);
@@ -32,8 +37,11 @@ function createMeiliSearchExecutor({
     const filters = buildFilters(params, opts);
     const limit = Number(opts.limit) || 20;
     const offset = Number(opts.offset) || 0;
-    const limitPh = p(params, limit);
-    const offsetPh = p(params, offset);
+    const pageInSql = options.pageInSql !== false;
+    const sqlLimit = pageInSql ? limit : Math.max(limit, ids.length);
+    const sqlOffset = pageInSql ? offset : 0;
+    const limitPh = p(params, sqlLimit);
+    const offsetPh = p(params, sqlOffset);
 
     const sql = `
     WITH candidates AS (
@@ -106,34 +114,42 @@ function createMeiliSearchExecutor({
           throw err;
         }
 
-        const finalHits = rows.filter((r: any) => r && r.id);
+        const strictTerms = tokenizeStrictSearchTerms(q);
+        const recheckedRows = rows.filter((r: any) => r && r.id);
+        const finalHits = strictTerms.length > 0
+          ? recheckedRows.filter((r: any) => messageMatchesAllStrictTerms(r.content, strictTerms))
+          : recheckedRows;
         const totalMs = Date.now() - tAll;
-        searchFreshnessRescueWallDurationMs.observe(
-          { result: 'rescued' },
-          Date.now() - tFreshnessRescue,
-        );
 
-        logger.info(
-          {
-            search_trace: true,
-            requestId,
-            query: q,
-            resolved_scope: scopeLabel,
-            search_backend: 'meili',
-            meili_candidate_count: 0,
-            pg_fresh_candidate_count: freshnessIds.length,
-            postgres_rechecked_count: finalHits.length,
-            freshness_rescued: true,
-            final_hit_count: finalHits.length,
-            meili_ms: meiliMs,
-            postgres_recheck_ms: recheckMs,
-            fallback_to_postgres: false,
-            total_ms: totalMs,
-          },
-          'search_trace',
-        );
+        if (finalHits.length > 0) {
+          searchFreshnessRescueWallDurationMs.observe(
+            { result: 'rescued' },
+            Date.now() - tFreshnessRescue,
+          );
+          logger.info(
+            {
+              search_trace: true,
+              requestId,
+              query: q,
+              resolved_scope: scopeLabel,
+              search_backend: 'meili',
+              meili_candidate_count: 0,
+              pg_fresh_candidate_count: freshnessIds.length,
+              postgres_rechecked_count: recheckedRows.length,
+              freshness_rescued: true,
+              strict_term_count: strictTerms.length,
+              strict_pass_count: finalHits.length,
+              final_hit_count: finalHits.length,
+              meili_ms: meiliMs,
+              postgres_recheck_ms: recheckMs,
+              fallback_to_postgres: false,
+              total_ms: totalMs,
+            },
+            'search_trace',
+          );
 
-        return buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+          return buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+        }
       }
 
       const totalMs = Date.now() - tAll;
@@ -161,7 +177,7 @@ function createMeiliSearchExecutor({
     // Running freshness on every search added ~400ms to p95 with 0% cache hit rate;
     // the supplement benefit (catching edits before re-indexing) doesn't justify the cost.
     const tRecheck = Date.now();
-    const recheckMeta = buildRecheckFromCandidates(ids, q, opts);
+    const recheckMeta = buildRecheckFromCandidates(ids, q, opts, { pageInSql: false });
     const rows = await runMeiliRecheckQuery(recheckMeta.sql, recheckMeta.params);
     const recheckMs = Date.now() - tRecheck;
     meiliRecheckDurationMs.observe({ source: 'meili', backend: recheckBackendLabel() }, recheckMs);
@@ -172,11 +188,39 @@ function createMeiliSearchExecutor({
       throw err;
     }
 
-    // Meili is the full-text candidate generator.  Once it returns candidates,
-    // Postgres rechecks only authorization, deletion, latest content, and
-    // request filters; it must not re-interpret FTS hits as exact substrings.
-    const finalHits = rows.filter((r: any) => r && r.id);
+    // Meili is a candidate generator. Postgres has now fetched the latest
+    // content, so enforce the API's exact all-term contract before returning.
+    const recheckedRows = rows.filter((r: any) => r && r.id);
+    const strictTerms = tokenizeStrictSearchTerms(q);
+    const strictHits = strictTerms.length > 0
+      ? recheckedRows.filter((r: any) => messageMatchesAllStrictTerms(r.content, strictTerms))
+      : recheckedRows;
+    const finalHits = strictHits.slice(recheckMeta.offset, recheckMeta.offset + recheckMeta.limit);
     const totalMs = Date.now() - tAll;
+
+    if (ids.length > 0 && recheckedRows.length > 0 && strictHits.length === 0) {
+      meiliClient.incFallbackTotal('strict_token_mismatch');
+      logger.warn(
+        {
+          search_trace: true,
+          requestId,
+          query: q,
+          resolved_scope: scopeLabel,
+          search_backend: 'meili',
+          meili_candidate_count: ids.length,
+          postgres_rechecked_count: recheckedRows.length,
+          strict_term_count: strictTerms.length,
+          strict_pass_count: strictHits.length,
+          reason: 'meili_strict_token_mismatch_fallback_postgres',
+          meili_ms: meiliMs,
+          postgres_recheck_ms: recheckMs,
+          fallback_to_postgres: true,
+          total_ms: totalMs,
+        },
+        'search_trace',
+      );
+      return searchOnce(q, opts, !searchUseReadReplica);
+    }
 
     logger.info(
       {
@@ -186,7 +230,9 @@ function createMeiliSearchExecutor({
         resolved_scope: scopeLabel,
         search_backend: 'meili',
         meili_candidate_count: ids.length,
-        postgres_rechecked_count: finalHits.length,
+        postgres_rechecked_count: recheckedRows.length,
+        strict_term_count: strictTerms.length,
+        strict_pass_count: finalHits.length,
         final_hit_count: finalHits.length,
         meili_ms: meiliMs,
         postgres_recheck_ms: recheckMs,
