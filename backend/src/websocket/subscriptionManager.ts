@@ -3,7 +3,6 @@ function createSubscriptionManager({
   channelClients,
   communityClients,
   userIdFromTarget,
-  userFeedRedisChannelForUserId,
   communityFeedRedisChannelForCommunityId,
   ready,
   ensureRedisChannelSubscribed,
@@ -12,64 +11,12 @@ function createSubscriptionManager({
   markChannelRecentConnect,
   clearChannelBootstrapPending = null,
   invalidateRecentConnectTargetsCache,
-  wsUserfeedOwnedShardsGauge = null,
-  wsUserfeedShardSubscriptionTotal = null,
-  getWorkerLabels = null,
 }) {
   const pendingRedisReleaseTimers = new Map();
-  const localUserFeedShardRefCounts = new Map();
   const localCommunityFeedShardRefCounts = new Map();
 
   function isGraceEligibleRedisTopic(redisChannel) {
     return redisChannel.startsWith("channel:") || redisChannel.startsWith("conversation:");
-  }
-
-  function workerLabels() {
-    if (typeof getWorkerLabels === "function") {
-      return getWorkerLabels();
-    }
-    return { vm: "unknown", worker: "unknown" };
-  }
-
-  function updateOwnedShardGauge() {
-    const wl = workerLabels();
-    wsUserfeedOwnedShardsGauge?.set?.(
-      { vm: wl.vm, worker: wl.worker },
-      localUserFeedShardRefCounts.size,
-    );
-  }
-
-  function incrementOwnedUserfeedShard(redisChannel) {
-    const nextCount = (localUserFeedShardRefCounts.get(redisChannel) || 0) + 1;
-    const firstOwner = nextCount === 1;
-    localUserFeedShardRefCounts.set(redisChannel, nextCount);
-    if (firstOwner) {
-      const wl = workerLabels();
-      const shard = redisChannel.startsWith("userfeed:") ? redisChannel.slice("userfeed:".length) : "unknown";
-      wsUserfeedShardSubscriptionTotal?.inc?.(
-        { action: "acquired", shard, vm: wl.vm, worker: wl.worker },
-        1,
-      );
-    }
-    updateOwnedShardGauge();
-  }
-
-  function decrementOwnedUserfeedShard(redisChannel) {
-    const current = localUserFeedShardRefCounts.get(redisChannel) || 0;
-    if (current <= 1) {
-      localUserFeedShardRefCounts.delete(redisChannel);
-      const wl = workerLabels();
-      const shard = redisChannel.startsWith("userfeed:") ? redisChannel.slice("userfeed:".length) : "unknown";
-      wsUserfeedShardSubscriptionTotal?.inc?.(
-        { action: "released", shard, vm: wl.vm, worker: wl.worker },
-        1,
-      );
-      updateOwnedShardGauge();
-      return true;
-    }
-    localUserFeedShardRefCounts.set(redisChannel, current - 1);
-    updateOwnedShardGauge();
-    return false;
   }
 
   function incrementOwnedCommunityfeedShard(redisChannel) {
@@ -147,17 +94,22 @@ function createSubscriptionManager({
 
     const userId = userIdFromTarget(redisChannel);
     if (redisChannel.startsWith("user:") && userId) {
-      await ready();
-      const userFeedShardChannel = userFeedRedisChannelForUserId(userId);
-      clearPendingRedisRelease(userFeedShardChannel);
-      await ensureRedisChannelSubscribed(userFeedShardChannel);
-      if (ws.readyState !== 1 /* WebSocket.OPEN */) return;
       if (!localUserClients.has(userId)) {
         localUserClients.set(userId, new Set());
       }
       localUserClients.get(userId).add(ws);
       ws._subscriptions.add(redisChannel);
-      incrementOwnedUserfeedShard(userFeedShardChannel);
+      try {
+        await ready();
+      } catch (err) {
+        const clients = localUserClients.get(userId);
+        clients?.delete(ws);
+        if ((clients?.size || 0) === 0) {
+          localUserClients.delete(userId);
+        }
+        ws._subscriptions.delete(redisChannel);
+        throw err;
+      }
       return;
     }
 
@@ -191,7 +143,6 @@ function createSubscriptionManager({
   }
 
   async function unsubscribeClient(ws, redisChannel) {
-    if (!ws._subscriptions.has(redisChannel)) return;
     const userId = userIdFromTarget(redisChannel);
     if (redisChannel.startsWith("user:") && userId) {
       const clients = localUserClients.get(userId);
@@ -200,11 +151,6 @@ function createSubscriptionManager({
         localUserClients.delete(userId);
       }
       ws._subscriptions.delete(redisChannel);
-      const userFeedShardChannel = userFeedRedisChannelForUserId(userId);
-      const shouldRelease = decrementOwnedUserfeedShard(userFeedShardChannel);
-      if (shouldRelease) {
-        releaseRedisChannelSubscription(userFeedShardChannel);
-      }
       return;
     }
 
