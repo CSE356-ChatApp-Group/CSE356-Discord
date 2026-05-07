@@ -3,6 +3,9 @@
 # shellcheck shell=bash
 
 deploy_prod_run_nginx_cutover_and_worker_roll() {
+  if [ "${SKIP_INGRESS_POST_DEPLOY:-0}" = "1" ]; then
+    echo "8c-9. Skipping local nginx/kernel tuning on worker-only host"
+  else
   # 8c. Nginx access.log: append request_time + upstream_response_time (idempotent).
   echo "8c. Nginx access log timing fields (idempotent)..."
   chatapp_scp_to_prod "${SCRIPT_DIR}/nginx/patches/patch-nginx-access-log-timing.sh" "${PROD_USER}@${PROD_HOST}:/tmp/patch-nginx-access-log-timing.sh"
@@ -156,6 +159,7 @@ PY
   echo "9.076 Nginx: ensure localhost stub_status (:18080) for edge metrics..."
   patch_nginx_stub_status
   echo "✓ Nginx stub_status for exporter OK"
+  fi
 
   # 9b–9c. Multi-worker: roll all workers to this release, then verify parity.
   if [ "${CHATAPP_INSTANCES}" -ge 2 ]; then

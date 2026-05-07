@@ -95,12 +95,16 @@ VM2_INTERNAL="${VM2_INTERNAL:-${CHATAPP_INV_VM2_INTERNAL}}"
 VM3_INTERNAL="${VM3_INTERNAL:-${CHATAPP_INV_VM3_INTERNAL}}"
 WSVM1="${WSVM1:-${CHATAPP_INV_WSVM1_PUBLIC}}"
 WSVM2="${WSVM2:-${CHATAPP_INV_WSVM2_PUBLIC}}"
+WSVM3="${WSVM3:-${CHATAPP_INV_WSVM3_PUBLIC}}"
 WSVM1_INTERNAL="${WSVM1_INTERNAL:-${CHATAPP_INV_WSVM1_INTERNAL}}"
 WSVM2_INTERNAL="${WSVM2_INTERNAL:-${CHATAPP_INV_WSVM2_INTERNAL}}"
+WSVM3_INTERNAL="${WSVM3_INTERNAL:-${CHATAPP_INV_WSVM3_INTERNAL}}"
 WSVM1_USER="${WSVM1_USER:-${CHATAPP_INV_WSVM1_USER}}"
 WSVM2_USER="${WSVM2_USER:-${CHATAPP_INV_WSVM2_USER}}"
+WSVM3_USER="${WSVM3_USER:-${CHATAPP_INV_WSVM3_USER}}"
 WSVM1_WORKERS="${WSVM1_WORKERS:-${CHATAPP_INV_WSVM1_WORKERS}}"
 WSVM2_WORKERS="${WSVM2_WORKERS:-${CHATAPP_INV_WSVM2_WORKERS}}"
+WSVM3_WORKERS="${WSVM3_WORKERS:-${CHATAPP_INV_WSVM3_WORKERS}}"
 WS_TIER_ENABLED="${WS_TIER_ENABLED:-${CHATAPP_INV_WS_TIER_ENABLED}}"
 if [[ "${CHATAPP_INV_WS_TIER_ENABLED}" == "true" ]] && [[ "${WS_TIER_ENABLED}" != "true" ]] && [[ "${ALLOW_WS_TIER_DISABLE:-0}" != "1" ]]; then
   echo "ERROR: inventory enables the dedicated websocket tier, but WS_TIER_ENABLED=${WS_TIER_ENABLED}." >&2
@@ -118,9 +122,13 @@ VM3_PGBOUNCER_MAX_DB_CONNECTIONS="${VM3_PGBOUNCER_MAX_DB_CONNECTIONS:-145}"
 VM1_PG_POOL_MAX_PER_INSTANCE="${VM1_PG_POOL_MAX_PER_INSTANCE:-25}"
 VM2_PG_POOL_MAX_PER_INSTANCE="${VM2_PG_POOL_MAX_PER_INSTANCE:-25}"
 VM3_PG_POOL_MAX_PER_INSTANCE="${VM3_PG_POOL_MAX_PER_INSTANCE:-25}"
+WSVM_PGBOUNCER_POOL_SIZE="${WSVM_PGBOUNCER_POOL_SIZE:-${VM2_PGBOUNCER_POOL_SIZE}}"
+WSVM_PGBOUNCER_MAX_DB_CONNECTIONS="${WSVM_PGBOUNCER_MAX_DB_CONNECTIONS:-${VM2_PGBOUNCER_MAX_DB_CONNECTIONS}}"
+WSVM_PG_POOL_MAX_PER_INSTANCE="${WSVM_PG_POOL_MAX_PER_INSTANCE:-${VM2_PG_POOL_MAX_PER_INSTANCE}}"
 PGBOUNCER_MIN_POOL_SIZE="${PGBOUNCER_MIN_POOL_SIZE:-5}"
 PGBOUNCER_RESERVE_SIZE="${PGBOUNCER_RESERVE_SIZE:-5}"
 PROD_USER="${PROD_USER:-ubuntu}"
+DEFAULT_PROD_USER="${PROD_USER}"
 MONITORING_VM_HOST="${MONITORING_VM_HOST:-${CHATAPP_INV_MONITORING_PUBLIC}}"
 MONITORING_VM_USER="${MONITORING_VM_USER:-${PROD_USER}}"
 MONITORING_VM_SCRAPE_SOURCE="${MONITORING_VM_SCRAPE_SOURCE:-${CHATAPP_INV_MONITORING_SCRAPE_SOURCE}}"
@@ -135,22 +143,28 @@ VM1_WORKER_PORTS=(4000 4001 4002 4003)
 VMX_WORKER_PORTS=(4000 4001 4002 4003 4004 4005)
 
 build_ws_upstream_csv() {
+  local exclude_internal="${1:-}"
   local upstreams=()
   local p
-  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM1_INTERNAL}" ]] && [[ "${WSVM1_WORKERS}" -gt 0 ]]; then
+  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM1_INTERNAL}" ]] && [[ "${WSVM1_INTERNAL}" != "${exclude_internal}" ]] && [[ "${WSVM1_WORKERS}" -gt 0 ]]; then
     for ((p=4000; p<4000 + WSVM1_WORKERS; p++)); do
       upstreams+=("${WSVM1_INTERNAL}:${p}")
     done
   fi
-  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM2_INTERNAL}" ]] && [[ "${WSVM2_WORKERS}" -gt 0 ]]; then
+  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM2_INTERNAL}" ]] && [[ "${WSVM2_INTERNAL}" != "${exclude_internal}" ]] && [[ "${WSVM2_WORKERS}" -gt 0 ]]; then
     for ((p=4000; p<4000 + WSVM2_WORKERS; p++)); do
       upstreams+=("${WSVM2_INTERNAL}:${p}")
+    done
+  fi
+  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM3_INTERNAL}" ]] && [[ "${WSVM3_INTERNAL}" != "${exclude_internal}" ]] && [[ "${WSVM3_WORKERS}" -gt 0 ]]; then
+    for ((p=4000; p<4000 + WSVM3_WORKERS; p++)); do
+      upstreams+=("${WSVM3_INTERNAL}:${p}")
     done
   fi
   if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
     if [[ "${#upstreams[@]}" -eq 0 ]]; then
       echo "ERROR: websocket tier is enabled, but no dedicated websocket upstreams were built." >&2
-      echo "       Check WSVM1/WSVM2 private IPs and worker counts in deploy/inventory-defaults.sh or deploy env." >&2
+      echo "       Check WSVM1/WSVM2/WSVM3 private IPs and worker counts in deploy/inventory-defaults.sh or deploy env." >&2
       return 1
     fi
   elif [[ "${#upstreams[@]}" -eq 0 ]]; then
@@ -179,14 +193,34 @@ source "${SCRIPT_DIR}/deploy-common.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/deploy-monitoring-shared.sh"
 
+deploy_host_user() {
+  local host="${1:?host required}"
+  case "${host}" in
+    "${WSVM1}")
+      printf '%s\n' "${WSVM1_USER}"
+      ;;
+    "${WSVM2}")
+      printf '%s\n' "${WSVM2_USER}"
+      ;;
+    "${WSVM3}")
+      printf '%s\n' "${WSVM3_USER}"
+      ;;
+    *)
+      printf '%s\n' "${DEFAULT_PROD_USER}"
+      ;;
+  esac
+}
+
 ssh_vm() {
   local host="$1"; shift
+  local user
+  user="$(deploy_host_user "${host}")"
   # shellcheck disable=SC2086
   ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
       -o ControlMaster=auto -o ControlPath="/tmp/ssh-chatapp-multi-%r@${host}:%p" \
       -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
-      "${PROD_USER}@${host}" "$@"
+      "${user}@${host}" "$@"
 }
 
 monitoring_host_user() {
@@ -198,8 +232,11 @@ monitoring_host_user() {
     "${WSVM2}")
       printf '%s\n' "${WSVM2_USER}"
       ;;
+    "${WSVM3}")
+      printf '%s\n' "${WSVM3_USER}"
+      ;;
     *)
-      printf '%s\n' "${PROD_USER}"
+      printf '%s\n' "${DEFAULT_PROD_USER}"
       ;;
   esac
 }
@@ -375,6 +412,56 @@ restore_remote_vm_to_vm1_upstream() {
    echo "✓ ${vm_label} restored to VM1 nginx upstream"
 }
 
+drain_ws_vm_from_vm1_app_ws() {
+  local vm_label="$1"
+  local vm_internal="$2"
+  local full_csv
+  local remaining_ws_csv
+  if [[ "${WS_TIER_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+  full_csv="$(build_remote_upstream_csv)"
+  remaining_ws_csv="$(build_ws_upstream_csv "${vm_internal}")"
+  echo "=== Draining ${vm_label} websocket workers from VM1 nginx app_ws ==="
+  rewrite_vm1_nginx_upstream "${full_csv}" "${remaining_ws_csv}" "drain ${vm_label} from VM1 nginx websocket upstream"
+  ssh_vm "$VM1" "
+    set -euo pipefail
+    SITE=/etc/nginx/sites-enabled/chatapp
+    ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
+    if printf '%s\n' \"\$ws_block\" | grep -q 'server ${vm_internal}:'; then
+      echo 'ERROR: ${vm_label} websocket upstream entries still present after drain'
+      exit 1
+    fi
+  "
+  echo "✓ ${vm_label} removed from VM1 nginx websocket upstream"
+}
+
+restore_ws_vm_to_vm1_app_ws() {
+  local vm_label="$1"
+  local vm_internal="$2"
+  local worker_count="$3"
+  local full_csv
+  local full_ws_csv
+  if [[ "${WS_TIER_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+  full_csv="$(build_remote_upstream_csv)"
+  full_ws_csv="$(build_ws_upstream_csv)"
+  echo "=== Restoring ${vm_label} websocket workers to VM1 nginx app_ws ==="
+  rewrite_vm1_nginx_upstream "${full_csv}" "${full_ws_csv}" "restore ${vm_label} to VM1 nginx websocket upstream"
+  ssh_vm "$VM1" "
+    set -euo pipefail
+    SITE=/etc/nginx/sites-enabled/chatapp
+    ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
+    missing=0
+    for ((port=4000; port<4000 + ${worker_count}; port++)); do
+      printf '%s\n' \"\$ws_block\" | grep -q 'server ${vm_internal}:'\"\${port}\"' max_fails=0;' || missing=1
+    done
+    [ \"\$missing\" -eq 0 ]
+  "
+  echo "✓ ${vm_label} restored to VM1 nginx websocket upstream"
+}
+
 cleanup_on_exit() {
   set +e
   if [[ "${DEPLOY_SUCCESS}" -ne 1 ]]; then
@@ -480,8 +567,11 @@ run_vm_deploy() {
       local_ws_ports_csv="__none__"
     fi
   fi
+  local deploy_user
+  deploy_user="$(deploy_host_user "${host}")"
 
   PROD_HOST="$host" \
+    PROD_USER="${deploy_user}" \
     PROM_REDIS_HOST="${PROM_REDIS_HOST}" \
     EXTRA_UPSTREAM_SERVERS_CSV="${extra_upstream_csv}" \
     LOCAL_WS_PORTS_CSV="${local_ws_ports_csv}" \
@@ -503,8 +593,10 @@ run_vm_deploy() {
     WS_TIER_ENABLED="${WS_TIER_ENABLED}" \
     WSVM1_INTERNAL="${WSVM1_INTERNAL}" \
     WSVM2_INTERNAL="${WSVM2_INTERNAL}" \
+    WSVM3_INTERNAL="${WSVM3_INTERNAL}" \
     WSVM1_WORKERS="${WSVM1_WORKERS}" \
     WSVM2_WORKERS="${WSVM2_WORKERS}" \
+    WSVM3_WORKERS="${WSVM3_WORKERS}" \
     bash "${SCRIPT_DIR}/deploy-prod.sh" "${DEPLOY_ARGS[@]}"
 }
 
@@ -574,7 +666,9 @@ sync_monitoring_stack() {
     "${WSVM1_INTERNAL}" \
     "${WSVM1_WORKERS}" \
     "${WSVM2_INTERNAL}" \
-    "${WSVM2_WORKERS}"
+    "${WSVM2_WORKERS}" \
+    "${WSVM3_INTERNAL}" \
+    "${WSVM3_WORKERS}"
   # shellcheck disable=SC2086
   push_monitoring_artifact "${PROM_BUILD}" "/tmp/prometheus-host.yml.deploy"
   rm -f "${PROM_BUILD}"
@@ -643,7 +737,7 @@ sync_monitoring_stack() {
     fi
     WEBHOOK_BYTES=\$(sudo docker exec \"\$AM_NAME\" sh -lc 'wc -c < /alertmanager/secrets/discord_webhook_url 2>/dev/null || echo 0')
     [ \"\${WEBHOOK_BYTES:-0}\" -lt 32 ] && echo 'ERROR: Alertmanager webhook secret not wired' && exit 1
-    echo 'Monitoring VM sync complete - Prometheus scraping VM1(4)+VM2(6)+VM3(6)+WSVM1(6)+WSVM2(6) workers'
+    echo 'Monitoring VM sync complete - Prometheus scraping VM1(4)+VM2(6)+VM3(6)+WSVM1(6)+WSVM2(6)+WSVM3(6) workers'
   " || echo "WARN: Monitoring VM sync had errors (non-fatal - app deploy succeeded)"
   echo "✓ Monitoring stack updated on monitoring VM (${MONITORING_VM_HOST})"
   echo ""
@@ -766,6 +860,12 @@ sync_monitoring_post_steps() {
     sync_monitoring_remote_host "${WSVM2}" "0" "${ports_csv}" "wsvm2"
   fi
 
+  if [ -n "${WSVM3}" ] && [ -n "${WSVM3_INTERNAL}" ] && [ "${WSVM3_WORKERS}" -gt 0 ]; then
+    ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
+    ports_csv=$(IFS=,; echo "${ports[*]}")
+    sync_monitoring_remote_host "${WSVM3}" "0" "${ports_csv}" "wsvm3"
+  fi
+
   if [ "${PROM_REDIS_HOST}" != "${VM1_INTERNAL}" ]; then
     ssh_vm "$VM1" "sudo docker rm -f redis_exporter >/dev/null 2>&1 || true" || true
   fi
@@ -872,6 +972,62 @@ run_preflight_db_check() {
   echo ""
 }
 
+run_ws_ssh_preflight() {
+  if [[ "${WS_TIER_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+  echo "=== Phase -0.5: Pre-flight websocket VM SSH check ==="
+  local host label user
+  local attempts delay ssh_exit
+  attempts="${WS_SSH_PREFLIGHT_ATTEMPTS:-8}"
+  delay="${WS_SSH_PREFLIGHT_INITIAL_SLEEP:-5}"
+  for label in WSVM1 WSVM2 WSVM3; do
+    host=""
+    user=""
+    case "${label}" in
+      WSVM1)
+        host="${WSVM1}"
+        user="${WSVM1_USER}"
+        ;;
+      WSVM2)
+        host="${WSVM2}"
+        user="${WSVM2_USER}"
+        ;;
+      WSVM3)
+        host="${WSVM3}"
+        user="${WSVM3_USER}"
+        ;;
+    esac
+    if [[ -z "${host}" ]]; then
+      continue
+    fi
+    echo "Checking SSH connectivity to ${label} (${user}@${host})..."
+    ssh_exit=1
+    for attempt in $(seq 1 "${attempts}"); do
+      set +e
+      ssh_vm "${host}" "echo ok >/dev/null"
+      ssh_exit=$?
+      set -e
+      if [[ "${ssh_exit}" -eq 0 ]]; then
+        break
+      fi
+      if [[ "${attempt}" -lt "${attempts}" ]]; then
+        echo "SSH attempt ${attempt}/${attempts} to ${label} failed; retrying in ${delay}s..."
+        sleep "${delay}"
+      fi
+    done
+    if [[ "${ssh_exit}" -ne 0 ]]; then
+      echo "ERROR: unable to SSH to ${label} (${user}@${host}) after ${attempts} attempts." >&2
+      echo "       The dedicated websocket tier is enabled, so this deploy must be able to reach every WS host." >&2
+      echo "       A 'kex_exchange_identification' or 'connection closed by remote host' error usually means sshd/fail2ban/MaxStartups" >&2
+      echo "       is rejecting or throttling the runner, not just a bad key. Confirm root login is allowed and the CI key is authorized." >&2
+      exit 1
+    fi
+  done
+  echo "✓ Websocket VM SSH preflight passed"
+  echo ""
+}
+
 # Extra upstream servers to inject on every rewrite_nginx_upstream call during VM1 deploy.
 # INCREASED from 5 to 6 workers per VM2/VM3 to utilize idle CPU capacity on those VMs.
 # Validated: VM3 CPU idle ~76%, VM2 CPU idle ~48%. Adding 1 worker should use ~15% additional CPU.
@@ -905,21 +1061,44 @@ if [ "$DRY_RUN" -eq 1 ]; then
   fi
   echo "    Phase  1:  Drain VM2 from VM1 nginx, then deploy VM2 (6 workers: 4000-4005)"
   echo "    Phase  2:  Verify VM2 workers, then rejoin VM2 to VM1 nginx"
-  echo "    Phase  3:  Deploy to VM1 (4 workers: 4000-4003)"
-  if [[ "${EMERGENCY_MODE}" == "true" ]]; then
-    echo "    Phase  4:  [SKIPPED] nginx upstream re-injection check (--emergency)"
+  if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+    echo "    Phase  3:  Drain each websocket VM from app_ws, deploy it, verify it, and restore it"
+    echo "      3a: WSVM3"
+    echo "      3b: WSVM2"
+    echo "      3c: WSVM1"
+    echo "    Phase  4:  Deploy to VM1 (4 workers: 4000-4003)"
+    if [[ "${EMERGENCY_MODE}" == "true" ]]; then
+      echo "    Phase  5:  [SKIPPED] nginx upstream re-injection check (--emergency)"
+    else
+      echo "    Phase  5:  Verify nginx upstream entries"
+    fi
+    if [[ "${FAST_STABILIZE_MODE}" == "true" ]]; then
+      echo "    Phase  6:  [SKIPPED] monitoring sync (--fast-stabilize)"
+    else
+      echo "    Phase  6:  Sync monitoring stack"
+    fi
+    if [[ "${EMERGENCY_MODE}" == "true" ]]; then
+      echo "    Phase  7:  Emergency quick sanity check"
+    else
+      echo "    Phase  7:  Final health check (app workers + websocket workers)"
+    fi
   else
-    echo "    Phase  4:  Verify nginx upstream entries"
-  fi
-  if [[ "${FAST_STABILIZE_MODE}" == "true" ]]; then
-    echo "    Phase  5:  [SKIPPED] monitoring sync (--fast-stabilize)"
-  else
-    echo "    Phase  5:  Sync monitoring stack"
-  fi
-  if [[ "${EMERGENCY_MODE}" == "true" ]]; then
-    echo "    Phase  6:  Emergency quick sanity check"
-  else
-    echo "    Phase  6:  Final health check (all 16 workers)"
+    echo "    Phase  3:  Deploy to VM1 (4 workers: 4000-4003)"
+    if [[ "${EMERGENCY_MODE}" == "true" ]]; then
+      echo "    Phase  4:  [SKIPPED] nginx upstream re-injection check (--emergency)"
+    else
+      echo "    Phase  4:  Verify nginx upstream entries"
+    fi
+    if [[ "${FAST_STABILIZE_MODE}" == "true" ]]; then
+      echo "    Phase  5:  [SKIPPED] monitoring sync (--fast-stabilize)"
+    else
+      echo "    Phase  5:  Sync monitoring stack"
+    fi
+    if [[ "${EMERGENCY_MODE}" == "true" ]]; then
+      echo "    Phase  6:  Emergency quick sanity check"
+    else
+      echo "    Phase  6:  Final health check (all 16 workers)"
+    fi
   fi
   echo ""
   echo "Configuration:"
@@ -950,6 +1129,7 @@ fi
 # Set SKIP_DB_SSH_PREFLIGHT=1 only when the deploy host cannot SSH to the DB VM
 # (e.g. missing known_hosts in CI); default is always verify max_connections.
 run_preflight_db_check
+run_ws_ssh_preflight
 
 # ── Phase 0: Drain VM3 from VM1 nginx, then deploy VM3 ───────────────────────
 # VM3 has no shared services: a *failed* deploy does not take down Redis/PgBouncer on VM1.
@@ -999,25 +1179,68 @@ if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
 fi
 restore_remote_vm_to_vm1_upstream "VM2" "${VM2_INTERNAL}"
 
-# ── Phase 3: Deploy to VM1 ───────────────────────────────────────────────────
+# ── Phase 3: Deploy dedicated websocket VMs one at a time ───────────────────
+# Keep app_ws serving the remaining websocket hosts while each target rolls.
+if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+  echo ""
+  drain_ws_vm_from_vm1_app_ws "WSVM3" "${WSVM3_INTERNAL}"
+  phase_deploy_workers_vm \
+    "=== Phase 3a: Deploy to WSVM3 (dedicated websocket tier; drained from app_ws during rollout) ===" \
+    "$WSVM3" "$WSVM3_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE"
+  if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
+    "=== Phase 3a.5: Verify all 6 WSVM3 workers healthy ===" \
+    "$WSVM3" "WSVM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
+    echo "ERROR: One or more WSVM3 workers unhealthy — aborting before touching WSVM2/WSVM1/VM1."
+    exit 1
+  fi
+  restore_ws_vm_to_vm1_app_ws "WSVM3" "${WSVM3_INTERNAL}" "${WSVM3_WORKERS}"
+
+  echo ""
+  drain_ws_vm_from_vm1_app_ws "WSVM2" "${WSVM2_INTERNAL}"
+  phase_deploy_workers_vm \
+    "=== Phase 3b: Deploy to WSVM2 (dedicated websocket tier; drained from app_ws during rollout) ===" \
+    "$WSVM2" "$WSVM2_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE"
+  if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
+    "=== Phase 3b.5: Verify all 6 WSVM2 workers healthy ===" \
+    "$WSVM2" "WSVM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
+    echo "ERROR: One or more WSVM2 workers unhealthy — aborting before touching WSVM1/VM1."
+    exit 1
+  fi
+  restore_ws_vm_to_vm1_app_ws "WSVM2" "${WSVM2_INTERNAL}" "${WSVM2_WORKERS}"
+
+  echo ""
+  drain_ws_vm_from_vm1_app_ws "WSVM1" "${WSVM1_INTERNAL}"
+  phase_deploy_workers_vm \
+    "=== Phase 3c: Deploy to WSVM1 (dedicated websocket tier; drained from app_ws during rollout) ===" \
+    "$WSVM1" "$WSVM1_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE"
+  if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
+    "=== Phase 3c.5: Verify all 6 WSVM1 workers healthy ===" \
+    "$WSVM1" "WSVM1" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
+    echo "ERROR: One or more WSVM1 workers unhealthy — aborting before touching VM1."
+    exit 1
+  fi
+  restore_ws_vm_to_vm1_app_ws "WSVM1" "${WSVM1_INTERNAL}" "${WSVM1_WORKERS}"
+fi
+
+# ── Phase 4: Deploy to VM1 ───────────────────────────────────────────────────
 # Pass EXTRA_UPSTREAM_SERVERS_CSV so rewrite_nginx_upstream preserves VM2/VM3 entries throughout
 # the rolling restart.  The single-host upstream parity gate is skipped here because
 # VM1 nginx intentionally contains remote HTTP peers and dedicated websocket peers;
-# same-release/all-worker health plus Phase 4 and the prod nginx audit validate topology.
-# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 5).
+# same-release/all-worker health plus Phase 5 and the prod nginx audit validate topology.
+# SKIP_MONITORING_SYNC=1: monitoring is handled once after all VMs are up (Phase 6).
 echo ""
 phase_deploy_workers_vm \
-  "=== Phase 3: Deploy to VM1 (PgBouncer/MinIO/nginx) ===" \
+  "=== Phase 4: Deploy to VM1 (PgBouncer/MinIO/nginx) ===" \
   "$VM1" "127.0.0.1" "$VM1_PGBOUNCER_POOL_SIZE" "$VM1_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM1_PG_POOL_MAX_PER_INSTANCE" "$EXTRA_UPSTREAM_CSV"
 
-# ── Phase 4: Ensure VM2+VM3 upstream entries survived the VM1 deploy ─────────
+# ── Phase 5: Ensure VM2+VM3 upstream entries survived the VM1 deploy ─────────
 # rewrite_nginx_upstream now preserves EXTRA_UPSTREAM_SERVERS_CSV entries, so this
 # is a belt-and-suspenders check.  If entries are missing, re-inject with Python.
 echo ""
 if [[ "${EMERGENCY_MODE}" == "true" ]]; then
-  echo "=== Phase 4: Upstream re-injection check skipped (--emergency) ==="
+  echo "=== Phase 5: Upstream re-injection check skipped (--emergency) ==="
 else
-  echo "=== Phase 4: Verify / re-inject VM2+VM3 upstream entries ==="
+  echo "=== Phase 5: Verify / re-inject VM2+VM3 upstream entries ==="
   ssh_vm "$VM1" "
   set -euo pipefail
   SITE=/etc/nginx/sites-enabled/chatapp
@@ -1111,35 +1334,43 @@ PY
 "
 fi
 
-# ── Phase 5: Combined monitoring sync — rendered once for all three VMs ──────
-# Runs after all app deploys succeed so Prometheus scrapes the correct worker
-# list for VM1 (4 workers), VM2 (6 workers), and VM3 (6 workers).
+# ── Phase 6: Combined monitoring sync — rendered once for all app + ws VMs ───
+# Runs after all deploys succeed so Prometheus scrapes the correct worker list.
 echo ""
 if [[ "${FAST_STABILIZE_MODE}" == "true" ]]; then
-  echo "=== Phase 5: Monitoring sync skipped (--fast-stabilize) ==="
+  echo "=== Phase 6: Monitoring sync skipped (--fast-stabilize) ==="
   echo "Run full deploy script without --fast-stabilize once incident is stable."
 else
   sync_monitoring_stack
   sync_monitoring_post_steps
 fi
 
-# ── Phase 6: Final health check — all 16 workers across all VMs ──────────────
+# ── Phase 7: Final health check — all app/ws workers across all VMs ──────────
 echo ""
 overall_ok=1
 if [[ "${EMERGENCY_MODE}" == "true" ]]; then
   emergency_quick_final_check || overall_ok=0
 else
-  echo "=== Phase 6: Final health check — all 16 workers (4 VM1 + 6 VM2 + 6 VM3) ==="
+  echo "=== Phase 7: Final health check — app tier + websocket tier ==="
   verify_and_heal_vm_workers "$VM1" "VM1" "$(IFS=,; echo "${VM1_WORKER_PORTS[*]}")" || overall_ok=0
   verify_and_heal_vm_workers "$VM2" "VM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" || overall_ok=0
   verify_and_heal_vm_workers "$VM3" "VM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" || overall_ok=0
+  if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+    verify_and_heal_vm_workers "$WSVM1" "WSVM1" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" || overall_ok=0
+    verify_and_heal_vm_workers "$WSVM2" "WSVM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" || overall_ok=0
+    verify_and_heal_vm_workers "$WSVM3" "WSVM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" || overall_ok=0
+  fi
 fi
 
 echo ""
 if [ "$overall_ok" -eq 1 ]; then
   DEPLOY_SUCCESS=1
   echo "======================================================================"
-  echo "=== Deploy complete: ${SHA:0:12} live on all three VMs          ==="
+  if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+    echo "=== Deploy complete: ${SHA:0:12} live on app + websocket VMs   ==="
+  else
+    echo "=== Deploy complete: ${SHA:0:12} live on all three VMs         ==="
+  fi
   echo "======================================================================"
 else
   echo "WARNING: One or more workers may be degraded - check output above."

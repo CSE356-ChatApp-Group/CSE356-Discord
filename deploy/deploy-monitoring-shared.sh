@@ -19,6 +19,8 @@
 #  13 wsvm1-workers (optional)
 #  14 wsvm2-host (optional)
 #  15 wsvm2-workers (optional)
+#  16 wsvm3-host (optional)
+#  17 wsvm3-workers (optional)
 deploy_render_prometheus_host_config() {
   local template_path="${1:?template path required}"
   local output_path="${2:?output path required}"
@@ -35,6 +37,8 @@ deploy_render_prometheus_host_config() {
   local wsvm1_workers="${13:-0}"
   local wsvm2_host="${14:-}"
   local wsvm2_workers="${15:-0}"
+  local wsvm3_host="${16:-}"
+  local wsvm3_workers="${17:-0}"
 
   local -a cmd
   cmd=(
@@ -58,6 +62,9 @@ deploy_render_prometheus_host_config() {
     if [ -n "${wsvm2_host}" ] && [ "${wsvm2_workers}" -gt 0 ]; then
       cmd+=(--wsvm2-host "${wsvm2_host}" --wsvm2-workers "${wsvm2_workers}")
     fi
+    if [ -n "${wsvm3_host}" ] && [ "${wsvm3_workers}" -gt 0 ]; then
+      cmd+=(--wsvm3-host "${wsvm3_host}" --wsvm3-workers "${wsvm3_workers}")
+    fi
   else
     cmd+=(--workers "${workers}")
   fi
@@ -79,9 +86,10 @@ deploy_render_prometheus_host_config() {
 deploy_monitoring_remote_compose_up_cmd() {
   local compose_file="${1:?compose file required}"
   local enable_edge="${2:-0}"
+  local compose_prefix='if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then sudo HOSTNAME_MACHINE=$(hostname) docker compose -f '"${compose_file}"'; else sudo HOSTNAME_MACHINE=$(hostname) docker-compose -f '"${compose_file}"'; fi'
   if [ "${enable_edge}" = "1" ]; then
-    echo "sudo HOSTNAME_MACHINE=$(hostname) docker compose -f ${compose_file} --profile edge up -d --remove-orphans node-exporter promtail nginx-exporter"
+    echo "${compose_prefix} --profile edge up -d --remove-orphans node-exporter promtail nginx-exporter"
   else
-    echo "sudo HOSTNAME_MACHINE=$(hostname) docker compose -f ${compose_file} up -d --remove-orphans node-exporter promtail"
+    echo "${compose_prefix} up -d --remove-orphans node-exporter promtail"
   fi
 }
