@@ -219,7 +219,12 @@ function createMeiliSearchExecutor({
         },
         'search_trace',
       );
-      return searchOnce(q, opts, !searchUseReadReplica);
+      // This rare path runs only after Meili returned candidates but the
+      // strict API contract needs a deeper Postgres pass, usually because the
+      // query contains stop words stripped from the Meili request. Do not send
+      // that follow-up to the read replica: replica timeouts here are surfaced
+      // by the Meili boundary as "busy" even though primary can often answer.
+      return searchOnce(q, opts, true);
     }
 
     logger.info(

@@ -17,10 +17,12 @@ describe('Meili execution strict all-term recheck', () => {
     candidateIds,
     recheckRows,
     searchOnceResult = { hits: [], offset: 0, limit: 20, estimatedTotalHits: 0, processingTimeMs: 0, query: '' },
+    searchUseReadReplica = false,
   }: {
     candidateIds: string[];
     recheckRows: any[];
     searchOnceResult?: any;
+    searchUseReadReplica?: boolean;
   }) {
     const meiliClient = {
       searchMessageCandidates: jest.fn().mockResolvedValue({
@@ -58,7 +60,7 @@ describe('Meili execution strict all-term recheck', () => {
         err.code = code;
         return err;
       },
-      searchUseReadReplica: false,
+      searchUseReadReplica,
       searchOnce,
     });
 
@@ -106,6 +108,50 @@ describe('Meili execution strict all-term recheck', () => {
     expect(searchOnce).toHaveBeenCalledWith(
       'disconnect with half',
       expect.objectContaining({ communityId: '00000000-0000-4000-8000-000000000005' }),
+      true,
+    );
+  });
+
+  it('forces the strict fallback to primary even when search normally uses a replica', async () => {
+    const candidateId = '00000000-0000-4000-8000-000000000021';
+    const fallbackResult = {
+      hits: [{ id: '00000000-0000-4000-8000-000000000022', content: 'beat because their' }],
+      offset: 0,
+      limit: 20,
+      estimatedTotalHits: 1,
+      processingTimeMs: 0,
+      query: 'beat because their',
+    };
+    const { executor, searchOnce } = makeExecutor({
+      candidateIds: [candidateId],
+      recheckRows: [
+        {
+          __scopeAccess: true,
+          id: candidateId,
+          content: 'beat around there',
+          authorId: '00000000-0000-4000-8000-000000000023',
+          authorDisplayName: 'A',
+          channelId: '00000000-0000-4000-8000-000000000024',
+          conversationId: null,
+          communityId: '00000000-0000-4000-8000-000000000025',
+          channelName: 'general',
+          createdAt: '2026-05-07T12:40:29.000Z',
+        },
+      ],
+      searchOnceResult: fallbackResult,
+      searchUseReadReplica: true,
+    });
+
+    await executor.searchWithMeiliBackend('beat because their', {
+      communityId: '00000000-0000-4000-8000-000000000025',
+      userId: '00000000-0000-4000-8000-000000000023',
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(searchOnce).toHaveBeenCalledWith(
+      'beat because their',
+      expect.objectContaining({ communityId: '00000000-0000-4000-8000-000000000025' }),
       true,
     );
   });
