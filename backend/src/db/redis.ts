@@ -140,6 +140,7 @@ function redisPubsubSubscribe(channel: string): Promise<unknown> {
   // but channel/conversation fanout still publishes on the direct topic.
   if (
     channel.startsWith('userfeed:')
+    || channel.startsWith('userfeed_worker:')
     || channel.startsWith('communityfeed:')
     || channel.startsWith('channel:')
     || channel.startsWith('conversation:')
@@ -154,6 +155,7 @@ function redisPubsubUnsubscribe(channel: string): void {
     redisSub.sunsubscribe(channel).catch(() => {});
   } else if (
     channel.startsWith('userfeed:')
+    || channel.startsWith('userfeed_worker:')
     || channel.startsWith('communityfeed:')
     || channel.startsWith('channel:')
     || channel.startsWith('conversation:')

@@ -25,7 +25,8 @@ const { getWorkerLabels } = require("./deliveryTrace");
 const {
   publishUserFeedTargets,
   isUserFeedEnvelope,
-  userFeedShardLabelForChannel,
+  isUserFeedWorkerChannel,
+  userFeedRouteLabelForChannel,
   userIdFromTarget,
 } = require("./userFeed");
 const {
@@ -380,11 +381,12 @@ function createRedisPubsubDelivery(ctx) {
     const userIds = Array.from(userIdsSet);
     const dedupeBatchAllowSet = new Set();
     if (!userIds.length) return;
-    const shard = userFeedShardLabelForChannel(channel);
+    const routeLabel = userFeedRouteLabelForChannel(channel);
+    const topicPrefix = isUserFeedWorkerChannel(channel) ? "userfeed_worker" : "userfeed";
     const wl = workerLabels();
-    wsPubsubMessagesTotal?.inc?.({ topic_prefix: "userfeed", shard, vm: wl.vm, worker: wl.worker });
-    wsUserfeedEnvelopeUsersTotal?.inc?.({ shard, vm: wl.vm, worker: wl.worker }, userIds.length);
-    observePubsubLagForPayload("userfeed", payload, pubsubReceiveMs);
+    wsPubsubMessagesTotal?.inc?.({ topic_prefix: topicPrefix, shard: routeLabel, vm: wl.vm, worker: wl.worker });
+    wsUserfeedEnvelopeUsersTotal?.inc?.({ shard: routeLabel, vm: wl.vm, worker: wl.worker }, userIds.length);
+    observePubsubLagForPayload(topicPrefix, payload, pubsubReceiveMs);
 
     let recipientCount = 0;
     for (const userId of userIds) {
@@ -393,10 +395,10 @@ function createRedisPubsubDelivery(ctx) {
     fanoutRecipientsHistogram.observe({ channel_type: "user" }, recipientCount);
     wsSocketSendTargetsBucket?.observe?.({ path: "userfeed" }, recipientCount);
     wsPubsubRecipientSlotsTotal?.inc?.(
-      { topic_prefix: "userfeed", shard, vm: wl.vm, worker: wl.worker },
+      { topic_prefix: topicPrefix, shard: routeLabel, vm: wl.vm, worker: wl.worker },
       recipientCount,
     );
-    wsUserfeedLocalRecipientsTotal?.inc?.({ shard, vm: wl.vm, worker: wl.worker }, recipientCount);
+    wsUserfeedLocalRecipientsTotal?.inc?.({ shard: routeLabel, vm: wl.vm, worker: wl.worker }, recipientCount);
 
     if (recipientCount === 0 && !logger.isLevelEnabled("debug")) return;
 
@@ -557,7 +559,7 @@ function createRedisPubsubDelivery(ctx) {
     }
 
     try {
-      if (USER_FEED_SHARD_CHANNEL_SET.has(channel)) {
+      if (USER_FEED_SHARD_CHANNEL_SET.has(channel) || isUserFeedWorkerChannel(channel)) {
         if (isUserFeedEnvelope(parsed)) {
           const payloadEvent = parsed?.payload?.event;
           if (typeof payloadEvent === "string" && payloadEvent.startsWith("message:")) {

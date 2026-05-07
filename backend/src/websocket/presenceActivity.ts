@@ -2,16 +2,33 @@ function createPresenceActivityHelpers({
   redis,
   connectionAliveKey,
   connectionActivityKey,
+  connectionOwnerKey = null,
+  currentWorkerOwnerId = null,
   CONNECTION_ALIVE_TTL_SECONDS,
   IDLE_TTL_SECONDS,
 }) {
+  function ownerId() {
+    return typeof currentWorkerOwnerId === "function" ? currentWorkerOwnerId() : null;
+  }
+
   async function markConnectionAlive(userId, connectionId) {
-    await redis.set(
+    const pipeline = redis.pipeline();
+    pipeline.set(
       connectionAliveKey(userId, connectionId),
       "1",
       "EX",
       CONNECTION_ALIVE_TTL_SECONDS,
     );
+    const workerOwner = ownerId();
+    if (connectionOwnerKey && workerOwner) {
+      pipeline.set(
+        connectionOwnerKey(userId, connectionId),
+        workerOwner,
+        "EX",
+        CONNECTION_ALIVE_TTL_SECONDS,
+      );
+    }
+    await pipeline.exec();
   }
 
   async function markConnectionActive(userId, connectionId) {
@@ -31,6 +48,15 @@ function createPresenceActivityHelpers({
       "EX",
       CONNECTION_ALIVE_TTL_SECONDS,
     );
+    const workerOwner = ownerId();
+    if (connectionOwnerKey && workerOwner) {
+      pipeline.set(
+        connectionOwnerKey(userId, connectionId),
+        workerOwner,
+        "EX",
+        CONNECTION_ALIVE_TTL_SECONDS,
+      );
+    }
     if (active) {
       pipeline.set(
         connectionActivityKey(userId, connectionId),

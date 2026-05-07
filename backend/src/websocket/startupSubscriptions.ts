@@ -13,6 +13,7 @@ function debugLog(msg) {
 function createStartupSubscriptionsLifecycle({
   ensureRedisChannelSubscribed,
   communityFeedShardChannels,
+  workerUserFeedChannel = null,
   logWsHotInfo,
 }) {
   let wsStartupPromise = null;
@@ -20,6 +21,9 @@ function createStartupSubscriptionsLifecycle({
 
   async function ensureShardSubscriptions() {
     const channels = [...communityFeedShardChannels];
+    if (workerUserFeedChannel) {
+      channels.unshift(workerUserFeedChannel);
+    }
     const total = channels.length;
     let completed = 0;
 
@@ -57,9 +61,10 @@ function createStartupSubscriptionsLifecycle({
     logWsHotInfo(
       () => ({
         communityfeedShards: communityFeedShardChannels.length,
+        workerUserFeedChannel,
         successful: completed,
       }),
-      "WS communityfeed shard subscriptions initialized",
+      "WS startup shard subscriptions initialized",
     );
   }
 

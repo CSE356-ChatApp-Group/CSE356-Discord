@@ -10,17 +10,33 @@ jest.mock('../src/websocket/fanout', () => {
   return { publish: pub, publishBatch: batch };
 });
 
+jest.mock('../src/db/redis', () => ({
+  pipeline: jest.fn(() => {
+    const ops: string[] = [];
+    return {
+      hkeys: jest.fn(function hkeys(this: any, key: string) {
+        ops.push(key);
+        return this;
+      }),
+      exec: jest.fn(async () => ops.map(() => [{}, []])),
+    };
+  }),
+}));
+
 const fanout = require('../src/websocket/fanout') as { publish: jest.Mock; publishBatch: jest.Mock };
+const redis = require('../src/db/redis') as { pipeline: jest.Mock };
 const {
   publishUserFeedTargets,
   runWithConcurrencyLimit,
   splitUserTargets,
   userFeedRedisChannelForUserId,
+  userFeedWorkerChannelForOwner,
 } = require('../src/websocket/userFeed') as {
   publishUserFeedTargets: (targets: string[], payload: Record<string, unknown>) => Promise<void>;
   runWithConcurrencyLimit: (jobs: Array<() => Promise<void>>, limit: number) => Promise<void>;
   splitUserTargets: (targets: string[]) => { userIds: string[]; passthroughTargets: string[] };
   userFeedRedisChannelForUserId: (userId: string) => string;
+  userFeedWorkerChannelForOwner: (ownerId: string) => string;
 };
 
 function pickUserIdsForDistinctShardChannels(minCount: number): string[] {
@@ -48,6 +64,17 @@ describe('userFeed', () => {
       for (const e of entries) {
         await fanout.publish(e.channel, e.payload);
       }
+    });
+    redis.pipeline.mockReset();
+    redis.pipeline.mockImplementation(() => {
+      const ops: string[] = [];
+      return {
+        hkeys: jest.fn(function hkeys(this: any, key: string) {
+          ops.push(key);
+          return this;
+        }),
+        exec: jest.fn(async () => ops.map(() => [{}, []])),
+      };
     });
   });
 
@@ -93,6 +120,38 @@ describe('userFeed', () => {
       expect(envelope.payload.data.id).toBe('m1');
     }
     expect(actualGroups).toEqual(expectedGroups);
+  });
+
+  it('publishUserFeedTargets prefers worker-owned channels and falls back to shard feeds', async () => {
+    redis.pipeline.mockImplementationOnce(() => {
+      const keys: string[] = [];
+      return {
+        hkeys: jest.fn(function hkeys(this: any, key: string) {
+          keys.push(key);
+          return this;
+        }),
+        exec: jest.fn(async () => keys.map((key) => {
+          if (key.includes('alpha')) return [{}, ['vm2:4001']];
+          if (key.includes('beta')) return [{}, ['vm2:4001', 'vm3:4004']];
+          return [{}, []];
+        })),
+      };
+    });
+
+    await publishUserFeedTargets(['user:alpha', 'user:beta', 'user:gamma'], {
+      event: 'message:created',
+      data: { id: 'm-worker' },
+    });
+
+    expect(fanout.publishBatch).toHaveBeenCalledTimes(1);
+    const batch = fanout.publishBatch.mock.calls[0][0] as Array<{
+      channel: string;
+      payload: { __wsRoute: { userIds: string[] } };
+    }>;
+    const groups = new Map(batch.map((entry) => [entry.channel, entry.payload.__wsRoute.userIds]));
+    expect(groups.get(userFeedWorkerChannelForOwner('vm2:4001'))).toEqual(['alpha', 'beta']);
+    expect(groups.get(userFeedWorkerChannelForOwner('vm3:4004'))).toEqual(['beta']);
+    expect(groups.get(userFeedRedisChannelForUserId('gamma'))).toEqual(['gamma']);
   });
 
   it('runWithConcurrencyLimit never exceeds the limit', async () => {

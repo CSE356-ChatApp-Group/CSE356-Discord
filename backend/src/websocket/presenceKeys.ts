@@ -14,6 +14,14 @@ function connectionAliveKey(userId, connectionId) {
   return `user:${userId}:connection:${connectionId}:alive`;
 }
 
+function connectionOwnerKey(userId, connectionId) {
+  return `user:${userId}:connection:${connectionId}:owner`;
+}
+
+function workerOwnerHashKey(userId) {
+  return `user:${userId}:worker_owners`;
+}
+
 function connectedUsersKey() {
   return "presence:connected_users";
 }
@@ -33,6 +41,8 @@ module.exports = {
   connectionStatusHashKey,
   connectionActivityKey,
   connectionAliveKey,
+  connectionOwnerKey,
+  workerOwnerHashKey,
   connectedUsersKey,
   recentDisconnectKey,
   reconnectWindowLabel,

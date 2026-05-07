@@ -1,5 +1,6 @@
 
 const fanout = require('./fanout');
+const redis = require('../db/redis');
 const {
   wsUserfeedPublishCallsTotal,
   wsUserfeedPublishTargetsTotal,
@@ -76,6 +77,64 @@ function userFeedShardLabelForChannel(channel) {
   return match ? match[1] : 'unknown';
 }
 
+function userFeedWorkerOwnerId(vm, worker) {
+  if (typeof vm !== 'string' || !vm || typeof worker !== 'string' || !worker) return null;
+  return `${vm}:${worker}`;
+}
+
+function userFeedWorkerChannelForOwner(ownerId) {
+  if (typeof ownerId !== 'string' || !ownerId) return null;
+  return `userfeed_worker:${ownerId}`;
+}
+
+function userFeedWorkerChannelForLabels(vm, worker) {
+  const ownerId = userFeedWorkerOwnerId(vm, worker);
+  return ownerId ? userFeedWorkerChannelForOwner(ownerId) : null;
+}
+
+function isUserFeedWorkerChannel(channel) {
+  return typeof channel === 'string' && channel.startsWith('userfeed_worker:');
+}
+
+function userFeedRouteLabelForChannel(channel) {
+  if (isUserFeedWorkerChannel(channel)) {
+    return channel.slice('userfeed_worker:'.length) || 'unknown';
+  }
+  return userFeedShardLabelForChannel(channel);
+}
+
+function workerOwnerHashKey(userId) {
+  return `user:${userId}:worker_owners`;
+}
+
+async function resolveWorkerOwnedUsers(userIds) {
+  const pipeline = redis.pipeline();
+  for (const userId of userIds) {
+    pipeline.hkeys(workerOwnerHashKey(userId));
+  }
+  const results = await pipeline.exec();
+  const byChannel = new Map();
+  const unmatched = [];
+
+  for (let i = 0; i < userIds.length; i += 1) {
+    const userId = userIds[i];
+    const rawOwners = Array.isArray(results?.[i]?.[1]) ? results[i][1] : [];
+    const owners = Array.from(new Set(rawOwners.filter((value) => typeof value === 'string' && value)));
+    if (!owners.length) {
+      unmatched.push(userId);
+      continue;
+    }
+    for (const ownerId of owners) {
+      const channel = userFeedWorkerChannelForOwner(ownerId);
+      if (!channel) continue;
+      if (!byChannel.has(channel)) byChannel.set(channel, []);
+      byChannel.get(channel).push(userId);
+    }
+  }
+
+  return { byChannel, unmatched };
+}
+
 function allUserFeedRedisChannels() {
   return Array.from(
     { length: USER_FEED_SHARD_COUNT },
@@ -121,8 +180,9 @@ async function publishUserFeedTargets(userTargets, payload) {
   const { userIds } = splitUserTargets(userTargets);
   if (!userIds.length) return;
 
-  const shardGroups = new Map();
-  for (const userId of userIds) {
+  const workerOwned = await resolveWorkerOwnedUsers(userIds);
+  const shardGroups = new Map(workerOwned.byChannel);
+  for (const userId of workerOwned.unmatched) {
     const shardChannel = userFeedRedisChannelForUserId(userId);
     if (!shardGroups.has(shardChannel)) shardGroups.set(shardChannel, []);
     shardGroups.get(shardChannel).push(userId);
@@ -134,7 +194,7 @@ async function publishUserFeedTargets(userTargets, payload) {
   }));
   const labels = getWorkerLabels();
   for (const [shardChannel, shardUserIds] of shardGroups.entries()) {
-    const shard = userFeedShardLabelForChannel(shardChannel);
+    const shard = userFeedRouteLabelForChannel(shardChannel);
     wsUserfeedPublishCallsTotal?.inc?.({ shard, vm: labels.vm, worker: labels.worker });
     wsUserfeedPublishTargetsTotal?.inc?.(
       { shard, vm: labels.vm, worker: labels.worker },
@@ -167,6 +227,11 @@ module.exports = {
   splitUserTargets,
   userFeedEnvelope,
   userFeedRedisChannelForUserId,
+  userFeedRouteLabelForChannel,
+  userFeedWorkerChannelForLabels,
+  userFeedWorkerChannelForOwner,
+  userFeedWorkerOwnerId,
+  isUserFeedWorkerChannel,
   userFeedShardLabelForChannel,
   userIdFromTarget,
 };

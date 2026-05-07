@@ -150,6 +150,7 @@ describe('channelRealtimeFanout', () => {
     pipelineSet = jest.fn();
     pipelineZadd = jest.fn();
     pipelineExpire = jest.fn();
+    const pipelineHkeys = jest.fn();
     const pipelineSismember = jest.fn();
     const pipelineZscore = jest.fn();
     pipelineExec = jest.fn(() => Promise.resolve([]));
@@ -159,6 +160,7 @@ describe('channelRealtimeFanout', () => {
       set: (...args: any[]) => { pipelineSet(...args); return pipelineObj; },
       zadd: (...args: any[]) => { pipelineZadd(...args); return pipelineObj; },
       expire: (...args: any[]) => { pipelineExpire(...args); return pipelineObj; },
+      hkeys: (...args: any[]) => { pipelineHkeys(...args); return pipelineObj; },
       zscore: (...args: any[]) => { pipelineZscore(...args); return pipelineObj; },
       sismember: (...args: any[]) => { pipelineSismember(...args); return pipelineObj; },
       exec: pipelineExec,

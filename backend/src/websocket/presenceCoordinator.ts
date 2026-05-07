@@ -6,10 +6,13 @@ function createPresenceCoordinator({
   connectionStatusHashKey,
   connectionActivityKey,
   connectionAliveKey,
+  connectionOwnerKey = null,
+  workerOwnerHashKey = null,
   connectedUsersKey,
   presenceSweeperDebounceMs,
   presenceDisconnectDebounceMs,
   connectionAliveKeyTtlSeconds,
+  currentWorkerOwnerId = null,
 }) {
   // Tracks the last time recomputeUserPresence ran for each user so the
   // reconcile sweeper can skip recently-computed slots.
@@ -26,7 +29,21 @@ function createPresenceCoordinator({
     }
   }
 
+  function ownerId() {
+    return typeof currentWorkerOwnerId === "function" ? currentWorkerOwnerId() : null;
+  }
+
+  async function decrementWorkerOwnerCount(userId, owner) {
+    if (!workerOwnerHashKey || typeof owner !== "string" || !owner) return;
+    const key = workerOwnerHashKey(userId);
+    const next = await redis.hincrby(key, owner, -1);
+    if (Number(next) <= 0) {
+      await redis.hdel(key, owner);
+    }
+  }
+
   async function upsertConnectionState(userId, connectionId, status) {
+    const workerOwner = ownerId();
     const multi = redis
       .multi()
       .sadd(connectionSetKey(userId), connectionId)
@@ -38,7 +55,26 @@ function createPresenceCoordinator({
     if (connectionAliveKeyTtlSeconds) {
       multi.set(connectionAliveKey(userId, connectionId), '1', 'EX', connectionAliveKeyTtlSeconds);
     }
-    await multi.exec();
+    let ownerSetResultIndex = -1;
+    if (connectionOwnerKey && workerOwner && connectionAliveKeyTtlSeconds) {
+      ownerSetResultIndex = 4;
+      multi.set(
+        connectionOwnerKey(userId, connectionId),
+        workerOwner,
+        'EX',
+        connectionAliveKeyTtlSeconds,
+        'NX',
+      );
+    }
+    const results = await multi.exec();
+    if (
+      workerOwnerHashKey
+      && workerOwner
+      && ownerSetResultIndex >= 0
+      && results?.[ownerSetResultIndex]?.[1] === 'OK'
+    ) {
+      await redis.hincrby(workerOwnerHashKey(userId), workerOwner, 1);
+    }
   }
 
   function resolveAggregateStatus(states) {
@@ -56,13 +92,22 @@ function createPresenceCoordinator({
   }
 
   async function removeConnection(userId, connectionId) {
-    await redis
+    const owner = connectionOwnerKey
+      ? await redis.get(connectionOwnerKey(userId, connectionId))
+      : null;
+    const multi = redis
       .multi()
       .srem(connectionSetKey(userId), connectionId)
       .hdel(connectionStatusHashKey(userId), connectionId)
       .del(connectionActivityKey(userId, connectionId))
-      .del(connectionAliveKey(userId, connectionId))
-      .exec();
+      .del(connectionAliveKey(userId, connectionId));
+    if (connectionOwnerKey) {
+      multi.del(connectionOwnerKey(userId, connectionId));
+    }
+    await multi.exec();
+    if (owner) {
+      await decrementWorkerOwnerCount(userId, owner);
+    }
   }
 
   async function recomputeUserPresence(userId) {
@@ -81,15 +126,18 @@ function createPresenceCoordinator({
       pipeline.hget(statusHash, connId);
       pipeline.exists(connectionActivityKey(userId, connId));
       pipeline.exists(connectionAliveKey(userId, connId));
+      pipeline.get(connectionOwnerKey ? connectionOwnerKey(userId, connId) : `__noop__:${connId}`);
     }
     const results = await pipeline.exec();
 
     const stateByConn = [];
     const staleConnIds = [];
+    const staleConnOwners = [];
     for (let i = 0; i < connIds.length; i += 1) {
-      const statusRes = results[i * 3];
-      const activityRes = results[i * 3 + 1];
-      const aliveRes = results[i * 3 + 2];
+      const statusRes = results[i * 4];
+      const activityRes = results[i * 4 + 1];
+      const aliveRes = results[i * 4 + 2];
+      const ownerRes = results[i * 4 + 3];
       const connId = connIds[i];
 
       const status = statusRes?.[1] || "online";
@@ -98,6 +146,7 @@ function createPresenceCoordinator({
 
       if (!isAlive) {
         staleConnIds.push(connId);
+        staleConnOwners.push(typeof ownerRes?.[1] === 'string' ? ownerRes[1] : null);
         continue;
       }
 
@@ -119,13 +168,22 @@ function createPresenceCoordinator({
 
     if (staleConnIds.length) {
       const stalePipe = redis.pipeline();
-      for (const connId of staleConnIds) {
+      for (let i = 0; i < staleConnIds.length; i += 1) {
+        const connId = staleConnIds[i];
         stalePipe.srem(connectionSetKey(userId), connId);
         stalePipe.hdel(statusHash, connId);
         stalePipe.del(connectionActivityKey(userId, connId));
         stalePipe.del(connectionAliveKey(userId, connId));
+        if (connectionOwnerKey) {
+          stalePipe.del(connectionOwnerKey(userId, connId));
+        }
       }
       await stalePipe.exec();
+      await Promise.all(
+        staleConnOwners
+          .filter((value) => typeof value === 'string' && value)
+          .map((value) => decrementWorkerOwnerCount(userId, value)),
+      );
     }
 
     if (!stateByConn.length) {

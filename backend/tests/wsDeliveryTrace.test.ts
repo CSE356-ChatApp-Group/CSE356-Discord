@@ -299,6 +299,12 @@ jest.mock('../src/websocket/outboundPayload', () => ({
 jest.mock('../src/websocket/userFeed', () => ({
   publishUserFeedTargets: jest.fn(() => Promise.resolve()),
   isUserFeedEnvelope: jest.fn(() => false),
+  isUserFeedWorkerChannel: jest.fn((ch: string) => typeof ch === 'string' && ch.startsWith('userfeed_worker:')),
+  userFeedRouteLabelForChannel: jest.fn((ch: string) => (
+    typeof ch === 'string' && ch.startsWith('userfeed_worker:')
+      ? ch.slice('userfeed_worker:'.length)
+      : '0'
+  )),
   userIdFromTarget: jest.fn((ch: string) => ch.startsWith('user:') ? ch.slice(5) : null),
 }));
 

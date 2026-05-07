@@ -28,6 +28,12 @@ jest.mock('../src/utils/metrics', () => ({
 jest.mock('../src/websocket/userFeed', () => ({
   publishUserFeedTargets: jest.fn(() => Promise.resolve()),
   isUserFeedEnvelope: jest.fn(() => false),
+  isUserFeedWorkerChannel: jest.fn((channel: string) => typeof channel === 'string' && channel.startsWith('userfeed_worker:')),
+  userFeedRouteLabelForChannel: jest.fn((channel: string) => (
+    typeof channel === 'string' && channel.startsWith('userfeed_worker:')
+      ? channel.slice('userfeed_worker:'.length)
+      : '0'
+  )),
   userIdFromTarget: jest.fn((channel: string) => (
     typeof channel === 'string' && channel.startsWith('user:')
       ? channel.slice('user:'.length)
