@@ -19,7 +19,8 @@ Multi-VM mode (three app VMs, per-VM PgBouncer architecture):
 
 Optional dedicated websocket tier:
         --wsvm1-host WSVM1_IP --wsvm1-workers 6 \\
-        --wsvm2-host WSVM2_IP --wsvm2-workers 6
+        --wsvm2-host WSVM2_IP --wsvm2-workers 6 \\
+        --wsvm3-host WSVM3_IP --wsvm3-workers 6
 """
 from __future__ import annotations
 
@@ -129,6 +130,8 @@ def main() -> None:
     ap.add_argument("--wsvm1-workers", type=int, default=0, help="WSVM1 worker count")
     ap.add_argument("--wsvm2-host", default="", help="WSVM2 private IP (optional websocket tier)")
     ap.add_argument("--wsvm2-workers", type=int, default=0, help="WSVM2 worker count")
+    ap.add_argument("--wsvm3-host", default="", help="WSVM3 private IP (optional websocket tier)")
+    ap.add_argument("--wsvm3-workers", type=int, default=0, help="WSVM3 worker count")
     ap.add_argument(
         "--omit-nginx-job",
         action="store_true",
@@ -162,6 +165,8 @@ def main() -> None:
             hosts_and_workers.append((args.wsvm1_host, args.wsvm1_workers, "wsvm1"))
         if args.wsvm2_host and args.wsvm2_workers > 0:
             hosts_and_workers.append((args.wsvm2_host, args.wsvm2_workers, "wsvm2"))
+        if args.wsvm3_host and args.wsvm3_workers > 0:
+            hosts_and_workers.append((args.wsvm3_host, args.wsvm3_workers, "wsvm3"))
         api_config = _api_block_multi_vm(hosts_and_workers)
 
         # Build (host, label) pairs for node_exporter and pgbouncer
