@@ -23,6 +23,8 @@ describe('meiliClient search request semantics', () => {
   afterEach(() => {
     process.env = OLD_ENV;
     jest.restoreAllMocks();
+    jest.dontMock('http');
+    jest.dontMock('https');
     delete (global as any).fetch;
   });
 
@@ -138,5 +140,50 @@ describe('meiliClient search request semantics', () => {
     expect(body).toContain('more');
     expect(body).toContain('just');
     expect(body).toContain('into');
+  });
+
+  it('uses a keep-alive HTTP agent outside test mode', async () => {
+    const { EventEmitter } = require('events');
+    const requestMock = jest.fn((options, callback) => {
+      const res = new EventEmitter();
+      res.statusCode = 200;
+      res.headers = { 'content-type': 'application/json' };
+      process.nextTick(() => {
+        callback(res);
+        res.emit('data', JSON.stringify({ hits: [], estimatedTotalHits: 0 }));
+        res.emit('end');
+      });
+      return {
+        setTimeout: jest.fn(),
+        on: jest.fn(),
+        write: jest.fn(),
+        end: jest.fn(),
+      };
+    });
+    const Agent = jest.fn(function MockAgent(this: any, options: any) {
+      this.options = options;
+    });
+
+    jest.doMock('http', () => ({ Agent, request: requestMock }));
+    jest.doMock('https', () => ({ Agent, request: jest.fn() }));
+    process.env.NODE_ENV = 'production';
+    delete (global as any).fetch;
+
+    const { searchMessageCandidates } = require('../src/search/meiliClient');
+    await searchMessageCandidates('alpha beta', {
+      communityId: '00000000-0000-4000-8000-000000000010',
+    });
+
+    expect(Agent).toHaveBeenCalledWith(expect.objectContaining({ keepAlive: true }));
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: expect.objectContaining({
+          options: expect.objectContaining({ keepAlive: true }),
+        }),
+        method: 'POST',
+        path: '/indexes/messages/search',
+      }),
+      expect.any(Function),
+    );
   });
 });

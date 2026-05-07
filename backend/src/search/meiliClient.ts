@@ -19,6 +19,8 @@
 const logger = require('../utils/logger');
 const client = require('prom-client');
 const { redisSearch } = require('../db/redis');
+const http = require('http');
+const https = require('https');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -75,7 +77,7 @@ const MEILI_WRITE_STREAM_BLOCK_MS = Math.max(
 const MEILI_WRITE_STREAM_COALESCE_MS = Math.max(
   0,
   Math.min(
-    5000,
+    60000,
     parseInt(process.env.MEILI_WRITE_STREAM_COALESCE_MS || String(MEILI_WRITE_FLUSH_MS), 10) || MEILI_WRITE_FLUSH_MS,
   ),
 );
@@ -91,6 +93,37 @@ const MEILI_WRITE_STREAM_CLAIM_IDLE_MS = Math.max(
   10000,
   Math.min(600000, parseInt(process.env.MEILI_WRITE_STREAM_CLAIM_IDLE_MS || '60000', 10) || 60000),
 );
+const MEILI_HTTP_KEEPALIVE_ENABLED =
+  String(process.env.MEILI_HTTP_KEEPALIVE_ENABLED || 'true').toLowerCase() !== 'false'
+  && process.env.MEILI_HTTP_KEEPALIVE_ENABLED !== '0';
+const MEILI_HTTP_KEEPALIVE_MAX_SOCKETS = Math.max(
+  1,
+  Math.min(256, parseInt(process.env.MEILI_HTTP_KEEPALIVE_MAX_SOCKETS || '64', 10) || 64),
+);
+const MEILI_HTTP_KEEPALIVE_MAX_FREE_SOCKETS = Math.max(
+  1,
+  Math.min(
+    MEILI_HTTP_KEEPALIVE_MAX_SOCKETS,
+    parseInt(process.env.MEILI_HTTP_KEEPALIVE_MAX_FREE_SOCKETS || '16', 10) || 16,
+  ),
+);
+const MEILI_HTTP_KEEPALIVE_MS = Math.max(
+  1000,
+  Math.min(300000, parseInt(process.env.MEILI_HTTP_KEEPALIVE_MS || '60000', 10) || 60000),
+);
+
+const meiliHttpAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: MEILI_HTTP_KEEPALIVE_MS,
+  maxSockets: MEILI_HTTP_KEEPALIVE_MAX_SOCKETS,
+  maxFreeSockets: MEILI_HTTP_KEEPALIVE_MAX_FREE_SOCKETS,
+});
+const meiliHttpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: MEILI_HTTP_KEEPALIVE_MS,
+  maxSockets: MEILI_HTTP_KEEPALIVE_MAX_SOCKETS,
+  maxFreeSockets: MEILI_HTTP_KEEPALIVE_MAX_FREE_SOCKETS,
+});
 
 function isEnabled(): boolean {
   return (
@@ -590,6 +623,16 @@ async function meiliFetch(
   path: string,
   options: { method?: string; body?: unknown; timeoutMs?: number } = {},
 ): Promise<any> {
+  if (!MEILI_HTTP_KEEPALIVE_ENABLED || process.env.NODE_ENV === 'test') {
+    return meiliFetchWithFetch(path, options);
+  }
+  return meiliFetchWithKeepAlive(path, options);
+}
+
+async function meiliFetchWithFetch(
+  path: string,
+  options: { method?: string; body?: unknown; timeoutMs?: number } = {},
+): Promise<any> {
   const controller = new AbortController();
   const tid = setTimeout(
     () => controller.abort(),
@@ -614,6 +657,76 @@ async function meiliFetch(
   } finally {
     clearTimeout(tid);
   }
+}
+
+async function meiliFetchWithKeepAlive(
+  path: string,
+  options: { method?: string; body?: unknown; timeoutMs?: number } = {},
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let url;
+    try {
+      url = new URL(`${MEILI_HOST}${path}`);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    const method = options.method ?? 'GET';
+    const body = options.body !== undefined ? JSON.stringify(options.body) : undefined;
+    const headers: Record<string, string | number> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${MEILI_MASTER_KEY}`,
+    };
+    if (body !== undefined) {
+      headers['Content-Length'] = Buffer.byteLength(body);
+    }
+
+    const transport = url.protocol === 'https:' ? https : http;
+    const agent = url.protocol === 'https:' ? meiliHttpsAgent : meiliHttpAgent;
+    const req = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method,
+        headers,
+        agent,
+      },
+      (res: any) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer | string) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          const statusCode = res.statusCode || 0;
+          if (statusCode < 200 || statusCode >= 300) {
+            reject(new Error(`Meili ${method} ${path} → ${statusCode}: ${text.slice(0, 200)}`));
+            return;
+          }
+          const contentType = String(res.headers?.['content-type'] || '');
+          if (!contentType.includes('application/json')) {
+            resolve(text);
+            return;
+          }
+          try {
+            resolve(text ? JSON.parse(text) : {});
+          } catch (err) {
+            reject(err);
+          }
+        });
+      },
+    );
+
+    req.setTimeout(options.timeoutMs ?? MEILI_TIMEOUT_MS, () => {
+      req.destroy(new Error(`Meili ${method} ${path} timed out after ${options.timeoutMs ?? MEILI_TIMEOUT_MS}ms`));
+    });
+    req.on('error', reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
 }
 
 // ── Document type ─────────────────────────────────────────────────────────────
