@@ -460,6 +460,9 @@ run_vm_deploy() {
     skip_upstream_parity=""
     skip_ingress_post_deploy=""
     ws_extra_upstream_csv="$(build_ws_upstream_csv)"
+    if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+      local_ws_ports_csv="__none__"
+    fi
   fi
 
   PROD_HOST="$host" \
@@ -481,6 +484,11 @@ run_vm_deploy() {
     SKIP_MONITORING_SYNC=1 \
     SKIP_INGRESS_POST_DEPLOY="${skip_ingress_post_deploy}" \
     FAST_ROLLBACK="${FAST_ROLLBACK_MODE}" \
+    WS_TIER_ENABLED="${WS_TIER_ENABLED}" \
+    WSVM1_INTERNAL="${WSVM1_INTERNAL}" \
+    WSVM2_INTERNAL="${WSVM2_INTERNAL}" \
+    WSVM1_WORKERS="${WSVM1_WORKERS}" \
+    WSVM2_WORKERS="${WSVM2_WORKERS}" \
     bash "${SCRIPT_DIR}/deploy-prod.sh" "${DEPLOY_ARGS[@]}"
 }
 
