@@ -6,6 +6,11 @@ const {
   wsUserfeedPublishTargetsTotal,
 } = require('../utils/metrics');
 const { getWorkerLabels } = require('./deliveryTrace');
+const {
+  connectionSetKey,
+  connectionAliveKey,
+  connectionOwnerKey,
+} = require('./presenceKeys');
 
 const rawUserFeedShardCount = Number(process.env.USER_FEED_SHARD_COUNT || '64');
 const USER_FEED_SHARD_COUNT =
@@ -135,6 +140,70 @@ async function resolveWorkerOwnedUsers(userIds) {
   return { byChannel, unmatched };
 }
 
+async function resolveLiveWorkerOwnedUsers(userIds) {
+  if (!userIds.length) {
+    return { byChannel: new Map(), unmatched: [] };
+  }
+
+  const connectionPipe = redis.pipeline();
+  for (const userId of userIds) {
+    connectionPipe.smembers(connectionSetKey(userId));
+  }
+  const connectionResults = await connectionPipe.exec();
+  const connectionIdsByUser = userIds.map((userId, index) => ({
+    userId,
+    connectionIds: Array.isArray(connectionResults?.[index]?.[1]) ? connectionResults[index][1] : [],
+  }));
+
+  const ownerPipe = redis.pipeline();
+  const ownerLookups = [];
+  for (const { userId, connectionIds } of connectionIdsByUser) {
+    for (const connectionId of connectionIds) {
+      ownerPipe.exists(connectionAliveKey(userId, connectionId));
+      ownerPipe.get(connectionOwnerKey(userId, connectionId));
+      ownerLookups.push({ userId });
+    }
+  }
+  const ownerResults = ownerLookups.length ? await ownerPipe.exec() : [];
+
+  const ownersByUser = new Map();
+  let ownerResultIndex = 0;
+  for (const { userId, connectionIds } of connectionIdsByUser) {
+    const owners = new Set();
+    for (const _connectionId of connectionIds) {
+      const aliveResult = ownerResults?.[ownerResultIndex]?.[1];
+      ownerResultIndex += 1;
+      const ownerResult = ownerResults?.[ownerResultIndex]?.[1];
+      ownerResultIndex += 1;
+      if (Number(aliveResult || 0) !== 1) continue;
+      if (typeof ownerResult === 'string' && ownerResult) {
+        owners.add(ownerResult);
+      }
+    }
+    if (owners.size) {
+      ownersByUser.set(userId, Array.from(owners));
+    }
+  }
+
+  const byChannel = new Map();
+  const unmatched = [];
+  for (const userId of userIds) {
+    const owners = ownersByUser.get(userId) || [];
+    if (!owners.length) {
+      unmatched.push(userId);
+      continue;
+    }
+    for (const ownerId of owners) {
+      const channel = userFeedWorkerChannelForOwner(ownerId);
+      if (!channel) continue;
+      if (!byChannel.has(channel)) byChannel.set(channel, []);
+      byChannel.get(channel).push(userId);
+    }
+  }
+
+  return { byChannel, unmatched };
+}
+
 function allUserFeedRedisChannels() {
   return Array.from(
     { length: USER_FEED_SHARD_COUNT },
@@ -176,11 +245,13 @@ function splitUserTargets(targets) {
   return { userIds, passthroughTargets };
 }
 
-async function publishUserFeedTargets(userTargets, payload) {
+async function publishUserFeedTargets(userTargets, payload, { preferLiveOwners = false } = {}) {
   const { userIds } = splitUserTargets(userTargets);
   if (!userIds.length) return;
 
-  const workerOwned = await resolveWorkerOwnedUsers(userIds);
+  const workerOwned = preferLiveOwners
+    ? await resolveLiveWorkerOwnedUsers(userIds)
+    : await resolveWorkerOwnedUsers(userIds);
   const shardGroups = new Map(workerOwned.byChannel);
   for (const userId of workerOwned.unmatched) {
     const shardChannel = userFeedRedisChannelForUserId(userId);
@@ -223,6 +294,7 @@ module.exports = {
   USER_FEED_SHARD_COUNT,
   isUserFeedEnvelope,
   publishUserFeedTargets,
+  resolveLiveWorkerOwnedUsers,
   runWithConcurrencyLimit,
   splitUserTargets,
   userFeedEnvelope,

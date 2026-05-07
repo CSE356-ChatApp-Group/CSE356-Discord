@@ -64,6 +64,7 @@ const {
   CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK,
   CHANNEL_MESSAGE_RECENT_CONNECT_FALLBACK_PROBE_MAX,
   CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
+  CHANNEL_MESSAGE_DIRECT_ACTIVE_USER_MAX,
   CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST,
   MESSAGE_USER_FANOUT_HTTP_BLOCKING,
   CHANNEL_MESSAGE_USER_FANOUT_MAX,
@@ -73,6 +74,7 @@ async function publishUserTopicTargets(
   targets: string[],
   envelope: Record<string, unknown>,
   path: string,
+  options: { preferLiveOwners?: boolean } = {},
 ) {
   if (!targets.length) return;
   return tracer.startActiveSpan('fanout.publish_userfeed', async (span: any) => {
@@ -81,7 +83,7 @@ async function publishUserTopicTargets(
       const publishStartedAt = process.hrtime.bigint();
       fanoutPublishTargetsHistogram.observe({ path }, targets.length);
       fanoutRecipientsHistogram.observe({ channel_type: 'user' }, targets.length);
-      await publishUserFeedTargets(targets, envelope);
+      await publishUserFeedTargets(targets, envelope, options);
       fanoutPublishDurationMs.observe(
         { path, stage: 'publish' },
         Number(process.hrtime.bigint() - publishStartedAt) / 1e6,
@@ -291,6 +293,7 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
           candidateCount: bootstrapPendingCandidateTargets.length + 1,
           cacheResult: 'miss' as const,
           pendingEnqueueTargets: bootstrapPendingCandidateTargets,
+          skipChannelTopic: false,
         };
       }
       wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'bootstrap_pending_empty_fallback' });
@@ -402,6 +405,72 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
     candidateCount: recentCandidateTargets.length + connectedFallbackCount + 1,
     cacheResult: 'miss' as const,
     pendingEnqueueTargets: Array.from(new Set([...recentCandidateTargets, ...activeTargets])),
+    skipChannelTopic: false,
+  };
+}
+
+async function resolveDirectActiveChannelUserTargets(channelId: string) {
+  if (CHANNEL_MESSAGE_DIRECT_ACTIVE_USER_MAX <= 0) return null;
+
+  const startedAt = process.hrtime.bigint();
+  const targetLookup = await getChannelUserFanoutTargetKeysWithMeta(channelId);
+  const candidateTargets = targetLookup.targets;
+  const lookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  const wl = getWorkerLabels();
+  fanoutPublishDurationMs.observe(
+    { path: 'channel_message_direct_active_user_topics', stage: 'target_lookup' },
+    lookupMs,
+  );
+  wsTargetLookupDurationMs?.observe?.(
+    { path: 'channel_message_direct_active_user_topics', result: targetLookup.cacheResult, vm: wl.vm, worker: wl.worker },
+    lookupMs,
+  );
+  fanoutTargetCandidatesHistogram.observe(
+    { path: 'channel_message_direct_active_user_topics' },
+    candidateTargets.length,
+  );
+
+  if (!candidateTargets.length || candidateTargets.length > CHANNEL_MESSAGE_DIRECT_ACTIVE_USER_MAX) {
+    return null;
+  }
+
+  const recentCandidateTargets = await resolveRecentChannelUserTargetsRaw(
+    channelId,
+    CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
+  ).catch(() => []);
+  const activeTargets = await filterActiveConnectedUserTargets(
+    candidateTargets,
+    'channel_message_direct_active_user_topics',
+  );
+
+  wsFanoutCandidateCountBucket?.observe?.(
+    { path: 'channel_message_direct_active_user_topics' },
+    candidateTargets.length,
+  );
+  wsActiveSubscriberTargetsBucket?.observe?.(
+    { path: 'channel_message_direct_active_user_topics' },
+    activeTargets.length,
+  );
+  if (activeTargets.length > 0) {
+    wsFanoutActiveTargetHitTotal?.inc?.(
+      { path: 'channel_message_direct_active_user_topics' },
+      activeTargets.length,
+    );
+  } else {
+    wsFanoutActiveTargetMissTotal?.inc?.({ path: 'channel_message_direct_active_user_topics' });
+  }
+
+  if (!activeTargets.length) {
+    return null;
+  }
+
+  return {
+    allTargets: activeTargets,
+    recentTargets: activeTargets,
+    candidateCount: candidateTargets.length,
+    cacheResult: targetLookup.cacheResult,
+    pendingEnqueueTargets: Array.from(new Set([...recentCandidateTargets, ...activeTargets])),
+    skipChannelTopic: true,
   };
 }
 
@@ -413,11 +482,16 @@ async function resolveUserTopicTargets(channelId: string, envelope: Record<strin
       candidateCount: 0,
       cacheResult: 'miss' as const,
       pendingEnqueueTargets: [] as string[],
+      skipChannelTopic: false,
     };
   }
 
   const mode = resolveChannelUserFanoutMode();
   if (isChannelMessageLiveEvent(envelope) && mode !== 'all') {
+    const directActiveTargets = await resolveDirectActiveChannelUserTargets(channelId);
+    if (directActiveTargets) {
+      return directActiveTargets;
+    }
     return resolveActiveChannelMessageTargets(channelId);
   }
 
@@ -464,6 +538,7 @@ async function resolveUserTopicTargets(channelId: string, envelope: Record<strin
       candidateCount: 0,
       cacheResult: targetLookup.cacheResult,
       pendingEnqueueTargets: [],
+      skipChannelTopic: false,
     };
   }
 
@@ -478,6 +553,7 @@ async function resolveUserTopicTargets(channelId: string, envelope: Record<strin
       candidateCount: capped.length,
       cacheResult: targetLookup.cacheResult,
       pendingEnqueueTargets: capped,
+      skipChannelTopic: false,
     };
   }
 
@@ -498,6 +574,7 @@ async function resolveUserTopicTargets(channelId: string, envelope: Record<strin
     candidateCount: capped.length,
     cacheResult: targetLookup.cacheResult,
     pendingEnqueueTargets: capped,
+    skipChannelTopic: false,
   };
 }
 
@@ -558,6 +635,13 @@ async function publishChannelMessageEvent(
   const firstChannel = CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST;
   const startedAt = process.hrtime.bigint();
   const mode = resolveChannelUserFanoutMode();
+  const allowEarlyChannelPublish =
+    firstChannel
+    && (
+      !isChannelMessageLiveEvent(envelope)
+      || mode === 'all'
+      || CHANNEL_MESSAGE_DIRECT_ACTIVE_USER_MAX <= 0
+    );
   // Start resolving the logical user audience immediately, but don't make the
   // explicit `channel:` publish wait for that lookup when channel-first mode is
   // enabled. This preserves the existing payload contract while reducing
@@ -568,6 +652,7 @@ async function publishChannelMessageEvent(
   let hintedRecentTargets: string[] = [];
   let candidateCount = 0;
   let cacheResult: 'hit' | 'miss' | 'coalesced' = 'miss';
+  let skipChannelTopic = false;
 
   async function publishChannelTopicOnly() {
     return tracer.startActiveSpan('fanout.publish_passthrough', async (span: any) => {
@@ -601,7 +686,7 @@ async function publishChannelMessageEvent(
     }
   }
 
-  if (firstChannel) {
+  if (allowEarlyChannelPublish) {
     await publishChannelTopicOnly();
   }
 
@@ -611,8 +696,13 @@ async function publishChannelMessageEvent(
     recentTargets: hintedRecentTargets,
     candidateCount,
     cacheResult,
+    skipChannelTopic,
   } = await userTargetsPromise);
   trace.getActiveSpan()?.setAttribute('fanout.recipient_count', allTargets.length);
+
+  if (firstChannel && !allowEarlyChannelPublish && !skipChannelTopic) {
+    await publishChannelTopicOnly();
+  }
 
   if (envelope?.event === 'message:created' && pendingEnqueueTargets.length > 0) {
     // Fire-and-forget: runs concurrently with channel publish and community feed.
@@ -649,6 +739,9 @@ async function publishChannelMessageEvent(
     channelMessageFanoutRecipientTotal.inc({ segment: 'candidate' }, candidateCount);
     channelMessageFanoutRecipientTotal.inc({ segment: 'inline_user_topic' }, inlineTargets.length);
     channelMessageFanoutRecipientTotal.inc({ segment: 'deferred_user_topic' }, deferredTargets.length);
+    if (skipChannelTopic) {
+      channelMessageFanoutRecipientTotal.inc({ segment: 'channel_topic_skipped' }, 1);
+    }
     if (mode === 'all' && !blocking && deferredTargets.length > 0) {
       realtimeMissAttributionTotal.inc(
         { reason: 'channel_user_topic_deferred_not_recent' },
@@ -664,6 +757,7 @@ async function publishChannelMessageEvent(
       mode === 'all'
         ? 'channel_message_user_topics'
         : 'channel_message_recent_connect_user_topics',
+      { preferLiveOwners: skipChannelTopic },
     );
   }
 
@@ -673,7 +767,7 @@ async function publishChannelMessageEvent(
     );
   }
 
-  if (!firstChannel) {
+  if (!firstChannel && !skipChannelTopic) {
     await publishChannelTopicOnly();
   }
 

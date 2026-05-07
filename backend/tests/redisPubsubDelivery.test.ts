@@ -444,4 +444,74 @@ describe('redisPubsubDelivery', () => {
       {},
     );
   });
+
+  it('seeds pending replay when a worker-targeted userfeed message has no local clients', async () => {
+    const enqueuePendingMessageForUsers = jest.fn(() => Promise.resolve());
+    const sendPayloadToSocket = jest.fn(() => true);
+    const { isUserFeedEnvelope } = require('../src/websocket/userFeed') as {
+      isUserFeedEnvelope: jest.Mock;
+    };
+    isUserFeedEnvelope.mockReturnValueOnce(true);
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      localUserClients: new Map(),
+      enqueuePendingMessageForUsers,
+    }));
+
+    await deliverPubsubMessage(
+      'userfeed_worker:vm3:4005',
+      JSON.stringify({
+        __wsRoute: { kind: 'users', userIds: ['alpha'] },
+        payload: { event: 'message:created', data: { id: 'm-userfeed-miss' } },
+      }),
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sendPayloadToSocket).not.toHaveBeenCalled();
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      ['alpha'],
+      expect.objectContaining({ event: 'message:created' }),
+      { recentTargets: ['user:alpha'] },
+    );
+  });
+
+  it('seeds pending replay when all local sockets for a userfeed recipient are already closed', async () => {
+    const stale = { readyState: 3, _userId: 'alpha' };
+    const clients = new Set([stale]);
+    const unsubscribeClient = jest.fn((ws) => {
+      clients.delete(ws);
+      return Promise.resolve();
+    });
+    const enqueuePendingMessageForUsers = jest.fn(() => Promise.resolve());
+    const sendPayloadToSocket = jest.fn(() => true);
+    const { isUserFeedEnvelope } = require('../src/websocket/userFeed') as {
+      isUserFeedEnvelope: jest.Mock;
+    };
+    isUserFeedEnvelope.mockReturnValueOnce(true);
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      localUserClients: new Map([['alpha', clients]]),
+      unsubscribeClient,
+      enqueuePendingMessageForUsers,
+    }));
+
+    await deliverPubsubMessage(
+      'userfeed_worker:vm3:4005',
+      JSON.stringify({
+        __wsRoute: { kind: 'users', userIds: ['alpha'] },
+        payload: { event: 'message:created', data: { id: 'm-userfeed-pruned' } },
+      }),
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(unsubscribeClient).toHaveBeenCalledWith(stale, 'user:alpha');
+    expect(sendPayloadToSocket).not.toHaveBeenCalled();
+    expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+      ['alpha'],
+      expect.objectContaining({ event: 'message:created' }),
+      { recentTargets: ['user:alpha'] },
+    );
+  });
 });

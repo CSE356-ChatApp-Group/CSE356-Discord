@@ -789,17 +789,18 @@ ssh_prod "
   # nice -n 15: deprioritise npm vs. the 5 live workers competing for the same CPU/disk
   nice -n 15 npm ci --omit=dev --legacy-peer-deps || nice -n 15 npm ci --omit=dev
 
-  # Run DB migrations before any new API instance starts.
-  set -a
-  source /opt/chatapp/shared/.env
-  set +a
-  MIGRATE_DATABASE_URL=\${PGDUMP_DATABASE_URL:-\$DATABASE_URL}
-  export DATABASE_URL=\"\$MIGRATE_DATABASE_URL\"
-  node \$RELEASE_PATH/backend/dist/db/migrate.js
+  if [ \"${RUN_DB_MIGRATIONS:-1}\" = \"1\" ]; then
+    # Run DB migrations before any new API instance starts.
+    set -a
+    source /opt/chatapp/shared/.env
+    set +a
+    MIGRATE_DATABASE_URL=\${PGDUMP_DATABASE_URL:-\$DATABASE_URL}
+    export DATABASE_URL=\"\$MIGRATE_DATABASE_URL\"
+    node \$RELEASE_PATH/backend/dist/db/migrate.js
 
-  # Fail fast if migrations did not create core tables (wrong DB, broken artifact, etc.).
-  cd \$RELEASE_PATH/backend
-  DATABASE_URL=\"\$MIGRATE_DATABASE_URL\" node -e \"
+    # Fail fast if migrations did not create core tables (wrong DB, broken artifact, etc.).
+    cd \$RELEASE_PATH/backend
+    DATABASE_URL=\"\$MIGRATE_DATABASE_URL\" node -e \"
 const { Client } = require('pg');
 (async () => {
   const url = process.env.DATABASE_URL;
@@ -823,6 +824,9 @@ const { Client } = require('pg');
   console.log('Post-migrate schema OK');
 })().catch((e) => { console.error(e); process.exit(1); });
 \"
+  else
+    echo 'Skipping DB migrations on this host (RUN_DB_MIGRATIONS=0)'
+  fi
   
   # Frontend is pre-built, but verify
   if [ ! -d \$RELEASE_PATH/frontend/dist ]; then
