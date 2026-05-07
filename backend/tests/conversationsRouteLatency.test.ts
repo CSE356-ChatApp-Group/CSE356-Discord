@@ -148,8 +148,9 @@ describe('conversations route side-effect latency', () => {
     console.info(`[latency-test] invite elapsedMs=${elapsedMs}`);
 
     expect(res.status).toBe(200);
-    expect(elapsedMs).toBeLessThan(SIDE_EFFECT_DELAY_MS);
-    await sleep(SIDE_EFFECT_DELAY_MS * 3);
+    // Side effects are now awaited before response, so elapsed time must be
+    // at least SIDE_EFFECT_DELAY_MS (the mocked publish delay).
+    expect(elapsedMs).toBeGreaterThanOrEqual(SIDE_EFFECT_DELAY_MS);
     expect(publishConversationInviteNotifications).toHaveBeenCalled();
   });
 
@@ -186,8 +187,9 @@ describe('conversations route side-effect latency', () => {
     console.info(`[latency-test] create elapsedMs=${elapsedMs}`);
 
     expect(res.status).toBe(201);
-    expect(elapsedMs).toBeLessThan(SIDE_EFFECT_DELAY_MS);
-    await sleep(SIDE_EFFECT_DELAY_MS * 2);
+    // Side effects are now awaited before response, so elapsed time must be
+    // at least SIDE_EFFECT_DELAY_MS (the mocked publish delay).
+    expect(elapsedMs).toBeGreaterThanOrEqual(SIDE_EFFECT_DELAY_MS);
     expect(publishUserFeedTargets).toHaveBeenCalled();
   });
 });
