@@ -69,16 +69,8 @@ describe('Meili execution strict all-term recheck', () => {
     return { executor, meiliClient, runSearchReadOnlyQuery, searchOnce, searchStrictLiteralFallback };
   }
 
-  it('falls back instead of returning a candidate missing a stop word from the original query', async () => {
+  it('does not force fallback for mixed-query stop words stripped from the Meili query', async () => {
     const candidateId = '00000000-0000-4000-8000-000000000001';
-    const fallbackResult = {
-      hits: [{ id: '00000000-0000-4000-8000-000000000002', content: 'disconnect with half' }],
-      offset: 0,
-      limit: 20,
-      estimatedTotalHits: 1,
-      processingTimeMs: 0,
-      query: 'disconnect with half',
-    };
     const { executor, meiliClient, searchOnce, searchStrictLiteralFallback } = makeExecutor({
       candidateIds: [candidateId],
       recheckRows: [
@@ -95,7 +87,6 @@ describe('Meili execution strict all-term recheck', () => {
           createdAt: '2026-05-07T12:40:29.000Z',
         },
       ],
-      searchOnceResult: fallbackResult,
     });
 
     const out = await executor.searchWithMeiliBackend('disconnect with half', {
@@ -105,11 +96,53 @@ describe('Meili execution strict all-term recheck', () => {
       offset: 0,
     });
 
+    expect(out.hits.map((h: any) => h.id)).toEqual([candidateId]);
+    expect(meiliClient.incFallbackTotal).not.toHaveBeenCalledWith('strict_token_mismatch');
+    expect(searchStrictLiteralFallback).not.toHaveBeenCalled();
+    expect(searchOnce).not.toHaveBeenCalled();
+  });
+
+  it('still falls back for all-stop-word queries when the literal terms are absent', async () => {
+    const candidateId = '00000000-0000-4000-8000-000000000031';
+    const fallbackResult = {
+      hits: [{ id: '00000000-0000-4000-8000-000000000032', content: 'more just about' }],
+      offset: 0,
+      limit: 20,
+      estimatedTotalHits: 1,
+      processingTimeMs: 0,
+      query: 'more just about',
+    };
+    const { executor, meiliClient, searchOnce, searchStrictLiteralFallback } = makeExecutor({
+      candidateIds: [candidateId],
+      recheckRows: [
+        {
+          __scopeAccess: true,
+          id: candidateId,
+          content: 'more around about',
+          authorId: '00000000-0000-4000-8000-000000000033',
+          authorDisplayName: 'A',
+          channelId: '00000000-0000-4000-8000-000000000034',
+          conversationId: null,
+          communityId: '00000000-0000-4000-8000-000000000035',
+          channelName: 'general',
+          createdAt: '2026-05-07T12:40:29.000Z',
+        },
+      ],
+      searchOnceResult: fallbackResult,
+    });
+
+    const out = await executor.searchWithMeiliBackend('more just about', {
+      communityId: '00000000-0000-4000-8000-000000000035',
+      userId: '00000000-0000-4000-8000-000000000033',
+      limit: 20,
+      offset: 0,
+    });
+
     expect(out).toBe(fallbackResult);
     expect(meiliClient.incFallbackTotal).toHaveBeenCalledWith('strict_token_mismatch');
     expect(searchStrictLiteralFallback).toHaveBeenCalledWith(
-      'disconnect with half',
-      expect.objectContaining({ communityId: '00000000-0000-4000-8000-000000000005' }),
+      'more just about',
+      expect.objectContaining({ communityId: '00000000-0000-4000-8000-000000000035' }),
       true,
     );
     expect(searchOnce).not.toHaveBeenCalled();
@@ -118,12 +151,12 @@ describe('Meili execution strict all-term recheck', () => {
   it('forces the strict literal fallback to primary even when search normally uses a replica', async () => {
     const candidateId = '00000000-0000-4000-8000-000000000021';
     const fallbackResult = {
-      hits: [{ id: '00000000-0000-4000-8000-000000000022', content: 'beat because their' }],
+      hits: [{ id: '00000000-0000-4000-8000-000000000022', content: 'beat elephant their' }],
       offset: 0,
       limit: 20,
       estimatedTotalHits: 1,
       processingTimeMs: 0,
-      query: 'beat because their',
+      query: 'beat elephant their',
     };
     const { executor, searchOnce, searchStrictLiteralFallback } = makeExecutor({
       candidateIds: [candidateId],
@@ -145,7 +178,7 @@ describe('Meili execution strict all-term recheck', () => {
       searchUseReadReplica: true,
     });
 
-    await executor.searchWithMeiliBackend('beat because their', {
+    await executor.searchWithMeiliBackend('beat elephant their', {
       communityId: '00000000-0000-4000-8000-000000000025',
       userId: '00000000-0000-4000-8000-000000000023',
       limit: 20,
@@ -153,7 +186,7 @@ describe('Meili execution strict all-term recheck', () => {
     });
 
     expect(searchStrictLiteralFallback).toHaveBeenCalledWith(
-      'beat because their',
+      'beat elephant their',
       expect.objectContaining({ communityId: '00000000-0000-4000-8000-000000000025' }),
       true,
     );
