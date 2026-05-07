@@ -502,56 +502,73 @@ verify_and_heal_vm_workers() {
   local host="$1"
   local label="$2"
   local ports_csv="$3"
+  local attempts="${WORKER_VERIFY_SSH_ATTEMPTS:-6}"
+  local delay="${WORKER_VERIFY_SSH_INITIAL_SLEEP:-3}"
+  local attempt
   echo "=== ${label}: verify/heal workers (${ports_csv}) ==="
-  ssh_vm "$host" "
-    set -euo pipefail
-    IFS=',' read -r -a ports <<< '${ports_csv}'
-    failures=0
-    for p in \"\${ports[@]}\"; do
-      unit=\"chatapp@\${p}.service\"
-      healthy=0
-      for attempt in 1 2 3; do
-        active=0
-        if systemctl is-active --quiet \"\$unit\"; then
-          active=1
-        fi
-        body=\$(curl -fsS --max-time 8 \"http://127.0.0.1:\${p}/health\" 2>/dev/null || true)
-        status=\$(printf '%s' \"\$body\" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"status\",\"\"))' 2>/dev/null || true)
-        if [ \"\$active\" -eq 1 ] && [ \"\$status\" = \"ok\" ]; then
-          healthy=1
-          break
-        fi
-        echo \"  \${unit} unhealthy (attempt \${attempt}) - repairing\"
-        sudo systemctl stop \"\$unit\" 2>/dev/null || true
-        sudo systemctl kill --kill-who=all --signal=TERM \"\$unit\" 2>/dev/null || true
-        sleep 0.5
-        for _ in \$(seq 1 20); do
-          if ! sudo ss -H -ltn \"sport = :\${p}\" | grep -q .; then
+  for attempt in $(seq 1 "${attempts}"); do
+    if ssh_vm "$host" "
+      set -euo pipefail
+      IFS=',' read -r -a ports <<< '${ports_csv}'
+      failures=0
+      for p in \"\${ports[@]}\"; do
+        unit=\"chatapp@\${p}.service\"
+        healthy=0
+        for attempt in 1 2 3; do
+          active=0
+          if systemctl is-active --quiet \"\$unit\"; then
+            active=1
+          fi
+          body=\$(curl -fsS --max-time 8 \"http://127.0.0.1:\${p}/health\" 2>/dev/null || true)
+          status=\$(printf '%s' \"\$body\" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"status\",\"\"))' 2>/dev/null || true)
+          if [ \"\$active\" -eq 1 ] && [ \"\$status\" = \"ok\" ]; then
+            healthy=1
             break
           fi
-          sleep 0.25
+          echo \"  \${unit} unhealthy (attempt \${attempt}) - repairing\"
+          sudo systemctl stop \"\$unit\" 2>/dev/null || true
+          sudo systemctl kill --kill-who=all --signal=TERM \"\$unit\" 2>/dev/null || true
+          sleep 0.5
+          for _ in \$(seq 1 20); do
+            if ! sudo ss -H -ltn \"sport = :\${p}\" | grep -q .; then
+              break
+            fi
+            sleep 0.25
+          done
+          for pid in \$(sudo ss -H -ltnp \"sport = :\${p}\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u); do
+            sudo kill -TERM \"\$pid\" 2>/dev/null || true
+          done
+          sleep 0.4
+          for pid in \$(sudo ss -H -ltnp \"sport = :\${p}\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u); do
+            sudo kill -9 \"\$pid\" 2>/dev/null || true
+          done
+          sudo systemctl reset-failed \"\$unit\" 2>/dev/null || true
+          sudo systemctl start \"\$unit\"
+          sleep 2
         done
-        for pid in \$(sudo ss -H -ltnp \"sport = :\${p}\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u); do
-          sudo kill -TERM \"\$pid\" 2>/dev/null || true
-        done
-        sleep 0.4
-        for pid in \$(sudo ss -H -ltnp \"sport = :\${p}\" | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | sort -u); do
-          sudo kill -9 \"\$pid\" 2>/dev/null || true
-        done
-        sudo systemctl reset-failed \"\$unit\" 2>/dev/null || true
-        sudo systemctl start \"\$unit\"
-        sleep 2
+        if [ \"\$healthy\" -ne 1 ]; then
+          echo \"  \${unit}: DEAD\"
+          sudo journalctl -u \"\$unit\" --no-pager -n 30 || true
+          failures=1
+        else
+          echo \"  \${unit}: ok\"
+        fi
       done
-      if [ \"\$healthy\" -ne 1 ]; then
-        echo \"  \${unit}: DEAD\"
-        sudo journalctl -u \"\$unit\" --no-pager -n 30 || true
-        failures=1
-      else
-        echo \"  \${unit}: ok\"
+      [ \"\$failures\" -eq 0 ]
+    "; then
+      return 0
+    fi
+    if [ "${attempt}" -lt "${attempts}" ]; then
+      echo "WARN: ${label} verify/heal attempt ${attempt}/${attempts} failed; retrying in ${delay}s..."
+      sleep "${delay}"
+      if [ "${delay}" -lt 30 ]; then
+        delay=$(( delay * 2 ))
+        [ "${delay}" -gt 30 ] && delay=30
       fi
-    done
-    [ \"\$failures\" -eq 0 ]
-  "
+    fi
+  done
+  echo "ERROR: ${label} verify/heal failed after ${attempts} attempts."
+  return 1
 }
 
 push_monitoring_artifact() {
