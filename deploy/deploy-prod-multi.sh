@@ -375,8 +375,11 @@ drain_remote_vm_from_vm1_upstream() {
   local remaining_csv
   local ws_csv
   remaining_csv="$(build_remote_upstream_csv "${vm_internal}")"
-  ws_csv="$(build_ws_upstream_csv)"
-  echo "=== Draining ${vm_label} remote workers from VM1 nginx upstream ==="
+  # In shared-websocket mode, app_ws is built from VM2/VM3 app workers. Drain the
+  # same VM from app_ws before restarting it; otherwise websocket handshakes can
+  # hit a worker while systemd has the port down.
+  ws_csv="$(build_ws_upstream_csv "${vm_internal}")"
+  echo "=== Draining ${vm_label} remote workers from VM1 nginx upstreams ==="
   rewrite_vm1_nginx_upstream "${remaining_csv}" "${ws_csv}" "drain ${vm_label} from VM1 nginx upstream"
   ssh_vm "$VM1" "
     set -euo pipefail
@@ -386,8 +389,16 @@ drain_remote_vm_from_vm1_upstream() {
       echo 'ERROR: ${vm_label} upstream entries still present after drain'
       exit 1
     fi
+    ws_tier_enabled='${WS_TIER_ENABLED}'
+    if [ \"\$ws_tier_enabled\" != 'true' ]; then
+      ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
+      if printf '%s\n' \"\$ws_block\" | grep -q 'server ${vm_internal}:'; then
+        echo 'ERROR: ${vm_label} websocket upstream entries still present after drain'
+        exit 1
+      fi
+    fi
   "
-  echo "✓ ${vm_label} removed from VM1 nginx upstream"
+  echo "✓ ${vm_label} removed from VM1 nginx upstreams"
 }
 
 restore_remote_vm_to_vm1_upstream() {
@@ -463,8 +474,9 @@ restore_ws_vm_to_vm1_app_ws() {
 }
 
 cleanup_on_exit() {
+  local status=$?
   set +e
-  if [[ "${DEPLOY_SUCCESS}" -ne 1 ]]; then
+  if [[ "${status}" -ne 0 && "${DEPLOY_SUCCESS}" -ne 1 ]]; then
     echo ""
     echo "↩ Exit trap: deploy did not complete successfully — restoring full VM1 nginx upstream..."
     local full_csv
@@ -482,6 +494,7 @@ cleanup_on_exit() {
       echo "  Run on VM1: grep 'upstream app' /etc/nginx/sites-enabled/chatapp"
     fi
   fi
+  exit "${status}"
 }
 trap cleanup_on_exit EXIT
 
