@@ -13,7 +13,7 @@
 |-------|----------|----------|---------|-------|-------------------|-------------------|
 | `POST /auth/register` | 805 | **3764*** | **4.7×** | 0.93 | 1 | PG INSERT variance on users table + Redis rate limiter (*p99 varies 1115–3764ms between windows) |
 | `GET /conversations` | 479 | **2905** | **6.1×** | 1.57 | 8 | Complex query (LATERAL joins) + 0% cache hit rate |
-| `GET /search` | 235 | **1105** | **4.7×** | 1.13 | 2 | MeiliSearch call + PG recheck. Meili fallback metrics = no data |
+| `GET /search` | 235 | **1105** | **4.7×** | 1.13 | 2 | MeiliSearch call + PG recheck, with tail from Meili empty/strict fallback paths |
 | `POST /communities/:id/join` | 121 | **400** | 3.3× | 1.81 | 5 | 5 sequential PG queries |
 | `GET /channels` | 189 | **238** | 1.3× | 0.01 | 5 | Complex query, 0% cache hit rate (always cold) |
 | `POST /messages` | 46 | **171** | 3.7× | 68.63 | 2 | PG query variance at high throughput; lock wait=NaN (no contention) |
@@ -114,19 +114,18 @@ The query chain:
 
 ### 3. GET /search — p99 1105ms (p95 235ms)
 
-**MeiliSearch-specific metrics returned "no data"** — `search_query_duration_ms_bucket`, `search_freshness_cache_total`, `search_meili_fallback_total` all returned empty results. This means either:
-- The metrics were renamed/removed in a recent deploy
-- No search traffic fell into those histogram buckets in the 10m window
-- The metrics are registered but never incremented
+**Corrected 2026-05-07 live read:** the first diagnostic script was querying stale metric names (`search_meili_fallback_total`, `search_freshness_cache_total`, `search_throttle_total`). The exported series are `meili_search_fallback_total`, split freshness hit/miss counters, and `search_throttled_total`.
 
-**What we know:** 2 PG queries per request. handler_overhead_p99=1ms. So the time is spent in the MeiliSearch client call + PG recheck.
+**What we know:** 2 PG queries per request on the normal path. handler_overhead_p99≈1ms. Live corrected Prometheus showed Meili p99≈350ms, primary Postgres recheck p99≈192ms, freshness rescue p99≈380–471ms, and fallback reasons around 10% of search traffic (`strict_token_mismatch`, `empty_candidates`, `recheck_error`, `unavailable`).
 
-**The spike likely comes from** the MeiliSearch → PG fallback path (strict_token_mismatch or empty_candidates) which runs the full search pipeline twice sequentially. But without the MeiliSearch-specific metrics, we can't confirm the fallback rate.
+**Root cause:** the tail came from sequential fallback paths:
+- `empty_candidates` ran freshness rescue and then still launched the full Postgres FTS/literal pipeline when freshness found nothing.
+- `strict_token_mismatch` rechecked Meili IDs, found no exact all-term match, then repeated the full Postgres search instead of going straight to the bounded literal rescue query.
 
 **Fix:**
-1. **Verify search metrics are being exported** — check `backend/src/utils/metrics.ts` for the metric names
-2. **Reduce MeiliSearch client timeout** — if Meili is slow, fail fast
-3. **The PG FTS fallback is the safety net** — don't remove it, but make it faster by pre-computing the FTS query and running it concurrently with Meili as a race (first result wins). This avoids the sequential double-work on fallback.
+1. **Use the corrected metric names** in diagnostics so Meili/freshness rates are visible.
+2. **Do not full-FTS fallback on empty Meili candidates** once the index is warm; bounded freshness rescue covers recent writes, then return an empty page. `MEILI_EMPTY_CANDIDATES_FALLBACK_ENABLED=true` remains as a temporary cold-index/rebuild switch.
+3. **For strict-token mismatch, run only the bounded literal rescue query on primary**, not the full FTS+literal pipeline.
 
 ---
 
@@ -167,7 +166,7 @@ Simple 1-PG-query route (`SELECT ... FROM users WHERE id = $1`). p95=43ms is alr
 | **P0** | Stop invalidating list caches on every message fanout — invalidate only on structural changes (new/delete conversation, join/leave channel). At 68 msg/s the current invalidation rate (136-340/s) keeps the cache permanently cold. | conversations, channels | conversations p99 from 2905→~50ms on cache hit | 10 lines in `conversationFanout.ts` + `channelRealtimeFanout.ts` |
 | **P0** | Drop LATERAL join from conversations list query (other user's read state not needed in sidebar) | conversations | 50%+ query time reduction even on cache miss | 1 day |
 | **P1** | Add sub-millisecond tracing to register handler to identify Redis vs PG vs other latency (currently opaque — `AUTH_PASSWORD_STORAGE_MODE=plain` so hash is free, yet p99=1-4s) | register | Identify the real 1-4s bottleneck | 2 hours |
-| **P1** | Verify search metrics are exporting (`search_query_duration_ms_bucket` returned no data — need to check `metrics.ts` and recent deploys) | search | Get visibility into Meili vs PG split | 1 hour |
+| **P1** | Keep search diagnostics on exported metric names (`meili_search_fallback_total`, freshness hit/miss counters, `search_throttled_total`) | search | Preserve visibility into Meili vs PG split | 1 hour |
 | **P1** | Batch community join queries (check+insert 5→2) | communities join | p99 from 400→~100ms | 0.5 day |
 | **P2** | Cache `/users/me` in Redis (5s TTL) | users/me | p99 from 145→~5ms | 2 hours |
 

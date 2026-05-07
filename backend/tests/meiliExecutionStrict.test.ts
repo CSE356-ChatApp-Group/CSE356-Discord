@@ -38,6 +38,7 @@ describe('Meili execution strict all-term recheck', () => {
     };
     const runSearchReadOnlyQuery = jest.fn().mockResolvedValue(recheckRows);
     const searchOnce = jest.fn().mockResolvedValue(searchOnceResult);
+    const searchStrictLiteralFallback = jest.fn().mockResolvedValue(searchOnceResult);
 
     const executor = createMeiliSearchExecutor({
       meiliClient,
@@ -62,9 +63,10 @@ describe('Meili execution strict all-term recheck', () => {
       },
       searchUseReadReplica,
       searchOnce,
+      searchStrictLiteralFallback,
     });
 
-    return { executor, meiliClient, runSearchReadOnlyQuery, searchOnce };
+    return { executor, meiliClient, runSearchReadOnlyQuery, searchOnce, searchStrictLiteralFallback };
   }
 
   it('falls back instead of returning a candidate missing a stop word from the original query', async () => {
@@ -77,7 +79,7 @@ describe('Meili execution strict all-term recheck', () => {
       processingTimeMs: 0,
       query: 'disconnect with half',
     };
-    const { executor, meiliClient, searchOnce } = makeExecutor({
+    const { executor, meiliClient, searchOnce, searchStrictLiteralFallback } = makeExecutor({
       candidateIds: [candidateId],
       recheckRows: [
         {
@@ -105,14 +107,15 @@ describe('Meili execution strict all-term recheck', () => {
 
     expect(out).toBe(fallbackResult);
     expect(meiliClient.incFallbackTotal).toHaveBeenCalledWith('strict_token_mismatch');
-    expect(searchOnce).toHaveBeenCalledWith(
+    expect(searchStrictLiteralFallback).toHaveBeenCalledWith(
       'disconnect with half',
       expect.objectContaining({ communityId: '00000000-0000-4000-8000-000000000005' }),
       true,
     );
+    expect(searchOnce).not.toHaveBeenCalled();
   });
 
-  it('forces the strict fallback to primary even when search normally uses a replica', async () => {
+  it('forces the strict literal fallback to primary even when search normally uses a replica', async () => {
     const candidateId = '00000000-0000-4000-8000-000000000021';
     const fallbackResult = {
       hits: [{ id: '00000000-0000-4000-8000-000000000022', content: 'beat because their' }],
@@ -122,7 +125,7 @@ describe('Meili execution strict all-term recheck', () => {
       processingTimeMs: 0,
       query: 'beat because their',
     };
-    const { executor, searchOnce } = makeExecutor({
+    const { executor, searchOnce, searchStrictLiteralFallback } = makeExecutor({
       candidateIds: [candidateId],
       recheckRows: [
         {
@@ -149,11 +152,12 @@ describe('Meili execution strict all-term recheck', () => {
       offset: 0,
     });
 
-    expect(searchOnce).toHaveBeenCalledWith(
+    expect(searchStrictLiteralFallback).toHaveBeenCalledWith(
       'beat because their',
       expect.objectContaining({ communityId: '00000000-0000-4000-8000-000000000025' }),
       true,
     );
+    expect(searchOnce).not.toHaveBeenCalled();
   });
 
   it('returns rechecked Meili rows when every original query term is present', async () => {
@@ -185,6 +189,25 @@ describe('Meili execution strict all-term recheck', () => {
 
     expect(out.hits.map((h: any) => h.id)).toEqual([candidateId]);
     expect(meiliClient.incFallbackTotal).not.toHaveBeenCalledWith('strict_token_mismatch');
+    expect(searchOnce).not.toHaveBeenCalled();
+  });
+
+  it('returns empty results for empty Meili candidates after freshness misses without full Postgres fallback', async () => {
+    const { executor, meiliClient, searchOnce, searchStrictLiteralFallback } = makeExecutor({
+      candidateIds: [],
+      recheckRows: [],
+    });
+
+    const out = await executor.searchWithMeiliBackend('nothing indexed here', {
+      communityId: '00000000-0000-4000-8000-000000000045',
+      userId: '00000000-0000-4000-8000-000000000043',
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(out.hits).toEqual([]);
+    expect(meiliClient.incFallbackTotal).not.toHaveBeenCalledWith('empty_candidates');
+    expect(searchStrictLiteralFallback).not.toHaveBeenCalled();
     expect(searchOnce).not.toHaveBeenCalled();
   });
 });

@@ -106,17 +106,24 @@ async function main() {
   const searchMetrics = [
     ['histogram_quantile(0.99, sum by (le) (rate(search_query_duration_ms_bucket{job="chatapp-api"}['+RANGE+'])))', 'search_duration_p99'],
     ['histogram_quantile(0.95, sum by (le) (rate(search_query_duration_ms_bucket{job="chatapp-api"}['+RANGE+'])))', 'search_duration_p95'],
-    ['sum by (result)(rate(search_freshness_cache_total{job="chatapp-api"}['+RANGE+']))', 'freshness_cache'],
-    ['sum by (result)(rate(search_meili_fallback_total{job="chatapp-api"}['+RANGE+']))', 'meili_fallback'],
+    ['sum(rate(search_freshness_cache_hits_total{job="chatapp-api"}['+RANGE+']))', 'freshness_cache_hits/s'],
+    ['sum by (reason)(rate(search_freshness_cache_misses_total{job="chatapp-api"}['+RANGE+']))', 'freshness_cache_misses/s'],
+    ['sum by (reason)(rate(meili_search_fallback_total{job="chatapp-api"}['+RANGE+']))', 'meili_fallback'],
+    ['histogram_quantile(0.99, sum by (le) (rate(meili_search_duration_ms_bucket{job="chatapp-api"}['+RANGE+'])))', 'meili_search_p99'],
+    ['histogram_quantile(0.99, sum by (le, source, backend) (rate(meili_recheck_duration_ms_bucket{job="chatapp-api"}['+RANGE+'])))', 'meili_recheck_p99'],
+    ['histogram_quantile(0.99, sum by (le, result) (rate(search_freshness_rescue_wall_duration_ms_bucket{job="chatapp-api"}['+RANGE+'])))', 'freshness_rescue_wall_p99'],
     ['sum(rate(search_replica_retry_total{job="chatapp-api"}['+RANGE+']))', 'replica_retries/s'],
-    ['sum(rate(search_throttle_total{job="chatapp-api"}['+RANGE+']))', 'throttles/s'],
+    ['sum(rate(search_throttled_total{job="chatapp-api"}['+RANGE+']))', 'throttles/s'],
     ['histogram_quantile(0.99, sum by (le) (rate(search_handler_overhead_ms_bucket{job="chatapp-api"}['+RANGE+'])))', 'handler_overhead_p99'],
   ];
   for (const [q, label] of searchMetrics) {
     const r = await query(q);
     if (r.data && r.data.result.length) {
       if (r.data.result.length === 1) log(`  ${label}: ${r.data.result[0].value[1]}`);
-      else for (const x of r.data.result) log(`  ${label}(${x.metric.result || ''}): ${x.value[1]}`);
+      else for (const x of r.data.result) {
+        const suffix = x.metric.result || x.metric.reason || [x.metric.source, x.metric.backend].filter(Boolean).join('/') || '';
+        log(`  ${label}(${suffix}): ${x.value[1]}`);
+      }
     } else log(`  ${label}: no data`);
   }
 

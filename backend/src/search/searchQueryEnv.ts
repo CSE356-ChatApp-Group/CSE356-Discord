@@ -101,6 +101,13 @@ function meiliFreshnessCandidateCap(): number {
   return baseCap;
 }
 
+function meiliEmptyCandidatesFallbackEnabled(): boolean {
+  const raw = process.env.MEILI_EMPTY_CANDIDATES_FALLBACK_ENABLED;
+  if (raw === undefined || raw === '') return false;
+  const v = String(raw).trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'no' || v === 'off');
+}
+
 module.exports = {
   SEARCH_USE_READ_REPLICA,
   SEARCH_RECHECK_USE_READ_REPLICA,
@@ -111,4 +118,5 @@ module.exports = {
   getSearchStatementTimeoutMs,
   meiliFreshnessWindowMs,
   meiliFreshnessCandidateCap,
+  meiliEmptyCandidatesFallbackEnabled,
 };

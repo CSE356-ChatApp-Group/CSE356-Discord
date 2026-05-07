@@ -16,6 +16,7 @@ function createMeiliSearchExecutor({
   createMeiliFallbackError,
   searchUseReadReplica,
   searchOnce,
+  searchStrictLiteralFallback,
 }) {
   const {
     meiliRecheckDurationMs,
@@ -23,6 +24,7 @@ function createMeiliSearchExecutor({
   } = require('../utils/metrics/searchPerformance');
   const {
     SEARCH_RECHECK_USE_READ_REPLICA,
+    meiliEmptyCandidatesFallbackEnabled,
   } = require('./searchQueryEnv');
 
   function buildRecheckFromCandidates(
@@ -152,25 +154,47 @@ function createMeiliSearchExecutor({
         }
       }
 
-      const totalMs = Date.now() - tAll;
       searchFreshnessRescueWallDurationMs.observe(
         { result: 'empty' },
         Date.now() - tFreshnessRescue,
       );
-      meiliClient.incFallbackTotal('empty_candidates');
-      logger.warn(
+      const totalMs = Date.now() - tAll;
+
+      if (meiliEmptyCandidatesFallbackEnabled()) {
+        meiliClient.incFallbackTotal('empty_candidates');
+        logger.warn(
+          {
+            requestId,
+            query: q,
+            resolved_scope: scopeLabel,
+            meili_candidate_count: 0,
+            pg_fresh_candidate_count: 0,
+            meili_ms: meiliMs,
+            total_ms: totalMs,
+          },
+          'search: meili returned zero candidates, falling back to postgres',
+        );
+        throw createMeiliFallbackError('meili_empty_candidates');
+      }
+
+      logger.info(
         {
+          search_trace: true,
           requestId,
           query: q,
           resolved_scope: scopeLabel,
+          search_backend: 'meili',
           meili_candidate_count: 0,
           pg_fresh_candidate_count: 0,
+          fallback_to_postgres: false,
+          final_hit_count: 0,
+          reason: 'meili_empty_candidates_no_pg_fallback',
           meili_ms: meiliMs,
           total_ms: totalMs,
         },
-        'search: meili returned zero candidates, falling back to postgres',
+        'search_trace',
       );
-      throw createMeiliFallbackError('meili_empty_candidates');
+      return buildResult([], q, Number(opts.offset) || 0, Number(opts.limit) || 20);
     }
 
     // Happy path: Meili returned candidates. Recheck directly — no freshness supplement.
@@ -220,10 +244,13 @@ function createMeiliSearchExecutor({
         'search_trace',
       );
       // This rare path runs only after Meili returned candidates but the
-      // strict API contract needs a deeper Postgres pass, usually because the
-      // query contains stop words stripped from the Meili request. Do not send
-      // that follow-up to the read replica: replica timeouts here are surfaced
-      // by the Meili boundary as "busy" even though primary can often answer.
+      // strict API contract needs a deeper exact pass, usually because the
+      // query contains stop words stripped from the Meili request. Use the
+      // bounded literal rescue directly instead of repeating the full FTS
+      // pipeline; force primary to avoid replica-tail false busy responses.
+      if (typeof searchStrictLiteralFallback === 'function') {
+        return searchStrictLiteralFallback(q, opts, true);
+      }
       return searchOnce(q, opts, true);
     }
 

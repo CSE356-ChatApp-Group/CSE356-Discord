@@ -777,6 +777,31 @@ async function searchOnce(
   }, { forcePrimary });
 }
 
+async function searchStrictLiteralFallback(
+  q: string,
+  opts: Record<string, any> = {},
+  forcePrimary = true,
+): Promise<any> {
+  const trimmed = String(q || '').trim();
+  const limit = Number(opts.limit) || 20;
+  const offset = Number(opts.offset) || 0;
+  if (!trimmed || !isScopedSearch(opts)) {
+    return buildResult([], trimmed, offset, limit);
+  }
+
+  const strictTerms = tokenizeStrictSearchTerms(trimmed);
+  const literalMeta = buildScopedLiteralParts(
+    trimmed,
+    opts,
+    strictTerms,
+    literalRecentCandidateCapDeep(),
+  );
+  const rows = await runSearchQuery(literalMeta.sql, literalMeta.params, { forcePrimary });
+  throwIfScopeDenied(rows);
+  const hits = rows.filter((row: any) => row && row.id);
+  return buildResult(hits, literalMeta.q, literalMeta.offset, literalMeta.limit);
+}
+
 // ── Meili-backed search path ──────────────────────────────────────────────────
 
 const { searchWithMeiliBackend } = createMeiliSearchExecutor({
@@ -797,6 +822,7 @@ const { searchWithMeiliBackend } = createMeiliSearchExecutor({
   createMeiliFallbackError,
   searchUseReadReplica: SEARCH_USE_READ_REPLICA,
   searchOnce,
+  searchStrictLiteralFallback,
 });
 
 async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
