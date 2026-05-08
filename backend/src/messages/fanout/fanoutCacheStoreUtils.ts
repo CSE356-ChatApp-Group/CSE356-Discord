@@ -1,4 +1,9 @@
 const redis = require('../../db/redis');
+const FANOUT_CACHE_VERSION_KEY_TTL_SECS = (() => {
+  const raw = Number.parseInt(process.env.FANOUT_CACHE_VERSION_KEY_TTL_SECS || '2592000', 10);
+  if (!Number.isFinite(raw) || raw < 60) return 2_592_000;
+  return Math.min(raw, 60 * 60 * 24 * 90);
+})();
 
 async function readVersionedCacheState(cacheKey: string, versionKey: string) {
   const mget = typeof redis.mget === 'function' ? redis.mget.bind(redis) : null;
@@ -22,16 +27,25 @@ async function readVersionedCacheState(cacheKey: string, versionKey: string) {
   }
 }
 
-async function invalidateVersionedCache(cacheKey: string, versionKey: string) {
+async function invalidateVersionedCache(
+  cacheKey: string,
+  versionKey: string,
+  versionTtlSecs: number = FANOUT_CACHE_VERSION_KEY_TTL_SECS,
+) {
+  const normalizedVersionTtlSecs = Number.isFinite(versionTtlSecs) && versionTtlSecs > 0
+    ? Math.floor(versionTtlSecs)
+    : FANOUT_CACHE_VERSION_KEY_TTL_SECS;
   try {
     const p = redis.pipeline();
     p.del(cacheKey);
     p.incr(versionKey);
+    p.expire(versionKey, normalizedVersionTtlSecs);
     await p.exec();
   } catch {
     await Promise.allSettled([
       redis.del(cacheKey),
       redis.incr(versionKey),
+      redis.expire(versionKey, normalizedVersionTtlSecs),
     ]);
   }
 }

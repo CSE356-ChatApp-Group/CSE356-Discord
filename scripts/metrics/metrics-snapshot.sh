@@ -88,6 +88,9 @@ queries=(
   'histogram_quantile(0.95, sum by (le) (rate(ws_bootstrap_channels_bucket{job="chatapp-api"}[5m])))'
   'sum by (result) (rate(ws_bootstrap_list_cache_total{job="chatapp-api"}[5m]))'
   'sum(rate(endpoint_list_cache_total{job="chatapp-api"}[5m])) by (endpoint, result)'
+  'sum by (endpoint) (rate(endpoint_list_cache_total{job="chatapp-api",result="hit"}[5m])) / clamp_min(sum by (endpoint) (rate(endpoint_list_cache_total{job="chatapp-api"}[5m])), 1e-9)'
+  'sum by (scope, reason) (rate(message_list_cache_store_skipped_total{job="chatapp-api"}[5m]))'
+  'sum by (path) (rate(messages_list_access_cache_hit_total{job="chatapp-api"}[5m]))'
   'sum by (outcome) (rate(message_post_idempotency_poll_total{job="chatapp-api"}[5m]))'
   'histogram_quantile(0.95, sum by (le, outcome) (rate(message_post_idempotency_poll_wait_ms_bucket{job="chatapp-api"}[5m])))'
   # Read-receipt insert-lock shedding + POST/read SLO helpers (canary gates)

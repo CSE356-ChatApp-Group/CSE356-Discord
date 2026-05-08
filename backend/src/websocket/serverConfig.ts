@@ -81,7 +81,11 @@ const WS_HOT_LOG_SAMPLE_RATE =
     : 0;
 
 const WS_BOOTSTRAP_CACHE_TTL_SECONDS = envInt('WS_BOOTSTRAP_CACHE_TTL_SECONDS', 180);
-const WS_BOOTSTRAP_INGRESS_TTL_SECONDS = 3;
+const rawBootstrapIngressTtlSeconds = envNumber('WS_BOOTSTRAP_INGRESS_TTL_SECONDS', 5);
+const WS_BOOTSTRAP_INGRESS_TTL_SECONDS =
+  Number.isFinite(rawBootstrapIngressTtlSeconds) && rawBootstrapIngressTtlSeconds > 0
+    ? Math.min(30, Math.max(2, Math.floor(rawBootstrapIngressTtlSeconds)))
+    : 5;
 const rawBootstrapIngressJitterMs = envNumber('WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS', 200);
 const WS_BOOTSTRAP_INGRESS_JITTER_MAX_MS =
   Number.isFinite(rawBootstrapIngressJitterMs) && rawBootstrapIngressJitterMs >= 0

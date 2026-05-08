@@ -7,10 +7,13 @@ jest.mock('../src/db/redis', () => ({
   mget: jest.fn(() => Promise.resolve([null, null])),
   set: jest.fn(() => Promise.resolve('OK')),
   del: jest.fn(() => Promise.resolve(1)),
+  incr: jest.fn(() => Promise.resolve(1)),
+  expire: jest.fn(() => Promise.resolve(1)),
   pipeline: jest.fn(() => ({
     del: jest.fn().mockReturnThis(),
     incr: jest.fn().mockReturnThis(),
-    exec: jest.fn(() => Promise.resolve([[null, 1], [null, 1]])),
+    expire: jest.fn().mockReturnThis(),
+    exec: jest.fn(() => Promise.resolve([[null, 1], [null, 1], [null, 1]])),
   })),
 }));
 
@@ -31,6 +34,8 @@ const redis = require('../src/db/redis') as {
   mget: jest.Mock;
   set: jest.Mock;
   del: jest.Mock;
+  incr: jest.Mock;
+  expire: jest.Mock;
   pipeline: jest.Mock;
 };
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -54,15 +59,20 @@ describe('conversationFanoutTargets', () => {
     redis.mget.mockReset();
     redis.set.mockReset();
     redis.del.mockReset();
+    redis.incr.mockReset();
+    redis.expire.mockReset();
     redis.pipeline.mockReset();
     redis.get.mockResolvedValue(null);
     redis.mget.mockResolvedValue([null, null]);
     redis.set.mockResolvedValue('OK');
     redis.del.mockResolvedValue(1);
+    redis.incr.mockResolvedValue(1);
+    redis.expire.mockResolvedValue(1);
     redis.pipeline.mockImplementation(() => ({
       del: jest.fn().mockReturnThis(),
       incr: jest.fn().mockReturnThis(),
-      exec: jest.fn(() => Promise.resolve([[null, 1], [null, 1]])),
+      expire: jest.fn().mockReturnThis(),
+      exec: jest.fn(() => Promise.resolve([[null, 1], [null, 1], [null, 1]])),
     }));
     metrics.fanoutTargetCacheTotal.inc.mockReset();
     metrics.conversationFanoutTargetsCacheVersionRetryTotal.inc.mockReset();
@@ -98,12 +108,7 @@ describe('conversationFanoutTargets', () => {
     expect(first).toEqual(['conversation:conv-2', 'user:a', 'user:b']);
     expect(second).toEqual(['conversation:conv-2', 'user:a', 'user:b']);
     expect(query).toHaveBeenCalledTimes(1);
-    expect(redis.set).toHaveBeenCalledWith(
-      'conversation:conv-2:fanout_targets',
-      JSON.stringify({ v: 2, u: ['a', 'b'] }),
-      'EX',
-      180,
-    );
+    expect(redis.set).not.toHaveBeenCalled();
   });
 
   it('invalidates the cached conversation audience', async () => {
@@ -112,6 +117,7 @@ describe('conversationFanoutTargets', () => {
     const pipe = redis.pipeline.mock.results[0].value;
     expect(pipe.del).toHaveBeenCalledWith('conversation:conv-3:fanout_targets');
     expect(pipe.incr).toHaveBeenCalledWith('conversation:conv-3:fanout_targets_v');
+    expect(pipe.expire).toHaveBeenCalled();
     expect(pipe.exec).toHaveBeenCalled();
   });
 

@@ -216,7 +216,7 @@ This is not causing a bug but means the overload-adaptive limit scaling (the des
 **File:** `bootstrapSubscriptions.ts`, `serverConfig.ts`  
 **Severity:** Medium  
 
-The ingress cache key has `WS_BOOTSTRAP_INGRESS_TTL_SECONDS=3` (hardcoded in `serverConfig.ts`). Two reconnects arriving >3s apart both go through the full list cache lookup path. Given p50 lifetime=26.9s (disconnect → reconnect gap is typically 0–2s), the ingress cache would coalesce rapid reconnects. But many grader reconnects arrive with >3s gaps.
+The ingress cache key TTL is controlled by `WS_BOOTSTRAP_INGRESS_TTL_SECONDS` (default **5s** in `serverConfig.ts`, with a small positive write-time jitter). Reconnects arriving after TTL expiry go through the full list cache lookup path; with p50 lifetime=26.9s (disconnect -> reconnect gap typically 0-2s), the ingress cache coalesces rapid reconnects while avoiding synchronized expiry spikes.
 
 The 180s list cache (`WS_BOOTSTRAP_CACHE_TTL_SECONDS=180`) is the real protection — a second lookup within 180s hits Redis (fast) rather than PG. The ingress cache's role is to prevent multiple simultaneous DB requests from the same user during a connection burst.
 

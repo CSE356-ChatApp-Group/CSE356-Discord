@@ -359,7 +359,7 @@ async function setPresence(userId, status, awayMessage) {
       } else {
         nextAwayMessage = normalizeAwayMessage(awayMessage);
         if (nextAwayMessage) {
-          pipeline.set(awayKey, nextAwayMessage);
+          pipeline.set(awayKey, nextAwayMessage, "EX", AWAY_MESSAGE_REDIS_TTL_SECS);
         } else {
           pipeline.del(awayKey);
         }

@@ -55,6 +55,7 @@ Use this when a PR touches **hot paths** (see [`backend-hotspots.md`](backend-ho
 | Env tunables (search, overload, RUM) | [`env.md`](env.md), [`.env.example`](../.env.example) |
 | Grafana dashboards (repo JSON) | **Overview:** [`chatapp-overview.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/chatapp-overview.json) — **Redis / cache:** [`redis-cache-store.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/redis-cache-store.json) (`job=redis` + app-side Redis-adjacent counters). Overview top links jump to Failure modes, Latency RCA, Redis, Overload, API routes. |
 | Instant Prometheus triage | [`scripts/metrics/metrics-snapshot.sh`](../scripts/metrics/metrics-snapshot.sh) |
+| Cache rollout guardrails snapshot | [`scripts/metrics/cache-guardrails-snapshot.sh`](../scripts/metrics/cache-guardrails-snapshot.sh) |
 | Redis key families (operators’ reference) | [`redis-key-map.md`](redis-key-map.md) |
 | Read-route strain canary gates | [`scripts/metrics/read-receipt-strain-gates.sh`](../scripts/metrics/read-receipt-strain-gates.sh) |
 | Top normalized SQL (`pg_stat_statements`: total, max, stddev, mean, IO) | [`scripts/postgres/pg-stat-statements-snapshot.sh`](../scripts/postgres/pg-stat-statements-snapshot.sh) |
@@ -75,6 +76,7 @@ Use this map to jump from a page/Discord alert to the right triage section quick
 | DB observability/replication | `ChatAppDbPostgresExporterDown`, `ChatAppDbReplication*`, `ChatAppDbReplica*` | `up{job="db-postgres"}`, replication slot metrics, replica disk series | [`runbooks.md`](runbooks.md#chatappdbpostgresexporterdown) |
 | Realtime/delivery | `ChatAppCriticalFanout*`, `ChatAppMessagePostFanout*`, `ChatAppRealtimeFanoutSlow`, `ChatAppDeliveryFails*`, `ChatAppWs*` | `fanout_queue_depth`, `fanout_job_latency_ms`, `ws_reliable_delivery_total`, publish failure counters | [`runbooks.md`](runbooks.md#chatapprealtimedeliveryfailures-family) |
 | Redis | `ChatAppRedis*` | `redis_up`, `redis_memory_used_bytes`, `redis_evicted_keys_total`, `redis_rejected_connections_total` | [`runbooks.md`](runbooks.md#chatappredis-health-family) |
+| List-cache quality | `ChatAppListCache*`, `ChatAppMessageListCacheStoreSkippedHigh` | `endpoint_list_cache_total`, `message_list_cache_store_skipped_total`, `messages_list_access_cache_hit_total` | [`runbooks.md`](runbooks.md#chatapppgpoolpressure-family) |
 
 ## Redis list-cache tuning (evidence before TTL changes)
 
@@ -114,6 +116,26 @@ histogram_quantile(0.95,
 **Interpretation:** raising TTL only makes sense if **hit ratio** or **primary DB load** warrants it and **p95/p99 latency**, **`endpoint_list_cache_invalidations_total`**, and **`pg_pool_waiting`** do not worsen. Dashboard: [`redis-cache-store.json`](../infrastructure/monitoring/grafana-provisioning-remote/dashboards/files/redis-cache-store.json).
 
 Canonical key patterns: [`redis-key-map.md`](redis-key-map.md).
+
+### Cache rollout guardrails (prod/staging)
+
+When rolling out cache hit-rate tuning, keep changes low-risk and reversible:
+
+1. Apply in this order: observability/alerts -> cache-key hygiene (TTL/retention) -> WS bootstrap ingress tuning -> conversation fanout tuning.
+   - Baseline each step with:
+     - `PROMETHEUS_URL=... ./scripts/metrics/cache-guardrails-snapshot.sh --write var/cache-guardrails-before.txt`
+   - Compare after rollout with:
+     - `PROMETHEUS_URL=... ./scripts/metrics/cache-guardrails-snapshot.sh --write var/cache-guardrails-after.txt`
+2. After each step, compare 5m and 10m windows for:
+   - `endpoint_list_cache_total` hit ratio by endpoint
+   - `message_list_cache_store_skipped_total{reason="epoch_changed"}`
+   - `ws_bootstrap_list_cache_total`
+   - `fanout_target_cache_total{path=~"conversation_event|channel_message_user_topics"}`
+   - `http_server_request_duration_ms` p95/p99, `pg_pool_waiting`, `pg_pool_operation_errors_total`, `redis_evicted_keys_total`
+3. Roll back immediately if any of the following persists for >=15m:
+   - route p95 regresses by >10% for touched paths
+   - cache miss/store-skip rates worsen after the tuning step
+   - Redis evictions appear or 5xx rises over baseline
 
 ## Where latency comes from (split app + DB VMs)
 
@@ -193,6 +215,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - Redis: `redis_up`, used/max memory, evictions, commands/sec (`redis_commands_processed_total` rate); SLOWLOG via `REDIS_SLOWLOG_SSH=ubuntu@<vm1> ./scripts/redis/redis-slowlog-snapshot.sh` or embed in `PROMETHEUS_URL=... REDIS_SLOWLOG_SSH=... ./scripts/metrics/metrics-snapshot.sh`
    - Node GC: worker-ranked `nodejs_gc_duration_seconds` p99 plus the same view split by `kind` (`major`, `minor`, `incremental`, `weakcb`) so sparse bucket tails are not mistaken for route load.
    - websocket bootstrap wall-time, breadth, and cache-hit rate
+- endpoint list-cache hit ratio by endpoint (`endpoint_list_cache_total`) plus message-list store-skips/access-shortcuts (`message_list_cache_store_skipped_total`, `messages_list_access_cache_hit_total`)
    - websocket reliable delivery mix (`ws_reliable_delivery_total` replay %, `ws_reliable_delivery_latency_ms` p95 by path) plus reconnect rate for correlation
    - channel message user-topic fanout split (`channel_message_fanout_recipient_total`) and miss hints (`realtime_miss_attribution_total`)
 

@@ -22,8 +22,18 @@ function envInt(name: string, defaultValue: number, { min }: { min?: number } = 
 const conversationFanoutConfig = Object.freeze({
   CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS: envInt(
     'CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS',
-    180,
+    120,
     { min: 1 },
+  ),
+  CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_MISSES: envInt(
+    'CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_MISSES',
+    2,
+    { min: 1 },
+  ),
+  CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_WINDOW_MS: envInt(
+    'CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_WINDOW_MS',
+    30000,
+    { min: 1000 },
   ),
   DM_FANOUT_TIMING_LOG: envBool('DM_FANOUT_TIMING_LOG', false)
     || String(process.env.DM_FANOUT_TIMING_LOG || '').toLowerCase() === 'all',

@@ -34,6 +34,7 @@ Subscribers use these **topic strings** (not the same as persistence keys):
 | `messages:conversation:<conversationId>:cacheEpoch` | Epoch for DM message list |
 
 TTL for message lists is **`MESSAGES_CACHE_TTL_SECS`** in [`backend/src/messages/lib/messageListCache.ts`](../backend/src/messages/lib/messageListCache.ts) (default **15s**, code constant).
+Epoch counter retention is bounded by **`MESSAGE_CACHE_EPOCH_TTL_SECS`** (default **2592000** s / 30d) so dormant scopes do not accumulate immortal counter keys.
 
 ---
 
@@ -111,6 +112,7 @@ Lua scripts and batch keys — [`backend/src/messages/lib/readReceiptState.ts`](
 | `ch_compat:<uuid>:<userId>` | Legacy conversationId→channel resolution (`accessCaches.ts`) |
 
 Message-target JSON caches use scoped keys from [`backend/src/messages/accessCaches.ts`](../backend/src/messages/accessCaches.ts) and [`backend/src/utils/versionedAccessCache.ts`](../backend/src/utils/versionedAccessCache.ts).
+Fanout version-key retention is bounded by **`FANOUT_CACHE_VERSION_KEY_TTL_SECS`** (default **2592000** s / 30d).
 
 ---
 

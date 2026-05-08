@@ -5,16 +5,23 @@
  */
 
 const { messageCacheBustWallDurationMs } = require('../utils/metrics');
+const MESSAGE_CACHE_EPOCH_TTL_SECS = (() => {
+  const raw = Number.parseInt(process.env.MESSAGE_CACHE_EPOCH_TTL_SECS || '2592000', 10);
+  if (!Number.isFinite(raw) || raw < 60) return 2_592_000;
+  return Math.min(raw, 60 * 60 * 24 * 90);
+})();
 
 type RedisLike = {
   get(key: string): Promise<string | null>;
   del(...keys: string[]): Promise<unknown>;
   incr(key: string): Promise<number>;
+  expire(key: string, seconds: number): Promise<number>;
 };
 
 type PipelineLike = {
   del(...keys: string[]): PipelineLike;
   incr(key: string): PipelineLike;
+  expire(key: string, seconds: number): PipelineLike;
   exec(): Promise<Array<[Error | null, unknown]> | null>;
 };
 
@@ -83,7 +90,12 @@ async function bustListAndEpoch(
   const t0 = process.hrtime.bigint();
   try {
     if (redisSupportsPipeline(redis)) {
-      const results = await redis.pipeline().del(listKey).incr(epochKey).exec();
+      const results = await redis
+        .pipeline()
+        .del(listKey)
+        .incr(epochKey)
+        .expire(epochKey, MESSAGE_CACHE_EPOCH_TTL_SECS)
+        .exec();
       if (Array.isArray(results)) {
         for (const row of results) {
           if (row && row[0]) {
@@ -99,6 +111,11 @@ async function bustListAndEpoch(
       }
       try {
         await redis.incr(epochKey);
+      } catch {
+        /* non-fatal */
+      }
+      try {
+        await redis.expire(epochKey, MESSAGE_CACHE_EPOCH_TTL_SECS);
       } catch {
         /* non-fatal */
       }

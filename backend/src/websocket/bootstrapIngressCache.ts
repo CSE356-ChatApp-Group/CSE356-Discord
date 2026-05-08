@@ -7,6 +7,12 @@ function wsBootstrapIngressKey(userId, scope = "default") {
   return `ws:bootstrap:${userId}:ingress:${scope}`;
 }
 
+function jitteredIngressTtlSeconds(ttlSeconds) {
+  const base = Number.isFinite(ttlSeconds) ? Math.max(1, Math.floor(ttlSeconds)) : 3;
+  const jitterMax = Math.max(1, Math.floor(base * 0.2));
+  return base + Math.floor(Math.random() * (jitterMax + 1));
+}
+
 async function readWsBootstrapIngressCache(redis, isRedisOperational, userId, scope = "default") {
   if (!isRedisOperational(redis)) return null;
   try {
@@ -30,11 +36,13 @@ async function writeWsBootstrapIngressCache(
 ) {
   if (!isRedisOperational(redis)) return;
   try {
+    // Add a small positive jitter to smooth synchronized expirations during reconnect bursts.
+    const ttlWithJitter = jitteredIngressTtlSeconds(ttlSeconds);
     await redis.set(
       wsBootstrapIngressKey(userId, scope),
       JSON.stringify(channels),
       "EX",
-      ttlSeconds,
+      ttlWithJitter,
     );
   } catch {
     /* fail-open */

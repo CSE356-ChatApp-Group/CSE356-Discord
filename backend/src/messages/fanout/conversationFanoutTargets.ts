@@ -8,6 +8,8 @@ const {
 const {
   conversationFanoutConfig: {
     CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS,
+    CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_MISSES,
+    CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_WINDOW_MS,
   },
 } = require('../config/conversationFanoutConfig');
 const {
@@ -15,6 +17,7 @@ const {
   invalidateVersionedCache,
 } = require('./fanoutCacheStoreUtils');
 const conversationFanoutTargetsInflight: Map<string, Promise<string[]>> = new Map();
+const conversationFanoutCacheWarmup: Map<string, { misses: number; firstMissAt: number }> = new Map();
 
 function conversationFanoutTargetsCacheKey(conversationId: string) {
   return `conversation:${conversationId}:fanout_targets`;
@@ -51,7 +54,28 @@ function parseConversationFanoutTargetsCached(
   return null;
 }
 
+function shouldWriteConversationFanoutCache(conversationId: string, forceWrite: boolean): boolean {
+  if (forceWrite) return true;
+  if (CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_MISSES <= 1) {
+    return true;
+  }
+  const now = Date.now();
+  const existing = conversationFanoutCacheWarmup.get(conversationId);
+  if (!existing || now - existing.firstMissAt > CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_WINDOW_MS) {
+    conversationFanoutCacheWarmup.set(conversationId, { misses: 1, firstMissAt: now });
+    return false;
+  }
+  const nextMisses = existing.misses + 1;
+  if (nextMisses >= CONVERSATION_FANOUT_TARGETS_CACHE_WARMUP_MISSES) {
+    conversationFanoutCacheWarmup.delete(conversationId);
+    return true;
+  }
+  conversationFanoutCacheWarmup.set(conversationId, { misses: nextMisses, firstMissAt: existing.firstMissAt });
+  return false;
+}
+
 async function invalidateConversationFanoutTargetsCache(conversationId: string) {
+  conversationFanoutCacheWarmup.delete(conversationId);
   const cacheKey = conversationFanoutTargetsCacheKey(conversationId);
   const versionKey = conversationFanoutTargetsVersionKey(conversationId);
   await invalidateVersionedCache(cacheKey, versionKey);
@@ -106,14 +130,16 @@ async function getConversationFanoutTargets(conversationId: string): Promise<str
         .filter((t) => typeof t === 'string' && t.startsWith('user:'))
         .map((t) => t.slice('user:'.length));
       const compact = { v: 2 as const, u: userIds };
-      redis
-        .set(
-          cacheKey,
-          JSON.stringify(compact),
-          'EX',
-          CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS,
-        )
-        .catch(() => {});
+      if (shouldWriteConversationFanoutCache(conversationId, attempt > 0)) {
+        redis
+          .set(
+            cacheKey,
+            JSON.stringify(compact),
+            'EX',
+            CONVERSATION_FANOUT_TARGETS_CACHE_TTL_SECS,
+          )
+          .catch(() => {});
+      }
       return uniqueTargets;
     }
     conversationFanoutTargetsCacheVersionRetryTotal.inc({ outcome: 'uncached_return' });
