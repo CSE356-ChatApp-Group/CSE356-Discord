@@ -205,7 +205,11 @@ build_ws_upstream_csv() {
       done
     fi
   fi
-  (IFS=,; echo "${upstreams[*]}")
+  if (( ${#upstreams[@]} == 0 )); then
+    echo ""
+  else
+    (IFS=,; echo "${upstreams[*]}")
+  fi
 }
 
 if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
@@ -307,7 +311,13 @@ build_remote_upstream_csv() {
       upstreams+=("${VM3_INTERNAL}:${p}")
     done
   fi
-  (IFS=,; echo "${upstreams[*]}")
+  # When both VM2 and VM3 are excluded (e.g. parallel-drain phase), the array is
+  # empty; ${upstreams[*]} would trigger "unbound variable" under set -u.
+  if (( ${#upstreams[@]} == 0 )); then
+    echo ""
+  else
+    (IFS=,; echo "${upstreams[*]}")
+  fi
 }
 
 rewrite_vm1_nginx_upstream() {
