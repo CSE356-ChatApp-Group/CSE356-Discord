@@ -295,6 +295,76 @@ const overloadStageGauge = new client.Gauge({
   help: 'Current load-shedding stage (0=normal 1=throttle-presence 2=shed-search 3=shed-writes)',
 });
 
+// ── Build-info (SHA + version) ───────────────────────────────────────────────
+//
+// Static gauge emitted once per worker at startup so Prometheus can prove
+// which commit a given chatapp-api scrape target is running. Mirrors the
+// well-known `*_build_info` convention used by node_exporter / nginx_exporter
+// / prometheus / postgres_exporter etc.
+//
+// Cardinality: one series per worker. Labels never change while a process is
+// alive; on deploy the old series age out via Prometheus retention.
+//
+// Source of SHA truth (in priority order):
+//   1. process.env.CHATAPP_RELEASE_SHA (deploy-injected override)
+//   2. backend/dist/.build-sha (written by backend/scripts/write-dist-build-metadata.cjs
+//      after `npm --prefix backend run build`; shipped inside the release tarball
+//      and validated by deploy/lib/deploy-guards.sh)
+//   3. 'unknown' (dev/test where neither is available)
+//
+// `version` reads backend/package.json#version, falling back to 'unknown'.
+function loadBuildInfo(): { sha: string; version: string } {
+  const fs = require('fs');
+  const path = require('path');
+  let sha = String(process.env.CHATAPP_RELEASE_SHA || '').trim();
+  if (!/^[0-9a-f]{40}$/i.test(sha)) sha = '';
+  if (!sha) {
+    // Try in order:
+    //   1. dist/utils/metrics.js → dist/.build-sha           (production / release tarball)
+    //   2. src/utils/metrics.ts  → dist/.build-sha           (tsx tests / dev after a build)
+    // If neither resolves to a valid 40-hex SHA we drop to 'unknown'.
+    const candidates = [
+      path.join(__dirname, '..', '.build-sha'),
+      path.join(__dirname, '..', '..', 'dist', '.build-sha'),
+    ];
+    for (const p of candidates) {
+      try {
+        const raw = fs.readFileSync(p, 'utf8').trim();
+        if (/^[0-9a-f]{40}$/i.test(raw)) { sha = raw; break; }
+      } catch { /* try next candidate */ }
+    }
+  }
+  if (!sha) sha = 'unknown';
+
+  let version = 'unknown';
+  try {
+    // From dist/utils/metrics.js → ../../package.json (backend/package.json)
+    const pkg = require(path.join(__dirname, '..', '..', 'package.json'));
+    if (typeof pkg?.version === 'string' && pkg.version.length > 0) {
+      version = pkg.version;
+    }
+  } catch { /* ignore */ }
+
+  return { sha, version };
+}
+
+const buildInfoGauge = new client.Gauge({
+  name: 'chatapp_build_info',
+  help: 'Build-info pseudo-metric: 1 with labels {sha, version} identifying the commit a chatapp-api worker is running.',
+  labelNames: ['sha', 'version'],
+});
+
+(function setBuildInfoOnce() {
+  try {
+    const info = loadBuildInfo();
+    buildInfoGauge.set({ sha: info.sha, version: info.version }, 1);
+  } catch {
+    // Never let build-info wiring crash a worker. A missing series is
+    // recoverable; a startup panic is not.
+    try { buildInfoGauge.set({ sha: 'unknown', version: 'unknown' }, 1); } catch { /* noop */ }
+  }
+})();
+
 /**
  * prom-client omits labeled counters from /metrics until the first observation.
  * Prime 0 increments so Prometheus/Grafana always have these series (flat 0 until real events).
@@ -839,6 +909,7 @@ module.exports = {
   sideEffectJobDurationMs,
   sideEffectQueueDroppedTotal,
   overloadStageGauge,
+  buildInfoGauge,
   authBcryptDurationMs,
   authBcryptActive,
   authBcryptWaiters,
