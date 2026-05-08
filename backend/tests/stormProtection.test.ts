@@ -1,7 +1,7 @@
 /**
  * Tests for the reconnect-storm protection patches:
  *   Patch A: Rate-limited progressive subscription hydration
- *   Patch B: Coalesce duplicate bootstrap work per user
+ *   Patch B: Coalesce duplicate bootstrap work per socket
  *   Patch C: Protect live fanout from bootstrap/reconnect work
  *   Patch D: Reduce fanout candidate explosion (dedupe)
  *   Patch E: Partial delivery root cause logging
@@ -45,6 +45,7 @@ function mockMetrics() {
 function mockWs(userId: string) {
   return {
     _userId: userId,
+    _connectionId: `${userId}-${Math.random().toString(36).slice(2)}`,
     readyState: 1, // OPEN
     terminate: jest.fn(),
   };
@@ -104,7 +105,7 @@ describe('createBootstrapHydrationScheduler', () => {
     expect(called).toBe(true);
   });
 
-  test('coalesces duplicate hydration for same user within window when channel list is unchanged', async () => {
+  test('does not coalesce hydration across distinct sockets for the same user', async () => {
     const { scheduler, metrics } = createScheduler();
     const ws1 = mockWs('user1');
     const ws2 = mockWs('user1');
@@ -119,10 +120,30 @@ describe('createBootstrapHydrationScheduler', () => {
     // Give it time to drain
     await new Promise(r => setTimeout(r, 50));
 
-    // Second hydration for same user should be coalesced
+    // A second socket for the same generated-client user still needs its own
+    // local channel subscriptions.
     await scheduler.enqueueHydration(ws2, 'user1', ['ch1'], hydrateFn);
 
-    // The second should have been coalesced
+    expect(callCount).toBe(2);
+    const coalescedMetrics = metrics.wsBootstrapCoalescedTotal._counts;
+    const coalescedKey = Object.keys(coalescedMetrics).find(k => k.includes('recent_hydration'));
+    expect(coalescedKey).toBeUndefined();
+  });
+
+  test('coalesces duplicate hydration for the same socket within window when channel list is unchanged', async () => {
+    const { scheduler, metrics } = createScheduler();
+    const ws = mockWs('user1');
+    let callCount = 0;
+
+    const hydrateFn = async () => {
+      callCount++;
+    };
+
+    await scheduler.enqueueHydration(ws, 'user1', ['ch1'], hydrateFn);
+    await new Promise(r => setTimeout(r, 50));
+    await scheduler.enqueueHydration(ws, 'user1', ['ch1'], hydrateFn);
+
+    expect(callCount).toBe(1);
     const coalescedMetrics = metrics.wsBootstrapCoalescedTotal._counts;
     const coalescedKey = Object.keys(coalescedMetrics).find(k => k.includes('recent_hydration'));
     expect(coalescedKey).toBeDefined();

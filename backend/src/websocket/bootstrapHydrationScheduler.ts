@@ -6,7 +6,7 @@
  *   • Per-worker hydration concurrency cap (env WS_BOOTSTRAP_HYDRATION_MAX_CONCURRENT).
  *   • Jittered scheduling to smooth post-ready hydration bursts.
  *   • Yields to live fanout when `signalLiveFanoutPending()` is called.
- *   • Coalesces repeated hydration for the same user within a short window.
+ *   • Coalesces repeated hydration for the same socket within a short window.
  *
  * Metrics emitted:
  *   ws_bootstrap_hydration_queue_depth
@@ -66,9 +66,10 @@ function createBootstrapHydrationScheduler(metrics: {
     reject: (err: Error) => void;
     enqueuedAt: number;
     fingerprint: string;
+    hydrationKey: string;
   }> = [];
 
-  const inFlightByUser = new Map<string, Promise<HydrationResult>>();
+  const inFlightBySocket = new Map<string, Promise<HydrationResult>>();
   const recentHydrations = new Map<string, { hydratedAt: number; fingerprint: string }>();
 
   // Live fanout pressure signal
@@ -128,10 +129,22 @@ function createBootstrapHydrationScheduler(metrics: {
     return `${normalized.length}:${normalized.join('\n')}`;
   }
 
+  function hydrationKeyFor(ws: any, userId: string): string {
+    const connectionId =
+      typeof ws?._connectionId === 'string' && ws._connectionId.trim()
+        ? ws._connectionId.trim()
+        : '';
+    if (connectionId) return `${userId}:${connectionId}`;
+    if (!ws._hydrationKey) {
+      ws._hydrationKey = `local-${Math.random().toString(36).slice(2)}`;
+    }
+    return `${userId}:${ws._hydrationKey}`;
+  }
+
   function pruneRecentHydrations(nowMs = Date.now()) {
     const cutoff = nowMs - COALESCE_WINDOW_MS;
-    for (const [userId, entry] of recentHydrations) {
-      if (entry.hydratedAt < cutoff) recentHydrations.delete(userId);
+    for (const [hydrationKey, entry] of recentHydrations) {
+      if (entry.hydratedAt < cutoff) recentHydrations.delete(hydrationKey);
     }
   }
 
@@ -181,7 +194,7 @@ function createBootstrapHydrationScheduler(metrics: {
       if (item.ws.readyState !== 1) {
         metricInc(metrics.wsBootstrapHydrationSkippedTotal, { reason: 'closed_socket' });
         item.resolve({ status: 'skipped', reason: 'closed_socket' });
-        inFlightByUser.delete(item.userId);
+        inFlightBySocket.delete(item.hydrationKey);
         reportMetrics();
         continue;
       }
@@ -204,7 +217,7 @@ function createBootstrapHydrationScheduler(metrics: {
         .then((result) => {
           const resolved = result || { status: 'hydrated' as const };
           if (resolved.status === 'hydrated') {
-            recentHydrations.set(item.userId, {
+            recentHydrations.set(item.hydrationKey, {
               hydratedAt: Date.now(),
               fingerprint: item.fingerprint,
             });
@@ -218,14 +231,14 @@ function createBootstrapHydrationScheduler(metrics: {
         })
         .finally(() => {
           activeHydrations = Math.max(0, activeHydrations - 1);
-          inFlightByUser.delete(item.userId);
+          inFlightBySocket.delete(item.hydrationKey);
           reportMetrics();
           // Continue draining
           if (pendingQueue.length > 0) {
             setImmediate(() => drainQueue(hydrateFn));
           }
         });
-      inFlightByUser.set(item.userId, hydrationPromise);
+      inFlightBySocket.set(item.hydrationKey, hydrationPromise);
     }
 
     draining = false;
@@ -234,8 +247,9 @@ function createBootstrapHydrationScheduler(metrics: {
   // ── Public API ──────────────────────────────────────────────────────────────
 
   /**
-   * Enqueue a hydration job. If the same user was hydrated recently within the
-   * coalesce window, skip duplicate work.
+   * Enqueue a hydration job. If the same socket was hydrated recently within
+   * the coalesce window, skip duplicate work. Subscriptions are socket-local, so
+   * a different connection for the same user must still hydrate.
    */
   function enqueueHydration(
     ws: any,
@@ -248,10 +262,11 @@ function createBootstrapHydrationScheduler(metrics: {
     }
 
     const fingerprint = channelFingerprint(channels);
+    const hydrationKey = hydrationKeyFor(ws, userId);
     const nowMs = Date.now();
     pruneRecentHydrations(nowMs);
 
-    const recent = recentHydrations.get(userId);
+    const recent = recentHydrations.get(hydrationKey);
     if (
       recent
       && recent.fingerprint === fingerprint
@@ -263,7 +278,7 @@ function createBootstrapHydrationScheduler(metrics: {
       return Promise.resolve({ status: 'skipped', reason: 'recent_hydration' });
     }
 
-    const inFlight = inFlightByUser.get(userId);
+    const inFlight = inFlightBySocket.get(hydrationKey);
     if (inFlight) {
       metricInc(metrics.wsBootstrapCoalescedTotal, { reason: 'duplicate_inflight' });
       metricInc(metrics.wsBootstrapHydrationSkippedTotal, { reason: 'duplicate_inflight' });
@@ -279,12 +294,13 @@ function createBootstrapHydrationScheduler(metrics: {
         reject,
         enqueuedAt: Date.now(),
         fingerprint,
+        hydrationKey,
       });
       metricInc(metrics.wsBootstrapHydrationDeferredTotal, { reason: 'scheduled' });
       reportMetrics();
       drainQueue(hydrateFn);
     });
-    inFlightByUser.set(userId, queuedPromise);
+    inFlightBySocket.set(hydrationKey, queuedPromise);
     return queuedPromise;
   }
 
@@ -307,14 +323,17 @@ function createBootstrapHydrationScheduler(metrics: {
    */
   function wasUserRecentlyHydrated(userId: string): boolean {
     pruneRecentHydrations();
-    return recentHydrations.has(userId);
+    for (const key of recentHydrations.keys()) {
+      if (key.startsWith(`${userId}:`)) return true;
+    }
+    return false;
   }
 
   /**
    * Mark a user as hydrated (for coalescing when hydration runs outside the scheduler).
    */
   function markUserHydrated(userId: string): void {
-    recentHydrations.set(userId, { hydratedAt: Date.now(), fingerprint: 'manual' });
+    recentHydrations.set(`${userId}:manual`, { hydratedAt: Date.now(), fingerprint: 'manual' });
     reportMetrics();
   }
 
@@ -329,7 +348,7 @@ function createBootstrapHydrationScheduler(metrics: {
   function resetForTests(): void {
     pendingQueue.length = 0;
     activeHydrations = 0;
-    inFlightByUser.clear();
+    inFlightBySocket.clear();
     recentHydrations.clear();
     liveFanoutPendingCount = 0;
     liveFanoutSignalAt = 0;
