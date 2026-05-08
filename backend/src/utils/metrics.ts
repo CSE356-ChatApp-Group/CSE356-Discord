@@ -111,6 +111,7 @@ const {
   communityCountPgReconcileTotal,
   communityCountPgReconcileSkippedTotal,
   communityCountCacheTotal,
+  communityJoinCacheTotal,
   clientWebVitalTimingSeconds,
   clientWebVitalClsScore,
   clientRumBatchesTotal,
@@ -792,6 +793,10 @@ const buildInfoGauge = new client.Gauge({
     communityCountPgReconcileSkippedTotal.inc({ reason: 'empty' }, 0);
     communityCountCacheTotal.inc({ result: 'hit' }, 0);
     communityCountCacheTotal.inc({ result: 'miss' }, 0);
+    communityJoinCacheTotal.inc({ result: 'hit' }, 0);
+    communityJoinCacheTotal.inc({ result: 'miss' }, 0);
+    communityJoinCacheTotal.inc({ result: 'repopulate' }, 0);
+    communityJoinCacheTotal.inc({ result: 'error' }, 0);
     for (const caller of ['read_receipt', 'other'] as const) {
       for (const shape of ['lite', 'full'] as const) {
         for (const result of [
@@ -1107,6 +1112,7 @@ module.exports = {
   communityCountPgReconcileTotal,
   communityCountPgReconcileSkippedTotal,
   communityCountCacheTotal,
+  communityJoinCacheTotal,
   msgTargetCacheTotal,
   msgTargetLookupSourceTotal,
   msgTargetLookupDurationMs,

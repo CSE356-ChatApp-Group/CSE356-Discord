@@ -49,6 +49,7 @@ const metricsMock = {
   communityCountPgReconcileTotal: { inc: jest.fn() },
   communityCountPgReconcileSkippedTotal: { inc: jest.fn() },
   communityCountCacheTotal: { inc: jest.fn() },
+  communityJoinCacheTotal: { inc: jest.fn() },
   // Router and other metrics used by communities/router
   apiRateLimitHitsTotal: { inc: jest.fn() },
 };
@@ -498,8 +499,11 @@ describe("communities router — join fires Redis incr, leave fires Redis decr",
     poolMock.query
       .mockResolvedValueOnce({ rows: [{ id: COMMUNITY_ID, is_public: true }] }) // resolve community
       .mockResolvedValueOnce({ rowCount: 1 }) // INSERT community_members
-      .mockResolvedValueOnce({ rows: [] }) // listCommunityRealtimeTargets (primary query)
-      .mockResolvedValueOnce({ rows: [{ user_id: USER_ID }] }); // reload members for presence invalidation
+      .mockResolvedValueOnce({ rows: [] }); // listCommunityRealtimeTargets (primary query)
+    // Deferred fan-out (setImmediate) reloads the member roster via the
+    // read replica; mock queryRead so the deferred path does not crash
+    // the test runner with an "undefined.rows" error on its background work.
+    poolMock.queryRead.mockResolvedValueOnce({ rows: [{ user_id: USER_ID }] });
 
     const app = buildApp();
     const res = await request(app)
@@ -518,12 +522,18 @@ describe("communities router — join fires Redis incr, leave fires Redis decr",
   });
 
   it("POST /:id/join returns 200 without Redis incr when already a member (rowCount=0)", async () => {
-    const pipelineSpy = jest.fn().mockReturnValue(
-      makePipeline([
+    // We only care that the join *does not* fire the member-count `HINCRBY`
+    // when the row already exists. Membership-cache populate uses the same
+    // Redis pipeline primitive but a different command set (SADD/EXPIRE), so
+    // assert against the actual command rather than pipeline call count.
+    let lastPipeline: ReturnType<typeof makePipeline> | null = null;
+    const pipelineSpy = jest.fn(() => {
+      lastPipeline = makePipeline([
         [null, 3],
         [null, 1],
-      ]),
-    );
+      ]);
+      return lastPipeline;
+    });
     redisMock.pipeline = pipelineSpy;
 
     poolMock.query
@@ -539,9 +549,13 @@ describe("communities router — join fires Redis incr, leave fires Redis decr",
 
     jest.runAllTimers();
     await Promise.resolve();
+    await Promise.resolve();
 
-    // pipeline was not called because rowCount=0 short-circuits before the incr
-    expect(pipelineSpy).not.toHaveBeenCalled();
+    // No HINCRBY: rowCount=0 short-circuits before incrCommunityMemberCount.
+    // (Pipeline may still be invoked once for the membership-cache populate.)
+    if (lastPipeline) {
+      expect((lastPipeline as any).hincrby).not.toHaveBeenCalled();
+    }
   });
 
   it("DELETE /:id/leave returns 200 and fires decrCommunityMemberCount", async () => {

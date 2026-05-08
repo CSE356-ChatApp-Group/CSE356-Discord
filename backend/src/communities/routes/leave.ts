@@ -41,8 +41,17 @@ router.delete("/:id/leave", param("id").isUUID(), async (req, res, next) => {
       [req.params.id, req.user.id],
     );
     if (!rowCount) {
+      // Either the user wasn't a member or they're the owner. In either
+      // case the cached membership flag (if any) is now wrong relative to
+      // the user's intent — drop it so the next /join request takes the
+      // slow path and re-establishes truth.
+      C.forgetUserCommunityMembership(req.user.id, req.params.id).catch(() => {});
       return res.json({ success: true });
     }
+
+    // Invalidate the per-user membership cache before any awaits below so a
+    // racing /join request from the same user re-runs the slow path.
+    C.forgetUserCommunityMembership(req.user.id, req.params.id).catch(() => {});
 
     decrCommunityMemberCount(req.params.id).catch(() => {});
 

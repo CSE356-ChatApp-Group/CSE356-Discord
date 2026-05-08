@@ -73,6 +73,15 @@ jest.mock('../src/communities/communityMemberCount', () => ({
   getCommunityMemberCountsFromRedis: jest.fn().mockResolvedValue(new Map()),
 }));
 
+jest.mock('../src/communities/communityMembershipCache', () => ({
+  COMMUNITY_MEMBERSHIP_TTL_SECS: 3600,
+  isUserCommunityMember: jest.fn().mockResolvedValue(false),
+  recordUserCommunityMembership: jest.fn().mockResolvedValue(undefined),
+  refreshUserCommunityMembershipTtl: jest.fn().mockResolvedValue(undefined),
+  forgetUserCommunityMembership: jest.fn().mockResolvedValue(undefined),
+  forgetUserCommunityMembershipBulk: jest.fn().mockResolvedValue(undefined),
+}));
+
 jest.mock('../src/utils/endpointCacheMetrics', () => ({
   recordEndpointListCache: jest.fn(),
   recordEndpointListCacheBypass: jest.fn(),
