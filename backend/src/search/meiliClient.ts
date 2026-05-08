@@ -21,6 +21,7 @@ const client = require('prom-client');
 const { redisSearch } = require('../db/redis');
 const http = require('http');
 const https = require('https');
+const os = require('os');
 const {
   ENGLISH_STOP_WORDS,
   stripEnglishStopWords,
@@ -96,6 +97,26 @@ const MEILI_WRITE_STREAM_LOCK_TTL_MS = Math.max(
 const MEILI_WRITE_STREAM_CLAIM_IDLE_MS = Math.max(
   10000,
   Math.min(600000, parseInt(process.env.MEILI_WRITE_STREAM_CLAIM_IDLE_MS || '60000', 10) || 60000),
+);
+// Periodic reaper for stale stream consumers. Each app restart leaves an old
+// `meili-<host>-<port>-<pid>-<slot>` consumer behind in `XINFO CONSUMERS`,
+// which Redis never garbage collects on its own. After a few days of normal
+// rolling restarts that list grows into the hundreds, which makes XINFO and
+// XPENDING noticeably slower and clutters operational queries. Only consumers
+// that have been idle for at least REAP_IDLE_MS *and* have no pending entries
+// (so dropping them cannot lose messages) are deleted. The reaper runs at
+// most once every REAP_INTERVAL_MS and only inside the lease-holding slot so
+// at most one writer per stream group performs the cleanup at a time.
+const MEILI_WRITE_STREAM_REAP_ENABLED =
+  String(process.env.MEILI_WRITE_STREAM_REAP_ENABLED || 'true').toLowerCase() !== 'false'
+  && process.env.MEILI_WRITE_STREAM_REAP_ENABLED !== '0';
+const MEILI_WRITE_STREAM_REAP_IDLE_MS = Math.max(
+  60000,
+  parseInt(process.env.MEILI_WRITE_STREAM_REAP_IDLE_MS || '3600000', 10) || 3600000,
+);
+const MEILI_WRITE_STREAM_REAP_INTERVAL_MS = Math.max(
+  60000,
+  parseInt(process.env.MEILI_WRITE_STREAM_REAP_INTERVAL_MS || '300000', 10) || 300000,
 );
 const MEILI_HTTP_KEEPALIVE_ENABLED =
   String(process.env.MEILI_HTTP_KEEPALIVE_ENABLED || 'true').toLowerCase() !== 'false'
@@ -275,6 +296,15 @@ const meiliTaskDurationMs = new client.Histogram({
   buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000],
 });
 
+// Stale stream consumer reaper. `result` is one of `deleted`, `skipped_active`,
+// `skipped_pending`, or `error` so dashboards can correlate cleanup volume
+// with restart churn and surface XGROUP DELCONSUMER failures.
+const meiliWriteStreamConsumersReapedTotal = new client.Counter({
+  name: 'meili_write_stream_consumers_reaped_total',
+  help: 'Stale Meili write stream consumers evaluated by the reaper',
+  labelNames: ['result'],
+});
+
 // ── In-process write batching ────────────────────────────────────────────────
 
 interface PendingUpsertEntry {
@@ -289,6 +319,8 @@ let streamConsumerClients: any[] = [];
 let streamConsumerStopping = false;
 let streamConsumerStarted = false;
 let queueDepthTimer: NodeJS.Timeout | null = null;
+/** Throttle for `maybeReapStaleMeiliWriteStreamConsumers` (slot 0 only). */
+let lastMeiliWriteStreamReapAt = 0;
 
 function pendingWriteCount(): number {
   return pendingUpserts.size;
@@ -392,8 +424,24 @@ function parseStreamEntryEnqueueMs(entryId: string): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+// systemd does not propagate the shell HOSTNAME into service units, so prefer
+// process.env.HOSTNAME (set by container runtimes, k8s, etc.) and fall back to
+// os.hostname() before the literal 'host' placeholder. The process pid keeps
+// the consumer name unique even if every fallback fires, so this is purely a
+// visibility improvement for XINFO CONSUMERS / metrics labels.
+function resolveLocalHostname(): string {
+  if (process.env.HOSTNAME) return String(process.env.HOSTNAME);
+  try {
+    const h = os.hostname();
+    if (h) return String(h);
+  } catch (_err) {
+    // ignore — fall through to placeholder
+  }
+  return 'host';
+}
+
 function streamConsumerName(slot: number) {
-  return `meili-${process.env.HOSTNAME || 'host'}-${process.env.PORT || '0'}-${process.pid}-${slot}`;
+  return `meili-${resolveLocalHostname()}-${process.env.PORT || '0'}-${process.pid}-${slot}`;
 }
 
 function streamLockKey(slot: number) {
@@ -673,6 +721,103 @@ async function coalesceMeiliWriteStreamMessages(
   return messages;
 }
 
+/**
+ * Parse one consumer row from `XINFO CONSUMERS` (ioredis: array of alternating
+ * field names and values per consumer).
+ */
+function parseXinfoConsumerRow(row: unknown): { name: string; pending: number; idle: number } | null {
+  if (!Array.isArray(row) || row.length < 2) return null;
+  let name: string | null = null;
+  let pending: number | null = null;
+  let idle: number | null = null;
+  for (let i = 0; i < row.length - 1; i += 2) {
+    const k = String(row[i]);
+    const v = row[i + 1];
+    if (k === 'name') name = String(v);
+    else if (k === 'pending') pending = Number(v);
+    else if (k === 'idle') idle = Number(v);
+  }
+  if (name == null || pending == null || idle == null || Number.isNaN(pending) || Number.isNaN(idle)) {
+    return null;
+  }
+  return { name, pending, idle };
+}
+
+async function reapStaleMeiliWriteStreamConsumers(
+  clientForStream: any,
+  activeConsumerName: string,
+): Promise<void> {
+  let info: unknown;
+  try {
+    info = await clientForStream.xinfo(
+      'CONSUMERS',
+      MEILI_WRITE_STREAM_KEY,
+      MEILI_WRITE_STREAM_GROUP,
+    );
+  } catch (err: any) {
+    meiliWriteStreamConsumersReapedTotal.inc({ result: 'error' });
+    logger.warn(
+      { err: { message: err?.message }, stream: MEILI_WRITE_STREAM_KEY },
+      'meili: write stream consumer reaper xinfo failed',
+    );
+    return;
+  }
+  if (!Array.isArray(info)) return;
+
+  let deleted = 0;
+  for (const row of info) {
+    const parsed = parseXinfoConsumerRow(row);
+    if (!parsed) continue;
+    const { name, pending, idle } = parsed;
+    if (name === activeConsumerName) {
+      meiliWriteStreamConsumersReapedTotal.inc({ result: 'skipped_active' });
+      continue;
+    }
+    if (pending > 0) {
+      meiliWriteStreamConsumersReapedTotal.inc({ result: 'skipped_pending' });
+      continue;
+    }
+    if (idle < MEILI_WRITE_STREAM_REAP_IDLE_MS) {
+      meiliWriteStreamConsumersReapedTotal.inc({ result: 'skipped_recent' });
+      continue;
+    }
+    try {
+      await clientForStream.xgroup(
+        'DELCONSUMER',
+        MEILI_WRITE_STREAM_KEY,
+        MEILI_WRITE_STREAM_GROUP,
+        name,
+      );
+      meiliWriteStreamConsumersReapedTotal.inc({ result: 'deleted' });
+      deleted += 1;
+    } catch (err: any) {
+      meiliWriteStreamConsumersReapedTotal.inc({ result: 'error' });
+      logger.warn(
+        { err: { message: err?.message }, consumer: name },
+        'meili: write stream consumer reaper delconsumer failed',
+      );
+    }
+  }
+  if (deleted > 0) {
+    logger.info(
+      { deleted, stream: MEILI_WRITE_STREAM_KEY, group: MEILI_WRITE_STREAM_GROUP },
+      'meili: reaped stale write stream consumers',
+    );
+  }
+}
+
+async function maybeReapStaleMeiliWriteStreamConsumers(
+  clientForStream: any,
+  activeConsumerName: string,
+  slot: number,
+): Promise<void> {
+  if (!MEILI_WRITE_STREAM_REAP_ENABLED || slot !== 0) return;
+  const now = Date.now();
+  if (now - lastMeiliWriteStreamReapAt < MEILI_WRITE_STREAM_REAP_INTERVAL_MS) return;
+  lastMeiliWriteStreamReapAt = now;
+  await reapStaleMeiliWriteStreamConsumers(clientForStream, activeConsumerName);
+}
+
 async function runMeiliWriteStreamConsumerSlot(clientForStream: any, slot: number) {
   const consumerName = streamConsumerName(slot);
   const lockKey = streamLockKey(slot);
@@ -691,6 +836,7 @@ async function runMeiliWriteStreamConsumerSlot(clientForStream: any, slot: numbe
           const current = await redisSearch.get(lockKey).catch(() => null);
           if (current !== lockValue) break;
           await redisSearch.pexpire(lockKey, MEILI_WRITE_STREAM_LOCK_TTL_MS);
+          await maybeReapStaleMeiliWriteStreamConsumers(clientForStream, consumerName, slot);
           await readMeiliWriteStreamBatch(clientForStream, consumerName);
         }
       } finally {
@@ -1277,5 +1423,11 @@ module.exports = {
     flushPendingWrites,
     sampleQueueDepth,
     pollMeiliTaskMetrics,
+    reapStaleMeiliWriteStreamConsumers,
+    parseXinfoConsumerRow,
+    streamConsumerName,
+    resetMeiliWriteStreamReapThrottleForTests: () => {
+      lastMeiliWriteStreamReapAt = 0;
+    },
   },
 };
