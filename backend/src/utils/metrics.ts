@@ -6,8 +6,13 @@ client.register.setDefaultLabels({
   env: process.env.NODE_ENV || 'development',
 });
 
-// Collect default Node.js process metrics (event loop lag, heap, GC, etc.)
-client.collectDefaultMetrics();
+// Collect default Node.js process metrics (event loop lag, heap, GC, etc.).
+// prom-client's default GC buckets jump from 100ms to 1s; that makes p99
+// interpolate near 1s when only a few collections cross 100ms. Keep finer
+// buckets around the SLO-relevant tail so worker-level dashboards stay useful.
+client.collectDefaultMetrics({
+  gcDurationBuckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1, 1.5, 2, 5],
+});
 
 const {
   httpRequestsTotal,

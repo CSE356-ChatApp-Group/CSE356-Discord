@@ -191,6 +191,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - realtime fanout stage/target p95 plus candidate-audience p95 before recent-connect filtering
    - deferred POST fanout: `fanout_job_latency_ms` p99, `fanout_queue_depth`, `fanout_retry_total`, `delivery_timeout_total`
    - Redis: `redis_up`, used/max memory, evictions, commands/sec (`redis_commands_processed_total` rate); SLOWLOG via `REDIS_SLOWLOG_SSH=ubuntu@<vm1> ./scripts/redis/redis-slowlog-snapshot.sh` or embed in `PROMETHEUS_URL=... REDIS_SLOWLOG_SSH=... ./scripts/metrics/metrics-snapshot.sh`
+   - Node GC: worker-ranked `nodejs_gc_duration_seconds` p99 plus the same view split by `kind` (`major`, `minor`, `incremental`, `weakcb`) so sparse bucket tails are not mistaken for route load.
    - websocket bootstrap wall-time, breadth, and cache-hit rate
    - websocket reliable delivery mix (`ws_reliable_delivery_total` replay %, `ws_reliable_delivery_latency_ms` p95 by path) plus reconnect rate for correlation
    - channel message user-topic fanout split (`channel_message_fanout_recipient_total`) and miss hints (`realtime_miss_attribution_total`)

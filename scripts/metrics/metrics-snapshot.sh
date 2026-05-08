@@ -121,6 +121,10 @@ queries=(
   'histogram_quantile(0.95, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))'
   'histogram_quantile(0.99, sum by (le, vm) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",method="POST",route="/api/v1/messages/"}[5m])))'
   'histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_ms_bucket{job="chatapp-api",route!="/metrics"}[5m])))'
+  # Node GC tail: keep worker and GC kind visible so coarse p99 panels do not hide the culprit.
+  'topk(20, histogram_quantile(0.99, sum by (le, vm, worker_port) (rate(nodejs_gc_duration_seconds_bucket{job="chatapp-api"}[5m]))) * 1000)'
+  'topk(30, histogram_quantile(0.99, sum by (le, kind, vm, worker_port) (rate(nodejs_gc_duration_seconds_bucket{job="chatapp-api"}[5m]))) * 1000)'
+  'topk(30, sum by (kind, vm, worker_port) (rate(nodejs_gc_duration_seconds_count{job="chatapp-api"}[5m])))'
   'histogram_quantile(0.95, sum by (le, vm) (rate(message_insert_lock_holder_duration_ms_bucket{job="chatapp-api"}[5m])))'
   'histogram_quantile(0.99, sum by (le, vm) (rate(message_insert_lock_holder_duration_ms_bucket{job="chatapp-api"}[5m])))'
   '100 * sum(rate(node_cpu_seconds_total{job="db-node",mode="iowait"}[5m])) / clamp_min(sum(rate(node_cpu_seconds_total{job="db-node"}[5m])), 1e-9)'
