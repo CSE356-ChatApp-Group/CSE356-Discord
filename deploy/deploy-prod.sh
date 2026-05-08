@@ -148,7 +148,9 @@ run_local_prod_nginx_audit() {
 
 cleanup_on_exit() {
   local status=$?
-  trap - EXIT
+  # Disable every signal we are subscribed to (EXIT and the three terminating
+  # signals) so a second SIGTERM during cleanup does not loop the trap.
+  trap - EXIT INT TERM HUP
   set +e
   if [ "${status}" -ne 0 ] && [[ -n "${_MONITORING_BG_PID:-}" ]] && kill -0 "${_MONITORING_BG_PID}" 2>/dev/null; then
     echo "Stopping background monitoring refresh after deploy failure..."
@@ -163,8 +165,19 @@ cleanup_on_exit() {
   elif [ "${status}" -ne 0 ]; then
     notify_discord_prod ":x: **Prod deploy FAILED** \`${RELEASE_SHA:0:7}\` (pre-cutover)"
   fi
+  # Release the remote prod deploy lock acquired in acquire_remote_deploy_lock.
+  # Idempotent: best-effort SSH rm; safe even if the lock was never created.
   release_remote_deploy_lock
-  rm -rf "${DEPLOY_SSH_TMPDIR}"
+  # Clean up any per-deploy local artefacts that later steps registered for
+  # cleanup. DOWNLOAD_PATH is set after the lock is acquired (Step 3); guard with
+  # ${DOWNLOAD_PATH:-} so this trap is safe when invoked before that point.
+  if [[ -n "${DOWNLOAD_PATH:-}" ]]; then
+    rm -f "${DOWNLOAD_PATH}" 2>/dev/null || true
+  fi
+  # _cleanup_deploy_ssh_tmpdir honours _DEPLOY_SSH_TMPDIR_OWNED so a parent
+  # orchestrator (deploy-prod-multi.sh) keeps the shared SSH ControlPath dir
+  # alive for sibling deploys.
+  _cleanup_deploy_ssh_tmpdir
   exit "${status}"
 }
 
@@ -359,6 +372,46 @@ for ((idx=0; idx<CHATAPP_INSTANCES; idx++)); do
   TARGET_PORTS+=( "$((BASE_APP_PORT + idx))" )
 done
 
+# Fail closed if the host runs more chatapp@ workers than CHATAPP_INSTANCES
+# expects. The rolling restart only writes per-port systemd drop-ins for the
+# ports it iterates (TARGET_PORTS), so any "extra" worker (e.g. chatapp@4005
+# active while shared .env says CHATAPP_INSTANCES=5) silently keeps an old
+# release.conf — the same drift that was observed on wsvm1:chatapp@4005.
+# Refuse instead of converging: the operator must either lower the worker
+# count (systemctl stop+disable the unexpected port) or raise CHATAPP_INSTANCES
+# in /opt/chatapp/shared/.env so deploys cover every running worker.
+_chatapp_active_ports_csv=$(ssh_prod "
+  set -euo pipefail
+  systemctl list-units 'chatapp@*.service' --state=active --no-legend 2>/dev/null \\
+    | sed -n 's/^[ ]*chatapp@\\([0-9]\\+\\)\\.service.*/\\1/p' \\
+    | sort -n \\
+    | paste -sd ','
+" 2>/dev/null || true)
+_chatapp_active_count=0
+if [[ -n "${_chatapp_active_ports_csv}" ]]; then
+  _chatapp_active_count=$(printf '%s' "${_chatapp_active_ports_csv}" | tr ',' '\n' | grep -c '^[0-9]\+$' || true)
+fi
+if [[ "${_chatapp_active_count}" =~ ^[0-9]+$ ]] && [ "${_chatapp_active_count}" -gt "${CHATAPP_INSTANCES}" ]; then
+  _chatapp_extra_ports=$(printf '%s\n' "${_chatapp_active_ports_csv//,/ }" \
+    | tr ' ' '\n' \
+    | awk -v base="${BASE_APP_PORT}" -v n="${CHATAPP_INSTANCES}" '$0 ~ /^[0-9]+$/ && $0 >= base + n {print}' \
+    | paste -sd ',' -)
+  echo ""
+  echo "ERROR: ${PROD_USER}@${PROD_HOST} runs ${_chatapp_active_count} active chatapp@ workers (${_chatapp_active_ports_csv})"
+  echo "       but /opt/chatapp/shared/.env declares CHATAPP_INSTANCES=${CHATAPP_INSTANCES}."
+  echo "       Rolling restart only covers ports ${BASE_APP_PORT}..$((BASE_APP_PORT + CHATAPP_INSTANCES - 1));"
+  echo "       extra worker(s) ${_chatapp_extra_ports:-(none)} would silently keep an old release drop-in."
+  echo ""
+  echo "       Resolve before retrying:"
+  echo "         a) align shared .env: ssh ${PROD_USER}@${PROD_HOST}"
+  echo "            and set CHATAPP_INSTANCES=${_chatapp_active_count} in /opt/chatapp/shared/.env, OR"
+  echo "         b) shut down extras:"
+  echo "            ssh ${PROD_USER}@${PROD_HOST} 'for p in ${_chatapp_extra_ports//,/ }; do sudo systemctl stop chatapp@\${p}; sudo systemctl disable chatapp@\${p}; done'"
+  echo ""
+  exit 1
+fi
+unset _chatapp_active_ports_csv _chatapp_active_count _chatapp_extra_ports
+
 WORKER_ONLY_HOST=0
 if [ "${SKIP_INGRESS_POST_DEPLOY:-0}" = "1" ]; then
   WORKER_ONLY_HOST=1
@@ -470,7 +523,11 @@ else
 fi
 
 acquire_remote_deploy_lock
-trap cleanup_on_exit EXIT
+# Register cleanup_on_exit on EXIT *and* the terminating signals (CI cancel,
+# Ctrl-C, kernel hang-up) so the remote /opt/chatapp/.deploy-lock-prod is
+# always released. Bash's bare `trap ... EXIT` does NOT fire when the shell is
+# killed by SIGTERM, which is how we leaked locks across all VMs in the past.
+trap cleanup_on_exit EXIT INT TERM HUP
 
 # Fast rollback: skip backup, artifact download/unpack, migrations, pgbouncer, monitoring
 if [[ "${FAST_ROLLBACK}" == "true" ]]; then
@@ -768,14 +825,14 @@ echo "✓ PostgreSQL tuned"
 # Include $$ so parallel deploy-prod.sh invocations (e.g. parallel VM2+VM3
 # rollout from deploy-prod-multi.sh) don't race on the same local /tmp path.
 DOWNLOAD_PATH="/tmp/chatapp-${RELEASE_SHA}-$$.tar.gz"
-_cleanup_download_path() {
-  rm -f "$DOWNLOAD_PATH" 2>/dev/null || true
-}
-_combined_cleanup() {
-  _cleanup_download_path
-  _cleanup_deploy_ssh_tmpdir
-}
-trap _combined_cleanup EXIT
+# Do NOT install a new EXIT trap here. The previous implementation registered
+# `_combined_cleanup` which silently *replaced* `cleanup_on_exit`, so the
+# remote prod deploy lock and exit-time rollback path stopped running on
+# success — every prod deploy was leaving /opt/chatapp/.deploy-lock-prod
+# behind on the target VM. cleanup_on_exit (registered above, after
+# acquire_remote_deploy_lock) now handles DOWNLOAD_PATH cleanup itself via the
+# ${DOWNLOAD_PATH:-} guard, so this assignment is the only thing that needs to
+# happen at this point.
 # 3. Download artifact to prod
 if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
   echo "3. Using local artifact..."

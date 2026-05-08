@@ -766,6 +766,127 @@ phase_verify_workers_vm() {
   echo "✓ All ${vm_label} workers healthy"
 }
 
+# Per-VM helper: SSH to ${host}, enumerate active chatapp@*.service units, and
+# compare each worker's WorkingDirectory (/proc/<pid>/cwd) plus systemd drop-in
+# against ${expected_release_path}. Prints one OK/DRIFT line per worker on
+# stdout (so callers can show full fleet state); returns 0 only if every
+# worker on the host is on the expected release.
+#
+# Used by verify_fleet_release_parity() — see comments there for the bug class
+# this gate exists to catch.
+collect_vm_release_state() {
+  local label="$1"; local host="$2"; local expected_release_path="$3"
+  ssh_vm "$host" "
+    set -uo pipefail
+    expected='${expected_release_path}'
+    have_drift=0
+    units=\$(systemctl list-units 'chatapp@*.service' --state=active --no-legend 2>/dev/null | awk '{print \$1}')
+    if [ -z \"\${units}\" ]; then
+      echo '  (no active chatapp@ workers)'
+      exit 0
+    fi
+    for unit in \${units}; do
+      port=\${unit#chatapp@}
+      port=\${port%.service}
+      pid=\$(systemctl show -p MainPID --value \"\$unit\" 2>/dev/null || echo 0)
+      if [ -z \"\${pid}\" ] || [ \"\${pid}\" = \"0\" ]; then
+        cwd='(no MainPID)'
+      else
+        cwd=\$(readlink -f /proc/\${pid}/cwd 2>/dev/null || echo '(unreadable)')
+      fi
+      drop=/etc/systemd/system/\${unit}.d/release.conf
+      if [ -f \"\$drop\" ]; then
+        dropwd=\$(grep '^WorkingDirectory=' \"\$drop\" 2>/dev/null | head -1 | cut -d= -f2- || true)
+        [ -n \"\${dropwd}\" ] || dropwd='(empty)'
+      else
+        dropwd='(no drop-in)'
+      fi
+      if [ \"\$cwd\" = \"\$expected\" ]; then
+        echo \"  OK     :\${port}  pid=\${pid}  cwd=\${cwd}  drop=\${dropwd}\"
+      else
+        echo \"  DRIFT  :\${port}  pid=\${pid}  cwd=\${cwd}  drop=\${dropwd}\"
+        have_drift=1
+      fi
+    done
+    [ \"\$have_drift\" -eq 0 ]
+  "
+}
+
+# Multi-VM release parity gate. Runs at the end of Phase 7 (final health) to
+# guarantee that every worker the orchestrator could touch is actually serving
+# the requested release commit. The single-VM gate_same_release in
+# deploy-prod-rolling.sh only checks TARGET_PORTS_CSV (the ports the rolling
+# loop iterated). It cannot detect:
+#   - a host whose CHATAPP_INSTANCES drifted between deploys, leaving a
+#     "real" worker (e.g. wsvm1:chatapp@4005 with shared .env saying 5)
+#     un-rolled with a stale drop-in pointing at an old release;
+#   - a worker started by a human via systemctl outside the deploy script;
+#   - a previous deploy that aborted mid-roll and never restored that worker.
+#
+# Returns 0 only when every active chatapp@ worker on every targeted VM is
+# running ${sha}. On failure it prints per-VM, per-port state plus remediation
+# guidance — operators get the failing host:port and the drop-in WorkingDirectory
+# without needing to SSH around.
+verify_fleet_release_parity() {
+  local sha="${1:?sha required}"
+  local expected="/opt/chatapp/releases/${sha}/backend"
+  local mismatches=0
+  local label host
+
+  echo "=== Phase 7.5: Verify every active chatapp@ worker is on ${sha:0:12} ==="
+  echo "  Expected WorkingDirectory: ${expected}"
+
+  for entry in "VM1:${VM1}" "VM2:${VM2}" "VM3:${VM3}"; do
+    label="${entry%%:*}"
+    host="${entry##*:}"
+    [ -n "${host}" ] || continue
+    echo "--- ${label} (${host}) ---"
+    if ! collect_vm_release_state "${label}" "${host}" "${expected}"; then
+      mismatches=$((mismatches + 1))
+    fi
+  done
+
+  if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+    for entry in "WSVM1:${WSVM1}" "WSVM2:${WSVM2}" "WSVM3:${WSVM3}"; do
+      label="${entry%%:*}"
+      host="${entry##*:}"
+      [ -n "${host}" ] || continue
+      echo "--- ${label} (${host}) ---"
+      if ! collect_vm_release_state "${label}" "${host}" "${expected}"; then
+        mismatches=$((mismatches + 1))
+      fi
+    done
+  fi
+
+  if [ "${mismatches}" -gt 0 ]; then
+    echo ""
+    echo "ERROR: fleet release parity check failed on ${mismatches} VM(s)."
+    echo "       At least one active chatapp@ worker is NOT serving ${sha:0:12}."
+    echo "       Clients routed to those workers will see the previous release."
+    echo ""
+    echo "       Likely causes (each with the corresponding fix):"
+    echo "         1) CHATAPP_INSTANCES in /opt/chatapp/shared/.env disagrees with the"
+    echo "            number of active chatapp@ ports on that host. deploy-prod.sh now"
+    echo "            refuses to start in this state, but a host that drifted *between*"
+    echo "            deploys (e.g. someone did 'systemctl start chatapp@4005' but"
+    echo "            forgot to bump CHATAPP_INSTANCES) reaches this gate. Fix on the"
+    echo "            host: set CHATAPP_INSTANCES to match the active worker count."
+    echo "         2) A worker on a stale drop-in. Inspect the DRIFT lines above:"
+    echo "            'drop=' shows /etc/systemd/system/chatapp@<port>.service.d/release.conf"
+    echo "            which records WorkingDirectory. If it points at the OLD release,"
+    echo "            update it to ${expected} and 'systemctl daemon-reload &&"
+    echo "            systemctl restart chatapp@<port>'."
+    echo "         3) A worker that never restarted during the deploy. Run:"
+    echo "            ssh <user>@<host> sudo systemctl restart chatapp@<port>"
+    echo "            after confirming its drop-in matches ${expected}."
+    echo ""
+    echo "       Re-run the deploy after remediation; this gate also runs at the end of"
+    echo "       every successful deploy, so the next run will confirm parity."
+    return 1
+  fi
+  echo "✓ Fleet release parity verified: every active worker is on ${sha:0:12}"
+}
+
 emergency_quick_final_check() {
   echo ""
   echo "=== Emergency final sanity check (quick) ==="
@@ -1604,6 +1725,18 @@ else
     verify_and_heal_vm_workers "$WSVM1" "WSVM1" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" || overall_ok=0
     verify_and_heal_vm_workers "$WSVM2" "WSVM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" || overall_ok=0
     verify_and_heal_vm_workers "$WSVM3" "WSVM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" || overall_ok=0
+  fi
+fi
+
+# Phase 7.5: Fleet-wide release parity. Skipped only in --rollback / --emergency
+# (rollback knowingly puts the fleet on a *previous* SHA; emergency mode is the
+# break-glass path where speed beats thoroughness). Skipped in canary mode too,
+# but we never reach this point under DEPLOY_STOP_AFTER_VM3=1 because that path
+# exits before Phase 7.
+if [[ "${EMERGENCY_MODE}" != "true" && "${FAST_ROLLBACK_MODE}" != "true" ]]; then
+  echo ""
+  if ! verify_fleet_release_parity "${SHA}"; then
+    overall_ok=0
   fi
 fi
 

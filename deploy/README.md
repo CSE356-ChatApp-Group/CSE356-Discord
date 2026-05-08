@@ -322,6 +322,47 @@ CHATAPP_INSTANCES=4 ./deploy/deploy-prod.sh <commit-sha>
 
 **GitHub Actions:** manual prod deploy passes `chatapp_instances` (default **4** via `CHATAPP_INSTANCES_PROD` repo variable or literal `4` in `deploy-manual.yml`). Set repo variable `CHATAPP_INSTANCES_PROD` lower only if you intentionally run a smaller worker pool.
 
+#### Deploy reliability gates (lock release + worker drift + fleet parity)
+
+`deploy-prod.sh` and `deploy-prod-multi.sh` enforce three guards that exist to catch real bugs we hit in production rollouts:
+
+1. **Remote deploy-lock release on EVERY exit path.** `acquire_remote_deploy_lock` writes `/opt/chatapp/.deploy-lock-prod/{owner,release_sha,started_at,started_at_iso}` on the target VM under `PROD_HOST`; the matching `cleanup_on_exit` is registered with `trap cleanup_on_exit EXIT INT TERM HUP` immediately after the lock is acquired so a CI cancel, Ctrl-C, or `SIGTERM` still SSHes back in to `rm -rf` the lock dir. Past regression: a later `_combined_cleanup` trap silently *replaced* `cleanup_on_exit`, so the lock was never released on success and every subsequent deploy hit `ERROR: prod deploy lock is held` (exit 42). The static guard in `scripts/deploy/test-deploy-guards.sh` blocks any reintroduction.
+2. **CHATAPP_INSTANCES drift refuses to start the deploy.** Before computing `TARGET_PORTS`, the script lists the host's active `chatapp@*.service` units. If the count exceeds `CHATAPP_INSTANCES` from `/opt/chatapp/shared/.env`, the deploy aborts with the offending ports and remediation. Past regression: WSVM1 ran 6 active workers while shared `.env` recorded `CHATAPP_INSTANCES=5`; rolling restart only covered :4000–:4004, leaving `chatapp@4005` on a stale `release.conf` drop-in. The next manual `systemctl restart chatapp@4005` would then load whatever release path the orphaned drop-in pointed at.
+3. **Fleet release parity gate after Phase 7.** `deploy-prod-multi.sh` SSHes every targeted VM (VM1/2/3 + WSVM1/2/3 when `WS_TIER_ENABLED=true`), enumerates active `chatapp@*` units, and compares `/proc/<pid>/cwd` plus the systemd drop-in `WorkingDirectory` against `/opt/chatapp/releases/<deploy-sha>/backend`. On mismatch it prints per-port `DRIFT  :<port>  pid=<pid>  cwd=<actual>  drop=<dropin>` lines and fails the deploy. Skipped only under `--rollback` and `--emergency`.
+
+##### Manual validation (no deploy required)
+
+Run the static regression test locally to verify these guards still fire (this is the same script CI executes via `bash scripts/deploy/test-deploy-guards.sh`):
+
+```bash
+npm run test:deploy-guards
+```
+
+To check the live fleet without running a deploy, you can mirror what the parity gate does:
+
+```bash
+SHA=<release-sha>
+EXPECTED="/opt/chatapp/releases/${SHA}/backend"
+for spec in "ubuntu@130.245.136.44 4000-4003 vm1" \
+            "ubuntu@130.245.136.137 4000-4005 vm2" \
+            "ubuntu@130.245.136.54 4000-4005 vm3" \
+            "root@130.245.136.218 4000-4005 wsvm1" \
+            "root@130.245.136.172 4000-4005 wsvm2" \
+            "root@130.245.136.46 4000-4005 wsvm3"; do
+  set -- $spec
+  user_host=$1; range=$2; label=$3
+  echo "--- ${label} (${user_host}) ---"
+  ssh -o BatchMode=yes "${user_host}" "for p in \$(seq ${range/-/ }); do
+    if ! systemctl is-active --quiet chatapp@\${p} 2>/dev/null; then continue; fi
+    pid=\$(systemctl show -p MainPID --value chatapp@\${p})
+    cwd=\$(readlink -f /proc/\${pid}/cwd 2>/dev/null || echo unknown)
+    [ \"\$cwd\" = \"${EXPECTED}\" ] && echo \"OK    :\${p}\" || echo \"DRIFT :\${p} cwd=\${cwd}\"
+  done"
+done
+```
+
+The expected output after a successful deploy is `OK :<port>` for every active worker on every VM (34 lines under the standard topology). Any `DRIFT` line means that worker is serving a previous release.
+
 **Three-app-VM production** (`./deploy/deploy-prod-multi.sh <sha>`): deploys VM3 → VM2 → VM1 with per-VM PgBouncer. For a **VM3-only canary** (pause before VM2/VM1), run `PROD_USER=ubuntu DEPLOY_STOP_AFTER_VM3=1 ./deploy/deploy-prod-multi.sh <sha>`; see [`docs/history/canary-read-receipt-insert-lock-shedding.md`](../docs/history/canary-read-receipt-insert-lock-shedding.md). **`redis_exporter`** is installed over SSH to **`REDIS_EXPORTER_SSH_HOST`** (default VM1 public IP); Prometheus scrapes **`PROM_REDIS_HOST:9121`** (default VM1 private IP). Override if you move the exporter.
 
 This:
