@@ -308,11 +308,25 @@ jobs:
           # Match deploy-prod-multi.sh: accept-new so VM2/VM3 work when SSH_KNOWN_HOSTS
           # only lists the primary ingress host (otherwise this step fails in ~1s).
           if [[ "${DEPLOY_SCRIPT_PATH}" == "deploy/deploy-prod-multi.sh" ]]; then
-            for vm in 130.245.136.44 130.245.136.137 130.245.136.54; do
+            source "${GITHUB_WORKSPACE}/deploy/inventory-defaults.sh"
+
+            clear_lock() {
+              local host="$1"
+              local user="$2"
+              if [[ -z "${host}" || -z "${user}" ]]; then
+                return 0
+              fi
               ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
-                "${PROD_USER}@${vm}" \
+                "${user}@${host}" \
                 'sudo rm -rf /opt/chatapp/.deploy-lock-prod'
-            done
+            }
+
+            clear_lock "${CHATAPP_INV_VM1_PUBLIC:-130.245.136.44}" "${CHATAPP_INV_VM1_USER:-${PROD_USER}}"
+            clear_lock "${CHATAPP_INV_VM2_PUBLIC:-130.245.136.137}" "${CHATAPP_INV_VM2_USER:-${PROD_USER}}"
+            clear_lock "${CHATAPP_INV_VM3_PUBLIC:-130.245.136.54}" "${CHATAPP_INV_VM3_USER:-${PROD_USER}}"
+            clear_lock "${CHATAPP_INV_WSVM1_PUBLIC:-}" "${CHATAPP_INV_WSVM1_USER:-}"
+            clear_lock "${CHATAPP_INV_WSVM2_PUBLIC:-}" "${CHATAPP_INV_WSVM2_USER:-}"
+            clear_lock "${CHATAPP_INV_WSVM3_PUBLIC:-}" "${CHATAPP_INV_WSVM3_USER:-}"
           else
             ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
               "${PROD_USER}@${PROD_HOST}" \
