@@ -8,7 +8,6 @@ on:
         required: true
         type: choice
         options:
-          - staging
           - prod
       sha:
         description: "Commit SHA or ref to deploy (defaults to current ref SHA)"
@@ -38,7 +37,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 concurrency:
-  group: deploy-${{ inputs.environment }}
+  group: deploy-prod
   cancel-in-progress: false
 
 jobs:
@@ -62,8 +61,8 @@ jobs:
             core.info(`Resolved deploy target ${ref} -> ${data.sha}`);
 
   # Download the CI-built tarball from GitHub Releases so the deploy job can use
-  # artifact_name (no long poll in reusable-vm-deploy). If release is not yet
-  # published, build/package the artifact in this run as a fallback.
+  # artifact_name (no long poll in reusable-vm-deploy). Manual prod deploys must
+  # use an already-tested release artifact.
   fetch-release:
     needs: resolve-target
     runs-on: ubuntu-latest
@@ -125,54 +124,8 @@ jobs:
           test -f "${ARTIFACT}"
           ls -la "./${ARTIFACT}"
 
-      - name: Build fallback release artifact
-        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
-        uses: actions/setup-node@v5
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Install dependencies for fallback build
-        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
-        run: npm ci
-
-      - name: Build app for fallback artifact
-        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
-        run: |
-          npm run build --workspace=backend
-          npm run build --workspace=frontend
-
-      - name: Reinstall production-only deps (for bundled node_modules)
-        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
-        run: npm ci --omit=dev --legacy-peer-deps
-
-      - name: Package fallback release artifact
-        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
-        env:
-          TARGET_SHA: ${{ needs.resolve-target.outputs.resolved_sha }}
-        run: |
-          set -euo pipefail
-          mkdir -p releases
-          tar --exclude=.git --exclude=.env \
-            -czf "releases/chatapp-${TARGET_SHA}.tar.gz" \
-            backend/dist/ \
-            backend/scripts/run-migrations.cjs \
-            backend/package*.json \
-            backend/tsconfig.json \
-            backend/node_modules/ \
-            frontend/dist/ \
-            frontend/package*.json \
-            migrations/ \
-            node_modules/ \
-            package*.json \
-            .env.example \
-            deploy/env/prod.required.env \
-            deploy/env/staging.required.env \
-            deploy/apply-env-profile.py
-          ls -lh "releases/chatapp-${TARGET_SHA}.tar.gz"
-
-      - name: Fail production when release artifact is missing
-        if: steps.download_release.outcome != 'success' && inputs.environment == 'prod'
+      - name: Fail when release artifact is missing
+        if: steps.download_release.outcome != 'success'
         run: |
           echo "ERROR: release-${{ needs.resolve-target.outputs.resolved_sha }} artifact not found."
           echo "Production manual deploy requires the tested release artifact; fallback build is disabled."
@@ -195,25 +148,8 @@ jobs:
           name: release-${{ needs.resolve-target.outputs.resolved_sha }}
           path: releases/chatapp-${{ needs.resolve-target.outputs.resolved_sha }}.tar.gz
 
-  deploy-staging:
-    needs: [resolve-target, fetch-release]
-    if: inputs.environment == 'staging'
-    uses: ./.github/workflows/reusable-vm-deploy.yml
-    secrets: inherit
-    with:
-      environment: staging
-      target_sha: ${{ needs.resolve-target.outputs.resolved_sha }}
-      host: ${{ vars.STAGING_HOST || '136.114.103.71' }}
-      user: ${{ vars.STAGING_USER || 'ssperrottet' }}
-      runs_on_json: ${{ vars.DEPLOY_RUNS_ON_STAGING != '' && vars.DEPLOY_RUNS_ON_STAGING || '["ubuntu-latest"]' }}
-      script_path: deploy/deploy-staging.sh
-      artifact_name: release-${{ needs.resolve-target.outputs.resolved_sha }}
-      clear_prod_deploy_lock: false
-      chatapp_instances: ${{ vars.CHATAPP_INSTANCES_STAGING != '' && vars.CHATAPP_INSTANCES_STAGING || '5' }}
-
   deploy-prod:
     needs: [resolve-target, fetch-release]
-    if: inputs.environment == 'prod'
     uses: ./.github/workflows/reusable-vm-deploy.yml
     secrets: inherit
     with:
