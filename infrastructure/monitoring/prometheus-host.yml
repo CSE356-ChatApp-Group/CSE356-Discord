@@ -79,6 +79,29 @@ __PGBOUNCER_TARGETS__
   # (--omit-nginx-job for envs without the edge exporter; see render-prometheus-host-config.py).
 __NGINX_JOB__
 
+  # ── Search VM (10.0.0.146): host metrics + OpenSearch metrics ─────────────
+  # Host runs Meilisearch (:7700) AND OpenSearch (:9200) in a single VM.
+  # Exporters installed by deploy/install-opensearch-metrics-exporters.sh:
+  #   :9100  prometheus-node-exporter (apt)
+  #   :9114  prometheus-community/elasticsearch_exporter (sidecar systemd)
+  # UFW must allow the monitoring VM private IP (10.0.1.102) to those ports.
+  # Hardcoded to 10.0.0.146 because OPENSEARCH_URL/MEILI_HOST in deploy/env/prod.required.env
+  # are static; staging does not run OpenSearch so this job has no staging counterpart.
+  - job_name: 'meilisearch-vm-node'
+    static_configs:
+      - targets: ['10.0.0.146:9100']
+        labels:
+          host: meilisearch-vm
+          role: search
+
+  - job_name: 'opensearch'
+    static_configs:
+      - targets: ['10.0.0.146:9114']
+        labels:
+          host: meilisearch-vm
+          cluster: docker-cluster
+    scrape_interval: 30s
+
   - job_name: 'prometheus'
     static_configs:
       - targets: ['127.0.0.1:9090']
