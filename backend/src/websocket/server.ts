@@ -616,6 +616,7 @@ const runtimeIntervals = createRuntimeIntervals({
   wss,
   WebSocket,
   wsHeartbeatIntervalMs: WS_HEARTBEAT_INTERVAL_MS,
+  wsAppKeepaliveIntervalMs: WS_APP_KEEPALIVE_INTERVAL_MS,
   wsHeartbeatMissedPingsBeforeKill: WS_HEARTBEAT_MISSED_PINGS_BEFORE_KILL,
   presenceSweeperMs: PRESENCE_SWEEPER_MS,
   noteRecentDisconnectForSocket,

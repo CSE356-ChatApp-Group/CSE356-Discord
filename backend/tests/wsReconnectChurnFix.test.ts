@@ -57,6 +57,7 @@ describe('heartbeat: multi-miss kill', () => {
       wss: fakeWss([opts.ws]),
       WebSocket: {},
       wsHeartbeatIntervalMs: 1000,
+      wsAppKeepaliveIntervalMs: 0,
       wsHeartbeatMissedPingsBeforeKill: opts.threshold ?? 2,
       presenceSweeperMs: 60_000,
       noteRecentDisconnectForSocket,
@@ -155,6 +156,36 @@ describe('heartbeat: multi-miss kill', () => {
     expect(ws.ping.mock.calls.length).toBe(callsAfterTerminate);
 
     intervals.stopHeartbeat();
+  });
+
+  it('runs app keepalive on its own interval instead of waiting for heartbeat', () => {
+    const ws = fakeWs(true);
+    const maybeSendAppKeepaliveFrame = jest.fn();
+    const intervals = createRuntimeIntervals({
+      wss: fakeWss([ws]),
+      WebSocket: {},
+      wsHeartbeatIntervalMs: 30_000,
+      wsAppKeepaliveIntervalMs: 8_000,
+      wsHeartbeatMissedPingsBeforeKill: 2,
+      presenceSweeperMs: 60_000,
+      noteRecentDisconnectForSocket: jest.fn(),
+      maybeSendAppKeepaliveFrame,
+      reconcileAllConnectedUsers: jest.fn().mockResolvedValue(undefined),
+      logger: { warn: jest.fn() },
+    });
+
+    jest.advanceTimersByTime(8_000);
+    expect(maybeSendAppKeepaliveFrame).toHaveBeenCalledTimes(1);
+    expect(ws.ping).not.toHaveBeenCalled();
+
+    jest.advanceTimersByTime(8_000);
+    expect(maybeSendAppKeepaliveFrame).toHaveBeenCalledTimes(2);
+    expect(ws.ping).not.toHaveBeenCalled();
+
+    jest.advanceTimersByTime(14_000);
+    expect(ws.ping).toHaveBeenCalledTimes(1);
+
+    intervals.stopAll();
   });
 });
 
