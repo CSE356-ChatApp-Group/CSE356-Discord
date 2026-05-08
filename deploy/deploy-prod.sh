@@ -25,9 +25,17 @@
 
 set -euo pipefail
 
-DEPLOY_SSH_TMPDIR="${DEPLOY_SSH_TMPDIR:-$(mktemp -d)}"
+if [[ -z "${DEPLOY_SSH_TMPDIR:-}" ]]; then
+  DEPLOY_SSH_TMPDIR="$(mktemp -d)"
+  _DEPLOY_SSH_TMPDIR_OWNED=1
+else
+  mkdir -p "${DEPLOY_SSH_TMPDIR}"
+  _DEPLOY_SSH_TMPDIR_OWNED=0
+fi
 _cleanup_deploy_ssh_tmpdir() {
-  rm -rf "${DEPLOY_SSH_TMPDIR}"
+  if [[ "${_DEPLOY_SSH_TMPDIR_OWNED:-0}" == "1" ]]; then
+    rm -rf "${DEPLOY_SSH_TMPDIR}"
+  fi
 }
 trap _cleanup_deploy_ssh_tmpdir EXIT
 
