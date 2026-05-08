@@ -15,6 +15,7 @@ type Row = {
   conversation_id: string | null;
   community_id: string | null;
   created_at: string;
+  created_at_cursor: string;
   updated_at: string | null;
   deleted_at: string | null;
 };
@@ -62,6 +63,8 @@ function saveBackfillCheckpoint(checkpointPath: string, checkpoint: Record<strin
 }
 
 async function main() {
+  const orderArg = String(getArg('order') || 'desc').toLowerCase();
+  const order: 'asc' | 'desc' = orderArg === 'asc' ? 'asc' : 'desc';
   const limit = Number(getArg('limit') || '0') || 0;
   const since = parseIsoMaybe(getArg('since'));
   const until = parseIsoMaybe(getArg('until'));
@@ -71,7 +74,9 @@ async function main() {
 
   const checkpoint = loadBackfillCheckpoint(
     checkpointPath,
-    since || '1970-01-01T00:00:00.000Z',
+    order === 'asc'
+      ? (since || '1970-01-01T00:00:00.000Z')
+      : (until || '9999-12-31T23:59:59.999Z'),
   );
   let cursorCreatedAt = checkpoint.createdAt;
   let cursorId = checkpoint.id;
@@ -86,14 +91,16 @@ async function main() {
   const startedAt = Date.now();
 
   while (true) {
-    const params: any[] = [cursorCreatedAt, cursorId, batchSize];
-    let p = 3;
-    let untilClause = '';
-    if (until) {
-      p += 1;
-      params.push(until);
-      untilClause = `AND m.created_at <= $${p}::timestamptz`;
-    }
+    const params: any[] = [];
+    const comparator = order === 'asc' ? '>' : '<';
+    const cursorCreatedAtPh = `$${params.push(cursorCreatedAt)}`;
+    const cursorIdPh = `$${params.push(cursorId)}`;
+    const limitPh = `$${params.push(batchSize)}`;
+
+    const boundaryParts: string[] = [];
+    if (since) boundaryParts.push(`AND m.created_at >= $${params.push(since)}::timestamptz`);
+    if (until) boundaryParts.push(`AND m.created_at <= $${params.push(until)}::timestamptz`);
+
     const { rows } = await poolMod.pool.query(
       `
       SELECT
@@ -104,14 +111,15 @@ async function main() {
         m.conversation_id,
         ch.community_id,
         m.created_at,
+        to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at_cursor,
         m.updated_at,
         m.deleted_at
       FROM messages m
       LEFT JOIN channels ch ON ch.id = m.channel_id
-      WHERE (m.created_at, m.id) > ($1::timestamptz, $2::uuid)
-        ${untilClause}
-      ORDER BY m.created_at ASC, m.id ASC
-      LIMIT $3
+      WHERE (m.created_at, m.id) ${comparator} (${cursorCreatedAtPh}::timestamptz, ${cursorIdPh}::uuid)
+      ${boundaryParts.join('\n      ')}
+      ORDER BY m.created_at ${order.toUpperCase()}, m.id ${order.toUpperCase()}
+      LIMIT ${limitPh}
       `,
       params,
     );
@@ -148,7 +156,7 @@ async function main() {
     }
 
     const last = batch[batch.length - 1];
-    cursorCreatedAt = new Date(last.created_at).toISOString();
+    cursorCreatedAt = String(last.created_at_cursor);
     cursorId = last.id;
 
     try {
