@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-DEPLOY_SSH_TMPDIR="$(mktemp -d)"
+DEPLOY_SSH_TMPDIR="${DEPLOY_SSH_TMPDIR:-$(mktemp -d)}"
 _cleanup_deploy_ssh_tmpdir() {
   rm -rf "${DEPLOY_SSH_TMPDIR}"
 }

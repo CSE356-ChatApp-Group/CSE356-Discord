@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-DEPLOY_SSH_TMPDIR="$(mktemp -d)"
+DEPLOY_SSH_TMPDIR="${DEPLOY_SSH_TMPDIR:-$(mktemp -d)}"
 _cleanup_deploy_ssh_tmpdir() {
   rm -rf "${DEPLOY_SSH_TMPDIR}"
 }
@@ -827,9 +827,11 @@ ssh_prod "
   
   # Backend dependencies are pre-bundled by scripts/release/package-release-artifact.sh.
   # Do not run npm ci on the VM: the release tarball must include node_modules.
+  # npm workspaces hoists shared deps to the repo-root node_modules/, so express may
+  # live at \$RELEASE_PATH/node_modules/express rather than \$RELEASE_PATH/backend/node_modules/express.
   cd \$RELEASE_PATH/backend
-  if [ ! -d node_modules/express ]; then
-    echo 'ERROR: backend/node_modules/express missing from release artifact.'
+  if [ ! -d node_modules/express ] && [ ! -d ../node_modules/express ]; then
+    echo 'ERROR: express not found in release artifact (neither backend/node_modules/express nor node_modules/express).'
     echo '       Rebuild with scripts/release/package-release-artifact.sh so node_modules is bundled.'
     exit 1
   fi

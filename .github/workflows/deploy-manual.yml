@@ -142,6 +142,10 @@ jobs:
           npm run build --workspace=backend
           npm run build --workspace=frontend
 
+      - name: Reinstall production-only deps (for bundled node_modules)
+        if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
+        run: npm ci --omit=dev --legacy-peer-deps
+
       - name: Package fallback release artifact
         if: steps.download_release.outcome != 'success' && inputs.environment != 'prod'
         env:
@@ -149,15 +153,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p releases
-          tar --exclude=node_modules --exclude=.git --exclude=.env \
+          tar --exclude=.git --exclude=.env \
             -czf "releases/chatapp-${TARGET_SHA}.tar.gz" \
             backend/dist/ \
             backend/scripts/run-migrations.cjs \
             backend/package*.json \
             backend/tsconfig.json \
+            backend/node_modules/ \
             frontend/dist/ \
             frontend/package*.json \
             migrations/ \
+            node_modules/ \
             package*.json \
             .env.example \
             deploy/env/prod.required.env \

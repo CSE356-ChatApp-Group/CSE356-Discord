@@ -26,15 +26,29 @@ fi
 
 bash "${ROOT}/scripts/release/verify-backend-dist-release-sha.sh" "${SHA}"
 
-tar --exclude=node_modules --exclude=.git --exclude=.env \
+# Bundle production node_modules into the tarball. deploy-prod.sh no longer runs
+# `npm ci` on the VM (since 1b791e5), so the artifact must contain the deps tree.
+# `npm ci --omit=dev` installs prod-only deps for all workspaces; npm hoists shared
+# deps to the repo-root node_modules/ and keeps version-conflicted ones in each
+# workspace's local node_modules/.
+echo "Installing production dependencies (npm ci --omit=dev) so node_modules is bundled..."
+npm ci --omit=dev --legacy-peer-deps
+
+# COPYFILE_DISABLE=1 suppresses macOS AppleDouble (._*) resource-fork sidecars that
+# BSD tar would otherwise embed; without it, the Linux loader can pick up files like
+# node_modules/bcrypt/prebuilds/linux-x64/._bcrypt.glibc.node and fail with
+# "invalid ELF header".
+COPYFILE_DISABLE=1 tar --exclude=.git --exclude=.env \
   -czf "$OUT" \
   backend/dist/ \
   backend/scripts/run-migrations.cjs \
   backend/package*.json \
   backend/tsconfig.json \
+  backend/node_modules/ \
   frontend/dist/ \
   frontend/package*.json \
   migrations/ \
+  node_modules/ \
   package*.json \
   .env.example \
   deploy/env/prod.required.env \

@@ -229,18 +229,23 @@ jobs:
       - name: Verify backend dist matches commit
         run: bash scripts/release/verify-backend-dist-release-sha.sh "${{ github.sha }}"
 
+      - name: Install production dependencies (for bundled node_modules)
+        run: npm ci --omit=dev --legacy-peer-deps
+
       - name: Package release artifact
         run: |
           mkdir -p releases
-          tar --exclude=node_modules --exclude=.git --exclude=.env \
+          tar --exclude=.git --exclude=.env \
             -czf releases/chatapp-${{ github.sha }}.tar.gz \
             backend/dist/ \
             backend/scripts/run-migrations.cjs \
             backend/package*.json \
             backend/tsconfig.json \
+            backend/node_modules/ \
             frontend/dist/ \
             frontend/package*.json \
             migrations/ \
+            node_modules/ \
             package*.json \
             .env.example \
             deploy/env/prod.required.env \
