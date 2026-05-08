@@ -128,6 +128,7 @@ queries=(
   'topk(20, histogram_quantile(0.99, sum by (le, vm, worker_port) (rate(nodejs_gc_duration_seconds_bucket{job="chatapp-api"}[5m]))) * 1000)'
   'topk(30, histogram_quantile(0.99, sum by (le, kind, vm, worker_port) (rate(nodejs_gc_duration_seconds_bucket{job="chatapp-api"}[5m]))) * 1000)'
   'topk(30, sum by (kind, vm, worker_port) (rate(nodejs_gc_duration_seconds_count{job="chatapp-api"}[5m])))'
+  'topk(20, 1000 * max by (vm, worker_port) (nodejs_eventloop_lag_max_seconds{job="chatapp-api"}))'
   'histogram_quantile(0.95, sum by (le, vm) (rate(message_insert_lock_holder_duration_ms_bucket{job="chatapp-api"}[5m])))'
   'histogram_quantile(0.99, sum by (le, vm) (rate(message_insert_lock_holder_duration_ms_bucket{job="chatapp-api"}[5m])))'
   '100 * sum(rate(node_cpu_seconds_total{job="db-node",mode="iowait"}[5m])) / clamp_min(sum(rate(node_cpu_seconds_total{job="db-node"}[5m])), 1e-9)'

@@ -746,6 +746,7 @@
         "y": 32
       },
       "id": 9,
+      "description": "Diagnostic worker view. Uses a 10m GC window, excludes workers younger than 15m, and hides workers with less than 1 GC sample/sec so sparse startup buckets do not look like sustained pressure.",
       "options": {
         "legend": {
           "calcs": [],
@@ -759,13 +760,13 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by(le, vm, worker_port)(rate(nodejs_gc_duration_seconds_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[$__rate_interval]))) * 1000",
+          "expr": "(histogram_quantile(0.99, sum by(le, vm, worker_port)((rate(nodejs_gc_duration_seconds_bucket{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[10m]) and on(instance, job) ((time() - process_start_time_seconds{job=\"chatapp-api\"}) > 900)))) * 1000) and on(vm, worker_port) (sum by(vm, worker_port)((rate(nodejs_gc_duration_seconds_count{job=\"chatapp-api\",vm=~\"$vm\",worker_port=~\"$worker\"}[10m]) and on(instance, job) ((time() - process_start_time_seconds{job=\"chatapp-api\"}) > 900))) >= 1)",
           "interval": "",
           "legendFormat": "{{vm}}:{{worker_port}}",
           "refId": "A"
         }
       ],
-      "title": "GC Duration p99 by Worker",
+      "title": "GC Duration p99 by Worker (Warm, Sample-Gated)",
       "type": "timeseries"
     },
     {

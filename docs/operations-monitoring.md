@@ -213,7 +213,7 @@ The AI cannot reach your private Prometheus from Cursor. Use one of these:
    - realtime fanout stage/target p95 plus candidate-audience p95 before recent-connect filtering
    - deferred POST fanout: `fanout_job_latency_ms` p99, `fanout_queue_depth`, `fanout_retry_total`, `delivery_timeout_total`
    - Redis: `redis_up`, used/max memory, evictions, commands/sec (`redis_commands_processed_total` rate); SLOWLOG via `REDIS_SLOWLOG_SSH=ubuntu@<vm1> ./scripts/redis/redis-slowlog-snapshot.sh` or embed in `PROMETHEUS_URL=... REDIS_SLOWLOG_SSH=... ./scripts/metrics/metrics-snapshot.sh`
-   - Node GC: worker-ranked `nodejs_gc_duration_seconds` p99 plus the same view split by `kind` (`major`, `minor`, `incremental`, `weakcb`) so sparse bucket tails are not mistaken for route load.
+   - Node GC: worker-ranked `nodejs_gc_duration_seconds` p99 plus the same view split by `kind` (`major`, `minor`, `incremental`, `weakcb`) and worker `nodejs_eventloop_lag_max_seconds` so sparse bucket tails are not mistaken for user-visible stalls.
    - websocket bootstrap wall-time, breadth, and cache-hit rate
 - endpoint list-cache hit ratio by endpoint (`endpoint_list_cache_total`) plus message-list store-skips/access-shortcuts (`message_list_cache_store_skipped_total`, `messages_list_access_cache_hit_total`)
    - websocket reliable delivery mix (`ws_reliable_delivery_total` replay %, `ws_reliable_delivery_latency_ms` p95 by path) plus reconnect rate for correlation
