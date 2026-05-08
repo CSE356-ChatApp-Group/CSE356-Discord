@@ -2,11 +2,24 @@
 
 **Documentation hub (canonical env, topology, update rules):** [docs/README.md](../docs/README.md)
 
-This document describes the staged deployment pipeline for ChatApp:
+This document describes the deployment pipeline for ChatApp:
 
 - **Dev**: Local + CI containers
-- **Staging**: Google Cloud Compute Engine VM
+- **Staging**: Google Cloud Compute Engine VM (temporarily unavailable)
 - **Production**: multi-VM Linode cluster (nginx + workers on **VM1** `ubuntu@130.245.136.44`, plus VM2/VM3 app hosts, DB, monitoring — see [docs/infrastructure-inventory.md](../docs/infrastructure-inventory.md)).
+
+## Temporary no-staging mode
+
+Staging is temporarily disabled as a required gate because the GCP staging host is unavailable / credits constrained.
+
+Current release policy:
+
+- CI/typecheck/tests + package-release must pass before production deploy.
+- Production deploy is manual only (no auto-deploy from `main`).
+- App-worker behavior changes use VM3-first canary, then 5-15 minute gate, then full rollout.
+- Singleton/lease behavior changes require validating lease ownership by the patched build; if VM3 cannot own the lease, use a short controlled fleet rollout with rollback ready.
+- DB/global config changes are maintenance-style changes with explicit rollback; VM canary does not replace this.
+- Do not run overlapping behavior canaries.
 
 > Public entry points (IPs drift with inventory; verify there):
 > - Staging app: `http://136.114.103.71`
@@ -48,9 +61,9 @@ This document describes the staged deployment pipeline for ChatApp:
 ## CI Pipeline
 
 ### Trigger
-Pushes and pull requests targeting `main` run **deploy-scripts**, **backend**, and **frontend** jobs. **Packaging**, **GitHub Releases**, and **auto staging deploy** run only on **pushes** to `main` (see `if:` on `package-release` / `deploy-staging` in `ci-deploy.yml`).
+Pushes and pull requests targeting `main` run **deploy-scripts**, **backend**, and **frontend** jobs. **Packaging** and **GitHub Releases** run only on pushes to `main` (`package-release` in `ci-deploy.yml`). Staging auto-deploy is temporarily disabled and does not gate CI completion.
 
-**Staging Playwright on `main` pushes:** off by default. After auto-deploy to staging, CI still runs the lightweight **API contract** job; the slow **Playwright `@staging` shards** run only when repository variable **`RUN_STAGING_E2E_ON_PUSH`** is set to **`true`** (Settings → Secrets and variables → Actions → Variables). Nightly and manual Playwright coverage uses the **Staging E2E** workflow (`.github/workflows/staging-e2e-nightly.yml`).
+**Staging Playwright on `main` pushes:** currently disabled alongside staging auto-deploy. Nightly/manual coverage remains available in **Staging E2E** (`.github/workflows/staging-e2e-nightly.yml`) for when staging access is restored.
 
 ### Steps (see `.github/workflows/ci-deploy.yml`)
 1. **deploy-scripts:** `bash -n` / `shellcheck` on deploy scripts, `promtool check rules` on `infrastructure/monitoring/alerts.yml`, Grafana dashboard JSON validation, Ansible syntax-check on `ansible/playbooks/*.yml`, plus small `node --check` / `py_compile` gates.
@@ -60,7 +73,7 @@ Pushes and pull requests targeting `main` run **deploy-scripts**, **backend**, a
 5. Upload workflow artifact `release-<sha>` and create/update GitHub Release tag **`release-<sha>`** with that tarball.
 
 ### Artifact
-Each release is immutable and tagged by commit SHA. The **same artifact** is deployed to both staging and production. **`backend/dist/.build-sha`** records the **git commit that produced `backend/dist`**; packaging fails if that file is missing or does not match the tarball’s release SHA (prevents **`SKIP_BUILD=1`** from silently shipping stale compiled output).
+Each release is immutable and tagged by commit SHA. The **same artifact** is deployed to production (and to staging again once restored). **`backend/dist/.build-sha`** records the **git commit that produced `backend/dist`**; packaging fails if that file is missing or does not match the tarball’s release SHA (prevents **`SKIP_BUILD=1`** from silently shipping stale compiled output).
 
 ## Deploy without GitHub (recommended for canaries)
 
@@ -90,7 +103,7 @@ Optional: **`SKIP_BUILD=1`** only when **`backend/dist/.build-sha`** already equ
 
 ## GitHub Button Deploys
 
-Staging deploys automatically from GitHub Actions after **CI Build & Package** succeeds on pushes to `main` via `.github/workflows/ci-deploy.yml` (reusable deploy job).
+Staging auto-deploy from `ci-deploy.yml` is temporarily disabled while staging is unavailable.
 
 You can still deploy manually from GitHub Actions using **Manual Deploy** (`workflow_dispatch`) in `.github/workflows/deploy-manual.yml`. For **prod**, optional flags include **VM3 canary only** (deploy the chosen SHA through VM3, then stop so you can soak before a second run without the flag for the full rollout) and **clear deploy lock** if a prior run stuck the lock on the VMs.
 
@@ -156,14 +169,19 @@ gh variable set PROD_USER --body "ubuntu" --repo "$REPO"
 
 1. Open GitHub Actions → **Manual Deploy**.
 2. Click **Run workflow**.
-3. Choose `environment`: `staging` or `prod`.
+3. Choose `environment`: `prod` (use `staging` only if/when staging access is restored).
 4. Optionally provide `sha` (if empty, workflow uses selected ref SHA). Short SHAs and refs are resolved to the full commit before checkout/download.
 
 Actions run **`ansible/playbooks/deploy-staging.yml`** / **`deploy-prod.yml`** ([`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml)), which call the same **`deploy/deploy-*.sh`** scripts as a local console deploy — one canonical path.
 
 **Ansible:** inventory for **manual** runs, bootstrap playbooks, and docs are in [`ansible/README.md`](../ansible/README.md).
 
-## Staging Deployment
+## Staging Deployment (currently unavailable)
+
+Staging is currently unreachable and should not block production deployment decisions.
+Keep this section for restoration work; production rollout decisions currently rely on CI + production canary policy.
+
+## Staging Deployment (reference when restored)
 
 ### Prerequisites
 - Staging VM on Google Cloud Compute Engine (Ubuntu 22.04 LTS)
@@ -278,14 +296,14 @@ Production uses immutable release directories:
 
 Shared nginx-related strings and the default site path live in `deploy/deploy-common.sh`; `deploy-prod.sh` and `preflight-check.sh` source it so retries and heal logic stay aligned.
 
-**Warning: This deploys to production. Ensure staging passed all checks first.**
+**Warning: This deploys to production. Ensure CI is green and use the VM3 canary gate before full rollout.**
 
 #### Zero-downtime production rollout (plan)
 
 Production deploys are designed for **no hard cut** while old and new binaries briefly overlap:
 
 1. **Ship code** — merge to `main`, wait for **CI Build & Package** + **`release-<sha>`** on GitHub Releases (same artifact staging and prod use).
-2. **Prove staging** — `./deploy/deploy-staging.sh <sha>` (or Actions auto-deploy) until green; run smoke / e2e / capacity scripts you rely on.
+2. **Run canary gate** — deploy VM3 first (`DEPLOY_STOP_AFTER_VM3=1` or `canary-promote.yml`), watch 5-15 minutes, then promote only if gate is green.
 3. **Preflight prod** — `./deploy/preflight-check.sh prod <sha> <PROD_USER> <PROD_HOST> <GITHUB_REPO>` from a host that can SSH and reach the artifact (VPN/firewall as needed).
 4. **Run prod deploy** — `CHATAPP_INSTANCES=4 ./deploy/deploy-prod.sh <sha>` (or **Manual Deploy** → `production` in GitHub Actions). The script: **pg_dump backup** → candidate on a **spare non-live port** when prod already has 3+ live workers (or the legacy alternate port in 1–2 worker layouts) → health + smoke **before** nginx sends live traffic → **pin candidate → roll non-candidate workers → restore upstream** so users keep an upstream during the swap.
 5. **Migrations** — keep changes **backward compatible** across the window where both versions may answer (see step 9 narrative below). Destructive DDL only with a separate maintenance plan.
@@ -364,7 +382,7 @@ The script prints `df`, nginx logrotate hints, PgBouncer `SHOW POOLS`, a short s
 
 ### Capacity gate before tuning prod
 
-Run load on **staging** first (same `CHATAPP_INSTANCES` shape as prod when possible):
+Run load on **staging** first when available (same `CHATAPP_INSTANCES` shape as prod when possible):
 
 ```bash
 # Steady SLO probe (~8m) — see optimization_* thresholds in staging-capacity.js
@@ -699,7 +717,7 @@ After deployment, verify WebSocket stability:
 
 ## Environment Files
 
-### Staging `.env`
+### Staging `.env` (when staging is restored)
 
 Edit `/opt/chatapp/shared/.env` on staging VM:
 - Point to staging database
@@ -781,14 +799,23 @@ ssh ssperrottet@136.114.103.71 "sudo systemctl reload nginx"
 
 - [ ] CI passed (all tests, builds green)
 - [ ] Artifact built from locked `package-lock.json`
-- [ ] Staging deployment succeeded
-- [ ] Staging validated (health, smoke tests, manual checks)
-- [ ] Database migrations reviewed and tested on staging
+- [ ] VM3 canary plan defined for app-worker behavior changes
+- [ ] Lease/singleton ownership check defined (if applicable)
+- [ ] For DB/global config changes: maintenance-style rollout + rollback plan reviewed
 - [ ] Prod database backup is recent and verified
 - [ ] Rollback plan confirmed
 - [ ] On-call person aware of deployment
 - [ ] Team notified (if needed)
 - [ ] Monitoring dashboard open during deploy
+
+## Required Deploy Report (every production deploy)
+
+- [ ] Exact commit SHA
+- [ ] Files changed
+- [ ] Tests run
+- [ ] Deploy command
+- [ ] Rollback command
+- [ ] 5-15 minute gate results
 
 ## Checklist: During Production Deploy
 

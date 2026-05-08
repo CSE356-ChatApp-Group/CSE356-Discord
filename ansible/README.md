@@ -22,7 +22,9 @@ Ansible’s `command` module **buffers the deploy script’s stdout until the sc
 
 ## Parity with GitHub Actions deploys
 
-**CI deploys use Ansible:** [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml) writes a temporary INI inventory from workflow inputs (`host`, `user`, `environment`) and runs **`playbooks/deploy-staging.yml`** or **`deploy-prod.yml`** from the **`ansible/`** directory (so `ansible.cfg` / `ci-ansible.cfg` apply). Playbooks invoke the same **`deploy/deploy-*.sh`** scripts with the same environment variables (`STAGING_*` / `PROD_*`, **`GITHUB_REPO`** = `github.repository`, optional **`LOCAL_ARTIFACT_PATH`** from the workflow artifact). Deploy tasks use **`chdir`** to the **repository root** so relative paths like **`.artifacts/chatapp-<sha>.tar.gz`** match the pre-Ansible CI behavior.
+**GitHub deploy workflows use Ansible:** [`reusable-vm-deploy.yml`](../.github/workflows/reusable-vm-deploy.yml) writes a temporary INI inventory from workflow inputs (`host`, `user`, `environment`) and runs **`playbooks/deploy-staging.yml`** or **`deploy-prod.yml`** from the **`ansible/`** directory (so `ansible.cfg` / `ci-ansible.cfg` apply). Playbooks invoke the same **`deploy/deploy-*.sh`** scripts with the same environment variables (`STAGING_*` / `PROD_*`, **`GITHUB_REPO`** = `github.repository`, optional **`LOCAL_ARTIFACT_PATH`** from the workflow artifact). Deploy tasks use **`chdir`** to the **repository root** so relative paths like **`.artifacts/chatapp-<sha>.tar.gz`** match the pre-Ansible CI behavior.
+
+**Temporary mode note:** `ci-deploy.yml` no longer auto-runs staging deploy while staging is unavailable. Production deploy workflows (`deploy-manual.yml`, `canary-promote.yml`) still call `reusable-vm-deploy.yml`.
 
 Keep **`ansible/inventory/hosts.yml`** aligned with repo variables **`STAGING_HOST`**, **`STAGING_USER`**, **`PROD_HOST`**, **`PROD_USER`** so **manual** `ansible-playbook` runs target the same hosts as Actions (CI does not read the committed inventory file).
 

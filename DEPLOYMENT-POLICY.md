@@ -4,25 +4,34 @@
 
 ## Principle
 
-**Production deployments must never bypass verification.** Code is validated in staging before any production traffic shift happens.
+**Production deployments must never bypass verification.** While staging is unavailable, verification happens through CI + controlled production canaries before full rollout.
 
-## Three-Environment Strategy
+## Temporary Operating Mode (No Staging Gate)
+
+Staging host `136.114.103.71` is currently unavailable (GCP host/credits), so staging is temporarily disabled as a required promotion gate.
+
+Required validation model until staging is restored:
+
+1. **CI/typecheck/tests must pass** before any production deploy.
+2. **App-worker behavior changes:** deploy VM3 first (`DEPLOY_STOP_AFTER_VM3=1` / canary workflow), soak 5-15 minutes, then promote only if green.
+3. **Singleton/lease-based behavior:** explicitly verify the patched build owns the lease. If VM3 cannot own it, use a short controlled fleet rollout with rollback ready.
+4. **DB/global config changes:** do a maintenance-style change with explicit rollback; VM canary is not sufficient.
+5. **No overlapping behavior canaries:** run one behavior-focused canary at a time.
+6. **Every deploy report must include:** exact commit, files changed, tests run, deploy command, rollback command, and 5-15 minute gate results.
+
+## Environment Strategy (Current)
 
 ```
 DEV ──PR──> CI (tests+build)
             │
- merge ───> main: package artifact ──auto SSH──> STAGING
-            │                                      │
-            ├─ Playwright E2E (@staging)           │
-            ├─ API contract harness (41 checks)   │
-            └─ (scheduled) k6 slo / nightly E2E   │
-                                                   │
- manual / GitHub "Manual Deploy" workflow ───────> PROD
+ merge ───> main: package artifact + release
+            │
+            └─ manual GitHub deploy / canary promote ─────> PROD (VM3 first, then full fleet)
 ```
 
 1. **Dev** (local): Developers test changes
-2. **Staging** (Google Cloud VM): Exact production environment, full validation
-3. **Production** (`ubuntu@130.245.136.44`): Zero-downtime cutover with instant rollback
+2. **Staging** (Google Cloud VM): Temporarily unavailable; not a release gate
+3. **Production** (`ubuntu@130.245.136.44`): Controlled canary + rollout with rollback
 
 ## Immutable Artifacts
 
@@ -42,9 +51,9 @@ Workflow: [`.github/workflows/ci-deploy.yml`](.github/workflows/ci-deploy.yml).
 2. Backend + frontend typecheck, unit tests, production builds
 3. Package artifact: `tarball(backend/dist, frontend/dist, migrations, package.json)`
 4. GitHub Release tagged `release-<sha>` with the tarball
-5. **Reusable deploy** job SSHs to staging and runs [`deploy/deploy-staging.sh`](deploy/deploy-staging.sh)
-6. **Playwright** staging E2E (`@staging`) — must pass
-7. **API contract harness** [`backend/scripts/api-contract-harness.cjs`](backend/scripts/api-contract-harness.cjs) — 41 course-aligned checks against staging HTTP+WS (set repo variable `API_CONTRACT_SSO_SKIP=1` if OIDC redirects cannot be reached from Actions)
+5. No automatic staging deploy gate while staging is unavailable
+6. Production deploy remains manual (`deploy-manual.yml` / `canary-promote.yml`)
+7. VM3 canary and explicit gate results are required before full-fleet promotion for app-worker behavior changes
 
 **No environment-specific builds.** Same artifact for staging and prod.
 
@@ -63,9 +72,11 @@ Prometheus rules live in [`infrastructure/monitoring/alerts.yml`](infrastructure
 
 After changing rules, copy `alerts.yml` to the monitoring host and restart Prometheus (or redeploy the monitoring stack) so Discord reflects the new definitions.
 
-### Staging Deployment (automatic from CI + optional manual)
+### Staging Deployment (temporarily disabled gate)
 
-Every push to `main` deploys staging via CI. You can also redeploy any release SHA manually:
+Staging is currently unreachable and does not block release readiness. Manual staging deploy commands are retained for future restoration, but promotion decisions should not wait on staging while this mode is active.
+
+You can still redeploy any release SHA manually when staging is restored:
 
 ```bash
 ./deploy/deploy-staging.sh <sha>
@@ -109,9 +120,9 @@ Or **Actions → Manual Deploy → prod** (passes `GITHUB_ACTIONS=true` so the s
 | `./deploy/deploy-prod.sh <prev-sha> --rollback` | ~6 min (skips everything except rolling restart) | Bad deploy, need to revert immediately |
 
 Process:
-1. **Staging must have deployed and passed first**
+1. **CI must be green first** (typecheck/tests/build/package-release complete)
 2. Interactive confirmation prompt when run from a laptop (skipped in GitHub Actions)
-3. Database backup (skippable with `SKIP_BACKUP=true` for code-only redeploys)
+3. Database backup (skippable with `SKIP_BACKUP=true` for code-only redeploys; never skip for DB/global config changes)
 4. Download exact same artifact from GitHub Releases
 5. Unpack as new release directory; `npm ci` with `nice -n 15` (low-priority, avoids CPU competition with live workers)
 6. Start on alternate port without touching running traffic
@@ -199,8 +210,8 @@ Benefits:
 
 1. **Same artifact everywhere**: CI builds once. Staging and prod use identical bits.
 2. **No environment-specific code**: All config via `.env` files, not compile-time.
-3. **Staging must match prod exactly**: Same Node version, same dependencies, same structure.
-4. **Staging must validate before prod**: No prod deploy without staging sign-off (CI deploys staging on every `main` push; confirm Playwright + API contract jobs are green before prod).
+3. **When restored, staging must match prod exactly**: Same Node version, same dependencies, same structure.
+4. **No automatic production deploy from `main`**: Production remains explicit/manual.
 5. **Database backups before prod**: Automatic, but verified.
 6. **Rollback must be instant**: Traffic switch is ~5 seconds, process already running.
 7. **No in-place overwrites**: Always new directories + symlink switch.
@@ -237,12 +248,23 @@ Keep monitoring for at least 5–10 minutes before declaring success.
 
 All rollbacks are manual (explicit confirmation) to prevent thrashing.
 
+## Deploy Report Requirements
+
+Every production deploy note (chat/issue/logbook) must include:
+
+- Exact commit SHA
+- Files changed
+- Tests run
+- Deploy command used
+- Rollback command prepared/used
+- 5-15 minute gate results
+
 ## Migration Safety
 
 - **Additive migrations only** near deploy time
 - **Backward-compatible schema** required
 - **Database backup before deploy** (automatic)
-- **Test on staging first** (mandatory)
+- **Test on staging first when available** (currently unavailable; use production maintenance procedure)
 - **Never run migrations after cutover** (migrations before traffic switch)
 
 ## PostgreSQL tuning during deploy
@@ -299,8 +321,8 @@ A deploy is successful when:
 
 - [ ] CI passed (all tests green)
 - [ ] Artifact built (tagged with SHA)
-- [ ] Staging deployed successfully
-- [ ] Staging health + smoke tests passed
+- [ ] If behavior canary: VM3-first deploy completed
+- [ ] 5-15 minute gate results reviewed and recorded
 - [ ] Production approval given
 - [ ] Production deployment script runs without errors
 - [ ] Candidate health checks pass

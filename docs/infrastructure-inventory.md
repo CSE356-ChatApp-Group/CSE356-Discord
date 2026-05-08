@@ -2,11 +2,11 @@
 
 Status: operational
 Owner: platform-operations
-Last reviewed: 2026-05-06
+Last reviewed: 2026-05-08
 
 Documentation hub: [`README.md`](README.md).
 
-Last updated: 2026-05-06
+Last updated: 2026-05-08
 
 This is the source of truth for current environment shape. Update this file whenever VM sizing, hosts, or provider changes.
 
@@ -14,6 +14,8 @@ This is the source of truth for current environment shape. Update this file when
 
 - Staging app VM (`staging-vm`, GCP Compute Engine): `e2-standard-8` (8 vCPU, 32 GB RAM). External IP **`136.114.103.71`**, internal IP **`10.128.0.2`**, SSH user **`ssperrottet`**.
 - Staging DB VM (`staging-db`, GCP Compute Engine): Debian 12, 8 vCPU, 8 GB RAM. External IP **`34.122.64.224`**, internal IP **`10.128.0.5`**, SSH user **`ssperrottet`**. PostgreSQL 16, database `chatapp_prod`, credentials at `/root/chatapp_prod_db_credentials.txt` (root-only, chmod 600). Same **Docker monitoring stack** as prod DB (`db-compose.yml`): Grafana, Prometheus, Alertmanager, Loki, Tempo; app VM runs only node-exporter + promtail (Loki push URL `10.128.0.5` in `promtail-host-config-staging.yml`).
+
+**Temporary status (2026-05-08):** staging app host `136.114.103.71` is currently unreachable (GCP host/credits). Staging is temporarily disabled as a required release gate; release validation currently relies on CI + production VM3 canary policy.
 
 **CI runners:** GitHub Actions build/test jobs use GitHub-hosted `ubuntu-latest` runners. Former self-hosted GCP runner VMs have been decommissioned/repurposed (`34.122.64.224` → staging DB VM). **Deploy jobs** can be pinned by workflow labels (see `DEPLOY_RUNS_ON_*` variables): recommended no-new-VM layout is self-hosted `deploy-staging` on the staging app VM (`136.114.103.71`) and self-hosted `deploy-prod` on the production monitoring VM (`130.245.136.120`).
 
