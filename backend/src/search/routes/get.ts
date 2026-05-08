@@ -6,7 +6,7 @@ const overload = require('../../utils/overload');
 const logger = require('../../utils/logger');
 const searchClient = require('../client');
 const { searchInstanceMeta, clampSearchPaging } = require('../helpers');
-const { searchHandlerOverheadMs } = require('../../utils/metrics/searchPerformance');
+const { searchHandlerOverheadMs, searchRouteParseScopeMs } = require('../../utils/metrics/searchPerformance');
 
 module.exports = function registerGetRoutes(router) {
   router.get('/', async (req, res, next) => {
@@ -92,6 +92,7 @@ module.exports = function registerGetRoutes(router) {
       const { limit: clampedLimit, offset: clampedOffset } = clampSearchPaging(limit, offset);
       const adjustedLimit = overload.searchLimit(clampedLimit);
       const effectiveScope = communityId ? 'community' : conversationId ? 'conversation' : 'unknown';
+      searchRouteParseScopeMs.observe({ scope: effectiveScope, status: 'success' }, Date.now() - startMs);
       const searchStartMs = Date.now();
       const results = await searchClient.search(normalizedQuery, {
         communityId,
@@ -168,6 +169,7 @@ module.exports = function registerGetRoutes(router) {
       res.json(results);
     } catch (err: any) {
       const durationMs = Date.now() - startMs;
+      searchRouteParseScopeMs.observe({ scope: 'unknown', status: 'error' }, durationMs);
       searchHandlerOverheadMs.observe({ scope: 'unknown', status: 'error' }, durationMs);
       if (err?.statusCode === 403) {
         logger.debug({ durationMs }, 'search: access denied');

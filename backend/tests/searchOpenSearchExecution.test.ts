@@ -32,6 +32,22 @@ describe('OpenSearch execution', () => {
     );
   });
 
+  it('uses bounded candidate size, id-only source, and strict match query (no fuzzy/wildcard/prefix)', () => {
+    jest.resetModules();
+    process.env.OPENSEARCH_MAX_CANDIDATES = '5000'; // clamps to 2000
+    const { buildOpenSearchQuery } = require('../src/search/opensearchExecution');
+    const body = buildOpenSearchQuery('strict terms', { communityId: 'c1' });
+    expect(body.size).toBe(2000);
+    expect(body._source).toEqual(['id']);
+    expect(body.query.bool.must).toEqual([
+      { match: { content: { query: 'strict terms', operator: 'and' } } },
+    ]);
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain('wildcard');
+    expect(serialized).not.toContain('prefix');
+    expect(serialized).not.toContain('fuzzy');
+  });
+
   it('rechecks through Postgres and drops stale/deleted rows, preserving latest content', async () => {
     jest.resetModules();
     jest.doMock('../src/search/opensearchClient', () => ({

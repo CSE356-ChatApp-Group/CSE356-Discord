@@ -100,6 +100,102 @@ const searchHandlerOverheadMs = new client.Histogram({
   buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
 });
 
+/** GET /search parse + scope-resolution overhead before backend search call. */
+const searchRouteParseScopeMs = new client.Histogram({
+  name: 'search_route_parse_scope_ms',
+  help: 'GET /search parse/validation/scope-resolution wall time before backend search execution',
+  labelNames: ['scope', 'status'],
+  buckets: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000],
+});
+
+/** OpenSearch candidate fetch latency (raw _search call only). */
+const opensearchCandidateFetchMs = new client.Histogram({
+  name: 'opensearch_candidate_fetch_ms',
+  help: 'OpenSearch candidate fetch wall time (/_search) for GET /search',
+  labelNames: ['scope', 'status'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Alias for OpenSearch candidate fetch latency (requested dashboard metric). */
+const opensearchSearchDurationMs = new client.Histogram({
+  name: 'opensearch_search_duration_ms',
+  help: 'OpenSearch candidate search duration for GET /search candidate retrieval',
+  labelNames: ['scope', 'status'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Candidate recheck (Postgres) latency after OpenSearch candidate retrieval. */
+const candidateRecheckMs = new client.Histogram({
+  name: 'candidate_recheck_ms',
+  help: 'Postgres candidate recheck wall time after OpenSearch candidate retrieval',
+  labelNames: ['scope', 'status'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Response formatting time after strict filtering/page slicing. */
+const searchFormattingMs = new client.Histogram({
+  name: 'search_formatting_ms',
+  help: 'Search result formatting wall time after backend retrieval/recheck',
+  labelNames: ['scope'],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250],
+});
+
+/** End-to-end search backend execution time (inside search client backend implementation). */
+const searchTotalMs = new client.Histogram({
+  name: 'search_total_ms',
+  help: 'Search backend total wall time from candidate fetch through final result build',
+  labelNames: ['backend', 'scope', 'status'],
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+});
+
+/** OpenSearch candidate count distribution per request. */
+const opensearchCandidateCount = new client.Histogram({
+  name: 'opensearch_candidate_count',
+  help: 'OpenSearch candidate ID count returned before Postgres recheck',
+  labelNames: ['scope'],
+  buckets: [0, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000, 2000],
+});
+
+/** Alias metric requested for dashboard parity. */
+const candidateCount = new client.Histogram({
+  name: 'candidate_count',
+  help: 'Candidate count distribution before recheck',
+  labelNames: ['backend', 'scope'],
+  buckets: [0, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000, 2000],
+});
+
+/** Recheck input count distribution (candidate IDs sent to Postgres recheck). */
+const opensearchRecheckInputCount = new client.Histogram({
+  name: 'opensearch_recheck_input_count',
+  help: 'Candidate count sent into Postgres recheck for OpenSearch backend',
+  labelNames: ['scope'],
+  buckets: [0, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000, 2000],
+});
+
+/** Recheck output count distribution (rows surviving access/deleted/latest-content checks). */
+const opensearchRecheckOutputCount = new client.Histogram({
+  name: 'opensearch_recheck_output_count',
+  help: 'Rows returned from Postgres recheck for OpenSearch backend before strict filtering',
+  labelNames: ['scope'],
+  buckets: [0, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000],
+});
+
+/** Alias metric requested for dashboard parity. */
+const recheckOutputCount = new client.Histogram({
+  name: 'recheck_output_count',
+  help: 'Recheck output count distribution',
+  labelNames: ['backend', 'scope'],
+  buckets: [0, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000],
+});
+
+/** Final result count after strict filtering and pagination. */
+const finalResultCount = new client.Histogram({
+  name: 'final_result_count',
+  help: 'Final result count distribution after strict filtering and paging',
+  labelNames: ['backend', 'scope'],
+  buckets: [0, 1, 2, 5, 10, 20, 50, 100, 250],
+});
+
 /** Cache hits for Meili freshness candidate results in Redis (incremented per hit). */
 const searchFreshnessCacheHitsTotal = new client.Counter({
   name: 'search_freshness_cache_hits_total',
@@ -133,6 +229,18 @@ module.exports = {
   searchFreshnessRescueWallDurationMs,
   meiliRecheckDurationMs,
   searchHandlerOverheadMs,
+  searchRouteParseScopeMs,
+  opensearchCandidateFetchMs,
+  opensearchSearchDurationMs,
+  candidateRecheckMs,
+  searchFormattingMs,
+  searchTotalMs,
+  opensearchCandidateCount,
+  candidateCount,
+  opensearchRecheckInputCount,
+  opensearchRecheckOutputCount,
+  recheckOutputCount,
+  finalResultCount,
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,

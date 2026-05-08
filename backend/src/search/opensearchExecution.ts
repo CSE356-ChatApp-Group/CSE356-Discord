@@ -7,6 +7,19 @@ const {
   buildResult,
 } = require('./resultFormatting');
 const {
+  opensearchSearchDurationMs,
+  opensearchCandidateFetchMs,
+  candidateRecheckMs,
+  searchFormattingMs,
+  searchTotalMs,
+  opensearchCandidateCount,
+  candidateCount,
+  opensearchRecheckInputCount,
+  opensearchRecheckOutputCount,
+  recheckOutputCount,
+  finalResultCount,
+} = require('../utils/metrics/searchPerformance');
+const {
   buildRecheckFromCandidates,
   applyStrictTermFilter,
 } = require('./candidateRecheck');
@@ -78,21 +91,57 @@ async function searchWithOpenSearchBackend(
   q: string,
   opts: Record<string, any> = {},
 ): Promise<any> {
-  const candidates = await searchOpenSearchCandidates(q, opts);
-  if (!candidates.ids.length) {
-    return buildResult([], q, Number(opts.offset) || 0, Number(opts.limit) || 20);
-  }
-  const recheckMeta = buildRecheckFromCandidates(candidates.ids, q, opts, { pageInSql: false });
-  const rows = await runCandidateRecheck(recheckMeta.sql, recheckMeta.params);
-  if (rows[0]?.__scopeAccess === false) {
-    const err: any = new Error('Access denied');
-    err.statusCode = 403;
+  const scope =
+    opts.communityId
+      ? 'community'
+      : opts.conversationId
+        ? 'conversation'
+        : 'unknown';
+  const totalStartedAt = Date.now();
+  try {
+    const candidateStartedAt = Date.now();
+    const candidates = await searchOpenSearchCandidates(q, opts);
+    const candidateMs = Date.now() - candidateStartedAt;
+    opensearchCandidateFetchMs.observe({ scope, status: 'success' }, candidateMs);
+    opensearchSearchDurationMs.observe({ scope, status: 'success' }, candidateMs);
+    opensearchCandidateCount.observe({ scope }, candidates.ids.length);
+    candidateCount.observe({ backend: 'opensearch', scope }, candidates.ids.length);
+    opensearchRecheckInputCount.observe({ scope }, candidates.ids.length);
+    if (!candidates.ids.length) {
+      finalResultCount.observe({ backend: 'opensearch', scope }, 0);
+      searchTotalMs.observe({ backend: 'opensearch', scope, status: 'success' }, Date.now() - totalStartedAt);
+      return buildResult([], q, Number(opts.offset) || 0, Number(opts.limit) || 20);
+    }
+    const recheckMeta = buildRecheckFromCandidates(candidates.ids, q, opts, { pageInSql: false });
+    const recheckStartedAt = Date.now();
+    const rows = await runCandidateRecheck(recheckMeta.sql, recheckMeta.params);
+    candidateRecheckMs.observe({ scope, status: 'success' }, Date.now() - recheckStartedAt);
+    if (rows[0]?.__scopeAccess === false) {
+      const err: any = new Error('Access denied');
+      err.statusCode = 403;
+      throw err;
+    }
+    const recheckedRows = rows.filter((row: any) => row && row.id);
+    opensearchRecheckOutputCount.observe({ scope }, recheckedRows.length);
+    recheckOutputCount.observe({ backend: 'opensearch', scope }, recheckedRows.length);
+    const strictHits = applyStrictTermFilter(recheckedRows, q);
+    const finalHits = strictHits.slice(recheckMeta.offset, recheckMeta.offset + recheckMeta.limit);
+    const formatStartedAt = Date.now();
+    const out = buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+    searchFormattingMs.observe({ scope }, Date.now() - formatStartedAt);
+    finalResultCount.observe({ backend: 'opensearch', scope }, finalHits.length);
+    searchTotalMs.observe({ backend: 'opensearch', scope, status: 'success' }, Date.now() - totalStartedAt);
+    return out;
+  } catch (err) {
+    // Keep stage metrics visible even when OpenSearch read path fails.
+    if (err?.name !== 'AbortError') {
+      opensearchCandidateFetchMs.observe({ scope, status: 'error' }, Date.now() - totalStartedAt);
+      opensearchSearchDurationMs.observe({ scope, status: 'error' }, Date.now() - totalStartedAt);
+    }
+    candidateRecheckMs.observe({ scope, status: 'error' }, Date.now() - totalStartedAt);
+    searchTotalMs.observe({ backend: 'opensearch', scope, status: 'error' }, Date.now() - totalStartedAt);
     throw err;
   }
-  const recheckedRows = rows.filter((row: any) => row && row.id);
-  const strictHits = applyStrictTermFilter(recheckedRows, q);
-  const finalHits = strictHits.slice(recheckMeta.offset, recheckMeta.offset + recheckMeta.limit);
-  return buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
 }
 
 module.exports = {

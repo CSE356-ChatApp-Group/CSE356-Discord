@@ -65,6 +65,18 @@ const {
   searchFreshnessRescueWallDurationMs,
   meiliRecheckDurationMs,
   searchHandlerOverheadMs,
+  searchRouteParseScopeMs,
+  opensearchCandidateFetchMs,
+  opensearchSearchDurationMs,
+  candidateRecheckMs,
+  searchFormattingMs,
+  searchTotalMs,
+  opensearchCandidateCount,
+  candidateCount,
+  opensearchRecheckInputCount,
+  opensearchRecheckOutputCount,
+  recheckOutputCount,
+  finalResultCount,
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
@@ -763,6 +775,39 @@ const overloadStageGauge = new client.Gauge({
       opensearchRequestErrorsTotal.inc({ operation }, 0);
     }
     opensearchBulkDocs.inc(0);
+    searchRouteParseScopeMs.observe({ scope: 'community', status: 'success' }, 0);
+    searchRouteParseScopeMs.observe({ scope: 'conversation', status: 'success' }, 0);
+    searchRouteParseScopeMs.observe({ scope: 'unknown', status: 'error' }, 0);
+    opensearchCandidateFetchMs.observe({ scope: 'community', status: 'success' }, 0);
+    opensearchCandidateFetchMs.observe({ scope: 'community', status: 'error' }, 0);
+    opensearchCandidateFetchMs.observe({ scope: 'conversation', status: 'success' }, 0);
+    opensearchCandidateFetchMs.observe({ scope: 'conversation', status: 'error' }, 0);
+    opensearchSearchDurationMs.observe({ scope: 'community', status: 'success' }, 0);
+    opensearchSearchDurationMs.observe({ scope: 'community', status: 'error' }, 0);
+    opensearchSearchDurationMs.observe({ scope: 'conversation', status: 'success' }, 0);
+    opensearchSearchDurationMs.observe({ scope: 'conversation', status: 'error' }, 0);
+    candidateRecheckMs.observe({ scope: 'community', status: 'success' }, 0);
+    candidateRecheckMs.observe({ scope: 'community', status: 'error' }, 0);
+    candidateRecheckMs.observe({ scope: 'conversation', status: 'success' }, 0);
+    candidateRecheckMs.observe({ scope: 'conversation', status: 'error' }, 0);
+    searchFormattingMs.observe({ scope: 'community' }, 0);
+    searchFormattingMs.observe({ scope: 'conversation' }, 0);
+    searchTotalMs.observe({ backend: 'opensearch', scope: 'community', status: 'success' }, 0);
+    searchTotalMs.observe({ backend: 'opensearch', scope: 'community', status: 'error' }, 0);
+    searchTotalMs.observe({ backend: 'opensearch', scope: 'conversation', status: 'success' }, 0);
+    searchTotalMs.observe({ backend: 'opensearch', scope: 'conversation', status: 'error' }, 0);
+    opensearchCandidateCount.observe({ scope: 'community' }, 0);
+    opensearchCandidateCount.observe({ scope: 'conversation' }, 0);
+    candidateCount.observe({ backend: 'opensearch', scope: 'community' }, 0);
+    candidateCount.observe({ backend: 'opensearch', scope: 'conversation' }, 0);
+    opensearchRecheckInputCount.observe({ scope: 'community' }, 0);
+    opensearchRecheckInputCount.observe({ scope: 'conversation' }, 0);
+    opensearchRecheckOutputCount.observe({ scope: 'community' }, 0);
+    opensearchRecheckOutputCount.observe({ scope: 'conversation' }, 0);
+    recheckOutputCount.observe({ backend: 'opensearch', scope: 'community' }, 0);
+    recheckOutputCount.observe({ backend: 'opensearch', scope: 'conversation' }, 0);
+    finalResultCount.observe({ backend: 'opensearch', scope: 'community' }, 0);
+    finalResultCount.observe({ backend: 'opensearch', scope: 'conversation' }, 0);
   } catch {
     /* ignore during unusual test setups */
   }
@@ -936,6 +981,18 @@ module.exports = {
   searchFreshnessRescueWallDurationMs,
   meiliRecheckDurationMs,
   searchHandlerOverheadMs,
+  searchRouteParseScopeMs,
+  opensearchCandidateFetchMs,
+  opensearchSearchDurationMs,
+  candidateRecheckMs,
+  searchFormattingMs,
+  searchTotalMs,
+  opensearchCandidateCount,
+  candidateCount,
+  opensearchRecheckInputCount,
+  opensearchRecheckOutputCount,
+  recheckOutputCount,
+  finalResultCount,
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
