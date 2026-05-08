@@ -69,6 +69,7 @@ const {
   MESSAGE_USER_FANOUT_HTTP_BLOCKING,
   CHANNEL_MESSAGE_USER_FANOUT_MAX,
 } = channelRealtimeConfig;
+const CHANNEL_MESSAGE_BOOTSTRAP_PENDING_BRIDGE_MAX = CHANNEL_MESSAGE_USER_FANOUT_MAX;
 
 async function publishUserTopicTargets(
   targets: string[],
@@ -196,6 +197,9 @@ async function resolveBootstrapPendingChannelUserTargetsRaw(channelId: string, c
     channelBootstrapPendingKey(channelId),
     since,
     '+inf',
+    'LIMIT',
+    0,
+    cap,
   );
   const targets = Array.from(
     new Set(
@@ -265,7 +269,7 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
     try {
       const bootstrapPendingCandidateTargets = await resolveBootstrapPendingChannelUserTargetsRaw(
         channelId,
-        CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
+        CHANNEL_MESSAGE_BOOTSTRAP_PENDING_BRIDGE_MAX,
       );
       const bootstrapPendingTargets = await filterActiveConnectedUserTargets(
         bootstrapPendingCandidateTargets,

@@ -396,6 +396,54 @@ describe('channelRealtimeFanout', () => {
     }
   });
 
+  it('publishChannelMessageCreated with userfeed skip does not cap bootstrap-pending bridge at recent-connect size', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = 'true';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    const ch = 'chan-large-bootstrap-pending';
+    const pendingUsers = Array.from({ length: 300 }, (_unused, idx) => `u${idx}`);
+    const activeMask = pendingUsers.map((userId) => (userId === 'u299' ? 1 : 0));
+    try {
+      redis.zrangebyscore.mockResolvedValueOnce(pendingUsers);
+      redis.call.mockResolvedValueOnce(activeMask);
+
+      await publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-large-bootstrap-pending' },
+      });
+
+      expect(redis.zrangebyscore).toHaveBeenCalledWith(
+        `channel:bootstrap_pending:${ch}`,
+        expect.any(Number),
+        '+inf',
+        'LIMIT',
+        0,
+        10000,
+      );
+      expect(redis.call).toHaveBeenCalledWith(
+        'SMISMEMBER',
+        'presence:connected_users',
+        ...pendingUsers,
+      );
+      expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+        pendingUsers.map((userId) => `user:${userId}`),
+        expect.objectContaining({ event: 'message:created' }),
+        { recentTargets: ['user:u299'] },
+      );
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('u299'),
+      ].sort());
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevSkip === undefined) delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+      else process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = prevSkip;
+    }
+  });
+
   it('publishChannelMessageCreated with userfeed skip omits hydrated active users from userfeed bridge', async () => {
     const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
     const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
