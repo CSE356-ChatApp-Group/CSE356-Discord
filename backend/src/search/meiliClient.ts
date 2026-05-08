@@ -115,6 +115,41 @@ const MEILI_HTTP_KEEPALIVE_MS = Math.max(
   1000,
   Math.min(300000, parseInt(process.env.MEILI_HTTP_KEEPALIVE_MS || '60000', 10) || 60000),
 );
+// Optional async polling of Meili task UIDs to surface task wait/duration metrics.
+// Polling is fire-and-forget against /tasks/<uid>; bounded backoff and timeout
+// keep the load on Meili low.
+const MEILI_TASK_METRICS_ENABLED =
+  String(process.env.MEILI_TASK_METRICS_ENABLED || 'true').toLowerCase() !== 'false'
+  && process.env.MEILI_TASK_METRICS_ENABLED !== '0';
+const MEILI_TASK_METRICS_POLL_MIN_MS = Math.max(
+  50,
+  Math.min(5000, parseInt(process.env.MEILI_TASK_METRICS_POLL_MIN_MS || '250', 10) || 250),
+);
+const MEILI_TASK_METRICS_POLL_MAX_MS = Math.max(
+  MEILI_TASK_METRICS_POLL_MIN_MS,
+  Math.min(30000, parseInt(process.env.MEILI_TASK_METRICS_POLL_MAX_MS || '5000', 10) || 5000),
+);
+const MEILI_TASK_METRICS_TIMEOUT_MS = Math.max(
+  5000,
+  Math.min(900000, parseInt(process.env.MEILI_TASK_METRICS_TIMEOUT_MS || '300000', 10) || 300000),
+);
+// Cap chunk size sent in a single Meili documents POST when draining the
+// stream consumer. Falls back to MEILI_WRITE_BATCH_SIZE so a single env knob
+// (`MEILI_WRITE_BATCH_SIZE`) bounds the docs-per-Meili-task on every write
+// path. Set higher than BATCH_SIZE only if you intentionally want stream
+// batches larger than the in-process flush size.
+const MEILI_WRITE_STREAM_TASK_CHUNK = Math.max(
+  1,
+  Math.min(
+    10000,
+    parseInt(process.env.MEILI_WRITE_STREAM_TASK_CHUNK || String(MEILI_WRITE_BATCH_SIZE), 10)
+      || MEILI_WRITE_BATCH_SIZE,
+  ),
+);
+const MEILI_WRITE_QUEUE_DEPTH_INTERVAL_MS = Math.max(
+  500,
+  Math.min(60000, parseInt(process.env.MEILI_WRITE_QUEUE_DEPTH_INTERVAL_MS || '5000', 10) || 5000),
+);
 
 const meiliHttpAgent = new http.Agent({
   keepAlive: true,
@@ -195,15 +230,65 @@ const meiliWriteStreamBatchSize = new client.Histogram({
   buckets: [1, 5, 10, 25, 50, 100, 200, 500, 1000],
 });
 
+// New visibility-lag metrics. Distinct from the existing
+// `meili_write_stream_batch_size` (entries per consumer ack cycle): this one
+// reports the number of documents in each individual Meili task POST after
+// chunking (chunk size capped by MEILI_WRITE_STREAM_TASK_CHUNK /
+// MEILI_WRITE_BATCH_SIZE).
+const meiliWriteBatchSize = new client.Histogram({
+  name: 'meili_write_batch_size',
+  help: 'Number of documents per single Meili documents POST (after chunking)',
+  labelNames: ['op'],
+  buckets: [1, 5, 10, 25, 50, 100, 200, 500, 1000],
+});
+
+const meiliWriteFlushDurationMs = new client.Histogram({
+  name: 'meili_write_flush_duration_ms',
+  help: 'Wall time for a single Meili documents POST (chunk flush, ms)',
+  labelNames: ['op'],
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000],
+});
+
+const meiliWriteEnqueueToFlushLagMs = new client.Histogram({
+  name: 'meili_write_enqueue_to_flush_lag_ms',
+  help: 'Time from enqueue (Redis stream) to flush (Meili POST) per document, ms',
+  labelNames: ['op'],
+  buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000],
+});
+
+const meiliWriteQueueDepth = new client.Gauge({
+  name: 'meili_write_queue_depth',
+  help: 'Approximate length of the Redis Stream backing Meili writes (XLEN)',
+});
+
+const meiliTaskWaitMs = new client.Histogram({
+  name: 'meili_task_wait_ms',
+  help: 'Meili task queue wait time (enqueuedAt → startedAt), ms',
+  labelNames: ['type', 'status'],
+  buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000],
+});
+
+const meiliTaskDurationMs = new client.Histogram({
+  name: 'meili_task_duration_ms',
+  help: 'Meili task processing duration (startedAt → finishedAt), ms',
+  labelNames: ['type', 'status'],
+  buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000],
+});
+
 // ── In-process write batching ────────────────────────────────────────────────
 
-const pendingUpserts = new Map<string, MeiliMessageDoc>();
+interface PendingUpsertEntry {
+  doc: MeiliMessageDoc;
+  enqueuedAtMs: number;
+}
+const pendingUpserts = new Map<string, PendingUpsertEntry>();
 let writeFlushTimer: NodeJS.Timeout | null = null;
 let writeFlushInFlight = false;
 let writeFlushQueued = false;
 let streamConsumerClients: any[] = [];
 let streamConsumerStopping = false;
 let streamConsumerStarted = false;
+let queueDepthTimer: NodeJS.Timeout | null = null;
 
 function pendingWriteCount(): number {
   return pendingUpserts.size;
@@ -215,14 +300,14 @@ function clearWriteFlushTimer() {
   writeFlushTimer = null;
 }
 
-function takePendingUpserts(max: number): MeiliMessageDoc[] {
-  const docs: MeiliMessageDoc[] = [];
-  for (const [id, doc] of pendingUpserts) {
+function takePendingUpserts(max: number): PendingUpsertEntry[] {
+  const entries: PendingUpsertEntry[] = [];
+  for (const [id, entry] of pendingUpserts) {
     pendingUpserts.delete(id);
-    docs.push(doc);
-    if (docs.length >= max) break;
+    entries.push(entry);
+    if (entries.length >= max) break;
   }
-  return docs;
+  return entries;
 }
 
 function scheduleWriteFlush(immediate = false) {
@@ -253,13 +338,19 @@ async function flushPendingWrites(): Promise<void> {
   try {
     while (pendingWriteCount() > 0) {
       writeFlushQueued = false;
-      const docs = takePendingUpserts(MEILI_WRITE_BATCH_SIZE);
-      if (!docs.length) break;
+      const entries = takePendingUpserts(MEILI_WRITE_BATCH_SIZE);
+      if (!entries.length) break;
 
+      const docs = entries.map((entry) => entry.doc);
       const t0 = Date.now();
       try {
-        await batchIndexMessages(docs);
-        meiliIndexDurationMs.observe({ op: 'index' }, Date.now() - t0);
+        const result = await batchIndexMessages(docs);
+        const flushMs = Date.now() - t0;
+        meiliIndexDurationMs.observe({ op: 'index' }, flushMs);
+        meiliWriteBatchSize.observe({ op: 'upsert' }, docs.length);
+        meiliWriteFlushDurationMs.observe({ op: 'index' }, flushMs);
+        observeEnqueueLagFromEntries(entries, t0, 'upsert');
+        if (result?.taskUid != null) schedulePollMeiliTaskMetrics(result.taskUid, 'index');
       } catch (err: any) {
         meiliIndexFailuresTotal.inc({ op: 'index' }, docs.length);
         logger.warn(
@@ -280,6 +371,27 @@ async function flushPendingWrites(): Promise<void> {
   }
 }
 
+function observeEnqueueLagFromEntries(
+  entries: Array<{ enqueuedAtMs: number }>,
+  flushedAtMs: number,
+  op: 'upsert' | 'delete',
+): void {
+  for (const entry of entries) {
+    const enqueuedAt = Number(entry.enqueuedAtMs);
+    if (!Number.isFinite(enqueuedAt) || enqueuedAt <= 0) continue;
+    const lag = Math.max(0, flushedAtMs - enqueuedAt);
+    meiliWriteEnqueueToFlushLagMs.observe({ op }, lag);
+  }
+}
+
+/** Parse the Redis Stream entry id (`<ms>-<seq>`) to extract enqueue time. */
+function parseStreamEntryEnqueueMs(entryId: string): number {
+  const dash = entryId.indexOf('-');
+  const tsStr = dash === -1 ? entryId : entryId.slice(0, dash);
+  const ms = parseInt(tsStr, 10);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 function streamConsumerName(slot: number) {
   return `meili-${process.env.HOSTNAME || 'host'}-${process.env.PORT || '0'}-${process.pid}-${slot}`;
 }
@@ -297,6 +409,11 @@ function parseStreamFields(fields: string[]) {
 }
 
 async function enqueueMeiliWriteStream(op: 'upsert' | 'delete', payload: Record<string, unknown>) {
+  // Stamp the producer-side enqueue time so consumers can compute the
+  // enqueue→flush lag even when this writer's clock differs from the Redis
+  // server (within the bounds of NTP drift). Consumers fall back to the
+  // Redis stream entry id timestamp when this field is absent.
+  const stamped = { ...payload, enqueuedAtMs: Date.now() };
   await redisSearch.xadd(
     MEILI_WRITE_STREAM_KEY,
     'MAXLEN',
@@ -306,7 +423,7 @@ async function enqueueMeiliWriteStream(op: 'upsert' | 'delete', payload: Record<
     'op',
     op,
     'payload',
-    JSON.stringify(payload),
+    JSON.stringify(stamped),
   );
   meiliWriteStreamEnqueuedTotal.inc({ op, result: 'ok' });
 }
@@ -331,7 +448,16 @@ async function processMeiliWriteStreamMessages(
 ) {
   if (!entries.length) return;
 
-  const latestByMessageId = new Map<string, { op: 'upsert' | 'delete'; doc?: MeiliMessageDoc }>();
+  // Track the *latest* op per message id (last write wins) along with the
+  // earliest enqueue time we have seen for it, so the enqueue→flush lag
+  // metric reflects the oldest pending mutation rather than the coalesced
+  // tail.
+  interface CoalescedEntry {
+    op: 'upsert' | 'delete';
+    doc?: MeiliMessageDoc;
+    enqueuedAtMs: number;
+  }
+  const latestByMessageId = new Map<string, CoalescedEntry>();
   const ackIds: string[] = [];
 
   for (const [entryId, fields] of entries) {
@@ -357,35 +483,83 @@ async function processMeiliWriteStreamMessages(
       meiliWriteStreamConsumedTotal.inc({ op, result: 'invalid' });
       continue;
     }
+    // Prefer the explicit enqueuedAtMs producer field if present; fall back
+    // to the Redis stream entry id timestamp for older entries.
+    const payloadEnqueuedAt = Number(payload.enqueuedAtMs);
+    const entryEnqueuedAt = Number.isFinite(payloadEnqueuedAt) && payloadEnqueuedAt > 0
+      ? payloadEnqueuedAt
+      : parseStreamEntryEnqueueMs(entryId);
+    const previous = latestByMessageId.get(messageId);
+    const earliestEnqueuedAt = previous && previous.enqueuedAtMs > 0
+      ? Math.min(previous.enqueuedAtMs, entryEnqueuedAt || previous.enqueuedAtMs)
+      : entryEnqueuedAt;
     if (op === 'delete') {
-      latestByMessageId.set(messageId, { op });
+      latestByMessageId.set(messageId, { op, enqueuedAtMs: earliestEnqueuedAt });
     } else {
-      latestByMessageId.set(messageId, { op, doc: toDoc(payload) });
+      latestByMessageId.set(messageId, { op, doc: toDoc(payload), enqueuedAtMs: earliestEnqueuedAt });
     }
     ackIds.push(entryId);
   }
 
-  const upserts: MeiliMessageDoc[] = [];
-  const deletes: string[] = [];
+  const upserts: Array<{ doc: MeiliMessageDoc; enqueuedAtMs: number }> = [];
+  const deletes: Array<{ id: string; enqueuedAtMs: number }> = [];
   for (const [id, item] of latestByMessageId) {
     if (item.op === 'delete') {
-      deletes.push(id);
+      deletes.push({ id, enqueuedAtMs: item.enqueuedAtMs });
     } else if (item.doc) {
-      upserts.push(item.doc);
+      upserts.push({ doc: item.doc, enqueuedAtMs: item.enqueuedAtMs });
     }
   }
 
-  if (upserts.length) {
+  // Chunk the coalesced batches so each Meili task is bounded by
+  // MEILI_WRITE_STREAM_TASK_CHUNK (defaults to MEILI_WRITE_BATCH_SIZE).
+  // Without this the stream consumer would happily POST 1000-doc tasks even
+  // when MEILI_WRITE_BATCH_SIZE was set to 200, defeating the point of the
+  // tunable.
+  // If any chunk fails we re-throw so the surrounding consumer slot skips
+  // the XACK below; XAUTOCLAIM will redeliver the unacked entries on the
+  // next tick. This preserves the existing at-least-once retry semantics
+  // even with per-chunk failure isolation for metrics.
+  for (let i = 0; i < upserts.length; i += MEILI_WRITE_STREAM_TASK_CHUNK) {
+    const chunkEntries = upserts.slice(i, i + MEILI_WRITE_STREAM_TASK_CHUNK);
+    const docs = chunkEntries.map((entry) => entry.doc);
     const t0 = Date.now();
-    await batchIndexMessages(upserts);
-    meiliIndexDurationMs.observe({ op: 'index_stream' }, Date.now() - t0);
-    meiliWriteStreamConsumedTotal.inc({ op: 'upsert', result: 'ok' }, upserts.length);
+    let result: { taskUid?: number } | null = null;
+    try {
+      result = await batchIndexMessages(docs);
+    } catch (err: any) {
+      meiliIndexFailuresTotal.inc({ op: 'index_stream' }, docs.length);
+      logger.warn(
+        {
+          err: { message: err?.message },
+          messageIds: docs.slice(0, 5).map((doc) => doc.id),
+          batchSize: docs.length,
+        },
+        'meili: stream upsert chunk failed',
+      );
+      throw err;
+    }
+    const flushMs = Date.now() - t0;
+    meiliIndexDurationMs.observe({ op: 'index_stream' }, flushMs);
+    meiliWriteBatchSize.observe({ op: 'upsert' }, docs.length);
+    meiliWriteFlushDurationMs.observe({ op: 'index_stream' }, flushMs);
+    observeEnqueueLagFromEntries(chunkEntries, t0, 'upsert');
+    meiliWriteStreamConsumedTotal.inc({ op: 'upsert', result: 'ok' }, docs.length);
+    if (result?.taskUid != null) schedulePollMeiliTaskMetrics(result.taskUid, 'index_stream');
   }
-  if (deletes.length) {
+
+  for (let i = 0; i < deletes.length; i += MEILI_WRITE_STREAM_TASK_CHUNK) {
+    const chunkEntries = deletes.slice(i, i + MEILI_WRITE_STREAM_TASK_CHUNK);
+    const ids = chunkEntries.map((entry) => entry.id);
     const t0 = Date.now();
-    await batchDeleteMessages(deletes, 'delete_stream');
-    meiliIndexDurationMs.observe({ op: 'delete_stream' }, Date.now() - t0);
-    meiliWriteStreamConsumedTotal.inc({ op: 'delete', result: 'ok' }, deletes.length);
+    const result = await batchDeleteMessages(ids, 'delete_stream');
+    const flushMs = Date.now() - t0;
+    meiliIndexDurationMs.observe({ op: 'delete_stream' }, flushMs);
+    meiliWriteBatchSize.observe({ op: 'delete' }, ids.length);
+    meiliWriteFlushDurationMs.observe({ op: 'delete_stream' }, flushMs);
+    observeEnqueueLagFromEntries(chunkEntries, t0, 'delete');
+    meiliWriteStreamConsumedTotal.inc({ op: 'delete', result: 'ok' }, ids.length);
+    if (result?.taskUid != null) schedulePollMeiliTaskMetrics(result.taskUid, 'delete_stream');
   }
 
   if (ackIds.length) {
@@ -561,9 +735,11 @@ function startMeiliWriteStreamConsumerIfEnabled() {
           slots: MEILI_WRITE_STREAM_CONSUMER_SLOTS,
           readCount: MEILI_WRITE_STREAM_READ_COUNT,
           coalesceMs: MEILI_WRITE_STREAM_COALESCE_MS,
+          taskChunk: MEILI_WRITE_STREAM_TASK_CHUNK,
         },
         'meili: write stream consumer starting',
       );
+      startQueueDepthSamplerIfEnabled();
       for (let slot = 0; slot < MEILI_WRITE_STREAM_CONSUMER_SLOTS; slot += 1) {
         void runMeiliWriteStreamConsumerSlot(streamConsumerClients[slot], slot);
       }
@@ -577,6 +753,7 @@ function startMeiliWriteStreamConsumerIfEnabled() {
 async function stopMeiliWriteStreamConsumer() {
   streamConsumerStopping = true;
   streamConsumerStarted = false;
+  stopQueueDepthSampler();
   const clientsToClose = streamConsumerClients;
   streamConsumerClients = [];
   await Promise.allSettled(
@@ -822,7 +999,11 @@ async function indexMessage(msg: MeiliMessageDoc): Promise<void> {
       );
     }
   }
-  pendingUpserts.set(String(doc.id), doc);
+  const previous = pendingUpserts.get(String(doc.id));
+  pendingUpserts.set(String(doc.id), {
+    doc,
+    enqueuedAtMs: previous?.enqueuedAtMs || Date.now(),
+  });
   scheduleWriteFlush();
 }
 
@@ -858,14 +1039,21 @@ async function deleteMessageNow(id: string, op = 'delete'): Promise<void> {
   }
 }
 
-async function batchDeleteMessages(ids: string[], op = 'delete'): Promise<void> {
-  if (!ids.length) return;
+async function batchDeleteMessages(
+  ids: string[],
+  op = 'delete',
+): Promise<{ taskUid?: number } | null> {
+  if (!ids.length) return null;
   try {
-    await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/documents/delete-batch`, {
+    const data = await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/documents/delete-batch`, {
       method: 'POST',
       body: ids,
       timeoutMs: Math.max(MEILI_TIMEOUT_MS, 10_000),
     });
+    const taskUid = data && typeof data === 'object' && typeof (data as any).taskUid === 'number'
+      ? (data as any).taskUid
+      : undefined;
+    return { taskUid };
   } catch (err: any) {
     meiliIndexFailuresTotal.inc({ op }, ids.length);
     logger.warn(
@@ -876,13 +1064,104 @@ async function batchDeleteMessages(ids: string[], op = 'delete'): Promise<void> 
   }
 }
 
-async function batchIndexMessages(msgs: MeiliMessageDoc[]): Promise<void> {
-  if (!msgs.length) return;
-  await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/documents`, {
+async function batchIndexMessages(
+  msgs: MeiliMessageDoc[],
+): Promise<{ taskUid?: number } | null> {
+  if (!msgs.length) return null;
+  const data = await meiliFetch(`/indexes/${MEILI_INDEX_MESSAGES}/documents`, {
     method: 'POST',
     body: msgs.map(toDoc),
     timeoutMs: Math.max(MEILI_TIMEOUT_MS, 10_000),
   });
+  const taskUid = data && typeof data === 'object' && typeof (data as any).taskUid === 'number'
+    ? (data as any).taskUid
+    : undefined;
+  return { taskUid };
+}
+
+// ── Meili task metrics polling ───────────────────────────────────────────────
+
+const TERMINAL_TASK_STATUSES = new Set(['succeeded', 'failed', 'canceled']);
+
+function parseIsoMs(value: any): number | null {
+  if (value == null) return null;
+  const ms = Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function schedulePollMeiliTaskMetrics(taskUid: number, op: string): void {
+  if (!MEILI_TASK_METRICS_ENABLED) return;
+  if (!Number.isFinite(taskUid)) return;
+  void pollMeiliTaskMetrics(taskUid, op).catch((err: any) => {
+    logger.debug(
+      { err: { message: err?.message }, taskUid, op },
+      'meili: task metric poll failed',
+    );
+  });
+}
+
+async function pollMeiliTaskMetrics(taskUid: number, op: string): Promise<void> {
+  const startedPollAt = Date.now();
+  let backoff = MEILI_TASK_METRICS_POLL_MIN_MS;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (Date.now() - startedPollAt > MEILI_TASK_METRICS_TIMEOUT_MS) return;
+    let task: any;
+    try {
+      task = await meiliFetch(`/tasks/${taskUid}`, { timeoutMs: 3000 });
+    } catch {
+      // Transient; back off and retry until timeout.
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+      backoff = Math.min(MEILI_TASK_METRICS_POLL_MAX_MS, backoff * 2);
+      continue;
+    }
+    const status = String(task?.status || '');
+    if (TERMINAL_TASK_STATUSES.has(status)) {
+      const type = String(task?.type || op || 'unknown');
+      const enqueuedMs = parseIsoMs(task?.enqueuedAt);
+      const startedMs = parseIsoMs(task?.startedAt);
+      const finishedMs = parseIsoMs(task?.finishedAt);
+      if (enqueuedMs != null && startedMs != null) {
+        meiliTaskWaitMs.observe({ type, status }, Math.max(0, startedMs - enqueuedMs));
+      }
+      if (startedMs != null && finishedMs != null) {
+        meiliTaskDurationMs.observe({ type, status }, Math.max(0, finishedMs - startedMs));
+      }
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, backoff));
+    backoff = Math.min(MEILI_TASK_METRICS_POLL_MAX_MS, backoff * 2);
+  }
+}
+
+// ── Queue depth sampler ──────────────────────────────────────────────────────
+
+async function sampleQueueDepth(clientForStream: any): Promise<void> {
+  try {
+    if (typeof clientForStream?.xlen !== 'function') return;
+    const len = await clientForStream.xlen(MEILI_WRITE_STREAM_KEY);
+    if (typeof len === 'number' && Number.isFinite(len)) {
+      meiliWriteQueueDepth.set(len);
+    }
+  } catch {
+    // Best-effort gauge; missing data is fine.
+  }
+}
+
+function startQueueDepthSamplerIfEnabled() {
+  if (queueDepthTimer) return;
+  if (!MEILI_WRITE_STREAM_ENABLED) return;
+  if (typeof (redisSearch as any)?.xlen !== 'function') return;
+  queueDepthTimer = setInterval(() => {
+    void sampleQueueDepth(redisSearch);
+  }, MEILI_WRITE_QUEUE_DEPTH_INTERVAL_MS);
+  if (typeof queueDepthTimer.unref === 'function') queueDepthTimer.unref();
+}
+
+function stopQueueDepthSampler() {
+  if (!queueDepthTimer) return;
+  clearInterval(queueDepthTimer);
+  queueDepthTimer = null;
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -991,4 +1270,12 @@ module.exports = {
   searchMessageCandidates,
   incFallbackTotal,
   MEILI_INDEX_MESSAGES,
+  // Exposed for tests so batching/coalescing/chunking can be exercised
+  // without spinning up Redis or a real Meili stream consumer.
+  __test: {
+    processMeiliWriteStreamMessages,
+    flushPendingWrites,
+    sampleQueueDepth,
+    pollMeiliTaskMetrics,
+  },
 };
