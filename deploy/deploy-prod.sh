@@ -765,7 +765,17 @@ PY
 "
 echo "✓ PostgreSQL tuned"
 
-DOWNLOAD_PATH="/tmp/chatapp-${RELEASE_SHA}.tar.gz"
+# Include $$ so parallel deploy-prod.sh invocations (e.g. parallel VM2+VM3
+# rollout from deploy-prod-multi.sh) don't race on the same local /tmp path.
+DOWNLOAD_PATH="/tmp/chatapp-${RELEASE_SHA}-$$.tar.gz"
+_cleanup_download_path() {
+  rm -f "$DOWNLOAD_PATH" 2>/dev/null || true
+}
+_combined_cleanup() {
+  _cleanup_download_path
+  _cleanup_deploy_ssh_tmpdir
+}
+trap _combined_cleanup EXIT
 # 3. Download artifact to prod
 if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
   echo "3. Using local artifact..."
