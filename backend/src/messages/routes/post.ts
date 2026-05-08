@@ -352,6 +352,7 @@ module.exports = function registerPostRoutes(router: import("express").IRouter) 
             communityId,
             baseMessage,
             message,
+            postAttachmentCount: attachments.length,
           });
           realtimePublishedAtForHttp = ch.realtimePublishedAtForHttp;
           realtimeChannelFanoutComplete = ch.realtimeChannelFanoutComplete;

@@ -45,14 +45,83 @@ type PostFanoutTimingMs = {
   recent_bridge_timeout_ms: number | null;
 };
 
+/**
+ * Async fanout jobs default to SELECT+JOIN hydration. When POST had no attachments,
+ * the request-path `message` already matches the fanout payload (INSERT…RETURNING
+ * includes author; attachments stay []). Skip the extra DB round-trip per message.
+ */
+async function resolveChannelMessageForAsyncFanoutJob(opts: {
+  postAttachmentCount: number;
+  channelId: string;
+  baseMessageId: string;
+  message: any;
+}) {
+  const { postAttachmentCount, channelId, baseMessageId, message } = opts;
+  if (postAttachmentCount === 0) {
+    if (!message || String(message.channel_id) !== String(channelId)) {
+      logger.warn(
+        { channelId, messageId: baseMessageId },
+        "POST /messages fanout job: skip-hydrate channel validation failed",
+      );
+      return null;
+    }
+    return message;
+  }
+  const msg = await loadHydratedMessageById(String(baseMessageId));
+  if (!msg) {
+    logger.warn(
+      { channelId, messageId: baseMessageId },
+      "POST /messages fanout job: message row missing",
+    );
+    return null;
+  }
+  if (String(msg.channel_id) !== String(channelId)) {
+    logger.warn(
+      { channelId, messageId: baseMessageId },
+      "POST /messages fanout job: channel mismatch",
+    );
+    return null;
+  }
+  return msg;
+}
+
+/**
+ * POST /messages already builds the final `message` (hydrate when attachments exist).
+ * Reuse it in the async worker — avoids a duplicate loadHydratedMessageById per DM send.
+ */
+function resolveConversationMessageForAsyncFanoutJob(opts: {
+  message: any;
+  conversationId: string;
+  baseMessageId: string;
+}) {
+  const { message, conversationId, baseMessageId } = opts;
+  if (!message) {
+    logger.warn(
+      { conversationId, messageId: baseMessageId },
+      "POST /messages fanout job: message missing",
+    );
+    return null;
+  }
+  if (String(message.conversation_id) !== String(conversationId)) {
+    logger.warn(
+      { conversationId, messageId: baseMessageId },
+      "POST /messages fanout job: conversation mismatch",
+    );
+    return null;
+  }
+  return message;
+}
+
 async function runChannelMessageCreatedFanout(opts: {
   req: { id?: string };
   channelId: string;
   communityId: string | null;
   baseMessage: { id: string; author_id: string; created_at: string | Date };
   message: any;
+  /** Length of POST body attachments array; >0 requires DB hydrate for attachment rows. */
+  postAttachmentCount: number;
 }) {
-  const { req, channelId, communityId, baseMessage, message } = opts;
+  const { req, channelId, communityId, baseMessage, message, postAttachmentCount } = opts;
   let realtimePublishedAtForHttp: string | undefined;
   let realtimeChannelFanoutComplete = false;
   let fanoutMeta: any = null;
@@ -119,21 +188,13 @@ async function runChannelMessageCreatedFanout(opts: {
                 "channel",
                 String(baseMessage.id),
                 async () => {
-                  const msg = await loadHydratedMessageById(String(baseMessage.id));
-                  if (!msg) {
-                    logger.warn(
-                      { channelId, messageId: baseMessage.id },
-                      "POST /messages fanout job: message row missing",
-                    );
-                    return;
-                  }
-                  if (String(msg.channel_id) !== String(channelId)) {
-                    logger.warn(
-                      { channelId, messageId: baseMessage.id },
-                      "POST /messages fanout job: channel mismatch",
-                    );
-                    return;
-                  }
+                  const msg = await resolveChannelMessageForAsyncFanoutJob({
+                    postAttachmentCount,
+                    channelId,
+                    baseMessageId: String(baseMessage.id),
+                    message,
+                  });
+                  if (!msg) return;
                   const envelope = messageFanoutEnvelope(
                     "message:created",
                     msg,
@@ -268,21 +329,12 @@ async function runConversationMessageCreatedFanout(opts: {
                 "conversation",
                 String(baseMessage.id),
                 async () => {
-                  const msg = await loadHydratedMessageById(String(baseMessage.id));
-                  if (!msg) {
-                    logger.warn(
-                      { conversationId, messageId: baseMessage.id },
-                      "POST /messages fanout job: message row missing",
-                    );
-                    return;
-                  }
-                  if (String(msg.conversation_id) !== String(conversationId)) {
-                    logger.warn(
-                      { conversationId, messageId: baseMessage.id },
-                      "POST /messages fanout job: conversation mismatch",
-                    );
-                    return;
-                  }
+                  const msg = resolveConversationMessageForAsyncFanoutJob({
+                    message,
+                    conversationId,
+                    baseMessageId: String(baseMessage.id),
+                  });
+                  if (!msg) return;
                   await publishConversationEventNow(
                     conversationId,
                     "message:created",
@@ -398,4 +450,6 @@ async function runConversationMessageCreatedFanout(opts: {
 module.exports = {
   runChannelMessageCreatedFanout,
   runConversationMessageCreatedFanout,
+  resolveChannelMessageForAsyncFanoutJob,
+  resolveConversationMessageForAsyncFanoutJob,
 };
