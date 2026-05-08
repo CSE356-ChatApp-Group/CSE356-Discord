@@ -39,20 +39,33 @@ function parseIsoMaybe(value: string | undefined): string | undefined {
 function loadBackfillCheckpoint(
   checkpointPath: string,
   fallbackCreatedAt: string,
-): { createdAt: string; id: string } {
+): {
+  createdAt: string;
+  id: string;
+  scanned: number;
+  indexed: number;
+  failures: number;
+} {
   const fs = requireCjs('fs');
+  const emptyId = '00000000-0000-0000-0000-000000000000';
   try {
     if (!fs.existsSync(checkpointPath)) {
-      return { createdAt: fallbackCreatedAt, id: '00000000-0000-0000-0000-000000000000' };
+      return { createdAt: fallbackCreatedAt, id: emptyId, scanned: 0, indexed: 0, failures: 0 };
     }
     const parsed = JSON.parse(fs.readFileSync(checkpointPath, 'utf8'));
     if (parsed?.createdAt && parsed?.id) {
-      return { createdAt: String(parsed.createdAt), id: String(parsed.id) };
+      return {
+        createdAt: String(parsed.createdAt),
+        id: String(parsed.id),
+        scanned: Number.isFinite(Number(parsed.scanned)) ? Number(parsed.scanned) : 0,
+        indexed: Number.isFinite(Number(parsed.indexed)) ? Number(parsed.indexed) : 0,
+        failures: Number.isFinite(Number(parsed.failures)) ? Number(parsed.failures) : 0,
+      };
     }
   } catch {
     // ignore parse/read errors and restart from fallback
   }
-  return { createdAt: fallbackCreatedAt, id: '00000000-0000-0000-0000-000000000000' };
+  return { createdAt: fallbackCreatedAt, id: emptyId, scanned: 0, indexed: 0, failures: 0 };
 }
 
 function saveBackfillCheckpoint(checkpointPath: string, checkpoint: Record<string, unknown>) {
@@ -70,7 +83,13 @@ async function main() {
   const until = parseIsoMaybe(getArg('until'));
   const checkpointPath = getArg('checkpoint') || 'var/opensearch-backfill.checkpoint.json';
   const dryRun = hasFlag('dry-run');
-  const batchSize = Math.min(500, Math.max(50, Number(getArg('batch-size') || '250') || 250));
+  const batchSize = Math.min(2000, Math.max(50, Number(getArg('batch-size') || '250') || 250));
+  const sleepMs = Math.min(60_000, Math.max(0, Number(getArg('sleep-ms') || '0') || 0));
+  const useReadReplica = hasFlag('use-read-replica');
+  const dbPool = useReadReplica && poolMod.readPool ? poolMod.readPool : poolMod.pool;
+  if (useReadReplica && !poolMod.readPool) {
+    console.warn('backfill: --use-read-replica set but PG_READ_REPLICA_URL not configured; using primary pool');
+  }
 
   const checkpoint = loadBackfillCheckpoint(
     checkpointPath,
@@ -85,9 +104,9 @@ async function main() {
     await ensureOpenSearchMessagesIndex();
   }
 
-  let scanned = 0;
-  let indexed = 0;
-  let failures = 0;
+  let scanned = checkpoint.scanned;
+  let indexed = checkpoint.indexed;
+  let failures = checkpoint.failures;
   const startedAt = Date.now();
 
   while (true) {
@@ -101,7 +120,7 @@ async function main() {
     if (since) boundaryParts.push(`AND m.created_at >= $${params.push(since)}::timestamptz`);
     if (until) boundaryParts.push(`AND m.created_at <= $${params.push(until)}::timestamptz`);
 
-    const { rows } = await poolMod.pool.query(
+    const { rows } = await dbPool.query(
       `
       SELECT
         m.id,
@@ -174,6 +193,9 @@ async function main() {
     const elapsedSec = Math.max(1, (Date.now() - startedAt) / 1000);
     const dps = (indexed / elapsedSec).toFixed(1);
     console.log(`progress scanned=${scanned} indexed=${indexed} failures=${failures} docs_per_sec=${dps}`);
+    if (sleepMs > 0) {
+      await new Promise((r) => setTimeout(r, sleepMs));
+    }
     if (limit > 0 && scanned >= limit) break;
   }
 
@@ -186,6 +208,9 @@ async function main() {
         indexed,
         failures,
         docsPerSec: Number((indexed / elapsedSec).toFixed(2)),
+        batchSize,
+        sleepMs,
+        useReadReplica: Boolean(useReadReplica && poolMod.readPool),
         checkpoint: { createdAt: cursorCreatedAt, id: cursorId, path: checkpointPath },
       },
       null,
@@ -201,4 +226,5 @@ main()
   })
   .finally(async () => {
     await poolMod.pool.end().catch(() => {});
+    if (poolMod.readPool) await poolMod.readPool.end().catch(() => {});
   });

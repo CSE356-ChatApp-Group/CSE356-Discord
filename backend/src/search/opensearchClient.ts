@@ -1,12 +1,17 @@
 const logger = require('../utils/logger');
+const {
+  recordOpenSearchWriteMetric,
+  classifyOpenSearchWrite,
+} = require('../utils/metrics/openSearchWriteMetrics');
 
 const OPENSEARCH_URL = String(process.env.OPENSEARCH_URL || '').replace(/\/$/, '');
 const OPENSEARCH_USERNAME = String(process.env.OPENSEARCH_USERNAME || '');
 const OPENSEARCH_PASSWORD = String(process.env.OPENSEARCH_PASSWORD || '');
 const OPENSEARCH_INDEX_MESSAGES = String(process.env.OPENSEARCH_INDEX_MESSAGES || 'messages_v1');
+/** Single-request timeout (dual-write index/delete/update). Bulk uses an explicit larger timeout. */
 const OPENSEARCH_TIMEOUT_MS = Math.min(
-  5000,
-  Math.max(500, parseInt(process.env.OPENSEARCH_TIMEOUT_MS || '2000', 10) || 2000),
+  30_000,
+  Math.max(500, parseInt(process.env.OPENSEARCH_TIMEOUT_MS || '8000', 10) || 8000),
 );
 
 const MESSAGES_V1_INDEX_MAPPING = {
@@ -53,11 +58,23 @@ function opensearchAuthHeader() {
 
 async function opensearchFetch(
   path: string,
-  options: { method?: string; body?: unknown; timeoutMs?: number; contentType?: string } = {},
+  options: {
+    method?: string;
+    body?: unknown;
+    timeoutMs?: number;
+    contentType?: string;
+    /** For POST /_bulk: number of documents in the batch (metrics). */
+    metricDocCount?: number;
+    /** When true, success/failure metrics are not recorded here (caller records after parsing /_bulk items). */
+    deferWriteMetric?: boolean;
+  } = {},
 ) {
   if (!isOpenSearchEnabled()) {
     throw new Error('OpenSearch is not configured');
   }
+  const method = options.method ?? 'GET';
+  const writeMeta = classifyOpenSearchWrite(path, method);
+  const t0 = Date.now();
   const controller = new AbortController();
   const timeoutMs = options.timeoutMs ?? OPENSEARCH_TIMEOUT_MS;
   const tid = setTimeout(() => controller.abort(), timeoutMs);
@@ -74,7 +91,7 @@ async function opensearchFetch(
           ? JSON.stringify(options.body)
           : undefined;
     const res = await fetch(`${OPENSEARCH_URL}${path}`, {
-      method: options.method ?? 'GET',
+      method,
       headers,
       body: requestBody,
       signal: controller.signal,
@@ -88,10 +105,29 @@ async function opensearchFetch(
     }
     if (!res.ok) {
       throw new Error(
-        `OpenSearch ${options.method ?? 'GET'} ${path} -> ${res.status}: ${String(text).slice(0, 250)}`,
+        `OpenSearch ${method} ${path} -> ${res.status}: ${String(text).slice(0, 250)}`,
       );
     }
+    if (writeMeta.record && !options.deferWriteMetric) {
+      const docCount =
+        writeMeta.operation === 'bulk' ? (options.metricDocCount ?? 0) : undefined;
+      recordOpenSearchWriteMetric({
+        ms: Date.now() - t0,
+        ok: true,
+        operation: writeMeta.operation,
+        docCount,
+      });
+    }
     return parsed;
+  } catch (err) {
+    if (writeMeta.record && !options.deferWriteMetric) {
+      recordOpenSearchWriteMetric({
+        ms: Date.now() - t0,
+        ok: false,
+        operation: writeMeta.operation,
+      });
+    }
+    throw err;
   } finally {
     clearTimeout(tid);
   }
@@ -133,15 +169,48 @@ async function bulkIndexMessagesToOpenSearch(messages: any[]): Promise<void> {
       return `${JSON.stringify({ index: { _index: OPENSEARCH_INDEX_MESSAGES, _id: doc.id } })}\n${JSON.stringify(doc)}`;
     })
     .join('\n') + '\n';
-  await opensearchFetch('/_bulk', {
-    method: 'POST',
-    body: ndjson,
-    contentType: 'application/x-ndjson',
-    timeoutMs: 15000,
-  }).catch((err) => {
+  const timeoutMs = Math.min(120_000, 10_000 + messages.length * 80);
+  const t0 = Date.now();
+  try {
+    const parsed = await opensearchFetch('/_bulk', {
+      method: 'POST',
+      body: ndjson,
+      contentType: 'application/x-ndjson',
+      timeoutMs,
+      metricDocCount: messages.length,
+      deferWriteMetric: true,
+    });
+    if (parsed && typeof parsed === 'object') {
+      const items = Array.isArray(parsed.items) ? parsed.items : [];
+      const bad = items.filter((it: any) => {
+        const st = it?.index?.status;
+        if (st === 200 || st === 201) return false;
+        return true;
+      });
+      if (bad.length) {
+        const firstErr = bad.map((it: any) => it?.index?.error || it?.index).find(Boolean);
+        logger.warn(
+          { batchSize: messages.length, failed: bad.length, firstErr },
+          'opensearch: bulk index had per-item failures',
+        );
+        throw new Error(`OpenSearch bulk: ${bad.length}/${messages.length} items not created (check status/error)`);
+      }
+    }
+    recordOpenSearchWriteMetric({
+      ms: Date.now() - t0,
+      ok: true,
+      operation: 'bulk',
+      docCount: messages.length,
+    });
+  } catch (err: any) {
     logger.warn({ err: { message: err?.message }, batchSize: messages.length }, 'opensearch: bulk index failed');
+    recordOpenSearchWriteMetric({
+      ms: Date.now() - t0,
+      ok: false,
+      operation: 'bulk',
+    });
     throw err;
-  });
+  }
 }
 
 async function indexMessageToOpenSearch(message: any): Promise<void> {

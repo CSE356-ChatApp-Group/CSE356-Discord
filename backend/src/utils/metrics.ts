@@ -20,6 +20,10 @@ const {
   httpRequestsAbortedTotal,
   httpOverloadShedTotal,
   presenceFanoutTotal,
+  presenceSnapshotWriteAttemptTotal,
+  presenceSnapshotWriteSkippedTotal,
+  presenceSnapshotBatchSize,
+  presenceSnapshotFlushDurationMs,
   fanoutRecipientsHistogram,
 } = require('./metrics/httpPresence');
 const {
@@ -27,6 +31,12 @@ const {
   presenceFanoutTargetsInvalidationKeysTotal,
   presenceFanoutTargetsInvalidationDurationMs,
 } = require('./metrics/presenceFanoutTargetsInvalidation');
+const {
+  opensearchBulkTotal,
+  opensearchBulkDurationMs,
+  opensearchBulkDocs,
+  opensearchRequestErrorsTotal,
+} = require('./metrics/openSearchWriteMetrics');
 
 const {
   sideEffectQueueDepth,
@@ -58,6 +68,10 @@ const {
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
+  searchEmptyMeiliRecentRescueTotal,
+  searchEmptyMeiliRecentRescueDurationMs,
+  searchEmptyMeiliRecentRescueRowsScanned,
+  searchEmptyMeiliRecentRescueResults,
 } = require('./metrics/searchPerformance');
 const {
   pgPoolTotal,
@@ -507,6 +521,10 @@ const overloadStageGauge = new client.Gauge({
     readStateFlushDeferredTotal.inc({ reason: 'insert_unhealthy' }, 0);
     readStateFlushDeferredTotal.inc({ reason: 'flush_pressure' }, 0);
     readStateFlushDeferredDirtyKeys.set(0);
+    presenceSnapshotWriteAttemptTotal.inc(0);
+    presenceSnapshotWriteSkippedTotal.inc({ reason: 'debounced' }, 0);
+    presenceSnapshotBatchSize.observe(0);
+    presenceSnapshotFlushDurationMs.observe(0);
     messageIngestStreamAppendedTotal.inc({ result: 'ok' }, 0);
     messageIngestStreamAppendedTotal.inc({ result: 'error' }, 0);
     messageIngestStreamConsumedTotal.inc({ result: 'ack' }, 0);
@@ -737,6 +755,14 @@ const overloadStageGauge = new client.Gauge({
       redisLuaEvalTotal.inc({ script_id, mode: 'eval_fallback', result: 'error' }, 0);
       redisLuaNoScriptRetryTotal.inc({ script_id }, 0);
     }
+    for (const result of ['success', 'error'] as const) {
+      opensearchBulkTotal.inc({ result }, 0);
+      opensearchBulkDurationMs.observe({ result }, 0);
+    }
+    for (const operation of ['index_doc', 'bulk', 'update', 'delete', 'create_index'] as const) {
+      opensearchRequestErrorsTotal.inc({ operation }, 0);
+    }
+    opensearchBulkDocs.inc(0);
   } catch {
     /* ignore during unusual test setups */
   }
@@ -749,9 +775,17 @@ module.exports = {
   httpRequestsAbortedTotal,
   httpOverloadShedTotal,
   presenceFanoutTotal,
+  presenceSnapshotWriteAttemptTotal,
+  presenceSnapshotWriteSkippedTotal,
+  presenceSnapshotBatchSize,
+  presenceSnapshotFlushDurationMs,
   presenceFanoutTargetsInvalidationTotal,
   presenceFanoutTargetsInvalidationKeysTotal,
   presenceFanoutTargetsInvalidationDurationMs,
+  opensearchBulkTotal,
+  opensearchBulkDurationMs,
+  opensearchBulkDocs,
+  opensearchRequestErrorsTotal,
   fanoutRecipientsHistogram,
   sideEffectQueueDepth,
   sideEffectQueueActiveWorkers,
@@ -905,6 +939,10 @@ module.exports = {
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
+  searchEmptyMeiliRecentRescueTotal,
+  searchEmptyMeiliRecentRescueDurationMs,
+  searchEmptyMeiliRecentRescueRowsScanned,
+  searchEmptyMeiliRecentRescueResults,
   startPgPoolMetrics,
   pgPoolCircuitBreakerRejectsTotal,
   pgPoolOperationErrorsTotal,
