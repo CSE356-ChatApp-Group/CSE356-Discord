@@ -148,4 +148,99 @@ describe('Search client OpenSearch routing', () => {
     expect(openSearchSearch).not.toHaveBeenCalled();
     expect(meiliSearch).toHaveBeenCalledTimes(1);
   });
+
+  it('does not fallback when OpenSearch returns candidates', async () => {
+    process.env.SEARCH_BACKEND = 'opensearch';
+    process.env.OPENSEARCH_READ_ENABLED = 'true';
+
+    const fallbackMetricInc = jest.fn();
+    const openSearchSearch = jest.fn().mockResolvedValue({
+      hits: [{ id: 'm1', createdAt: new Date().toISOString() }],
+      offset: 0,
+      limit: 20,
+      estimatedTotalHits: 1,
+      __opensearchCandidateCount: 1,
+    });
+    const runSearchTransaction = jest.fn();
+    const runSearchQuery = jest.fn();
+
+    jest.doMock('../src/search/opensearchExecution', () => ({
+      searchWithOpenSearchBackend: openSearchSearch,
+    }));
+    jest.doMock('../src/search/meiliClient', () => ({
+      isSearchBackend: jest.fn(() => false),
+    }));
+    jest.doMock('../src/search/searchExecution', () => ({
+      runSearchQuery,
+      runSearchReadOnlyQuery: jest.fn(),
+      runSearchTransaction,
+    }));
+    jest.doMock('../src/utils/metrics/searchPerformance', () => ({
+      searchReplicaRetryTotal: { inc: jest.fn() },
+      searchFreshnessQueryDurationMs: { observe: jest.fn() },
+      searchFreshnessCacheHitsTotal: { inc: jest.fn() },
+      searchFreshnessCacheMissesTotal: { inc: jest.fn() },
+      searchFreshnessSkippedShortQueryTotal: { inc: jest.fn() },
+      searchOpenSearchFallbackTotal: { inc: fallbackMetricInc },
+    }));
+
+    const { search } = require('../src/search/client');
+    const out = await search('hello', { communityId: 'c1', userId: 'u1', limit: 20, offset: 0 });
+    expect(openSearchSearch).toHaveBeenCalledTimes(1);
+    expect(runSearchTransaction).not.toHaveBeenCalled();
+    expect(runSearchQuery).not.toHaveBeenCalled();
+    expect(fallbackMetricInc).not.toHaveBeenCalled();
+    expect(Array.isArray(out.hits)).toBe(true);
+  });
+
+  it('falls back to bounded Postgres search when OpenSearch returns zero candidates and increments metric', async () => {
+    process.env.SEARCH_BACKEND = 'opensearch';
+    process.env.OPENSEARCH_READ_ENABLED = 'true';
+
+    const fallbackMetricInc = jest.fn();
+    const openSearchSearch = jest.fn().mockResolvedValue({
+      hits: [],
+      offset: 0,
+      limit: 20,
+      estimatedTotalHits: 0,
+      __opensearchCandidateCount: 0,
+    });
+    const txQuery = jest.fn().mockResolvedValue({ rows: [] });
+    const runSearchTransaction = jest.fn(async (fn: any) => fn({ query: txQuery }));
+    const runSearchQuery = jest.fn();
+
+    jest.doMock('../src/search/opensearchExecution', () => ({
+      searchWithOpenSearchBackend: openSearchSearch,
+    }));
+    jest.doMock('../src/search/meiliClient', () => ({
+      isSearchBackend: jest.fn(() => false),
+    }));
+    jest.doMock('../src/search/searchExecution', () => ({
+      runSearchQuery,
+      runSearchReadOnlyQuery: jest.fn(),
+      runSearchTransaction,
+    }));
+    jest.doMock('../src/utils/metrics/searchPerformance', () => ({
+      searchReplicaRetryTotal: { inc: jest.fn() },
+      searchFreshnessQueryDurationMs: { observe: jest.fn() },
+      searchFreshnessCacheHitsTotal: { inc: jest.fn() },
+      searchFreshnessCacheMissesTotal: { inc: jest.fn() },
+      searchFreshnessSkippedShortQueryTotal: { inc: jest.fn() },
+      searchOpenSearchFallbackTotal: { inc: fallbackMetricInc },
+    }));
+
+    const { search } = require('../src/search/client');
+    const out = await search('hello', { communityId: 'c1', userId: 'u1', limit: 20, offset: 0 });
+    expect(openSearchSearch).toHaveBeenCalledTimes(1);
+    expect(runSearchTransaction).toHaveBeenCalled();
+    expect(txQuery).toHaveBeenCalled();
+    expect(fallbackMetricInc).toHaveBeenCalledWith({ reason: 'empty_candidates', scope: 'community' });
+    expect(out).toEqual(
+      expect.objectContaining({
+        hits: expect.any(Array),
+        offset: 0,
+        limit: 20,
+      }),
+    );
+  });
 });

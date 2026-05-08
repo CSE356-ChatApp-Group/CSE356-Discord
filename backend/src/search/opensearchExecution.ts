@@ -110,7 +110,12 @@ async function searchWithOpenSearchBackend(
     if (!candidates.ids.length) {
       finalResultCount.observe({ backend: 'opensearch', scope }, 0);
       searchTotalMs.observe({ backend: 'opensearch', scope, status: 'success' }, Date.now() - totalStartedAt);
-      return buildResult([], q, Number(opts.offset) || 0, Number(opts.limit) || 20);
+      const out = buildResult([], q, Number(opts.offset) || 0, Number(opts.limit) || 20);
+      Object.defineProperty(out, '__opensearchCandidateCount', {
+        value: 0,
+        enumerable: false,
+      });
+      return out;
     }
     const recheckMeta = buildRecheckFromCandidates(candidates.ids, q, opts, { pageInSql: false });
     const recheckStartedAt = Date.now();
@@ -128,6 +133,10 @@ async function searchWithOpenSearchBackend(
     const finalHits = strictHits.slice(recheckMeta.offset, recheckMeta.offset + recheckMeta.limit);
     const formatStartedAt = Date.now();
     const out = buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+    Object.defineProperty(out, '__opensearchCandidateCount', {
+      value: candidates.ids.length,
+      enumerable: false,
+    });
     searchFormattingMs.observe({ scope }, Date.now() - formatStartedAt);
     finalResultCount.observe({ backend: 'opensearch', scope }, finalHits.length);
     searchTotalMs.observe({ backend: 'opensearch', scope, status: 'success' }, Date.now() - totalStartedAt);

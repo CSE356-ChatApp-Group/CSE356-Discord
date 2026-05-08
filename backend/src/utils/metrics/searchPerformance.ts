@@ -196,6 +196,13 @@ const finalResultCount = new client.Histogram({
   buckets: [0, 1, 2, 5, 10, 20, 50, 100, 250],
 });
 
+/** OpenSearch->Postgres fallback activations for empty candidate windows. */
+const searchOpenSearchFallbackTotal = new client.Counter({
+  name: 'search_opensearch_fallback_total',
+  help: 'OpenSearch read fallbacks to Postgres search path',
+  labelNames: ['reason', 'scope'],
+});
+
 /** Cache hits for Meili freshness candidate results in Redis (incremented per hit). */
 const searchFreshnessCacheHitsTotal = new client.Counter({
   name: 'search_freshness_cache_hits_total',
@@ -269,6 +276,7 @@ module.exports = {
   opensearchRecheckOutputCount,
   recheckOutputCount,
   finalResultCount,
+  searchOpenSearchFallbackTotal,
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,

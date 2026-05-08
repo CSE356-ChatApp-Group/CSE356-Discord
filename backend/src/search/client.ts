@@ -29,6 +29,7 @@ const {
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
+  searchOpenSearchFallbackTotal,
 } = require('../utils/metrics/searchPerformance');
 const {
   tokenizeStrictSearchTerms,
@@ -832,10 +833,57 @@ const { searchWithMeiliBackend } = createMeiliSearchExecutor({
 
 async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   const trimmed = String(q || '').trim();
+  const scope =
+    opts.communityId
+      ? 'community'
+      : opts.conversationId
+        ? 'conversation'
+        : 'unknown';
 
   if (SEARCH_BACKEND === 'opensearch' && OPENSEARCH_READ_ENABLED) {
     try {
-      return await searchWithOpenSearchBackend(trimmed, opts);
+      const osResult = await searchWithOpenSearchBackend(trimmed, opts);
+      if (osResult?.__opensearchCandidateCount === 0) {
+        searchOpenSearchFallbackTotal.inc({ reason: 'empty_candidates', scope });
+        logger.info(
+          { query: trimmed, scope },
+          'search: opensearch returned zero candidates, falling back to postgres bounded search',
+        );
+        const initialForcePrimary = !SEARCH_USE_READ_REPLICA;
+        try {
+          const result = await searchOnce(trimmed, opts, initialForcePrimary);
+          if (!shouldRetrySearchOnPrimary(initialForcePrimary, result)) {
+            return result;
+          }
+          logPrimaryRetry(
+            trimmed,
+            opts,
+            'search: replica returned empty result set, retrying on primary',
+            'empty_result',
+          );
+          return await searchOnce(trimmed, opts, true);
+        } catch (err) {
+          if (!shouldRetrySearchOnPrimary(initialForcePrimary, null, err)) {
+            throw err;
+          }
+          const metricReason =
+            err?.statusCode === 403
+              ? 'access_check'
+              : err?.code === '25P02'
+                ? 'aborted_transaction'
+                : (!err?.code && err?.message === 'Query read timeout')
+                  ? 'query_timeout'
+                  : 'other_error';
+          logPrimaryRetry(
+            trimmed,
+            opts,
+            'search: replica access check may be stale, retrying on primary',
+            metricReason,
+          );
+          return searchOnce(trimmed, opts, true);
+        }
+      }
+      return osResult;
     } catch (err: any) {
       if (err?.statusCode === 403) {
         throw err;
