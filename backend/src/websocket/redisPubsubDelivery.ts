@@ -43,6 +43,15 @@ const {
   hasDeliveryRiskReason,
 } = require("./redisPubsubTopicUtils");
 
+const RAW_WS_PUBSUB_DELIVERY_YIELD_EVERY = Number.parseInt(
+  process.env.WS_PUBSUB_DELIVERY_YIELD_EVERY || "64",
+  10,
+);
+const WS_PUBSUB_DELIVERY_YIELD_EVERY =
+  Number.isFinite(RAW_WS_PUBSUB_DELIVERY_YIELD_EVERY) && RAW_WS_PUBSUB_DELIVERY_YIELD_EVERY > 0
+    ? Math.min(512, Math.max(16, RAW_WS_PUBSUB_DELIVERY_YIELD_EVERY))
+    : 64;
+
 /**
  * @param ctx - Closed-over server wiring (maps, subscribe helpers, sendPayloadToSocket).
  */
@@ -69,6 +78,16 @@ function createRedisPubsubDelivery(ctx) {
   const anonymousSocketIds = new WeakMap();
   let nextAnonymousSocketId = 0;
   const STALE_MAP_RECOVERY_MAX_USERS = 100;
+
+  function yieldToEventLoop() {
+    return new Promise((resolve) => setImmediate(resolve));
+  }
+
+  async function maybeYieldDeliveryLoop(index) {
+    if (index <= 0) return;
+    if (index % WS_PUBSUB_DELIVERY_YIELD_EVERY !== 0) return;
+    await yieldToEventLoop();
+  }
 
   function reliableMessageId(parsed) {
     if (!isPlainJsonObject(parsed)) return null;
@@ -500,6 +519,7 @@ function createRedisPubsubDelivery(ctx) {
 
     const usersWithoutOpenClients = new Set();
 
+    let deliveryLoopIndex = 0;
     for (const userId of userIds) {
       const clients = localUserClients.get(userId);
       if (!clients || clients.size === 0) {
@@ -514,6 +534,8 @@ function createRedisPubsubDelivery(ctx) {
       }
       const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
       for (const ws of clients) {
+        deliveryLoopIndex += 1;
+        await maybeYieldDeliveryLoop(deliveryLoopIndex);
         if (internalSubscribeChannels) {
           if (!internalSubscribeChannels.length) continue;
           const results = await Promise.allSettled(
@@ -572,7 +594,7 @@ function createRedisPubsubDelivery(ctx) {
     }
   }
 
-  function deliverCommunityFeedMessage(channel, routed, pubsubReceiveMs: number | null = null) {
+  async function deliverCommunityFeedMessage(channel, routed, pubsubReceiveMs: number | null = null) {
     const communityId = routed.__wsRoute.communityId;
     if (typeof communityId !== "string" || !communityId) return;
     const clients = communityClients.get(communityId);
@@ -598,7 +620,10 @@ function createRedisPubsubDelivery(ctx) {
     const logicalChannel = `community:${communityId}`;
     const preparedPayload = prepareSocketPayload(logicalChannel, payload, null);
     const dedupeBatchAllowSet = new Set();
+    let deliveryLoopIndex = 0;
     for (const ws of clients) {
+      deliveryLoopIndex += 1;
+      await maybeYieldDeliveryLoop(deliveryLoopIndex);
       sendReliablePayloadToSocket(ws, logicalChannel, payload, null, {
         preparedPayload,
         dedupeBatchAllowSet,
@@ -636,7 +661,7 @@ function createRedisPubsubDelivery(ctx) {
 
       if (COMMUNITY_FEED_SHARD_CHANNEL_SET.has(channel)) {
         if (isCommunityFeedEnvelope(parsed)) {
-          deliverCommunityFeedMessage(channel, parsed, pubsubReceiveMs);
+          await deliverCommunityFeedMessage(channel, parsed, pubsubReceiveMs);
         }
         return;
       }
@@ -719,7 +744,10 @@ function createRedisPubsubDelivery(ctx) {
     const reasonCounts: Record<string, number> = {};
     const socketMissUserIds = new Set();
     const dedupeBatchAllowSet = new Set();
+      let deliveryLoopIndex = 0;
       for (const ws of clients) {
+        deliveryLoopIndex += 1;
+        await maybeYieldDeliveryLoop(deliveryLoopIndex);
         const notOpenBefore = Number(reasonCounts.not_open || 0);
         const waiterOverflowBefore = Number(reasonCounts.waiters_overflow_terminated || 0);
         const backpressureKillBefore = Number(reasonCounts.backpressure_kill || 0);
