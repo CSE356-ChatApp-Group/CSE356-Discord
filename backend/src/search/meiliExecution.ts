@@ -21,56 +21,39 @@ function createMeiliSearchExecutor({
   const {
     meiliRecheckDurationMs,
     searchFreshnessRescueWallDurationMs,
+    searchEmptyMeiliRecentRescueTotal,
+    searchEmptyMeiliRecentRescueDurationMs,
+    searchEmptyMeiliRecentRescueRowsScanned,
+    searchEmptyMeiliRecentRescueResults,
   } = require('../utils/metrics/searchPerformance');
   const {
     SEARCH_RECHECK_USE_READ_REPLICA,
     meiliEmptyCandidatesFallbackEnabled,
+    emptyMeiliRecentRescueEnabled,
+    emptyMeiliRecentRescueWindowMs,
+    emptyMeiliRecentRescueLimit,
+    emptyMeiliRecentRescueTimeoutMs,
   } = require('./searchQueryEnv');
   const {
     stripEnglishStopWords,
   } = require('./stopWords');
+  const {
+    buildRecheckFromCandidates,
+    applyStrictTermFilter,
+  } = require('./candidateRecheck');
+  const { buildEmptyMeiliRecentRescueSql } = require('./sqlParts');
 
   function tokenizeMeiliRecheckTerms(q: string) {
     return tokenizeStrictSearchTerms(stripEnglishStopWords(q));
   }
 
-  function buildRecheckFromCandidates(
-    ids: string[],
-    q: string,
-    opts: Record<string, any>,
-    options: { pageInSql?: boolean } = {},
-  ) {
-    const params: any[] = [];
-    const scope = buildScopedAccessParts(params, opts);
-    const idsPh = p(params, ids);
-    const filters = buildFilters(params, opts);
-    const limit = Number(opts.limit) || 20;
-    const offset = Number(opts.offset) || 0;
-    const pageInSql = options.pageInSql !== false;
-    const sqlLimit = pageInSql ? limit : Math.max(limit, ids.length);
-    const sqlOffset = pageInSql ? offset : 0;
-    const limitPh = p(params, sqlLimit);
-    const offsetPh = p(params, sqlOffset);
-
-    const sql = `
-    WITH candidates AS (
-      SELECT unnest(${idsPh}::uuid[]) AS id
-    )
-    ${scope ? `, ${scope.cte.trim()}` : ''}
-    SELECT ${scope ? 'scope_access.has_access AS "__scopeAccess",' : ''}
-      recheck_rows.*
-    ${scope ? scope.fromClause : 'FROM'}
-    ${scope ? 'LEFT JOIN LATERAL (' : '('}
-      SELECT ${SELECT_COLS}
-      ${FROM_CLAUSE}
-      JOIN candidates c ON c.id = m.id
-      WHERE m.deleted_at IS NULL
-        ${filters}
-      ORDER BY m.created_at DESC, m.id DESC
-      LIMIT ${limitPh} OFFSET ${offsetPh}
-    ) recheck_rows ${scope ? scope.onClause : ''}`;
-
-    return { sql, params, limit, offset, q };
+  function isRescueStatementTimeout(err: unknown): boolean {
+    const e = err as { code?: string; message?: string };
+    return (
+      e?.code === '57014'
+      || /canceling statement due to statement timeout/i.test(String(e?.message || ''))
+      || (!e?.code && String(e?.message || '') === 'Query read timeout')
+    );
   }
 
   async function searchWithMeiliBackend(
@@ -123,11 +106,8 @@ function createMeiliSearchExecutor({
           throw err;
         }
 
-        const strictTerms = tokenizeMeiliRecheckTerms(q);
         const recheckedRows = rows.filter((r: any) => r && r.id);
-        const finalHits = strictTerms.length > 0
-          ? recheckedRows.filter((r: any) => messageMatchesAllStrictTerms(r.content, strictTerms))
-          : recheckedRows;
+        const finalHits = applyStrictTermFilter(recheckedRows, q);
         const totalMs = Date.now() - tAll;
 
         if (finalHits.length > 0) {
@@ -146,7 +126,7 @@ function createMeiliSearchExecutor({
               pg_fresh_candidate_count: freshnessIds.length,
               postgres_rechecked_count: recheckedRows.length,
               freshness_rescued: true,
-              strict_term_count: strictTerms.length,
+              strict_term_count: tokenizeMeiliRecheckTerms(q).length,
               strict_pass_count: finalHits.length,
               final_hit_count: finalHits.length,
               meili_ms: meiliMs,
@@ -158,6 +138,91 @@ function createMeiliSearchExecutor({
           );
 
           return buildResult(finalHits, recheckMeta.q, recheckMeta.offset, recheckMeta.limit);
+        }
+      }
+
+      // Tightly bounded literal rescue for Meili indexing lag (empty candidates only).
+      if (emptyMeiliRecentRescueEnabled() && String(q || '').trim()) {
+        const stripped = stripEnglishStopWords(String(q).trim());
+        const rescueTerms = tokenizeStrictSearchTerms(stripped);
+        if (rescueTerms.length > 0) {
+          const tRescue = Date.now();
+          const rescueMeta = buildEmptyMeiliRecentRescueSql(
+            opts,
+            emptyMeiliRecentRescueWindowMs(),
+            emptyMeiliRecentRescueLimit(),
+            rescueTerms,
+            stripped,
+          );
+          try {
+            const rescueRows = await runSearchReadOnlyQuery(rescueMeta.sql, rescueMeta.params, {
+              kind: 'empty_meili_recent_rescue',
+              forcePrimary: true,
+              statementTimeoutMs: emptyMeiliRecentRescueTimeoutMs(),
+            });
+            const rescueMs = Date.now() - tRescue;
+            searchEmptyMeiliRecentRescueDurationMs.observe(rescueMs);
+
+            if (rescueRows[0]?.__scopeAccess === false) {
+              const err: any = new Error('Access denied');
+              err.statusCode = 403;
+              throw err;
+            }
+
+            const scanCount = Number(
+              rescueRows[0]?.__emptyMeiliRescueScanCount ?? rescueRows[0]?.__emptymeilirescuecount ?? 0,
+            );
+            if (Number.isFinite(scanCount) && scanCount >= 0) {
+              searchEmptyMeiliRecentRescueRowsScanned.observe(scanCount);
+            }
+
+            const candidateRows = rescueRows.filter((r: any) => r && r.id);
+            const rescueHits = applyStrictTermFilter(candidateRows, q);
+            const rescueTotalMs = Date.now() - tAll;
+
+            if (rescueHits.length > 0) {
+              searchEmptyMeiliRecentRescueTotal.inc({ result: 'hit' });
+              searchEmptyMeiliRecentRescueResults.observe(rescueHits.length);
+              logger.info(
+                {
+                  search_trace: true,
+                  requestId,
+                  query: q,
+                  resolved_scope: scopeLabel,
+                  search_backend: 'meili',
+                  empty_meili_recent_rescue: true,
+                  meili_candidate_count: 0,
+                  rescue_scan_count: scanCount,
+                  rescue_hit_count: rescueHits.length,
+                  rescue_ms: rescueMs,
+                  total_ms: rescueTotalMs,
+                },
+                'search_trace',
+              );
+              return buildResult(rescueHits, q, Number(opts.offset) || 0, Number(opts.limit) || 20);
+            }
+
+            searchEmptyMeiliRecentRescueTotal.inc({ result: 'miss' });
+            searchEmptyMeiliRecentRescueResults.observe(0);
+          } catch (err: unknown) {
+            const e = err as { statusCode?: number };
+            if (e?.statusCode === 403) throw err;
+            const rescueMs = Date.now() - tRescue;
+            searchEmptyMeiliRecentRescueDurationMs.observe(rescueMs);
+            if (isRescueStatementTimeout(err)) {
+              searchEmptyMeiliRecentRescueTotal.inc({ result: 'timeout' });
+              logger.debug(
+                { requestId, query: q, rescue_ms: rescueMs },
+                'search: empty-meili recent rescue timed out',
+              );
+            } else {
+              searchEmptyMeiliRecentRescueTotal.inc({ result: 'error' });
+              logger.warn(
+                { err, requestId, query: q },
+                'search: empty-meili recent rescue failed',
+              );
+            }
+          }
         }
       }
 
@@ -223,9 +288,7 @@ function createMeiliSearchExecutor({
     // content, so enforce the API's exact all-term contract before returning.
     const recheckedRows = rows.filter((r: any) => r && r.id);
     const strictTerms = tokenizeMeiliRecheckTerms(q);
-    const strictHits = strictTerms.length > 0
-      ? recheckedRows.filter((r: any) => messageMatchesAllStrictTerms(r.content, strictTerms))
-      : recheckedRows;
+    const strictHits = applyStrictTermFilter(recheckedRows, q);
     const finalHits = strictHits.slice(recheckMeta.offset, recheckMeta.offset + recheckMeta.limit);
     const totalMs = Date.now() - tAll;
 

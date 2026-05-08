@@ -577,6 +577,42 @@ SEARCH_BACKEND=postgres
 
 This restores the default Postgres search path while preserving warm indexing. If the Meili service itself must be removed from the write path too, also set `MEILI_ENABLED=false` and redeploy.
 
+## OpenSearch POC (No Production Cutover)
+
+OpenSearch integration is scaffolded as a **candidate-retrieval-only POC**. It does not replace Postgres recheck/authorization and is disabled by default.
+
+Run a tiny local single-node instance:
+
+```bash
+docker run --rm --name chatapp-opensearch-poc \
+  -p 9200:9200 \
+  -e "discovery.type=single-node" \
+  -e "plugins.security.disabled=true" \
+  -e "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" \
+  opensearchproject/opensearch:2.15.0
+```
+
+POC env flags (keep reads disabled unless explicitly testing):
+
+```bash
+SEARCH_BACKEND=meili
+OPENSEARCH_URL=http://127.0.0.1:9200
+OPENSEARCH_INDEX_MESSAGES=messages_v1
+OPENSEARCH_DUAL_WRITE_ENABLED=false
+OPENSEARCH_READ_ENABLED=false
+OPENSEARCH_MAX_CANDIDATES=250
+```
+
+POC scripts:
+
+```bash
+tsx scripts/search/backfill-opensearch-messages.ts --dry-run --limit 1000
+tsx scripts/search/backfill-opensearch-messages.ts --checkpoint var/opensearch-backfill.checkpoint.json
+tsx scripts/search/compare-search-backends.ts --userId <uuid> --communityId <uuid>
+```
+
+Do not enable OpenSearch reads in production as part of this POC work.
+
 ## Migration Strategy
 
 ### Before Deploying

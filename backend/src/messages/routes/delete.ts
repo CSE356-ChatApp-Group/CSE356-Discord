@@ -10,6 +10,7 @@ const { validate } = require("./validation");
 const { query } = require("../../db/pool");
 const overload = require("../../utils/overload");
 const meiliClient = require("../../search/meiliClient");
+const { dualWriteDeleteMessage } = require("../../search/opensearchWrite");
 const logger = require("../../utils/logger");
 const sideEffects = require("../sideEffects");
 const { bustMessagesCacheSafe } = require("../lib/messageListCache");
@@ -150,6 +151,9 @@ module.exports = function registerDeleteRoutes(router) {
       // Fire-and-forget: remove deleted message from Meilisearch.
       if (meiliClient.isEnabled() && message.id) {
         setImmediate(() => { meiliClient.deleteMessage(message.id).catch(() => {}); });
+      }
+      if (message.id) {
+        setImmediate(() => { dualWriteDeleteMessage(message.id).catch(() => {}); });
       }
     } catch (err) {
       next(err);

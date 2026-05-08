@@ -7,6 +7,7 @@
 const logger = require("../../utils/logger");
 const redis = require("../../db/redis");
 const meiliClient = require("../../search/meiliClient");
+const { dualWriteIndexMessage } = require("../../search/opensearchWrite");
 const sideEffects = require("../sideEffects");
 const { MSG_IDEM_SUCCESS_TTL_SECS } = require("../lib/idempotency");
 const {
@@ -252,6 +253,20 @@ function runPostSuccessFollowup(opts: {
   if (meiliClient.isEnabled() && message.id) {
     setImmediate(() => {
       meiliClient.indexMessage({
+        id: message.id,
+        content: message.content || "",
+        authorId: message.author_id,
+        channelId: message.channel_id || null,
+        communityId: communityId || null,
+        conversationId: message.conversation_id || null,
+        createdAt: new Date(message.created_at).getTime(),
+        updatedAt: null,
+      }).catch(() => {});
+    });
+  }
+  if (message.id) {
+    setImmediate(() => {
+      dualWriteIndexMessage({
         id: message.id,
         content: message.content || "",
         authorId: message.author_id,

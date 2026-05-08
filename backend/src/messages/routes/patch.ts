@@ -10,6 +10,7 @@ const { validate } = require("./validation");
 const { query } = require("../../db/pool");
 const overload = require("../../utils/overload");
 const meiliClient = require("../../search/meiliClient");
+const { dualWriteIndexMessage } = require("../../search/opensearchWrite");
 const { bustMessagesCacheSafe } = require("../lib/messageListCache");
 const { publishConversationEventNow } = require("../fanout/conversationFanout");
 const { messageFanoutEnvelope } = require("../realtimePayload");
@@ -136,6 +137,32 @@ module.exports = function registerPatchRoutes(router) {
               } catch { /* non-fatal */ }
             }
             await meiliClient.indexMessage({
+              id: message.id,
+              content: message.content || "",
+              authorId: message.author_id,
+              channelId: message.channel_id || null,
+              communityId,
+              conversationId: message.conversation_id || null,
+              createdAt: new Date(message.created_at).getTime(),
+              updatedAt: new Date(message.updated_at || Date.now()).getTime(),
+            });
+          })().catch(() => {});
+        });
+      }
+      if (message.id) {
+        setImmediate(() => {
+          (async () => {
+            let communityId: string | null = null;
+            if (message.channel_id) {
+              try {
+                const { rows: chRows } = await query(
+                  "SELECT community_id FROM channels WHERE id = $1",
+                  [message.channel_id],
+                );
+                communityId = chRows[0]?.community_id || null;
+              } catch { /* non-fatal */ }
+            }
+            await dualWriteIndexMessage({
               id: message.id,
               content: message.content || "",
               authorId: message.author_id,

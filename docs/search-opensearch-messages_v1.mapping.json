@@ -1,0 +1,31 @@
+{
+  "settings": {
+    "index": {
+      "number_of_shards": 3,
+      "number_of_replicas": 0,
+      "refresh_interval": "5s"
+    },
+    "analysis": {
+      "analyzer": {
+        "default": {
+          "type": "standard"
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": false,
+    "properties": {
+      "id": { "type": "keyword" },
+      "content": { "type": "text" },
+      "communityId": { "type": "keyword" },
+      "channelId": { "type": "keyword" },
+      "conversationId": { "type": "keyword" },
+      "authorId": { "type": "keyword" },
+      "createdAt": { "type": "date" },
+      "updatedAt": { "type": "date" },
+      "deletedAt": { "type": "date" },
+      "isDeleted": { "type": "boolean" }
+    }
+  }
+}
