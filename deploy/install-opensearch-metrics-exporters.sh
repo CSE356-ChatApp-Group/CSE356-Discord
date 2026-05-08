@@ -130,10 +130,10 @@ Group=elasticsearch_exporter
 ExecStart=${ESE_BIN} \\
   --es.uri=${ES_URI} \\
   --es.all \\
-  --es.cluster_settings \\
   --es.indices \\
   --es.indices_settings \\
   --es.shards \\
+  --collector.clustersettings \\
   --web.listen-address=0.0.0.0:${ES_EXPORTER_PORT}
 Restart=on-failure
 RestartSec=5s
