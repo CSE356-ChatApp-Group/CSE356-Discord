@@ -265,77 +265,26 @@ async function resolveActiveConnectedChannelUserTargets(
 
 async function resolveActiveChannelMessageTargets(channelId: string) {
   const startedAt = process.hrtime.bigint();
-  if (channelMessageSkipUserfeedPublishEnabled()) {
-    try {
-      const bootstrapPendingCandidateTargets = await resolveBootstrapPendingChannelUserTargetsRaw(
+  const useBootstrapPendingBridge = channelMessageSkipUserfeedPublishEnabled();
+  let bootstrapPendingCandidateTargets: string[] = [];
+  let bootstrapPendingTargets: string[] = [];
+  const bootstrapPendingCandidateTargetsPromise = useBootstrapPendingBridge
+    ? resolveBootstrapPendingChannelUserTargetsRaw(
         channelId,
         CHANNEL_MESSAGE_BOOTSTRAP_PENDING_BRIDGE_MAX,
-      );
-      const bootstrapPendingTargets = await filterActiveConnectedUserTargets(
-        bootstrapPendingCandidateTargets,
-        'channel_message_bootstrap_pending_subscribers',
-      );
-      const bootstrapPendingLookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-      fanoutPublishDurationMs.observe(
-        { path: 'channel_message_bootstrap_pending_subscribers', stage: 'target_lookup' },
-        bootstrapPendingLookupMs,
-      );
-      fanoutTargetCandidatesHistogram.observe(
-        { path: 'channel_message_bootstrap_pending_subscribers' },
-        bootstrapPendingCandidateTargets.length + 1,
-      );
-      wsFanoutCandidateCountBucket?.observe?.(
-        { path: 'channel_message_bootstrap_pending_subscribers' },
-        bootstrapPendingCandidateTargets.length + 1,
-      );
-      wsActiveSubscriberTargetsBucket?.observe?.(
-        { path: 'channel_message_bootstrap_pending_subscribers' },
-        bootstrapPendingTargets.length,
-      );
-      if (bootstrapPendingTargets.length > 0) {
-        wsFanoutActiveTargetHitTotal?.inc?.(
-          { path: 'channel_message_bootstrap_pending_subscribers' },
-          bootstrapPendingTargets.length,
+      ).catch((err) => {
+        // Fail open: if the new narrow marker path cannot answer, fall back to
+        // the previous active/recent bridge rather than risk a missed recipient.
+        wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'bootstrap_pending_lookup_failed' });
+        logger.warn(
+          { err, channelId },
+          'Failed to resolve bootstrap-pending channel fanout targets; falling back to active bridge',
         );
-      } else {
-        wsFanoutActiveTargetMissTotal?.inc?.({ path: 'channel_message_bootstrap_pending_subscribers' });
-      }
-      // When bootstrap_pending has targets, return immediately (fast path).
-      // When empty, fall through to the recent_connect ZSET lookup instead
-      // of returning zero targets — the markers may have been cleared by
-      // progressive hydration completing between prepare and publish, or the
-      // ZSET entries may have expired. The recent_connect ZSET has a longer
-      // window (5 min) and covers recently-bootstrapped users.
-      if (bootstrapPendingTargets.length > 0) {
-        return {
-          allTargets: bootstrapPendingTargets,
-          recentTargets: bootstrapPendingTargets,
-          candidateCount: bootstrapPendingCandidateTargets.length + 1,
-          cacheResult: 'miss' as const,
-          pendingEnqueueTargets: bootstrapPendingCandidateTargets,
-          skipChannelTopic: false,
-        };
-      }
-      wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'bootstrap_pending_empty_fallback' });
-      if (logger.isLevelEnabled('debug')) {
-        logger.debug(
-          { channelId },
-          'WS bootstrap_pending returned empty; falling through to recent_connect bridge',
-        );
-      }
-      // Fall through to recent_connect + active-connected lookup below.
-    } catch (err) {
-      // Fail open: if the new narrow marker path cannot answer, fall back to
-      // the previous active/recent bridge rather than risk a missed recipient.
-      wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'bootstrap_pending_lookup_failed' });
-      logger.warn(
-        { err, channelId },
-        'Failed to resolve bootstrap-pending channel fanout targets; falling back to active bridge',
-      );
-    }
-  }
+        return [];
+      })
+    : Promise.resolve([]);
 
-  const recentCandidateTargets = await resolveRecentChannelUserTargetsRaw(
+  const recentCandidateTargetsPromise = resolveRecentChannelUserTargetsRaw(
     channelId,
     CHANNEL_MESSAGE_IMMEDIATE_RECENT_BRIDGE_MAX,
   ).catch((err) => {
@@ -343,11 +292,65 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
     logger.warn({ err, channelId }, 'Failed to resolve recent channel message bridge targets');
     return [];
   });
-  const recentTargets = await filterActiveConnectedUserTargets(
-    recentCandidateTargets,
+
+  const [resolvedBootstrapPendingCandidateTargets, recentCandidateTargets] = await Promise.all([
+    bootstrapPendingCandidateTargetsPromise,
+    recentCandidateTargetsPromise,
+  ]);
+  bootstrapPendingCandidateTargets = resolvedBootstrapPendingCandidateTargets;
+
+  const combinedCandidateTargets = Array.from(new Set([
+    ...bootstrapPendingCandidateTargets,
+    ...recentCandidateTargets,
+  ]));
+  const combinedActiveTargets = await filterActiveConnectedUserTargets(
+    combinedCandidateTargets,
     'channel_message_active_subscribers',
   );
-  const targetSet = new Set(recentTargets);
+  const combinedActiveTargetSet = new Set(combinedActiveTargets);
+  bootstrapPendingTargets = bootstrapPendingCandidateTargets.filter((target) =>
+    combinedActiveTargetSet.has(target),
+  );
+  const recentTargets = recentCandidateTargets.filter((target) =>
+    combinedActiveTargetSet.has(target),
+  );
+
+  if (useBootstrapPendingBridge) {
+    const bootstrapPendingLookupMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    fanoutPublishDurationMs.observe(
+      { path: 'channel_message_bootstrap_pending_subscribers', stage: 'target_lookup' },
+      bootstrapPendingLookupMs,
+    );
+    fanoutTargetCandidatesHistogram.observe(
+      { path: 'channel_message_bootstrap_pending_subscribers' },
+      bootstrapPendingCandidateTargets.length + 1,
+    );
+    wsFanoutCandidateCountBucket?.observe?.(
+      { path: 'channel_message_bootstrap_pending_subscribers' },
+      bootstrapPendingCandidateTargets.length + 1,
+    );
+    wsActiveSubscriberTargetsBucket?.observe?.(
+      { path: 'channel_message_bootstrap_pending_subscribers' },
+      bootstrapPendingTargets.length,
+    );
+    if (bootstrapPendingTargets.length > 0) {
+      wsFanoutActiveTargetHitTotal?.inc?.(
+        { path: 'channel_message_bootstrap_pending_subscribers' },
+        bootstrapPendingTargets.length,
+      );
+    } else {
+      wsFanoutActiveTargetMissTotal?.inc?.({ path: 'channel_message_bootstrap_pending_subscribers' });
+      wsFanoutRecoveryAsyncTotal?.inc?.({ reason: 'bootstrap_pending_empty_fallback' });
+      if (logger.isLevelEnabled('debug')) {
+        logger.debug(
+          { channelId },
+          'WS bootstrap_pending returned empty; falling through to recent_connect bridge',
+        );
+      }
+    }
+  }
+
+  const targetSet = new Set(combinedActiveTargets);
 
   // Connected fallback only runs when explicitly enabled via config flag.
   // Previously this also fired when both ZSETs were empty (d73822c), which
@@ -366,7 +369,8 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
     }
   }
   const activeTargets = [...targetSet];
-  const duplicateCandidateCount = recentTargets.length + connectedFallbackCount - activeTargets.length;
+  const duplicateCandidateCount =
+    bootstrapPendingTargets.length + recentTargets.length + connectedFallbackCount - activeTargets.length;
   if (duplicateCandidateCount > 0) {
     wsRecipientDuplicateCandidatesTotal?.inc?.(
       { path: 'channel_message_active_subscribers' },
@@ -422,9 +426,13 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
   return {
     allTargets: activeTargets,
     recentTargets: activeTargets,
-    candidateCount: recentCandidateTargets.length + connectedFallbackCount + 1,
+    candidateCount: bootstrapPendingCandidateTargets.length + recentCandidateTargets.length + connectedFallbackCount + 1,
     cacheResult: 'miss' as const,
-    pendingEnqueueTargets: Array.from(new Set([...recentCandidateTargets, ...activeTargets])),
+    pendingEnqueueTargets: Array.from(new Set([
+      ...bootstrapPendingCandidateTargets,
+      ...recentCandidateTargets,
+      ...activeTargets,
+    ])),
     skipChannelTopic: false,
   };
 }

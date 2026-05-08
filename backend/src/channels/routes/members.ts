@@ -10,7 +10,10 @@ const { publishUserFeedTargets } = require('../../websocket/userFeed');
 const { invalidateWsAclCache, invalidateWsBootstrapCaches } = require('../../websocket/server');
 const { raceChannelAccess } = require('../../messages/channelAccessCache');
 const { invalidateChannelUserFanoutTargetsCache } = require('../../messages/fanout/channelRealtimeFanout');
-const { markChannelBootstrapPending } = require('../../websocket/recentConnect');
+const {
+  markChannelBootstrapPending,
+  markChannelsRecentConnect,
+} = require('../../websocket/recentConnect');
 const S = require('../channelRouterShared');
 
 module.exports = function register(router) {
@@ -135,29 +138,38 @@ router.post('/:id/members',
           channelId: req.params.id,
           communityId: channel.community_id,
         });
-        publishUserFeedTargets(insertedUserIds, {
+        for (const userId of insertedUserIds) {
+          // Expire any stale denial before subsequent client-driven subscribes.
+          invalidateWsAclCache(userId, `channel:${req.params.id}`);
+        }
+        const primeResults = await Promise.allSettled(
+          insertedUserIds.flatMap((userId) => [
+            markChannelBootstrapPending(userId, [req.params.id]),
+            markChannelsRecentConnect(userId, [req.params.id]),
+          ]),
+        );
+        {
+          const rejected = primeResults.find((result) => result.status === 'rejected');
+          if (rejected && rejected.status === 'rejected') {
+            logger.warn(
+              { err: rejected.reason, channelId: req.params.id, userCount: insertedUserIds.length },
+              'Failed to prime private channel invitees for WS delivery',
+            );
+          }
+        }
+        await publishUserFeedTargets(insertedUserIds, {
           __wsInternal: {
             kind: 'subscribe_channels',
             channels: [`channel:${req.params.id}`],
           },
-        }).catch(() => {});
-        Promise.allSettled(
-          insertedUserIds.map((userId) => markChannelBootstrapPending(userId, [req.params.id])),
-        ).then((results) => {
-          const rejected = results.find((result) => result.status === 'rejected');
-          if (rejected && rejected.status === 'rejected') {
-            logger.warn(
-              { err: rejected.reason, channelId: req.params.id, userCount: insertedUserIds.length },
-              'Failed to mark private channel invitees as pending WS subscribe targets',
-            );
-          }
+        }).catch((err) => {
+          logger.warn(
+            { err, channelId: req.params.id, userCount: insertedUserIds.length },
+            'Failed to publish private channel subscribe hint',
+          );
         });
         // No channel-list cache bust needed: private-channel access is always
         // checked fresh from channel_members on each request (not cached).
-      }
-      for (const { user_id } of insertedRows) {
-        // Expire the WS ACL cache so subsequent subscribe attempts are checked fresh.
-        invalidateWsAclCache(user_id, `channel:${req.params.id}`);
       }
       // Rebuild auto-subscribe list on reconnect; otherwise ws:bootstrap cache can omit channel:N.
       invalidateWsBootstrapCaches(insertedRows.map((row) => row.user_id)).catch(() => {});

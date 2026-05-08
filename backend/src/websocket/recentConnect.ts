@@ -90,6 +90,24 @@ async function markChannelRecentConnect(userId: string, channelId: string) {
     .exec();
 }
 
+async function markChannelsRecentConnect(userId: string, channelIds: string[]) {
+  if (!channelRecentZsetEnabled()) return;
+  const ids = Array.isArray(channelIds)
+    ? [...new Set(channelIds.filter((id) => typeof id === 'string' && id.length > 0))]
+    : [];
+  if (!ids.length) return;
+  const now = Date.now();
+  const cutoff = now - WS_RECENT_CONNECT_TTL_SECONDS * 1000 - 1000;
+  const multi = redis.multi();
+  for (const channelId of ids) {
+    const key = channelRecentConnectKey(channelId);
+    multi.zremrangebyscore(key, '-inf', cutoff);
+    multi.zadd(key, now, userId);
+    multi.expire(key, WS_RECENT_CONNECT_TTL_SECONDS + 60);
+  }
+  await multi.exec();
+}
+
 async function markChannelBootstrapPending(userId: string, channelIds: string[]) {
   if (!channelRecentZsetEnabled()) return;
   const ids = Array.isArray(channelIds)
@@ -127,6 +145,7 @@ module.exports = {
   channelRecentZsetEnabled,
   markWsRecentConnect,
   markChannelRecentConnect,
+  markChannelsRecentConnect,
   markChannelBootstrapPending,
   clearChannelBootstrapPending,
 };

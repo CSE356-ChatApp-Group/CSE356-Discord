@@ -396,6 +396,56 @@ describe('channelRealtimeFanout', () => {
     }
   });
 
+  it('publishChannelMessageCreated with userfeed skip unions bootstrap-pending and recent-connect users', async () => {
+    const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+    const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+    const prevConnectedFallback = process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
+    process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = 'recent_connect';
+    process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = 'true';
+    process.env.CHANNEL_RECENT_ZSET_ENABLED = 'true';
+    process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = 'false';
+    const ch = 'chan-bootstrap-and-recent';
+    try {
+      redis.zrangebyscore
+        .mockResolvedValueOnce(['pending-user'])
+        .mockResolvedValueOnce(['recent-user', 'pending-user']);
+      redis.call.mockResolvedValueOnce([1, 1]);
+
+      await publishPrivateChannelMessageCreated(ch, {
+        event: 'message:created',
+        data: { id: 'm-bootstrap-and-recent' },
+      });
+
+      expect(redis.zrangebyscore).toHaveBeenCalledTimes(2);
+      expect(redis.zrangebyscore.mock.calls[0][0]).toBe(`channel:bootstrap_pending:${ch}`);
+      expect(redis.zrangebyscore.mock.calls[1][0]).toBe(`channel:recent_connect:${ch}`);
+      expect(redis.call).toHaveBeenCalledWith(
+        'SMISMEMBER',
+        'presence:connected_users',
+        'pending-user',
+        'recent-user',
+      );
+      expect(query).not.toHaveBeenCalled();
+      expect(enqueuePendingMessageForUsers).toHaveBeenCalledWith(
+        expect.arrayContaining(['user:pending-user', 'user:recent-user']),
+        expect.objectContaining({ event: 'message:created' }),
+        { recentTargets: expect.arrayContaining(['user:pending-user', 'user:recent-user']) },
+      );
+      expect(fanout.publish.mock.calls.map((c) => c[0]).sort()).toEqual([
+        `channel:${ch}`,
+        userFeedRedisChannelForUserId('pending-user'),
+        userFeedRedisChannelForUserId('recent-user'),
+      ].sort());
+    } finally {
+      if (prevMode === undefined) delete process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
+      else process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE = prevMode;
+      if (prevSkip === undefined) delete process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
+      else process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH = prevSkip;
+      if (prevConnectedFallback === undefined) delete process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK;
+      else process.env.CHANNEL_MESSAGE_RECENT_CONNECT_INCLUDE_CONNECTED_FALLBACK = prevConnectedFallback;
+    }
+  });
+
   it('publishChannelMessageCreated with userfeed skip does not cap bootstrap-pending bridge at recent-connect size', async () => {
     const prevMode = process.env.CHANNEL_MESSAGE_USER_FANOUT_MODE;
     const prevSkip = process.env.CHANNEL_MESSAGE_SKIP_USERFEED_PUBLISH;
