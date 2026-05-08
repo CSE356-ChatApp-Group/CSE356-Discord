@@ -282,8 +282,24 @@ async function resolveActiveChannelMessageTargets(channelId: string) {
       );
       fanoutTargetCandidatesHistogram.observe(
         { path: 'channel_message_bootstrap_pending_subscribers' },
-        bootstrapPendingTargets.length + 1,
+        bootstrapPendingCandidateTargets.length + 1,
       );
+      wsFanoutCandidateCountBucket?.observe?.(
+        { path: 'channel_message_bootstrap_pending_subscribers' },
+        bootstrapPendingCandidateTargets.length + 1,
+      );
+      wsActiveSubscriberTargetsBucket?.observe?.(
+        { path: 'channel_message_bootstrap_pending_subscribers' },
+        bootstrapPendingTargets.length,
+      );
+      if (bootstrapPendingTargets.length > 0) {
+        wsFanoutActiveTargetHitTotal?.inc?.(
+          { path: 'channel_message_bootstrap_pending_subscribers' },
+          bootstrapPendingTargets.length,
+        );
+      } else {
+        wsFanoutActiveTargetMissTotal?.inc?.({ path: 'channel_message_bootstrap_pending_subscribers' });
+      }
       // When bootstrap_pending has targets, return immediately (fast path).
       // When empty, fall through to the recent_connect ZSET lookup instead
       // of returning zero targets — the markers may have been cleared by
