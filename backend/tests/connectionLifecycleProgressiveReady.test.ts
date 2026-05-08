@@ -317,4 +317,28 @@ describe('progressive websocket bootstrap ready', () => {
     pending.resolve(0);
     await flush();
   });
+
+  it('re-drains pending replay after DB replay when the first pending probe was empty', async () => {
+    process.env.WS_BOOTSTRAP_PROGRESSIVE_READY = 'true';
+    process.env.WS_REPLAY_SKIP_DB_WHEN_PENDING_HIT = 'true';
+    const replayMissedMessagesToSocket = jest.fn().mockResolvedValue(undefined);
+    const replayPendingMessagesToSocket = jest
+      .fn()
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(2);
+    const { handleConnection } = buildHarness({
+      consumeRecentDisconnect: jest.fn().mockResolvedValue({ disconnectedAt: Date.now() - 1000 }),
+      replayMissedMessagesToSocket,
+      replayPendingMessagesToSocket,
+    });
+    const ws = new FakeSocket();
+
+    await handleConnection(ws, { url: '/ws?token=t', headers: {} });
+    await waitForFrame(ws, (frame) => frame.event === 'ready');
+    await waitUntil(() => replayPendingMessagesToSocket.mock.calls.length >= 2);
+
+    expect(replayMissedMessagesToSocket).toHaveBeenCalledTimes(1);
+    expect(replayPendingMessagesToSocket).toHaveBeenNthCalledWith(1, ws, 'user-1');
+    expect(replayPendingMessagesToSocket).toHaveBeenNthCalledWith(2, ws, 'user-1');
+  });
 });

@@ -94,45 +94,9 @@ function createConnectionLifecycle({
       wsReplayFailOpenTotal.inc({ reason: "per_socket" });
       return;
     }
-    if (!tryBeginReplayForIp(ws._clientIp)) {
-      wsReplayFailOpenTotal.inc({ reason: "per_ip" });
-      logger.warn(
-        { userId: user.id, clientIp: ws._clientIp },
-        "WS reconnect replay skipped: per-IP concurrent replay cap",
-      );
-      return;
-    }
-
-    const admission = await waitForReplayGateOpen(ws, user.id);
-    if (!admission.ok) {
-      if (!admission.cancelled) {
-        wsReplayFailOpenTotal.inc({ reason: admission.gate.reason || "gate" });
-      }
-      logger.warn(
-        {
-          userId: user.id,
-          reason: admission.gate.reason,
-          waiting: admission.gate.pool.waiting,
-          inFlight: getReplayInFlightCount(),
-          maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
-          attempts: admission.attempts,
-          deferredWaitMs: admission.totalWaitMs,
-          cancelled: admission.cancelled,
-        },
-        "WS reconnect replay skipped after bounded admission waits",
-      );
-      endReplayForIp(ws._clientIp);
-      return;
-    }
-
     ws._replayConsumed = true;
-    await new Promise((r) => setTimeout(r, replayStartupJitterMs()));
-    if (ws.readyState !== WebSocket.OPEN) {
-      endReplayForIp(ws._clientIp);
-      return;
-    }
-
     let replaySlotHeld = false;
+    let replayBegunForIp = false;
     try {
       const replayStartedAt = Date.now();
       const replayAllowed = canRunReplayForUser(user.id);
@@ -141,36 +105,74 @@ function createConnectionLifecycle({
       if (preferPendingReplay) {
         pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
       }
+
+      const shouldAttemptDbReplay = replayAllowed && !(preferPendingReplay && pendingReplayed > 0);
+
       if (replayAllowed) {
-        if (preferPendingReplay && pendingReplayed > 0) {
+        if (!shouldAttemptDbReplay) {
           logWsHotInfo(() => ({
-              userId: user.id,
-              connectionId: ws._connectionId,
-              pendingReplayed,
-            }),
-            "WS reconnect DB replay skipped because Redis pending replay produced messages");
+            userId: user.id,
+            connectionId: ws._connectionId,
+            pendingReplayed,
+          }),
+          "WS reconnect DB replay skipped because Redis pending replay produced messages");
         } else {
-          if (!tryAcquireReplaySlot()) {
-            wsReplayFailOpenTotal.inc({ reason: "semaphore_full" });
+          if (!tryBeginReplayForIp(ws._clientIp)) {
+            wsReplayFailOpenTotal.inc({ reason: "per_ip" });
             logger.warn(
               {
                 userId: user.id,
-                inFlight: getReplayInFlightCount(),
-                maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+                clientIp: ws._clientIp,
               },
-              "WS reconnect replay skipped: semaphore slot unavailable at execution",
+              "WS reconnect replay skipped: per-IP concurrent replay cap",
             );
-            return;
+          } else {
+            replayBegunForIp = true;
+            const admission = await waitForReplayGateOpen(ws, user.id);
+            if (!admission.ok) {
+              if (!admission.cancelled) {
+                wsReplayFailOpenTotal.inc({ reason: admission.gate.reason || "gate" });
+              }
+              logger.warn(
+                {
+                  userId: user.id,
+                  reason: admission.gate.reason,
+                  waiting: admission.gate.pool.waiting,
+                  inFlight: getReplayInFlightCount(),
+                  maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+                  attempts: admission.attempts,
+                  deferredWaitMs: admission.totalWaitMs,
+                  cancelled: admission.cancelled,
+                },
+                "WS reconnect replay skipped after bounded admission waits",
+              );
+            } else {
+              await new Promise((r) => setTimeout(r, replayStartupJitterMs()));
+              if (ws.readyState === WebSocket.OPEN) {
+                if (!tryAcquireReplaySlot()) {
+                  wsReplayFailOpenTotal.inc({ reason: "semaphore_full" });
+                  logger.warn(
+                    {
+                      userId: user.id,
+                      inFlight: getReplayInFlightCount(),
+                      maxInFlight: replayAdmissionConfig.replaySemaphoreMax,
+                    },
+                    "WS reconnect replay skipped: semaphore slot unavailable at execution",
+                  );
+                } else {
+                  replaySlotHeld = true;
+                  await replayMissedMessagesToSocket(
+                    ws,
+                    user.id,
+                    recentDisconnect,
+                    replayUpperBoundMs,
+                  );
+                  releaseReplaySlot();
+                  replaySlotHeld = false;
+                }
+              }
+            }
           }
-          replaySlotHeld = true;
-          await replayMissedMessagesToSocket(
-            ws,
-            user.id,
-            recentDisconnect,
-            replayUpperBoundMs,
-          );
-          releaseReplaySlot();
-          replaySlotHeld = false;
         }
       } else {
         logWsHotInfo(() => ({
@@ -180,8 +182,8 @@ function createConnectionLifecycle({
           }),
           "WS reconnect replay DB query skipped due to short per-user cooldown");
       }
-      if (!preferPendingReplay) {
-        pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
+      if (ws.readyState === WebSocket.OPEN && (!preferPendingReplay || pendingReplayed === 0)) {
+        pendingReplayed += await replayPendingMessagesToSocket(ws, user.id);
       }
       logWsHotInfo(() => ({
           event: "ws.replay.pending_drain",
@@ -197,7 +199,9 @@ function createConnectionLifecycle({
       if (replaySlotHeld) {
         releaseReplaySlot();
       }
-      endReplayForIp(ws._clientIp);
+      if (replayBegunForIp) {
+        endReplayForIp(ws._clientIp);
+      }
     }
   }
 
