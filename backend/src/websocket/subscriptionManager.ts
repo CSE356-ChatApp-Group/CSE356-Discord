@@ -6,6 +6,7 @@ function createSubscriptionManager({
   communityFeedRedisChannelForCommunityId,
   ready,
   ensureRedisChannelSubscribed,
+  ensureRedisChannelsSubscribed = null,
   releaseRedisChannelSubscription,
   redisSubscriptionReleaseGraceMs = 0,
   markChannelRecentConnect,
@@ -142,6 +143,68 @@ function createSubscriptionManager({
     }
   }
 
+  async function subscribeClients(ws, redisChannels) {
+    const uniqueChannels = Array.from(
+      new Set(
+        (Array.isArray(redisChannels) ? redisChannels : [])
+          .filter((channel) => typeof channel === "string" && channel)
+          .filter((channel) => !ws._subscriptions.has(channel)),
+      ),
+    );
+    if (!uniqueChannels.length) return;
+
+    const directTopics = [];
+    for (const redisChannel of uniqueChannels) {
+      if (redisChannel.startsWith("user:") || redisChannel.startsWith("community:")) {
+        await subscribeClient(ws, redisChannel);
+      } else {
+        clearPendingRedisRelease(redisChannel);
+        directTopics.push(redisChannel);
+      }
+    }
+    if (!directTopics.length) return;
+
+    let subscribedTopics = directTopics;
+    if (typeof ensureRedisChannelsSubscribed === "function") {
+      try {
+        await ensureRedisChannelsSubscribed(directTopics);
+      } catch {
+        const settled = await Promise.allSettled(
+          directTopics.map((channel) => ensureRedisChannelSubscribed(channel)),
+        );
+        subscribedTopics = directTopics.filter((_channel, idx) => settled[idx]?.status === "fulfilled");
+      }
+    } else {
+      const settled = await Promise.allSettled(
+        directTopics.map((channel) => ensureRedisChannelSubscribed(channel)),
+      );
+      subscribedTopics = directTopics.filter((_channel, idx) => settled[idx]?.status === "fulfilled");
+    }
+
+    if (ws.readyState !== 1 /* WebSocket.OPEN */) return;
+
+    for (const redisChannel of subscribedTopics) {
+      if (ws._subscriptions.has(redisChannel)) continue;
+      if (!channelClients.has(redisChannel)) {
+        channelClients.set(redisChannel, new Set());
+      }
+      channelClients.get(redisChannel).add(ws);
+      ws._subscriptions.add(redisChannel);
+      if (!redisChannel.startsWith("channel:")) continue;
+      ws._explicitChannelUnsub?.delete(redisChannel);
+      const uid = ws._userId;
+      if (!uid) continue;
+      const channelId = redisChannel.slice("channel:".length);
+      clearChannelBootstrapPending?.(uid, channelId).catch(() => {});
+      const skipRecentConnectSideEffects = ws._bootstrapRecentConnectChannelIds?.has(channelId);
+      if (!skipRecentConnectSideEffects) {
+        markChannelRecentConnect(uid, channelId)
+          .then(() => invalidateRecentConnectTargetsCache?.(channelId))
+          .catch(() => {});
+      }
+    }
+  }
+
   async function unsubscribeClient(ws, redisChannel) {
     const userId = userIdFromTarget(redisChannel);
     if (redisChannel.startsWith("user:") && userId) {
@@ -172,6 +235,7 @@ function createSubscriptionManager({
     subscribeCommunityClient,
     unsubscribeCommunityClient,
     subscribeClient,
+    subscribeClients,
     unsubscribeClient,
   };
 }

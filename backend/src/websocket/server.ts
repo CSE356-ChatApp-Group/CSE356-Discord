@@ -319,6 +319,7 @@ const COMMUNITY_FEED_SHARD_CHANNELS = allCommunityFeedRedisChannels();
 const COMMUNITY_FEED_SHARD_CHANNEL_SET = new Set(COMMUNITY_FEED_SHARD_CHANNELS);
 const {
   ensureRedisChannelSubscribed,
+  ensureRedisChannelsSubscribed,
   releaseRedisChannelSubscription,
 } = createRedisSubscriptionRegistry({
   redisSub,
@@ -419,6 +420,7 @@ const {
   subscribeCommunityClient,
   unsubscribeCommunityClient,
   subscribeClient,
+  subscribeClients,
   unsubscribeClient,
 } = createSubscriptionManager({
   localUserClients,
@@ -428,6 +430,7 @@ const {
   communityFeedRedisChannelForCommunityId,
   ready,
   ensureRedisChannelSubscribed,
+  ensureRedisChannelsSubscribed,
   releaseRedisChannelSubscription,
   redisSubscriptionReleaseGraceMs: WS_REDIS_SUBSCRIPTION_RELEASE_GRACE_MS,
   markChannelRecentConnect,
@@ -567,6 +570,7 @@ const {
   markChannelBootstrapPending,
   invalidateRecentConnectTargetsCache,
   subscribeClient,
+  subscribeClients,
   subscribeCommunityClient,
   parseChannelKey,
   wsBootstrapListCacheTotal,

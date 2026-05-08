@@ -150,6 +150,32 @@ function redisPubsubSubscribe(channel: string): Promise<unknown> {
   return Promise.resolve();
 }
 
+function redisPubsubSubscribableChannels(channels: string[]): string[] {
+  const values = Array.isArray(channels) ? channels : [];
+  if (REDIS_IS_CLUSTER) {
+    return values.filter((channel) => typeof channel === 'string' && channel.trim());
+  }
+  return values.filter((channel) => (
+    typeof channel === 'string'
+    && (
+      channel.startsWith('userfeed:')
+      || channel.startsWith('userfeed_worker:')
+      || channel.startsWith('communityfeed:')
+      || channel.startsWith('channel:')
+      || channel.startsWith('conversation:')
+    )
+  ));
+}
+
+function redisPubsubSubscribeMany(channels: string[]): Promise<unknown> {
+  const uniqueChannels = Array.from(new Set(redisPubsubSubscribableChannels(channels)));
+  if (!uniqueChannels.length) return Promise.resolve();
+  if (REDIS_IS_CLUSTER) {
+    return redisSub.ssubscribe(...uniqueChannels);
+  }
+  return redisSub.subscribe(...uniqueChannels);
+}
+
 function redisPubsubUnsubscribe(channel: string): void {
   if (REDIS_IS_CLUSTER) {
     redisSub.sunsubscribe(channel).catch(() => {});
@@ -180,5 +206,6 @@ module.exports.redisSub             = redisSub;
 module.exports.REDIS_IS_CLUSTER     = REDIS_IS_CLUSTER;
 module.exports.REDIS_PUBSUB_EVENT   = REDIS_PUBSUB_EVENT;
 module.exports.redisPubsubSubscribe = redisPubsubSubscribe;
+module.exports.redisPubsubSubscribeMany = redisPubsubSubscribeMany;
 module.exports.redisPubsubUnsubscribe = redisPubsubUnsubscribe;
 module.exports.closeRedisConnections = closeRedisConnections;

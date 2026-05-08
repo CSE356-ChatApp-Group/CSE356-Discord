@@ -17,6 +17,7 @@ function createBootstrapSubscriptionsHelpers({
   markChannelBootstrapPending = null,
   invalidateRecentConnectTargetsCache,
   subscribeClient,
+  subscribeClients = null,
   subscribeCommunityClient,
   parseChannelKey,
   wsBootstrapListCacheTotal,
@@ -434,7 +435,11 @@ function createBootstrapSubscriptionsHelpers({
       for (let i = 0; i < deliveryChannels.length; i += WS_BOOTSTRAP_BATCH_SIZE) {
         await bootstrapHydrationScheduler?.waitForLiveFanoutQuiet?.();
         const batch = deliveryChannels.slice(i, i + WS_BOOTSTRAP_BATCH_SIZE);
-        await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
+        if (typeof subscribeClients === "function") {
+          await subscribeClients(ws, batch);
+        } else {
+          await Promise.allSettled(batch.map((channel) => subscribeBootstrapChannel(ws, channel)));
+        }
         if (ws.readyState !== 1) return;
       }
       wsBootstrapHydrationStepDurationMs?.observe?.({ step: "delivery" }, Date.now() - stepStart);
