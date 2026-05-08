@@ -27,7 +27,7 @@ chatapp_scp_to_multi_vm() {
   # shellcheck disable=SC2086
   scp -q \
     -o BatchMode=yes -o ConnectTimeout=25 \
-    -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-multi-%r@"${host}":%p \
+    -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR:-/tmp}/ssh-%r@%h:%p" \
     -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS:-} \
     "$@"
@@ -39,7 +39,7 @@ chatapp_scp_to_prod() {
   # shellcheck disable=SC2086
   scp -q \
     -o BatchMode=yes -o ConnectTimeout=20 \
-    -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR:-/tmp}/ssh-%r@%h:%p" -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS:-} \
     "$@"
 }
@@ -51,7 +51,7 @@ chatapp_scp_from_prod() {
   # shellcheck disable=SC2086
   scp -q \
     -o BatchMode=yes -o ConnectTimeout=20 \
-    -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+    -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR:-/tmp}/ssh-%r@%h:%p" -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS:-} \
     "${PROD_USER}@${PROD_HOST}:${remote}" "${local_path}"
 }
@@ -62,7 +62,7 @@ chatapp_scp_to_monitor() {
   # shellcheck disable=SC2086
   scp -q \
     -o BatchMode=yes -o ConnectTimeout=25 \
-    -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
+    -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR:-/tmp}/ssh-%r@%h:%p" -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS:-} \
     "$@"
 }
@@ -71,7 +71,7 @@ chatapp_scp_recursive_to_monitor() {
   # shellcheck disable=SC2086
   scp -qr \
     -o BatchMode=yes -o ConnectTimeout=60 \
-    -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
+    -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR:-/tmp}/ssh-%r@%h:%p" -o ControlPersist=10m \
     ${DEPLOY_SSH_EXTRA_OPTS:-} \
     "$@"
 }

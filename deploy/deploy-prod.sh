@@ -18,12 +18,18 @@
 #
 # Flags:
 #   --rollback     Fast rollback to <release-sha> (already on server). Skips backup,
-#                  artifact download, npm ci, migrations, pgbouncer, monitoring.
+#                  artifact download/unpack, migrations, pgbouncer, monitoring.
 #                  Completes in ~2-3 min.  Use when the current deploy is bad and you
 #                  need to revert quickly.
 #   SKIP_BACKUP=true  Skip pg_dump (safe for code-only deploys, saves 2-5 min).
 
 set -euo pipefail
+
+DEPLOY_SSH_TMPDIR="$(mktemp -d)"
+_cleanup_deploy_ssh_tmpdir() {
+  rm -rf "${DEPLOY_SSH_TMPDIR}"
+}
+trap _cleanup_deploy_ssh_tmpdir EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/deploy-phase-common.sh
@@ -33,7 +39,7 @@ source "${SCRIPT_DIR}/lib/deploy-phase-common.sh"
 RELEASE_SHA=${1:?Release SHA required. Usage: ./deploy-prod.sh <sha> [--rollback]}
 # Refuse odd SHAs early so they never reach unquoted remote snippets.
 chatapp_validate_release_sha "${RELEASE_SHA}" || exit 1
-# --rollback flag: skip artifact download, backup, npm ci, migrations, pgbouncer setup,
+# --rollback flag: skip artifact download, backup, artifact unpack, migrations, pgbouncer setup,
 # and monitoring refresh — only do the rolling restart + health gates.
 FAST_ROLLBACK="${FAST_ROLLBACK:-false}"
 if [[ "${2:-}" == "--rollback" ]]; then
@@ -83,7 +89,7 @@ ssh_prod() {
   # shellcheck disable=SC2086
   ssh -o BatchMode=yes -o ConnectTimeout=25 \
       -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-      -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-%r@%h:%p -o ControlPersist=10m \
+      -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR}/ssh-%r@%h:%p" -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${PROD_HOST}" "$@"
 }
@@ -92,7 +98,7 @@ ssh_prod_db() {
   # shellcheck disable=SC2086
   ssh -o BatchMode=yes -o ConnectTimeout=25 \
       -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-      -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-prod-db-%r@%h:%p -o ControlPersist=10m \
+      -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR}/ssh-%r@%h:%p" -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${PROD_USER}@${PROD_DB_HOST}" "$@"
 }
@@ -101,7 +107,7 @@ ssh_monitor() {
   # shellcheck disable=SC2086
   ssh -o BatchMode=yes -o ConnectTimeout=25 \
       -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-      -o ControlMaster=auto -o ControlPath=/tmp/ssh-chatapp-monitor-%r@%h:%p -o ControlPersist=10m \
+      -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR}/ssh-%r@%h:%p" -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${MONITORING_VM_USER}@${MONITORING_VM_HOST}" "$@"
 }
@@ -136,6 +142,11 @@ cleanup_on_exit() {
   local status=$?
   trap - EXIT
   set +e
+  if [ "${status}" -ne 0 ] && [[ -n "${_MONITORING_BG_PID:-}" ]] && kill -0 "${_MONITORING_BG_PID}" 2>/dev/null; then
+    echo "Stopping background monitoring refresh after deploy failure..."
+    kill "${_MONITORING_BG_PID}" 2>/dev/null || true
+    wait "${_MONITORING_BG_PID}" 2>/dev/null || true
+  fi
   if [ "${status}" -ne 0 ] && [ "${NGINX_CANDIDATE_PIN_ACTIVE:-0}" -eq 1 ] && [ "${ROLLBACK_ALREADY_ATTEMPTED:-0}" -eq 0 ]; then
     ROLLBACK_ALREADY_ATTEMPTED=1
     echo "↩ Exit trap: deploy failed after nginx was pinned to candidate; attempting recovery..."
@@ -145,7 +156,31 @@ cleanup_on_exit() {
     notify_discord_prod ":x: **Prod deploy FAILED** \`${RELEASE_SHA:0:7}\` (pre-cutover)"
   fi
   release_remote_deploy_lock
+  rm -rf "${DEPLOY_SSH_TMPDIR}"
   exit "${status}"
+}
+
+deploy_prod_cancel_monitoring_refresh() {
+  if [[ -n "${_MONITORING_BG_PID:-}" ]] && kill -0 "${_MONITORING_BG_PID}" 2>/dev/null; then
+    echo "Stopping background monitoring refresh before rollback..."
+    kill "${_MONITORING_BG_PID}" 2>/dev/null || true
+    wait "${_MONITORING_BG_PID}" 2>/dev/null || true
+  fi
+}
+
+deploy_prod_wait_monitoring_refresh_nonfatal() {
+  local code
+  if [[ -n "${_MONITORING_BG_PID:-}" ]]; then
+    echo "Waiting for background monitoring refresh to complete..."
+    set +e
+    wait "${_MONITORING_BG_PID}"
+    code=$?
+    set -e
+    if [[ "${code}" -ne 0 ]]; then
+      echo "WARN: monitoring refresh failed (non-fatal) with exit code ${code}"
+    fi
+    _MONITORING_BG_PID=""
+  fi
 }
 
 DEPLOY_LOCK_DIR="/opt/chatapp/.deploy-lock-prod"
@@ -232,7 +267,8 @@ RECLAIM_OLD_PORT="${RECLAIM_OLD_PORT:-false}"
 PIN_CANDIDATE_BEFORE_COMPANION="${PIN_CANDIDATE_BEFORE_COMPANION:-true}"
 INGRESS_CANARY_SECONDS="${INGRESS_CANARY_SECONDS:-45}"
 ALL_WORKER_HEALTH_PASSES="${ALL_WORKER_HEALTH_PASSES:-3}"
-# Seconds to wait after a worker restarts and passes health checks before rolling the next one.
+# Maximum seconds to wait after a worker passes health before rolling the next one.
+# The rolling helper exits early after 3 consecutive /health OK responses.
 # Gives WebSocket clients time to reconnect + replay before the next worker is taken down.
 # 8s: matches WS_APP_KEEPALIVE_INTERVAL_MS so all clients reconnect within one keepalive cycle.
 # (Was 15s — reduced to shave ~20s off a 5-worker rolling deploy.)
@@ -428,7 +464,7 @@ fi
 acquire_remote_deploy_lock
 trap cleanup_on_exit EXIT
 
-# Fast rollback: skip backup, artifact download, npm ci, migrations, pgbouncer, monitoring
+# Fast rollback: skip backup, artifact download/unpack, migrations, pgbouncer, monitoring
 if [[ "${FAST_ROLLBACK}" == "true" ]]; then
   do_fast_rollback
   exit 0
@@ -789,10 +825,14 @@ ssh_prod "
   mkdir -p \$RELEASE_PATH
   tar xzf \"\$REMOTE_TGZ\" -C \$RELEASE_PATH
   
-  # Install backend dependencies
+  # Backend dependencies are pre-bundled by scripts/release/package-release-artifact.sh.
+  # Do not run npm ci on the VM: the release tarball must include node_modules.
   cd \$RELEASE_PATH/backend
-  # nice -n 15: deprioritise npm vs. the 5 live workers competing for the same CPU/disk
-  nice -n 15 npm ci --omit=dev --legacy-peer-deps || nice -n 15 npm ci --omit=dev
+  if [ ! -d node_modules/express ]; then
+    echo 'ERROR: backend/node_modules/express missing from release artifact.'
+    echo '       Rebuild with scripts/release/package-release-artifact.sh so node_modules is bundled.'
+    exit 1
+  fi
 
   if [ \"${RUN_DB_MIGRATIONS:-1}\" = \"1\" ]; then
     # Run DB migrations before any new API instance starts.
@@ -849,12 +889,6 @@ capture_previous_release_map
 
 # 5.5. Install/update systemd unit
 echo "5.5. Installing/updating systemd unit..."
-# Use ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
-# subsystem which misparses '@' in remote paths, causing "Permission denied".
-ssh_prod 'cat > /tmp/chatapp-template.service' < "${SCRIPT_DIR}/chatapp-template.service"
-ssh_prod 'cat > /tmp/redis-wait.sh' < "${SCRIPT_DIR}/redis-wait.sh"
-chatapp_scp_to_prod "${SCRIPT_DIR}/apply-env-profile.py" "${PROD_USER}@${PROD_HOST}:/tmp/apply-env-profile.py"
-chatapp_scp_to_prod "${SCRIPT_DIR}/env/prod.required.env" "${PROD_USER}@${PROD_HOST}:/tmp/prod.required.env"
 _PROD_DEPLOY_OVERLAY_ENV=$(mktemp)
 {
   echo "CHATAPP_INSTANCES=${CHATAPP_INSTANCES}"
@@ -880,8 +914,28 @@ _PROD_DEPLOY_OVERLAY_ENV=$(mktemp)
   echo "AUTH_GLOBAL_PER_IP_RATE_LIMIT=false"
   echo "AUTH_PASSWORD_STORAGE_MODE=plain"
 } > "${_PROD_DEPLOY_OVERLAY_ENV}"
-chatapp_scp_to_prod "${_PROD_DEPLOY_OVERLAY_ENV}" "${PROD_USER}@${PROD_HOST}:/tmp/prod.deploy.overlay.env"
+# Use an ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
+# subsystem which misparses '@' in remote paths, causing "Permission denied".
+# Batch helper/config files into one tar stream to avoid five separate SSH/SCP round trips.
+_PROD_DEPLOY_BUNDLE_DIR=$(mktemp -d)
+cp "${SCRIPT_DIR}/chatapp-template.service" "${_PROD_DEPLOY_BUNDLE_DIR}/chatapp-template.service"
+cp "${SCRIPT_DIR}/redis-wait.sh" "${_PROD_DEPLOY_BUNDLE_DIR}/redis-wait.sh"
+cp "${SCRIPT_DIR}/apply-env-profile.py" "${_PROD_DEPLOY_BUNDLE_DIR}/apply-env-profile.py"
+cp "${SCRIPT_DIR}/env/prod.required.env" "${_PROD_DEPLOY_BUNDLE_DIR}/prod.required.env"
+cp "${_PROD_DEPLOY_OVERLAY_ENV}" "${_PROD_DEPLOY_BUNDLE_DIR}/prod.deploy.overlay.env"
+if ! tar -C "${_PROD_DEPLOY_BUNDLE_DIR}" -cf - \
+  chatapp-template.service \
+  redis-wait.sh \
+  apply-env-profile.py \
+  prod.required.env \
+  prod.deploy.overlay.env \
+  | ssh_prod 'tar xf - -C /tmp'; then
+  rm -f "${_PROD_DEPLOY_OVERLAY_ENV}"
+  rm -rf "${_PROD_DEPLOY_BUNDLE_DIR}"
+  exit 1
+fi
 rm -f "${_PROD_DEPLOY_OVERLAY_ENV}"
+rm -rf "${_PROD_DEPLOY_BUNDLE_DIR}"
 ssh_prod "
   set -eo pipefail
   RELEASE_PATH=$RELEASE_DIR/$RELEASE_SHA
@@ -996,8 +1050,7 @@ if [ "${ROLLING_RESTART:-false}" = "true" ]; then
     rollback_cutover; exit 1
   }
   echo "✓ :${NEW_PORT} back in nginx upstream (all ${CHATAPP_INSTANCES} workers active)"
-  echo "  Settling ${WORKER_SETTLE_SECS}s before rolling remaining workers..."
-  sleep "${WORKER_SETTLE_SECS}"
+  wait_worker_settle_after_health "${NEW_PORT}" "before rolling remaining workers"
 fi
 
 deploy_prod_run_nginx_cutover_and_worker_roll
@@ -1019,19 +1072,12 @@ source "${SCRIPT_DIR}/deploy-prod-monitoring-sync.sh"
 
 # 10.55–10.65. Sync monitoring config and refresh containers.
 # Run in background — monitoring is non-critical for the grader and takes 1-2 min.
-# We wait for it before the final success notification so errors surface in the log.
+# Step 11 and the final health gates continue immediately; wait after Step 12 passes.
 #
 # SKIP_MONITORING_SYNC=1 suppresses this block; deploy-prod-multi.sh sets it for
 # per-VM calls and handles monitoring as a single combined step at the end.
 echo "10.55–10.65. Starting monitoring refresh in background..."
 deploy_prod_start_monitoring_refresh_background
-
-# Wait for background monitoring refresh before updating symlink + final gates
-if [[ -n "${_MONITORING_BG_PID:-}" ]]; then
-  echo "Waiting for background monitoring refresh to complete..."
-  wait "${_MONITORING_BG_PID}" \
-    || echo "⚠ Monitoring refresh had errors (non-fatal — app deploy succeeded)"
-fi
 
 # 11. Update current symlink
 echo "11. Updating current release symlink..."
@@ -1061,16 +1107,19 @@ if gate_same_release && gate_all_worker_health && gate_upstream_parity && gate_c
     echo "Running prod nginx parity audit after deploy..."
     if ! run_local_prod_nginx_audit; then
       echo "ERROR: post-deploy prod nginx parity audit failed."
+      deploy_prod_cancel_monitoring_refresh
       rollback_cutover
       exit 1
     fi
     echo "✓ Prod nginx parity audit passed"
   fi
   deploy_log_phase "final gates + nginx audit OK"
+  deploy_prod_wait_monitoring_refresh_nonfatal
   notify_discord_prod ":white_check_mark: **Prod deploy succeeded** \`${RELEASE_SHA:0:7}\` · ${CHATAPP_INSTANCES} workers"
   echo "✓ Production deployment SUCCESSFUL"
 else
   echo "ERROR: Final health check failed after cutover."
+  deploy_prod_cancel_monitoring_refresh
   rollback_cutover
   exit 1
 fi

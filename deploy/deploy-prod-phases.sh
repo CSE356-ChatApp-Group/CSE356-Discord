@@ -212,8 +212,7 @@ PY
         }
 
         # 6. Settle: let WS clients reconnect to updated worker before rolling the next.
-        echo "  Settling ${WORKER_SETTLE_SECS}s for WS reconnects..."
-        sleep "${WORKER_SETTLE_SECS}"
+        wait_worker_settle_after_health "${roll_port}" "for WS reconnects before next worker restart"
         deploy_log_phase "rolled :${roll_port}"
       done
 
@@ -331,8 +330,7 @@ PY
 
       if [ "${#ADDITIONAL_PORTS[@]}" -gt 0 ]; then
         echo "9b.5. Rolling additional worker ports (${ADDITIONAL_PORTS[*]}) to ${RELEASE_SHA}..."
-        echo "  Settling ${WORKER_SETTLE_SECS}s after OLD_PORT restart before rolling additional workers..."
-        sleep "${WORKER_SETTLE_SECS}"
+        wait_worker_settle_after_health "${OLD_PORT}" "after OLD_PORT restart before rolling additional workers"
         for extra_port in "${ADDITIONAL_PORTS[@]}"; do
           if ! restart_worker_on_release "${extra_port}"; then
             echo "ERROR: Rolling additional worker port ${extra_port} failed."
@@ -353,8 +351,7 @@ PY
             rollback_cutover
             exit 1
           fi
-          echo "  Settling ${WORKER_SETTLE_SECS}s for WS clients to reconnect before next worker restart..."
-          sleep "${WORKER_SETTLE_SECS}"
+          wait_worker_settle_after_health "${extra_port}" "for WS clients to reconnect before next worker restart"
         done
       fi
 

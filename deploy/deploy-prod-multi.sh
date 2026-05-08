@@ -32,6 +32,12 @@
 
 set -euo pipefail
 
+DEPLOY_SSH_TMPDIR="$(mktemp -d)"
+_cleanup_deploy_ssh_tmpdir() {
+  rm -rf "${DEPLOY_SSH_TMPDIR}"
+}
+trap _cleanup_deploy_ssh_tmpdir EXIT
+
 DEPLOY_SUCCESS=0
 
 SHA=${1:?Usage: deploy-prod-multi.sh <sha> [--rollback] [--dry-run] [--fast-stabilize] [--emergency]}
@@ -142,21 +148,33 @@ REDIS_EXPORTER_SSH_HOST="${REDIS_EXPORTER_SSH_HOST:-$VM1}"
 VM1_WORKER_PORTS=(4000 4001 4002 4003)
 VMX_WORKER_PORTS=(4000 4001 4002 4003 4004 4005)
 
+internal_is_excluded() {
+  local candidate="${1:-}"
+  shift || true
+  local excluded
+  for excluded in "$@"; do
+    if [[ -n "${excluded}" && "${candidate}" == "${excluded}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 build_ws_upstream_csv() {
-  local exclude_internal="${1:-}"
+  local exclude_internals=("$@")
   local upstreams=()
   local p
-  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM1_INTERNAL}" ]] && [[ "${WSVM1_INTERNAL}" != "${exclude_internal}" ]] && [[ "${WSVM1_WORKERS}" -gt 0 ]]; then
+  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM1_INTERNAL}" ]] && ! internal_is_excluded "${WSVM1_INTERNAL}" "${exclude_internals[@]+"${exclude_internals[@]}"}" && [[ "${WSVM1_WORKERS}" -gt 0 ]]; then
     for ((p=4000; p<4000 + WSVM1_WORKERS; p++)); do
       upstreams+=("${WSVM1_INTERNAL}:${p}")
     done
   fi
-  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM2_INTERNAL}" ]] && [[ "${WSVM2_INTERNAL}" != "${exclude_internal}" ]] && [[ "${WSVM2_WORKERS}" -gt 0 ]]; then
+  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM2_INTERNAL}" ]] && ! internal_is_excluded "${WSVM2_INTERNAL}" "${exclude_internals[@]+"${exclude_internals[@]}"}" && [[ "${WSVM2_WORKERS}" -gt 0 ]]; then
     for ((p=4000; p<4000 + WSVM2_WORKERS; p++)); do
       upstreams+=("${WSVM2_INTERNAL}:${p}")
     done
   fi
-  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM3_INTERNAL}" ]] && [[ "${WSVM3_INTERNAL}" != "${exclude_internal}" ]] && [[ "${WSVM3_WORKERS}" -gt 0 ]]; then
+  if [[ "${WS_TIER_ENABLED}" == "true" ]] && [[ -n "${WSVM3_INTERNAL}" ]] && ! internal_is_excluded "${WSVM3_INTERNAL}" "${exclude_internals[@]+"${exclude_internals[@]}"}" && [[ "${WSVM3_WORKERS}" -gt 0 ]]; then
     for ((p=4000; p<4000 + WSVM3_WORKERS; p++)); do
       upstreams+=("${WSVM3_INTERNAL}:${p}")
     done
@@ -168,12 +186,16 @@ build_ws_upstream_csv() {
       return 1
     fi
   elif [[ "${#upstreams[@]}" -eq 0 ]]; then
-    for p in "${VMX_WORKER_PORTS[@]}"; do
-      upstreams+=("${VM2_INTERNAL}:${p}")
-    done
-    for p in "${VMX_WORKER_PORTS[@]}"; do
-      upstreams+=("${VM3_INTERNAL}:${p}")
-    done
+    if ! internal_is_excluded "${VM2_INTERNAL}" "${exclude_internals[@]+"${exclude_internals[@]}"}"; then
+      for p in "${VMX_WORKER_PORTS[@]}"; do
+        upstreams+=("${VM2_INTERNAL}:${p}")
+      done
+    fi
+    if ! internal_is_excluded "${VM3_INTERNAL}" "${exclude_internals[@]+"${exclude_internals[@]}"}"; then
+      for p in "${VMX_WORKER_PORTS[@]}"; do
+        upstreams+=("${VM3_INTERNAL}:${p}")
+      done
+    fi
   fi
   (IFS=,; echo "${upstreams[*]}")
 }
@@ -217,7 +239,7 @@ ssh_vm() {
   user="$(deploy_host_user "${host}")"
   # shellcheck disable=SC2086
   ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-      -o ControlMaster=auto -o ControlPath="/tmp/ssh-chatapp-multi-%r@${host}:%p" \
+      -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR}/ssh-%r@%h:%p" \
       -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${user}@${host}" "$@"
@@ -248,7 +270,7 @@ ssh_monitoring_host() {
   user="$(monitoring_host_user "${host}")"
   # shellcheck disable=SC2086
   ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-      -o ControlMaster=auto -o ControlPath="/tmp/ssh-chatapp-multi-%r@${host}:%p" \
+      -o ControlMaster=auto -o ControlPath="${DEPLOY_SSH_TMPDIR}/ssh-%r@%h:%p" \
       -o ControlPersist=10m \
       ${DEPLOY_SSH_EXTRA_OPTS} \
       "${user}@${host}" "$@"
@@ -264,15 +286,15 @@ scp_to_monitoring_host() {
 }
 
 build_remote_upstream_csv() {
-  local exclude_internal="${1:-}"
+  local exclude_internals=("$@")
   local upstreams=()
   local p
-  if [[ "${VM2_INTERNAL}" != "${exclude_internal}" ]]; then
+  if ! internal_is_excluded "${VM2_INTERNAL}" "${exclude_internals[@]+"${exclude_internals[@]}"}"; then
     for p in "${VMX_WORKER_PORTS[@]}"; do
       upstreams+=("${VM2_INTERNAL}:${p}")
     done
   fi
-  if [[ "${VM3_INTERNAL}" != "${exclude_internal}" ]]; then
+  if ! internal_is_excluded "${VM3_INTERNAL}" "${exclude_internals[@]+"${exclude_internals[@]}"}"; then
     for p in "${VMX_WORKER_PORTS[@]}"; do
       upstreams+=("${VM3_INTERNAL}:${p}")
     done
@@ -284,6 +306,10 @@ rewrite_vm1_nginx_upstream() {
   local extra_upstream_csv="${1:-}"
   local ws_upstream_csv="${2:-}"
   local context="${3:-vm1 upstream rewrite}"
+  local verify_mode="${4:-}"
+  local verify_label="${5:-}"
+  local verify_internals_csv="${6:-}"
+  local verify_worker_count="${7:-0}"
   if [[ -z "${ws_upstream_csv}" ]]; then
     ws_upstream_csv="$(build_ws_upstream_csv)"
   fi
@@ -293,6 +319,12 @@ rewrite_vm1_nginx_upstream() {
     export LOCAL_PORTS_CSV='$(IFS=,; echo "${VM1_WORKER_PORTS[*]}")'
     export EXTRA_UPSTREAM_SERVERS_CSV='${extra_upstream_csv}'
     export WS_EXTRA_UPSTREAM_SERVERS_CSV='${ws_upstream_csv}'
+    export VERIFY_MODE='${verify_mode}'
+    export VERIFY_LABEL='${verify_label}'
+    export VERIFY_INTERNALS_CSV='${verify_internals_csv}'
+    export VERIFY_WORKER_PORTS_CSV='$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")'
+    export VERIFY_WORKER_COUNT='${verify_worker_count}'
+    export WS_TIER_ENABLED='${WS_TIER_ENABLED}'
     TMP_SITE=\$(mktemp)
     sudo cp \"\$SITE\" \"\$TMP_SITE\"
     export TMP_SITE
@@ -363,6 +395,60 @@ PY
     rm -f \"\$TMP_SITE\"
     sudo nginx -t >/dev/null
     sudo systemctl reload nginx
+    if [ -n \"\$VERIFY_MODE\" ]; then
+      upstream_block=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\$SITE\")
+      ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
+      IFS=',' read -r -a verify_internals <<< \"\$VERIFY_INTERNALS_CSV\"
+      case \"\$VERIFY_MODE\" in
+        drain_remote)
+          for internal in \"\${verify_internals[@]}\"; do
+            [ -n \"\$internal\" ] || continue
+            if printf '%s\n' \"\$upstream_block\" | grep -Fq \"server \${internal}:\"; then
+              echo \"ERROR: \$VERIFY_LABEL upstream entries still present after drain\"
+              exit 1
+            fi
+            if [ \"\$WS_TIER_ENABLED\" != 'true' ] && printf '%s\n' \"\$ws_block\" | grep -Fq \"server \${internal}:\"; then
+              echo \"ERROR: \$VERIFY_LABEL websocket upstream entries still present after drain\"
+              exit 1
+            fi
+          done
+          ;;
+        restore_remote)
+          IFS=',' read -r -a verify_ports <<< \"\$VERIFY_WORKER_PORTS_CSV\"
+          missing=0
+          for internal in \"\${verify_internals[@]}\"; do
+            [ -n \"\$internal\" ] || continue
+            for port in \"\${verify_ports[@]}\"; do
+              printf '%s\n' \"\$upstream_block\" | grep -Fq \"server \${internal}:\${port} max_fails=0;\" || missing=1
+            done
+          done
+          [ \"\$missing\" -eq 0 ]
+          ;;
+        drain_ws)
+          for internal in \"\${verify_internals[@]}\"; do
+            [ -n \"\$internal\" ] || continue
+            if printf '%s\n' \"\$ws_block\" | grep -Fq \"server \${internal}:\"; then
+              echo \"ERROR: \$VERIFY_LABEL websocket upstream entries still present after drain\"
+              exit 1
+            fi
+          done
+          ;;
+        restore_ws)
+          missing=0
+          for internal in \"\${verify_internals[@]}\"; do
+            [ -n \"\$internal\" ] || continue
+            for ((port=4000; port<4000 + VERIFY_WORKER_COUNT; port++)); do
+              printf '%s\n' \"\$ws_block\" | grep -Fq \"server \${internal}:\${port} max_fails=0;\" || missing=1
+            done
+          done
+          [ \"\$missing\" -eq 0 ]
+          ;;
+        *)
+          echo \"ERROR: unknown nginx verification mode: \$VERIFY_MODE\"
+          exit 1
+          ;;
+      esac
+    fi
   " || {
     echo "ERROR: ${context} failed."
     return 1
@@ -372,78 +458,72 @@ PY
 drain_remote_vm_from_vm1_upstream() {
   local vm_label="$1"
   local vm_internal="$2"
+  drain_remote_vms_from_vm1_upstream "${vm_label}" "${vm_internal}"
+}
+
+drain_remote_vms_from_vm1_upstream() {
+  local vm_label="$1"
+  shift
+  local vm_internals=("$@")
   local remaining_csv
   local ws_csv
-  remaining_csv="$(build_remote_upstream_csv "${vm_internal}")"
+  local internals_csv
+  remaining_csv="$(build_remote_upstream_csv "${vm_internals[@]}")"
   # In shared-websocket mode, app_ws is built from VM2/VM3 app workers. Drain the
   # same VM from app_ws before restarting it; otherwise websocket handshakes can
   # hit a worker while systemd has the port down.
-  ws_csv="$(build_ws_upstream_csv "${vm_internal}")"
+  ws_csv="$(build_ws_upstream_csv "${vm_internals[@]}")"
+  internals_csv=$(IFS=,; echo "${vm_internals[*]}")
   echo "=== Draining ${vm_label} remote workers from VM1 nginx upstreams ==="
-  rewrite_vm1_nginx_upstream "${remaining_csv}" "${ws_csv}" "drain ${vm_label} from VM1 nginx upstream"
-  ssh_vm "$VM1" "
-    set -euo pipefail
-    SITE=/etc/nginx/sites-enabled/chatapp
-    upstream_block=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\$SITE\")
-    if printf '%s\n' \"\$upstream_block\" | grep -q 'server ${vm_internal}:'; then
-      echo 'ERROR: ${vm_label} upstream entries still present after drain'
-      exit 1
-    fi
-    ws_tier_enabled='${WS_TIER_ENABLED}'
-    if [ \"\$ws_tier_enabled\" != 'true' ]; then
-      ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
-      if printf '%s\n' \"\$ws_block\" | grep -q 'server ${vm_internal}:'; then
-        echo 'ERROR: ${vm_label} websocket upstream entries still present after drain'
-        exit 1
-      fi
-    fi
-  "
+  rewrite_vm1_nginx_upstream "${remaining_csv}" "${ws_csv}" "drain ${vm_label} from VM1 nginx upstream" \
+    "drain_remote" "${vm_label}" "${internals_csv}"
   echo "✓ ${vm_label} removed from VM1 nginx upstreams"
 }
 
 restore_remote_vm_to_vm1_upstream() {
   local vm_label="$1"
   local vm_internal="$2"
+  restore_remote_vms_to_vm1_upstream "${vm_label}" "${vm_internal}"
+}
+
+restore_remote_vms_to_vm1_upstream() {
+  local vm_label="$1"
+  shift
+  local vm_internals=("$@")
   local full_csv
   local ws_csv
+  local internals_csv
   full_csv="$(build_remote_upstream_csv)"
   ws_csv="$(build_ws_upstream_csv)"
+  internals_csv=$(IFS=,; echo "${vm_internals[*]}")
   echo "=== Restoring ${vm_label} remote workers to VM1 nginx upstream ==="
-  rewrite_vm1_nginx_upstream "${full_csv}" "${ws_csv}" "restore ${vm_label} to VM1 nginx upstream"
-  ssh_vm "$VM1" "
-    set -euo pipefail
-    SITE=/etc/nginx/sites-enabled/chatapp
-    upstream_block=\$(sudo sed -n '/^upstream app {/,/^}/p' \"\$SITE\")
-    missing=0
-    for port in ${VMX_WORKER_PORTS[*]}; do
-      printf '%s\n' \"\$upstream_block\" | grep -q 'server ${vm_internal}:'\"\${port}\"' max_fails=0;' || missing=1
-    done
-    [ \"\$missing\" -eq 0 ]
-  "
-   echo "✓ ${vm_label} restored to VM1 nginx upstream"
+  rewrite_vm1_nginx_upstream "${full_csv}" "${ws_csv}" "restore ${vm_label} to VM1 nginx upstream" \
+    "restore_remote" "${vm_label}" "${internals_csv}"
+  echo "✓ ${vm_label} restored to VM1 nginx upstream"
 }
 
 drain_ws_vm_from_vm1_app_ws() {
   local vm_label="$1"
   local vm_internal="$2"
+  drain_ws_vms_from_vm1_app_ws "${vm_label}" "${vm_internal}"
+}
+
+drain_ws_vms_from_vm1_app_ws() {
+  local vm_label="$1"
+  shift
+  local vm_internals=("$@")
   local full_csv
   local remaining_ws_csv
+  local internals_csv
   if [[ "${WS_TIER_ENABLED}" != "true" ]]; then
     return 0
   fi
   full_csv="$(build_remote_upstream_csv)"
-  remaining_ws_csv="$(build_ws_upstream_csv "${vm_internal}")"
+  remaining_ws_csv="$(build_ws_upstream_csv "${vm_internals[@]}")"
+  internals_csv=$(IFS=,; echo "${vm_internals[*]}")
   echo "=== Draining ${vm_label} websocket workers from VM1 nginx app_ws ==="
-  rewrite_vm1_nginx_upstream "${full_csv}" "${remaining_ws_csv}" "drain ${vm_label} from VM1 nginx websocket upstream"
-  ssh_vm "$VM1" "
-    set -euo pipefail
-    SITE=/etc/nginx/sites-enabled/chatapp
-    ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
-    if printf '%s\n' \"\$ws_block\" | grep -q 'server ${vm_internal}:'; then
-      echo 'ERROR: ${vm_label} websocket upstream entries still present after drain'
-      exit 1
-    fi
-  "
+  rewrite_vm1_nginx_upstream "${full_csv}" "${remaining_ws_csv}" "drain ${vm_label} from VM1 nginx websocket upstream" \
+    "drain_ws" "${vm_label}" "${internals_csv}"
   echo "✓ ${vm_label} removed from VM1 nginx websocket upstream"
 }
 
@@ -459,23 +539,20 @@ restore_ws_vm_to_vm1_app_ws() {
   full_csv="$(build_remote_upstream_csv)"
   full_ws_csv="$(build_ws_upstream_csv)"
   echo "=== Restoring ${vm_label} websocket workers to VM1 nginx app_ws ==="
-  rewrite_vm1_nginx_upstream "${full_csv}" "${full_ws_csv}" "restore ${vm_label} to VM1 nginx websocket upstream"
-  ssh_vm "$VM1" "
-    set -euo pipefail
-    SITE=/etc/nginx/sites-enabled/chatapp
-    ws_block=\$(sudo sed -n '/^upstream app_ws {/,/^}/p' \"\$SITE\")
-    missing=0
-    for ((port=4000; port<4000 + ${worker_count}; port++)); do
-      printf '%s\n' \"\$ws_block\" | grep -q 'server ${vm_internal}:'\"\${port}\"' max_fails=0;' || missing=1
-    done
-    [ \"\$missing\" -eq 0 ]
-  "
+  rewrite_vm1_nginx_upstream "${full_csv}" "${full_ws_csv}" "restore ${vm_label} to VM1 nginx websocket upstream" \
+    "restore_ws" "${vm_label}" "${vm_internal}" "${worker_count}"
   echo "✓ ${vm_label} restored to VM1 nginx websocket upstream"
 }
 
 cleanup_on_exit() {
   local status=$?
+  trap - EXIT
   set +e
+  if [[ "${status}" -ne 0 && -n "${MONITORING_BG_PID:-}" ]] && kill -0 "${MONITORING_BG_PID}" 2>/dev/null; then
+    echo "Stopping background monitoring sync after deploy failure..."
+    kill "${MONITORING_BG_PID}" 2>/dev/null || true
+    wait "${MONITORING_BG_PID}" 2>/dev/null || true
+  fi
   if [[ "${status}" -ne 0 && "${DEPLOY_SUCCESS}" -ne 1 ]]; then
     echo ""
     echo "↩ Exit trap: deploy did not complete successfully — restoring full VM1 nginx upstream..."
@@ -494,6 +571,7 @@ cleanup_on_exit() {
       echo "  Run on VM1: grep 'upstream app' /etc/nginx/sites-enabled/chatapp"
     fi
   fi
+  rm -rf "${DEPLOY_SSH_TMPDIR}"
   exit "${status}"
 }
 trap cleanup_on_exit EXIT
@@ -860,43 +938,77 @@ UNIT
 sync_monitoring_post_steps() {
   echo "Ensuring UFW scrape rules and host exporters on monitored VMs (source ${MONITORING_VM_SCRAPE_SOURCE})..."
 
+  local ports ports_csv
+  local monitoring_pids=()
+  local monitoring_labels=()
+  local pid code i sync_failed
+
   ports=("${VM1_WORKER_PORTS[@]}" 9100 9126 9113)
   if [ "${PROM_REDIS_HOST}" = "${VM1_INTERNAL}" ]; then
     ports+=(9121)
   fi
   ports_csv=$(IFS=,; echo "${ports[*]}")
-  sync_monitoring_remote_host "${VM1}" "1" "${ports_csv}" "vm1"
+  # Refresh monitored hosts in parallel; each host remains non-fatal like the previous sequential flow.
+  sync_monitoring_remote_host "${VM1}" "1" "${ports_csv}" "vm1" &
+  monitoring_pids+=("$!")
+  monitoring_labels+=("vm1")
 
   ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
   if [ "${PROM_REDIS_HOST}" = "${VM2_INTERNAL}" ]; then
     ports+=(9121)
   fi
   ports_csv=$(IFS=,; echo "${ports[*]}")
-  sync_monitoring_remote_host "${VM2}" "0" "${ports_csv}" "vm2"
+  sync_monitoring_remote_host "${VM2}" "0" "${ports_csv}" "vm2" &
+  monitoring_pids+=("$!")
+  monitoring_labels+=("vm2")
 
   ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
   if [ "${PROM_REDIS_HOST}" = "${VM3_INTERNAL}" ]; then
     ports+=(9121)
   fi
   ports_csv=$(IFS=,; echo "${ports[*]}")
-  sync_monitoring_remote_host "${VM3}" "0" "${ports_csv}" "vm3"
+  sync_monitoring_remote_host "${VM3}" "0" "${ports_csv}" "vm3" &
+  monitoring_pids+=("$!")
+  monitoring_labels+=("vm3")
 
   if [ -n "${WSVM1}" ] && [ -n "${WSVM1_INTERNAL}" ] && [ "${WSVM1_WORKERS}" -gt 0 ]; then
     ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
     ports_csv=$(IFS=,; echo "${ports[*]}")
-    sync_monitoring_remote_host "${WSVM1}" "0" "${ports_csv}" "wsvm1"
+    sync_monitoring_remote_host "${WSVM1}" "0" "${ports_csv}" "wsvm1" &
+    monitoring_pids+=("$!")
+    monitoring_labels+=("wsvm1")
   fi
 
   if [ -n "${WSVM2}" ] && [ -n "${WSVM2_INTERNAL}" ] && [ "${WSVM2_WORKERS}" -gt 0 ]; then
     ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
     ports_csv=$(IFS=,; echo "${ports[*]}")
-    sync_monitoring_remote_host "${WSVM2}" "0" "${ports_csv}" "wsvm2"
+    sync_monitoring_remote_host "${WSVM2}" "0" "${ports_csv}" "wsvm2" &
+    monitoring_pids+=("$!")
+    monitoring_labels+=("wsvm2")
   fi
 
   if [ -n "${WSVM3}" ] && [ -n "${WSVM3_INTERNAL}" ] && [ "${WSVM3_WORKERS}" -gt 0 ]; then
     ports=("${VMX_WORKER_PORTS[@]}" 9100 9126)
     ports_csv=$(IFS=,; echo "${ports[*]}")
-    sync_monitoring_remote_host "${WSVM3}" "0" "${ports_csv}" "wsvm3"
+    sync_monitoring_remote_host "${WSVM3}" "0" "${ports_csv}" "wsvm3" &
+    monitoring_pids+=("$!")
+    monitoring_labels+=("wsvm3")
+  fi
+
+  sync_failed=0
+  for i in "${!monitoring_pids[@]}"; do
+    pid="${monitoring_pids[$i]}"
+    set +e
+    wait "$pid"
+    code=$?
+    set -e
+    if [ "${code}" -ne 0 ]; then
+      echo "WARN: monitoring host refresh failed on ${monitoring_labels[$i]} (exit ${code}; non-fatal)"
+      sync_failed=1
+    fi
+  done
+  if [ "${sync_failed}" -ne 0 ]; then
+    echo "WARN: one or more monitoring host refreshes failed (non-fatal)"
   fi
 
   if [ "${PROM_REDIS_HOST}" != "${VM1_INTERNAL}" ]; then
@@ -941,6 +1053,31 @@ sync_monitoring_post_steps() {
       echo 'WARN: monitoring VM cannot reach ${PROM_REDIS_HOST}:9121 (check firewall/security groups)'
     fi
   " || true
+}
+
+start_monitoring_sync_background() {
+  # Phase 6 monitoring refresh runs off the deploy critical path; Phase 7 health gates continue immediately.
+  (
+    set +e
+    sync_monitoring_stack
+    sync_monitoring_post_steps
+  ) &
+  MONITORING_BG_PID=$!
+}
+
+wait_monitoring_sync_background_nonfatal() {
+  local code
+  if [[ -n "${MONITORING_BG_PID:-}" ]]; then
+    echo "Waiting for background monitoring sync to complete..."
+    set +e
+    wait "${MONITORING_BG_PID}"
+    code=$?
+    set -e
+    if [[ "${code}" -ne 0 ]]; then
+      echo "WARN: monitoring refresh failed (non-fatal) with exit code ${code}"
+    fi
+    MONITORING_BG_PID=""
+  fi
 }
 
 run_preflight_db_check() {
@@ -1087,18 +1224,16 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "  Release:      ${SHA:0:12} (from release-${SHA})"
   echo "  Phases:"
   echo "    Phase -1:  Pre-flight PostgreSQL check"
-  echo "    Phase  0:  Drain VM3 from VM1 nginx, then deploy VM3 (6 workers: 4000-4005)"
-  echo "    Phase 0.5: Verify VM3 workers, then rejoin VM3 to VM1 nginx"
   if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
+    echo "    Phase  0:  Drain VM3 from VM1 nginx, then deploy VM3 (6 workers: 4000-4005)"
+    echo "    Phase 0.5: Verify VM3 workers, then rejoin VM3 to VM1 nginx"
     echo "    (CANARY) STOP after VM3 — DEPLOY_STOP_AFTER_VM3=1"
+  else
+    echo "    Phase  0:  Drain VM2+VM3 from VM1 nginx, then deploy VM2+VM3 in parallel"
+    echo "    Phase 0.5: Verify VM2+VM3 workers in parallel, then rejoin both to VM1 nginx"
   fi
-  echo "    Phase  1:  Drain VM2 from VM1 nginx, then deploy VM2 (6 workers: 4000-4005)"
-  echo "    Phase  2:  Verify VM2 workers, then rejoin VM2 to VM1 nginx"
   if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
-    echo "    Phase  3:  Drain each websocket VM from app_ws, deploy it, verify it, and restore it"
-    echo "      3a: WSVM3"
-    echo "      3b: WSVM2"
-    echo "      3c: WSVM1"
+    echo "    Phase  3:  Drain WSVM2+WSVM3 from app_ws, deploy/verify in parallel, restore both, then deploy WSVM1 last"
     echo "    Phase  4:  Deploy to VM1 (4 workers: 4000-4003)"
     if [[ "${EMERGENCY_MODE}" == "true" ]]; then
       echo "    Phase  5:  [SKIPPED] nginx upstream re-injection check (--emergency)"
@@ -1164,25 +1299,25 @@ fi
 run_preflight_db_check
 run_ws_ssh_preflight
 
-# ── Phase 0: Drain VM3 from VM1 nginx, then deploy VM3 ───────────────────────
-# VM3 has no shared services: a *failed* deploy does not take down Redis/PgBouncer on VM1.
-# Remove VM3 from the shared VM1 nginx upstream before rolling its workers so
-# POST traffic never targets a restarting remote peer.
-drain_remote_vm_from_vm1_upstream "VM3" "${VM3_INTERNAL}"
-phase_deploy_workers_vm \
-  "=== Phase 0: Deploy to VM3 (workers only; drained from VM1 nginx during rollout) ===" \
-  "$VM3" "$VM3_INTERNAL" "$VM3_PGBOUNCER_POOL_SIZE" "$VM3_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM3_PG_POOL_MAX_PER_INSTANCE" "" "1"
-
-# ── Phase 0.5: Verify VM3 healthy, then rejoin it to VM1 nginx ──────────────
-if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
-  "=== Phase 0.5: Verify all 6 VM3 workers healthy ===" \
-  "$VM3" "VM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
-  echo "ERROR: One or more VM3 workers unhealthy — aborting before touching VM2/VM1."
-  exit 1
-fi
-restore_remote_vm_to_vm1_upstream "VM3" "${VM3_INTERNAL}"
-
 if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
+  # ── Phase 0: Canary deploy VM3 in isolation ────────────────────────────────
+  # VM3 has no shared services: a *failed* deploy does not take down Redis/PgBouncer on VM1.
+  # Remove VM3 from the shared VM1 nginx upstream before rolling its workers so
+  # POST traffic never targets a restarting remote peer.
+  drain_remote_vm_from_vm1_upstream "VM3" "${VM3_INTERNAL}"
+  phase_deploy_workers_vm \
+    "=== Phase 0: Deploy to VM3 (workers only; drained from VM1 nginx during rollout) ===" \
+    "$VM3" "$VM3_INTERNAL" "$VM3_PGBOUNCER_POOL_SIZE" "$VM3_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM3_PG_POOL_MAX_PER_INSTANCE" "" "1"
+
+  # ── Phase 0.5: Verify VM3 healthy, then rejoin it to VM1 nginx ────────────
+  if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
+    "=== Phase 0.5: Verify all 6 VM3 workers healthy ===" \
+    "$VM3" "VM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
+    echo "ERROR: One or more VM3 workers unhealthy — aborting before touching VM2/VM1."
+    exit 1
+  fi
+  restore_remote_vm_to_vm1_upstream "VM3" "${VM3_INTERNAL}"
+
   echo ""
   echo "======================================================================"
   echo "=== CANARY: DEPLOY_STOP_AFTER_VM3=1 - rollout paused here.        ==="
@@ -1193,53 +1328,99 @@ if [[ "${DEPLOY_STOP_AFTER_VM3:-}" == "1" ]]; then
   exit 0
 fi
 
-# ── Phase 1: Drain VM2 from VM1 nginx, then deploy VM2 ───────────────────────
-# Remove VM2 from the shared VM1 nginx upstream before rolling its workers so
-# POST traffic never targets a restarting remote peer.
+# ── Phases 0-2: Drain VM2+VM3, deploy both worker VMs, verify both, restore ──
+# Remove both remote worker VMs from the shared VM1 nginx upstream in one rewrite
+# before rolling their workers so POST traffic never targets restarting peers.
 echo ""
-drain_remote_vm_from_vm1_upstream "VM2" "${VM2_INTERNAL}"
+drain_remote_vms_from_vm1_upstream "VM2+VM3" "${VM2_INTERNAL}" "${VM3_INTERNAL}"
+
+echo "=== Phases 0/1: Deploy VM2 and VM3 in parallel (workers only; drained from VM1 nginx) ==="
+phase_deploy_workers_vm \
+  "=== Phase 0: Deploy to VM3 (workers only; drained from VM1 nginx during rollout) ===" \
+  "$VM3" "$VM3_INTERNAL" "$VM3_PGBOUNCER_POOL_SIZE" "$VM3_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM3_PG_POOL_MAX_PER_INSTANCE" "" "1" &
+vm3_deploy_pid=$!
 phase_deploy_workers_vm \
   "=== Phase 1: Deploy to VM2 (workers only; drained from VM1 nginx during rollout) ===" \
-  "$VM2" "$VM2_INTERNAL" "$VM2_PGBOUNCER_POOL_SIZE" "$VM2_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM2_PG_POOL_MAX_PER_INSTANCE" "" "0"
+  "$VM2" "$VM2_INTERNAL" "$VM2_PGBOUNCER_POOL_SIZE" "$VM2_PGBOUNCER_MAX_DB_CONNECTIONS" "$VM2_PG_POOL_MAX_PER_INSTANCE" "" "0" &
+vm2_deploy_pid=$!
 
-# ── Phase 2: Verify VM2 healthy, then rejoin it to VM1 nginx ─────────────────
-if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
-  "=== Phase 2: Verify all 6 VM2 workers healthy ===" \
-  "$VM2" "VM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
-  echo "ERROR: One or more VM2 workers unhealthy — aborting before touching VM1."
-  echo "       VM1/VM3 are still on their previous releases."
+set +e
+wait "$vm3_deploy_pid"; vm3_deploy_code=$?
+wait "$vm2_deploy_pid"; vm2_deploy_code=$?
+set -e
+if [[ "${vm3_deploy_code}" -ne 0 || "${vm2_deploy_code}" -ne 0 ]]; then
+  echo "ERROR: Parallel VM worker deploy failed (VM3=${vm3_deploy_code}, VM2=${vm2_deploy_code}) — aborting before touching websocket tier/VM1."
   exit 1
 fi
-restore_remote_vm_to_vm1_upstream "VM2" "${VM2_INTERNAL}"
 
-# ── Phase 3: Deploy dedicated websocket VMs one at a time ───────────────────
-# Keep app_ws serving the remaining websocket hosts while each target rolls.
+if [[ "${EMERGENCY_MODE}" != "true" ]]; then
+  echo "=== Phases 0.5/2: Verify VM2 and VM3 in parallel ==="
+  phase_verify_workers_vm \
+    "=== Phase 0.5: Verify all 6 VM3 workers healthy ===" \
+    "$VM3" "VM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" &
+  vm3_verify_pid=$!
+  phase_verify_workers_vm \
+    "=== Phase 2: Verify all 6 VM2 workers healthy ===" \
+    "$VM2" "VM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" &
+  vm2_verify_pid=$!
+
+  set +e
+  wait "$vm3_verify_pid"; vm3_verify_code=$?
+  wait "$vm2_verify_pid"; vm2_verify_code=$?
+  set -e
+  if [[ "${vm3_verify_code}" -ne 0 || "${vm2_verify_code}" -ne 0 ]]; then
+    echo "ERROR: Parallel VM worker verification failed (VM3=${vm3_verify_code}, VM2=${vm2_verify_code}) — aborting before touching websocket tier/VM1."
+    exit 1
+  fi
+fi
+
+restore_remote_vms_to_vm1_upstream "VM2+VM3" "${VM2_INTERNAL}" "${VM3_INTERNAL}"
+
+# ── Phase 3: Deploy dedicated websocket VMs ─────────────────────────────────
+# Keep app_ws serving the remaining websocket hosts while targets roll.
 if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
   echo ""
-  drain_ws_vm_from_vm1_app_ws "WSVM3" "${WSVM3_INTERNAL}"
+  # WSVM2 and WSVM3 are homogeneous websocket worker VMs, so drain/deploy/verify/restore them together.
+  drain_ws_vms_from_vm1_app_ws "WSVM2+WSVM3" "${WSVM2_INTERNAL}" "${WSVM3_INTERNAL}"
   phase_deploy_workers_vm \
     "=== Phase 3a: Deploy to WSVM3 (dedicated websocket tier; drained from app_ws during rollout) ===" \
-    "$WSVM3" "$WSVM3_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE" "" "0"
-  if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
-    "=== Phase 3a.5: Verify all 6 WSVM3 workers healthy ===" \
-    "$WSVM3" "WSVM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
-    echo "ERROR: One or more WSVM3 workers unhealthy — aborting before touching WSVM2/WSVM1/VM1."
-    exit 1
-  fi
-  restore_ws_vm_to_vm1_app_ws "WSVM3" "${WSVM3_INTERNAL}" "${WSVM3_WORKERS}"
-
-  echo ""
-  drain_ws_vm_from_vm1_app_ws "WSVM2" "${WSVM2_INTERNAL}"
+    "$WSVM3" "$WSVM3_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE" "" "0" &
+  wsvm3_deploy_pid=$!
   phase_deploy_workers_vm \
     "=== Phase 3b: Deploy to WSVM2 (dedicated websocket tier; drained from app_ws during rollout) ===" \
-    "$WSVM2" "$WSVM2_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE" "" "0"
-  if [[ "${EMERGENCY_MODE}" != "true" ]] && ! phase_verify_workers_vm \
-    "=== Phase 3b.5: Verify all 6 WSVM2 workers healthy ===" \
-    "$WSVM2" "WSVM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")"; then
-    echo "ERROR: One or more WSVM2 workers unhealthy — aborting before touching WSVM1/VM1."
+    "$WSVM2" "$WSVM2_INTERNAL" "$WSVM_PGBOUNCER_POOL_SIZE" "$WSVM_PGBOUNCER_MAX_DB_CONNECTIONS" "$WSVM_PG_POOL_MAX_PER_INSTANCE" "" "0" &
+  wsvm2_deploy_pid=$!
+
+  set +e
+  wait "$wsvm3_deploy_pid"; wsvm3_deploy_code=$?
+  wait "$wsvm2_deploy_pid"; wsvm2_deploy_code=$?
+  set -e
+  if [[ "${wsvm3_deploy_code}" -ne 0 || "${wsvm2_deploy_code}" -ne 0 ]]; then
+    echo "ERROR: Parallel websocket worker deploy failed (WSVM3=${wsvm3_deploy_code}, WSVM2=${wsvm2_deploy_code}) — aborting before touching WSVM1/VM1."
     exit 1
   fi
-  restore_ws_vm_to_vm1_app_ws "WSVM2" "${WSVM2_INTERNAL}" "${WSVM2_WORKERS}"
+
+  if [[ "${EMERGENCY_MODE}" != "true" ]]; then
+    phase_verify_workers_vm \
+      "=== Phase 3a.5: Verify all 6 WSVM3 workers healthy ===" \
+      "$WSVM3" "WSVM3" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" &
+    wsvm3_verify_pid=$!
+    phase_verify_workers_vm \
+      "=== Phase 3b.5: Verify all 6 WSVM2 workers healthy ===" \
+      "$WSVM2" "WSVM2" "$(IFS=,; echo "${VMX_WORKER_PORTS[*]}")" &
+    wsvm2_verify_pid=$!
+
+    set +e
+    wait "$wsvm3_verify_pid"; wsvm3_verify_code=$?
+    wait "$wsvm2_verify_pid"; wsvm2_verify_code=$?
+    set -e
+    if [[ "${wsvm3_verify_code}" -ne 0 || "${wsvm2_verify_code}" -ne 0 ]]; then
+      echo "ERROR: Parallel websocket worker verification failed (WSVM3=${wsvm3_verify_code}, WSVM2=${wsvm2_verify_code}) — aborting before touching WSVM1/VM1."
+      exit 1
+    fi
+  fi
+
+  restore_ws_vm_to_vm1_app_ws "WSVM2+WSVM3" "${WSVM2_INTERNAL},${WSVM3_INTERNAL}" "${WSVM2_WORKERS}"
 
   echo ""
   drain_ws_vm_from_vm1_app_ws "WSVM1" "${WSVM1_INTERNAL}"
@@ -1368,14 +1549,15 @@ PY
 fi
 
 # ── Phase 6: Combined monitoring sync — rendered once for all app + ws VMs ───
-# Runs after all deploys succeed so Prometheus scrapes the correct worker list.
+# Starts after all deploys succeed so Prometheus scrapes the correct worker list,
+# then final health gates run while the non-critical sync continues.
 echo ""
 if [[ "${FAST_STABILIZE_MODE}" == "true" ]]; then
   echo "=== Phase 6: Monitoring sync skipped (--fast-stabilize) ==="
   echo "Run full deploy script without --fast-stabilize once incident is stable."
 else
-  sync_monitoring_stack
-  sync_monitoring_post_steps
+  echo "=== Phase 6: Starting monitoring sync in background ==="
+  start_monitoring_sync_background
 fi
 
 # ── Phase 7: Final health check — all app/ws workers across all VMs ──────────
@@ -1397,6 +1579,7 @@ fi
 
 echo ""
 if [ "$overall_ok" -eq 1 ]; then
+  wait_monitoring_sync_background_nonfatal
   DEPLOY_SUCCESS=1
   echo "======================================================================"
   if [[ "${WS_TIER_ENABLED}" == "true" ]]; then

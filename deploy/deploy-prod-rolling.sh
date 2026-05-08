@@ -150,6 +150,46 @@ nginx_drain_after_upstream_removal() {
   sleep "${drain_secs}"
 }
 
+wait_worker_settle_after_health() {
+  local port="${1:?port required}"
+  local context="${2:-worker settle}"
+  local cap="${WORKER_SETTLE_SECS:-10}"
+
+  if ! [[ "${cap}" =~ ^[0-9]+$ ]]; then
+    echo "WARN: WORKER_SETTLE_SECS must be an integer (got '${cap}'); using 10s"
+    cap=10
+  fi
+  if [ "${cap}" -le 0 ]; then
+    echo "  Worker :${port} settle disabled (${context})"
+    return 0
+  fi
+
+  echo "  Settling worker :${port}: waiting for 3 consecutive /health OKs or ${cap}s max (${context})..."
+  ssh_prod "
+    set -euo pipefail
+    port='${port}'
+    cap='${cap}'
+    ok=0
+    elapsed=0
+    while [ \"\$elapsed\" -lt \"\$cap\" ]; do
+      body=\$(curl -fsS --max-time 4 \"http://127.0.0.1:\${port}/health\" 2>/dev/null || true)
+      status=\$(printf '%s' \"\$body\" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"status\",\"\"))' 2>/dev/null || true)
+      if [ \"\$status\" = \"ok\" ]; then
+        ok=\$((ok + 1))
+      else
+        ok=0
+      fi
+      if [ \"\$ok\" -ge 3 ]; then
+        echo \"worker :\${port} settled after \${elapsed}s\"
+        exit 0
+      fi
+      sleep 1
+      elapsed=\$((elapsed + 1))
+    done
+    echo \"worker :\${port} settle cap reached after \${cap}s\"
+  " || echo "WARN: worker :${port} adaptive settle check failed over SSH (non-fatal)"
+}
+
 stop_chatapp_port() {
   local p="${1:?port required}"
   ssh_prod "sudo systemctl stop chatapp@${p} 2>/dev/null || true"
