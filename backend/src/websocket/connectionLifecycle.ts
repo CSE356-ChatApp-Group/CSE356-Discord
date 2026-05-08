@@ -103,7 +103,12 @@ function createConnectionLifecycle({
       const preferPendingReplay = wsReplaySkipDbWhenPendingHit();
       let pendingReplayed = 0;
       if (preferPendingReplay) {
-        pendingReplayed = await replayPendingMessagesToSocket(ws, user.id);
+        pendingReplayed = await replayPendingMessagesToSocket(
+          ws,
+          user.id,
+          recentDisconnect,
+          replayUpperBoundMs,
+        );
       }
 
       const shouldAttemptDbReplay = replayAllowed && !(preferPendingReplay && pendingReplayed > 0);
@@ -183,7 +188,12 @@ function createConnectionLifecycle({
           "WS reconnect replay DB query skipped due to short per-user cooldown");
       }
       if (ws.readyState === WebSocket.OPEN && (!preferPendingReplay || pendingReplayed === 0)) {
-        pendingReplayed += await replayPendingMessagesToSocket(ws, user.id);
+        pendingReplayed += await replayPendingMessagesToSocket(
+          ws,
+          user.id,
+          recentDisconnect,
+          replayUpperBoundMs,
+        );
       }
       logWsHotInfo(() => ({
           event: "ws.replay.pending_drain",

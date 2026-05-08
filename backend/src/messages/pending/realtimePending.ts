@@ -391,15 +391,22 @@ async function shouldSkipPendingReplayWrite(): Promise<boolean> {
   return pendingGuardCachedShouldSkip;
 }
 
-async function drainPendingMessagesForUser(userId: string) {
+async function drainPendingMessagesForUser(
+  userId: string,
+  opts: { minScoreMs?: number; maxScoreMs?: number } = {},
+) {
   if (!isRedisOperational()) return [];
   if (typeof userId !== 'string' || !userId) return [];
   const key = pendingUserKey(userId);
   const now = Date.now();
+  const minScoreMs = Number(opts?.minScoreMs ?? '-inf');
+  const maxScoreMs = Number(opts?.maxScoreMs ?? now);
+  const minScore = Number.isFinite(minScoreMs) && minScoreMs > 0 ? minScoreMs : '-inf';
+  const maxScore = Number.isFinite(maxScoreMs) && maxScoreMs > 0 ? Math.min(maxScoreMs, now) : now;
   const messageIds = await redis.zrangebyscore(
     key,
-    '-inf',
-    now,
+    minScore,
+    maxScore,
     'LIMIT',
     0,
     WS_REPLAY_PENDING_DRAIN_LIMIT,

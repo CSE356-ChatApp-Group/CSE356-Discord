@@ -78,7 +78,10 @@ const logger = require("../utils/logger");
 const { isRuntimeLogCategoryEnabled } = require("../utils/runtimeLogControl");
 const presenceService = require("../presence/service");
 const { isAuthBypassEnabled, getBypassAuthContext } = require("../auth/bypass");
-const { loadReplayableMessagesForUser } = require("../messages/pending/reconnectReplay");
+const {
+  loadReplayableMessagesForUser,
+  WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
+} = require("../messages/pending/reconnectReplay");
 const { drainPendingMessagesForUser, enqueuePendingMessageForUsers } = require("../messages/pending/realtimePending");
 const {
   markWsRecentConnect,
@@ -500,15 +503,18 @@ async function replayMissedMessagesToSocket(ws, userId, previousDisconnect, reco
     reconnectObservedAtMs,
   );
 }
-async function replayPendingMessagesToSocket(ws, userId) {
+async function replayPendingMessagesToSocket(ws, userId, previousDisconnect = null, reconnectObservedAtMs = null) {
   return replayWs.replayPendingMessagesToSocket(
     {
       drainPendingMessagesForUser,
       sendPayloadToSocket,
       WS_REPLAY_OUTBOUND_YIELD_EVERY,
+      WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS,
     },
     ws,
     userId,
+    previousDisconnect,
+    reconnectObservedAtMs,
   );
 }
 

@@ -277,8 +277,9 @@ describe('progressive websocket bootstrap ready', () => {
     const replayMissedMessagesToSocket = jest.fn().mockResolvedValue(undefined);
     const tryAcquireReplaySlot = jest.fn().mockReturnValue(true);
     const replayPendingMessagesToSocket = jest.fn().mockResolvedValue(3);
+    const recentDisconnect = { disconnectedAt: Date.now() - 1000 };
     const { handleConnection, deps } = buildHarness({
-      consumeRecentDisconnect: jest.fn().mockResolvedValue({ disconnectedAt: Date.now() - 1000 }),
+      consumeRecentDisconnect: jest.fn().mockResolvedValue(recentDisconnect),
       replayMissedMessagesToSocket,
       replayPendingMessagesToSocket,
       tryAcquireReplaySlot,
@@ -289,7 +290,12 @@ describe('progressive websocket bootstrap ready', () => {
     await waitForFrame(ws, (frame) => frame.event === 'ready');
     await waitUntil(() => replayPendingMessagesToSocket.mock.calls.length > 0);
 
-    expect(replayPendingMessagesToSocket).toHaveBeenCalledWith(ws, 'user-1');
+    expect(replayPendingMessagesToSocket).toHaveBeenCalledWith(
+      ws,
+      'user-1',
+      recentDisconnect,
+      expect.any(Number),
+    );
     expect(replayMissedMessagesToSocket).not.toHaveBeenCalled();
     expect(tryAcquireReplaySlot).not.toHaveBeenCalled();
     expect(deps.releaseReplaySlot).not.toHaveBeenCalled();
@@ -322,12 +328,13 @@ describe('progressive websocket bootstrap ready', () => {
     process.env.WS_BOOTSTRAP_PROGRESSIVE_READY = 'true';
     process.env.WS_REPLAY_SKIP_DB_WHEN_PENDING_HIT = 'true';
     const replayMissedMessagesToSocket = jest.fn().mockResolvedValue(undefined);
+    const recentDisconnect = { disconnectedAt: Date.now() - 1000 };
     const replayPendingMessagesToSocket = jest
       .fn()
       .mockResolvedValueOnce(0)
       .mockResolvedValueOnce(2);
     const { handleConnection } = buildHarness({
-      consumeRecentDisconnect: jest.fn().mockResolvedValue({ disconnectedAt: Date.now() - 1000 }),
+      consumeRecentDisconnect: jest.fn().mockResolvedValue(recentDisconnect),
       replayMissedMessagesToSocket,
       replayPendingMessagesToSocket,
     });
@@ -338,7 +345,19 @@ describe('progressive websocket bootstrap ready', () => {
     await waitUntil(() => replayPendingMessagesToSocket.mock.calls.length >= 2);
 
     expect(replayMissedMessagesToSocket).toHaveBeenCalledTimes(1);
-    expect(replayPendingMessagesToSocket).toHaveBeenNthCalledWith(1, ws, 'user-1');
-    expect(replayPendingMessagesToSocket).toHaveBeenNthCalledWith(2, ws, 'user-1');
+    expect(replayPendingMessagesToSocket).toHaveBeenNthCalledWith(
+      1,
+      ws,
+      'user-1',
+      recentDisconnect,
+      expect.any(Number),
+    );
+    expect(replayPendingMessagesToSocket).toHaveBeenNthCalledWith(
+      2,
+      ws,
+      'user-1',
+      recentDisconnect,
+      expect.any(Number),
+    );
   });
 });

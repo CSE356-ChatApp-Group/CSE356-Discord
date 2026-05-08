@@ -78,10 +78,35 @@ async function replayMissedMessagesToSocket(
   }
 }
 
-async function replayPendingMessagesToSocket(deps, ws, userId) {
-  const { drainPendingMessagesForUser, sendPayloadToSocket, WS_REPLAY_OUTBOUND_YIELD_EVERY } =
-    deps;
-  const pendingPayloads = await drainPendingMessagesForUser(userId);
+async function replayPendingMessagesToSocket(
+  deps,
+  ws,
+  userId,
+  previousDisconnect = null,
+  reconnectObservedAtMs = null,
+) {
+  const {
+    drainPendingMessagesForUser,
+    sendPayloadToSocket,
+    WS_REPLAY_OUTBOUND_YIELD_EVERY,
+    WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS = 0,
+  } = deps;
+  const disconnectedAt = Number(previousDisconnect?.disconnectedAt || 0);
+  const reconnectObservedAt = Number(reconnectObservedAtMs || 0);
+  const shouldUseReconnectWindow =
+    Number.isFinite(disconnectedAt)
+    && disconnectedAt > 0
+    && Number.isFinite(reconnectObservedAt)
+    && reconnectObservedAt > disconnectedAt;
+  const pendingPayloads = await drainPendingMessagesForUser(
+    userId,
+    shouldUseReconnectWindow
+      ? {
+          minScoreMs: Math.max(0, disconnectedAt - Number(WS_MESSAGE_REPLAY_DISCONNECT_GRACE_MS || 0)),
+          maxScoreMs: reconnectObservedAt,
+        }
+      : {},
+  );
   if (!pendingPayloads.length) return 0;
   let n = 0;
   for (const payload of pendingPayloads) {
