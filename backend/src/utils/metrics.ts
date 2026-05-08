@@ -771,7 +771,7 @@ const overloadStageGauge = new client.Gauge({
       opensearchBulkTotal.inc({ result }, 0);
       opensearchBulkDurationMs.observe({ result }, 0);
     }
-    for (const operation of ['index_doc', 'bulk', 'update', 'delete', 'create_index'] as const) {
+    for (const operation of ['index_doc', 'bulk', 'update', 'delete', 'create_index', 'search_read'] as const) {
       opensearchRequestErrorsTotal.inc({ operation }, 0);
     }
     opensearchBulkDocs.inc(0);

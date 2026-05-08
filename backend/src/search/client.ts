@@ -21,6 +21,8 @@ const db = require('../db/pool');
 const logger = require('../utils/logger');
 const meiliClient = require('./meiliClient');
 const redis = require('../db/redis');
+const { opensearchRequestErrorsTotal } = require('../utils/metrics');
+const { searchWithOpenSearchBackend } = require('./opensearchExecution');
 const {
   searchReplicaRetryTotal,
   searchFreshnessQueryDurationMs,
@@ -54,6 +56,8 @@ const {
   buildCommunityTraceFields,
 } = require('./searchTracing');
 const {
+  SEARCH_BACKEND,
+  OPENSEARCH_READ_ENABLED,
   SEARCH_USE_READ_REPLICA,
   SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED,
   literalRecentCandidateCap,
@@ -828,6 +832,26 @@ const { searchWithMeiliBackend } = createMeiliSearchExecutor({
 
 async function search(q: string, opts: Record<string, any> = {}): Promise<any> {
   const trimmed = String(q || '').trim();
+
+  if (SEARCH_BACKEND === 'opensearch' && OPENSEARCH_READ_ENABLED) {
+    try {
+      return await searchWithOpenSearchBackend(trimmed, opts);
+    } catch (err: any) {
+      if (err?.statusCode === 403) {
+        throw err;
+      }
+      opensearchRequestErrorsTotal.inc({ operation: 'search_read' });
+      logger.warn(
+        { err: { message: err?.message }, query: trimmed },
+        'search: opensearch read path failed, returning busy',
+      );
+      const busyErr: any = new Error('Search temporarily busy; please retry.');
+      busyErr.statusCode = 503;
+      busyErr.code = 'SEARCH_OPENSEARCH_BUSY';
+      busyErr.cause = err;
+      throw busyErr;
+    }
+  }
 
   // Meili path: attempt Meili-backed candidate generation with Postgres recheck.
   // Only candidate-generation misses/errors fall back to full Postgres search.

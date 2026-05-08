@@ -101,3 +101,51 @@ describe('OpenSearch execution', () => {
     ).rejects.toMatchObject({ statusCode: 403 });
   });
 });
+
+describe('Search client OpenSearch routing', () => {
+  afterEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    delete process.env.SEARCH_BACKEND;
+    delete process.env.OPENSEARCH_READ_ENABLED;
+  });
+
+  it('uses OpenSearch backend when SEARCH_BACKEND=opensearch and OPENSEARCH_READ_ENABLED=true', async () => {
+    process.env.SEARCH_BACKEND = 'opensearch';
+    process.env.OPENSEARCH_READ_ENABLED = 'true';
+    const openSearchSearch = jest.fn().mockResolvedValue({ hits: [], offset: 0, limit: 20, estimatedTotalHits: 0 });
+    jest.doMock('../src/search/opensearchExecution', () => ({
+      searchWithOpenSearchBackend: openSearchSearch,
+    }));
+    jest.doMock('../src/search/meiliClient', () => ({
+      isSearchBackend: jest.fn(() => false),
+    }));
+
+    const { search } = require('../src/search/client');
+    await search('hello', { communityId: 'c1', userId: 'u1', limit: 20, offset: 0 });
+    expect(openSearchSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not use OpenSearch backend when OPENSEARCH_READ_ENABLED=false', async () => {
+    process.env.SEARCH_BACKEND = 'opensearch';
+    process.env.OPENSEARCH_READ_ENABLED = 'false';
+    const openSearchSearch = jest.fn();
+    const meiliSearch = jest.fn().mockResolvedValue({ hits: [], offset: 0, limit: 20, estimatedTotalHits: 0 });
+    jest.doMock('../src/search/opensearchExecution', () => ({
+      searchWithOpenSearchBackend: openSearchSearch,
+    }));
+    jest.doMock('../src/search/meiliClient', () => ({
+      isSearchBackend: jest.fn(() => true),
+    }));
+    jest.doMock('../src/search/meiliExecution', () => ({
+      createMeiliSearchExecutor: jest.fn(() => ({
+        searchWithMeiliBackend: meiliSearch,
+      })),
+    }));
+
+    const { search } = require('../src/search/client');
+    await search('hello', { communityId: 'c1', userId: 'u1', limit: 20, offset: 0 });
+    expect(openSearchSearch).not.toHaveBeenCalled();
+    expect(meiliSearch).toHaveBeenCalledTimes(1);
+  });
+});
