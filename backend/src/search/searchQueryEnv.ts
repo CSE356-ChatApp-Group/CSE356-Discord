@@ -15,6 +15,12 @@ const SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED =
 const SEARCH_RECHECK_USE_READ_REPLICA =
   String(process.env.SEARCH_RECHECK_USE_READ_REPLICA || '').trim().toLowerCase() === 'true';
 
+const SEARCH_BACKEND = String(process.env.SEARCH_BACKEND || 'meili').trim().toLowerCase();
+const OPENSEARCH_DUAL_WRITE_ENABLED =
+  String(process.env.OPENSEARCH_DUAL_WRITE_ENABLED || 'false').trim().toLowerCase() === 'true';
+const OPENSEARCH_READ_ENABLED =
+  String(process.env.OPENSEARCH_READ_ENABLED || 'false').trim().toLowerCase() === 'true';
+
 /**
  * Max recent messages scanned per scope before applying literal substring
  * (scoped total candidate set). Evaluated per query (not at module load).
@@ -123,10 +129,49 @@ function meiliEmptyCandidatesFallbackEnabled(): boolean {
   return !(v === '0' || v === 'false' || v === 'no' || v === 'off');
 }
 
+/** When Meilisearch returns zero candidates: bounded Postgres literal scan over very recent messages only. */
+function emptyMeiliRecentRescueEnabled(): boolean {
+  return (
+    String(process.env.SEARCH_EMPTY_MEILI_RECENT_RESCUE_ENABLED || '')
+      .trim()
+      .toLowerCase() === 'true'
+  );
+}
+
+/** Wall-clock window (ms) for recent-message rescue; clamped 10s–5m, default 120s. */
+function emptyMeiliRecentRescueWindowMs(): number {
+  const raw = parseInt(process.env.SEARCH_EMPTY_MEILI_RECENT_RESCUE_WINDOW_MS || '120000', 10);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 120000;
+  return Math.min(Math.max(v, 10_000), 300_000);
+}
+
+/** Max rows scanned in the recent window (ORDER BY created_at DESC LIMIT n). Default 250, clamp 50–500. */
+function emptyMeiliRecentRescueLimit(): number {
+  const raw = parseInt(process.env.SEARCH_EMPTY_MEILI_RECENT_RESCUE_LIMIT || '250', 10);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 250;
+  return Math.min(Math.max(v, 50), 500);
+}
+
+/** Statement timeout for the rescue query only. Default 120ms, clamp 50–500ms. */
+function emptyMeiliRecentRescueTimeoutMs(): number {
+  const raw = parseInt(process.env.SEARCH_EMPTY_MEILI_RECENT_RESCUE_TIMEOUT_MS || '120', 10);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 120;
+  return Math.min(Math.max(v, 50), 500);
+}
+
+function openSearchMaxCandidates(): number {
+  const raw = parseInt(process.env.OPENSEARCH_MAX_CANDIDATES || '250', 10);
+  const v = Number.isFinite(raw) && raw > 0 ? raw : 250;
+  return Math.min(Math.max(v, 50), 2000);
+}
+
 module.exports = {
+  SEARCH_BACKEND,
   SEARCH_USE_READ_REPLICA,
   SEARCH_RECHECK_USE_READ_REPLICA,
   SEARCH_REPLICA_EMPTY_RESULT_RETRY_ENABLED,
+  OPENSEARCH_DUAL_WRITE_ENABLED,
+  OPENSEARCH_READ_ENABLED,
   literalRecentCandidateCap,
   literalRecentCandidateCapDeep,
   literalStrictMismatchCandidateCap,
@@ -135,4 +180,9 @@ module.exports = {
   meiliFreshnessWindowMs,
   meiliFreshnessCandidateCap,
   meiliEmptyCandidatesFallbackEnabled,
+  emptyMeiliRecentRescueEnabled,
+  emptyMeiliRecentRescueWindowMs,
+  emptyMeiliRecentRescueLimit,
+  emptyMeiliRecentRescueTimeoutMs,
+  openSearchMaxCandidates,
 };
