@@ -215,6 +215,34 @@ const searchFreshnessSkippedShortQueryTotal = new client.Counter({
   help: 'Freshness supplement queries skipped due to short query length (< 3 chars)',
 });
 
+/** Empty-Meili recent bounded rescue attempts by result. */
+const searchEmptyMeiliRecentRescueTotal = new client.Counter({
+  name: 'search_empty_meili_recent_rescue_total',
+  help: 'Bounded recent rescue attempts when Meili returns empty candidates',
+  labelNames: ['result'],
+});
+
+/** Wall time for bounded empty-Meili recent rescue query path. */
+const searchEmptyMeiliRecentRescueDurationMs = new client.Histogram({
+  name: 'search_empty_meili_recent_rescue_duration_ms',
+  help: 'Wall time for bounded empty-Meili recent rescue attempts',
+  buckets: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+/** Number of rows scanned by bounded empty-Meili recent rescue. */
+const searchEmptyMeiliRecentRescueRowsScanned = new client.Histogram({
+  name: 'search_empty_meili_recent_rescue_rows_scanned',
+  help: 'Rows scanned by bounded empty-Meili recent rescue query',
+  buckets: [0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+});
+
+/** Number of rows rescued by bounded empty-Meili rescue path. */
+const searchEmptyMeiliRecentRescueResults = new client.Histogram({
+  name: 'search_empty_meili_recent_rescue_results',
+  help: 'Result count returned by bounded empty-Meili recent rescue path',
+  buckets: [0, 1, 2, 5, 10, 20, 50, 100, 250],
+});
+
 module.exports = {
   searchReplicaRetryTotal,
   searchDbBackendTotal,
@@ -244,4 +272,8 @@ module.exports = {
   searchFreshnessCacheHitsTotal,
   searchFreshnessCacheMissesTotal,
   searchFreshnessSkippedShortQueryTotal,
+  searchEmptyMeiliRecentRescueTotal,
+  searchEmptyMeiliRecentRescueDurationMs,
+  searchEmptyMeiliRecentRescueRowsScanned,
+  searchEmptyMeiliRecentRescueResults,
 };

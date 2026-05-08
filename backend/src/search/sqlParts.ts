@@ -134,6 +134,93 @@ function buildStrictLiteralPredicate(
   return `position(lower(${rawQueryPh}::text) in lower(coalesce(${contentExpr}, ''))) > 0`;
 }
 
+function buildEmptyMeiliRecentRescueSql(
+  opts: Record<string, any>,
+  windowMs: number,
+  recentLimit: number,
+  strictTerms: string[],
+  rawQuery: string,
+): { sql: string; params: any[] } {
+  const params: any[] = [];
+  const scope = buildScopedAccessParts(params, opts);
+  if (!scope) {
+    return { sql: 'SELECT NULL WHERE FALSE', params };
+  }
+  const strictMultiWord = strictTerms.length > 1;
+  const strictTermLikePhs = strictTerms.map((t) => p(params, t.toLowerCase()));
+  const rawQueryPh = p(params, String(rawQuery || '').toLowerCase());
+  const nowWindowPh = p(params, Math.max(1, Number(windowMs) || 1));
+  const limitN = Math.min(2000, Math.max(10, Number(recentLimit) || 250));
+  const authorTimeFilters = buildAuthorTimeFilters(params, opts, 'm');
+  const textPredicate = buildStrictLiteralPredicate(
+    "m.content",
+    strictMultiWord,
+    strictTermLikePhs,
+    rawQueryPh,
+  );
+  const communityFields =
+    scope.scopeType === 'community'
+      ? `ch.community_id AS "communityId", ch.name AS "channelName"`
+      : `NULL::uuid AS "communityId", NULL::text AS "channelName"`;
+  const scopeJoin =
+    scope.scopeType === 'community'
+      ? `
+    JOIN channels ch ON ch.id = m.channel_id
+    LEFT JOIN channel_members cm ON cm.channel_id = ch.id AND cm.user_id = ${scope.userIdPh}
+    `
+      : `
+    LEFT JOIN channels ch ON ch.id = m.channel_id
+    `;
+  const scopeFilter =
+    scope.scopeType === 'community'
+      ? `
+      AND ch.community_id = ${scope.targetIdPh}
+      AND (ch.is_private = FALSE OR cm.user_id IS NOT NULL)
+    `
+      : `
+      AND m.conversation_id = ${scope.targetIdPh}
+      AND EXISTS (
+        SELECT 1 FROM conversation_participants cp
+        WHERE cp.conversation_id = ${scope.targetIdPh}
+          AND cp.user_id = ${scope.userIdPh}
+          AND cp.left_at IS NULL
+      )
+    `;
+
+  const sql = `
+    WITH ${scope.cte},
+    scoped_recent AS MATERIALIZED (
+      SELECT
+        m.id,
+        m.content,
+        m.author_id AS "authorId",
+        COALESCE(NULLIF(u.display_name, ''), u.username) AS "authorDisplayName",
+        m.channel_id AS "channelId",
+        m.conversation_id AS "conversationId",
+        m.created_at AS "createdAt",
+        ${communityFields}
+      FROM messages m
+      JOIN users u ON u.id = m.author_id
+      ${scopeJoin}
+      WHERE m.deleted_at IS NULL
+        AND m.created_at >= (NOW() - (${nowWindowPh}::bigint * INTERVAL '1 millisecond'))
+        ${scopeFilter}
+        ${authorTimeFilters}
+        AND ${textPredicate}
+      ORDER BY m.created_at DESC, m.id DESC
+      LIMIT ${limitN}
+    )
+    SELECT
+      scope_access.has_access AS "__scopeAccess",
+      (SELECT COUNT(*)::int FROM scoped_recent) AS "__emptyMeiliRescueScanCount",
+      scoped_recent.*
+    FROM scope_access
+    LEFT JOIN scoped_recent ON scope_access.has_access = TRUE
+    ORDER BY "createdAt" DESC NULLS LAST, id DESC NULLS LAST
+  `;
+  return { sql, params };
+}
+
 module.exports = {
   SELECT_COLS,
   SELECT_COLS_FROM_SCOPED_CANDIDATE,
@@ -144,4 +231,5 @@ module.exports = {
   buildAuthorTimeFilters,
   buildFilters,
   buildStrictLiteralPredicate,
+  buildEmptyMeiliRecentRescueSql,
 };
