@@ -1,0 +1,39 @@
+-- no-transaction
+-- Migration 041: Non-partial index on messages(created_at DESC, id DESC).
+--
+-- Context (2026-05-08 incident):
+--   scripts/search/backfill-opensearch-messages.ts paginates messages with a
+--   stable tuple cursor:
+--
+--     WHERE (m.created_at, m.id) < ($cursor_ts, $cursor_id)
+--     ORDER BY m.created_at DESC, m.id DESC
+--     LIMIT $batch
+--
+--   Without a non-partial composite index on (created_at, id), the planner
+--   chooses Parallel Seq Scan + Sort over the entire 54M-row, 28GB messages
+--   heap for every batch. Existing indexes are partial:
+--     idx_messages_channel_created_at_replay     (created_at DESC) WHERE deleted_at IS NULL AND channel_id IS NOT NULL
+--     idx_messages_conv_created_at_replay        (created_at DESC) WHERE deleted_at IS NULL AND conversation_id IS NOT NULL
+--     idx_messages_channel                       (channel_id, created_at DESC) WHERE deleted_at IS NULL
+--     idx_messages_conversation                  (conversation_id, created_at DESC) WHERE deleted_at IS NULL
+--   None of these can serve a global "(created_at, id) < (...)" cursor that
+--   does not filter by channel/conversation/deleted_at.
+--
+--   Symptoms observed: replica vdb at 96-97% utilization sustained,
+--   replication replay lag ~5s, mean exec time 187s on replica /
+--   18s on primary for the same SQL (pg_stat_statements). The script was
+--   patched to never use the read replica; this index ensures even
+--   primary-side runs use Index Scan + LIMIT (sub-millisecond per batch).
+--
+-- Trade-off:
+--   - Cost: btree on (timestamptz, uuid) over ~54M rows ≈ 2-3 GB of disk and
+--     a small write-amp on every messages INSERT. Acceptable: messages is
+--     append-mostly (very few updates) and inserts land at the rightmost leaf
+--     (created_at = now()).
+--   - Benefit: any cursor scan over messages by recency (analytics exports,
+--     search backfills, legacy replays) becomes O(rows_scanned) instead of
+--     O(table_size).
+--
+-- Build is CONCURRENTLY + IF NOT EXISTS, idempotent and safe on production.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_created_at_id
+    ON messages (created_at DESC, id DESC);

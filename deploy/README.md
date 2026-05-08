@@ -611,6 +611,14 @@ tsx scripts/search/backfill-opensearch-messages.ts --checkpoint var/opensearch-b
 tsx scripts/search/compare-search-backends.ts --userId <uuid> --communityId <uuid>
 ```
 
+The backfill always runs against the **primary** PostgreSQL (default `DATABASE_URL`). It refuses
+the legacy `--use-read-replica` flag — the cursor pagination needs the non-partial
+`(created_at DESC, id DESC)` index added in migration 041, and routing it through the
+application read replica saturated `vdb` and pushed replay lag to ~5s on 2026-05-08. To run
+against a dedicated heavy-read DSN that is *not* the live replica, set
+`OPENSEARCH_BACKFILL_DATABASE_URL` instead. Defaults are conservative (`--batch-size 100`,
+`--sleep-ms 250`, session `statement_timeout=30s`, `application_name=opensearch-backfill`).
+
 Do not enable OpenSearch reads in production as part of this POC work.
 
 ## Migration Strategy

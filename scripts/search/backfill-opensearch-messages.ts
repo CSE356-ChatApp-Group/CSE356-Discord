@@ -1,11 +1,60 @@
+/**
+ * OpenSearch messages backfill (operator-run, primary-only).
+ *
+ * Reads `messages` rows in stable cursor order (created_at DESC, id DESC) and
+ * bulk-indexes them into OpenSearch. Designed to be re-runnable from a
+ * checkpoint file.
+ *
+ * Hard guarantees (regression-tested in backend/tests/opensearchBackfill.test.ts):
+ *
+ *   1. Always primary. The script never imports `readPool` from
+ *      backend/src/db/pool.ts, and the legacy `--use-read-replica` flag is
+ *      explicitly refused. Operators wanting a non-default DSN must set
+ *      OPENSEARCH_BACKFILL_DATABASE_URL (e.g. a dedicated heavy-read pool
+ *      that is *not* the shared application replica). On 2026-05-08 this
+ *      script — when run with --use-read-replica — saturated the prod read
+ *      replica's vdb at 96% utilization and pushed replay lag to ~5s because
+ *      the cursor query had no usable index and fell back to Parallel Seq Scan
+ *      on a 54M-row, 28GB messages table. See the matching investigation
+ *      notes in docs/operations-monitoring.md and migration 041.
+ *
+ *   2. Bounded per-batch. Every SQL execution has a LIMIT bound to
+ *      --batch-size (default 100, max 2000) AND a 30s session-level
+ *      statement_timeout, so a missing index can never silently mass-scan.
+ *
+ *   3. Identifiable. The script's pg connections set
+ *      application_name='opensearch-backfill' so they are visible in
+ *      pg_stat_activity and easy to cancel.
+ *
+ *   4. Throttled by default. --sleep-ms defaults to 250ms between batches so
+ *      a long backfill does not pin disk continuously.
+ *
+ * Usage:
+ *   tsx scripts/search/backfill-opensearch-messages.ts \
+ *     --checkpoint var/opensearch-backfill.checkpoint.json \
+ *     --batch-size 100 --sleep-ms 250
+ *
+ *   # Dry run, scoped to last 24h, capped at 5k rows:
+ *   tsx scripts/search/backfill-opensearch-messages.ts \
+ *     --dry-run --since 2026-05-07T00:00:00Z --limit 5000
+ *
+ * Required SQL plan: cursor `(m.created_at, m.id) < ($cursor_ts, $cursor_id)`
+ * ORDER BY (created_at DESC, id DESC) LIMIT $batch needs a non-partial
+ * btree on messages(created_at DESC, id DESC) — see migration 041.
+ */
+
 import { createRequire } from 'module';
 
 const requireCjs = createRequire(__filename);
-const poolMod = requireCjs('../../backend/src/db/pool');
-const {
-  bulkIndexMessagesToOpenSearch,
-  ensureOpenSearchMessagesIndex,
-} = requireCjs('../../backend/src/search/opensearchClient');
+const { Pool } = requireCjs('pg');
+
+// OpenSearch client is loaded lazily inside main() (after the
+// --use-read-replica refusal check) so that operators who pass the legacy
+// flag get the clean refusal exit even when OPENSEARCH_URL is unset/bogus.
+type OpenSearchModule = {
+  bulkIndexMessagesToOpenSearch: (docs: unknown[]) => Promise<void>;
+  ensureOpenSearchMessagesIndex: () => Promise<void>;
+};
 
 type Row = {
   id: string;
@@ -75,7 +124,50 @@ function saveBackfillCheckpoint(checkpointPath: string, checkpoint: Record<strin
   fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
 }
 
+const BACKFILL_APPLICATION_NAME = 'opensearch-backfill';
+const BACKFILL_STATEMENT_TIMEOUT_MS = 30_000;
+
+/**
+ * Dedicated, primary-only Pool. We deliberately do not import the shared
+ * pool from backend/src/db/pool.ts so that:
+ *   - this script can never select PG_READ_REPLICA_URL,
+ *   - we can apply per-session statement_timeout without affecting the
+ *     long-running app pool,
+ *   - the connection is identifiable in pg_stat_activity by app name.
+ *
+ * Operators who want to run against an alternative DSN (e.g. a dedicated
+ * "heavy-read" pool that is not the live replica) can set
+ * OPENSEARCH_BACKFILL_DATABASE_URL. There is no way to point this at the
+ * application read replica through env alone.
+ */
+function buildBackfillPool(): InstanceType<typeof Pool> {
+  const connectionString =
+    process.env.OPENSEARCH_BACKFILL_DATABASE_URL || process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error(
+      'opensearch-backfill: DATABASE_URL (or OPENSEARCH_BACKFILL_DATABASE_URL) must be set',
+    );
+  }
+  return new Pool({
+    connectionString,
+    max: 2,
+    application_name: BACKFILL_APPLICATION_NAME,
+    statement_timeout: BACKFILL_STATEMENT_TIMEOUT_MS,
+    keepAlive: false,
+  });
+}
+
 async function main() {
+  if (hasFlag('use-read-replica')) {
+    console.error(
+      'opensearch-backfill: --use-read-replica is no longer supported. ' +
+        'This script saturated the read replica on 2026-05-08 (replica disk 96% util, replay lag 5s) ' +
+        'because the cursor query had no usable index. Run against the primary, or set ' +
+        'OPENSEARCH_BACKFILL_DATABASE_URL to a dedicated heavy-read DSN.',
+    );
+    process.exit(2);
+  }
+
   const orderArg = String(getArg('order') || 'desc').toLowerCase();
   const order: 'asc' | 'desc' = orderArg === 'asc' ? 'asc' : 'desc';
   const limit = Number(getArg('limit') || '0') || 0;
@@ -83,13 +175,15 @@ async function main() {
   const until = parseIsoMaybe(getArg('until'));
   const checkpointPath = getArg('checkpoint') || 'var/opensearch-backfill.checkpoint.json';
   const dryRun = hasFlag('dry-run');
-  const batchSize = Math.min(2000, Math.max(50, Number(getArg('batch-size') || '250') || 250));
-  const sleepMs = Math.min(60_000, Math.max(0, Number(getArg('sleep-ms') || '0') || 0));
-  const useReadReplica = hasFlag('use-read-replica');
-  const dbPool = useReadReplica && poolMod.readPool ? poolMod.readPool : poolMod.pool;
-  if (useReadReplica && !poolMod.readPool) {
-    console.warn('backfill: --use-read-replica set but PG_READ_REPLICA_URL not configured; using primary pool');
-  }
+  const batchSize = Math.min(2000, Math.max(50, Number(getArg('batch-size') || '100') || 100));
+  const sleepMs = Math.min(60_000, Math.max(0, Number(getArg('sleep-ms') || '250') || 250));
+
+  const dbPool = buildBackfillPool();
+
+  // Lazy-load OpenSearch client only after the flag/DSN guards have passed.
+  const opensearch: OpenSearchModule = requireCjs(
+    '../../backend/src/search/opensearchClient',
+  );
 
   const checkpoint = loadBackfillCheckpoint(
     checkpointPath,
@@ -101,7 +195,7 @@ async function main() {
   let cursorId = checkpoint.id;
 
   if (!dryRun) {
-    await ensureOpenSearchMessagesIndex();
+    await opensearch.ensureOpenSearchMessagesIndex();
   }
 
   let scanned = checkpoint.scanned;
@@ -165,7 +259,7 @@ async function main() {
 
     if (!dryRun && docs.length > 0) {
       try {
-        await bulkIndexMessagesToOpenSearch(docs);
+        await opensearch.bulkIndexMessagesToOpenSearch(docs);
         indexed += docs.length;
       } catch {
         failures += docs.length;
@@ -210,21 +304,19 @@ async function main() {
         docsPerSec: Number((indexed / elapsedSec).toFixed(2)),
         batchSize,
         sleepMs,
-        useReadReplica: Boolean(useReadReplica && poolMod.readPool),
+        applicationName: BACKFILL_APPLICATION_NAME,
+        statementTimeoutMs: BACKFILL_STATEMENT_TIMEOUT_MS,
         checkpoint: { createdAt: cursorCreatedAt, id: cursorId, path: checkpointPath },
       },
       null,
       2,
     ),
   );
+
+  await dbPool.end().catch(() => {});
 }
 
-main()
-  .catch((err) => {
-    console.error(err);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await poolMod.pool.end().catch(() => {});
-    if (poolMod.readPool) await poolMod.readPool.end().catch(() => {});
-  });
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
