@@ -683,6 +683,17 @@ run_vm_deploy() {
   local pg_pool_max="$5"
   local extra_upstream_csv="${6:-}"
   local run_db_migrations="${7:-0}"
+  local chatapp_role="${CHATAPP_ROLE:-app}"
+  case "${host}" in
+    "${WSVM1}"|"${WSVM2}"|"${WSVM3}")
+      if [[ "${WS_TIER_ENABLED}" == "true" ]]; then
+        chatapp_role="ws"
+      fi
+      ;;
+    *)
+      chatapp_role="app"
+      ;;
+  esac
   local skip_upstream_parity="1"
   local skip_ingress_post_deploy="1"
   local local_ws_ports_csv=""
@@ -718,6 +729,7 @@ run_vm_deploy() {
     SKIP_INGRESS_POST_DEPLOY="${skip_ingress_post_deploy}" \
     FAST_ROLLBACK="${FAST_ROLLBACK_MODE}" \
     RUN_DB_MIGRATIONS="${run_db_migrations}" \
+    CHATAPP_ROLE="${chatapp_role}" \
     WS_TIER_ENABLED="${WS_TIER_ENABLED}" \
     WSVM1_INTERNAL="${WSVM1_INTERNAL}" \
     WSVM2_INTERNAL="${WSVM2_INTERNAL}" \

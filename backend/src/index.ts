@@ -45,6 +45,15 @@ const PORT = process.env.PORT || 3000;
 let server;
 let shuttingDown = false;
 
+function normalizedChatappRole() {
+  return String(process.env.CHATAPP_ROLE || 'app').trim().toLowerCase();
+}
+
+function isWsOnlyRole() {
+  const role = normalizedChatappRole();
+  return role === 'ws' || role === 'websocket' || role === 'websocket-only';
+}
+
 function isTransientRuntimeError(err) {
   const message = String(err?.message || "").toLowerCase();
   const code = String(err?.code || "");
@@ -169,12 +178,22 @@ async function start() {
   logger.info("waiting for wsServer");
   await wsServer.ready();
 
+  const wsOnlyRole = isWsOnlyRole();
+  logger.info(
+    { chatappRole: normalizedChatappRole(), wsOnlyRole },
+    wsOnlyRole
+      ? 'Starting in websocket-only role; skipping app-tier background workers'
+      : 'Starting in app role; enabling full background workers',
+  );
+
   startPgPoolMetrics(pool);
   startCapacitySnapshotHeartbeat();
-  startChannelLastMessageFlushInterval();
-  startReadStateFlushInterval();
-  startCommunityCountReconcileInterval();
-  startPresenceMirrorFlushInterval();
+  if (!wsOnlyRole) {
+    startChannelLastMessageFlushInterval();
+    startReadStateFlushInterval();
+    startCommunityCountReconcileInterval();
+    startPresenceMirrorFlushInterval();
+  }
 
   server = http.createServer(app);
 
@@ -216,8 +235,10 @@ async function start() {
 
   server.listen({ port: PORT, backlog: 4096 }, () => {
     logger.info({ port: PORT }, "ChatApp API listening");
-    startMessageIngestConsumerIfEnabled();
-    startMeiliWriteStreamConsumerIfEnabled();
+    if (!wsOnlyRole) {
+      startMessageIngestConsumerIfEnabled();
+      startMeiliWriteStreamConsumerIfEnabled();
+    }
   });
 
   process.on("SIGTERM", () => shutdown("SIGTERM"));

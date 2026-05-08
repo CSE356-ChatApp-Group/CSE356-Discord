@@ -936,6 +936,7 @@ _PROD_DEPLOY_OVERLAY_ENV=$(mktemp)
   echo "NODE_OPTIONS=\"--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=16\""
   echo "AUTH_GLOBAL_PER_IP_RATE_LIMIT=false"
   echo "AUTH_PASSWORD_STORAGE_MODE=plain"
+  echo "CHATAPP_ROLE=${CHATAPP_ROLE:-app}"
 } > "${_PROD_DEPLOY_OVERLAY_ENV}"
 # Use an ssh stdin pipe instead of scp: OpenSSH >=9.0 switches scp to the SFTP
 # subsystem which misparses '@' in remote paths, causing "Permission denied".

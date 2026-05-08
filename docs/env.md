@@ -98,6 +98,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `PORT` | HTTP port |
 | `LOG_LEVEL` | Pino level (production default `info`) |
 | `LOG_SERVICE_NAME` | Service name in logs / tracing |
+| `CHATAPP_ROLE` | Runtime role for startup behavior. `app` (default) enables all background loops; `ws`/`websocket`/`websocket-only` runs websocket delivery/replay only and skips app-tier DB/search background workers on startup. |
 | `HTTP_COMPRESSION_ENABLED` | Enable Express gzip compression. Default on outside production, off in production because repo nginx already gzips API responses. |
 | `DATABASE_URL` | Postgres connection string |
 | `REDIS_URL` | Main Redis connection string |
