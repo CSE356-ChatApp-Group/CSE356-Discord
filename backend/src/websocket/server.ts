@@ -733,6 +733,7 @@ const { deliverPubsubMessage } = createRedisPubsubDelivery({
   USER_FEED_SHARD_CHANNEL_SET,
   COMMUNITY_FEED_SHARD_CHANNEL_SET,
   subscribeClient,
+  subscribeClients,
   unsubscribeClient,
   subscribeCommunityClient,
   unsubscribeCommunityClient,

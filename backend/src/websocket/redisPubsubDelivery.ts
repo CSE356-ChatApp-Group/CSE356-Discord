@@ -64,6 +64,7 @@ function createRedisPubsubDelivery(ctx) {
     USER_FEED_SHARD_CHANNEL_SET,
     COMMUNITY_FEED_SHARD_CHANNEL_SET,
     subscribeClient,
+    subscribeClients = null,
     unsubscribeClient,
     subscribeCommunityClient,
     unsubscribeCommunityClient,
@@ -538,13 +539,25 @@ function createRedisPubsubDelivery(ctx) {
         await maybeYieldDeliveryLoop(deliveryLoopIndex);
         if (internalSubscribeChannels) {
           if (!internalSubscribeChannels.length) continue;
-          const results = await Promise.allSettled(
-            internalSubscribeChannels.map((targetChannel) => subscribeClient(ws, targetChannel)),
-          );
-          const failed = results.find((r) => r.status === "rejected");
-          if (failed && failed.status === "rejected") {
+          let subscribeError = null;
+          if (typeof subscribeClients === "function") {
+            try {
+              await subscribeClients(ws, internalSubscribeChannels);
+            } catch (err) {
+              subscribeError = err;
+            }
+          } else {
+            const results = await Promise.allSettled(
+              internalSubscribeChannels.map((targetChannel) => subscribeClient(ws, targetChannel)),
+            );
+            const failed = results.find((r) => r.status === "rejected");
+            if (failed && failed.status === "rejected") {
+              subscribeError = failed.reason;
+            }
+          }
+          if (subscribeError) {
             logger.warn(
-              { err: failed.reason, userId, channelCount: internalSubscribeChannels.length },
+              { err: subscribeError, userId, channelCount: internalSubscribeChannels.length },
               "WS internal auto-subscribe command failed",
             );
           }

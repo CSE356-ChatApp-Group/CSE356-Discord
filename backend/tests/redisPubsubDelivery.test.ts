@@ -494,6 +494,55 @@ describe('redisPubsubDelivery', () => {
     );
   });
 
+  it('batches internal subscribe_channels updates before forwarding the wire event', async () => {
+    const ws = { readyState: 1, _userId: 'alpha' };
+    const subscribeClient = jest.fn(() => Promise.resolve());
+    const subscribeClients = jest.fn(() => Promise.resolve());
+    const sendPayloadToSocket = jest.fn(() => true);
+    const { isUserFeedEnvelope } = require('../src/websocket/userFeed') as {
+      isUserFeedEnvelope: jest.Mock;
+    };
+    isUserFeedEnvelope.mockReturnValueOnce(true);
+
+    const { deliverPubsubMessage } = createRedisPubsubDelivery(createCtx(sendPayloadToSocket, {
+      localUserClients: new Map([['alpha', new Set([ws])]]),
+      subscribeClient,
+      subscribeClients,
+      parseChannelKey: jest.fn((channel: string) => {
+        const match = /^(channel|conversation|community|user):(.+)$/.exec(channel);
+        return match ? { type: match[1], id: match[2] } : null;
+      }),
+    }));
+
+    await deliverPubsubMessage(
+      'userfeed_worker:vm3:4005',
+      JSON.stringify({
+        __wsRoute: { kind: 'users', userIds: ['alpha'] },
+        payload: {
+          __wsInternal: {
+            kind: 'subscribe_channels',
+            channels: ['channel:one', 'channel:two', 'channel:one'],
+          },
+        },
+      }),
+    );
+
+    expect(subscribeClients).toHaveBeenCalledWith(ws, ['channel:one', 'channel:two']);
+    expect(subscribeClient).not.toHaveBeenCalled();
+    expect(sendPayloadToSocket).toHaveBeenCalledWith(
+      ws,
+      'user:alpha',
+      expect.objectContaining({
+        __wsInternal: expect.objectContaining({ kind: 'subscribe_channels' }),
+      }),
+      null,
+      expect.objectContaining({ dedupePath: 'user_topic' }),
+    );
+    expect(subscribeClients.mock.invocationCallOrder[0]).toBeLessThan(
+      sendPayloadToSocket.mock.invocationCallOrder[0],
+    );
+  });
+
   it('seeds pending replay when all local sockets for a userfeed recipient are already closed', async () => {
     const stale = { readyState: 3, _userId: 'alpha' };
     const clients = new Set([stale]);
