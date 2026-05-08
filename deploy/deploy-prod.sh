@@ -818,8 +818,11 @@ ARTIFACT_SHA256=$(openssl dgst -sha256 "$DOWNLOAD_PATH" | awk '{print $2}')
 echo "Artifact SHA256 (local): ${ARTIFACT_SHA256}"
 
 # 4. Copy to production server
+# Use the canonical remote filename (without the local $$ suffix) so the
+# unpack step on the host can find it regardless of which deploy-prod.sh
+# process produced it.
 echo "4. Copying to production..."
-chatapp_scp_to_prod "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/"
+chatapp_scp_to_prod "$DOWNLOAD_PATH" "$PROD_USER@$PROD_HOST:/tmp/chatapp-${RELEASE_SHA}.tar.gz"
 chatapp_scp_to_prod "${SCRIPT_DIR}/health-check.sh" "${SCRIPT_DIR}/smoke-test.sh" "${SCRIPT_DIR}/candidate-ws-smoke.cjs" "$PROD_USER@$PROD_HOST:/tmp/"
 rm "$DOWNLOAD_PATH"
 echo "✓ Copied to production"
