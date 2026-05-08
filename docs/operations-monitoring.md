@@ -345,6 +345,7 @@ Optional fields: **`waitedMs`**, **`lockWaiters`**. Correlate with **`requestId`
 | Read receipts (insert lock) | `read_receipt_shed_total{reason="message_channel_insert_lock_pressure"}`, `read_receipt_requests_total{result="deferred_message_channel_insert_lock_pressure"}`, `message_channel_insert_lock_total`, `message_channel_insert_lock_wait_ms`, `message_channel_insert_lock_pressure_wait_p95_ms`, `message_channel_insert_lock_pressure_recent_timeout_count` | Soft-defer `PUT /messages/:id/read` under per-process lock pressure; see [`history/canary-read-receipt-insert-lock-shedding.md`](history/canary-read-receipt-insert-lock-shedding.md). |
 | Optional RUM | `client_web_vital_*`, `client_rum_batches_total` | Browser-side; requires `ENABLE_CLIENT_RUM` + built frontend flags. |
 | Memory | `process_resident_memory_bytes{job="chatapp-api"}` | **Per Node process** (each `chatapp@` port is a target). **`ChatAppHighMemoryUsage`** in [`alerts.yml`](../infrastructure/monitoring/alerts.yml) fires when RSS **> ~650 MiB for 10m** per target — tune if VM RAM or worker count changes. Grafana overview panel overlays the same threshold. |
+| Build identity | `chatapp_build_info{sha, version} = 1` | Pseudo-metric emitted **once per worker at startup** (see `backend/src/utils/metrics.ts` — `buildInfoGauge`). `sha` is the 40-char `git rev-parse HEAD` from build time, sourced first from `CHATAPP_RELEASE_SHA` (deploy-injected), then from `backend/dist/.build-sha` (written by `backend/scripts/write-dist-build-metadata.cjs`), else `unknown`. `version` is `backend/package.json#version`. **Cardinality:** one series per worker, ages out on next deploy. **Use it to** prove fleet-wide SHA parity without SSHing each VM (`count by (sha) (chatapp_build_info)` should be 1 group with the count equal to the configured worker target count). |
 
 ## Example PromQL (instant or range)
 
@@ -354,6 +355,9 @@ Use these in Prometheus **Graph** or in `scripts/metrics/metrics-snapshot.sh` (o
 # Workers reachable for scrape (multi-VM: expect count == configured targets, often 16)
 sum(up{job="chatapp-api"})
 count(up{job="chatapp-api"})
+
+# Fleet SHA parity (expect ONE row; count = configured worker target count)
+count by (sha, version) (chatapp_build_info)
 
 # Pool stress
 pg_pool_waiting{job="chatapp-api"}
