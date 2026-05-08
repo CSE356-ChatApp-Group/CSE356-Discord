@@ -2,7 +2,7 @@
 
 Status: operational
 Owner: platform-operations
-Last reviewed: 2026-05-01
+Last reviewed: 2026-05-08
 
 **Maintainers:** When you add or change a tunable, update [`.env.example`](../.env.example), this file, and (if staging/prod must pin it) [`deploy/env/`](../deploy/env/). See **[`docs/README.md`](README.md)** for the full maintenance checklist and single sources of truth.
 
@@ -30,6 +30,8 @@ Use these rules before adding or keeping a variable:
 **Prometheus scrape host (runner env, optional):** When rendering `infrastructure/monitoring/prometheus-host.yml` for the DB/monitoring VM, **`deploy-prod.sh`** sets the app VM address via **`PROM_APP_HOST`** if set; otherwise it uses the first address from **`hostname -I`** on the prod app SSH host, then falls back to **`10.0.0.237`**. Staging uses **`STAGING_PROM_APP_HOST`** with the same pattern, default **`10.128.0.2`**. Override when VPC addressing differs.
 
 **Three-VM prod orchestrator (`deploy-prod-multi.sh`, runner env):** **`PROM_REDIS_HOST`** is the **private** address Prometheus uses for the `redis` scrape target (default **VM1 internal**, `10.0.0.237` in the current inventory). **`REDIS_EXPORTER_SSH_HOST`** is the **SSH-reachable** host where `redis_exporter` is started in Docker (default **VM1 public**, `130.245.136.44`). Do not point SSH at a VPC-only IP from a machine outside the VLAN — the old default did that and caused deploy-time SSH timeouts while metrics checks still passed.
+
+**Dedicated websocket tier (`deploy-prod-multi.sh`, inventory):** **`CHATAPP_INV_WS_TIER_INTERNAL_LB_PORT`** (default **4080** in [`deploy/inventory-defaults.sh`](../deploy/inventory-defaults.sh)) makes VM1’s **`upstream app_ws`** use **one address per WS host** (`ws_private_ip:port`). Each WS host installs nginx via [`deploy/install-ws-tier-internal-lb.sh`](../deploy/install-ws-tier-internal-lb.sh) before upstream rewrites and balances **`least_conn`** across local **`chatapp@4000+`**. Export **`CHATAPP_INV_WS_TIER_INTERNAL_LB_PORT=0`** (or **`WS_TIER_INTERNAL_LB_PORT=0`**) to keep the legacy flat list of **every** worker port per WS host (original consistent-hash ring).
 
 ## Grading / autograder hosts
 
@@ -198,6 +200,7 @@ All have defaults in code unless noted. Omit in `.env` for normal operation.
 | `MESSAGE_CACHE_EPOCH_TTL_SECS` | Retention for message-list epoch/version keys (`messages:*:cacheEpoch`) bumped during cache busts (default **2592000** s / 30d, clamp **60–7776000**). Keeps hot-scope correctness while letting old scopes age out. |
 | `FANOUT_CACHE_VERSION_KEY_TTL_SECS` | Retention for fanout version keys (`channel:*:user_fanout_targets_v`, `conversation:*:fanout_targets_v`) bumped during audience invalidation (default **2592000** s / 30d, clamp **60–7776000**). |
 | `COMMUNITY_COUNT_RECONCILE_INTERVAL_MS`, `COMMUNITY_COUNT_RECONCILE_BATCH_SIZE`, `COMMUNITY_COUNT_RECONCILE_LOCK_TTL_MS`, `COMMUNITY_COUNT_RECONCILE_PRESSURE_QUEUE` | Background reconcile of denormalized community member counts (`communityMemberCount.ts`; defaults **300000** ms interval, batch **100**, lock TTL tied to interval, pool-waiting guard **2**). |
+| `COMMUNITY_MEMBERSHIP_CACHE_TTL_SECS` | TTL (seconds, default **3600**, min **60**) for the per-user `community_member:user:<uid>` Redis SET that backs the `POST /api/v1/communities/:id/join` idempotent-fast-path (`communityMembershipCache.ts`). Slides forward on every join attempt; expired keys self-heal at the next request via the slow-path `INSERT … ON CONFLICT DO NOTHING`. Watch `community_join_cache_total{result="hit"\|"miss"\|"repopulate"\|"error"}`. |
 | `COMMUNITIES_HEAVY_QUERY_TIMEOUT_MS`, `COMMUNITIES_HEAVY_QUERY_MAX_INFLIGHT` | `GET /communities` unread-count hydration timeout plus concurrency cap before serving the normal base list with `unread_channel_count=0`; watch route p95 and `endpoint_list_cache_bypass_total{endpoint="communities",reason=~"pressure|timeout"}` |
 | `CHANNEL_MESSAGE_PUBLISH_CHANNEL_FIRST` | When `true` (default), `message:created` is published to `channel:<uuid>` before logical per-member user delivery |
 | `CHANNEL_MESSAGE_USER_FANOUT` | Master toggle for logical per-member duplicate fanout on channel posts (set **`0`/`false`/`off`** to disable). Distinct from mode below. |

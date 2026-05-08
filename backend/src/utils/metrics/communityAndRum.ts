@@ -28,6 +28,19 @@ const communityCountCacheTotal = new client.Counter({
   labelNames: ['result'],
 });
 
+/**
+ * `POST /api/v1/communities/:id/join` Redis fast-path outcomes.
+ *   hit         — SISMEMBER said member; INSERT + fan-out skipped
+ *   miss        — cache cold; INSERT inserted a new row
+ *   repopulate  — cache cold; INSERT was a no-op (DB already had the row)
+ *   error       — Redis unavailable; fell through to slow path
+ */
+const communityJoinCacheTotal = new client.Counter({
+  name: 'community_join_cache_total',
+  help: 'Community-join idempotent fast-path outcomes (per-user membership Redis cache)',
+  labelNames: ['result'],
+});
+
 /** Browser timing vitals (LCP, INP, FCP, TTFB) in seconds. */
 const clientWebVitalTimingSeconds = new client.Histogram({
   name: 'client_web_vital_timing_seconds',
@@ -54,6 +67,7 @@ module.exports = {
   communityCountPgReconcileTotal,
   communityCountPgReconcileSkippedTotal,
   communityCountCacheTotal,
+  communityJoinCacheTotal,
   clientWebVitalTimingSeconds,
   clientWebVitalClsScore,
   clientRumBatchesTotal,

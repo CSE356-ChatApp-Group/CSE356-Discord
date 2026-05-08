@@ -58,6 +58,14 @@ router.delete(
         "SELECT user_id FROM community_members WHERE community_id=$1",
         [req.params.id],
       );
+      // Invalidate the per-user membership cache for every member up-front:
+      // FK CASCADE on the `DELETE FROM communities` below silently removes
+      // their `community_members` rows, so the Redis flag (which is the
+      // join fast-path's source of truth) must be cleared in lock-step.
+      C.forgetUserCommunityMembershipBulk(
+        memberRows.map((r) => r.user_id),
+        req.params.id,
+      ).catch(() => {});
       await C.cleanupCommunityUnreadCounterKeys(req.params.id);
 
       // FK cascade from messages.channel_id -> channels.id was dropped (migration 023).
