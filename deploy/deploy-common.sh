@@ -22,7 +22,7 @@ CHATAPP_NGINX_PROXY_RETRY_LINE_LEGACY='proxy_next_upstream error timeout http_50
 # --- Multiplexed scp to a prod-family VM (ControlPath must match deploy-prod-multi.sh ssh_vm). ---
 # Requires: PROD_USER. Optional: DEPLOY_SSH_EXTRA_OPTS.
 chatapp_scp_to_multi_vm() {
-  local host="${1:?host required}"
+  : "${1:?host required}"
   shift
   # shellcheck disable=SC2086
   scp -q \
