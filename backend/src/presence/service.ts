@@ -124,10 +124,17 @@ async function flushPresenceDbMirrorBatch() {
 
   try {
     await query(
-      `INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
-       SELECT *
-       FROM UNNEST($1::uuid[], $2::presence_status[], $3::text[], $4::timestamptz[])
-            AS payload(user_id, status, custom_msg, updated_at)
+      `WITH _presence_mirror_settings AS MATERIALIZED (
+         SELECT set_config('synchronous_commit', 'off', true)
+       ),
+       payload AS (
+         SELECT *
+         FROM UNNEST($1::uuid[], $2::presence_status[], $3::text[], $4::timestamptz[])
+              AS payload(user_id, status, custom_msg, updated_at)
+       )
+       INSERT INTO presence_snapshots (user_id, status, custom_msg, updated_at)
+       SELECT payload.*
+       FROM payload, _presence_mirror_settings
        ON CONFLICT (user_id) DO UPDATE SET
          status = EXCLUDED.status,
          custom_msg = EXCLUDED.custom_msg,
