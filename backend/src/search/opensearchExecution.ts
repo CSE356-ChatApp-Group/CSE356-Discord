@@ -2,7 +2,10 @@ const {
   runSearchReadOnlyQuery,
   runSearchQuery,
 } = require('./searchExecution');
-const { SEARCH_RECHECK_USE_READ_REPLICA } = require('./searchQueryEnv');
+const {
+  SEARCH_RECHECK_USE_READ_REPLICA,
+  openSearchMaxCandidates,
+} = require('./searchQueryEnv');
 const {
   buildResult,
 } = require('./resultFormatting');
@@ -28,9 +31,17 @@ const {
   OPENSEARCH_INDEX_MESSAGES,
 } = require('./opensearchClient');
 
+function resolveOpenSearchCandidateSize(opts: Record<string, any> = {}) {
+  const configuredMax = openSearchMaxCandidates();
+  const limitRaw = Number(opts.limit);
+  const offsetRaw = Number(opts.offset);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 20;
+  const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0;
+  const pageWindow = offset + Math.max(100, limit * 4);
+  return Math.min(configuredMax, Math.max(50, pageWindow));
+}
+
 function buildOpenSearchQuery(q: string, opts: Record<string, any>) {
-  const rawMax = parseInt(process.env.OPENSEARCH_MAX_CANDIDATES || '250', 10);
-  const maxCandidates = Math.min(Math.max(Number.isFinite(rawMax) && rawMax > 0 ? rawMax : 250, 50), 2000);
   const filters: any[] = [{ term: { isDeleted: false } }];
   if (opts.communityId) {
     filters.push({ term: { communityId: String(opts.communityId) } });
@@ -47,7 +58,7 @@ function buildOpenSearchQuery(q: string, opts: Record<string, any>) {
     filters.push({ range: { createdAt: range } });
   }
   return {
-    size: maxCandidates,
+    size: resolveOpenSearchCandidateSize(opts),
     from: 0,
     _source: ['id'],
     query: {
@@ -155,6 +166,7 @@ async function searchWithOpenSearchBackend(
 
 module.exports = {
   buildOpenSearchQuery,
+  resolveOpenSearchCandidateSize,
   searchOpenSearchCandidates,
   searchWithOpenSearchBackend,
 };
