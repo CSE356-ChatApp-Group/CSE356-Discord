@@ -597,6 +597,9 @@ echo "✓ Backup prepared"
 deploy_log_phase "database backup complete"
 fi  # end SKIP_BACKUP check
 
+# Primary Postgres IP for PgBouncer [databases] host when Node binds :6432 on a LAN address (multi-VM).
+_PG_BACKEND_FIX_HOST="${PG_PRIMARY_HOST:-${CHATAPP_INV_DB_INTERNAL:-10.0.1.62}}"
+
 # 2b. Install/configure PgBouncer (idempotent — safe on every deploy)
 echo "2b) Installing and configuring PgBouncer..."
 ssh_prod "mkdir -p \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}\""
@@ -619,6 +622,13 @@ TMPFILES
   # (typical code-only redeploy) to eliminate any transient connection stall risk.
   _pgb_hash_before=\$(sha256sum /etc/pgbouncer/pgbouncer.ini 2>/dev/null | awk '{print \$1}' || echo none)
   sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS} PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE} PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE} PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} PG_PRIMARY_HOST=\"${PG_PRIMARY_HOST:-${CHATAPP_INV_DB_INTERNAL:-10.0.1.62}}\" CHATAPP_INV_DB_INTERNAL=\"${CHATAPP_INV_DB_INTERNAL:-10.0.1.62}\" python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
+  # Multi-VM deploy (PGBOUNCER_BIND_ADDR is each worker VM's LAN IP): older pgbouncer-setup.py releases
+  # mistakenly used that IP as the PostgreSQL backend host. Pin backend to the primary DB VLAN address
+  # after every setup so any artifact/runner checkout cannot regress production mid-rollout.
+  if [ -n \"${PGBOUNCER_BIND_ADDR:-}\" ] && [ \"${PGBOUNCER_BIND_ADDR}\" != \"127.0.0.1\" ]; then
+    sudo sed -i.bak-deploy-pg-primary \"s/^\\(chatapp_prod = \\)host=[^ ]*/\\1host=${_PG_BACKEND_FIX_HOST}/\" /etc/pgbouncer/pgbouncer.ini
+    echo \"PgBouncer backend host pinned to ${_PG_BACKEND_FIX_HOST} (client bind ${PGBOUNCER_BIND_ADDR})\"
+  fi
   _pgb_hash_after=\$(sha256sum /etc/pgbouncer/pgbouncer.ini 2>/dev/null | awk '{print \$1}' || echo none)
   sudo systemctl enable pgbouncer
   if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then
