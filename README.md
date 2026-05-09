@@ -1,394 +1,267 @@
 # ChatApp MVP
 
-A production-ready messaging platform designed for cloud-native deployment.
-Supports real-time messaging, communities, channels, DMs, presence, search, and attachments.
+ChatApp is a Discord-like messaging system with communities, channels, direct messages, presence, search, attachments, and real-time WebSocket delivery. This README is the main final-project documentation entrypoint for a new developer or grader. Deeper operational references live in [`docs/README.md`](docs/README.md).
 
----
+## Project Overview
 
-## Architecture Overview
+The main purpose of the system is to provide a production-style messaging server that accepts HTTP API traffic, stores durable chat state in Postgres, and pushes real-time events to connected clients over WebSockets. The frontend talks to the backend through Nginx using REST endpoints for durable actions and a WebSocket connection for live updates.
 
+Major components:
+
+| Component | Role |
+|-----------|------|
+| Frontend client | Browser UI for auth, communities, channels, DMs, presence, search, and attachments. |
+| Nginx | Reverse proxy, TLS entrypoint in production, and load balancer for API/WebSocket workers. |
+| Backend API workers | Node/Express HTTP API plus WebSocket server. Multiple workers can run across VMs. |
+| Postgres | Durable source of truth for users, communities, channels, messages, read state, and metadata. |
+| Redis | Pub/Sub bus for realtime fanout, cache store, presence TTLs, idempotency leases, and coordination. |
+| MinIO/S3-compatible storage | Attachment object storage through pre-signed URLs. |
+| Monitoring stack | Prometheus, Grafana, Loki, Tempo, Alertmanager, and node exporters for operations and load analysis. |
+
+Architecture:
+
+```text
+Browser / Mobile Client
+        |
+        | HTTP / WebSocket
+        v
+Nginx reverse proxy / load balancer
+        |
+        +-------------------+-------------------+
+        |                   |                   |
+        v                   v                   v
+API + WS worker       API + WS worker      API + WS worker
+        \                   |                   /
+         \                  | Redis Pub/Sub    /
+          +-----------------v-----------------+
+                            |
+                            v
+                         Postgres
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Browser / Mobile Client                        │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │ HTTP/WebSocket
-                    ┌────────▼────────┐
-                    │ Nginx (prod VM1)│  ← TLS / reverse proxy; workers on VM1–3
-                    └────────┬────────┘
-          ┌─────────────────┼────────────────┐
-   ┌──────▼──────┐   ┌──────▼──────┐  ┌──────▼──────┐
-   │  API workers │   │  API workers │  │  API workers │
-   │   (VM1)      │   │   (VM2)      │  │   (VM3)      │
-   └──────┬──────┘   └──────┬──────┘  └──────┬──────┘
-          └──────────────────┼────────────────┘
-                     ┌───────▼───────┐
-                     │  Redis Pub/Sub│  ← WS fanout, presence, cache
-                     └───────┬───────┘
-                     ┌───────▼───────┐
-                     │   Postgres    │  ← DB host / replica (see docs/infrastructure-inventory.md)
-                     └───────────────┘
-```
 
-### Redis Pub/Sub Fanout
+When a user posts a message, the backend validates access, inserts the message in Postgres, publishes a `message:created` event through Redis, and every API worker with matching local WebSocket clients forwards that event. The delivery contract and course-grading interpretation are documented in [`docs/architecture/realtime-delivery-contract.md`](docs/architecture/realtime-delivery-contract.md) and [`docs/architecture/grading-delivery-semantics.md`](docs/architecture/grading-delivery-semantics.md).
 
-When a message is created on any API node:
+## Running the System
 
-1. The handler inserts the row into Postgres
-2. Calls `fanout.publish(channel, event)` → publishes to Redis
-3. All 3 API nodes receive it via their dedicated subscriber connection
-4. Each node delivers it to its locally-connected WebSocket clients
+Required local dependencies:
 
-This means _any_ client connected to _any_ node receives real-time events instantly.
+- Docker and Docker Compose for the full local stack.
+- Node.js and npm for direct development, tests, and builds.
+- Optional: `k6` for load tests, `gh` for release/deploy workflows, and `promtool`/Ansible tooling for deploy-script validation.
 
-**Course grading / throughput (“Failed deliveries”, outages):** see [`docs/architecture/grading-delivery-semantics.md`](docs/architecture/grading-delivery-semantics.md) for how the 15s-per-listener rule maps to HTTP 201, WebSocket `message:created`, and common false positives (403, harness scope).
+Configuration:
 
-**Documentation:** [`docs/README.md`](docs/README.md) (canonical sources and update rules), [`AGENTS.md`](AGENTS.md) (quick links for contributors and coding agents).
+- Start from [`.env.example`](.env.example): `cp .env.example .env`.
+- Full variable semantics live in [`docs/env.md`](docs/env.md).
+- Git-tracked staging and production required profiles live in [`deploy/env/staging.required.env`](deploy/env/staging.required.env) and [`deploy/env/prod.required.env`](deploy/env/prod.required.env).
+- Current host topology, SSH users, and sizing live in [`docs/infrastructure-inventory.md`](docs/infrastructure-inventory.md).
 
----
-
-## Quick Start (Local)
+Quick start:
 
 ```bash
-# 1. Clone and configure
 git clone https://github.com/CSE356-ChatApp-Group/CSE356-Discord.git chatapp
 cd chatapp
-cp .env.example .env          # edit secrets as needed
-
-# 2. Start all services
+cp .env.example .env
 docker compose up -d
-
-# 3. Verify
-curl http://localhost/health   # → {"status":"ok"}
+curl http://localhost/health
 ```
 
-## Observability & Production Debugging
+Local service URLs after startup:
 
-When something breaks in production, start here:
+| Service | URL | Notes |
+|---------|-----|-------|
+| API | `http://localhost/api/v1` | Routed through Nginx. |
+| WebSocket | `ws://localhost/ws` | Pass `token=<accessToken>` after login. |
+| MinIO console | `http://localhost:9001` | S3-compatible object storage UI. |
+| Grafana | `http://localhost:3001` | Default local credentials are `admin` / `admin`. |
+| Prometheus | `http://127.0.0.1:9090` | Metrics and PromQL. |
+| Alertmanager | `http://localhost:9093` | Local alert routing. |
 
-### Where to see logs
-
-- **Fastest path:** `docker compose logs -f api nginx`
-- **Grafana logs UI:** `http://localhost:3001` → **Explore** → select **Loki**
-- Logs now include a **request ID** (`x-request-id`) so you can trace one failing request end-to-end.
-
-### Where to see metrics and traces
-
-- **Health check:** `http://localhost/health`
-- **Prometheus metrics:** `http://localhost/metrics`
-- **Grafana traces:** `http://localhost:3001` → **Explore** → select **Tempo**
-- **Grafana dashboard:** `http://localhost:3001` → **Dashboards** → **ChatApp** → **ChatApp Overview**
-- **Alertmanager UI:** `http://localhost:9093`
-- **Prometheus UI:** `http://127.0.0.1:9090`
-- **Loki API:** `http://127.0.0.1:3100`
-- **Tempo API / metrics:** `http://127.0.0.1:3200`
-- **Remote browser access:**
-  - Staging Grafana: `http://136.114.103.71/grafana/`
-  - Production Grafana: `https://group-8.cse356.compas.cs.stonybrook.edu/grafana/`
-- **Prometheus alerts:** representative names include `ChatAppApiDown`, `ChatAppHigh5xxRate`, `ChatAppHighP95Latency`, `ChatAppEventLoopLagHigh`, `ChatAppHighMemoryUsage`, `ChatAppCpuSaturationHigh`, `ChatAppPgPoolPressure`, `ChatAppPgPoolSevereSaturation`, `ChatAppOverloadSheddingActive`, `ChatAppHostCpuHigh`, `ChatAppHostMemoryPressure`, `ChatAppHostSwapIoHigh`, and `ChatAppDiskSpaceLow`. There is **no** `ChatAppMinioDown` rule in-repo; the full set is `infrastructure/monitoring/alerts.yml`.
-
-### Monitoring quick commands
+Common commands:
 
 ```bash
-npm run monitoring:up       # start / refresh Grafana, Prometheus, Loki, Tempo, etc.
-npm run monitoring:status   # one-screen health summary + URLs
-npm run monitoring:logs     # tail monitoring logs
-npm run monitoring:down     # stop only monitoring services
+docker compose up -d       # start local stack
+docker compose logs -f api nginx
+docker compose down        # stop local stack
+
+npm test                   # backend Jest, then frontend Vitest
+npm run build              # build backend and frontend
+npm run docs:check         # documentation consistency checks
 ```
 
-**Metric catalog, PromQL examples, and how to export data for incidents / Cursor:** [`docs/operations-monitoring.md`](docs/operations-monitoring.md). From any host that can reach Prometheus: `PROMETHEUS_URL=http://127.0.0.1:9090 npm run metrics:snapshot` or `PROMETHEUS_URL=... npm run metrics:snapshot -- --write var/metrics-snapshot.txt`.
-
-### Error triage workflow
-
-1. Open Grafana → **Explore** → select **Loki**.
-2. Start with `{"service":"chatapp-api"}` or search for a returned `requestId` / `x-request-id`.
-3. For server faults, narrow to `"level":"error"` or the message `Unhandled error`.
-4. Use the same time window in **Tempo** to inspect sampled traces for the failing path.
-
-If you only have shell access, `docker compose logs -f api nginx` is still the fastest first look.
-
-### Scale-up signals to watch most closely
-
-If your main question is **"do we need a bigger prod server yet?"**, the best alerts are:
-
-1. `ChatAppHostCpuHigh` or `ChatAppCpuSaturationHigh` for 10–15 minutes
-2. `ChatAppPgPoolPressure`, `ChatAppPgPoolSevereSaturation`, or `ChatAppOverloadSheddingActive`
-3. `ChatAppHighP95Latency` together with CPU / memory pressure
-
-Those three together are the clearest early warning that prod needs more headroom.
-
-### Discord alerting setup
-
-Recommended channel layout:
-
-- `local` → no alerts by default, or a personal test channel
-- `staging` → `#chatapp-staging-alerts`
-- `production` → `#chatapp-prod-alerts`
-
-Set the environment and webhook in `.env`:
+Targeted tests:
 
 ```bash
-ALERT_ENVIRONMENT=local           # local | staging | production
-DISCORD_WEBHOOK_URL_LOCAL=
-DISCORD_WEBHOOK_URL_STAGING=
-DISCORD_WEBHOOK_URL_PROD=
+npm --prefix backend run test
+npm --prefix backend run test:docker
+npm --prefix frontend run test
 ```
 
-Then start or reload the monitoring services:
+If no `DATABASE_URL` is provided, the backend test runner provisions disposable Postgres and Redis containers for Jest. If `DATABASE_URL` is set manually, the runner refuses unsafe non-test databases unless explicitly overridden.
 
-```bash
-docker compose up -d --force-recreate alertmanager prometheus
+Deployment:
+
+- CI builds and tests backend/frontend and packages immutable release artifacts.
+- Production deploys are manual and use canary rollout steps; see [`deploy/README.md`](deploy/README.md).
+- The course production layout is multi-VM and environment-specific. Do not copy IPs or env blocks from this README; use [`docs/infrastructure-inventory.md`](docs/infrastructure-inventory.md) and `deploy/env/*.required.env`.
+
+Cloud assumptions:
+
+- Production expects reachable Postgres, Redis, object storage, and monitoring endpoints.
+- App workers are intended to be stateless aside from local WebSocket connections; shared state is in Postgres and Redis.
+- WebSocket clients must tolerate reconnects and resubscribe/rehydrate after `ready`.
+
+## Scaling and Load Handling
+
+The scaling work focused on finding the actual bottleneck under load, measuring it, and then changing either the data path or deployment topology. Evidence is spread across [`load-tests/README.md`](load-tests/README.md), [`docs/p99-spike-analysis.md`](docs/p99-spike-analysis.md), [`docs/route-performance-audit.md`](docs/route-performance-audit.md), [`docs/operations-monitoring.md`](docs/operations-monitoring.md), and generated reports under `artifacts/load-tests/`.
+
+Main bottlenecks identified:
+
+| Bottleneck | Evidence used | Changes made | Why it helped | Remaining tradeoff |
+|------------|---------------|--------------|---------------|--------------------|
+| Postgres pool/query pressure | Prometheus route p95/p99, `pg_pool_waiting`, query counts per request, `pg_stat_statements`, and load-test status mixes. | Added read-replica routing, reduced query round trips, tuned pool/overload behavior, added route-specific diagnostics, and optimized hot message/conversation paths. | Fewer synchronous DB calls per request and better separation of read load from primary writes. | Strong reads may still need primary routing; replica reads can lag briefly. |
+| Message and WebSocket fanout | Delivery failures, WebSocket metrics, Redis fanout counters, generated-client behavior, and grader 15s delivery semantics. | Standardized channel/conversation/user topic fanout, sharded logical user delivery, strict WebSocket `ready`, pending replay, queue/backpressure metrics, and Redis Pub/Sub delivery maps. | Any API worker can accept a message while every worker can deliver it to its local sockets through Redis. | Duplicate fanout improves compatibility but increases Redis work for large audiences. |
+| Cache invalidation keeping hit rates near zero | `endpoint_list_cache_total`, cache invalidation counters, route p99 spikes, and production p99 analysis. | Reduced per-message structural cache invalidation, added cache guardrails, tuned list/cache TTLs, and documented Redis key families. | Hot list routes can reuse cached responses instead of repeatedly running expensive DB queries. | Caches must be invalidated carefully on membership or structural changes. |
+| Search tail latency | Search route p95/p99, Meili/OpenSearch latency breakdowns, fallback counters, and Postgres recheck metrics. | Added dedicated search backend paths behind flags, bounded candidate/recheck work, tuned fallback behavior, and preserved Postgres fallback for correctness. | Search no longer amplifies tail latency by repeatedly falling through unbounded fallback paths. | Dedicated search infrastructure adds indexing lag and operational complexity. |
+| Production rollout risk | Failed deploy attempts, fleet version skew, nginx/WebSocket drain behavior, and release artifact integrity checks. | Added manual production canaries, build-SHA verification, safer rollback/deploy locks, nginx drain handling, monitoring sync, and fleet SHA metrics. | Rollouts can prove one VM before fleet-wide deployment and can verify that all workers run the intended release. | Staging may be unavailable, so production canaries and monitoring must be used carefully. |
+
+Load testing:
+
+- `npm run load:staging:smoke`, `npm run load:staging:slo`, `npm run load:staging:break`, and related profiles exercise auth, community/conversation/message reads, message posts, read receipts, and WebSocket churn.
+- Each run records k6 summaries, Prometheus snapshots, logs, metadata, and a report under `artifacts/load-tests/<timestamp>/`.
+- Status `0`, `503`, `5xx`, p95/p99 latency, Postgres pool pressure, Redis fanout delay, event loop lag, and WebSocket delivery are analyzed together instead of treating one metric as the whole story.
+
+The result is not just "more servers"; the system uses measured route-level and infrastructure evidence to decide whether to optimize SQL, cache behavior, Redis fanout, search fallback, worker layout, or deployment capacity.
+
+## Design Decisions
+
+| Decision | Choice | Reason |
+|----------|--------|--------|
+| Durable data store | Postgres with UUID keys, migrations, and optional read-replica routing. | Relational constraints fit users, memberships, channels, messages, and read state; replicas provide a path for read scaling. |
+| Realtime transport | WebSockets on every API worker with Redis Pub/Sub as the shared bus. | Workers stay horizontally scalable while Redis bridges events across processes and hosts. |
+| Delivery compatibility | Publish message events to message-bearing channel/conversation topics and logical user streams where needed. | Rich clients can subscribe to precise topics, while generated or reconnecting clients still receive compatible `message:created` events. |
+| Caching | Redis list caches, idempotency leases, presence TTLs, fanout target caches, and key maps. | Redis absorbs repeated reads and short-lived coordination without making the backend stateful. |
+| Backpressure and overload | Pool guards, overload stages, fanout queues, timeout metrics, and shedding where safer than hanging. | Under load, fast failure and clear metrics are easier to debug than unbounded queues. |
+| Search | Postgres full-text search plus optional Meili/OpenSearch paths with bounded fallback and recheck. | Postgres is the correctness baseline; dedicated search can improve latency/scale when carefully bounded. |
+| Deployment | Immutable release artifacts, manual production canary, multi-VM rollout, build-SHA checks, and rollback scripts. | Reduces version skew and lets risky backend changes soak before full cutover. |
+| Observability | Prometheus metrics, Grafana dashboards, Loki logs, Tempo traces, Alertmanager alerts, request IDs, and runbooks. | Scaling decisions and incidents need concrete evidence, not guesswork. |
+| Authentication/security | JWT-based protected API, OAuth/local auth support, token revocation paths, private object storage through pre-signed URLs. | Keeps API calls stateless while avoiding public attachment buckets. |
+
+## Developer Guide
+
+Repository structure:
+
+```text
+backend/                 Express API, WebSocket server, DB/Redis/search code, Jest tests
+frontend/                Browser client and frontend tests
+migrations/              Postgres schema migrations
+infrastructure/          Nginx and monitoring configuration
+deploy/                  Release, env profile, and production/staging deploy scripts
+load-tests/              k6 staging load profiles and capacity test docs
+scripts/                 Metrics, release, Redis, Postgres, load, and ops helpers
+docs/                    Canonical docs index, env, topology, operations, architecture, history
+artifacts/load-tests/    Generated historical load-test summaries
 ```
 
-Checks:
+Important starting points:
 
-1. Confirm Alertmanager is healthy at `http://localhost:9093/#/status`.
-2. Test the full path by temporarily stopping the API:
-   ```bash
-   docker compose stop api
-   # wait ~2 minutes for ChatAppApiDown
-   docker compose start api
-   ```
-3. Alerts now include the `environment` label so the message clearly says `local`, `staging`, or `production`.
+- Docs map and maintenance rules: [`docs/README.md`](docs/README.md)
+- Env semantics: [`docs/env.md`](docs/env.md)
+- Infrastructure inventory: [`docs/infrastructure-inventory.md`](docs/infrastructure-inventory.md)
+- Metrics and PromQL: [`docs/operations-monitoring.md`](docs/operations-monitoring.md)
+- Redis keys and Pub/Sub patterns: [`docs/redis-key-map.md`](docs/redis-key-map.md)
+- Incident runbooks: [`docs/runbooks.md`](docs/runbooks.md)
+- Backend hotspots: [`docs/backend-hotspots.md`](docs/backend-hotspots.md)
 
-> Critical alerts will ping `@here`; warning alerts will post without paging everyone. Keeping staging and prod in separate channels is the most usable setup.
+How to add or modify a feature:
 
-### Production logging behavior
+1. Find the relevant backend route, service, or frontend screen from the structure above.
+2. Check [`docs/README.md`](docs/README.md) for the canonical doc that owns the behavior, env variable, metric, or topology claim.
+3. Add or update tests near the changed behavior. Backend tests live in `backend/tests/`; frontend tests live under `frontend/` and `frontend/e2e/`.
+4. If the change adds an env var, update [`.env.example`](.env.example), [`docs/env.md`](docs/env.md), and required deploy profiles if production/staging must pin it.
+5. If the change adds a metric, define it in `backend/src/utils/metrics.ts` or the existing metrics modules and document operator-facing usage in [`docs/operations-monitoring.md`](docs/operations-monitoring.md).
+6. Run targeted tests, then `npm test`, `npm run build`, and `npm run docs:check` when docs changed.
 
-To avoid slowing down a busy server:
+Debugging common problems:
 
-- successful, fast requests are mostly **suppressed in production**
-- **4xx**, **5xx**, and **slow requests** are still logged
-- sensitive fields like tokens, cookies, and passwords are **redacted**
-- tracing is **off by default**; when enabled, production sampling defaults to `OTEL_TRACES_SAMPLE_RATIO=0.05`
+| Problem | First checks |
+|---------|--------------|
+| API errors or latency | `docker compose logs -f api nginx`, request ID logs, Grafana route p95/p99, [`docs/runbooks.md`](docs/runbooks.md). |
+| WebSocket delivery miss | Verify HTTP status, WebSocket `ready`, `message:created`, Redis fanout metrics, and [`docs/architecture/grading-delivery-semantics.md`](docs/architecture/grading-delivery-semantics.md). |
+| Database pressure | `pg_pool_waiting`, route query counts, `pg_stat_statements`, and [`scripts/postgres/pg-stat-statements-snapshot.sh`](scripts/postgres/pg-stat-statements-snapshot.sh). |
+| Cache behavior | `endpoint_list_cache_total`, invalidation counters, Redis key map, and cache guardrail snapshots. |
+| Search tail latency | Search backend metrics, fallback counters, candidate/recheck timing, and [`docs/p99-spike-analysis.md`](docs/p99-spike-analysis.md). |
+| Deployment issue | Release build SHA, deploy lock, nginx upstreams, fleet SHA metric, and [`deploy/README.md`](deploy/README.md). |
 
-Useful env knobs:
+Known issues and future improvements:
 
-```bash
-LOG_LEVEL=info
-OTEL_ENABLED=false
-OTEL_TRACES_SAMPLE_RATIO=0.05
-```
+- Some team contribution details are still placeholders in [`TEAM.md`](TEAM.md).
+- Search can continue moving toward a dedicated backend once indexing and fallback behavior are stable.
+- Very large channels still require careful fanout and Redis capacity planning.
+- Read replicas improve read throughput but introduce possible short replication lag.
+- Staging availability has changed over time; production canaries currently carry more validation responsibility.
+- Future product features such as reactions, threads, polls, and voice channels can extend the existing message and realtime patterns.
 
-## Testing
+### API Reference
 
-Run all tests from the monorepo root:
+All protected endpoints require `Authorization: Bearer <accessToken>`.
 
-```bash
-npm test
-```
+Authentication:
 
-This runs backend Jest tests and frontend Vitest tests in sequence.
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/auth/register` | No | Local registration. |
+| `POST` | `/auth/login` | No | Local login. |
+| `POST` | `/auth/refresh` | No | Refresh access token. |
+| `POST` | `/auth/logout` | Yes | Revoke tokens. |
+| `GET` | `/auth/google` | No | Start Google OAuth. |
+| `GET` | `/auth/github` | No | Start GitHub OAuth. |
 
-Run backend tests only (auto-provisions disposable Postgres + Redis if needed):
+Messages:
 
-```bash
-cd backend
-npm test
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/messages` | Paginated history by `channelId` or `conversationId`; supports `before`, `after`, and cached latest pages. |
+| `GET` | `/messages/context/:messageId` | Search jump/context window around a message. |
+| `POST` | `/messages` | Send a message; supports `Idempotency-Key` for safe retries. |
+| `PATCH` | `/messages/:id` | Edit own message. |
+| `DELETE` | `/messages/:id` | Delete own message. |
+| `PUT` | `/messages/:id/read` | Update read cursor. |
 
-If `DATABASE_URL` is not provided, the backend test runner starts disposable
-Postgres and Redis containers, runs migrations, executes Jest, and cleans up.
-In CI or other pre-provisioned environments, it uses existing environment values.
+Communities:
 
-To always run against disposable Docker services (even if you exported
-`DATABASE_URL` / `REDIS_URL` in your shell), use:
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/communities` | Visible communities; supports keyset pagination with `limit` and `after`. |
 
-```bash
-cd backend
-npm run test:docker
-```
-
-Safety rails: when `DATABASE_URL` is set manually, the backend test runner now
-refuses to run unless it looks like a test database and `REDIS_URL` is set.
-Override intentionally with `ALLOW_NON_TEST_DATABASE=1`.
-
-Run frontend tests only:
-
-```bash
-cd frontend
-npm test
-```
-
-## Build
-
-Build both packages from the monorepo root:
-
-```bash
-npm run build
-```
-
-### Services after startup
-
-| Service       | URL                     | Notes                |
-| ------------- | ----------------------- | -------------------- |
-| API           | http://localhost/api/v1 | via Nginx            |
-| WebSocket     | ws://localhost/ws       | via Nginx            |
-| MinIO console | http://localhost:9001   | S3 object storage UI |
-| Grafana       | http://localhost:3001   | admin / admin        |
-
----
-
-## Project Structure
-
-```
-chatapp/
-├── backend/
-│   ├── src/
-│   │   ├── index.ts              Entry point (HTTP + WS server)
-│   │   ├── app.ts                Express app, middleware, route mounting
-│   │   ├── db/
-│   │   │   ├── pool.ts           Postgres pool singleton
-│   │   │   ├── redis.ts          Redis + subscriber clients
-│   │   │   └── migrate.ts        SQL migration runner
-│   │   ├── auth/
-│   │   │   ├── passport.ts       Strategy registration (local, Google, GitHub)
-│   │   │   ├── router.ts         /auth/* endpoints
-│   │   │   └── usersRouter.ts    /users/* endpoints
-│   │   ├── communities/router.ts  CRUD + member management
-│   │   ├── channels/router.ts     Channel CRUD
-│   │   ├── messages/
-│   │   │   ├── router.ts          Message CRUD + read states
-│   │   │   └── conversationsRouter.ts  DM conversations
-│   │   ├── presence/
-│   │   │   ├── service.ts         Redis TTL + fanout logic
-│   │   │   └── router.ts
-│   │   ├── search/
-│   │   │   ├── client.ts          Postgres FTS (+ optional Meilisearch path)
-│   │   │   └── router.ts
-│   │   ├── attachments/router.ts  S3 pre-sign + metadata
-│   │   ├── websocket/
-│   │   │   ├── server.ts          WS upgrade handler + subscription mgmt
-│   │   │   └── fanout.ts          Redis publish helper
-│   │   ├── middleware/
-│   │   │   └── authenticate.ts    JWT verify + requireRole factory
-│   │   └── utils/
-│   │       ├── jwt.ts             sign/verify + deny-list
-│   │       └── logger.ts          pino logger
-│   ├── tests/auth.test.ts
-│   ├── Dockerfile
-│   └── package.json
-├── migrations/
-│   └── 001_initial_schema.sql     Full Postgres schema
-├── infrastructure/
-│   ├── nginx/nginx.conf
-│   └── monitoring/prometheus.yml
-├── .github/workflows/ci-deploy.yml
-├── docker-compose.yml
-└── .env.example
-```
-
----
-
-## API Reference
-
-### Authentication
-
-| Method | Path           | Auth | Description          |
-| ------ | -------------- | ---- | -------------------- |
-| POST   | /auth/register | –    | Local registration   |
-| POST   | /auth/login    | –    | Local login          |
-| POST   | /auth/refresh  | –    | Refresh access token |
-| POST   | /auth/logout   | ✓    | Revoke tokens        |
-| GET    | /auth/google   | –    | Start Google OAuth   |
-| GET    | /auth/github   | –    | Start GitHub OAuth   |
-
-All protected endpoints require: `Authorization: Bearer <accessToken>`
-
-### Messages
-
-| Method | Path                         | Description                                                                                                                                                                                                                          |
-| ------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GET    | /messages                    | Paginated history: `channelId` or `conversationId`; optional `before=<messageId>` (older page), **`after=<messageId>`** (newer page). Do not pass both `before` and `after`. Latest page is Redis-cached when neither cursor is set. |
-| GET    | /messages/context/:messageId | Message window around an id (search “jump”): optional `limit` (per side, 1–50, default 25). Response includes `hasOlder` / `hasNewer` and chronological `messages`.                                                                  |
-| POST   | /messages                    | Send message                                                                                                                                                                                                                         |
-| PATCH  | /messages/:id                | Edit own message                                                                                                                                                                                                                     |
-| DELETE | /messages/:id                | Delete own message (hard delete)                                                                                                                                                                                                     |
-| PUT    | /messages/:id/read           | Update read cursor                                                                                                                                                                                                                   |
-
-**POST /messages — retries:** send header `Idempotency-Key: <opaque string>` (≤200 chars, same user). While the key is held in Redis, duplicate posts return the same created message with **201** instead of creating twice. Optional env: `MSG_IDEM_PENDING_TTL_SECS` (in-flight lease, default 120), `MSG_IDEM_SUCCESS_TTL_SECS` (stored result, default 86400), `MSG_IDEM_POLL_DEADLINE_MS` / `MSG_IDEM_POLL_MAX_SLEEP_MS` (duplicate-lease wait: exponential backoff, default deadline 5000ms). If Redis is unavailable, idempotency is skipped so messaging still works.
-
-### Communities
-
-| Method | Path         | Description                                                                                                                                                  |
-| ------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GET    | /communities | All communities visible to the user (default). Optional paging: `?limit=1-100` and `?after=<communityId>` (keyset cursor from the previous page’s last row). |
-
-### WebSocket Events
-
-Connect: `ws://host/ws?token=<accessToken>`
-
-**Client → Server:**
+WebSocket:
 
 ```json
-{ "type": "subscribe",   "channel": "channel:<uuid>" }
+{ "type": "subscribe", "channel": "channel:<uuid>" }
 { "type": "unsubscribe", "channel": "channel:<uuid>" }
-{ "type": "presence",    "status": "idle" }
+{ "type": "presence", "status": "idle" }
 { "type": "activity" }
 { "type": "ping" }
 ```
 
-**Server → Client:**
+Common server events include `ready`, `message:created`, `message:updated`, `message:deleted`, `presence:updated`, read receipt events, and membership/invite events. The exact delivery contract is in [`docs/architecture/realtime-delivery-contract.md`](docs/architecture/realtime-delivery-contract.md).
 
-```json
-{ "event": "message:created",    "data": { ...message } }
-{ "event": "message:updated",    "data": { ...message } }
-{ "event": "message:deleted",    "data": { "id": "..." } }
-{ "event": "presence:updated",   "data": { "userId": "...", "status": "online" } }
-{ "event": "community:member_joined", "data": { ... } }
-{ "event": "subscribed",         "data": { "channel": "..." } }
-```
+Search:
 
-### Search
-
-```
+```text
 GET /search?q=hello&communityId=<uuid>&authorId=<uuid>&after=2024-01-01&limit=20
 ```
 
----
+## Team Process and Contributions
 
-## Cloud deployment
-
-**Current staging/production hosts, SSH defaults, and sizing** — [`docs/infrastructure-inventory.md`](docs/infrastructure-inventory.md) (update that file when infra changes; do not treat the README architecture diagram as the only source of truth).
-
-**CI, release artifacts, and deploy flow** — [`deploy/README.md`](deploy/README.md).
-
-**Required env profiles (what the fleet is meant to run)** — [`deploy/env/prod.required.env`](deploy/env/prod.required.env), [`deploy/env/staging.required.env`](deploy/env/staging.required.env). **Semantics and defaults** for every variable — [`docs/env.md`](docs/env.md).
-
-**Multi-host split compose:** if you run DB, cache, and API on different machines, use per-host `docker compose` overrides and point `DATABASE_URL` / `REDIS_URL` at the real targets. For the **course / Linode** layout, use the deploy guide and inventory — do not assume a fixed “4-node” split that matches this repo’s current production.
-
----
-
-## Extending the MVP
-
-### Adding voice channels
-
-The `channels` table has a `type` column with `voice_placeholder` enum ready.
-Integrate WebRTC signaling (e.g. mediasoup) and add a signal-relay route.
-
-### Horizontal DB scaling
-
-The UUID primary keys and `created_at` cursors are compatible with Citus (Postgres sharding)
-or read-replica routing. Replace `pool.ts` with a read/write split pool when ready.
-
-### Scaling search
-
-The FTS implementation in `search/client.ts` uses Postgres `tsvector` + `websearch_to_tsquery`.
-To switch to a dedicated search engine, implement the same `search(q, opts)` interface in `client.ts`.
-No other files need to change.
-
-### Adding reactions, threads, polls
-
-All extend `messages` with junction tables. The existing WebSocket fanout and Redis Pub/Sub
-pattern handles their real-time delivery without structural changes.
-
----
+Team reflection and individual contributions are documented in [`TEAM.md`](TEAM.md). Samuel Perrottet's section is filled from repository history; the other team members are intentionally left as placeholders for final team review.
 
 ## Security Checklist
 
-- [ ] Rotate all secrets in `.env` before production
-- [ ] Enable TLS in Nginx config (uncomment HTTPS server block)
-- [ ] Restrict Redis and Postgres ports to VPC-internal only
-- [ ] Set `NODE_ENV=production` (disables stack traces in error responses)
-- [ ] Configure S3 bucket policy to private (pre-signed URLs only)
-- [ ] Enable Postgres SSL (`?sslmode=require` in DATABASE_URL)
-- [ ] Set up log aggregation (Loki + Grafana or ELK)
+- Rotate all secrets in `.env` before production.
+- Keep Redis and Postgres on private networks or firewalled ports.
+- Set `NODE_ENV=production` for production workers.
+- Keep object storage buckets private and use pre-signed URLs.
+- Use TLS at the Nginx edge in production.
+- Keep logging redaction enabled for tokens, cookies, and passwords.
+- Monitor alerts from [`infrastructure/monitoring/alerts.yml`](infrastructure/monitoring/alerts.yml).

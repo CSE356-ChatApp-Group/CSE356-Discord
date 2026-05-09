@@ -41,7 +41,7 @@ Conservative `PUT /api/v1/messages/:id/read` soft-defer under per-process channe
 | Gate | Requirement |
 |------|-------------|
 | **`POST /api/v1/messages` 503** | Rate **flat or lower** vs pre-canary baseline on **vm3** and fleet-wide; must **not** regress. Compare `rate(message_post_response_total{status_code="503"}[5m])` with `vm` label. |
-| **Correctness smoke** | Passes: send message, mark read on low-pressure path (no unexpected 5xx). Optional: [`runbooks.md`](runbooks.md) grader watcher during soak. |
+| **Correctness smoke** | Passes: send message, mark read on low-pressure path (no unexpected 5xx). Optional: [`runbooks.md`](../runbooks.md) grader watcher during soak. |
 
 **`read_receipt_shed_total{reason="message_channel_insert_lock_pressure"}`** — if this stays **zero** during the soak, that is **not a failure**. It only means **insert-lock pressure did not hit the defer threshold** on the canary workers in that window. The important negatives are: no **503 regression** on POST, no correctness break, no surprise **`/read` 5xx** spike.
 
