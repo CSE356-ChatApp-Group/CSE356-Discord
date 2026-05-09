@@ -203,6 +203,39 @@ server {
     client_max_body_size 10m;
   }
 
+  # Read receipts are protected by app-side coalescing and soft-defer gates.  Do
+  # not return synthetic nginx successes here; proxy them so durable read state
+  # and app metrics stay accurate while avoiding the stricter message limiter.
+  location ~ ^/api/v1/messages/[^/]+/read/?$ {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 0;
+    proxy_read_timeout 30s;
+    client_max_body_size 10m;
+  }
+
+  location = /api/v1/messages/batch-read {
+    proxy_pass http://app;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Request-Id $request_id;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_next_upstream error timeout http_502 http_503 http_504 non_idempotent;
+    proxy_next_upstream_tries 0;
+    proxy_read_timeout 30s;
+    client_max_body_size 10m;
+  }
+
   location ~ ^/api/v1/communities/[^/]+/join/?$ {
     limit_req zone=community_join_direct burst=60 nodelay;
     limit_conn external_expensive_conns 5;
