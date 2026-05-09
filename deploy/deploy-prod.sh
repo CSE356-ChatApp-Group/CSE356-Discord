@@ -26,7 +26,8 @@
 set -euo pipefail
 
 if [[ -z "${DEPLOY_SSH_TMPDIR:-}" ]]; then
-  DEPLOY_SSH_TMPDIR="$(mktemp -d)"
+  # Keep ControlMaster socket paths under /tmp — short enough for macOS Unix socket limits.
+  DEPLOY_SSH_TMPDIR="$(mktemp -d /tmp/chatapp-dssh.XXXXXX)"
   _DEPLOY_SSH_TMPDIR_OWNED=1
 else
   mkdir -p "${DEPLOY_SSH_TMPDIR}"
