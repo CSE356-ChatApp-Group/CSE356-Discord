@@ -4,7 +4,7 @@
 
 const { tracer, trace } = require("../../utils/tracer");
 const { SpanStatusCode } = require("@opentelemetry/api");
-const { withTransaction, pool } = require("../../db/pool");
+const { withTransaction, pool, query } = require("../../db/pool");
 const {
   MESSAGE_POST_INSERT_STATEMENT_TIMEOUT_MS,
   MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS,
@@ -143,6 +143,57 @@ async function runChannelInsertTransaction({
   return { row, communityId };
 }
 
+async function runChannelInsertSingleStatement({
+  channelId,
+  userId,
+  normalizedContent,
+  threadId,
+  txPhases,
+}: {
+  channelId: string;
+  userId: string;
+  normalizedContent: string;
+  threadId: string | null;
+  txPhases: { t0: number; t_access: number; t_insert: number; t_later: number };
+}) {
+  txPhases.t0 = Date.now();
+  txPhases.t_access = txPhases.t0;
+  const insertRes = await query({
+    text: MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL,
+    values: [
+      channelId,
+      userId,
+      normalizedContent || null,
+      threadId || null,
+    ],
+    query_timeout: MESSAGE_POST_CHANNEL_INSERT_STATEMENT_TIMEOUT_MS,
+  });
+  txPhases.t_insert = Date.now();
+
+  if (!insertRes.rows.length) {
+    const accessRes = await query(MESSAGE_POST_CHANNEL_ACCESS_DIAGNOSTIC_SQL, [
+      channelId,
+      userId,
+    ]);
+    txPhases.t_later = Date.now();
+    const accessRow = accessRes.rows[0];
+    if (accessRow && accessRow.author_exists === false) {
+      throw buildMessagePostError(
+        "Session no longer valid",
+        401,
+        "author_missing",
+      );
+    }
+    throw buildMessagePostError("Access denied", 403, "channel_access");
+  }
+
+  const row = insertRes.rows[0];
+  const communityId = row.post_insert_community_id ?? null;
+  delete row.post_insert_community_id;
+  txPhases.t_later = txPhases.t_insert;
+  return { row, communityId };
+}
+
 async function runConversationInsertTransaction({
   client,
   conversationId,
@@ -234,6 +285,20 @@ async function runPostInsertPhase({
   const runChannelMessageRowUnderInsertLock = () =>
     tracer.startActiveSpan("channel_insert.db_pool", async (span: any) => {
       try {
+        if (attachments.length === 0) {
+          const { row, communityId: nextCommunityId } =
+            await runChannelInsertSingleStatement({
+              channelId: channelId!,
+              userId,
+              normalizedContent,
+              threadId,
+              txPhases,
+            });
+          communityId = nextCommunityId;
+          span.setAttribute("pool.acquire_ms", 0);
+          span.setAttribute("tx.single_statement", true);
+          return row;
+        }
         return await withTransaction(
           async (client: any) => {
             const { row, communityId: nextCommunityId } =
