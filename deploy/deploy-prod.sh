@@ -618,7 +618,7 @@ TMPFILES
   # PgBouncer SIGHUP is non-disruptive but we skip it when pool math is unchanged
   # (typical code-only redeploy) to eliminate any transient connection stall risk.
   _pgb_hash_before=\$(sha256sum /etc/pgbouncer/pgbouncer.ini 2>/dev/null | awk '{print \$1}' || echo none)
-  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS} PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE} PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE} PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
+  sudo env PGBOUNCER_POOL_SIZE=${_PGB_SIZE} PGBOUNCER_MAX_DB_CONNECTIONS=${PGBOUNCER_MAX_DB_CONNECTIONS} PGBOUNCER_MIN_POOL_SIZE=${PGBOUNCER_MIN_POOL_SIZE} PGBOUNCER_RESERVE_SIZE=${PGBOUNCER_RESERVE_SIZE} PG_MAX_CONNECTIONS=${PG_MAX_CONNECTIONS} PG_PRIMARY_HOST=\"${PG_PRIMARY_HOST:-${CHATAPP_INV_DB_INTERNAL:-10.0.1.62}}\" CHATAPP_INV_DB_INTERNAL=\"${CHATAPP_INV_DB_INTERNAL:-10.0.1.62}\" python3 \"\$HOME/${DEPLOY_REMOTE_HELPER_DIR}/pgbouncer-setup.py\"
   _pgb_hash_after=\$(sha256sum /etc/pgbouncer/pgbouncer.ini 2>/dev/null | awk '{print \$1}' || echo none)
   sudo systemctl enable pgbouncer
   if [ \"${ALLOW_DB_RESTART}\" = \"true\" ]; then

@@ -44,28 +44,50 @@ r = urllib.parse.urlparse(db_url)
 pg_user = r.username or 'chatapp'
 pg_pass = urllib.parse.unquote(r.password or '')
 pg_host = r.hostname or '127.0.0.1'
-pg_port = r.port or 5432
-pg_db   = r.path.lstrip('/')
+pg_port = int(r.port) if r.port is not None else 5432
+pg_db = r.path.lstrip('/')
 
-# If DATABASE_URL was already rewritten to point at PgBouncer (:6432), use
-# the real PostgreSQL port (5432) for the backend stanza — never loop back.
+# Real PostgreSQL host/port for the [databases] stanza (may differ from DATABASE_URL host when
+# Node connects to local PgBouncer via loopback or via this VM's LAN IP :6432).
 pg_backend_port = 5432 if pg_port == 6432 else pg_port
+pg_backend_host = pg_host
 
-# If .env already targets PgBouncer, urlparse host is loopback — recover real PG host
-# from the existing ini so re-runs of this script do not write host=127.0.0.1.
-if str(pg_port) == '6432' and pg_host in ('127.0.0.1', 'localhost', '::1'):
+
+def _recover_backend_from_ini():
+    """Populate pg_backend_host/port from an existing pgbouncer.ini [databases] line."""
+    global pg_backend_host, pg_backend_port
     try:
         existing = open('/etc/pgbouncer/pgbouncer.ini', encoding='utf-8').read()
         mh = re.search(r'^\s*\S+\s*=\s*host=(\S+)\s+port=(\d+)', existing, re.MULTILINE)
         if mh:
-            pg_host, pg_backend_port = mh.group(1), int(mh.group(2))
-            print(f'Recovered PgBouncer backend from ini: {pg_host}:{pg_backend_port}')
+            pg_backend_host = mh.group(1)
+            pg_backend_port = int(mh.group(2))
+            return True
     except OSError:
         pass
+    return False
+
+
+if pg_port == 6432:
+    if pg_host in ('127.0.0.1', 'localhost', '::1'):
+        if _recover_backend_from_ini():
+            print(f'Recovered PgBouncer backend from ini: {pg_backend_host}:{pg_backend_port}')
+    else:
+        # Multi-VM: DATABASE_URL uses this VM's LAN IP for Node→PgBouncer; PostgreSQL is on the DB host.
+        env_primary = (os.environ.get('PG_PRIMARY_HOST') or os.environ.get('CHATAPP_INV_DB_INTERNAL') or '').strip()
+        if env_primary:
+            pg_backend_host = env_primary
+            print(f'PgBouncer backend host from env: {pg_backend_host}:{pg_backend_port}')
+        elif _recover_backend_from_ini():
+            print(f'Recovered PgBouncer backend from ini: {pg_backend_host}:{pg_backend_port}')
+        # Ini/env might still match the client LAN IP from an older buggy deploy — never use that as PG host.
+        if pg_backend_host == pg_host:
+            pg_backend_host = '10.0.1.62'
+            print(f'PgBouncer backend host corrected to VLAN primary {pg_backend_host}:{pg_backend_port}')
 
 print(
     f'Parsed DATABASE_URL: user={pg_user} client={r.hostname}:{pg_port} '
-    f'backend={pg_host}:{pg_backend_port} db={pg_db}'
+    f'backend={pg_backend_host}:{pg_backend_port} db={pg_db}'
 )
 
 
@@ -122,7 +144,7 @@ print(f'CPU count: {_ncpu} → default_pool_size={PGBOUNCER_POOL_SIZE} max_db_co
 # ── Write pgbouncer.ini ─────────────────────────────────────────────────────────
 ini = f"""\
 [databases]
-{pg_db} = host={pg_host} port={pg_backend_port} dbname={_pgbouncer_conn_value(pg_db)} user={_pgbouncer_conn_value(pg_user)} password={_pgbouncer_conn_value(pg_pass)}
+{pg_db} = host={pg_backend_host} port={pg_backend_port} dbname={_pgbouncer_conn_value(pg_db)} user={_pgbouncer_conn_value(pg_user)} password={_pgbouncer_conn_value(pg_pass)}
 
 [pgbouncer]
 ; Listen on all interfaces (0.0.0.0) to allow local workers and multi-VM deployments
@@ -248,7 +270,7 @@ else:
 # ── Set PG role timeouts (safety backstop behind PgBouncer query_timeout) ───────
 # Local Postgres only: remote DB must run ALTER ROLE as superuser on the DB host
 # (see deploy/cutover-to-remote-db.sh).
-_is_local_pg = pg_host in ('127.0.0.1', 'localhost', '::1')
+_is_local_pg = pg_backend_host in ('127.0.0.1', 'localhost', '::1')
 if _is_local_pg:
     result = subprocess.run(
         ['sudo', '-u', 'postgres', 'psql', '-qAt', '-c',
@@ -263,7 +285,7 @@ if _is_local_pg:
         print(f'Warning: could not set PG role timeouts: {result.stderr.strip()}')
 else:
     print(
-        f'Skipping ALTER ROLE on app VM (PostgreSQL host is {pg_host}). '
+        f'Skipping ALTER ROLE on app VM (PostgreSQL host is {pg_backend_host}). '
         'Apply on the database server as postgres superuser if not already set.'
     )
 
