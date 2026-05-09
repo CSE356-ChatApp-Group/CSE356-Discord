@@ -76,6 +76,12 @@ GITHUB_REPO="${GITHUB_REPO:-CSE356-ChatApp-Group/CSE356-Discord}"
 LOCAL_ARTIFACT_PATH="${LOCAL_ARTIFACT_PATH:-}"
 RELEASE_DIR="/opt/chatapp/releases"
 CURRENT_LINK="/opt/chatapp/current"
+# Set before remote artifact download (step 3); cleanup_on_exit removes stale tarballs.
+DOWNLOAD_PATH=""
+_cleanup_download_path() {
+  [[ -n "${DOWNLOAD_PATH:-}" ]] || return 0
+  rm -f "${DOWNLOAD_PATH}" 2>/dev/null || true
+}
 OLD_PORT=4000
 NEW_PORT=4001
 # shellcheck source=deploy-common.sh
@@ -150,6 +156,7 @@ cleanup_on_exit() {
   local status=$?
   trap - EXIT
   set +e
+  _cleanup_download_path
   if [ "${status}" -ne 0 ] && [[ -n "${_MONITORING_BG_PID:-}" ]] && kill -0 "${_MONITORING_BG_PID}" 2>/dev/null; then
     echo "Stopping background monitoring refresh after deploy failure..."
     kill "${_MONITORING_BG_PID}" 2>/dev/null || true
@@ -778,14 +785,8 @@ echo "✓ PostgreSQL tuned"
 # Include $$ so parallel deploy-prod.sh invocations (e.g. parallel VM2+VM3
 # rollout from deploy-prod-multi.sh) don't race on the same local /tmp path.
 DOWNLOAD_PATH="/tmp/chatapp-${RELEASE_SHA}-$$.tar.gz"
-_cleanup_download_path() {
-  rm -f "$DOWNLOAD_PATH" 2>/dev/null || true
-}
-_combined_cleanup() {
-  _cleanup_download_path
-  _cleanup_deploy_ssh_tmpdir
-}
-trap _combined_cleanup EXIT
+# cleanup_on_exit (registered above) already runs _cleanup_download_path + deploy lock + ssh tmpdir cleanup.
+# Do not replace that EXIT trap — a prior bug used trap _combined_cleanup here and skipped rollback/lock release.
 # 3. Download artifact to prod
 if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
   echo "3. Using local artifact..."
