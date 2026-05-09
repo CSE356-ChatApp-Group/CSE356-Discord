@@ -26,12 +26,6 @@ Samuel's work, based on repository history and the current documentation/code la
 
 ## Team Process
 
-TODO: Describe how the team communicated, divided work, tracked progress, and handled deadlines.
+The team held weekly meetings to discuss progress, current blockers, and continuing issues. Most day-to-day communication happened by text in a group chat, with larger project goals, deadlines, and milestone status tracked in a shared coordination document.
 
-Suggested points to fill:
-
-- Primary communication channels and meeting cadence.
-- How tasks were assigned and reviewed.
-- How progress was tracked before milestones or demos.
-- How production issues, load-test failures, and grading feedback were triaged.
-- How final documentation and submission readiness were checked.
+We used CI with automated tests to catch regressions before merge, and production changes were deployed manually with canary rollouts when possible to reduce risk. Because the system had several interacting performance-sensitive pieces, performance regressions were still common when changes had unforeseen side effects. The team used load-test results, metrics, logs, and targeted follow-up fixes to identify and address those regressions quickly.
