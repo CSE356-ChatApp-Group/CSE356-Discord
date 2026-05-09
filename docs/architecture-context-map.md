@@ -15,7 +15,7 @@ Purpose: Pre-tuning context. No recommendations — just the map.
   - VM3: `130.245.136.54` (6 Node workers)
 - **Total workers: 16** (4 + 6 + 6)
 - Ports: VM1 `chatapp@4000`–`chatapp@4003`; VM2/VM3 `chatapp@4000`–`chatapp@4005`
-- Each worker: `--max-old-space-size=479` MB heap, `UV_THREADPOOL_SIZE=8`
+- Each worker: V8 heap cap computed at deploy time via `min(1500, max(192, RAM_MB * 25 / 100 / instances))` (16 GB / 6 inst → ~666 MB; 16 GB / 4 inst → ~1024 MB). `--max-semi-space-size=64`. `UV_THREADPOOL_SIZE=8`. See `deploy/deploy-prod-remote-sizing.sh` for the source-of-truth formula.
 
 ### Nginx (on VM1 only)
 - Upstream `app` lists VM1 localhost ports + VM2/VM3 private IPs

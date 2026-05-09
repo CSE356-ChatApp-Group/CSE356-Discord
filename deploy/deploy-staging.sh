@@ -115,17 +115,23 @@ per_inst_cpu = (ncpu + inst - 1) // inst
 print(max(2, min(4, per_inst_cpu - 1)))
 ")
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
-# Formula: min(1500, max(RAM_MB * 12%, 192))
-#   - 12% of RAM scaled per instance (not a flat % so it works on small and large VMs)
+# Formula: min(1500, max(RAM_MB * 25%, 192))
+#   - 25% of RAM scaled per instance (not a flat % so it works on small and large VMs)
 #   - Floor of 192 MB (enough for startup overhead on any supported machine)
 #   - Cap of 1500 MB (prevent single instance monopolising memory on large VMs)
+# Coefficient was 12% historically (sized for 2 GB hosts); raised to 25% on
+# 2026-05 after prod nodejs_gc_duration_seconds p99 showed occasional 0.3–2 s
+# Mark-Sweep-Compact spikes — workers ran at 50–85% of the 12% cap and V8
+# kept aborting incremental marking to run synchronous compactions. 25%
+# leaves OS page cache the majority of RAM and matches deploy-prod-remote-sizing.sh.
 # Examples:
-#   2 GB / 1 inst: min(1500, max(246, 192)) = 246 MB   ← leaves room for PG + pgbouncer
-#   2 GB / 2 inst: min(1500, max(123, 192)) = 192 MB   (floor kicks in)
-#   7.8 GB / 2 inst: min(1500, max(468, 192)) = 468 MB ← reasonable on staging
+#   2 GB / 1 inst: min(1500, max(512, 192)) = 512 MB   ← leaves room for PG + pgbouncer
+#   2 GB / 2 inst: min(1500, max(256, 192)) = 256 MB
+#   7.8 GB / 2 inst: min(1500, max(975, 192)) = 975 MB ← reasonable on staging
+#   16 GB / 6 inst: min(1500, max(666, 192)) = 666 MB  ← prod app/wsvm hosts
 _REMOTE_RAM_MB=$(chatapp_ssh_staging_app "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 7800)
 # shellcheck disable=SC2034  # used inside chatapp_ssh_staging_app string on lines ~500-501
-NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 // 100 // ${CHATAPP_INSTANCES})))")
+NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 25 // 100 // ${CHATAPP_INSTANCES})))")
 
 echo "=== Deploying ${RELEASE_SHA} to staging (${STAGING_USER}@${STAGING_HOST}) ==="
 echo "  VM vCPUs: ${_REMOTE_NPROC}  HTTP workers: ${CHATAPP_INSTANCES}  pgbouncer_pool: ${_PGB_SIZE}  pg_max_conn: ${PG_MAX_CONNECTIONS}"
@@ -496,9 +502,11 @@ chatapp_ssh_staging_app "
     || echo 'AUTH_PASSWORD_STORAGE_MODE=plain' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # NODE_OPTIONS: set V8 heap limit so GC pressure triggers before the OOM
   # killer interferes.  NODE_OLD_SPACE_MB is computed from remote RAM / instances.
+  # --max-semi-space-size=64 (was 16): larger young generation reduces minor-GC
+  # frequency and premature promotion to old space; mirrors deploy-prod.sh.
   sudo grep -q '^NODE_OPTIONS=' /opt/chatapp/shared/.env \
-    && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS=\"--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=16\"/' /opt/chatapp/shared/.env \
-    || echo 'NODE_OPTIONS=\"--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=16\"' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
+    && sudo sed -i 's/^NODE_OPTIONS=.*/NODE_OPTIONS=\"--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=64\"/' /opt/chatapp/shared/.env \
+    || echo 'NODE_OPTIONS=\"--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=64\"' | sudo tee -a /opt/chatapp/shared/.env > /dev/null
   # Enforce git-tracked realtime profile so deploys cannot drift.
   sudo python3 /tmp/apply-env-profile.py \
     --target /opt/chatapp/shared/.env \

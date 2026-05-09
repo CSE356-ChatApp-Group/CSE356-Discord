@@ -158,7 +158,23 @@ per_inst_cpu = (ncpu + inst - 1) // inst
 print(max(2, min(4, per_inst_cpu - 1)))
 ")
 # V8 max-old-space per instance: cap heap below the OOM killer threshold.
-# Formula: min(1500, max(RAM_MB * 12%, 192)) — same as deploy-staging.sh.
-# On a 2 GB prod machine: min(1500, max(246, 192)) = 246 MB.
+#
+# Formula: min(1500, max(RAM_MB * 25%, 192)) — same as deploy-staging.sh.
+#
+# History: the coefficient was 12% when prod ran on a 2 GB machine
+# (min(1500, max(246, 192)) = 246 MB). Prod is now 16 GB / 4–6 instances per
+# host, where 12% computes to ~320–490 MB per worker — workers were running
+# at 50–85% of cap (heap_total 100–164 MB on top of ~50 MB overhead) and V8
+# was firing emergency Mark-Sweep-Compact GCs (occasional 0.3–2 s pauses
+# visible in `nodejs_gc_duration_seconds_bucket{kind="major"}` p99). Bumping
+# to 25% gives V8 enough headroom for incremental marking to complete before
+# the cap forces a synchronous compact, while still leaving the host the
+# majority of RAM for OS page cache, nginx, redis_exporter, etc.
+#
+# Examples (current prod):
+#   16 GB / 6 inst: min(1500, max(666, 192)) = 666 MB  (was 320 MB)
+#   16 GB / 4 inst: min(1500, max(1024, 192)) = 1024 MB (was 491 MB)
+#   2  GB / 1 inst: min(1500, max(512, 192)) = 512 MB  (was 246 MB)
+#   2  GB / 2 inst: min(1500, max(256, 192)) = 256 MB  (was 192 MB)
 _REMOTE_RAM_MB=$(ssh_prod "awk '/MemTotal/{printf \"%d\", \$2/1024}' /proc/meminfo" 2>/dev/null || echo 2048)
-NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 12 // 100 // ${CHATAPP_INSTANCES})))")
+NODE_OLD_SPACE_MB=$(python3 -c "print(min(1500, max(192, ${_REMOTE_RAM_MB} * 25 // 100 // ${CHATAPP_INSTANCES})))")

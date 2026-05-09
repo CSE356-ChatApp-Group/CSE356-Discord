@@ -955,7 +955,13 @@ _PROD_DEPLOY_OVERLAY_ENV=$(mktemp)
   echo "AUTH_BYPASS=false"
   echo "LOG_LEVEL=info"
   echo "FANOUT_QUEUE_CONCURRENCY=${FANOUT_QUEUE_CONCURRENCY}"
-  echo "NODE_OPTIONS=\"--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=16\""
+  # --max-semi-space-size=64 (default is 16): a 64 MB young generation
+  # reduces minor-GC frequency ~3-4x and dramatically reduces premature
+  # promotion of short-lived allocations (WS broadcast envelopes, JSON
+  # response bodies, large cache lookups) into old space — both contribute
+  # directly to nodejs_gc_duration_seconds p99 outliers. Costs ~96 MB extra
+  # RSS per worker (V8 keeps two semi-spaces); negligible on 16 GB hosts.
+  echo "NODE_OPTIONS=\"--max-old-space-size=${NODE_OLD_SPACE_MB} --max-semi-space-size=64\""
   echo "AUTH_GLOBAL_PER_IP_RATE_LIMIT=false"
   echo "AUTH_PASSWORD_STORAGE_MODE=plain"
   echo "CHATAPP_ROLE=${CHATAPP_ROLE:-app}"
