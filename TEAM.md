@@ -48,7 +48,7 @@ JiaXin (Angel) Xie contributed across all three phases of the project: core acce
 Angel's main contributions included:
 
 - Early development phase:
-- Designed and set up authentication support for Google, GitHub, and the course OAuth2/OpenID Connect provider (including OpenID OAuth integration commits).
+- Designed and set up authentication support for Google, GitHub, and the course OAuth2/OpenID Connect provider.
 - Set up HTTPS for the application with Let's Encrypt for secure production/staging access.
 - Testing and verification phase:
 - Drove requirement conformance checks against grader/API-contract expectations and documented/fixed requirement mismatches through code and test updates.
