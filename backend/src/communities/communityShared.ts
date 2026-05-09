@@ -193,7 +193,13 @@ async function executeResolvedPublicJoin(req, res, next, resolved) {
     }
 
     const { rowCount } = await query(
-      `INSERT INTO community_members (community_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+      `WITH _community_join_settings AS MATERIALIZED (
+         SELECT set_config('synchronous_commit', 'off', true)
+       )
+       INSERT INTO community_members (community_id, user_id)
+       SELECT $1, $2
+       FROM _community_join_settings
+       ON CONFLICT DO NOTHING`,
       [communityId, req.user.id],
     );
     if (!rowCount) {

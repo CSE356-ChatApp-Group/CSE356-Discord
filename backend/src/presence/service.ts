@@ -345,7 +345,28 @@ async function syncConnectionStatuses(userId, status) {
   await pipeline.exec();
 }
 
-async function setPresence(userId, status, awayMessage) {
+async function publishPresenceUpdate(userId, payload) {
+  try {
+    const recipientUserIds = await getPresenceFanoutRecipientUserIds(userId);
+    await publishUserFeedTargets(
+      recipientUserIds.length ? recipientUserIds : [userId],
+      payload,
+    );
+  } catch (err) {
+    logger.debug({ err, userId }, 'Presence recipient fanout lookup failed');
+    await publishUserFeedTargets([userId], payload);
+  }
+}
+
+function schedulePresenceUpdate(userId, payload) {
+  setImmediate(() => {
+    publishPresenceUpdate(userId, payload).catch((err) => {
+      logger.warn({ err, userId }, 'presence update fanout failed');
+    });
+  });
+}
+
+async function setPresence(userId, status, awayMessage, opts: { deferFanout?: boolean } = {}) {
   const key = presenceStatusKey(userId);
   const awayKey = awayMessageKey(userId);
   const [previousStatus, previousAwayMessage] = await redis.mget(key, awayKey);
@@ -412,15 +433,10 @@ async function setPresence(userId, status, awayMessage) {
       },
     };
 
-    try {
-      const recipientUserIds = await getPresenceFanoutRecipientUserIds(userId);
-      await publishUserFeedTargets(
-        recipientUserIds.length ? recipientUserIds : [userId],
-        payload,
-      );
-    } catch (err) {
-      logger.debug({ err, userId }, 'Presence recipient fanout lookup failed');
-      await publishUserFeedTargets([userId], payload);
+    if (opts.deferFanout) {
+      schedulePresenceUpdate(userId, payload);
+    } else {
+      await publishPresenceUpdate(userId, payload);
     }
   }
 

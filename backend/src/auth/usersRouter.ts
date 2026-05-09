@@ -314,11 +314,12 @@ router.patch('/me',
           req.user.id,
           nextStatus,
           nextStatus === 'away' ? req.body.awayMessage : null,
+          { deferFanout: true },
         );
       } else if (hasAwayMessageUpdate) {
         const currentStatus = await presenceService.getPresence(req.user.id);
         if (currentStatus === 'away') {
-          await presenceService.setPresence(req.user.id, 'away', req.body.awayMessage);
+          await presenceService.setPresence(req.user.id, 'away', req.body.awayMessage, { deferFanout: true });
         } else {
           await presenceService.setAwayMessage(req.user.id, req.body.awayMessage);
         }

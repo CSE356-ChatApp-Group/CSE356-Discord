@@ -65,6 +65,14 @@ const {
 const router = express.Router();
 router.use(authenticate);
 
+function scheduleConversationSideEffects(label: string, fn: () => Promise<void>) {
+  setImmediate(() => {
+    fn().catch((err) => {
+      logger.warn({ err }, label);
+    });
+  });
+}
+
 // ── List ───────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   const cacheKey = conversationsCacheKey(req.user.id);
@@ -173,6 +181,7 @@ router.post('/',
     try {
       client = await getClient();
       await client.query('BEGIN');
+      await client.query('SET LOCAL synchronous_commit = off');
 
       const providedParticipants = req.body.participantIds || req.body.participants || [];
       const resolvedParticipants = await resolveParticipantIds(client, providedParticipants);
@@ -205,8 +214,11 @@ router.post('/',
             client.release();
             client = null;
             const pairIds = [req.user.id, otherId].filter(Boolean);
-            await runExistingDmSideEffects({ existingId: cachedId, pairIds });
-            return res.json({ conversation: existing, created: false });
+            res.json({ conversation: existing, created: false });
+            scheduleConversationSideEffects('existing DM side effects failed', () =>
+              runExistingDmSideEffects({ existingId: cachedId, pairIds })
+            );
+            return;
           }
           // Cache stale – fall through to DB lookup.
         }
@@ -228,8 +240,11 @@ router.post('/',
           const existing = await loadConversationWithParticipants(client, existingId);
           await client.query('COMMIT');
           const pairIds = [req.user.id, otherId].filter(Boolean);
-          await runExistingDmSideEffects({ existingId, pairIds });
-          return res.json({ conversation: existing, created: false });
+          res.json({ conversation: existing, created: false });
+          scheduleConversationSideEffects('existing DM side effects failed', () =>
+            runExistingDmSideEffects({ existingId, pairIds })
+          );
+          return;
         }
       }
 
@@ -254,15 +269,17 @@ router.post('/',
       client.release();
       client = null;
       const conversation = await loadConversationWithParticipants({ query }, conv.id);
-      await runCreatedConversationSideEffects({
-        conversation,
-        conversationId: conv.id,
-        allIds,
-        invitedUserIds,
-        invitedBy: req.user.id,
-      });
 
       res.status(201).json({ conversation: conversation || conv, created: true });
+      scheduleConversationSideEffects('created conversation side effects failed', () =>
+        runCreatedConversationSideEffects({
+          conversation,
+          conversationId: conv.id,
+          allIds,
+          invitedUserIds,
+          invitedBy: req.user.id,
+        })
+      );
     } catch (err) {
       await client?.query('ROLLBACK').catch(() => {});
       const isDirectPairConflict =
@@ -282,11 +299,14 @@ router.post('/',
                 recoveryClient,
                 directPairMemberIds[0],
                 directPairMemberIds[1],
-              );
+            );
             if (existingId) {
               const existing = await loadConversationWithParticipants(recoveryClient, existingId);
-              await runExistingDmSideEffects({ existingId, pairIds: directPairMemberIds });
-              return res.json({ conversation: existing, created: false });
+              res.json({ conversation: existing, created: false });
+              scheduleConversationSideEffects('existing DM conflict recovery side effects failed', () =>
+                runExistingDmSideEffects({ existingId, pairIds: directPairMemberIds })
+              );
+              return;
             }
           } finally {
             recoveryClient.release();
