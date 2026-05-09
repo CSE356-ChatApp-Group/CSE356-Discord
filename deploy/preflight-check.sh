@@ -28,7 +28,7 @@ echo "=== Preflight: ${ENVIRONMENT} ==="
 echo "Target: ${SSH_USER}@${SSH_HOST}"
 
 REQUIRED_COMMANDS=(ssh scp curl)
-if [[ -z "$LOCAL_ARTIFACT_PATH" ]]; then
+if [[ -z "$LOCAL_ARTIFACT_PATH" ]] && [[ "${SKIP_GH_RELEASE_PREFLIGHT:-}" != "1" ]]; then
   REQUIRED_COMMANDS=(gh "${REQUIRED_COMMANDS[@]}")
 fi
 
@@ -51,17 +51,21 @@ if [[ -n "$LOCAL_ARTIFACT_PATH" ]]; then
     exit 1
   fi
 else
-  if [[ -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]]; then
-    echo "Using GitHub token from environment for gh commands."
-  elif ! gh auth status >/dev/null 2>&1; then
-    echo "ERROR: GitHub CLI is not authenticated. Run: gh auth login"
-    exit 1
-  fi
+  if [[ "${SKIP_GH_RELEASE_PREFLIGHT:-}" == "1" ]]; then
+    echo "Skipping GitHub release artifact check (SKIP_GH_RELEASE_PREFLIGHT=1; e.g. deploy-prod.sh --rollback)."
+  else
+    if [[ -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]]; then
+      echo "Using GitHub token from environment for gh commands."
+    elif ! gh auth status >/dev/null 2>&1; then
+      echo "ERROR: GitHub CLI is not authenticated. Run: gh auth login"
+      exit 1
+    fi
 
-  echo "Checking release artifact exists..."
-  if ! gh release view "release-${RELEASE_SHA}" -R "$GITHUB_REPO" >/dev/null 2>&1; then
-    echo "ERROR: Release release-${RELEASE_SHA} not found in ${GITHUB_REPO}"
-    exit 1
+    echo "Checking release artifact exists..."
+    if ! gh release view "release-${RELEASE_SHA}" -R "$GITHUB_REPO" >/dev/null 2>&1; then
+      echo "ERROR: Release release-${RELEASE_SHA} not found in ${GITHUB_REPO}"
+      exit 1
+    fi
   fi
 fi
 

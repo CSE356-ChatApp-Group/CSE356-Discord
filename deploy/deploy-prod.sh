@@ -164,7 +164,12 @@ cleanup_on_exit() {
     notify_discord_prod ":x: **Prod deploy FAILED** \`${RELEASE_SHA:0:7}\` (pre-cutover)"
   fi
   release_remote_deploy_lock
-  rm -rf "${DEPLOY_SSH_TMPDIR}"
+  # Only remove a directory this process created. Parallel deploy-prod children
+  # (deploy-prod-multi) may share a caller-provided DEPLOY_SSH_TMPDIR — never
+  # delete it or a sibling's SSH control sockets break mid-flight.
+  if [[ "${_DEPLOY_SSH_TMPDIR_OWNED:-0}" == "1" ]]; then
+    rm -rf "${DEPLOY_SSH_TMPDIR}"
+  fi
   exit "${status}"
 }
 
@@ -307,6 +312,11 @@ deploy_log_phase() {
 }
 
 # Connectivity + remote prerequisites before any CHATAPP_INSTANCES / sizing SSH fan-out.
+# Fast rollback uses /opt/chatapp/releases/<sha> already on the host; older SHAs may not
+# have a matching GitHub release tag from this laptop, so skip the gh release gate.
+if [[ "${FAST_ROLLBACK}" == "true" ]]; then
+  export SKIP_GH_RELEASE_PREFLIGHT=1
+fi
 "${SCRIPT_DIR}/preflight-check.sh" prod "$RELEASE_SHA" "$PROD_USER" "$PROD_HOST" "$GITHUB_REPO"
 deploy_log_phase "preflight OK"
 if [ "${ENFORCE_PROD_NGINX_AUDIT_PREFLIGHT}" = "true" ]; then

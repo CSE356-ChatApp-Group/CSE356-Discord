@@ -589,7 +589,9 @@ cleanup_on_exit() {
       echo "  Run on VM1: grep 'upstream app' /etc/nginx/sites-enabled/chatapp"
     fi
   fi
-  rm -rf "${DEPLOY_SSH_TMPDIR}"
+  if [[ "${_DEPLOY_SSH_TMPDIR_OWNED:-0}" == "1" ]]; then
+    rm -rf "${DEPLOY_SSH_TMPDIR}"
+  fi
   exit "${status}"
 }
 trap cleanup_on_exit EXIT
