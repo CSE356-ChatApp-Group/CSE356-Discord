@@ -8,7 +8,7 @@
 #     - VM1 (127.0.0.1:6432)  handles 4 local workers only
 #     - VM2 (10.0.3.243:6432)  handles 6 workers on VM2 only
 #     - VM3 (10.0.2.164:6432)  handles 6 workers on VM3 only
-#   All connect to PostgreSQL on the shared DB VM (130.245.136.21:5432)
+#   All pool to PostgreSQL on the primary DB private IP (10.0.1.62:5432; public 130.245.136.21)
 #   nginx on VM1 load-balances HTTP traffic across all 16 workers unchanged.
 #
 # Usage: bash deploy/deploy-prod-multi.sh <release-sha> [--rollback] [--dry-run] [--fast-stabilize] [--emergency]
