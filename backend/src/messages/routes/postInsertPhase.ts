@@ -21,6 +21,19 @@ const {
 } = require("../sqlFragments");
 import type { MessagesAuthedRequest } from "./postTypes";
 
+const MESSAGE_POST_CHANNEL_INSERT_SINGLE_STATEMENT_SQL =
+  MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL.replace(
+    /^\s*INSERT INTO/,
+    `
+WITH _message_post_settings AS MATERIALIZED (
+  SELECT set_config('synchronous_commit', 'off', true)
+)
+INSERT INTO`,
+  ).replace(
+    "FROM channels c",
+    "FROM _message_post_settings, channels c",
+  );
+
 function buildMessagePostError(
   message: string,
   statusCode: number,
@@ -159,7 +172,7 @@ async function runChannelInsertSingleStatement({
   txPhases.t0 = Date.now();
   txPhases.t_access = txPhases.t0;
   const insertRes = await query({
-    text: MESSAGE_POST_CHANNEL_INSERT_MERGED_SQL,
+    text: MESSAGE_POST_CHANNEL_INSERT_SINGLE_STATEMENT_SQL,
     values: [
       channelId,
       userId,
