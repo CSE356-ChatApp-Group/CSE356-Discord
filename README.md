@@ -277,7 +277,7 @@ GET /search?q=hello&communityId=<uuid>&authorId=<uuid>&after=2024-01-01&limit=20
 
 ## Team Process and Contributions
 
-Team reflection and individual contributions are documented in [`TEAM.md`](TEAM.md). Samuel Perrottet's section is filled from repository history; the other team members are intentionally left as placeholders for final team review.
+Team reflection and individual contributions are documented in [`TEAM.md`](TEAM.md).
 
 ## Security Checklist
 
